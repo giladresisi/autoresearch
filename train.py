@@ -11,6 +11,10 @@ import pandas as pd
 # Directory where prepare.py writes {ticker}.parquet files
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "stock_data")
 
+# Backtest window — matches prepare.py; edit here to change the simulation period
+BACKTEST_START = "2026-01-01"
+BACKTEST_END   = "2026-03-01"
+
 
 def load_ticker_data(ticker: str) -> pd.DataFrame | None:
     """Reads CACHE_DIR/{ticker}.parquet; returns None if file does not exist."""
@@ -18,6 +22,19 @@ def load_ticker_data(ticker: str) -> pd.DataFrame | None:
     if not os.path.exists(path):
         return None
     return pd.read_parquet(path)
+
+
+def load_all_ticker_data() -> dict[str, pd.DataFrame]:
+    """Loads all *.parquet files from CACHE_DIR. Returns {} if directory is empty or missing."""
+    if not os.path.isdir(CACHE_DIR):
+        return {}
+    result = {}
+    for fname in os.listdir(CACHE_DIR):
+        if fname.endswith(".parquet"):
+            ticker = fname[:-len(".parquet")]
+            path = os.path.join(CACHE_DIR, fname)
+            result[ticker] = pd.read_parquet(path)
+    return result
 
 
 # ── Indicators ────────────────────────────────────────────────────────────────
@@ -230,19 +247,143 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
 
 
 def manage_position(position: dict, df: pd.DataFrame) -> float:
-    """Returns updated stop_price (>= position['stop_price']). TODO: Phase 3."""
-    return position['stop_price']
+    """
+    Raise stop to breakeven (entry_price) once price_10am >= entry_price + 1 × ATR14.
+    Never lower the stop. Returns updated stop_price (>= position['stop_price']).
+    """
+    current_stop = position['stop_price']
+    entry_price  = position['entry_price']
+    atr_series   = calc_atr14(df)
+    atr          = float(atr_series.iloc[-1])
+    if pd.isna(atr) or atr == 0:
+        return current_stop
+    price_10am = float(df['price_10am'].iloc[-1])
+    if price_10am >= entry_price + atr:
+        return max(current_stop, entry_price)
+    return current_stop
 
 
-# TODO: Phase 3 — chronological backtester loop + Sharpe output
+def run_backtest(ticker_dfs: dict) -> dict:
+    """
+    Run chronological backtest over BACKTEST_START..BACKTEST_END.
+    ticker_dfs: {ticker: full history DataFrame with date index}
+    Returns stats dict: sharpe, total_trades, win_rate, avg_pnl_per_trade, total_pnl.
+    """
+    start = date.fromisoformat(BACKTEST_START)
+    end   = date.fromisoformat(BACKTEST_END)
+
+    # Collect all trading days that fall in [start, end)
+    all_days: set = set()
+    for df in ticker_dfs.values():
+        for d in df.index:
+            if start <= d < end:
+                all_days.add(d)
+    trading_days = sorted(all_days)
+
+    if len(trading_days) < 2:
+        return {"sharpe": 0.0, "total_trades": 0, "win_rate": 0.0,
+                "avg_pnl_per_trade": 0.0, "total_pnl": 0.0}
+
+    portfolio: dict = {}   # ticker -> position dict
+    trades: list = []      # list of pnl floats per closed trade
+    daily_values: list = []
+
+    for i, today in enumerate(trading_days):
+        prev_day = trading_days[i - 1] if i > 0 else None
+
+        # 1. Check stops using previous day's low
+        if prev_day is not None:
+            to_close = []
+            for ticker, pos in portfolio.items():
+                df = ticker_dfs[ticker]
+                if prev_day in df.index:
+                    prev_low = float(df.loc[prev_day, "low"])
+                    if prev_low <= pos["stop_price"]:
+                        pnl = (pos["stop_price"] - pos["entry_price"]) * pos["shares"]
+                        trades.append(pnl)
+                        to_close.append(ticker)
+            for t in to_close:
+                del portfolio[t]
+
+        # 2. Screen for new entries
+        for ticker, df in ticker_dfs.items():
+            if ticker in portfolio:
+                continue
+            hist = df.loc[:today]
+            signal = screen_day(hist, today)
+            if signal is None:
+                continue
+            entry_price = signal["entry_price"] + 0.03
+            shares = 500.0 / entry_price
+            portfolio[ticker] = {
+                "entry_price": entry_price,
+                "entry_date": today,
+                "shares": shares,
+                "stop_price": signal["stop"],
+                "ticker": ticker,
+            }
+
+        # 3. Manage positions (including new entries)
+        for ticker, pos in portfolio.items():
+            df = ticker_dfs[ticker]
+            hist = df.loc[:today]
+            new_stop = manage_position(pos, hist)
+            pos["stop_price"] = max(new_stop, pos["stop_price"])
+
+        # 4. Mark-to-market: portfolio value = sum of (price_10am × shares) for open positions
+        portfolio_value = 0.0
+        for ticker, pos in portfolio.items():
+            df = ticker_dfs[ticker]
+            if today in df.index:
+                portfolio_value += float(df.loc[today, "price_10am"]) * pos["shares"]
+        daily_values.append(portfolio_value)
+
+    # End of backtest: close all remaining positions at last available price_10am
+    for ticker, pos in portfolio.items():
+        df = ticker_dfs[ticker]
+        last_price = float(df["price_10am"].iloc[-1])
+        pnl = (last_price - pos["entry_price"]) * pos["shares"]
+        trades.append(pnl)
+
+    # Sharpe computation (PRD Feature 5): annualised daily-changes Sharpe
+    arr = np.array(daily_values, dtype=float)
+    changes = np.diff(arr)
+    if len(changes) == 0 or changes.std() == 0:
+        sharpe = 0.0
+    else:
+        sharpe = float((changes.mean() / changes.std()) * np.sqrt(252))
+
+    total_trades = len(trades)
+    total_pnl    = float(sum(trades))
+    wins         = sum(1 for p in trades if p > 0)
+    win_rate     = (wins / total_trades) if total_trades > 0 else 0.0
+    avg_pnl      = (total_pnl / total_trades) if total_trades > 0 else 0.0
+
+    return {
+        "sharpe":            round(sharpe, 6),
+        "total_trades":      total_trades,
+        "win_rate":          round(win_rate, 3),
+        "avg_pnl_per_trade": round(avg_pnl, 2),
+        "total_pnl":         round(total_pnl, 2),
+    }
+
+
+def print_results(stats: dict) -> None:
+    """Print the fixed-format summary block. Agent parses this with grep."""
+    print("---")
+    print(f"sharpe:              {stats['sharpe']:.6f}")
+    print(f"total_trades:        {stats['total_trades']}")
+    print(f"win_rate:            {stats['win_rate']:.3f}")
+    print(f"avg_pnl_per_trade:   {stats['avg_pnl_per_trade']:.2f}")
+    print(f"total_pnl:           {stats['total_pnl']:.2f}")
+    print(f"backtest_start:      {BACKTEST_START}")
+    print(f"backtest_end:        {BACKTEST_END}")
+
 
 if __name__ == "__main__":
-    ticker = sys.argv[1] if len(sys.argv) > 1 else "AAPL"
-    df = load_ticker_data(ticker)
-    if df is None:
-        print(f"No cached data for {ticker}. Run prepare.py first.")
+    ticker_dfs = load_all_ticker_data()
+    if not ticker_dfs:
+        print(f"No cached data in {CACHE_DIR}. Run prepare.py first.", file=sys.stderr)
         sys.exit(1)
-    today_val = df.index[-1]
-    if hasattr(today_val, 'date'):
-        today_val = today_val.date()
-    print(screen_day(df, today_val))
+    stats = run_backtest(ticker_dfs)
+    print_results(stats)

@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Status: Phase 2 Complete (16/16 tests passing) — Ready for Phase 3
+## Status: Phase 3 Complete (51/51 tests passing) — Ready for Phase 4
 
 ## Feature: Phase 1 — Infrastructure Setup
 ### Planning Phase
@@ -191,17 +191,51 @@ Transformed the `autoresearch` project from an LLM-driven nanochat pretraining o
 
 ---
 
+## Feature: Phase 3 — Strategy + Backtester (`train.py`)
+### Planning Phase
+**Status**: ✅ Planned
+**Plan File**: .agents/plans/phase-3-strategy-backtester.md
+
+### Implementation
+**Status**: ✅ Complete — 51/51 tests passing (15 new + 20 screener + 16 prepare), 0 failures
+
+**Files created/modified:**
+- `train.py` — Added `BACKTEST_START`/`BACKTEST_END` constants, `load_all_ticker_data()`, real `manage_position()`, `run_backtest()`, `print_results()`; replaced `__main__` debug block (+152/-11)
+- `tests/test_backtester.py` — Created (15 tests: 5 manage_position + 8 run_backtest + 2 output format)
+
+### Code Review Findings — ✅ All Fixed (2026-03-18)
+
+| Severity | Issue | Fix Applied |
+|----------|-------|-------------|
+| 🟢 Low | Plan comment stated ATR14 ≈ 2.0 for `atr_spread=2.0`; actual TR = 2×spread = 4.0 | Test fixture comment corrected |
+| 🟢 Low | `@pytest.mark.integration` applied to test that requires no network (synthetic DataFrame) | Marker removed; test runs unconditionally |
+| 🟢 Low | Missing blank line (PEP 8) between `manage_position` and `run_backtest` | Two blank lines added |
+
+### Acceptance Criteria Validation — ✅ ACCEPTED (2026-03-18)
+
+All 14 criteria passed. Key verifications:
+- Stop-hit detection uses `prev_day` low (no look-ahead) ✅
+- No double-entry for tickers already in portfolio ✅
+- End-of-backtest close at `price_10am.iloc[-1]` ✅
+- Sharpe `std == 0` guard returns 0.0 (not inf/nan) ✅
+- `grep "^sharpe:"` captures exactly one parseable float ✅
+- Exit code 1 on empty cache confirmed ✅
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/phase-3-strategy-backtester.md`
+- Full backtester implementation: `manage_position()`, `run_backtest()`, `print_results()`, updated `__main__`
+- 15 tests implemented (5 manage_position + 8 run_backtest + 2 output format)
+- All 4 validation levels passed; 36 pre-existing tests unaffected
+- 3 minor code-review divergences, all improvements
+
+---
+
 ## What the Next Agent Should Do
 
-### Immediate next step: Phase 3 — Strategy + backtester (`train.py`)
+### Immediate next step: Phase 4 — Agent instructions (`program.md`)
 
-Phases 1 and 2 are complete. Read `prd.md` Features 3–5 and create an implementation plan for:
-
-**Phase 3 — Strategy + backtester (`train.py`)**
-- Full rewrite per PRD Features 2–5
-- Port indicator functions from `example-screener.py`
-- Implement `screen_day()`, `manage_position()`, chronological backtester loop
-- Fixed-format output block with `sharpe:` line
+Phases 1, 2, and 3 are complete. Read `prd.md` and create an implementation plan for:
 
 **Phase 4 — Agent instructions (`program.md`)**
 - Rewrite for stock optimization loop (higher Sharpe = keep)
@@ -215,3 +249,4 @@ Phases 1 and 2 are complete. Read `prd.md` Features 3–5 and create an implemen
 
 ### Key constraint for next agent
 Do not commit `results-v0.tsv`, `.env`, or any `prd.backup-*.md` files. Only commit source files.
+- Criterion 18 from screener AC validation remains unverifiable until Phase 5 populates the Parquet cache.
