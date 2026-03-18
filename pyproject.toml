@@ -11,3 +11,8 @@ dependencies = [
     "pyarrow>=21.0.0",
     "yfinance",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
