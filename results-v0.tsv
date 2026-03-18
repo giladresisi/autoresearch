@@ -1,0 +1,27 @@
+commit  val_bpb memory_gb       status  description
+8ead12d 0.997277        44.0    keep    baseline
+1a7052e 1.001276        44.0    discard reduce WARMDOWN_RATIO from 0.5 to 0.2
+841428a 1.001709        66.5    discard increase DEPTH from 8 to 10
+365161e 0.997579        44.0    discard FINAL_LR_FRAC=0.1 instead of 0.0
+be05373 0.988084        43.8    keep    halve TOTAL_BATCH_SIZE to 2^18 for 2x more optimizer steps
+
+ All 5 experiments complete. Here's the summary:
+
+  ┌─────────┬──────────┬─────────┬────────────────────────────────┐
+  │ commit  │ val_bpb  │ status  │          description           │
+  ├─────────┼──────────┼─────────┼────────────────────────────────┤
+  │ 8ead12d │ 0.997277 │ keep    │ baseline                       │
+  ├─────────┼──────────┼─────────┼────────────────────────────────┤
+  │ 1a7052e │ 1.001276 │ discard │ reduce WARMDOWN_RATIO 0.5→0.2  │
+  ├─────────┼──────────┼─────────┼────────────────────────────────┤
+  │ 841428a │ 1.001709 │ discard │ increase DEPTH 8→10            │
+  ├─────────┼──────────┼─────────┼────────────────────────────────┤
+  │ 365161e │ 0.997579 │ discard │ FINAL_LR_FRAC=0.1              │
+  ├─────────┼──────────┼─────────┼────────────────────────────────┤
+  │ be05373 │ 0.988084 │ keep    │ halve TOTAL_BATCH_SIZE to 2^18 │
+  └─────────┴──────────┴─────────┴────────────────────────────────┘
+
+  Result: Only experiment 5 improved val_bpb — halving TOTAL_BATCH_SIZE from 2**19 to 2**18 roughly doubled the optimizer steps (953→1836) in the same 5-minute budget, yielding a solid ~0.009 improvement in
+  val_bpb (0.997277→0.988084). The branch is now at commit be05373 with this change.
+
+✻ Baked for 36m 24s
