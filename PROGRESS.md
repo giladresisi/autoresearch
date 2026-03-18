@@ -1,11 +1,51 @@
 # PROGRESS
 
-## Status: Phase 2 Code Review Fixes Complete — Ready for Phase 3
+## Status: Phase 2 Complete (16/16 tests passing) — Ready for Phase 3
 
 ## Feature: Phase 1 — Infrastructure Setup
 ### Planning Phase
 **Status**: ✅ Planned
 **Plan File**: .agents/plans/phase-1-infrastructure.md
+
+## Feature: Phase 2 — Data Layer (`prepare.py`)
+### Planning Phase
+**Status**: ✅ Planned
+**Plan File**: .agents/plans/phase-2-data-layer.md
+
+### Implementation
+**Status**: ✅ Complete — 16/16 tests passing (including integration), 0 failures
+
+**Files created/modified:**
+- `prepare.py` — full rewrite: old LLM pipeline → yfinance OHLCV downloader (~107 lines)
+- `tests/test_prepare.py` — created (16 tests: 14 mock + 1 integration + 1 subprocess)
+- `pyproject.toml` — added `[tool.pytest.ini_options]` with `integration` marker
+
+### Code Review Findings — ✅ All Fixed (2026-03-18)
+
+| Severity | Issue | Fix Applied |
+|----------|-------|-------------|
+| 🔴 High | `test_index_is_date_objects` false confidence — `isinstance(pd.Timestamp, datetime.date)` is `True` because Timestamp inherits from datetime.datetime; test passed even with wrong index type | Changed to `type(d) is datetime.date` |
+| 🟡 Medium | `from datetime import datetime` unused at module level — caused `import datetime as _dt` workaround inside function body | Removed top-level import; promoted to `import datetime` at module level |
+| 🟡 Medium | `process_ticker` did not call `os.makedirs(CACHE_DIR)` — would raise `OSError` if called as a library function outside `__main__` | Added `os.makedirs(CACHE_DIR, exist_ok=True)` before `to_parquet` |
+| 🟢 Low | `import io` and `import sys` unused in `tests/test_prepare.py` | Removed both |
+
+**Code review report:** `.agents/code-reviews/phase-2-data-layer.md`
+
+### HISTORY_START Fix (2026-03-18)
+
+`HISTORY_START` was `BACKTEST_START - 2 years = 2024-01-01`. yfinance enforces a **730-day rolling limit** for 1h interval data (~2 years from today). With today at 2026-03-18, the cutoff is ~2024-03-18, making `2024-01-01` out of range.
+
+**Fix:** Changed `DateOffset(years=2)` → `DateOffset(years=1)`, giving `HISTORY_START = 2025-01-01`. This provides ~252 trading days of pre-backtest history (above the 200-row warning threshold) while staying well within the 730-day window.
+
+**After fix:** Integration test `test_download_ticker_returns_expected_schema` now passes (was silently skipping with misleading "network unavailable" message).
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/phase-2-data-layer.md`
+- Full rewrite of `prepare.py`: old LLM pipeline → yfinance OHLCV downloader
+- 16 tests implemented (14 mock + 1 integration + 1 subprocess)
+- All 4 validation levels passed; 20/20 screener tests unaffected
+- No divergences from plan
 
 ## Feature: Feature 2 — Screener (screen_day)
 ### Planning Phase
@@ -74,6 +114,35 @@
 
 ## Process Learnings
 
+### yfinance 1h interval has a 730-day rolling window limit (2026-03-18)
+
+**What happened:** `HISTORY_START = BACKTEST_START - 2 years` pushed the fetch start to `2024-01-01`, which is ~810 days ago. yfinance silently returns an empty DataFrame for 1h requests older than ~730 days. The integration test's skip message said "network unavailable" — masking the real cause.
+
+**What to do differently:**
+- For 1h yfinance data, `HISTORY_START` must stay within ~700 days of today (leave margin).
+- 1 year of pre-backtest history gives ~252 trading days — sufficient for SMA150 warmup and well within the limit.
+- When an integration test skips with a vague message, always verify the actual API response before assuming a network issue.
+
+---
+
+### Post-execution subagent issues in `ai-dev-env:execute` skill (2026-03-18)
+
+**What happened:** After Phase 2 execution, the skill's post-execution subagents ran incorrectly: only 2 of 3 launched, the wrong `subagent_type` was used for one, and the Output Report was declared before subagents completed.
+
+**Root causes:**
+1. The executor stopped reading after launching 2 agents — missed the 3rd (`ai-dev-env:code-review`).
+2. `superpowers:code-reviewer` was used as `subagent_type` instead of `general-purpose` — bypassed actual skill invocation.
+3. Subagents ran in background after the Output Report, so a REJECTED verdict could never gate completion.
+
+**Fix documented in:** `~/projects/ai-dev-env/subagents/fix.md`
+
+**Rules for post-execution subagents:**
+- All 3 are mandatory — none can be skipped.
+- Always use `subagent_type: "general-purpose"`; prompt must begin with `"Use the Skill tool to invoke ai-dev-env:<skill-name>"`.
+- Launch all 3 **foreground** before writing the Output Report so failures can gate completion.
+
+---
+
 ### Phase vs. Feature numbering confusion (2026-03-18)
 
 **What happened:** The PRD defines both *features* (Feature 1, 2, 3 — logical groupings) and *implementation phases* (Phase 1: Infrastructure, Phase 2: Data Layer, Phase 3: Strategy — execution ordering). When asked to "plan feature 2," the planning agent matched on the feature number and planned the Screener, skipping the Data Layer (Phase 2) which the Screener depends on for real-data integration testing.
@@ -124,19 +193,9 @@ Transformed the `autoresearch` project from an LLM-driven nanochat pretraining o
 
 ## What the Next Agent Should Do
 
-### Immediate next step: derive implementation plans and execute them
+### Immediate next step: Phase 3 — Strategy + backtester (`train.py`)
 
-Read `prd.md` in full, then create and execute detailed implementation plans for each phase:
-
-**Phase 1 — Infrastructure**
-- Update `pyproject.toml`: remove `torch`, `kernels`, `rustbpe`, `tiktoken`; add `yfinance`
-- Run `uv sync`, verify imports
-
-**Phase 2 — Data layer (`prepare.py`)**
-- Full rewrite per PRD Feature 1 spec
-- User-configurable constants block at top (`TICKERS`, `BACKTEST_START`, `BACKTEST_END`)
-- 1h yfinance download → resample to daily OHLCV + `price_10am`
-- Cache as one Parquet file per ticker in `~/.cache/autoresearch/stock_data/`
+Phases 1 and 2 are complete. Read `prd.md` Features 3–5 and create an implementation plan for:
 
 **Phase 3 — Strategy + backtester (`train.py`)**
 - Full rewrite per PRD Features 2–5

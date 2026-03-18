@@ -16,3 +16,8 @@ dependencies = [
 dev = [
     "pytest>=9.0.2",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as integration tests requiring live network access (deselect with '-m not integration')",
+]
