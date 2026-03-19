@@ -1,114 +1,134 @@
 # autoresearch
 
-This is an experiment to have the LLM do its own research.
+Autonomous stock strategy optimizer: iterates on screener and position management logic in `train.py` to maximize the `sharpe` ratio of a historical backtest.
 
-## Setup
+---
 
-To set up a new experiment, work with the user to:
+## Setup (once per session)
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `autoresearch/<tag>` must not already exist — this is a fresh run.
+1. **Agree on a run tag**: Propose a tag based on today's date (e.g. `mar18`). The branch `autoresearch/<tag>` must not already exist — check with `git branch -a | grep autoresearch/`.
 2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
-3. **Read the in-scope files**: The repo is small. Read these files for full context:
-   - `README.md` — repository context.
-   - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
-   - `train.py` — the file you modify. Model architecture, optimizer, training loop.
-4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
-5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
-6. **Confirm and go**: Confirm setup looks good.
+3. **Read the in-scope files**: `README.md`, `prepare.py` (read-only), `train.py` (the file you modify).
+4. **Verify data exists**: Check that `~/.cache/autoresearch/stock_data/` contains `.parquet` files. Run `ls ~/.cache/autoresearch/stock_data/`. If the directory is empty or missing, tell the human to run `uv run prepare.py` and wait for confirmation before continuing.
+5. **Initialize results.tsv**: Create the file with just the header row below. The baseline `sharpe` will be recorded after the first run.
+6. **Confirm and go**: Confirm setup looks good, then begin the experiment loop.
 
-Once you get confirmation, kick off the experimentation.
+---
 
-## Experimentation
+## Experimentation rules
 
-Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
+### What you CAN do
 
-**What you CAN do:**
-- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.
+- Modify `screen_day()` in `train.py` — screener criteria, thresholds, indicator parameters, entry/exit rules, and any indicator helper functions it calls.
+- Modify `manage_position()` in `train.py` — stop management logic, breakeven trigger level, trailing stop behavior.
+- Add new indicator helper functions that `screen_day()` or `manage_position()` call.
 
-**What you CANNOT do:**
-- Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
-- Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
-- Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
+### What you CANNOT do
 
-**The goal is simple: get the lowest val_bpb.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
+- Modify anything below the `# DO NOT EDIT BELOW THIS LINE` comment in `train.py` — `run_backtest()`, `print_results()`, data loading functions, and the `__main__` block are the evaluation harness. Fixed. Must not be touched.
+- Modify `print_results()` or the output format block — the agent parses this output; changing it breaks the loop.
+- Modify `load_ticker_data()` or `load_all_ticker_data()` — fixed data loading infrastructure.
+- Modify `CACHE_DIR`, `BACKTEST_START`, `BACKTEST_END` constants — the backtest window is fixed per the PRD.
+- Modify `prepare.py` — read-only data pipeline.
+- Modify the Sharpe computation formula inside `run_backtest()`.
+- Install new packages or add dependencies beyond what's in `pyproject.toml`.
 
-**VRAM** is a soft constraint. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
+### Goal
 
-**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
+Maximize `sharpe` — **higher Sharpe is better**. Keep any change that increases Sharpe; discard any change that does not.
 
-**The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
+### Simplicity criterion
+
+All else being equal, simpler is better. A small `sharpe` improvement that adds ugly complexity is not worth it. A simplification that maintains equal or better `sharpe` is always a win. Prefer interpretable threshold changes over convoluted logic.
+
+### First run
+
+Always run the strategy as-is (unmodified) as the very first run to establish the baseline Sharpe before making any changes.
+
+---
 
 ## Output format
 
-Once the script finishes it prints a summary like this:
+When the script completes successfully it prints a fixed-format block:
 
 ```
 ---
-val_bpb:          0.997900
-training_seconds: 300.1
-total_seconds:    325.9
-peak_vram_mb:     45060.2
-mfu_percent:      39.80
-total_tokens_M:   499.6
-num_steps:        953
-num_params_M:     50.3
-depth:            8
+sharpe:              1.234567
+total_trades:        12
+win_rate:            0.583
+avg_pnl_per_trade:   18.45
+total_pnl:           221.40
+backtest_start:      2026-01-01
+backtest_end:        2026-03-01
 ```
 
-Note that the script is configured to always stop after 5 minutes, so depending on the computing platform of this computer the numbers might look different. You can extract the key metric from the log file:
+Extract the key metrics from `run.log`:
 
+```bash
+grep "^sharpe:" run.log
+grep "^total_trades:" run.log
 ```
-grep "^val_bpb:" run.log
-```
+
+Exit code 0 on success. Exit code 1 if the cache is empty (no parquet files found).
+
+---
 
 ## Logging results
 
-When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
+Log every run to `results.tsv` (tab-separated — NOT comma-separated; commas break in descriptions).
 
-The TSV has a header row and 5 columns:
+Header row (5 columns, tab-separated):
 
 ```
-commit	val_bpb	memory_gb	status	description
+commit	sharpe	total_trades	status	description
 ```
 
-1. git commit hash (short, 7 chars)
-2. val_bpb achieved (e.g. 1.234567) — use 0.000000 for crashes
-3. peak memory in GB, round to .1f (e.g. 12.3 — divide peak_vram_mb by 1024) — use 0.0 for crashes
-4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried
+Column definitions:
+1. `commit`: git commit hash (short, 7 chars) from `git rev-parse --short HEAD`
+2. `sharpe`: Sharpe ratio achieved (e.g. `1.234567`) — use `0.000000` for crashes
+3. `total_trades`: number of trades completed in the backtest — use `0` for crashes
+4. `status`: `keep`, `discard`, or `crash`
+5. `description`: short text description of what this experiment tried
 
 Example:
 
 ```
-commit	val_bpb	memory_gb	status	description
-a1b2c3d	0.997900	44.0	keep	baseline
-b2c3d4e	0.993200	44.2	keep	increase LR to 0.04
-c3d4e5f	1.005000	44.0	discard	switch to GeLU activation
-d4e5f6g	0.000000	0.0	crash	double model width (OOM)
+commit	sharpe	total_trades	status	description
+a1b2c3d	0.000000	0	keep	baseline (no trades, strict screener)
+b2c3d4e	1.234567	12	keep	relaxed CCI threshold to -30
+c3d4e5f	0.872000	9	discard	removed volume filter
+d4e5f6g	0.000000	0	crash	divide-by-zero in custom indicator
 ```
+
+**Do NOT commit `results.tsv`** — it is intentionally untracked.
+
+---
 
 ## The experiment loop
 
-The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autoresearch/mar5-gpu0`).
+**LOOP FOREVER:**
 
-LOOP FOREVER:
+1. Check git state: verify current branch and commit hash (`git log --oneline -1`).
+2. Modify `train.py` with an experimental idea. Edit the file directly. **Only edit code above the `# DO NOT EDIT BELOW THIS LINE` comment** — everything below it is the evaluation harness and must not be touched.
+3. `git commit` the change to `train.py` only; leave `results.tsv` untracked.
+4. Run: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee).
+5. Extract results: `grep "^sharpe:" run.log` and `grep "^total_trades:" run.log`.
+6. If grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python traceback and attempt a fix. If you cannot fix it within a few attempts, give up: log status `crash`, run `git reset --hard HEAD~1`, and move on.
+7. Record the result in `results.tsv`.
+8. If Sharpe **improved (higher)** compared to the current best → keep the commit, advance the branch.
+9. If Sharpe is equal or worse → `git reset --hard HEAD~1` (revert to previous commit).
 
-1. Look at the git state: the current branch/commit we're on
-2. Tune `train.py` with an experimental idea by directly hacking the code.
-3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If val_bpb improved (lower), you "advance" the branch, keeping the git commit
-9. If val_bpb is equal or worse, you git reset back to where you started
+### NEVER STOP
 
-The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
+Once the loop has begun, do NOT pause to ask the user if you should continue. The user may be asleep. **You are autonomous.** Loop until manually stopped.
 
-**Timeout**: Each experiment should take ~5 minutes total (+ a few seconds for startup and eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (discard and revert).
+If you run out of ideas: try relaxing individual screener criteria one at a time, combining near-misses, varying the stop management trigger level, or adjusting position entry/exit rules.
 
-**Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
+### Crash handling
 
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
+- If a run crashes and the fix is trivial (typo, missing import): fix and re-run.
+- If the underlying idea is broken and cannot be quickly repaired: log `crash` and `git reset --hard HEAD~1` to move on.
 
-As an example use case, a user might leave you running while they sleep. If each experiment takes you ~5 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+### No-trades scenario
+
+A Sharpe of `0.0` with `total_trades: 0` means the screener found zero signals across the entire backtest window. This is common on first run with the strict default screener. Try relaxing one threshold at a time (e.g. the CCI threshold, volume ratio, or momentum requirement) to generate at least some trades before optimizing Sharpe. **No signals = no information** — you cannot optimize what you cannot measure.

@@ -263,6 +263,11 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
     return current_stop
 
 
+# ── DO NOT EDIT BELOW THIS LINE ───────────────────────────────────────────────
+# run_backtest(), print_results(), load_ticker_data(), load_all_ticker_data(),
+# and the __main__ block are the evaluation harness. They must not be modified.
+# ──────────────────────────────────────────────────────────────────────────────
+
 def run_backtest(ticker_dfs: dict) -> dict:
     """
     Run chronological backtest over BACKTEST_START..BACKTEST_END.

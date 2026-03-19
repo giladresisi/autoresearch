@@ -1,5 +1,29 @@
 # PROGRESS
 
+## Status: Phase 4 Complete (74/74 tests passing) — Ready for Phase 5
+
+## Feature: Phase 4 — Agent Instructions (`program.md`)
+### Planning Phase
+**Status**: ✅ Planned
+**Plan File**: .agents/plans/phase-4-agent-instructions.md
+
+### Implementation
+**Status**: ✅ Complete — 74/74 tests passing (23 new + 51 pre-existing), 0 failures
+
+**Files created/modified:**
+- `program.md` — full rewrite: nanochat/GPU instructions → stock Sharpe optimization agent instructions
+- `tests/test_program_md.py` — created (23 structural tests)
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/phase-4-agent-instructions.md`
+- Full rewrite of `program.md`: legacy nanochat/GPU → stock Sharpe optimization agent instructions
+- 23 structural tests implemented, all passing
+- All 3 automated validation levels passed; 51 pre-existing tests unaffected
+- 1 minor plan-authoring divergence (test count labeling inconsistency), resolved by following the code listing
+
+---
+
 ## Status: Phase 3 Complete (51/51 tests passing) — Ready for Phase 4
 
 ## Feature: Phase 1 — Infrastructure Setup
