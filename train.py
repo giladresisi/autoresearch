@@ -149,88 +149,61 @@ def nearest_resistance_atr(df, entry_price, atr, lookback=90):
 
 def screen_day(df: pd.DataFrame, today) -> "dict | None":
     """
+    Momentum breakout strategy: enter when price_10am breaks above 20-day high
+    with above-average volume, price above SMA50, and sufficient room above resistance.
     df: full daily history up to and including today
     Returns None if no signal, or dict with at minimum {'stop': float}
     """
     # Ensure no look-ahead: slice to today
     df = df.loc[:today]
 
-    # R1: minimum 150 rows for SMA150 to be defined
-    if len(df) < 150:
+    # Minimum history for indicators
+    if len(df) < 60:
         return None
 
-    # Compute all indicators up front on a working copy
+    # Compute indicators
     df = df.copy()
-    df['_sma150'] = df['close'].rolling(150).mean()
+    df['_sma50']  = df['close'].rolling(50).mean()
     df['_vm30']   = df['volume'].rolling(30).mean()
-    df['_cci']    = calc_cci(df)
     df['_atr14']  = calc_atr14(df)
 
-    # Extract scalar values from last row
-    sma150     = float(df['_sma150'].iloc[-1])
+    sma50      = float(df['_sma50'].iloc[-1])
     vm30       = float(df['_vm30'].iloc[-1])
     atr        = float(df['_atr14'].iloc[-1])
-    c0         = float(df['_cci'].iloc[-1])
-    c1         = float(df['_cci'].iloc[-2])
-    c2         = float(df['_cci'].iloc[-3])
     price_10am = float(df['price_10am'].iloc[-1])
 
-    # Guard NaN/zero before any rule evaluation
-    if pd.isna(price_10am) or pd.isna(sma150) or pd.isna(vm30) or pd.isna(atr) or pd.isna(c1) or pd.isna(c2) or vm30 == 0 or atr == 0:
+    # Guard NaN/zero
+    if pd.isna(price_10am) or pd.isna(sma50) or pd.isna(vm30) or pd.isna(atr) or vm30 == 0 or atr == 0:
         return None
 
-    # Rule 1: price_10am must be above SMA150
-    if price_10am <= sma150:
+    # Rule 1: price above SMA50 (short-term uptrend)
+    if price_10am <= sma50:
         return None
 
-    # Rule 2: 3 consecutive up-close days — compare indices [-4], [-3], [-2], [-1]
-    close = df['close']
-    if not (float(close.iloc[-1]) > float(close.iloc[-2]) > float(close.iloc[-3]) > float(close.iloc[-4])):
+    # Rule 2: price_10am breaks above the 20-day highest close (breakout)
+    high20 = float(df['close'].iloc[-21:-1].max())  # prior 20 days, exclude today
+    if price_10am <= high20:
         return None
 
-    # Rule 3: both last 2 days volume >= 0.85× MA30
-    vol1 = float(df['volume'].iloc[-1]) / vm30
-    vol2 = float(df['volume'].iloc[-2]) / vm30
-    if not (vol1 >= 0.85 and vol2 >= 0.85):
+    # Rule 3: today's volume >= 1.2× MA30 (volume confirmation)
+    vol_ratio = float(df['volume'].iloc[-1]) / vm30
+    if vol_ratio < 1.2:
         return None
 
-    # Rule 4: CCI(20) < -30, rising 2 consecutive days
-    if pd.isna(c0) or not (c0 < -30 and c0 > c1 > c2):
-        return None
-
-    # Rule 5: pullback >= 5% from 7-day local high AND all-time high
-    # Uses price_10am (not close) so comparisons match actual entry conditions
-    local_high = float(df['high'].iloc[-8:-1].max())
-    ath        = float(df['high'].max())
-    pct_local  = (local_high - price_10am) / local_high
-    pct_ath    = (ath - price_10am) / ath
-    if not (pct_local >= 0.05 and pct_ath >= 0.05):
-        return None
-
-    # R4: upper wick of entry candle must be strictly less than body
-    last_c     = float(df['close'].iloc[-1])
-    last_o     = float(df['open'].iloc[-1])
-    last_h     = float(df['high'].iloc[-1])
-    body       = abs(last_c - last_o)
-    upper_wick = last_h - max(last_c, last_o)
-    if body == 0 or upper_wick >= body:
-        return None
-
-    # R3: reject if bounce is stalling at a ceiling
+    # Rule 4: not stalling at ceiling
     if is_stalling_at_ceiling(df):
         return None
 
-    # R2+R6: a valid pivot-low-anchored stop must exist
+    # Stop: prefer pivot-low stop, fall back to 2.0 ATR
     stop = find_stop_price(df, price_10am, atr)
     if stop is None:
-        return None
+        stop = round(price_10am - 2.0 * atr, 2)
 
-    # 1.5× ATR buffer safety net (find_stop_price enforces it too, but belt-and-suspenders)
+    # 1.5 ATR buffer safety net
     if price_10am - stop < 1.5 * atr:
         return None
 
-    # R5: nearest overhead resistance must be >= 2× ATR away
-    # None means no overhead pivot exists — treat as passing (bullish, no resistance)
+    # Resistance check: nearest overhead pivot >= 2 ATR away
     res_atr = nearest_resistance_atr(df, price_10am, atr)
     if res_atr is not None and res_atr < 2.0:
         return None
@@ -239,10 +212,9 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
         'stop':        stop,
         'entry_price': price_10am,
         'atr14':       round(atr, 4),
-        'sma150':      round(sma150, 4),
-        'cci':         round(c0, 2),
-        'pct_local':   round(pct_local, 4),
-        'pct_ath':     round(pct_ath, 4),
+        'sma50':       round(sma50, 4),
+        'vol_ratio':   round(vol_ratio, 4),
+        'high20':      round(high20, 4),
     }
 
 
