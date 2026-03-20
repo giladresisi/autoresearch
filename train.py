@@ -180,9 +180,14 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if price_10am <= sma50:
         return None
 
-    # Rule 2: price_10am breaks above the 20-day highest close (breakout)
+    # Rule 2a: price_10am breaks above the 20-day highest close (breakout)
     high20 = float(df['close'].iloc[-21:-1].max())  # prior 20 days, exclude today
     if price_10am <= high20:
+        return None
+
+    # Rule 2b: price_10am also above yesterday's high (breakout continuation)
+    prev_high = float(df['high'].iloc[-2])
+    if price_10am <= prev_high:
         return None
 
     # Rule 3: today's volume >= 1.0× MA30 (average or above)
