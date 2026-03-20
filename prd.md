@@ -607,6 +607,129 @@ Allowing fractional shares is mathematically correct but differs from real broke
 
 ---
 
+---
+
+## Enhancements (2026-03-20)
+
+These additions were identified after running multi-sector optimization loops across five worktrees (energy, semis, utilities, financials, energy OOS). They address discovered limitations in the optimization signal and add new reporting capabilities.
+
+---
+
+### Enhancement 1: Train/Test Split
+
+**Motivation:** Optimizing on the full backtest window leads to overfitting — the agent can memorize specific days and tune thresholds to the noise of a single 3-month period, as confirmed by the energy strategy's in-sample Sharpe of 5.79 collapsing to -0.01 OOS.
+
+**Description:** The backtest window is split at setup time. The final 2 weeks become a held-out test set. The optimization loop runs exclusively on the training set. After each iteration, the strategy is also run on the test set for tracking — but the keep/discard decision is based on train P&L only (no leakage).
+
+**Changes required:**
+
+| File | Section | Change |
+|---|---|---|
+| `train.py` | Mutable (above line) | Add `TRAIN_END` and `TEST_START` constants (written by agent at setup; `TRAIN_END = BACKTEST_END − 14 calendar days`) |
+| `train.py` | Immutable (below line) | `run_backtest(start=None, end=None)` — add optional start/end params defaulting to `BACKTEST_START`/`BACKTEST_END` |
+| `train.py` | Immutable (below line) | `print_results(metrics, prefix="")` — add prefix param so output lines become `train_total_pnl:` vs `test_total_pnl:` |
+| `train.py` | Immutable (below line) | `__main__` — call `run_backtest` twice (train range, test range) and print both result blocks |
+| `program.md` | Setup | Compute and write `TRAIN_END`/`TEST_START` at session start |
+| `program.md` | Loop | Keep/discard based on `train_total_pnl`; also record `test_pnl` in results.tsv |
+| `program.md` | results.tsv schema | Add `test_pnl` column |
+
+**Design constraint:** The keep/discard decision must never use `test_total_pnl`. Using test results for selection converts the test set into a second training set, negating its purpose.
+
+---
+
+### Enhancement 2: Optimize for Train P&L Instead of Sharpe
+
+**Motivation:** The Sharpe formula in the current backtest (`mean(diff(daily_portfolio_values)) / std(diff(daily_portfolio_values))`) operates on the raw dollar portfolio value series, not on percentage returns relative to capital deployed. On days with no open positions the value is $0, making `diff` include large entry/exit artifacts. This causes two pathologies:
+
+1. **Inflated Sharpe with no activity:** A mostly-idle portfolio has low variance → high Sharpe, regardless of whether P&L is positive.
+2. **Degenerate stop management optimum:** Raising the breakeven trigger reduces stop-management events, which smooths the portfolio value series, which lowers variance, which mechanically raises Sharpe — while actually worsening P&L. This was confirmed in the financials run: Sharpe 6.58 with total P&L of -$60.
+
+**Description:** Replace Sharpe with `train_total_pnl` as the keep/discard criterion. This directly rewards strategies that make money on the training window.
+
+**Changes required:**
+
+| File | Section | Change |
+|---|---|---|
+| `program.md` | Loop | Keep/discard decision: `if train_total_pnl improved (higher) → keep; else → git reset --hard HEAD~1` |
+| `program.md` | Loop | Extract `grep "^train_total_pnl:" run.log` instead of `grep "^sharpe:"` |
+| `program.md` | results.tsv schema | Primary sort/compare column becomes `train_pnl`; Sharpe still recorded as informational |
+
+**Note:** Sharpe is still computed and printed — it remains useful as a diagnostic signal for risk-adjusted quality, but it no longer drives the optimization decision.
+
+---
+
+### Enhancement 3: Final Test Run Outputs — CSV and Per-Ticker P&L Table
+
+**Motivation:** After the optimization loop completes, the user wants to inspect the raw trade data for the final test run in detail: the full daily OHLCV + indicator DataFrame for each ticker, and a per-ticker P&L breakdown to understand which names contributed to performance.
+
+**Description:** After the final iteration, the agent triggers a special final test run with full output mode enabled. The run writes a CSV of all ticker data and prints a per-ticker P&L table.
+
+**Changes required:**
+
+| File | Section | Change |
+|---|---|---|
+| `train.py` | Mutable (above line) | Add `WRITE_FINAL_OUTPUTS = False` constant (agent sets to `True` only for the final test run) |
+| `train.py` | Immutable (below line) | `run_backtest()` — accumulate `ticker_pnl: dict[str, float]` as trades close |
+| `train.py` | Immutable (below line) | At end of backtest, if `WRITE_FINAL_OUTPUTS`: write `final_test_data.csv` (per-ticker daily OHLCV + indicators for the test window) and print per-ticker P&L table |
+| `program.md` | End of loop | After final iteration: set `WRITE_FINAL_OUTPUTS = True`, run test window, restore to `False` |
+
+**Output:**
+- `final_test_data.csv` — one row per (ticker, date) with all columns the strategy uses
+- Printed table: ticker, trades, wins, total P&L, sorted by P&L descending
+
+---
+
+### Enhancement 4: Sector Trend Summary (`data_trend.md`)
+
+**Motivation:** Before the first iteration, the agent should report the general market character of the downloaded tickers for the backtest period — whether the universe was broadly bullish, bearish, or mixed. This provides context for interpreting the strategy results and helps the agent choose appropriate starting directions.
+
+**Description:** `prepare.py` writes a `data_trend.md` file immediately after all data is downloaded. The file contains a one-paragraph summary of the sector's price behavior over the backtest window.
+
+**Changes required:**
+
+| File | Section | Change |
+|---|---|---|
+| `prepare.py` | Infrastructure (not user config) | Add `write_trend_summary(tickers, backtest_start, backtest_end, cache_dir)` function called after download loop |
+
+**Content of `data_trend.md`:** Ticker count, median return over the window, count of up vs down names, top 3 gainers and bottom 3 losers with % return, and a one-line sector character phrase (e.g., "Broadly bullish: 13/17 tickers rose, median +8.2%. Sector trending up with moderate dispersion.").
+
+---
+
+### Enhancement 5: Extended results.tsv
+
+**Motivation:** The current results.tsv only records `sharpe` and `total_trades`. After running multi-sector loops, the gap between Sharpe and actual P&L was missed because P&L was never tracked per-iteration. Win rate and P&L provide essential additional signal for evaluating experiment quality.
+
+**Description:** Add `win_rate`, `train_pnl`, and `test_pnl` columns to results.tsv. All values are already printed by `print_results()` in run.log — this is purely a program.md change.
+
+**New results.tsv schema:**
+
+```
+commit	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	status	description
+```
+
+**Changes required:**
+
+| File | Section | Change |
+|---|---|---|
+| `program.md` | results.tsv schema | Update column spec and grep commands |
+| `program.md` | Loop | Extract `win_rate:` and `total_pnl:` from run.log for each block (train/test) |
+
+---
+
+### Enhancement Summary
+
+| # | Enhancement | Mutable section | Immutable section | `program.md` | `prepare.py` |
+|---|---|:---:|:---:|:---:|:---:|
+| 1 | Train/test split | ✅ (2 constants) | ✅ (params + prefix + __main__) | ✅ | — |
+| 2 | Optimize for train P&L | — | — | ✅ | — |
+| 3 | Final test outputs (CSV + table) | ✅ (1 constant) | ✅ (accumulate + output) | ✅ | — |
+| 4 | Sector trend summary | — | — | — | ✅ |
+| 5 | Extended results.tsv | — | — | ✅ | — |
+
+All immutable-section changes are **additive**: optional parameters with backwards-compatible defaults, output gated behind a flag, and a prefix parameter. The Sharpe formula and core backtest loop are unchanged.
+
+---
+
 ## Appendix
 
 ### Related Documents

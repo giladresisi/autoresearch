@@ -346,7 +346,7 @@ This is not complex code — it could be a simple wrapper script that checks the
 
 ---
 
-## Status: All Phases Complete + Post-Phase-5 Enhancements — 86/87 tests passing, 1 skipped
+## Status: All Phases Complete + Multi-Sector Optimization Results + Enhancement PRD — 86/87 tests passing, 1 skipped
 
 ---
 
@@ -373,6 +373,67 @@ This is not complex code — it could be a simple wrapper script that checks the
 **Pre-existing bugs fixed:**
 - `prepare.py`: Windows cp1252 encoding error on `→` arrow character
 - `prepare.py`: `price_10am` always NaN — yfinance 1h bars start at 9:30 AM ET, not 10:00 AM
+
+### Multi-Sector Optimization Runs (2026-03-20)
+
+Five parallel worktrees were run to validate the optimization loop across sectors and time windows.
+
+#### Results Summary
+
+| Sector / Run | Branch | Window | Best Sharpe | Trades | Total PnL | Tag |
+|---|---|---|---|---|---|---|
+| Energy (in-sample) | `autoresearch/mar20` | Dec 20 → Mar 20, 2026 | 5.791 | 18 | — | `energy-momentum-v1` |
+| Energy (OOS validation) | `autoresearch/energy-oos-sep25` | Sep 20 → Dec 20, 2025 | -0.010 | 6 | -$85 | — |
+| Energy (OOS optimized) | `autoresearch/energy-oos-opt-sep25` | Sep 20 → Dec 20, 2025 | 8.208 | 73 | ~$956 | `energy-oos-v1` |
+| Semis | `autoresearch/semis-mar20` | Dec 20 → Mar 20, 2026 | 4.754 | 34 | $602 | `semis-momentum-v1` |
+| Utilities | `autoresearch/utilities-mar20` | Dec 20 → Mar 20, 2026 | 4.363 | 29 | $47 | `utilities-breakout-v1` |
+| Financials | `autoresearch/financials-mar20` | Dec 20 → Mar 20, 2026 | 6.575 | 45 | **-$60** | `financials-v1` |
+
+#### Cross-Sector Insights
+
+**The pullback screener (master baseline) was wrong for every sector tested.** All runs that started from the pullback screener (utilities, and implicitly the original energy baseline) converged to momentum breakout structures within the first 7–10 iterations. The loop rediscovered the same structure independently each time.
+
+**Sector-specific parameter tuning that emerged:**
+
+| Parameter | Energy (in-sample) | Semis | Utilities | Energy OOS |
+|---|---|---|---|---|
+| Breakout window | 20-day high | 20-day | 5-day | 20-day |
+| Trend filter | SMA50 | SMA20 | SMA30 | SMA50 |
+| RSI range | 50–75 | 50–85 | 50–75 | 30–90 |
+| Volume | 1.0× | 1.2× | 1.2× | 0.95× |
+| ATR stop | 2.0× | 2.5× | 2.0× | 2.5× |
+| Breakeven trigger | 1.5× ATR | 2.5× ATR | 1.5× ATR | 5.0× ATR |
+
+**Breakeven trigger was the dominant variable across sectors.** Energy OOS and Financials both converged to 5× ATR as the breakeven trigger, producing the highest Sharpe gains of any single parameter. The original 1.5× trigger moves stops too early for momentum strategies — normal intraday pullbacks trigger it and kill positions before they run.
+
+**OOS validation result: FAIL (Sharpe -0.01).** The in-sample energy strategy (Sharpe 5.79 on Dec–Mar) collapsed to -0.01 on the Sep–Dec window. This confirms the strategy overfit to the specific Dec–Mar 2026 energy regime during 28 iterations. The energy OOS optimization run then found a valid strategy for the Sep–Dec window (Sharpe 8.21) — confirming the window had tradeable signals, but requiring different parameters.
+
+#### Sharpe Metric Flaw Discovered
+
+The financials run produced Sharpe 6.58 with **total PnL of -$60**, exposing a structural flaw in the Sharpe computation:
+
+- `daily_values` is the raw sum of mark-to-market open positions (not returns on capital deployed)
+- On days with no positions, the value is `$0` — `diff(daily_values)` includes large entry/exit artifacts, not returns
+- Any change that holds positions longer (e.g., raising the breakeven trigger) reduces stop-management events → smoother daily_values curve → lower variance → higher Sharpe, even if P&L worsens
+- The optimizer found a degenerate optimum: "do less with stops" maximizes Sharpe while minimizing actual profit
+
+This was compounded by the financials loop selecting RSI 65–90 entries, which tend to be near price exhaustion — entering overbought momentum stocks that frequently reverse.
+
+**Conclusion:** Sharpe as currently computed is an unreliable optimization target. It can be gamed by smoothing the portfolio value trajectory without improving returns.
+
+#### Proposed Enhancements
+
+Five enhancements documented in `prd.md` (Enhancements section):
+
+1. **Train/test split** — last 2 weeks held out as test; optimization runs on train only; test P&L tracked per iteration for reporting
+2. **Optimize for train P&L** — replace Sharpe as keep/discard criterion with `train_total_pnl`; Sharpe retained as informational metric
+3. **Final test run outputs** — after loop completes, write `final_test_data.csv` (full per-ticker daily data for test window) and print per-ticker P&L table
+4. **Sector trend summary (`data_trend.md`)** — `prepare.py` writes a one-paragraph trend summary after download (median return, up/down counts, top/bottom movers)
+5. **Extended results.tsv** — add `train_pnl`, `test_pnl`, `win_rate` columns alongside existing `sharpe` and `total_trades`
+
+See `prd.md → Enhancements` for full implementation spec including which changes go in the mutable section, immutable section, `program.md`, and `prepare.py`.
+
+---
 
 ### Post-Phase-5 Enhancements (2026-03-20)
 
