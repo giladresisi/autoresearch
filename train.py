@@ -176,7 +176,7 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     price_10am = float(df['price_10am'].iloc[-1])
 
     # Guard NaN/zero before any rule evaluation
-    if pd.isna(sma150) or pd.isna(vm30) or pd.isna(atr) or pd.isna(c1) or pd.isna(c2) or vm30 == 0 or atr == 0:
+    if pd.isna(price_10am) or pd.isna(sma150) or pd.isna(vm30) or pd.isna(atr) or pd.isna(c1) or pd.isna(c2) or vm30 == 0 or atr == 0:
         return None
 
     # Rule 1: price_10am must be above SMA150
@@ -194,17 +194,17 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if not (vol1 >= 0.85 and vol2 >= 0.85):
         return None
 
-    # Rule 4: CCI(20) < -50, rising 2 consecutive days
-    if pd.isna(c0) or not (c0 < -50 and c0 > c1 > c2):
+    # Rule 4: CCI(20) < -30, rising 2 consecutive days
+    if pd.isna(c0) or not (c0 < -30 and c0 > c1 > c2):
         return None
 
-    # Rule 5: pullback >= 8% from 7-day local high AND all-time high
+    # Rule 5: pullback >= 5% from 7-day local high AND all-time high
     # Uses price_10am (not close) so comparisons match actual entry conditions
     local_high = float(df['high'].iloc[-8:-1].max())
     ath        = float(df['high'].max())
     pct_local  = (local_high - price_10am) / local_high
     pct_ath    = (ath - price_10am) / ath
-    if not (pct_local >= 0.08 and pct_ath >= 0.08):
+    if not (pct_local >= 0.05 and pct_ath >= 0.05):
         return None
 
     # R4: upper wick of entry candle must be strictly less than body
