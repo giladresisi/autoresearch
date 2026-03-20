@@ -48,6 +48,15 @@ def calc_cci(df, p=20):
     return (tp - sma) / (0.015 * md)
 
 
+def calc_rsi14(df):
+    # RSI(14) using standard Wilder smoothing
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss.replace(0, float('nan'))
+    return 100 - (100 / (1 + rs))
+
+
 def calc_atr14(df):
     # Average True Range (Wilder, 14-bar rolling mean of true range)
     # First 13 values are NaN because rolling(14) needs 14 bars
@@ -166,14 +175,16 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     df['_sma50']  = df['close'].rolling(50).mean()
     df['_vm30']   = df['volume'].rolling(30).mean()
     df['_atr14']  = calc_atr14(df)
+    df['_rsi14']  = calc_rsi14(df)
 
     sma50      = float(df['_sma50'].iloc[-1])
     vm30       = float(df['_vm30'].iloc[-1])
     atr        = float(df['_atr14'].iloc[-1])
+    rsi        = float(df['_rsi14'].iloc[-1])
     price_10am = float(df['price_10am'].iloc[-1])
 
     # Guard NaN/zero
-    if pd.isna(price_10am) or pd.isna(sma50) or pd.isna(vm30) or pd.isna(atr) or vm30 == 0 or atr == 0:
+    if pd.isna(price_10am) or pd.isna(sma50) or pd.isna(vm30) or pd.isna(atr) or pd.isna(rsi) or vm30 == 0 or atr == 0:
         return None
 
     # Rule 1: price above SMA50 (short-term uptrend)
@@ -193,6 +204,10 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     # Rule 3: today's volume >= 1.0× MA30 (average or above)
     vol_ratio = float(df['volume'].iloc[-1]) / vm30
     if vol_ratio < 1.0:
+        return None
+
+    # Rule 3b: RSI between 50 and 75 (momentum building, not overbought)
+    if not (50 <= rsi <= 75):
         return None
 
     # Rule 4: not stalling at ceiling
