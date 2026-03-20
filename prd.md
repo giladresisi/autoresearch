@@ -730,6 +730,103 @@ All immutable-section changes are **additive**: optional parameters with backwar
 
 ---
 
+### Enhancement 6: Multi-Strategy Registry and LLM-Driven Strategy Selector
+
+**Motivation:** Once multiple strategies have been optimized for different sectors and timeframes, they need to coexist in a single git branch and be applied to real-time ticker data. The selection of which strategy applies to a given ticker on a given day is not a mechanical lookup — it requires contextual reasoning about sector fit, regime similarity, and recent price behavior.
+
+---
+
+#### 6a: Strategy Registry
+
+**Description:** A `strategies/` directory on `master` holds one Python module per published strategy. Each file contains the strategy's `screen_day()`, `manage_position()`, and a `METADATA` dict that fully documents its optimization context.
+
+```
+strategies/
+├── __init__.py              # REGISTRY dict: {name: module}
+├── base_indicators.py       # shared: calc_rsi, calc_atr14, calc_cci, find_stop_price, ...
+├── energy_momentum_v1.py
+├── semis_momentum_v1.py
+├── utilities_breakout_v1.py
+└── ...
+```
+
+**`METADATA` fields per strategy:**
+
+| Field | Description |
+|---|---|
+| `name` | Unique strategy identifier (e.g. `semis-momentum-v1`) |
+| `sector` | Sector label (e.g. `semiconductors`) |
+| `tickers` | Ticker universe the strategy was optimized on |
+| `train_start` / `train_end` | Training window dates |
+| `test_start` / `test_end` | Held-out test window dates (post-Enhancement 1) |
+| `source_branch` | Git branch the strategy was optimized on |
+| `source_commit` | Git commit hash of the best iteration |
+| `train_pnl` | Total P&L on training window |
+| `train_sharpe` | Sharpe on training window (informational) |
+| `train_trades` | Number of trades on training window |
+| `description` | Free-text description of what the strategy does and what market regime it was tuned for |
+
+**How strategies reach master (no `git merge`):**
+Worktree branches are never merged into master. After a worktree's optimization loop completes, a post-optimization extraction step reads the best `train.py` via `git show <tag>:train.py`, extracts all code above the `# DO NOT EDIT BELOW THIS LINE` boundary, and writes it as a new `strategies/<name>.py` on master. The worktree branch and tag remain intact for audit; the branch itself can be pruned after extraction.
+
+This approach avoids merge conflicts entirely — `train.py` across worktrees are structurally different files (each was evolved independently), but each strategy's `screen_day()` and `manage_position()` are self-contained and can coexist as separate modules.
+
+---
+
+#### 6b: LLM-Driven Strategy Selector
+
+**Description:** When screening a ticker for real-time trade signals, the strategy to apply is selected by an LLM based on contextual reasoning — not by a deterministic lookup of which tickers were in the strategy's training universe. The LLM reads the available strategies' metadata and the current ticker's recent data, and decides which strategy (or strategies) is most applicable, explaining its choice.
+
+**Why not a ticker-membership filter:** A strategy optimized on `[NVDA, AMD, INTC, ...]` captures patterns of the semiconductor sector in a specific market regime. A new ticker like `MRVL` (Marvell) wasn't in the training set but belongs to the same sector and may fit the same regime. Conversely, `GS` (Goldman Sachs) was in the financials training set, but if Goldman is behaving like a growth stock during a particular rally, the semis momentum strategy might be more applicable than the financials one. Ticker membership is a weak proxy for relevance; sector fit + regime match is the right criterion.
+
+**Selector inputs:**
+- Full `REGISTRY` with each strategy's `METADATA` (sector, training window, description, regime context)
+- Target ticker symbol + its recent OHLCV data (e.g. last 30 days: trend direction, volatility, volume pattern)
+- Today's date
+
+**Selector output:**
+- Selected strategy name (or a ranked list if multiple seem applicable)
+- Plain-language explanation covering: which sector the ticker fits, which market regime is currently active, why the selected strategy's training conditions match current conditions, and any caveats
+
+**Example output for NVDA on a given day:**
+> *Selected: `semis-momentum-v1`*
+> *Reason: NVDA is a semiconductor name and is currently above its 20-day SMA with RSI ~62 and volume trending above its 30-day average — matching the regime this strategy was trained on (Dec–Mar 2026, semis in a momentum phase). The financials strategy (`financials-v1`) is not applicable: different sector, different price dynamics. The utilities strategy is not applicable: NVDA is high-beta, utilities strategy was tuned for low-ATR slow movers.*
+
+**Example output for NVDA on a different day:**
+> *Selected: none (no strategy confident match)*
+> *Reason: NVDA is trading below SMA20 with RSI 38 — a mean-reversion environment. The semis strategy was optimized for breakout entries in an uptrending regime and would produce false signals here. No currently available strategy was tuned for semiconductor mean-reversion.*
+
+**Implementation:** The selector is a lightweight LLM call (separate from the optimization loop) that receives strategy metadata + ticker snapshot as context. It is not part of `train.py` or the backtesting infrastructure — it is a runtime tool built on top of the registry.
+
+**Interface:**
+```python
+def select_strategy(ticker: str, recent_df: pd.DataFrame, today: date) -> dict:
+    """
+    Returns:
+      {
+        'strategy': 'semis-momentum-v1',   # or None
+        'explanation': '...',
+        'confidence': 'high' | 'medium' | 'low'
+      }
+    """
+```
+
+---
+
+#### Enhancement Summary (updated)
+
+| # | Enhancement | Mutable section | Immutable section | `program.md` | `prepare.py` | New files |
+|---|---|:---:|:---:|:---:|:---:|:---:|
+| 1 | Train/test split | ✅ | ✅ | ✅ | — | — |
+| 2 | Optimize for train P&L | — | — | ✅ | — | — |
+| 3 | Final test outputs (CSV + table) | ✅ | ✅ | ✅ | — | — |
+| 4 | Sector trend summary | — | — | — | ✅ | `data_trend.md` |
+| 5 | Extended results.tsv | — | — | ✅ | — | — |
+| 6a | Strategy registry | — | — | ✅ (extraction step) | — | `strategies/` |
+| 6b | LLM strategy selector | — | — | — | — | `strategy_selector.py` |
+
+---
+
 ## Appendix
 
 ### Related Documents

@@ -423,15 +423,21 @@ This was compounded by the financials loop selecting RSI 65–90 entries, which 
 
 #### Proposed Enhancements
 
-Five enhancements documented in `prd.md` (Enhancements section):
+Six enhancements documented in `prd.md → Enhancements`:
 
 1. **Train/test split** — last 2 weeks held out as test; optimization runs on train only; test P&L tracked per iteration for reporting
 2. **Optimize for train P&L** — replace Sharpe as keep/discard criterion with `train_total_pnl`; Sharpe retained as informational metric
 3. **Final test run outputs** — after loop completes, write `final_test_data.csv` (full per-ticker daily data for test window) and print per-ticker P&L table
 4. **Sector trend summary (`data_trend.md`)** — `prepare.py` writes a one-paragraph trend summary after download (median return, up/down counts, top/bottom movers)
 5. **Extended results.tsv** — add `train_pnl`, `test_pnl`, `win_rate` columns alongside existing `sharpe` and `total_trades`
+6. **Multi-strategy registry + LLM-driven selector** — publish optimized strategies as named modules in a `strategies/` directory on master; at runtime an LLM selects which strategy to apply to a given ticker based on sector fit, regime match, and recent price behavior — not ticker membership — and provides a plain-language explanation of its choice
 
-See `prd.md → Enhancements` for full implementation spec including which changes go in the mutable section, immutable section, `program.md`, and `prepare.py`.
+**Key architecture decisions for Enhancement 6:**
+- Worktree branches are never merged into master. Strategy code is extracted via `git show <tag>:train.py` and committed as `strategies/<name>.py` on master — avoiding all cross-branch conflicts in `train.py`
+- `METADATA` in each strategy file stores the full optimization context: sector, tickers, training window, source commit, train P&L/Sharpe
+- Strategy selection at runtime is LLM-based: the selector receives all strategy metadata + the target ticker's recent OHLCV snapshot and reasons about sector alignment, regime similarity, and current price behavior. It outputs the chosen strategy and an explanation. A ticker that wasn't in a strategy's training universe can still be selected if the LLM judges the regime match appropriate (e.g. MRVL → semis strategy); a ticker that was in the training universe can be rejected if current conditions don't match (e.g. GS in a mean-reversion phase → no strategy applies)
+
+See `prd.md → Enhancements` for full implementation spec.
 
 ---
 
