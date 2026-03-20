@@ -185,9 +185,9 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if price_10am <= high20:
         return None
 
-    # Rule 3: today's volume >= 1.2× MA30 (volume confirmation)
+    # Rule 3: today's volume >= 1.0× MA30 (average or above)
     vol_ratio = float(df['volume'].iloc[-1]) / vm30
-    if vol_ratio < 1.2:
+    if vol_ratio < 1.0:
         return None
 
     # Rule 4: not stalling at ceiling
