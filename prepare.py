@@ -21,10 +21,10 @@ import yfinance as yf
 # The agent loop setup will overwrite TICKERS, BACKTEST_START, and BACKTEST_END
 # based on the parameters the user specifies in their request. Edit the values
 # here directly when running prepare.py manually outside the agent loop.
-TICKERS = ["AAPL", "MSFT", "NVDA", "JPM", "TSLA"]
+TICKERS = ["CTVA", "LIN", "XOM", "DBA", "SM", "IYE", "EOG", "APA", "EQT", "CTRA", "APD", "DVN", "BKR", "COP", "VLO", "HEI", "HAL"]
 
-BACKTEST_START = "2026-01-01"  # first day of the backtest window (inclusive)
-BACKTEST_END   = "2026-03-01"  # last day of the backtest window (exclusive)
+BACKTEST_START = "2025-12-20"  # first day of the backtest window (inclusive)
+BACKTEST_END   = "2026-03-20"  # last day of the backtest window (exclusive)
 # ────────────────────────────────────────────────────────────────────────────
 
 # Derived (do not modify)

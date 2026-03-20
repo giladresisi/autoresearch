@@ -12,8 +12,8 @@ import pandas as pd
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "stock_data")
 
 # Backtest window — matches prepare.py; edit here to change the simulation period
-BACKTEST_START = "2026-01-01"
-BACKTEST_END   = "2026-03-01"
+BACKTEST_START = "2025-12-20"
+BACKTEST_END   = "2026-03-20"
 
 
 def load_ticker_data(ticker: str) -> pd.DataFrame | None:
