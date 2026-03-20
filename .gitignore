@@ -22,5 +22,8 @@ dev/
 # Results file
 results.tsv
 
+# Test logs
+*.log
+
 # Environment variables
 .env

@@ -4,14 +4,60 @@ Autonomous stock strategy optimizer: iterates on screener and position managemen
 
 ---
 
+## Parameters
+
+The following parameters can be specified in the user's query. If not specified, defaults apply.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| **Timeframe** | Past 3 months before today | The backtest window: `BACKTEST_START` = first day of the 3-month window, `BACKTEST_END` = today. |
+| **Tickers** | As specified in `prepare.py` (`TICKERS` list) | Stock symbols to backtest. |
+| **Iterations** | 30 | Number of experiment iterations to run before stopping. |
+
+---
+
 ## Setup (once per session)
 
-1. **Agree on a run tag**: Propose a tag based on today's date (e.g. `mar18`). The branch `autoresearch/<tag>` must not already exist — check with `git branch -a | grep autoresearch/`.
-2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
-3. **Read the in-scope files**: `README.md`, `prepare.py` (read-only), `train.py` (the file you modify).
-4. **Verify data exists**: Check that `~/.cache/autoresearch/stock_data/` contains `.parquet` files. Run `ls ~/.cache/autoresearch/stock_data/`. If the directory is empty or missing, tell the human to run `uv run prepare.py` and wait for confirmation before continuing.
-5. **Initialize results.tsv**: Create the file with just the header row below. The baseline `sharpe` will be recorded after the first run.
-6. **Confirm and go**: Confirm setup looks good, then begin the experiment loop.
+1. **Parse parameters from the user's query**: Identify any user-specified values for timeframe, tickers, and iterations. For each parameter, note whether it is user-defined or using the default.
+
+2. **Compute dates**:
+   - If the user specified a timeframe, parse it into `BACKTEST_START` and `BACKTEST_END` dates (`YYYY-MM-DD`).
+   - If using the default, set `BACKTEST_END` = today's date, `BACKTEST_START` = 3 months prior (e.g. today `2026-03-20` → start `2025-12-20`).
+
+3. **Agree on a run tag**: Propose a tag based on today's date (e.g. `mar20`). The branch `autoresearch/<tag>` must not already exist — check with `git branch -a | grep autoresearch/`.
+
+4. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
+
+5. **Update `prepare.py` USER CONFIGURATION**: Edit the `TICKERS`, `BACKTEST_START`, and `BACKTEST_END` values in the `# ── USER CONFIGURATION ──` block of `prepare.py`. These three variables are the only lines you may edit in `prepare.py`.
+
+   Example edit for tickers `AAPL, NVDA` and window `2025-12-20` to `2026-03-20`:
+   ```python
+   TICKERS = ["AAPL", "NVDA"]
+   BACKTEST_START = "2025-12-20"
+   BACKTEST_END   = "2026-03-20"
+   ```
+
+6. **Update `train.py` constants**: Set `BACKTEST_START` and `BACKTEST_END` at the top of `train.py` to match the values you just wrote into `prepare.py`.
+
+7. **Download data**: Run `uv run prepare.py`. Wait for it to complete. If it fails, report the error to the user and stop. Data is cached in `~/.cache/autoresearch/stock_data/` as `.parquet` files — one per ticker.
+
+8. **Read the in-scope files**: `README.md`, `train.py` (the file you modify in experiments).
+
+9. **Print the parameter trace** — output this block immediately after setup completes, before the first experiment run:
+
+   ```
+   ── Run parameters ────────────────────────────────
+   Tickers:     AAPL, NVDA          [user-defined]
+   Timeframe:   2025-12-20 → 2026-03-20  [user-defined]
+   Iterations:  30                   [default]
+   ──────────────────────────────────────────────────
+   ```
+
+   Label each line `[user-defined]` or `[default]` as appropriate.
+
+10. **Initialize results.tsv**: Create the file with just the header row below. The baseline `sharpe` will be recorded after the first run.
+
+11. **Confirm and go**: Confirm setup looks good, then begin the experiment loop.
 
 ---
 
@@ -22,14 +68,15 @@ Autonomous stock strategy optimizer: iterates on screener and position managemen
 - Modify `screen_day()` in `train.py` — screener criteria, thresholds, indicator parameters, entry/exit rules, and any indicator helper functions it calls.
 - Modify `manage_position()` in `train.py` — stop management logic, breakeven trigger level, trailing stop behavior.
 - Add new indicator helper functions that `screen_day()` or `manage_position()` call.
+- Edit the `TICKERS`, `BACKTEST_START`, and `BACKTEST_END` lines in the `# ── USER CONFIGURATION ──` block of `prepare.py` **during setup only** (step 5 above). No other lines in `prepare.py` may be changed.
 
 ### What you CANNOT do
 
 - Modify anything below the `# DO NOT EDIT BELOW THIS LINE` comment in `train.py` — `run_backtest()`, `print_results()`, data loading functions, and the `__main__` block are the evaluation harness. Fixed. Must not be touched.
 - Modify `print_results()` or the output format block — the agent parses this output; changing it breaks the loop.
 - Modify `load_ticker_data()` or `load_all_ticker_data()` — fixed data loading infrastructure.
-- Modify `CACHE_DIR`, `BACKTEST_START`, `BACKTEST_END` constants — the backtest window is fixed per the PRD.
-- Modify `prepare.py` — read-only data pipeline.
+- Modify `CACHE_DIR` in `train.py` — fixed cache path.
+- Modify `prepare.py` beyond the three USER CONFIGURATION variables (`TICKERS`, `BACKTEST_START`, `BACKTEST_END`).
 - Modify the Sharpe computation formula inside `run_backtest()`.
 - Install new packages or add dependencies beyond what's in `pyproject.toml`.
 
@@ -106,7 +153,7 @@ d4e5f6g	0.000000	0	crash	divide-by-zero in custom indicator
 
 ## The experiment loop
 
-**LOOP FOREVER:**
+**LOOP for the configured number of iterations (default: 30):**
 
 1. Check git state: verify current branch and commit hash (`git log --oneline -1`).
 2. Modify `train.py` with an experimental idea. Edit the file directly. **Only edit code above the `# DO NOT EDIT BELOW THIS LINE` comment** — everything below it is the evaluation harness and must not be touched.
@@ -117,12 +164,13 @@ d4e5f6g	0.000000	0	crash	divide-by-zero in custom indicator
 7. Record the result in `results.tsv`.
 8. If Sharpe **improved (higher)** compared to the current best → keep the commit, advance the branch.
 9. If Sharpe is equal or worse → `git reset --hard HEAD~1` (revert to previous commit).
+10. When the configured number of iterations is reached, stop and report the best result to the user.
 
-### NEVER STOP
+### AUTONOMOUS UNTIL DONE — NEVER STOP EARLY
 
-Once the loop has begun, do NOT pause to ask the user if you should continue. The user may be asleep. **You are autonomous.** Loop until manually stopped.
+Once the loop has begun, do NOT pause to ask the user if you should continue. The user may be asleep. **You are autonomous.** NEVER stop before reaching the configured iteration count. Loop until done, then stop and report.
 
-If you run out of ideas: try relaxing individual screener criteria one at a time, combining near-misses, varying the stop management trigger level, or adjusting position entry/exit rules.
+If you run out of ideas before reaching the iteration limit: try relaxing individual screener criteria one at a time, combining near-misses, varying the stop management trigger level, or adjusting position entry/exit rules.
 
 ### Crash handling
 

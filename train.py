@@ -258,7 +258,7 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
     if pd.isna(atr) or atr == 0:
         return current_stop
     price_10am = float(df['price_10am'].iloc[-1])
-    if price_10am >= entry_price + atr:
+    if price_10am >= entry_price + 1.5 * atr:
         return max(current_stop, entry_price)
     return current_stop
 
@@ -266,6 +266,10 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
 # ── DO NOT EDIT BELOW THIS LINE ───────────────────────────────────────────────
 # run_backtest(), print_results(), load_ticker_data(), load_all_ticker_data(),
 # and the __main__ block are the evaluation harness. They must not be modified.
+#
+# DEVELOPERS / MAINTAINERS: if you intentionally change anything below this
+# line, you must also update GOLDEN_HASH in tests/test_optimization.py and
+# rerun `uv run pytest tests/test_optimization.py::test_harness_below_do_not_edit_is_unchanged`.
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_backtest(ticker_dfs: dict) -> dict:
@@ -310,7 +314,14 @@ def run_backtest(ticker_dfs: dict) -> dict:
             for t in to_close:
                 del portfolio[t]
 
-        # 2. Screen for new entries
+        # 2. Manage existing positions (before screening, so new entries are excluded)
+        for ticker, pos in portfolio.items():
+            df = ticker_dfs[ticker]
+            hist = df.loc[:today]
+            new_stop = manage_position(pos, hist)
+            pos["stop_price"] = max(new_stop, pos["stop_price"])
+
+        # 3. Screen for new entries
         for ticker, df in ticker_dfs.items():
             if ticker in portfolio:
                 continue
@@ -327,13 +338,6 @@ def run_backtest(ticker_dfs: dict) -> dict:
                 "stop_price": signal["stop"],
                 "ticker": ticker,
             }
-
-        # 3. Manage positions (including new entries)
-        for ticker, pos in portfolio.items():
-            df = ticker_dfs[ticker]
-            hist = df.loc[:today]
-            new_stop = manage_position(pos, hist)
-            pos["stop_price"] = max(new_stop, pos["stop_price"])
 
         # 4. Mark-to-market: portfolio value = sum of (price_10am × shares) for open positions
         portfolio_value = 0.0

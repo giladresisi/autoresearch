@@ -73,9 +73,10 @@ def test_price_10am_is_open_of_10am_bar():
     hourly_et = hourly.copy()
     hourly_et.index = hourly_et.index.tz_convert("America/New_York")
     for d, row in daily.iterrows():
-        # Find the 10am bar for this date in hourly data
-        mask = (hourly_et.index.date == d) & (hourly_et.index.time == datetime.time(10, 0))
-        assert mask.sum() == 1, f"Expected one 10am bar for {d}"
+        # yfinance 1h bars start at 9:30 AM ET (no 10:00 AM bar exists).
+        # price_10am is extracted from the 9:30 AM bar (market open).
+        mask = (hourly_et.index.date == d) & (hourly_et.index.time == datetime.time(9, 30))
+        assert mask.sum() == 1, f"Expected one 9:30am bar for {d}"
         expected = hourly_et.loc[mask, "Open"].iloc[0]
         assert row["price_10am"] == pytest.approx(expected)
 
@@ -210,14 +211,35 @@ def test_download_ticker_returns_expected_schema():
 # ── Main block test (1, subprocess) ──────────────────────────────────────────
 
 def test_main_exits_1_when_tickers_empty():
-    """Main block exits 1 with clear message when TICKERS list is empty."""
+    """Main block exits 1 with clear message when TICKERS list is empty.
+
+    Uses a patched copy of prepare.py with TICKERS=[] to test the guard path
+    without depending on the real TICKERS value configured in the source file.
+    """
+    import os
     import subprocess
+    import tempfile
     from pathlib import Path
     project_root = Path(__file__).parent.parent
-    result = subprocess.run(
-        ["uv", "run", "python", "prepare.py"],
-        capture_output=True,
-        cwd=project_root,
+    source = (project_root / "prepare.py").read_text(encoding="utf-8")
+    # Override TICKERS to empty list to exercise the early-exit guard
+    patched = source.replace(
+        'TICKERS = ["AAPL", "MSFT", "NVDA", "JPM", "TSLA"]',
+        'TICKERS = []',
+        1,
     )
+    with tempfile.NamedTemporaryFile(
+        suffix=".py", delete=False, mode="w", encoding="utf-8"
+    ) as f:
+        f.write(patched)
+        tmp_path = f.name
+    try:
+        result = subprocess.run(
+            ["uv", "run", "python", tmp_path],
+            capture_output=True,
+            cwd=project_root,
+        )
+    finally:
+        os.unlink(tmp_path)
     assert result.returncode == 1
     assert b"TICKERS" in result.stdout

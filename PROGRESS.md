@@ -1,6 +1,69 @@
 # PROGRESS
 
-## Status: Phase 4 Complete (74/74 tests passing) — Ready for Phase 5
+## Status: All Phases Complete + Post-Phase-5 Enhancements — 86/87 tests passing, 1 skipped
+
+---
+
+## Feature: Phase 5 — End-to-End Integration Test + Post-Phase Enhancements
+### Planning Phase
+**Status**: ✅ Planned
+**Started**: 2026-03-19
+**Plan File**: .agents/plans/phase-5-end-to-end.md
+
+### Phase 5 Core Implementation (2026-03-19)
+**Status**: ✅ Complete — 86/86 tests passing (9 new integration + 77 pre-existing), 0 failures
+
+**Files created/modified:**
+- `prepare.py` — set TICKERS to 5-stock list; fixed Windows cp1252 encoding (`→` → `->` in print statements); fixed `price_10am` extraction from 10:00 AM → 9:30 AM bar (yfinance 1h bars labeled at 9:30 ET, no 10 AM bar exists)
+- `tests/test_e2e.py` — created (9 integration tests + module-scoped fixtures)
+- `tests/test_prepare.py` — updated 2 tests: 9:30 AM bar fix + patched-copy approach for empty-tickers test
+- `.gitignore` — added `*.log` entry
+
+**Key outcomes:**
+- 5 parquet files cached: AAPL, MSFT, NVDA, JPM, TSLA — 289 rows each, Jan 2025 – Feb 2026
+- Criterion 18 (screen_day on real Parquet data) resolved: VERIFIED ✅
+- Agent loop viability confirmed: relaxed screener produces ≥ 1 trade across 42-day window
+
+**Pre-existing bugs fixed:**
+- `prepare.py`: Windows cp1252 encoding error on `→` arrow character
+- `prepare.py`: `price_10am` always NaN — yfinance 1h bars start at 9:30 AM ET, not 10:00 AM
+
+### Post-Phase-5 Enhancements (2026-03-20)
+
+#### 1. Multi-iteration multi-ticker agent loop test
+Added `test_agent_loop_two_iterations_multi_ticker` (Test 9 in `tests/test_e2e.py`). Simulates 2 sequential agent loop iterations on all cached tickers (≥ 2 required). Iteration 1 relaxes CCI and pullback thresholds; Iteration 2 adds an ATR-based stop fallback and lowers the resistance gate. Verifies keep/discard accounting (best_sharpe == max of history) and that ≥ 1 trade fires with full relaxation.
+
+#### 2. `run_backtest()` order swap: manage before screen
+Swapped the per-day loop in `run_backtest()` so existing positions are managed (stop updated) **before** screening for new entries. Previously new entries were managed on their entry day, which is incorrect since the stop price was just set. The new order ensures newly opened positions are never managed on the same day they're opened.
+
+#### 3. `manage_position()` ATR multiplier: 1× → 1.5×ATR
+The breakeven trigger in `manage_position()` was `entry_price + 1.0 × ATR14`. Changed to `entry_price + 1.5 × ATR14` to match the minimum price-to-stop gap enforced at entry time by `screen_day()`. Both entry guard and ongoing management now apply the same 1.5×ATR buffer.
+
+#### 4. SHA-256 golden hash update + developer comment
+After the harness changed (order swap + developer note), updated `GOLDEN_HASH` in `tests/test_optimization.py` from `dca8913b…` to `fcbf75cf…`. Added a comment immediately below the `# ── DO NOT EDIT BELOW THIS LINE` marker in `train.py` instructing future maintainers to update the hash and rerun the relevant test whenever they intentionally change the harness.
+
+#### 5. Configurable agent loop parameters
+Made 3 agent loop parameters configurable from the user's Claude Code query, with defaults:
+
+| Parameter | Default |
+|-----------|---------|
+| Timeframe | Past 3 months before today |
+| Tickers | As listed in `prepare.py` TICKERS |
+| Iterations | 30 |
+
+**Files updated:**
+- `prepare.py` — added developer comment to USER CONFIGURATION block noting it is overwritten by the agent loop setup; no logic changes
+- `program.md` — full rewrite: added Parameters section, updated Setup steps (parse parameters → compute dates → edit prepare.py USER CONFIGURATION → edit train.py constants → run prepare.py → print parameter trace), added parameter trace format showing `[user-defined]` / `[default]` labels, changed "LOOP FOREVER" to "LOOP for configured iterations", clarified CANNOT-do constraints for prepare.py
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/phase-5-end-to-end.md`
+- Full pipeline validation: prepare.py → parquet cache → backtester → output block
+- 8 integration tests implemented (Phase 5), 1 added post-phase (multi-iteration multi-ticker)
+- Two pre-existing bugs discovered and fixed; Test 8 expanded to 4-parameter mutation due to Jan–Mar 2026 market conditions
+- All 5 validation levels passed; system ready for autonomous agent handoff
+
+---
 
 ## Feature: Phase 4 — Agent Instructions (`program.md`)
 ### Planning Phase
@@ -11,8 +74,15 @@
 **Status**: ✅ Complete — 74/74 tests passing (23 new + 51 pre-existing), 0 failures
 
 **Files created/modified:**
-- `program.md` — full rewrite: nanochat/GPU instructions → stock Sharpe optimization agent instructions
-- `tests/test_program_md.py` — created (23 structural tests)
+- `program.md` — full rewrite: nanochat/GPU instructions → stock Sharpe optimization agent instructions with `results.tsv` logging, keep/discard loop, DO NOT EDIT boundary, crash handling, and no-trades guidance
+- `tests/test_program_md.py` — created (23 structural tests covering: setup steps, output format, TSV schema, loop instructions, cannot-modify constraints, no legacy references)
+
+**Key design decisions:**
+- `results.tsv` schema: `commit | sharpe | total_trades | status | description` (tab-separated; commas break in descriptions)
+- Status values: `keep`, `discard`, `crash`
+- `NEVER STOP` instruction makes agent autonomous once loop begins
+- `git reset --hard HEAD~1` on discard/crash; advance branch on keep
+- Baseline run required before any mutations
 
 ### Reports Generated
 
@@ -255,22 +325,12 @@ All 14 criteria passed. Key verifications:
 
 ---
 
-## What the Next Agent Should Do
+## System Ready
 
-### Immediate next step: Phase 4 — Agent instructions (`program.md`)
+All 5 phases are complete. The pipeline is fully operational:
 
-Phases 1, 2, and 3 are complete. Read `prd.md` and create an implementation plan for:
+1. `uv run prepare.py` — downloads and caches OHLCV data for the configured tickers
+2. `uv run train.py` — runs the backtest, prints a fixed-format results block
+3. Agent loop (via `program.md`) — autonomously mutates `train.py`, commits, backtests, keeps or reverts
 
-**Phase 4 — Agent instructions (`program.md`)**
-- Rewrite for stock optimization loop (higher Sharpe = keep)
-- Updated `results.tsv` schema: `commit`, `sharpe`, `total_trades`, `status`, `description`
-
-**Phase 5 — End-to-end test**
-- Set `TICKERS = ["AAPL", "MSFT", "NVDA", "JPM", "TSLA"]`
-- Run `prepare.py`, verify 5 Parquet files
-- Run `train.py`, verify `sharpe:` appears in output
-- Validate at least 1 trade occurred in the backtest window
-
-### Key constraint for next agent
-Do not commit `results-v0.tsv`, `.env`, or any `prd.backup-*.md` files. Only commit source files.
-- Criterion 18 from screener AC validation remains unverifiable until Phase 5 populates the Parquet cache.
+To start an experiment session: open a Claude Code conversation in this repo and describe your desired run parameters (tickers, timeframe, iterations). The agent will handle setup and run autonomously.

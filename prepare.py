@@ -17,7 +17,11 @@ import pandas as pd
 import yfinance as yf
 
 # ── USER CONFIGURATION ──────────────────────────────────────────────────────
-TICKERS = []  # TODO: fill in ticker symbols, e.g. ["AAPL", "MSFT", "NVDA"]
+# These are the DEFAULT values used by the agent loop (see program.md).
+# The agent loop setup will overwrite TICKERS, BACKTEST_START, and BACKTEST_END
+# based on the parameters the user specifies in their request. Edit the values
+# here directly when running prepare.py manually outside the agent loop.
+TICKERS = ["AAPL", "MSFT", "NVDA", "JPM", "TSLA"]
 
 BACKTEST_START = "2026-01-01"  # first day of the backtest window (inclusive)
 BACKTEST_END   = "2026-03-01"  # last day of the backtest window (exclusive)
@@ -55,8 +59,10 @@ def resample_to_daily(df_hourly: pd.DataFrame) -> pd.DataFrame:
         df.index = df.index.tz_localize("UTC")
     df.index = df.index.tz_convert("America/New_York")
 
-    # Extract the 10:00 AM ET open price for each trading day
-    mask = df.index.time == datetime.time(10, 0)
+    # Extract the 9:30 AM ET open price for each trading day.
+    # yfinance 1h bars are labeled at the start of each period (9:30, 10:30, ...),
+    # so there is no 10:00 AM bar. Use the 9:30 AM bar (market open) as price_10am.
+    mask = df.index.time == datetime.time(9, 30)
     df_10am = df[mask][["Open"]].copy()
     df_10am.index = pd.Index([ts.date() for ts in df_10am.index], name="date")
     price_10am_series = df_10am["Open"].rename("price_10am")
@@ -106,7 +112,7 @@ def process_ticker(ticker: str) -> bool:
     validate_ticker_data(ticker, df_daily, BACKTEST_START)
     os.makedirs(CACHE_DIR, exist_ok=True)
     df_daily.to_parquet(path)
-    print(f"  {ticker}: saved {len(df_daily)} days → {path}")
+    print(f"  {ticker}: saved {len(df_daily)} days -> {path}")
     return True
 
 
@@ -115,8 +121,8 @@ if __name__ == "__main__":
         print("ERROR: TICKERS list is empty. Edit prepare.py and add ticker symbols before running.")
         sys.exit(1)
     os.makedirs(CACHE_DIR, exist_ok=True)
-    print(f"Downloading {len(TICKERS)} tickers → {CACHE_DIR}")
-    print(f"Date range: {HISTORY_START} → {BACKTEST_END} (1h bars, resampled to daily)")
+    print(f"Downloading {len(TICKERS)} tickers -> {CACHE_DIR}")
+    print(f"Date range: {HISTORY_START} -> {BACKTEST_END} (1h bars, resampled to daily)")
     ok = 0
     for ticker in TICKERS:
         if process_ticker(ticker):
