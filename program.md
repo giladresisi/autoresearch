@@ -18,17 +18,19 @@ The following parameters can be specified in the user's query. If not specified,
 
 ## Setup (once per session)
 
+0. **Verify you are in an optimization worktree**: Run `git branch --show-current`. The branch
+   must match `autoresearch/*`. If it shows `master` or any other branch, **stop immediately**
+   and tell the user:
+   > You are on the `master` branch. Please use the `prepare-optimization` skill first to create
+   > a dedicated worktree, then open a new Claude Code session inside it (`cd ../<tag> && claude`).
+
 1. **Parse parameters from the user's query**: Identify any user-specified values for timeframe, tickers, and iterations. For each parameter, note whether it is user-defined or using the default.
 
 2. **Compute dates**:
    - If the user specified a timeframe, parse it into `BACKTEST_START` and `BACKTEST_END` dates (`YYYY-MM-DD`).
    - If using the default, set `BACKTEST_END` = today's date, `BACKTEST_START` = 3 months prior (e.g. today `2026-03-20` → start `2025-12-20`).
 
-3. **Agree on a run tag**: Propose a tag based on today's date (e.g. `mar20`). The branch `autoresearch/<tag>` must not already exist — check with `git branch -a | grep autoresearch/`.
-
-4. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
-
-5. **Update `prepare.py` USER CONFIGURATION**: Edit the `TICKERS`, `BACKTEST_START`, and `BACKTEST_END` values in the `# ── USER CONFIGURATION ──` block of `prepare.py`. These three variables are the only lines you may edit in `prepare.py`.
+3. **Update `prepare.py` USER CONFIGURATION**: Edit the `TICKERS`, `BACKTEST_START`, and `BACKTEST_END` values in the `# ── USER CONFIGURATION ──` block of `prepare.py`. These three variables are the only lines you may edit in `prepare.py`.
 
    Example edit for tickers `AAPL, NVDA` and window `2025-12-20` to `2026-03-20`:
    ```python
@@ -37,17 +39,17 @@ The following parameters can be specified in the user's query. If not specified,
    BACKTEST_END   = "2026-03-20"
    ```
 
-6. **Update `train.py` constants**: Set `BACKTEST_START` and `BACKTEST_END` at the top of `train.py` to match the values you just wrote into `prepare.py`.
+4. **Update `train.py` constants**: Set `BACKTEST_START` and `BACKTEST_END` at the top of `train.py` to match the values you just wrote into `prepare.py`.
 
-6b. **Compute train/test split**: Set `TRAIN_END = BACKTEST_END − 14 calendar days`
+4b. **Compute train/test split**: Set `TRAIN_END = BACKTEST_END − 14 calendar days`
     (e.g. BACKTEST_END `2026-03-20` → TRAIN_END `2026-03-06`). Write both
     `TRAIN_END` and `TEST_START` (same date) into the mutable section of `train.py`.
 
-7. **Download data**: Run `uv run prepare.py`. Wait for it to complete. If it fails, report the error to the user and stop. Data is cached in `~/.cache/autoresearch/stock_data/` as `.parquet` files — one per ticker.
+5. **Download data**: Run `uv run prepare.py`. Wait for it to complete. If it fails, report the error to the user and stop. Data is cached in `~/.cache/autoresearch/stock_data/` as `.parquet` files — one per ticker.
 
-8. **Read the in-scope files**: `README.md`, `train.py` (the file you modify in experiments).
+6. **Read the in-scope files**: `README.md`, `train.py` (the file you modify in experiments).
 
-8b. **Check for legacy Sharpe objective**: Grep the starting strategy file or `train.py` for the line:
+6b. **Check for legacy Sharpe objective**: Grep `train.py` for the line:
     ```
     # LEGACY_OBJECTIVE: sharpe
     ```
@@ -61,7 +63,7 @@ The following parameters can be specified in the user's query. If not specified,
     - The first baseline run will then establish a clean P&L baseline for the new loop.
     If the line is **not** present, the strategy was already optimized for train P&L — proceed normally.
 
-9. **Print the parameter trace** — output this block immediately after setup completes, before the first experiment run:
+7. **Print the parameter trace** — output this block immediately after setup completes, before the first experiment run:
 
    ```
    ── Run parameters ────────────────────────────────
@@ -73,9 +75,9 @@ The following parameters can be specified in the user's query. If not specified,
 
    Label each line `[user-defined]` or `[default]` as appropriate.
 
-10. **Initialize results.tsv**: Create the file with just the header row below. The baseline `sharpe` will be recorded after the first run.
+8. **Initialize results.tsv**: Create the file with just the header row below. The baseline `sharpe` will be recorded after the first run.
 
-11. **Confirm and go**: Confirm setup looks good, then begin the experiment loop.
+9. **Confirm and go**: Confirm setup looks good, then begin the experiment loop.
 
 ---
 
@@ -86,7 +88,7 @@ The following parameters can be specified in the user's query. If not specified,
 - Modify `screen_day()` in `train.py` — screener criteria, thresholds, indicator parameters, entry/exit rules, and any indicator helper functions it calls.
 - Modify `manage_position()` in `train.py` — stop management logic, breakeven trigger level, trailing stop behavior.
 - Add new indicator helper functions that `screen_day()` or `manage_position()` call.
-- Edit the `TICKERS`, `BACKTEST_START`, and `BACKTEST_END` lines in the `# ── USER CONFIGURATION ──` block of `prepare.py` **during setup only** (step 5 above). No other lines in `prepare.py` may be changed.
+- Edit the `TICKERS`, `BACKTEST_START`, and `BACKTEST_END` lines in the `# ── USER CONFIGURATION ──` block of `prepare.py` **during setup only** (step 3 above). No other lines in `prepare.py` may be changed.
 
 ### What you CANNOT do
 
