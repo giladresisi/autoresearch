@@ -98,6 +98,66 @@ def validate_ticker_data(ticker: str, df: pd.DataFrame, backtest_start: str) -> 
         print(f"WARNING: {ticker} has {n_missing} backtest days with missing price_10am")
 
 
+def write_trend_summary(tickers: list, backtest_start: str, backtest_end: str, cache_dir: str) -> None:
+    """Compute sector price behaviour for the backtest window and write data_trend.md."""
+    records = []
+    for ticker in tickers:
+        path = os.path.join(cache_dir, f"{ticker}.parquet")
+        if not os.path.exists(path):
+            continue
+        df = pd.read_parquet(path)
+        start_dt = pd.Timestamp(backtest_start).date()
+        end_dt   = pd.Timestamp(backtest_end).date()
+        sub = df[(df.index >= start_dt) & (df.index < end_dt)]
+        if len(sub) < 2:
+            continue
+        first_close = float(sub["close"].iloc[0])
+        last_close  = float(sub["close"].iloc[-1])
+        if first_close == 0:
+            continue
+        ret = (last_close - first_close) / first_close
+        records.append((ticker, ret))
+
+    if not records:
+        with open("data_trend.md", "w", encoding="utf-8") as f:
+            f.write("# Sector Trend Summary\n\nNo data available.\n")
+        return
+
+    records.sort(key=lambda x: x[1], reverse=True)
+    returns = [r for _, r in records]
+    n = len(returns)
+    sorted_returns = sorted(returns)
+    # True median: average the two middle values for even N
+    median_ret = float((sorted_returns[n // 2 - 1] + sorted_returns[n // 2]) / 2 if n % 2 == 0
+                       else sorted_returns[n // 2])
+    n_up   = sum(1 for r in returns if r > 0)
+    n_down = len(returns) - n_up
+    top3   = records[:3]
+    bot3   = records[-3:][::-1]
+
+    if median_ret > 0.03:
+        character = f"Broadly bullish: {n_up}/{len(records)} tickers rose, median {median_ret:+.1%}."
+    elif median_ret < -0.03:
+        character = f"Broadly bearish: {n_down}/{len(records)} tickers fell, median {median_ret:+.1%}."
+    else:
+        character = f"Mixed/flat: {n_up}/{len(records)} tickers rose, median {median_ret:+.1%}."
+
+    lines = [
+        "# Sector Trend Summary",
+        "",
+        f"**Window**: {backtest_start} → {backtest_end} | **Tickers**: {len(records)}",
+        f"**Median return**: {median_ret:+.1%} | **Up**: {n_up} | **Down**: {n_down}",
+        "",
+        f"**Top gainers**: " + ", ".join(f"{t} ({r:+.1%})" for t, r in top3),
+        f"**Bottom losers**: " + ", ".join(f"{t} ({r:+.1%})" for t, r in bot3),
+        "",
+        f"**Sector character**: {character}",
+    ]
+    with open("data_trend.md", "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print("data_trend.md written")
+
+
 def process_ticker(ticker: str) -> bool:
     """Download, resample, validate, and cache one ticker. Returns True on success."""
     path = os.path.join(CACHE_DIR, f"{ticker}.parquet")
@@ -128,3 +188,4 @@ if __name__ == "__main__":
         if process_ticker(ticker):
             ok += 1
     print(f"\nDone: {ok}/{len(TICKERS)} tickers cached successfully.")
+    write_trend_summary(TICKERS, BACKTEST_START, BACKTEST_END, CACHE_DIR)

@@ -33,17 +33,17 @@ def test_verify_cache_instruction():
 
 def test_results_tsv_header():
     c = _content()
-    assert "commit\tsharpe\ttotal_trades\tstatus\tdescription" in c
+    assert "commit\ttrain_pnl\ttest_pnl\ttrain_sharpe\ttotal_trades\twin_rate\tstatus\tdescription" in c
 
 
-def test_grep_sharpe_command():
+def test_grep_train_pnl_command():
     c = _content()
-    assert 'grep "^sharpe:" run.log' in c
+    assert 'grep "^train_total_pnl:" run.log' in c
 
 
 def test_grep_total_trades_command():
     c = _content()
-    assert 'grep "^total_trades:" run.log' in c
+    assert 'grep "^train_total_trades:" run.log' in c
 
 
 def test_output_block_format():
@@ -58,8 +58,10 @@ def test_output_block_format():
     assert "backtest_end:" in c
 
 
-def test_higher_sharpe_is_better():
+def test_higher_pnl_is_better():
     c = _content()
+    # program.md must state that higher train_total_pnl is the keep criterion
+    assert "train_total_pnl" in c
     assert "higher" in c.lower()
     # Must NOT say "lower is better" (val_bpb legacy)
     assert "lower is better" not in c

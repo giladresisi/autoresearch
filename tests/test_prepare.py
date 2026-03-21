@@ -6,7 +6,7 @@ import pytest
 import numpy as np
 import pandas as pd
 
-from prepare import resample_to_daily, validate_ticker_data, process_ticker, CACHE_DIR, BACKTEST_START
+from prepare import resample_to_daily, validate_ticker_data, process_ticker, write_trend_summary, CACHE_DIR, BACKTEST_START
 
 
 def _make_hourly_df(n_days: int = 10) -> pd.DataFrame:
@@ -208,6 +208,59 @@ def test_download_ticker_returns_expected_schema():
     assert len(df_daily) > 0
 
 
+# ── write_trend_summary tests (4) ────────────────────────────────────────────
+
+def _make_parquet(tmp_path, ticker, prices):
+    """Write a minimal parquet file so write_trend_summary can load it."""
+    import pandas as pd
+    base = datetime.date(2026, 1, 1)
+    dates = [base + datetime.timedelta(days=i) for i in range(len(prices))]
+    df = pd.DataFrame({
+        'open': prices, 'high': prices, 'low': prices, 'close': prices,
+        'volume': [1_000_000.0] * len(prices), 'price_10am': prices,
+    }, index=pd.Index(dates, name='date'))
+    df.to_parquet(tmp_path / f"{ticker}.parquet")
+
+
+def test_write_trend_summary_creates_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    prices = list(range(100, 160))   # 60 days, monotone rise
+    _make_parquet(tmp_path, 'AAA', prices)
+    write_trend_summary(['AAA'], '2026-01-01', '2026-03-01', str(tmp_path))
+    assert (tmp_path / 'data_trend.md').exists()
+
+
+def test_write_trend_summary_content(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    prices_a = list(range(100, 160))          # +59% rise
+    prices_b = list(range(160, 100, -1))      # −37% fall
+    _make_parquet(tmp_path, 'AAA', prices_a)
+    _make_parquet(tmp_path, 'BBB', prices_b)
+    write_trend_summary(['AAA', 'BBB'], '2026-01-01', '2026-03-01', str(tmp_path))
+    content = (tmp_path / 'data_trend.md').read_text()
+    assert 'AAA' in content
+    assert 'BBB' in content
+    assert 'Median return' in content
+    assert 'Sector character' in content
+
+
+def test_write_trend_summary_missing_ticker_skipped(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    prices = list(range(100, 160))
+    _make_parquet(tmp_path, 'REAL', prices)
+    # GHOST has no parquet file — must not raise
+    write_trend_summary(['REAL', 'GHOST'], '2026-01-01', '2026-03-01', str(tmp_path))
+    content = (tmp_path / 'data_trend.md').read_text()
+    assert 'REAL' in content
+
+
+def test_write_trend_summary_no_data_writes_fallback(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    write_trend_summary(['NONE'], '2026-01-01', '2026-03-01', str(tmp_path))
+    content = (tmp_path / 'data_trend.md').read_text()
+    assert 'No data available' in content
+
+
 # ── Main block test (1, subprocess) ──────────────────────────────────────────
 
 def test_main_exits_1_when_tickers_empty():
@@ -221,13 +274,12 @@ def test_main_exits_1_when_tickers_empty():
     import tempfile
     from pathlib import Path
     project_root = Path(__file__).parent.parent
+    import re
     source = (project_root / "prepare.py").read_text(encoding="utf-8")
-    # Override TICKERS to empty list to exercise the early-exit guard
-    patched = source.replace(
-        'TICKERS = ["AAPL", "MSFT", "NVDA", "JPM", "TSLA"]',
-        'TICKERS = []',
-        1,
-    )
+    # Override TICKERS to empty list to exercise the early-exit guard.
+    # Use regex so the test stays robust when the ticker list changes.
+    patched = re.sub(r'^TICKERS = \[.*\]', 'TICKERS = []', source, count=1, flags=re.MULTILINE)
+    assert patched != source, "Failed to patch TICKERS — check that prepare.py has a TICKERS = [...] line"
     with tempfile.NamedTemporaryFile(
         suffix=".py", delete=False, mode="w", encoding="utf-8"
     ) as f:

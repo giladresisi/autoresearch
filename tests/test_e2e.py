@@ -78,9 +78,9 @@ def test_parquet_index_is_date_objects(first_parquet_df, skip_if_cache_missing):
 
 
 @pytest.mark.integration
-def test_train_exits_zero_with_sharpe_output(skip_if_cache_missing):
+def test_train_exits_zero_with_pnl_output(skip_if_cache_missing):
     """
-    `uv run train.py` must exit with code 0 and print 'sharpe: <float>' to stdout.
+    `uv run train.py` must exit with code 0 and print 'train_total_pnl: <float>' to stdout.
     This is the primary integration smoke test — if this passes, the agent loop works.
     """
     result = subprocess.run(
@@ -94,18 +94,18 @@ def test_train_exits_zero_with_sharpe_output(skip_if_cache_missing):
         f"stderr:\n{result.stderr[-2000:]}\n"
         f"stdout:\n{result.stdout[-500:]}"
     )
-    sharpe_lines = [
+    pnl_lines = [
         line for line in result.stdout.splitlines()
-        if line.startswith("sharpe:")
+        if line.startswith("train_total_pnl:")
     ]
-    assert len(sharpe_lines) == 1, (
-        f"Expected exactly one 'sharpe:' line in output, got {len(sharpe_lines)}.\n"
+    assert len(pnl_lines) == 1, (
+        f"Expected exactly one 'train_total_pnl:' line in output, got {len(pnl_lines)}.\n"
         f"stdout:\n{result.stdout}"
     )
-    # Sharpe value must be parseable as float
-    value_str = sharpe_lines[0].split(":", 1)[1].strip()
-    sharpe_value = float(value_str)  # raises ValueError if not parseable
-    assert isinstance(sharpe_value, float)
+    # P&L value must be parseable as float
+    value_str = pnl_lines[0].split(":", 1)[1].strip()
+    pnl_value = float(value_str)  # raises ValueError if not parseable
+    assert isinstance(pnl_value, float)
 
 
 @pytest.mark.integration
@@ -122,9 +122,9 @@ def test_output_has_all_seven_fields(skip_if_cache_missing):
     )
     assert result.returncode == 0, f"train.py crashed: {result.stderr[-1000:]}"
     required_fields = [
-        "sharpe:", "total_trades:", "win_rate:",
-        "avg_pnl_per_trade:", "total_pnl:",
-        "backtest_start:", "backtest_end:",
+        "train_sharpe:", "train_total_trades:", "train_win_rate:",
+        "train_avg_pnl_per_trade:", "train_total_pnl:",
+        "train_backtest_start:", "train_backtest_end:",
     ]
     for field in required_fields:
         assert any(line.startswith(field) for line in result.stdout.splitlines()), (
@@ -184,18 +184,18 @@ def test_agent_loop_two_iterations_multi_ticker(all_ticker_dfs, backtest_stats):
     """
     Simulates two sequential agent loop iterations on all cached tickers (≥ 2 required).
 
-    Iteration 1 — relax CCI threshold (-50 → -30) and pullback (8% → 5%):
-      Represents an agent hypothesis that the screener is too conservative.
-    Iteration 2 — add ATR-based stop fallback + lower resistance gate (0.1 ATR):
+    Iteration 1 — relax volume threshold (vol_ratio 1.0 → 0.8):
+      Accepts slightly below-average volume days.
+    Iteration 2 — relax RSI upper bound (75 → 80) + resistance gate (2.0 → 0.1 ATR):
       Builds on whichever source was *kept* from iteration 1, exactly as the real
       loop would: if iter 1 improved Sharpe, iter 2 starts from that code; if not,
       iter 2 starts from the original.
 
-    Keep/discard rule: keep the new source only if Sharpe strictly improves.
+    Keep/discard rule: keep the new source only if total_pnl strictly improves.
 
     Verifies:
     - ≥ 2 tickers participated (multi-ticker requirement)
-    - After both iterations, best_sharpe == max(baseline, iter1, iter2) — the
+    - After both iterations, best_pnl == max(baseline, iter1, iter2) — the
       keep/discard accounting is correct and the best is never lost
     - The fully-relaxed screener produces ≥ 1 trade across the ticker universe,
       confirming at least one real position was opened (non-trivial backtest)
@@ -208,18 +208,6 @@ def test_agent_loop_two_iterations_multi_ticker(all_ticker_dfs, backtest_stats):
     )
 
     train_source = REPO_ROOT.joinpath("train.py").read_text(encoding="utf-8")
-
-    # Shared stop-block strings used in iterations 2 and the full-relaxation check
-    _orig_stop = (
-        "    stop = find_stop_price(df, price_10am, atr)\n"
-        "    if stop is None:\n"
-        "        return None\n"
-    )
-    _atr_stop = (
-        "    stop = find_stop_price(df, price_10am, atr)\n"
-        "    if stop is None:\n"
-        "        stop = round(price_10am - 2.0 * atr, 2)\n"
-    )
 
     def run_source(source, label):
         """Load modified train.py source as a temp module and run its backtester."""
@@ -237,51 +225,46 @@ def test_agent_loop_two_iterations_multi_ticker(all_ticker_dfs, backtest_stats):
             _os.unlink(tmp)
 
     # Iteration 0 — baseline from fixture (unmodified screener)
-    best_sharpe = backtest_stats["sharpe"]
+    best_pnl = backtest_stats["total_pnl"]
     best_source = train_source
-    history = [best_sharpe]
+    history = [best_pnl]
 
-    # ── Iteration 1: relax CCI threshold and pullback ──────────────────────────
-    assert "c0 < -50" in train_source, "CCI pattern changed — update test"
-    assert "pct_local >= 0.08" in train_source, "Pullback pattern changed — update test"
-    src1 = train_source.replace("c0 < -50", "c0 < -30", 1)
-    src1 = src1.replace("pct_local >= 0.08", "pct_local >= 0.05", 1)
+    # ── Iteration 1: relax volume threshold ───────────────────────────────────
+    assert "vol_ratio < 1.0" in train_source, "Volume pattern changed — update test"
+    src1 = train_source.replace("vol_ratio < 1.0", "vol_ratio < 0.8", 1)
     ast.parse(src1)  # mutation must be valid Python
 
     stats1 = run_source(src1, "train_iter1")
-    history.append(stats1["sharpe"])
-    if stats1["sharpe"] > best_sharpe:  # keep
-        best_sharpe = stats1["sharpe"]
+    history.append(stats1["total_pnl"])
+    if stats1["total_pnl"] > best_pnl:  # keep
+        best_pnl = stats1["total_pnl"]
         best_source = src1
 
-    # ── Iteration 2: ATR stop fallback + relax resistance ─────────────────────
+    # ── Iteration 2: relax RSI upper bound + relax resistance ─────────────────
     # Starts from best_source — correctly reflects the keep/discard outcome above.
-    # The _orig_stop block is present in both original and iter1 sources (iter1 only
-    # touched CCI and pullback), so this replacement is safe regardless of what was kept.
-    assert _orig_stop in best_source, "Stop block changed — update test"
+    assert "rsi <= 75" in best_source, "RSI pattern changed — update test"
     assert "res_atr < 2.0" in best_source, "Resistance pattern changed — update test"
-    src2 = best_source.replace(_orig_stop, _atr_stop, 1)
+    src2 = best_source.replace("rsi <= 75", "rsi <= 80", 1)
     src2 = src2.replace("res_atr < 2.0", "res_atr < 0.1", 1)
     ast.parse(src2)
 
     stats2 = run_source(src2, "train_iter2")
-    history.append(stats2["sharpe"])
-    if stats2["sharpe"] > best_sharpe:  # keep
-        best_sharpe = stats2["sharpe"]
+    history.append(stats2["total_pnl"])
+    if stats2["total_pnl"] > best_pnl:  # keep
+        best_pnl = stats2["total_pnl"]
 
     # ── Invariant: tracked best must equal the max observed across all iterations ─
-    assert best_sharpe == max(history), (
-        f"Keep/discard accounting error: tracked best={best_sharpe}, "
+    assert best_pnl == max(history), (
+        f"Keep/discard accounting error: tracked best={best_pnl}, "
         f"max of history={max(history)}, full history={history}"
     )
 
     # ── Multi-ticker trade check ───────────────────────────────────────────────
-    # Apply all four mutations from the original source and verify ≥ 1 trade fires
+    # Apply all mutations from the original source and verify ≥ 1 trade fires
     # across the full ticker set. This confirms the pipeline ran real positions
     # (not just returned empty stats) on a multi-ticker dataset.
-    src_full = train_source.replace("c0 < -50", "c0 < -30", 1)
-    src_full = src_full.replace("pct_local >= 0.08", "pct_local >= 0.05", 1)
-    src_full = src_full.replace(_orig_stop, _atr_stop, 1)
+    src_full = train_source.replace("vol_ratio < 1.0", "vol_ratio < 0.8", 1)
+    src_full = src_full.replace("rsi <= 75", "rsi <= 80", 1)
     src_full = src_full.replace("res_atr < 2.0", "res_atr < 0.1", 1)
     ast.parse(src_full)
 
@@ -297,7 +280,7 @@ def test_agent_loop_threshold_mutation_no_crash(all_ticker_dfs, backtest_stats):
     """
     Simulates the first agent loop iteration on real data:
       1. Baseline Sharpe from the default (strict) screener — from fixture.
-      2. Relaxed screener (CCI -50 → -30) via a temporary modified module.
+      2. Relaxed screener (vol_ratio 1.0 → 0.8, RSI 75 → 80, res_atr 2.0 → 0.1).
       3. Both runs complete without error.
       4. Relaxed screener must produce ≥ 1 trade — proves agent has a viable path.
 
@@ -307,43 +290,19 @@ def test_agent_loop_threshold_mutation_no_crash(all_ticker_dfs, backtest_stats):
     import os as _os
 
     train_source = REPO_ROOT.joinpath("train.py").read_text(encoding="utf-8")
-    assert "c0 < -50" in train_source, (
-        "CCI threshold 'c0 < -50' not found in train.py editable section. "
+    assert "vol_ratio < 1.0" in train_source, (
+        "Volume threshold 'vol_ratio < 1.0' not found in train.py editable section. "
         "Update this test if the threshold expression was changed."
     )
-    assert "pct_local >= 0.08" in train_source, (
-        "Pullback threshold 'pct_local >= 0.08' not found in train.py editable section. "
-        "Update this test if the pullback expression was changed."
+    assert "rsi <= 75" in train_source, (
+        "RSI threshold 'rsi <= 75' not found in train.py editable section. "
+        "Update this test if the RSI expression was changed."
     )
-    # Simulate an agent loop mutation sweep across three screener parameters:
-    #   1. CCI threshold: -50 → -30 (find oversold stocks earlier in the recovery)
-    #   2. Pullback threshold: 8% → 5% (accept shallower pullbacks)
-    #   3. Pivot-stop fallback: if no pivot-low is found, fall back to 2×ATR stop
-    #      (allows entry even when historical support levels are sparse)
-    # On the Jan–Mar 2026 window the primary binding constraints are (2) and (3);
-    # the agent would discover this through its optimization loop.
-    relaxed_source = train_source.replace("c0 < -50", "c0 < -30", 1)
-    relaxed_source = relaxed_source.replace("pct_local >= 0.08", "pct_local >= 0.05", 1)
-    # Replace the "no pivot → return None" guard with an ATR-based fallback stop.
-    # Indentation: the block inside screen_day uses 4-space indent.
-    _orig_stop_block = (
-        "    stop = find_stop_price(df, price_10am, atr)\n"
-        "    if stop is None:\n"
-        "        return None\n"
-    )
-    _relaxed_stop_block = (
-        "    stop = find_stop_price(df, price_10am, atr)\n"
-        "    if stop is None:\n"
-        "        stop = round(price_10am - 2.0 * atr, 2)\n"
-    )
-    assert _orig_stop_block in relaxed_source, (
-        "Pivot-stop guard block not found in train.py. "
-        "Update this test if the find_stop_price fallback was changed."
-    )
-    relaxed_source = relaxed_source.replace(_orig_stop_block, _relaxed_stop_block, 1)
-    # Also relax the resistance distance requirement: 2.0 ATR → 0.1 ATR.
-    # (On the Jan-Mar 2026 window the market bounced into nearby resistance;
-    # the agent might reasonably lower this gate while exploring thresholds.)
+    # Simulate an agent loop mutation sweep across two screener parameters:
+    #   1. Volume threshold: vol_ratio < 1.0 → 0.8 (accept slightly below-average volume)
+    #   2. RSI upper bound: rsi <= 75 → rsi <= 80 (allow more momentum)
+    relaxed_source = train_source.replace("vol_ratio < 1.0", "vol_ratio < 0.8", 1)
+    relaxed_source = relaxed_source.replace("rsi <= 75", "rsi <= 80", 1)
     assert "res_atr < 2.0" in relaxed_source, (
         "Resistance threshold 'res_atr < 2.0' not found. "
         "Update this test if the resistance check was changed."
@@ -364,13 +323,13 @@ def test_agent_loop_threshold_mutation_no_crash(all_ticker_dfs, backtest_stats):
     finally:
         _os.unlink(tmp_path)
 
-    assert "sharpe" in backtest_stats  # baseline from fixture
-    assert "sharpe" in relaxed_stats
+    assert "total_pnl" in backtest_stats  # baseline from fixture
+    assert "total_pnl" in relaxed_stats
 
     # Key Phase 5 viability requirement (PRD: "Phase 5 validation explicitly
     # checks for at least 1 trade before handing off to the agent")
     assert relaxed_stats["total_trades"] >= 1, (
-        f"Relaxed screener (CCI -30, pullback 5%) produced 0 trades over "
+        f"Relaxed screener (vol_ratio 0.8, RSI 80, res_atr 0.1) produced 0 trades over "
         f"{BACKTEST_START} to {train.BACKTEST_END} on {len(all_ticker_dfs)} tickers. "
         "Extend BACKTEST_START/BACKTEST_END and re-run `uv run prepare.py`."
     )

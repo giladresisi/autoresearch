@@ -1,6 +1,6 @@
 # autoresearch
 
-Autonomous stock strategy optimizer: iterates on screener and position management logic in `train.py` to maximize the `sharpe` ratio of a historical backtest.
+Autonomous stock strategy optimizer: iterates on screener and position management logic in `train.py` to maximize `train_total_pnl` on the training window of a historical backtest.
 
 ---
 
@@ -38,6 +38,10 @@ The following parameters can be specified in the user's query. If not specified,
    ```
 
 6. **Update `train.py` constants**: Set `BACKTEST_START` and `BACKTEST_END` at the top of `train.py` to match the values you just wrote into `prepare.py`.
+
+6b. **Compute train/test split**: Set `TRAIN_END = BACKTEST_END − 14 calendar days`
+    (e.g. BACKTEST_END `2026-03-20` → TRAIN_END `2026-03-06`). Write both
+    `TRAIN_END` and `TEST_START` (same date) into the mutable section of `train.py`.
 
 7. **Download data**: Run `uv run prepare.py`. Wait for it to complete. If it fails, report the error to the user and stop. Data is cached in `~/.cache/autoresearch/stock_data/` as `.parquet` files — one per ticker.
 
@@ -79,10 +83,15 @@ The following parameters can be specified in the user's query. If not specified,
 - Modify `prepare.py` beyond the three USER CONFIGURATION variables (`TICKERS`, `BACKTEST_START`, `BACKTEST_END`).
 - Modify the Sharpe computation formula inside `run_backtest()`.
 - Install new packages or add dependencies beyond what's in `pyproject.toml`.
+- Modify `TRAIN_END` or `TEST_START` after setup. These are set once at session start and must not be changed during the experiment loop.
 
 ### Goal
 
-Maximize `sharpe` — **higher Sharpe is better**. Keep any change that increases Sharpe; discard any change that does not.
+Maximize `train_total_pnl` — **higher total P&L on the training window is better**.
+Keep any change that increases `train_total_pnl`; discard any change that does not.
+
+`train_sharpe` is still computed and printed — use it as a risk-quality diagnostic,
+but it does not drive the keep/discard decision.
 
 ### Simplicity criterion
 
@@ -96,24 +105,34 @@ Always run the strategy as-is (unmodified) as the very first run to establish th
 
 ## Output format
 
-When the script completes successfully it prints a fixed-format block:
+When the script completes successfully it prints two fixed-format blocks — one for the training window, one for the test window:
 
 ```
 ---
-sharpe:              1.234567
-total_trades:        12
-win_rate:            0.583
-avg_pnl_per_trade:   18.45
-total_pnl:           221.40
-backtest_start:      2026-01-01
-backtest_end:        2026-03-01
+train_sharpe:              1.234567
+train_total_trades:        12
+train_win_rate:            0.583
+train_avg_pnl_per_trade:   18.45
+train_total_pnl:           221.40
+train_backtest_start:      2026-01-01
+train_backtest_end:        2026-03-06
+---
+test_sharpe:               0.876543
+test_total_trades:         3
+test_win_rate:             0.333
+test_avg_pnl_per_trade:    5.20
+test_total_pnl:            15.60
+test_backtest_start:       2026-03-06
+test_backtest_end:         2026-03-20
 ```
 
 Extract the key metrics from `run.log`:
 
 ```bash
-grep "^sharpe:" run.log
-grep "^total_trades:" run.log
+grep "^train_total_pnl:" run.log
+grep "^train_total_trades:" run.log
+grep "^train_win_rate:" run.log
+grep "^test_total_pnl:" run.log
 ```
 
 Exit code 0 on success. Exit code 1 if the cache is empty (no parquet files found).
@@ -124,27 +143,30 @@ Exit code 0 on success. Exit code 1 if the cache is empty (no parquet files foun
 
 Log every run to `results.tsv` (tab-separated — NOT comma-separated; commas break in descriptions).
 
-Header row (5 columns, tab-separated):
+Header row (7 columns, tab-separated):
 
 ```
-commit	sharpe	total_trades	status	description
+commit	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	status	description
 ```
 
 Column definitions:
 1. `commit`: git commit hash (short, 7 chars) from `git rev-parse --short HEAD`
-2. `sharpe`: Sharpe ratio achieved (e.g. `1.234567`) — use `0.000000` for crashes
-3. `total_trades`: number of trades completed in the backtest — use `0` for crashes
-4. `status`: `keep`, `discard`, or `crash`
-5. `description`: short text description of what this experiment tried
+2. `train_pnl`: total P&L on the training window — use `0.00` for crashes
+3. `test_pnl`: total P&L on the test window — use `0.00` for crashes
+4. `train_sharpe`: Sharpe ratio on the training window (e.g. `1.234567`) — use `0.000000` for crashes
+5. `total_trades`: number of trades completed in the training backtest — use `0` for crashes
+6. `win_rate`: fraction of winning trades — use `0.000` for crashes
+7. `status`: `keep`, `discard`, or `crash`
+8. `description`: short text description of what this experiment tried
 
 Example:
 
 ```
-commit	sharpe	total_trades	status	description
-a1b2c3d	0.000000	0	keep	baseline (no trades, strict screener)
-b2c3d4e	1.234567	12	keep	relaxed CCI threshold to -30
-c3d4e5f	0.872000	9	discard	removed volume filter
-d4e5f6g	0.000000	0	crash	divide-by-zero in custom indicator
+commit	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	status	description
+a1b2c3d	0.00	0.00	0.000000	0	0.000	keep	baseline (no trades, strict screener)
+b2c3d4e	221.40	15.60	1.234567	12	0.583	keep	relaxed volume ratio to 1.2
+c3d4e5f	180.00	8.00	0.872000	9	0.444	discard	removed volume filter
+d4e5f6g	0.00	0.00	0.000000	0	0.000	crash	divide-by-zero in custom indicator
 ```
 
 **Do NOT commit `results.tsv`** — it is intentionally untracked.
@@ -159,11 +181,11 @@ d4e5f6g	0.000000	0	crash	divide-by-zero in custom indicator
 2. Modify `train.py` with an experimental idea. Edit the file directly. **Only edit code above the `# DO NOT EDIT BELOW THIS LINE` comment** — everything below it is the evaluation harness and must not be touched.
 3. `git commit` the change to `train.py` only; leave `results.tsv` untracked.
 4. Run: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee).
-5. Extract results: `grep "^sharpe:" run.log` and `grep "^total_trades:" run.log`.
+5. Extract results: `grep "^train_total_pnl:" run.log` and `grep "^train_total_trades:" run.log`.
 6. If grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python traceback and attempt a fix. If you cannot fix it within a few attempts, give up: log status `crash`, run `git reset --hard HEAD~1`, and move on.
 7. Record the result in `results.tsv`.
-8. If Sharpe **improved (higher)** compared to the current best → keep the commit, advance the branch.
-9. If Sharpe is equal or worse → `git reset --hard HEAD~1` (revert to previous commit).
+8. If `train_total_pnl` **improved (higher)** compared to the current best → keep the commit, advance the branch.
+9. If `train_total_pnl` is equal or lower → `git reset --hard HEAD~1` (revert to previous commit).
 10. When the configured number of iterations is reached, stop and report the best result to the user.
 
 ### AUTONOMOUS UNTIL DONE — NEVER STOP EARLY
@@ -180,3 +202,19 @@ If you run out of ideas before reaching the iteration limit: try relaxing indivi
 ### No-trades scenario
 
 A Sharpe of `0.0` with `total_trades: 0` means the screener found zero signals across the entire backtest window. This is common on first run with the strict default screener. Try relaxing one threshold at a time (e.g. the CCI threshold, volume ratio, or momentum requirement) to generate at least some trades before optimizing Sharpe. **No signals = no information** — you cannot optimize what you cannot measure.
+
+---
+
+## Final test run (after last iteration)
+
+After the configured number of iterations is reached, trigger a special final test run
+with full output mode enabled:
+
+1. Edit `WRITE_FINAL_OUTPUTS = True` in the mutable section of `train.py`
+2. Run: `uv run train.py > run.log 2>&1`
+3. Edit `WRITE_FINAL_OUTPUTS = False` (restore immediately)
+4. Collect `final_test_data.csv` — per-ticker daily OHLCV + indicators for the test window
+5. Read the per-ticker P&L table printed at the end of `run.log`
+
+**Design constraint**: `WRITE_FINAL_OUTPUTS` must be restored to `False` after the final
+run to prevent all subsequent runs from writing CSV files. Never commit it as `True`.

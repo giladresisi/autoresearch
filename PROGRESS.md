@@ -1,5 +1,21 @@
 # PROGRESS
 
+## Feature: Optimization Harness Overhaul (Enhancements 1–5)
+### Planning Phase
+**Status**: ✅ Implemented
+**Started**: 2026-03-21
+**Plan File**: .agents/plans/optimization-harness-overhaul.md
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/optimization-harness-overhaul.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics (58/61 passing, 0 regressions)
+
+---
+
+
 ## Run: mar20 — Energy/Materials Universe (2026-03-20)
 
 ### Results Summary

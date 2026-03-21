@@ -15,6 +15,15 @@ CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "sto
 BACKTEST_START = "2025-12-20"
 BACKTEST_END   = "2026-03-20"
 
+# Train/test split — last 14 calendar days of the backtest window are held out as test set.
+# Written by the agent at setup time. Do NOT modify during the experiment loop.
+TRAIN_END   = "2026-03-06"   # BACKTEST_END − 14 calendar days
+TEST_START  = "2026-03-06"   # same date as TRAIN_END (test window starts here)
+
+# Final output flag — set to True only for the special post-loop final test run.
+# Agent sets True, runs train.py, then immediately restores to False.
+WRITE_FINAL_OUTPUTS = False
+
 
 def load_ticker_data(ticker: str) -> pd.DataFrame | None:
     """Reads CACHE_DIR/{ticker}.parquet; returns None if file does not exist."""
@@ -256,38 +265,42 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
 
 
 # ── DO NOT EDIT BELOW THIS LINE ───────────────────────────────────────────────
-# run_backtest(), print_results(), load_ticker_data(), load_all_ticker_data(),
-# and the __main__ block are the evaluation harness. They must not be modified.
+# run_backtest(), print_results(), _write_final_outputs(), load_ticker_data(),
+# load_all_ticker_data(), and the __main__ block are the evaluation harness.
+# They must not be modified.
 #
 # DEVELOPERS / MAINTAINERS: if you intentionally change anything below this
 # line, you must also update GOLDEN_HASH in tests/test_optimization.py and
 # rerun `uv run pytest tests/test_optimization.py::test_harness_below_do_not_edit_is_unchanged`.
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_backtest(ticker_dfs: dict) -> dict:
+def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = None) -> dict:
     """
-    Run chronological backtest over BACKTEST_START..BACKTEST_END.
-    ticker_dfs: {ticker: full history DataFrame with date index}
-    Returns stats dict: sharpe, total_trades, win_rate, avg_pnl_per_trade, total_pnl.
+    Run chronological backtest over start..end (defaults to BACKTEST_START..BACKTEST_END).
+    Returns stats dict: sharpe, total_trades, win_rate, avg_pnl_per_trade, total_pnl,
+                        ticker_pnl, backtest_start, backtest_end.
     """
-    start = date.fromisoformat(BACKTEST_START)
-    end   = date.fromisoformat(BACKTEST_END)
+    s = date.fromisoformat(start or BACKTEST_START)
+    e = date.fromisoformat(end or BACKTEST_END)
 
-    # Collect all trading days that fall in [start, end)
+    # Collect all trading days that fall in [s, e)
     all_days: set = set()
     for df in ticker_dfs.values():
         for d in df.index:
-            if start <= d < end:
+            if s <= d < e:
                 all_days.add(d)
     trading_days = sorted(all_days)
 
     if len(trading_days) < 2:
         return {"sharpe": 0.0, "total_trades": 0, "win_rate": 0.0,
-                "avg_pnl_per_trade": 0.0, "total_pnl": 0.0}
+                "avg_pnl_per_trade": 0.0, "total_pnl": 0.0,
+                "ticker_pnl": {}, "backtest_start": start or BACKTEST_START,
+                "backtest_end": end or BACKTEST_END}
 
     portfolio: dict = {}   # ticker -> position dict
     trades: list = []      # list of pnl floats per closed trade
     daily_values: list = []
+    ticker_pnl: dict[str, float] = {}
 
     for i, today in enumerate(trading_days):
         prev_day = trading_days[i - 1] if i > 0 else None
@@ -302,6 +315,7 @@ def run_backtest(ticker_dfs: dict) -> dict:
                     if prev_low <= pos["stop_price"]:
                         pnl = (pos["stop_price"] - pos["entry_price"]) * pos["shares"]
                         trades.append(pnl)
+                        ticker_pnl[ticker] = ticker_pnl.get(ticker, 0.0) + pnl
                         to_close.append(ticker)
             for t in to_close:
                 del portfolio[t]
@@ -345,6 +359,7 @@ def run_backtest(ticker_dfs: dict) -> dict:
         last_price = float(df["price_10am"].iloc[-1])
         pnl = (last_price - pos["entry_price"]) * pos["shares"]
         trades.append(pnl)
+        ticker_pnl[ticker] = ticker_pnl.get(ticker, 0.0) + pnl
 
     # Sharpe computation (PRD Feature 5): annualised daily-changes Sharpe
     arr = np.array(daily_values, dtype=float)
@@ -366,19 +381,64 @@ def run_backtest(ticker_dfs: dict) -> dict:
         "win_rate":          round(win_rate, 3),
         "avg_pnl_per_trade": round(avg_pnl, 2),
         "total_pnl":         round(total_pnl, 2),
+        "ticker_pnl":        ticker_pnl,
+        "backtest_start":    start or BACKTEST_START,
+        "backtest_end":      end or BACKTEST_END,
     }
 
 
-def print_results(stats: dict) -> None:
+def print_results(stats: dict, prefix: str = "") -> None:
     """Print the fixed-format summary block. Agent parses this with grep."""
     print("---")
-    print(f"sharpe:              {stats['sharpe']:.6f}")
-    print(f"total_trades:        {stats['total_trades']}")
-    print(f"win_rate:            {stats['win_rate']:.3f}")
-    print(f"avg_pnl_per_trade:   {stats['avg_pnl_per_trade']:.2f}")
-    print(f"total_pnl:           {stats['total_pnl']:.2f}")
-    print(f"backtest_start:      {BACKTEST_START}")
-    print(f"backtest_end:        {BACKTEST_END}")
+    print(f"{prefix}sharpe:              {stats['sharpe']:.6f}")
+    print(f"{prefix}total_trades:        {stats['total_trades']}")
+    print(f"{prefix}win_rate:            {stats['win_rate']:.3f}")
+    print(f"{prefix}avg_pnl_per_trade:   {stats['avg_pnl_per_trade']:.2f}")
+    print(f"{prefix}total_pnl:           {stats['total_pnl']:.2f}")
+    print(f"{prefix}backtest_start:      {stats['backtest_start']}")
+    print(f"{prefix}backtest_end:        {stats['backtest_end']}")
+
+
+def _write_final_outputs(ticker_dfs: dict, test_start: str, test_end: str,
+                         ticker_pnl: dict) -> None:
+    """Write final_test_data.csv and print per-ticker P&L table for the test window."""
+    import csv
+    s = date.fromisoformat(test_start)
+    e = date.fromisoformat(test_end)
+    rows = []
+    for ticker, df in ticker_dfs.items():
+        # Compute rolling indicators on the full history so test-window values are meaningful.
+        # Slicing first would leave sma50/rsi14/atr14/vm30 as NaN across the 14-day window.
+        full = df.copy()
+        full["sma50"] = full["close"].rolling(50).mean()
+        full["rsi14"] = calc_rsi14(full)
+        full["atr14"] = calc_atr14(full)
+        full["vm30"]  = full["volume"].rolling(30).mean()
+        sub = full[(full.index >= s) & (full.index < e)]
+        if sub.empty:
+            continue
+        for idx_date, row in sub.iterrows():
+            rows.append({
+                "ticker": ticker,
+                "date": str(idx_date),
+                **{c: round(float(row[c]), 4) if not pd.isna(row[c]) else ""
+                   for c in ["open", "high", "low", "close", "volume",
+                              "price_10am", "sma50", "rsi14", "atr14", "vm30"]},
+            })
+    if rows:
+        fieldnames = list(rows[0].keys())
+        with open("final_test_data.csv", "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(rows)
+        print(f"final_test_data.csv written ({len(rows)} rows)")
+    if ticker_pnl:
+        sorted_pnl = sorted(ticker_pnl.items(), key=lambda x: x[1], reverse=True)
+        print("\nPer-ticker P&L (test window):")
+        print(f"  {'Ticker':<10} {'P&L':>10}")
+        print("  " + "-" * 22)
+        for t, p in sorted_pnl:
+            print(f"  {t:<10} {p:>10.2f}")
 
 
 if __name__ == "__main__":
@@ -386,5 +446,9 @@ if __name__ == "__main__":
     if not ticker_dfs:
         print(f"No cached data in {CACHE_DIR}. Run prepare.py first.", file=sys.stderr)
         sys.exit(1)
-    stats = run_backtest(ticker_dfs)
-    print_results(stats)
+    train_stats = run_backtest(ticker_dfs, start=BACKTEST_START, end=TRAIN_END)
+    print_results(train_stats, prefix="train_")
+    test_stats = run_backtest(ticker_dfs, start=TEST_START, end=BACKTEST_END)
+    print_results(test_stats, prefix="test_")
+    if WRITE_FINAL_OUTPUTS:
+        _write_final_outputs(ticker_dfs, TEST_START, BACKTEST_END, test_stats["ticker_pnl"])

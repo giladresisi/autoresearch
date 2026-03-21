@@ -69,13 +69,13 @@ def test_editable_section_stays_runnable_after_threshold_change():
     """
     above, marker, below = _split_train_source()
 
-    assert "c0 < -50" in above, (
-        "Expected CCI threshold 'c0 < -50' in the editable section of train.py. "
+    assert "vol_ratio < 1.0" in above, (
+        "Expected volume ratio threshold 'vol_ratio < 1.0' in the editable section of train.py. "
         "Update this test if the threshold expression changes."
     )
 
     # Simulate a threshold relaxation (the most common agent edit)
-    modified_source = above.replace("c0 < -50", "c0 < -30", 1) + marker + below
+    modified_source = above.replace("vol_ratio < 1.0", "vol_ratio < 1.2", 1) + marker + below
 
     # Must be syntactically valid Python
     ast.parse(modified_source)
@@ -95,7 +95,7 @@ def test_editable_section_stays_runnable_after_threshold_change():
         # Empty dataset: no trades, must return a valid stats dict without raising
         stats = mod.run_backtest({})
         assert isinstance(stats, dict)
-        assert "sharpe" in stats
+        assert "total_pnl" in stats
         assert stats["total_trades"] == 0
     finally:
         os.unlink(tmp_path)
@@ -115,7 +115,7 @@ def test_harness_below_do_not_edit_is_unchanged():
     # Golden hash of the harness at the time the DO NOT EDIT boundary was set.
     # To recompute: python -c "import hashlib; s=open('train.py').read();
     #   m='# ── DO NOT EDIT BELOW THIS LINE'; print(hashlib.sha256(s.partition(m)[2].encode()).hexdigest())"
-    GOLDEN_HASH = "fcbf75cf3a1104e51a4d3a50d359ef06f82a004aff92eb9c86e6ec1b94f95248"
+    GOLDEN_HASH = "fae7e2d542b828ef2114aa7eee9441eab69efc624a01f6545007cbc4c8b68681"
 
     _, _, below = _split_train_source()
     actual_hash = hashlib.sha256(below.encode("utf-8")).hexdigest()
@@ -202,17 +202,17 @@ def test_most_recent_train_commit_modified_only_editable_section():
     )
 
 
-# ── Test 3: Sharpe optimization is feasible on a known-good dataset ───────────
+# ── Test 3: P&L optimization is feasible on a known-good dataset ─────────────
 
 def test_optimization_feasible_on_synthetic_data():
     """
     Verifies the optimization loop has a viable path: there exists at least one
-    mutation to screen_day that produces Sharpe > 0 on a synthetic dataset where
+    mutation to screen_day that produces total_pnl > 0 on a synthetic dataset where
     the default (strict) screener produces 0 trades.
 
     Design:
-    - strict_screen: always returns None  → 0 trades → Sharpe 0.0
-    - relaxed_screen: fires on entry day  → 1 trade  → Sharpe > 0
+    - strict_screen: always returns None  → 0 trades → total_pnl 0.0
+    - relaxed_screen: fires on entry day  → 1 trade  → total_pnl > 0
 
     Both screen_day and manage_position are patched so the test remains stable
     regardless of what the agent has done to those functions:
@@ -221,9 +221,7 @@ def test_optimization_feasible_on_synthetic_data():
     - Patching manage_position: the default implementation raises the stop to
       breakeven once price >= entry + ATR. On our synthetic data this can move
       the stop close to the price level, making a small noise dip cause a
-      stop-out mid-backtest. A stop-out produces a large negative daily_change
-      that swamps the positive trend and can yield negative Sharpe — making the
-      test unreliable. Patching to a no-op isolates the test from that effect.
+      stop-out mid-backtest. Patching to a no-op isolates the test from that effect.
     """
     ticker_dfs = _make_rising_dataset()
 
@@ -250,12 +248,12 @@ def test_optimization_feasible_on_synthetic_data():
          mock.patch.object(train, "manage_position", no_op_manage):
         relaxed_stats = train.run_backtest(ticker_dfs)
 
-    # Strict baseline: 0 trades, Sharpe = 0.0
+    # Strict baseline: 0 trades, total_pnl = 0.0
     assert strict_stats["total_trades"] == 0, (
         "strict_screen must produce 0 trades (it always returns None)"
     )
-    assert strict_stats["sharpe"] == 0.0, (
-        "0-trade baseline must have Sharpe = 0.0"
+    assert strict_stats["total_pnl"] == 0.0, (
+        "0-trade baseline must have total_pnl = 0.0"
     )
 
     # Relaxed: at least one trade occurs
@@ -265,17 +263,15 @@ def test_optimization_feasible_on_synthetic_data():
         "with the synthetic dataset date range."
     )
 
-    # The trade must be profitable (rising synthetic prices → Sharpe > 0)
-    assert relaxed_stats["sharpe"] > 0.0, (
-        f"Expected positive Sharpe from a profitable trade on rising-price synthetic data. "
-        f"Got sharpe={relaxed_stats['sharpe']}, total_trades={relaxed_stats['total_trades']}. "
-        f"If Sharpe=0.0 with trades>0, check that std(daily_changes)>0 — "
-        f"prices must have noise, not be perfectly linear."
+    # The trade must be profitable (rising synthetic prices → positive P&L)
+    assert relaxed_stats["total_pnl"] > 0.0, (
+        f"Expected positive total_pnl from a profitable trade on rising-price synthetic data. "
+        f"Got total_pnl={relaxed_stats['total_pnl']}, total_trades={relaxed_stats['total_trades']}."
     )
 
     # Core assertion: the optimization loop has a viable path
-    assert relaxed_stats["sharpe"] > strict_stats["sharpe"], (
-        f"Relaxed screener (sharpe={relaxed_stats['sharpe']}) must beat strict "
-        f"screener (sharpe={strict_stats['sharpe']}). "
-        f"This means at least one mutation to screen_day improves Sharpe."
+    assert relaxed_stats["total_pnl"] > strict_stats["total_pnl"], (
+        f"Relaxed screener (total_pnl={relaxed_stats['total_pnl']}) must beat strict "
+        f"screener (total_pnl={strict_stats['total_pnl']}). "
+        f"This means at least one mutation to screen_day improves P&L."
     )

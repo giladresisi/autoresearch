@@ -45,68 +45,43 @@ def make_pivot_df(n: int = 250) -> pd.DataFrame:
 
 
 def make_signal_df(n: int = 250) -> pd.DataFrame:
-    """Synthetic DataFrame where screen_day returns a non-None dict (all 11 rules pass).
+    """Synthetic DataFrame where screen_day returns a non-None dict.
 
-    Design:
-    - Bars 0-229: steady rise 60->120 (SMA150 at end ~105)
-    - Bars 230-241: run-up to 180 (creates ATH ~181, puts high tp in 20-bar CCI window)
-    - Bars 242-245: fast pullback (170, 150, 130, 110)
-    - Bars 246-249: last 4 rising closes (100, 101, 102, 103)
-    - price_10am[-1]=110: above SMA150~105 (Rule 1), ~35% below ATH (Rule 5)
-    - CCI[-1] well below -50 and rising (Rule 4): 20-bar mean ~137, tp[-1]~103
-    - Body >> wick at last bar (R4-wick): open[-1]=99, high[-1]=103.5
-    - Explicit pivot low at bar 210 with prior touch (R2+R6 stop)
+    Design satisfies the current momentum-breakout screener:
+    - Bars 0-234: steady rise 60→97 (SMA50 at end ≈ 95)
+    - Bars 235-249: 8 up-bars (+1) and 6 down-bars (−0.7), alternating
+      → RSI14 ≈ 66 (within the required 50–75 band)
+    - price_10am[-1] = 115: breaks above 20-day high close (~100) and yesterday high (~100.3)
+    - volume = VM30 everywhere → vol_ratio = 1.0 (passes ≥ 1.0 threshold)
+    - No overhead pivot high above 115 → resistance check passes
+    - Stop: ATR-fallback = price_10am − 2×ATR (always satisfies the 1.5×ATR buffer)
     """
     base = date(2024, 1, 2)
     dates = [base + timedelta(days=i) for i in range(n)]
 
-    close = np.linspace(60.0, 120.0, n, dtype=float)
-
-    # Big run-up bars 230-241: 116 -> 180 (ATH, and anchors 20-bar CCI mean high)
-    for i, idx in enumerate(range(230, 242)):
-        close[idx] = 116.0 + (180.0 - 116.0) * (i / 11)
-
-    # Fast pullback
-    close[242:246] = [170.0, 150.0, 130.0, 110.0]
-
-    # Last 4 closes strictly rising (Rule 2)
-    close[246] = 100.0  # close[-4]
-    close[247] = 101.0  # close[-3]
-    close[248] = 102.0  # close[-2]
-    close[249] = 103.0  # close[-1]
+    close = np.zeros(n, dtype=float)
+    # Steady rise builds SMA50 to ~95 well below the breakout price_10am of 115
+    close[:235] = np.linspace(60.0, 97.0, 235)
+    # Alternating oscillation: 8 ups of +1, 6 downs of −0.7 → RSI14 ≈ 66
+    close[235:250] = [97.0, 98.0, 97.3, 98.3, 97.6, 98.6, 97.9, 98.9,
+                      98.2, 99.2, 98.5, 99.5, 98.8, 99.8, 100.8]
 
     high  = close * 1.005
     low   = close * 0.995
-
-    # Last bar: large body (open=99, close=103, body=4) and small wick (high=103.5, wick=0.5)
-    # so upper_wick (0.5) < body (4) — R4-wick passes
     open_ = close * 0.998
-    open_[249] = 99.0
 
-    # price_10am[-1]=110: above SMA150~105, and ~35% below ATH~181 and local_high~171
     price_10am = close.copy()
-    price_10am[249] = 110.0
+    # Big jump on the last bar to trigger the 20-day breakout rule
+    price_10am[249] = 115.0
 
-    volume = np.full(n, 1_000_000.0)
-
-    df = pd.DataFrame({
+    return pd.DataFrame({
         'open':       open_,
         'high':       high,
         'low':        low,
         'close':      close,
-        'volume':     volume,
+        'volume':     np.full(n, 1_000_000.0),
         'price_10am': price_10am,
     }, index=pd.Index(dates, name='date'))
-
-    # Pivot low at bar 210 (well below price_10am=110, gap ~20 >> 1.5*ATR)
-    pivot_price = 90.0
-    df.iloc[210, df.columns.get_loc('low')] = pivot_price
-
-    # Prior touch of pivot zone (required by R2 in find_stop_price)
-    df.iloc[195, df.columns.get_loc('low')]  = pivot_price * 0.99
-    df.iloc[195, df.columns.get_loc('high')] = pivot_price * 1.01
-
-    return df
 
 
 # ── Indicator unit tests ──────────────────────────────────────────────────────
@@ -248,21 +223,11 @@ def test_stop_always_below_entry():
     assert result['stop'] < result['entry_price']
 
 
-def test_rule4_fail_cci_not_rising():
-    # CCI is rising for 2 days means c0 > c1 > c2.
-    # Set c1 <= c2 to break the rising condition — screen_day must return None.
+def test_rule2b_fail_price_not_above_prev_high():
+    # Rule 2b: price_10am must exceed yesterday's high.
+    # Raise yesterday's high above price_10am (115) → Rule 2b fails → return None.
     df = make_signal_df(250)
-    # Raise tp at position -2 (c1) relative to -3 (c2) so c1 > c2 fails (c1 <= c2)
-    # We do this by lowering close[-3] below close[-2], making tp[-2] > tp[-3]
-    # so that when CCI is computed, c1 (index -2) is no longer < c2 (index -3)
-    # Simpler: directly break the rising streak by making position -2 close > -1 close
-    # so that CCI at -2 (c1) >= CCI at -1 (c0), violating c0 > c1
-    close_m1 = float(df['close'].iloc[-1])
-    close_m2 = float(df['close'].iloc[-2])
-    # Raise close[-2] above close[-1]: tp[-2] > tp[-1] → c1 > c0, fails c0 > c1 > c2
-    df.iloc[-2, df.columns.get_loc('close')] = close_m1 * 1.05
-    df.iloc[-2, df.columns.get_loc('high')]  = close_m1 * 1.055
-    df.iloc[-2, df.columns.get_loc('low')]   = close_m1 * 1.045
+    df.iloc[-2, df.columns.get_loc('high')] = 120.0  # prev_high=120 > price_10am=115
     today = df.index[-1]
     assert screen_day(df, today) is None
 
