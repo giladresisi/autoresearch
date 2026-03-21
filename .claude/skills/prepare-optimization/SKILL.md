@@ -144,10 +144,42 @@ Legacy:    neutralized  OR  n/a
 ─────────────────────────────────────────────────────
 ```
 
-To start the optimization, open a new Claude Code session in the worktree:
+Then give the user these instructions:
+
+---
+
+Open a new Claude Code session in the worktree and ask Claude to start the optimization:
+
 ```
 cd ../<tag>
 claude
 ```
-Then tell Claude the tickers, timeframe, and number of iterations you want (or accept
-the defaults from `prepare.py`). Claude will read `program.md` and run the experiment loop.
+
+**Example requests** (use any combination of parameters, or omit any for the default):
+
+```
+Run the optimization
+```
+```
+Run the optimization for 50 iterations
+```
+```
+Run the optimization for AAPL, MSFT, NVDA, GOOGL, AMZN, META, TSLA, AVGO, COST, NFLX,
+ADBE, AMD, QCOM, TXN, INTC, AMAT, MU, ASML, ARM, MRVL
+```
+```
+Run the optimization for nasdaq100 stocks over the past 6 months
+```
+```
+Run the optimization for the past 4 months, 40 iterations
+```
+
+**Defaults** (applied when a parameter is not specified):
+
+| Parameter | Default |
+|-----------|---------|
+| Tickers | CTVA, LIN, XOM, DBA, SM, IYE, EOG, APA, EQT, CTRA, APD, DVN, BKR, COP, VLO, HEI, HAL |
+| Timeframe | Past 3 months (train: first 2.5 months, test: final 2 weeks) |
+| Iterations | 30 |
+
+---
