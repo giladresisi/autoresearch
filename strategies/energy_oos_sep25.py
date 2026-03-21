@@ -1,43 +1,72 @@
 """
-strategies/energy_momentum_v1.py — Extracted from autoresearch/mar20 @ e9886df
+strategies/energy_oos_sep25.py — Extracted from autoresearch/energy-oos-sep25 @ e9886df
 """
-import numpy as np
-import pandas as pd
 
 METADATA = {
-    "name":         "energy-momentum-v1",
-    "sector":       "energy/materials",
-    "tickers":      ["CTVA", "LIN", "XOM", "DBA", "SM", "IYE", "EOG", "APA",
-                     "EQT", "CTRA", "APD", "DVN", "BKR", "COP", "VLO", "HEI", "HAL"],
-    "train_start":  "2025-12-20",
-    "train_end":    "2026-03-06",
-    "test_start":   "2026-03-06",
-    "test_end":     "2026-03-20",
-    "source_branch": "autoresearch/mar20",
-    "source_commit": "e9886df",
-    "train_pnl":    952.88,
-    "train_sharpe": 5.791,
-    "train_trades": 18,
-    "description": (
-        "Momentum breakout strategy for the energy/materials sector. Enters when "
-        "price_10am breaks above the 20-day highest close and yesterday's high, with "
-        "volume at or above its 30-day average, RSI between 50 and 75 (building "
-        "momentum, not overbought), and price above SMA50. Stop at 2.0×ATR or "
-        "pivot-low. Optimized on Dec 2025–Mar 2026 energy universe in a trending "
-        "macro regime. Best applied when the broader energy sector (IYE/XLE) is "
-        "above its own SMA50."
+    "name":         'energy-oos-sep25',
+    "sector":       'energy/materials',
+    "tickers":      ['CTVA', 'LIN', 'XOM', 'DBA', 'SM', 'IYE', 'EOG', 'APA', 'EQT', 'CTRA', 'APD', 'DVN', 'BKR', 'COP', 'VLO', 'HEI', 'HAL'],
+    "train_start":  '2025-09-20',
+    "train_end":    '2025-12-20',
+    "test_start":   '2025-12-20',
+    "test_end":     '2025-12-20',
+    "source_branch": 'autoresearch/energy-oos-sep25',
+    "source_commit": 'e9886df',
+    "train_pnl":    None,
+    "train_sharpe": None,
+    "train_trades": None,
+    "description":  (
+        "This momentum breakout strategy enters when the 10am price exceeds both the 20-day highest close and the prior day's high, with RSI(14) between 50 and 75, price above SMA(50), and volume at least 1.0Ã— the 30-day average volume â€” confirming trend, momentum, and participation without being overbought. The stop is placed 0.3Ã—ATR(14) below the nearest qualifying pivot low (requiring at least one prior historical touch within 90 bars and fewer than 10 zone touches), with a hard minimum buffer of 1.5Ã—ATR(14) from entry; if no valid pivot exists, the stop defaults to 2.0Ã—ATR(14) below entry, and the stop trails up to breakeven once price reaches entry + 1.5Ã—ATR(14). The strategy also requires at least 2.0Ã—ATR(14) of clear space to the nearest overhead pivot-high resistance, and rejects entries where price is stalling at a ceiling (last 3 highs within a 3% band with closes below them), making it best suited for trending, low-resistance market regimes with expanding volume."
     ),
 }
 
 # LEGACY_OBJECTIVE: sharpe — this strategy was optimized for Sharpe ratio (pre-Enhancement 2).
 # Before using it as the starting point for a new optimization run, see program.md §Setup step 8b.
 
-# ── Indicators ────────────────────────────────────────────────────────────────
-# Verbatim from e9886df:train.py (above the DO NOT EDIT boundary)
+"""
+train.py â€” Stock strategy screener, position manager, and backtester.
+Rewrite screener criteria, position manager logic, and entry/exit rules to optimize Sharpe ratio.
+Do NOT modify: CACHE_DIR, load_ticker_data(), Sharpe computation, or the output block format.
+"""
+import os, sys
+from datetime import date
+import numpy as np
+import pandas as pd
+
+# Directory where prepare.py writes {ticker}.parquet files
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "stock_data")
+
+# Backtest window â€” matches prepare.py; edit here to change the simulation period
+BACKTEST_START = "2025-12-20"
+BACKTEST_END   = "2026-03-20"
+
+
+def load_ticker_data(ticker: str) -> pd.DataFrame | None:
+    """Reads CACHE_DIR/{ticker}.parquet; returns None if file does not exist."""
+    path = os.path.join(CACHE_DIR, f"{ticker}.parquet")
+    if not os.path.exists(path):
+        return None
+    return pd.read_parquet(path)
+
+
+def load_all_ticker_data() -> dict[str, pd.DataFrame]:
+    """Loads all *.parquet files from CACHE_DIR. Returns {} if directory is empty or missing."""
+    if not os.path.isdir(CACHE_DIR):
+        return {}
+    result = {}
+    for fname in os.listdir(CACHE_DIR):
+        if fname.endswith(".parquet"):
+            ticker = fname[:-len(".parquet")]
+            path = os.path.join(CACHE_DIR, fname)
+            result[ticker] = pd.read_parquet(path)
+    return result
+
+
+# â”€â”€ Indicators â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def calc_cci(df, p=20):
     # Commodity Channel Index over period p
-    # raw=True passes a numpy array to the lambda — ~10× faster than a pandas Series for rolling apply
+    # raw=True passes a numpy array to the lambda â€” ~10Ã— faster than a pandas Series for rolling apply
     tp  = (df['high'] + df['low'] + df['close']) / 3
     sma = tp.rolling(p).mean()
     md  = tp.rolling(p).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
@@ -64,7 +93,7 @@ def calc_atr14(df):
     return tr.rolling(14).mean()
 
 
-# ── R2 + R6: Pivot-low-anchored stop ─────────────────────────────────────────
+# â”€â”€ R2 + R6: Pivot-low-anchored stop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def find_pivot_lows(df, bars=4):
     # A pivot low is the lowest bar in a symmetric window of `bars` on each side
@@ -87,14 +116,14 @@ def zone_touch_count(df, level, lookback=90, band_pct=0.015):
 
 def find_stop_price(df, entry_price, atr):
     # Finds the highest qualifying pivot low satisfying R2 (prior touch) and R6 (not too noisy),
-    # with a 1.5× ATR buffer between entry_price and the derived stop level
+    # with a 1.5Ã— ATR buffer between entry_price and the derived stop level
     if len(df) < 60:
         return None
     window = df.iloc[-90:].copy().reset_index(drop=True)
     pivots = find_pivot_lows(window, bars=4)
     if not pivots:
         return None
-    # Sort descending by price — consider nearest-to-entry pivot first
+    # Sort descending by price â€” consider nearest-to-entry pivot first
     candidates = sorted(
         [(i, p) for i, p in pivots if entry_price - p >= 1.5 * atr],
         key=lambda x: x[1], reverse=True
@@ -120,7 +149,7 @@ def find_stop_price(df, entry_price, atr):
     return None
 
 
-# ── R3: Bounce stalling at ceiling ───────────────────────────────────────────
+# â”€â”€ R3: Bounce stalling at ceiling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def is_stalling_at_ceiling(df, band_pct=0.03):
     # Detects when the last 3 highs cluster tightly (< band_pct range) and all closes sit below them
@@ -132,7 +161,7 @@ def is_stalling_at_ceiling(df, band_pct=0.03):
     return (h_max - h_min) / h_min <= band_pct and all(c < h_min for c in last3_closes)
 
 
-# ── R5: Nearest pivot-high resistance >= 2x ATR ───────────────────────────────
+# â”€â”€ R5: Nearest pivot-high resistance >= 2x ATR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def nearest_resistance_atr(df, entry_price, atr, lookback=90):
     # Returns distance to nearest overhead pivot high in ATR units, or None if none exists above entry
@@ -150,7 +179,7 @@ def nearest_resistance_atr(df, entry_price, atr, lookback=90):
     return (min(pivot_highs) - entry_price) / atr
 
 
-# ── Screener ──────────────────────────────────────────────────────────────────
+# â”€â”€ Screener, position manager, backtester stubs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def screen_day(df: pd.DataFrame, today) -> "dict | None":
     """
@@ -197,7 +226,7 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if price_10am <= prev_high:
         return None
 
-    # Rule 3: today's volume >= 1.0× MA30 (average or above)
+    # Rule 3: today's volume >= 1.0Ã— MA30 (average or above)
     vol_ratio = float(df['volume'].iloc[-1]) / vm30
     if vol_ratio < 1.0:
         return None
@@ -234,11 +263,9 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     }
 
 
-# ── Position manager ──────────────────────────────────────────────────────────
-
 def manage_position(position: dict, df: pd.DataFrame) -> float:
     """
-    Raise stop to breakeven (entry_price) once price_10am >= entry_price + 1.5 × ATR14.
+    Raise stop to breakeven (entry_price) once price_10am >= entry_price + 1 Ã— ATR14.
     Never lower the stop. Returns updated stop_price (>= position['stop_price']).
     """
     current_stop = position['stop_price']
@@ -251,3 +278,5 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
     if price_10am >= entry_price + 1.5 * atr:
         return max(current_stop, entry_price)
     return current_stop
+
+

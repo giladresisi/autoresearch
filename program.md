@@ -47,6 +47,20 @@ The following parameters can be specified in the user's query. If not specified,
 
 8. **Read the in-scope files**: `README.md`, `train.py` (the file you modify in experiments).
 
+8b. **Check for legacy Sharpe objective**: Grep the starting strategy file or `train.py` for the line:
+    ```
+    # LEGACY_OBJECTIVE: sharpe
+    ```
+    If found, the strategy's parameters were tuned under the old Sharpe-optimizing harness (pre-Enhancement 2).
+    Before the experiment loop begins, update `train.py` above the boundary to remove or replace any
+    logic that was explicitly written to boost Sharpe at the expense of P&L (e.g. overly tight screeners
+    that reduce trade count to inflate Sharpe). Concretely:
+    - Keep the core entry/exit structure and indicator logic intact.
+    - Reset any threshold that was tightened purely to reduce trades and lift Sharpe (e.g. unusually
+      narrow RSI bands, very high volume multiples) back to a more neutral starting value.
+    - The first baseline run will then establish a clean P&L baseline for the new loop.
+    If the line is **not** present, the strategy was already optimized for train P&L — proceed normally.
+
 9. **Print the parameter trace** — output this block immediately after setup completes, before the first experiment run:
 
    ```
