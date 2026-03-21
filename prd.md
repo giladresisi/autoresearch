@@ -766,6 +766,15 @@ strategies/
 | `train_trades` | Number of trades on training window |
 | `description` | Free-text description of what the strategy does and what market regime it was tuned for |
 
+**Branching policy (enforced from Enhancement 6 onwards):**
+
+| Branch | Allowed changes |
+|---|---|
+| `master` / `main` | Infrastructure, tooling, harness, data layer, screener, docs, registry extraction (write-only append of `strategies/<name>.py`). **Strategy logic (`screen_day`, `manage_position`, parameters) must not be modified here.** |
+| Worktrees (e.g. `autoresearch/<date>`) | All strategy optimization work. The only place where `train.py` is iterated, filters are added/removed, and parameters are tuned. |
+
+**Exceptions:** Strategy code in `master` may be touched only for: (1) critical bug fixes that affect live trading correctness, (2) renaming/deprecating a strategy module, or (3) explicit instruction from the user. These must be noted in the commit message.
+
 **How strategies reach master (no `git merge`):**
 Worktree branches are never merged into master. After a worktree's optimization loop completes, a post-optimization extraction step reads the best `train.py` via `git show <tag>:train.py`, extracts all code above the `# DO NOT EDIT BELOW THIS LINE` boundary, and writes it as a new `strategies/<name>.py` on master. The worktree branch and tag remain intact for audit; the branch itself can be pruned after extraction.
 

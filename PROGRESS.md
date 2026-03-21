@@ -1,17 +1,37 @@
 # PROGRESS
 
+## Feature: Strategy Registry and LLM Selector (Enhancements 6a + 6b)
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-21
+**Plan**: .agents/plans/strategy-registry-and-selector.md
+
+### Core Validation
+`strategies/` package created with REGISTRY, `base_indicators.py`, and `energy_momentum_v1.py` (extracted from `e9886df`). `strategy_selector.py` calls `claude -p` CLI (no API key — runs inside Claude Code); `_call_claude()` strips `CLAUDECODE` env var before spawning subprocess. Integration test `test_select_strategy_real_claude_code` makes a real CLI call for XOM and validates response shape and strategy validity.
+
+### Test Status
+- Automated: ✅ 120 passed, 1 skipped (unit + integration + e2e, full suite via `.venv`)
+- Manual: none required
+
+### Notes
+- Selector uses `claude -p <prompt>` subprocess — requires Claude Code on PATH; not portable outside Claude Code
+- `BOUNDARY` in `extract_strategy.py` is a substring match (`"DO NOT EDIT BELOW THIS LINE"`) to handle Unicode dash decorations in the actual comment
+- `ANTHROPIC_API_KEY` removed from `.env` and `pyproject.toml`
+
+---
+
 ## Feature: Optimization Harness Overhaul (Enhancements 1–5)
-### Planning Phase
-**Status**: ✅ Implemented
-**Started**: 2026-03-21
-**Plan File**: .agents/plans/optimization-harness-overhaul.md
 
-### Reports Generated
+**Status**: ✅ Complete
+**Completed**: 2026-03-21
+**Plan**: .agents/plans/optimization-harness-overhaul.md
 
-**Execution Report:** `.agents/execution-reports/optimization-harness-overhaul.md`
-- Detailed implementation summary
-- Divergences and resolutions
-- Test results and metrics (58/61 passing, 0 regressions)
+### Core Validation
+Train/test split, P&L-based keep/discard, final test CSV output, sector trend summary, and extended results.tsv all implemented and verified via automated tests.
+
+### Test Status
+- Automated: ✅ 58/61 passing (3 pre-existing failures unrelated to this feature)
+- Manual: none required
 
 ---
 
