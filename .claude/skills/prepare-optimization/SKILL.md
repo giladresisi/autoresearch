@@ -31,15 +31,24 @@ Check whether the user named a starting strategy in their message:
 
 ## Step 2: Determine Branch Name
 
-Choose a short tag. Default pattern: `<month><day>` (e.g. `mar21`).
-If the named strategy has a recognizable sector (e.g. `energy_momentum_v1` → `energy`,
-`semis_mar20` → `semis`), prefix the tag: `energy-mar21`, `semis-apr01`.
+The branch name needs a descriptive prefix so the worktree folder is self-explanatory
+(e.g. `energy-mar21`, `semis-apr01`, `mag7-mar21`). Derive it from, in order:
+
+1. **The user's message** — if it mentions a sector, theme, or set of tickers (e.g. "energy
+   stocks", "semiconductors", "mag7", "defensive names"), use that as the prefix.
+2. **The named starting strategy** — if the strategy name implies a sector
+   (e.g. `energy_momentum_v1` → `energy`, `semis_mar20` → `semis`), use that.
+3. **Neither** — if there is no usable context, ask the user before proceeding:
+   > To name the worktree, can you briefly describe what you want to optimize for?
+   > (e.g. "energy stocks", "semiconductors", "mag7") — no need to list exact tickers.
+
+Once you have a prefix, the tag is `<prefix>-<month><day>` (e.g. `energy-mar21`).
 
 Check for collision:
 ```bash
 git branch -a | grep "autoresearch/<tag>"
 ```
-If it exists, append a suffix: `mar21-b`, `mar21-c`, etc.
+If it exists, append a suffix: `energy-mar21-b`, etc.
 
 Full branch name: `autoresearch/<tag>`.
 
