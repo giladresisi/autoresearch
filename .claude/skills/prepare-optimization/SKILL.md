@@ -107,7 +107,22 @@ when done.
 
 ---
 
-## Step 6: Hand Off
+## Step 6: Commit Initial State
+
+If train.py was modified (strategy injection or legacy-objective neutralization), commit it now:
+
+```bash
+cd "../<tag>"
+git add train.py
+git commit -m "setup(<tag>): seed from <strategy_name>, neutralize legacy Sharpe objective"
+```
+
+If train.py was not modified (default strategy, no legacy marker), skip this step — the
+worktree starts from the base branch commit with no additional changes needed.
+
+---
+
+## Step 7: Hand Off
 
 Tell the user the worktree is ready:
 
