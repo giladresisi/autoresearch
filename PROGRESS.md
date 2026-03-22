@@ -1,5 +1,29 @@
 # PROGRESS
 
+## Feature: V3-B Walk-Forward Evaluation Framework (R2, R4-full, R7)
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-22
+**Plan**: .agents/plans/v3-b-walk-forward.md
+
+### Core Validation
+Walk-forward CV loop (N=3 folds, 10-business-day test windows) implemented in `__main__`. R7 diagnostics (max_drawdown, calmar, pnl_consistency) added to `run_backtest()` and `print_results()`. Silent holdout `[TRAIN_END, BACKTEST_END]` prints `HIDDEN` during optimization loop. `program.md` updated for new output format and `min_test_pnl` keep/discard criterion. Live-cache tests confirmed all R7 metrics finite on real data (NaN guard added for missing `price_10am` rows).
+
+### Test Status
+- Automated: ✅ 14 passed (+9 new V3-B unit tests, +2 live-cache tests), 1 pre-existing skip (git state)
+- Manual: none required
+
+### Notes
+- `WALK_FORWARD_WINDOWS = 3` and `SILENT_END = "2026-02-20"` added to mutable section
+- `_exec_main_block()` helper introduced in test file to work around `runpy.run_path` namespace isolation
+- NaN guard added to `portfolio_value` computation — all 17 cached tickers have one `price_10am = NaN` row (2026-02-02 data gap); without guard, `max_drawdown` returned NaN
+- GOLDEN_HASH updated to `9ed46928eb57190df2e2413c326a73713526fde6f68b068f04ddbd222495baf9`
+- Keep/discard criterion changed from `train_total_pnl` to `min_test_pnl`
+
+**Execution Report:** `.agents/execution-reports/v3-b-walk-forward.md`
+
+---
+
 ## Feature: V3-A Signal Correctness (R1, R3, R5, R4-partial)
 
 **Status**: ✅ Complete

@@ -24,6 +24,14 @@ TEST_START  = "2026-03-06"   # same date as TRAIN_END (test window starts here)
 # Agent sets True, runs train.py, then immediately restores to False.
 WRITE_FINAL_OUTPUTS = False
 
+# Walk-forward evaluation: number of rolling test folds (V3-B R2)
+WALK_FORWARD_WINDOWS = 3
+
+# Silent holdout boundary (V3-B R4-full): TRAIN_END − 14 calendar days.
+# Walk-forward folds' test windows end at approximately this date.
+# Set by the agent at session setup. Do NOT change during the loop.
+SILENT_END = "2026-02-20"   # example; agent computes this at setup
+
 # Risk-proportional sizing: dollar risk per trade (V3-A R3)
 RISK_PER_TRADE = 50.0
 
@@ -304,13 +312,17 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         return {"sharpe": 0.0, "total_trades": 0, "win_rate": 0.0,
                 "avg_pnl_per_trade": 0.0, "total_pnl": 0.0,
                 "ticker_pnl": {}, "backtest_start": start or BACKTEST_START,
-                "backtest_end": end or BACKTEST_END, "trade_records": []}
+                "backtest_end": end or BACKTEST_END, "trade_records": [],
+                "max_drawdown": 0.0, "calmar": 0.0, "pnl_consistency": 0.0}
 
     portfolio: dict = {}   # ticker -> position dict
     trades: list = []      # list of pnl floats per closed trade
     trade_records: list = []   # R5: per-trade attribution dicts
     daily_values: list = []
     ticker_pnl: dict[str, float] = {}
+    # R7: track cumulative realized P&L + open MTM for equity curve metrics
+    cumulative_realized: float = 0.0
+    equity_curve: list = []
 
     for i, today in enumerate(trading_days):
         prev_day = trading_days[i - 1] if i > 0 else None
@@ -325,6 +337,7 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
                     if prev_low <= pos["stop_price"]:
                         pnl = (pos["stop_price"] - pos["entry_price"]) * pos["shares"]
                         trades.append(pnl)
+                        cumulative_realized += pnl
                         ticker_pnl[ticker] = ticker_pnl.get(ticker, 0.0) + pnl
                         trade_records.append({
                             "ticker":       ticker,
@@ -368,12 +381,17 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
             }
 
         # 4. Mark-to-market: portfolio value = sum of (price_10am × shares) for open positions
+        # Skip NaN prices (e.g. data gaps) to avoid poisoning the Sharpe and equity-curve metrics.
         portfolio_value = 0.0
         for ticker, pos in portfolio.items():
             df = ticker_dfs[ticker]
             if today in df.index:
-                portfolio_value += float(df.loc[today, "price_10am"]) * pos["shares"]
+                price = float(df.loc[today, "price_10am"])
+                if not np.isnan(price):
+                    portfolio_value += price * pos["shares"]
         daily_values.append(portfolio_value)
+        # R7: equity = realized gains so far + current open position MTM
+        equity_curve.append((today, cumulative_realized + portfolio_value))
 
     # End of backtest: close all remaining positions at last available price_10am
     last_day = trading_days[-1] if trading_days else None
@@ -382,6 +400,7 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         last_price = float(df["price_10am"].iloc[-1])
         pnl = (last_price - pos["entry_price"]) * pos["shares"]
         trades.append(pnl)
+        cumulative_realized += pnl
         ticker_pnl[ticker] = ticker_pnl.get(ticker, 0.0) + pnl
         trade_records.append({
             "ticker":       ticker,
@@ -408,6 +427,29 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
     win_rate     = (wins / total_trades) if total_trades > 0 else 0.0
     avg_pnl      = (total_pnl / total_trades) if total_trades > 0 else 0.0
 
+    # R7: Equity curve metrics
+    if equity_curve:
+        eq_values = np.array([v for _, v in equity_curve], dtype=float)
+        peak = np.maximum.accumulate(eq_values)
+        max_drawdown = float(np.max(peak - eq_values))
+    else:
+        max_drawdown = 0.0
+
+    calmar = (total_pnl / max_drawdown) if max_drawdown > 0 else 0.0
+
+    # R7: Monthly P&L consistency (min monthly P&L across all months in window)
+    monthly_equity: dict = {}
+    for dt, eq in equity_curve:
+        key = (dt.year, dt.month)
+        monthly_equity[key] = eq   # last equity value for that month
+    month_keys = sorted(monthly_equity.keys())
+    monthly_pnl_list = []
+    prev_eq = 0.0
+    for mk in month_keys:
+        monthly_pnl_list.append(monthly_equity[mk] - prev_eq)
+        prev_eq = monthly_equity[mk]
+    pnl_consistency = min(monthly_pnl_list) if monthly_pnl_list else total_pnl
+
     return {
         "sharpe":            round(sharpe, 6),
         "total_trades":      total_trades,
@@ -418,6 +460,9 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         "backtest_start":    start or BACKTEST_START,
         "backtest_end":      end or BACKTEST_END,
         "trade_records":     trade_records,   # R5
+        "max_drawdown":      round(max_drawdown, 2),
+        "calmar":            round(calmar, 4),
+        "pnl_consistency":   round(pnl_consistency, 2),
     }
 
 
@@ -431,6 +476,8 @@ def print_results(stats: dict, prefix: str = "") -> None:
     print(f"{prefix}total_pnl:           {stats['total_pnl']:.2f}")
     print(f"{prefix}backtest_start:      {stats['backtest_start']}")
     print(f"{prefix}backtest_end:        {stats['backtest_end']}")
+    print(f"{prefix}calmar:              {stats.get('calmar', 0.0):.4f}")
+    print(f"{prefix}pnl_consistency:     {stats.get('pnl_consistency', 0.0):.2f}")
 
 
 def _write_final_outputs(ticker_dfs: dict, test_start: str, test_end: str,
@@ -491,10 +538,51 @@ if __name__ == "__main__":
     if not ticker_dfs:
         print(f"No cached data in {CACHE_DIR}. Run prepare.py first.", file=sys.stderr)
         sys.exit(1)
-    train_stats = run_backtest(ticker_dfs, start=BACKTEST_START, end=TRAIN_END)
-    print_results(train_stats, prefix="train_")
-    _write_trades_tsv(train_stats["trade_records"])   # R5
-    test_stats = run_backtest(ticker_dfs, start=TEST_START, end=BACKTEST_END)
-    print_results(test_stats, prefix="test_")
+
+    # R2: Walk-forward CV — N folds with 10-business-day test windows
+    # stepping back from TRAIN_END.
+    import pandas as _pd
+    from pandas.tseries.offsets import BDay as _BDay
+
+    _train_end_ts = _pd.Timestamp(TRAIN_END)
+    fold_test_pnls: list = []
+    last_fold_train_records: list = []
+
+    for _i in range(WALK_FORWARD_WINDOWS):
+        # Fold _i (0-indexed, oldest first).
+        # Fold WALK_FORWARD_WINDOWS-1 (newest) has test window ending at TRAIN_END.
+        _steps_back = WALK_FORWARD_WINDOWS - 1 - _i
+        _fold_test_end_ts   = _train_end_ts - _BDay(_steps_back * 10)
+        _fold_test_start_ts = _fold_test_end_ts - _BDay(10)
+        _fold_train_end_ts  = _fold_test_start_ts
+
+        _fold_train_end   = str(_fold_train_end_ts.date())
+        _fold_test_start  = str(_fold_test_start_ts.date())
+        _fold_test_end    = str(_fold_test_end_ts.date())
+        _fold_n           = _i + 1
+
+        _fold_train_stats = run_backtest(ticker_dfs, start=BACKTEST_START, end=_fold_train_end)
+        _fold_test_stats  = run_backtest(ticker_dfs, start=_fold_test_start, end=_fold_test_end)
+
+        print_results(_fold_train_stats, prefix=f"fold{_fold_n}_train_")
+        print_results(_fold_test_stats,  prefix=f"fold{_fold_n}_test_")
+
+        fold_test_pnls.append(_fold_test_stats["total_pnl"])
+        if _fold_n == WALK_FORWARD_WINDOWS:
+            last_fold_train_records = _fold_train_stats["trade_records"]
+
+    min_test_pnl = min(fold_test_pnls) if fold_test_pnls else 0.0
+    print("---")
+    print(f"min_test_pnl:            {min_test_pnl:.2f}")
+
+    # Write trades.tsv from the most recent training fold
+    _write_trades_tsv(last_fold_train_records)
+
+    # R4-full: Silent holdout — [TRAIN_END, BACKTEST_END]
+    _silent_stats = run_backtest(ticker_dfs, start=TRAIN_END, end=BACKTEST_END)
+    print("---")
     if WRITE_FINAL_OUTPUTS:
-        _write_final_outputs(ticker_dfs, TEST_START, BACKTEST_END, test_stats["ticker_pnl"])
+        print_results(_silent_stats, prefix="holdout_")
+        _write_final_outputs(ticker_dfs, TRAIN_END, BACKTEST_END, _silent_stats["ticker_pnl"])
+    else:
+        print(f"silent_pnl: HIDDEN")

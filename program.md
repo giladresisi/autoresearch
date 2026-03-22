@@ -41,9 +41,15 @@ The following parameters can be specified in the user's query. If not specified,
 
 4. **Update `train.py` constants**: Set `BACKTEST_START` and `BACKTEST_END` at the top of `train.py` to match the values you just wrote into `prepare.py`.
 
-4b. **Compute train/test split**: Set `TRAIN_END = BACKTEST_END − 14 calendar days`
-    (e.g. BACKTEST_END `2026-03-20` → TRAIN_END `2026-03-06`). Write both
-    `TRAIN_END` and `TEST_START` (same date) into the mutable section of `train.py`.
+4b. **Compute train/test split and walk-forward boundaries**:
+    - `TRAIN_END = BACKTEST_END − 14 calendar days`
+      (e.g. BACKTEST_END `2026-03-20` → TRAIN_END `2026-03-06`)
+    - `TEST_START = TRAIN_END` (same date — kept for backward reference)
+    - `SILENT_END = TRAIN_END − 14 calendar days`
+      (e.g. TRAIN_END `2026-03-06` → SILENT_END `2026-02-20`)
+
+    Write `TRAIN_END`, `TEST_START`, and `SILENT_END` into the mutable section of `train.py`.
+    `WALK_FORWARD_WINDOWS` is already set to 3 — leave it unless the user specifies otherwise.
 
 5. **Download data**: Run `uv run prepare.py`. Wait for it to complete. If it fails, report the error to the user and stop. Data is cached in `~/.cache/autoresearch/stock_data/` as `.parquet` files — one per ticker.
 
@@ -103,11 +109,11 @@ The following parameters can be specified in the user's query. If not specified,
 
 ### Goal
 
-Maximize `train_total_pnl` — **higher total P&L on the training window is better**.
-Keep any change that increases `train_total_pnl`; discard any change that does not.
+Maximize `min_test_pnl` — **higher minimum test P&L across all walk-forward folds is better**.
+Keep any change that increases `min_test_pnl`; discard any change that does not.
 
-`train_sharpe` is still computed and printed — use it as a risk-quality diagnostic,
-but it does not drive the keep/discard decision.
+`fold{N}_train_*` metrics are still computed and printed — use them as diagnostics,
+but they do not drive the keep/discard decision.
 
 ### Simplicity criterion
 
@@ -121,35 +127,50 @@ Always run the strategy as-is (unmodified) as the very first run to establish th
 
 ## Output format
 
-When the script completes successfully it prints two fixed-format blocks — one for the training window, one for the test window:
+When the script completes successfully it prints N×2 fold blocks (N = `WALK_FORWARD_WINDOWS`),
+then a `min_test_pnl` summary, then a `silent_pnl` line.
+
+For `WALK_FORWARD_WINDOWS = 3`, the output is:
 
 ```
 ---
-train_sharpe:              1.234567
-train_total_trades:        12
-train_win_rate:            0.583
-train_avg_pnl_per_trade:   18.45
-train_total_pnl:           221.40
-train_backtest_start:      2026-01-01
-train_backtest_end:        2026-03-06
+fold1_train_sharpe:              1.234567
+fold1_train_total_trades:        8
+fold1_train_win_rate:            0.625
+fold1_train_avg_pnl_per_trade:   12.50
+fold1_train_total_pnl:           100.00
+fold1_train_backtest_start:      2025-12-20
+fold1_train_backtest_end:        2026-01-09
+fold1_train_calmar:              2.5000
+fold1_train_pnl_consistency:     30.00
 ---
-test_sharpe:               0.876543
-test_total_trades:         3
-test_win_rate:             0.333
-test_avg_pnl_per_trade:    5.20
-test_total_pnl:            15.60
-test_backtest_start:       2026-03-06
-test_backtest_end:         2026-03-20
+fold1_test_sharpe:               0.234567
+...
+fold1_test_total_pnl:            25.00
+fold1_test_backtest_start:       2026-01-09
+fold1_test_backtest_end:         2026-01-23
+...
+---
+(fold2 and fold3 blocks follow the same pattern)
+---
+min_test_pnl:            -5.00
+---
+silent_pnl: HIDDEN
 ```
 
 Extract the key metrics from `run.log`:
 
 ```bash
-grep "^train_total_pnl:" run.log
-grep "^train_total_trades:" run.log
-grep "^train_win_rate:" run.log
-grep "^test_total_pnl:" run.log
+grep "^min_test_pnl:" run.log
+grep "^fold3_train_total_pnl:" run.log
+grep "^fold3_train_total_trades:" run.log
+grep "^fold3_train_win_rate:" run.log
+grep "^fold3_train_sharpe:" run.log
+grep "^fold3_train_calmar:" run.log
+grep "^fold3_train_pnl_consistency:" run.log
 ```
+
+Replace `fold3` with `fold${WALK_FORWARD_WINDOWS}` if you change `WALK_FORWARD_WINDOWS`.
 
 Exit code 0 on success. Exit code 1 if the cache is empty (no parquet files found).
 
@@ -159,30 +180,33 @@ Exit code 0 on success. Exit code 1 if the cache is empty (no parquet files foun
 
 Log every run to `results.tsv` (tab-separated — NOT comma-separated; commas break in descriptions).
 
-Header row (7 columns, tab-separated):
+Header row (tab-separated):
 
 ```
-commit	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	status	description
+commit	min_test_pnl	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	train_calmar	train_pnl_consistency	status	description
 ```
 
 Column definitions:
-1. `commit`: git commit hash (short, 7 chars) from `git rev-parse --short HEAD`
-2. `train_pnl`: total P&L on the training window — use `0.00` for crashes
-3. `test_pnl`: total P&L on the test window — use `0.00` for crashes
-4. `train_sharpe`: Sharpe ratio on the training window (e.g. `1.234567`) — use `0.000000` for crashes
-5. `total_trades`: number of trades completed in the training backtest — use `0` for crashes
-6. `win_rate`: fraction of winning trades — use `0.000` for crashes
-7. `status`: `keep`, `discard`, or `crash`
-8. `description`: short text description of what this experiment tried
+1. `commit`: git commit hash (short, 7 chars)
+2. `min_test_pnl`: minimum test P&L across all walk-forward folds — the keep/discard criterion
+3. `train_pnl`: most recent fold's (fold N) train total P&L
+4. `test_pnl`: most recent fold's (fold N) test total P&L
+5. `train_sharpe`: most recent fold's train Sharpe
+6. `total_trades`: most recent fold's train trade count
+7. `win_rate`: most recent fold's train win rate
+8. `train_calmar`: most recent fold's train Calmar ratio (diagnostic)
+9. `train_pnl_consistency`: most recent fold's train min monthly P&L (diagnostic)
+10. `status`: `keep`, `discard`, or `crash`
+11. `description`: short experiment description
 
 Example:
 
 ```
-commit	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	status	description
-a1b2c3d	0.00	0.00	0.000000	0	0.000	keep	baseline (no trades, strict screener)
-b2c3d4e	221.40	15.60	1.234567	12	0.583	keep	relaxed volume ratio to 1.2
-c3d4e5f	180.00	8.00	0.872000	9	0.444	discard	removed volume filter
-d4e5f6g	0.00	0.00	0.000000	0	0.000	crash	divide-by-zero in custom indicator
+commit	min_test_pnl	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	train_calmar	train_pnl_consistency	status	description
+a1b2c3d	0.00	0.00	0.00	0.000000	0	0.000	0.0000	0.00	keep	baseline (no trades, strict screener)
+b2c3d4e	15.60	221.40	25.00	1.234567	12	0.583	2.5000	30.00	keep	relaxed volume ratio to 1.2
+c3d4e5f	-5.00	180.00	8.00	0.872000	9	0.444	1.2000	15.00	discard	removed volume filter
+d4e5f6g	0.00	0.00	0.00	0.000000	0	0.000	0.0000	0.00	crash	divide-by-zero in custom indicator
 ```
 
 **Do NOT commit `results.tsv`** — it is intentionally untracked.
@@ -197,16 +221,16 @@ d4e5f6g	0.00	0.00	0.000000	0	0.000	crash	divide-by-zero in custom indicator
 2. Modify `train.py` with an experimental idea. Edit the file directly. **Only edit code above the `# DO NOT EDIT BELOW THIS LINE` comment** — everything below it is the evaluation harness and must not be touched.
 3. `git commit` the change to `train.py` only; leave `results.tsv` untracked.
 4. Run: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee).
-5. Extract results: `grep "^train_total_pnl:" run.log` and `grep "^train_total_trades:" run.log`.
+5. Extract results: `grep "^min_test_pnl:" run.log` and `grep "^fold${WALK_FORWARD_WINDOWS}_train_total_trades:" run.log`.
 6. If grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python traceback and attempt a fix. If you cannot fix it within a few attempts, give up: log status `crash`, run `git reset --hard HEAD~1`, and move on.
 7. Record the result in `results.tsv`.
-8. If `train_total_pnl` **improved (higher)** compared to the current best → keep the commit, advance the branch.
+8. If `min_test_pnl` **improved (higher)** compared to the current best → keep the commit, advance the branch.
 
-> **Note:** `test_total_pnl` is printed for diagnostic purposes only. Do NOT use it to
-> decide whether to keep or discard an experiment. The sole keep/discard criterion is
-> `train_total_pnl`. Acting on test P&L during the loop contaminates the holdout window.
+> **Note:** `silent_pnl` is hidden during the loop (`HIDDEN`). Do NOT attempt to infer or
+> act on the hidden holdout result. The sole keep/discard criterion is `min_test_pnl`.
+> `fold{N}_train_*` metrics are for diagnostics only.
 
-9. If `train_total_pnl` is equal or lower → `git reset --hard HEAD~1` (revert to previous commit).
+9. If `min_test_pnl` is equal or lower → `git reset --hard HEAD~1` (revert to previous commit).
 10. When the configured number of iterations is reached, stop and report the best result to the user.
 
 ### AUTONOMOUS UNTIL DONE — NEVER STOP EARLY
@@ -234,14 +258,14 @@ with full output mode enabled:
 1. Edit `WRITE_FINAL_OUTPUTS = True` in the mutable section of `train.py`
 2. Run: `uv run train.py > run.log 2>&1`
 3. Edit `WRITE_FINAL_OUTPUTS = False` (restore immediately)
-4. Collect `final_test_data.csv` — per-ticker daily OHLCV + indicators for the test window
-5. Read the per-ticker P&L table printed at the end of `run.log`
+4. Collect `final_test_data.csv` — per-ticker daily OHLCV + indicators for the holdout window
+5. Read the per-ticker P&L table printed at the end of `run.log` (prefixed `holdout_`)
 6. Append per-ticker P&L to `results.tsv` — add an empty line after the last experiment row,
    then a header row, then one row per ticker (tab-separated):
 
    ```bash
    printf "\n" >> results.tsv
-   printf "ticker\ttest_pnl\n" >> results.tsv
+   printf "ticker\tholdout_pnl\n" >> results.tsv
    uv run python -c "
    import re, sys
    lines = open('run.log').readlines()
