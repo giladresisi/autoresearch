@@ -1,5 +1,27 @@
 # PROGRESS
 
+## Feature: V3-E Configurable Walk-Forward Window Size and Rolling Training Windows
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-22
+**Plan File**: .agents/plans/v3-e-configurable-walk-forward.md
+
+### Core Validation
+`FOLD_TEST_DAYS = 20` and `FOLD_TRAIN_DAYS = 0` added to the mutable section immediately after `WALK_FORWARD_WINDOWS`. Walk-forward loop in `__main__` updated to use `FOLD_TEST_DAYS` for all fold window calculations; `FOLD_TRAIN_DAYS > 0` rolling-window if/else branch added with `max(...)` clamping against `date.fromisoformat(BACKTEST_START)`. `program.md` step 4b expanded with agent setup guidance. Setting `FOLD_TEST_DAYS=10, FOLD_TRAIN_DAYS=0` reproduces V3-D fold boundaries exactly.
+
+### Test Status
+- Automated: ✅ 105 passed, 3 pre-existing failures (unchanged), 1 pre-existing skip
+- Manual: Scenarios A/B/C require live parquet cache — accepted non-blocking gaps per plan
+
+### Notes
+- GOLDEN_HASH updated from `9fba956b62e48a93d40a8ab6f386c6674bb96bd7efcfef793db198d4a078749e` to `8e52c979a05340df9bef49dbfda0c7086621e6dd2ac2e7c3a9bf12772c04e0a7`
+- `FOLD_TRAIN_DAYS = 0` (expanding) preserves all existing backtest behavior
+- `program.md` recommends `WALK_FORWARD_WINDOWS = 9` (expanding) or `13` (rolling) for the 19-month window
+
+**Reports:** `.agents/execution-reports/v3-e-configurable-walk-forward.md` | `.agents/code-reviews/v3-e-configurable-walk-forward.md`
+
+---
+
 ## Feature: V3-D Diagnostics and Advanced (R6, R10, R11)
 
 **Status**: ✅ Complete

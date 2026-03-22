@@ -49,7 +49,22 @@ The following parameters can be specified in the user's query. If not specified,
       (e.g. TRAIN_END `2026-03-06` → SILENT_END `2026-02-20`)
 
     Write `TRAIN_END`, `TEST_START`, and `SILENT_END` into the mutable section of `train.py`.
-    `WALK_FORWARD_WINDOWS` is already set to 3 — leave it unless the user specifies otherwise.
+
+    **Walk-forward fold constants** (V3-E — set once at session setup, do NOT change during the loop):
+    - `FOLD_TEST_DAYS` — test window width in business days per fold.
+      Default `20` (≈1 calendar month, ~40–100 trades on 85 tickers). Set to `10` to reproduce
+      legacy V3-B/D behavior (not recommended — too few trades per fold to be meaningful).
+    - `FOLD_TRAIN_DAYS` — training window width in business days.
+      `0` = expanding (train from `BACKTEST_START`; more training data per fold; simpler).
+      `120` = 6-month rolling window (exposes successive folds to genuinely different market
+      slices; recommended when maximizing regime diversity is the goal).
+      Default `0` (expanding).
+    - `WALK_FORWARD_WINDOWS` — recommended values for the 19-month window (2024-09 → 2026-03):
+      - `9` with `FOLD_TEST_DAYS=20, FOLD_TRAIN_DAYS=0`: 9 months of test coverage (~Jun 2025
+        → Mar 2026), ~18 backtest calls/iteration, ~30–60 s per iteration.
+      - `13` with `FOLD_TEST_DAYS=20, FOLD_TRAIN_DAYS=120`: full 19-month coverage, ~26
+        backtest calls/iteration, ~45–90 s per iteration.
+      Leave at `3` only if the user explicitly specifies legacy configuration.
 
 5. **Download data**: Run `uv run prepare.py`. Wait for it to complete. If it fails, report the error to the user and stop. Data is cached in `~/.cache/autoresearch/stock_data/` as `.parquet` files — one per ticker.
 

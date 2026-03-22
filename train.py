@@ -27,6 +27,19 @@ WRITE_FINAL_OUTPUTS = False
 # Walk-forward evaluation: number of rolling test folds (V3-B R2)
 WALK_FORWARD_WINDOWS = 3
 
+# Test window width in business days per fold.
+# 20 ≈ 1 calendar month → ~40–100 trades on 85 tickers; enough to distinguish skill from noise.
+# Set at session setup. Do NOT change during the loop.
+FOLD_TEST_DAYS = 20
+
+# Training window width in business days.
+# 0 = expanding: each fold trains from BACKTEST_START to its test window's start (all prior history).
+# N > 0 = rolling: each fold trains on only the N most recent business days before its test window,
+#   exposing successive folds to genuinely different market slices.
+# Recommended: 0 (expanding) for simplicity; 120 (≈6 months) for maximum regime diversity.
+# Set at session setup. Do NOT change during the loop.
+FOLD_TRAIN_DAYS = 0
+
 # Silent holdout boundary (V3-B R4-full): TRAIN_END − 14 calendar days.
 # Walk-forward folds' test windows end at approximately this date.
 # Set by the agent at session setup. Do NOT change during the loop.
@@ -695,7 +708,7 @@ if __name__ == "__main__":
     if not _train_ticker_dfs:
         _train_ticker_dfs = ticker_dfs  # safety: if holdout fraction is too large, fall back
 
-    # R2: Walk-forward CV — N folds with 10-business-day test windows
+    # R2: Walk-forward CV — N folds with FOLD_TEST_DAYS-business-day test windows (V3-E)
     # stepping back from TRAIN_END.
     import pandas as _pd
     from pandas.tseries.offsets import BDay as _BDay
@@ -709,8 +722,8 @@ if __name__ == "__main__":
         # Fold _i (0-indexed, oldest first).
         # Fold WALK_FORWARD_WINDOWS-1 (newest) has test window ending at TRAIN_END.
         _steps_back = WALK_FORWARD_WINDOWS - 1 - _i
-        _fold_test_end_ts   = _train_end_ts - _BDay(_steps_back * 10)
-        _fold_test_start_ts = _fold_test_end_ts - _BDay(10)
+        _fold_test_end_ts   = _train_end_ts - _BDay(_steps_back * FOLD_TEST_DAYS)
+        _fold_test_start_ts = _fold_test_end_ts - _BDay(FOLD_TEST_DAYS)
         _fold_train_end_ts  = _fold_test_start_ts
 
         _fold_train_end   = str(_fold_train_end_ts.date())
@@ -718,7 +731,13 @@ if __name__ == "__main__":
         _fold_test_end    = str(_fold_test_end_ts.date())
         _fold_n           = _i + 1
 
-        _fold_train_stats = run_backtest(_train_ticker_dfs, start=BACKTEST_START, end=_fold_train_end)
+        if FOLD_TRAIN_DAYS > 0:
+            _fold_train_start_ts = _fold_train_end_ts - _BDay(FOLD_TRAIN_DAYS)
+            _fold_train_start = str(max(_fold_train_start_ts.date(),
+                                        date.fromisoformat(BACKTEST_START)))
+        else:
+            _fold_train_start = BACKTEST_START
+        _fold_train_stats = run_backtest(_train_ticker_dfs, start=_fold_train_start, end=_fold_train_end)
         _fold_test_stats  = run_backtest(_train_ticker_dfs, start=_fold_test_start, end=_fold_test_end)
 
         print_results(_fold_train_stats, prefix=f"fold{_fold_n}_train_")

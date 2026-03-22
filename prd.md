@@ -14,7 +14,7 @@ The system is developed in three versioned harness generations, each building on
 |---------|-------|------|
 | **V1** | Initial implementation: data pipeline, backtester, Sharpe metric, agent loop | 2026-01 |
 | **V2** | Train/test split, P&L objective, final outputs, sector registry, strategy selector | 2026-03-20 |
-| **V3** | Harness robustness: look-ahead fix, risk-proportional sizing, walk-forward CV, robustness controls | 2026-03-22 |
+| **V3** | Harness robustness: look-ahead fix, risk-proportional sizing, walk-forward CV, robustness controls, configurable fold sizing | 2026-03-22 |
 
 ---
 
@@ -875,7 +875,7 @@ After completing optimization runs across `energy-mar21` and `nasdaq100-mar21` w
 
 ### Implementation Plans
 
-V3 is organized into three sequential implementation plans, each executable as a single plan+execution session. **Run in order** — V3-B's walk-forward results are more meaningful after V3-A's sizing fix, and V3-C layers on top of the new framework.
+V3 is organized into sequential implementation plans, each executable as a single plan+execution session. **Run in order** — V3-B's walk-forward results are more meaningful after V3-A's sizing fix, V3-C layers on top of the new framework, and V3-E requires all prior changes to be present before modifying the walk-forward loop.
 
 Every plan that touches the immutable zone requires a `GOLDEN_HASH` update in `tests/test_optimization.py`.
 
@@ -990,10 +990,110 @@ Lower-priority improvements. Each can be scheduled independently as a small stan
 
 ---
 
+#### V3-E: Configurable Walk-Forward Window Size and Rolling Training Windows
+
+**Pre-requisite:** V3-D complete (all V3-A through V3-D changes present in `train.py`).
+
+**Goal:** Replace the two hardcoded `10`-business-day values in the walk-forward loop with configurable constants, and add support for rolling training windows. This makes test folds statistically meaningful (enough trades per fold to distinguish signal from noise) and allows training windows to span genuinely different market regimes.
+
+**Motivation:**
+
+The V3-B walk-forward loop hardcodes `10` business days for both the test window width and the step between folds. With a momentum screener on 85 tickers, a 10-business-day window yields only ~10–30 trades — too thin to distinguish a 60% win rate from luck (95% CI spans ~30 percentage points). Additionally, with `WALK_FORWARD_WINDOWS = 3`, all three test folds cluster within the most recent 6 weeks of the backtest window, all in the same market regime. `min_test_pnl` therefore measures "consistent in recent 6 weeks" rather than "resilient across diverse conditions."
+
+Two separate problems require two separate fixes:
+
+| Problem | Fix |
+|---------|-----|
+| Test folds too short — ~15 trades, wide CI, looks like noise | `FOLD_TEST_DAYS` constant — set to 20 (≈1 calendar month, ~40–100 trades on 85 tickers) |
+| All folds in same recent regime — training windows nearly identical to each other | `FOLD_TRAIN_DAYS` constant — set to 0 (expanding) or e.g. 120 (6-month rolling); combined with more folds to spread test coverage across the full backtest window |
+
+**New constants (mutable section of `train.py`):**
+
+```python
+# Test window width in business days per fold.
+# 20 ≈ 1 calendar month → ~40–100 trades on 85 tickers; enough to distinguish skill from noise.
+# Set at session setup. Do NOT change during the loop.
+FOLD_TEST_DAYS = 20
+
+# Training window width in business days.
+# 0 = expanding: each fold trains from BACKTEST_START to its test window's start (all prior history).
+# N > 0 = rolling: each fold trains on only the N most recent business days before its test window,
+#   exposing successive folds to genuinely different market slices.
+# Recommended: 0 (expanding) for simplicity; 120 (≈6 months) for maximum regime diversity.
+# Set at session setup. Do NOT change during the loop.
+FOLD_TRAIN_DAYS = 0
+```
+
+**Walk-forward loop change (immutable zone):**
+
+Replace the two hardcoded `10` values and add rolling train window logic. Diff relative to V3-B/D:
+
+```python
+# Before (V3-B, hardcoded):
+_fold_test_end_ts   = _train_end_ts - _BDay(_steps_back * 10)
+_fold_test_start_ts = _fold_test_end_ts - _BDay(10)
+_fold_train_end_ts  = _fold_test_start_ts
+_fold_train_stats = run_backtest(_train_ticker_dfs, start=BACKTEST_START, end=_fold_train_end)
+
+# After (V3-E, configurable):
+_fold_test_end_ts   = _train_end_ts - _BDay(_steps_back * FOLD_TEST_DAYS)
+_fold_test_start_ts = _fold_test_end_ts - _BDay(FOLD_TEST_DAYS)
+_fold_train_end_ts  = _fold_test_start_ts
+
+if FOLD_TRAIN_DAYS > 0:
+    _fold_train_start_ts = _fold_train_end_ts - _BDay(FOLD_TRAIN_DAYS)
+    _fold_train_start = str(max(_fold_train_start_ts.date(),
+                                date.fromisoformat(BACKTEST_START)))
+else:
+    _fold_train_start = BACKTEST_START
+
+_fold_train_stats = run_backtest(_train_ticker_dfs, start=_fold_train_start, end=_fold_train_end)
+```
+
+No other harness logic changes. `FOLD_TEST_DAYS` also replaces the `10` in the step calculation, so test windows remain non-overlapping regardless of the chosen size.
+
+**Recommended configuration for the current 19-month window (2024-09-01 → 2026-03-20):**
+
+```python
+FOLD_TEST_DAYS      = 20   # 1 month per fold
+FOLD_TRAIN_DAYS     = 0    # expanding: simpler, more training data per fold
+WALK_FORWARD_WINDOWS = 9   # 9 × 20 days = 180 business days ≈ 9 months of test coverage
+                           # test folds span ~Jun 2025 → Mar 2026
+```
+
+For maximum regime diversity (trades off some training data per fold for genuinely different training slices):
+
+```python
+FOLD_TEST_DAYS      = 20
+FOLD_TRAIN_DAYS     = 120  # 6-month rolling train window
+WALK_FORWARD_WINDOWS = 13  # covers the full 19-month window; ~26 backtest calls per iteration
+```
+
+**Performance note:** Each iteration now runs `WALK_FORWARD_WINDOWS × 2` backtest calls (train + test per fold). At 9 folds, this is 18 calls vs the current 6 — roughly 3× slower per iteration. With 85 tickers and a 6-month window per fold, each call completes in ~2–5 seconds, so a full iteration takes ~30–60 seconds. A 30-iteration session runs in ~15–30 minutes — still viable overnight. At 13 folds with rolling windows, ~26 calls per iteration, expect ~45–90 seconds per iteration.
+
+**Files changed:**
+
+| File | Zone | Changes |
+|------|------|---------|
+| `train.py` | Mutable | Add `FOLD_TEST_DAYS = 20` and `FOLD_TRAIN_DAYS = 0` constants near `WALK_FORWARD_WINDOWS` |
+| `train.py` | Immutable | Walk-forward loop: replace 2 hardcoded `10` values with `FOLD_TEST_DAYS`; add `FOLD_TRAIN_DAYS` branch for rolling train window start |
+| `program.md` | — | Document `FOLD_TEST_DAYS`, `FOLD_TRAIN_DAYS`, and updated `WALK_FORWARD_WINDOWS` recommendation; update setup step 4b to include these constants |
+| `tests/test_optimization.py` | — | Update `GOLDEN_HASH` (immutable zone changed) |
+
+**Backward compatibility:** Setting `FOLD_TEST_DAYS = 10` and `FOLD_TRAIN_DAYS = 0` exactly reproduces the V3-B/D walk-forward behavior. The default values in code are set to the new recommended values (`FOLD_TEST_DAYS = 20`); the agent sets them during session setup per `program.md`.
+
+**Validation:**
+- With `FOLD_TEST_DAYS = 10`, `FOLD_TRAIN_DAYS = 0`, `WALK_FORWARD_WINDOWS = 3`: output matches V3-D baseline (fold boundaries identical)
+- With `FOLD_TEST_DAYS = 20`, `FOLD_TRAIN_DAYS = 0`, `WALK_FORWARD_WINDOWS = 9`: 9 fold result blocks print; oldest fold test window starts ~9 months before `TRAIN_END`
+- With `FOLD_TRAIN_DAYS = 120`: fold 1 train start is `BACKTEST_START + 0` days (clamped); fold 9 train start is `FOLD_9_TEST_START - 120 business days`; verify no fold's train start precedes `BACKTEST_START`
+- `GOLDEN_HASH` test passes after update
+
+---
+
 ### V3 Compatibility Notes
 
-- V3-A, V3-B, V3-C each touch the immutable zone → each requires a `GOLDEN_HASH` update in `tests/test_optimization.py`
-- **Sequence dependency:** V3-A → V3-B → V3-C. V3-A must precede V3-B (sizing fix makes rolling-window results meaningful). V3-C can be parallelised with V3-B if needed but is designed to layer on top.
+- V3-A, V3-B, V3-C, V3-E each touch the immutable zone → each requires a `GOLDEN_HASH` update in `tests/test_optimization.py`
+- **Sequence dependency:** V3-A → V3-B → V3-C → V3-D → V3-E. V3-E must follow V3-D (all prior harness changes present).
 - All V3 mutable-section constants are agent-tunable during optimization runs
 - The `strategies/` registry (V2 Enhancement 6) and `scripts/fetch_all_strategies.py` are unaffected by V3
 - **Out-of-scope items from V1 that V3 now addresses:** "Max concurrent positions cap" → R8; "Walk-forward validation" → R2; "Risk-per-trade sizing" → R3
