@@ -306,6 +306,9 @@ def format_metadata_dict(meta: dict) -> list[str]:
     def _val(v):
         if v is None:
             return "None"
+        # float('nan') repr is 'nan' which is not a Python builtin — coerce to None
+        if isinstance(v, float) and v != v:  # NaN check
+            return "None"
         return repr(v)
 
     desc = meta.get("description", "")

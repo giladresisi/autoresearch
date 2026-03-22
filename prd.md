@@ -8,6 +8,14 @@ The LLM agent modifies a single Python script (`train.py`) that embodies a compl
 
 **MVP Goal:** Enable autonomous LLM-driven experimentation on a configurable stock screening and position management strategy, with Sharpe ratio as the optimization target.
 
+The system is developed in three versioned harness generations, each building on the previous:
+
+| Version | Scope | Date |
+|---------|-------|------|
+| **V1** | Initial implementation: data pipeline, backtester, Sharpe metric, agent loop | 2026-01 |
+| **V2** | Train/test split, P&L objective, final outputs, sector registry, strategy selector | 2026-03-20 |
+| **V3** | Harness robustness: look-ahead fix, risk-proportional sizing, walk-forward CV, robustness controls | 2026-03-22 |
+
 ---
 
 ## Mission
@@ -440,7 +448,7 @@ df_10am = df[df.index.time == pd.Timestamp("10:00").time()]
 
 ---
 
-## Implementation Phases
+## V1: Initial Implementation (Phases 1–5)
 
 ### Phase 1: Infrastructure Setup
 
@@ -546,8 +554,9 @@ grep "^sharpe:" run.log
 **Advanced Features:**
 - Multi-strategy ensemble (run multiple `train.py` variants on different branches simultaneously)
 - Dynamic ticker universe (re-fetch S&P 500 constituents at prepare time)
-- Walk-forward validation (test on out-of-sample period after optimizing on in-sample)
-- Risk-per-trade sizing (size based on ATR rather than fixed $500)
+- Walk-forward validation → **addressed in V3-B (R2)**
+- Risk-per-trade sizing → **addressed in V3-A (R3)**
+- Max concurrent positions cap → **addressed in V3-C (R8)**
 
 ---
 
@@ -609,7 +618,7 @@ Allowing fractional shares is mathematically correct but differs from real broke
 
 ---
 
-## Enhancements (2026-03-20)
+## V2: Evaluation Signal Quality (Enhancements 1–6, 2026-03-20)
 
 These additions were identified after running multi-sector optimization loops across five worktrees (energy, semis, utilities, financials, energy OOS). They address discovered limitations in the optimization signal and add new reporting capabilities.
 
@@ -833,6 +842,161 @@ def select_strategy(ticker: str, recent_df: pd.DataFrame, today: date) -> dict:
 | 5 | Extended results.tsv | — | — | ✅ | — | — |
 | 6a | Strategy registry | — | — | ✅ (extraction step) | — | `strategies/` |
 | 6b | LLM strategy selector | — | — | — | — | `strategy_selector.py` |
+
+---
+
+## V3: Harness Robustness (2026-03-22)
+
+### Background
+
+After completing optimization runs across `energy-mar21` and `nasdaq100-mar21` worktrees, post-run agent reflections identified structural weaknesses in the V2 harness. Full details, contradiction analysis, and verdicts are in `harness_upgrade_20260322_1403.md`.
+
+**Root causes discovered:**
+
+| Root cause | Effect | Addressed by |
+|---|---|---|
+| Look-ahead bias: indicators use today's close | Inflated backtest performance | R1 |
+| Fixed-notional sizing: tight and wide stops get same position | Leverage artefact, not real alpha | R3 |
+| 14-day test window (~10 trading days) | Too few trades to distinguish signal from noise | R2 (rolling windows) |
+| Agent sees `test_pnl` every iteration | Implicit selection pressure toward test-window fits | R4 |
+| Single training window | Optimizer exploits one regime, not structural edge | R2 |
+| No per-trade data | Agent can only adjust global thresholds; flies blind | R5 |
+| Sector concentration: 10+ correlated longs simultaneously | Leveraged macro bet, not diversified alpha | R8 |
+| Knife-edge stop placement | Fragile to small fill deviations in live trading | R9 |
+
+**Four contradictions identified** (see `harness_upgrade_20260322_1403.md` §Contradictions for full verdicts):
+
+- **C1:** R4-simple vs R2 → R4's "print HIDDEN" option is dropped once R2 is implemented; use R4's 3-segment silent holdout instead
+- **C2:** R2 vs R7 as primary objective → R2 (min test PnL) is primary; R7 (Calmar) is a printed diagnostic only
+- **C3:** R9-date-shift vs R2 → R9's date-shift perturbation is dropped (redundant with R2's rolling windows); only R9's price/stop perturbation is kept
+- **C4:** R5 vs R9 → When R9 is active, `trades.tsv` annotates `pnl_min`; a new `discard-fragile` status distinguishes fragility discards from genuine underperformance
+
+---
+
+### Implementation Plans
+
+V3 is organized into three sequential implementation plans, each executable as a single plan+execution session. **Run in order** — V3-B's walk-forward results are more meaningful after V3-A's sizing fix, and V3-C layers on top of the new framework.
+
+Every plan that touches the immutable zone requires a `GOLDEN_HASH` update in `tests/test_optimization.py`.
+
+---
+
+#### V3-A: Signal Correctness (R1, R3, R5, R4-partial)
+
+**Goal:** Fix the measurement foundation before restructuring the evaluation loop. Every subsequent plan's results become more meaningful once these are in place.
+
+**Why group these together:** All address "what does the optimizer actually measure." R3 and R5 are both additive changes to `run_backtest()` — one GOLDEN_HASH update covers both. R1 is mutable-zone only. R4-partial is a `program.md` instruction change with no code change.
+
+| Rec | Description | Change |
+|-----|-------------|--------|
+| R1 | Fix look-ahead bias | In `screen_day()`: compute all indicators on `df.iloc[:-1]` (yesterday + prior); read only `price_10am` from `df.iloc[-1]` (today) for entry/stop checks |
+| R3 | Risk-proportional sizing | Add `RISK_PER_TRADE = 50.0` to mutable constants; in `run_backtest()` replace `shares = 500.0 / entry_price` with `shares = RISK_PER_TRADE / (entry_price - signal['stop'])` |
+| R5 | Trade-level attribution | In `run_backtest()`: accumulate per-trade records `{ticker, entry_date, exit_date, days_held, stop_type, entry_price, exit_price, pnl}`; write to `trades.tsv` from `__main__`. `screen_day` signal dict must include `stop_type: 'pivot' | 'fallback'` |
+| R4 (partial) | Behavioral: don't act on test PnL | Update `program.md` keep/discard to use `train_total_pnl` only; document that `test_total_pnl` is printed but not used as a decision signal during the loop |
+
+**Files changed:**
+
+| File | Zone | Changes |
+|------|------|---------|
+| `train.py` | Mutable | R1: indicator slice; R3: `RISK_PER_TRADE` constant |
+| `train.py` | Immutable | R3: shares formula; R5: trade accumulation + `trades.tsv` write; `screen_day` signal contract extended with `stop_type` |
+| `program.md` | — | R4 partial: keep/discard instructions |
+| `tests/test_optimization.py` | — | Update `GOLDEN_HASH` |
+
+**Validation:**
+- `trades.tsv` written after each run with correct columns
+- Verify R3: wide ATR-fallback stops produce smaller share counts than tight pivot stops
+- Verify R1: first entry date's indicators reflect yesterday's close, not today's
+
+---
+
+#### V3-B: Walk-Forward Evaluation Framework (R2, R4-full, R7)
+
+**Goal:** Replace the single train→test split with rolling walk-forward CV as the optimization objective. This is the highest-impact single change for generalizability.
+
+**Pre-requisite:** V3-A complete.
+
+**Why group these together:** All restructure how `__main__` evaluates each experiment. R2 is the centerpiece; R4-full (3-segment silent holdout) is a natural companion since both define the evaluation horizon; R7 adds metrics to what's already being computed. One GOLDEN_HASH update.
+
+**Contradiction handling applied:**
+- C1: R4-simple dropped; R4-full's visible-test windows become the walk-forward folds for R2
+- C2: R7 is a diagnostic column only; R2's `min_test_pnl` is the sole keep/discard criterion
+
+| Rec | Description | Change |
+|-----|-------------|--------|
+| R2 | Walk-forward CV | Add `WALK_FORWARD_WINDOWS = 3` to mutable constants. `__main__` runs `run_backtest()` N times with staggered train/test windows (10-day step); reports one result block per window plus `min_test_pnl`. Keep/discard criterion: `min_test_pnl` |
+| R4 (full) | Silent holdout | Add `SILENT_END` constant (set at setup: `TRAIN_END − 14 calendar days`). `__main__` runs an additional backtest for `TRAIN_END → BACKTEST_END`; suppresses its output during the loop (`silent_pnl: HIDDEN`); reveals in the final run only |
+| R7 | Calmar + consistency | `run_backtest()` returns `max_drawdown` and per-month PnL breakdown. `print_results()` emits `train_calmar:` and `train_pnl_consistency:` (min monthly PnL). Added as columns to `results.tsv`; not used for keep/discard |
+
+**Files changed:**
+
+| File | Zone | Changes |
+|------|------|---------|
+| `train.py` | Mutable | R2: `WALK_FORWARD_WINDOWS` constant; R4-full: `SILENT_END` constant |
+| `train.py` | Immutable | R2: rolling-window loop in `__main__`; `min_test_pnl` aggregation; R4-full: silent holdout call + output suppression; R7: `max_drawdown` + monthly PnL in `run_backtest()` return; new print lines in `print_results()` |
+| `program.md` | — | Setup: compute `SILENT_END`; loop: keep/discard on `min_test_pnl`; results.tsv schema: add `min_test_pnl`, `train_calmar`, `train_pnl_consistency` columns |
+| `tests/test_optimization.py` | — | Update `GOLDEN_HASH` |
+
+**Validation:**
+- Rolling windows produce distinct trade sets (spot-check with `grep "^train_backtest_start:" run.log`)
+- `min_test_pnl` is correctly the minimum across all window test scores
+- Silent holdout output absent from run.log during loop; present in final run
+- Calmar and consistency columns appear in `results.tsv`
+
+---
+
+#### V3-C: Portfolio Robustness Controls (R8, R9-price-only)
+
+**Goal:** Add optional controls that penalize concentration risk and fragile stop placement. Both are gated by mutable-section constants so the agent can tune them during optimization runs.
+
+**Pre-requisite:** V3-A complete. V3-B strongly recommended (R9 cost: seeds × walk-forward windows — confirm still fast enough before enabling).
+
+**Why group these together:** Both are optional additions to `run_backtest()` controlled by mutable constants. One GOLDEN_HASH update.
+
+**Contradiction handling applied:**
+- C3: R9's date-shift perturbation dropped (covered by V3-B's rolling windows); only price/stop perturbation implemented
+- C4: When R9 active, `trades.tsv` annotated with `pnl_min`; new `discard-fragile` status added
+
+| Rec | Description | Change |
+|-----|-------------|--------|
+| R8 | Position cap + correlation penalty | Add `MAX_SIMULTANEOUS_POSITIONS = 5` and `CORRELATION_PENALTY_WEIGHT = 0.0` to mutable constants. `run_backtest()` skips new entries when `len(portfolio) >= MAX_SIMULTANEOUS_POSITIONS`; subtracts `CORRELATION_PENALTY_WEIGHT × avg_pairwise_correlation × total_pnl` from reported metric |
+| R9 (price only) | Robustness perturbation | Add `ROBUSTNESS_SEEDS = 0` to mutable constants (0 = off; 5 = enabled). When enabled, `run_backtest()` runs N seeds with entry prices ±0.5% and stop levels ±0.3 ATR; reports `pnl_min`. `trades.tsv` reflects nominal seed with header annotation `# pnl_min: $X.XX`. Status `discard-fragile` logged when nominal PnL > 0 but `pnl_min < 0` |
+
+**Files changed:**
+
+| File | Zone | Changes |
+|------|------|---------|
+| `train.py` | Mutable | R8: two constants; R9: `ROBUSTNESS_SEEDS` constant |
+| `train.py` | Immutable | R8: portfolio cap guard + correlation penalty; R9: perturbation loop + `pnl_min` output line |
+| `program.md` | — | Document `discard-fragile` status; instruct agent to inspect `trades.tsv` annotation when a fragility discard occurs |
+| `tests/test_optimization.py` | — | Update `GOLDEN_HASH` |
+
+**Validation:**
+- With `MAX_SIMULTANEOUS_POSITIONS = 2` on a multi-ticker universe: verify no more than 2 positions ever open simultaneously
+- With `ROBUSTNESS_SEEDS = 5`: verify `pnl_min` line appears in run.log; verify `trades.tsv` has annotation header
+- `discard-fragile` rows appear in results.tsv when nominal PnL is positive but `pnl_min < 0`
+
+---
+
+#### V3-D: Diagnostics and Advanced (R6, R10, R11) — Future
+
+Lower-priority improvements. Each can be scheduled independently as a small standalone plan.
+
+| Rec | Description | Effort | Notes |
+|-----|-------------|--------|-------|
+| R10 | Bootstrap CI on final PnL | Low | Additive to `_write_final_outputs()` only. Can be added as a minor item to V3-A or V3-C. |
+| R11 | Regime-conditional parameters | Low (partial) | `screen_day()` change only (mutable zone) — can be done by the agent during any optimization run. Harness-level per-regime stats require a future immutable-zone plan. |
+| R6 | Ticker holdout | Medium | Requires `__main__` restructuring to hold out ticker subsets. Lower urgency once V3-B's walk-forward CV is in place. |
+
+---
+
+### V3 Compatibility Notes
+
+- V3-A, V3-B, V3-C each touch the immutable zone → each requires a `GOLDEN_HASH` update in `tests/test_optimization.py`
+- **Sequence dependency:** V3-A → V3-B → V3-C. V3-A must precede V3-B (sizing fix makes rolling-window results meaningful). V3-C can be parallelised with V3-B if needed but is designed to layer on top.
+- All V3 mutable-section constants are agent-tunable during optimization runs
+- The `strategies/` registry (V2 Enhancement 6) and `scripts/fetch_all_strategies.py` are unaffected by V3
+- **Out-of-scope items from V1 that V3 now addresses:** "Max concurrent positions cap" → R8; "Walk-forward validation" → R2; "Risk-per-trade sizing" → R3
 
 ---
 

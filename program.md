@@ -231,6 +231,104 @@ with full output mode enabled:
 3. Edit `WRITE_FINAL_OUTPUTS = False` (restore immediately)
 4. Collect `final_test_data.csv` — per-ticker daily OHLCV + indicators for the test window
 5. Read the per-ticker P&L table printed at the end of `run.log`
+6. Append per-ticker P&L to `results.tsv` — add an empty line after the last experiment row,
+   then a header row, then one row per ticker (tab-separated):
+
+   ```bash
+   printf "\n" >> results.tsv
+   printf "ticker\ttest_pnl\n" >> results.tsv
+   uv run python -c "
+   import re, sys
+   lines = open('run.log').readlines()
+   i = next(i for i, l in enumerate(lines) if 'Per-ticker P&L' in l)
+   for l in lines[i+3:]:
+       m = re.match(r'\s+(\S+)\s+([-\d.]+)', l.rstrip())
+       if m:
+           print(m.group(1) + '\t' + m.group(2))
+   " >> results.tsv
+   ```
 
 **Design constraint**: `WRITE_FINAL_OUTPUTS` must be restored to `False` after the final
 run to prevent all subsequent runs from writing CSV files. Never commit it as `True`.
+
+---
+
+## Harness reflection (write harness_upgrade.md)
+
+After the final test run, perform a deep, max-effort reflection on this run in its entirety —
+the harness design, the parameters chosen, and what the outcomes reveal about both.
+**Think as hard as you can.** This reflection will be harvested by the `fetch-strategies`
+skill and merged with reflections from other worktrees to drive improvements to the system.
+
+### What to reflect on
+
+**1. Statistical validity of the test window**
+- How many test-window trades were there? (< 10 = noisy signal)
+- Were test-window positions mostly force-closed at the boundary rather than exiting via stop?
+  (If so: the 14-day test window is too short for this strategy's typical holding period)
+- Is the gap between `train_total_pnl` and `test_total_pnl` large? Estimate what fraction
+  of that gap is likely overfitting vs. genuine regime difference.
+
+**2. Overfitting indicators**
+- Did `train_total_pnl` improve monotonically across iterations while `test_pnl` stagnated
+  or declined? That is a strong overfitting signal.
+- Did the final screener accumulate many conditions? Each added rule is a potential
+  overfit to training-window noise.
+- Did the strategy converge toward very narrow parameter ranges (e.g. RSI 58–62)?
+  Narrow ranges are fragile out-of-sample.
+
+**3. Training window market regime**
+- Was the training period trending, volatile, or range-bound? How does that affect
+  the validity of the learned parameters for future markets?
+- Were the chosen tickers correlated with each other? (Many semis/financials moving
+  together inflates apparent diversification.)
+
+**4. Parameter choices**
+- **Tickers**: Were some tickers responsible for almost all the P&L? Would a broader
+  or more diversified basket produce more robust results?
+- **Timeframe**: Was the backtest window long enough to capture multiple market
+  regimes, or did it all fall in one trend / one event?
+- **Iterations**: Did improvement plateau early (e.g. after iteration 10)?
+  Was 30 iterations too many (overfit) or too few (unexplored space)?
+
+**5. Harness structural issues**
+- Is the 14-day test window appropriate for this strategy's typical trade duration?
+  (If avg hold is > 5 days and test window is 10 trading days, most test trades
+  are force-closed — consider recommending a longer test window.)
+- Is `train_total_pnl` the right objective? (It scales with trade count — a strategy
+  that generates many small trades can outscore a strategy with fewer but higher-quality
+  trades. Consider whether `train_avg_pnl_per_trade` or `train_win_rate` should be
+  a co-objective or guard rail.)
+
+### Output format
+
+Write your conclusions to `harness_upgrade.md` in this worktree using exactly this structure:
+
+```markdown
+# Harness Update Recommendations
+
+**Worktree:** <current branch name>
+**Run date:** <today's date YYYY-MM-DD>
+**Parameters:** tickers=<list>, timeframe=<BACKTEST_START>→<BACKTEST_END>, iterations=<N>
+**Results:** train_pnl=<X>, test_pnl=<Y>, train_trades=<N>, test_trades=<M>
+
+---
+
+## Recommendations
+
+### R1: <short title>
+**Category:** `harness-split` | `harness-objective` | `harness-structure` | `params-tickers` | `params-timeframe` | `params-iterations`
+**Priority:** `high` | `medium` | `low`
+**Rationale:** <1–3 sentences: what you observed that motivates this recommendation>
+**Suggested change:** <concrete, actionable change to program.md, train.py constants, or parameter selection guidance>
+
+### R2: ...
+```
+
+**Rules:**
+- Write between 3 and 8 recommendations. Don't pad with obvious/generic advice.
+- Every recommendation must be grounded in a specific observation from this run's data
+  (reference actual numbers: trade counts, PnL values, iteration curve, etc.).
+- Be critical of the harness and parameters even when the run looked "good" —
+  a good train result with a weak test result is a problem, not a success.
+- Do NOT commit `harness_upgrade.md` — it is intentionally untracked (like `results.tsv`).

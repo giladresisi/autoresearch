@@ -22,6 +22,9 @@ dev/
 # Results file
 results.tsv
 
+# Harness upgrade reflections (per-worktree, untracked like results.tsv)
+harness_upgrade.md
+
 # Test logs
 *.log
 

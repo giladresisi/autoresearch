@@ -105,7 +105,123 @@ fix it directly — no need to re-run the script for minor edits.
 
 ---
 
-## Step 5: Run tests
+## Step 5: Collect and merge harness_updates.md
+
+After extracting strategies, collect any `harness_updates.md` files from the same
+worktrees and merge them into a single timestamped file in the master branch.
+
+### 5a: Discover harness_updates files
+
+Get the list of worktrees you just processed (or all worktrees if running globally):
+
+```bash
+git worktree list --porcelain
+```
+
+For each worktree path, check whether `harness_upgrade.md` exists:
+
+```bash
+# Example — adjust paths as found above
+ls ../semis-mar22/harness_upgrade.md 2>/dev/null
+ls ../financials-mar22/harness_upgrade.md 2>/dev/null
+```
+
+If **no** `harness_upgrade.md` is found in any worktree, skip this step entirely.
+
+### 5b: Read all found files
+
+Read each `harness_upgrade.md` using the Read tool. Note the worktree branch name
+and the `**Parameters:**` / `**Results:**` header block from each file.
+
+### 5c: Merge, deduplicate, and find contradictions (ultrathink)
+
+**Think as hard as you can** before writing the merged output.
+
+**Pass 1 — Deduplicate:**
+
+1. **Group semantically similar recommendations** across worktrees — e.g. two
+   worktrees both recommending "extend test window" should produce one recommendation,
+   not two. Use your judgement: recommendations are "the same" if they target the
+   same harness/parameter aspect with similar actionable guidance, even if the
+   wording differs.
+
+2. **For each merged recommendation**, list every worktree it came from in a
+   `**Seen in:**` field.
+
+3. **Sort by priority then by number of worktrees** (highest-priority and most-
+   frequently-seen recommendations first).
+
+**Pass 2 — Find contradictions:**
+
+After deduplication, scan the full recommendation list for **contradictions**: cases
+where two recommendations, if both implemented, would conflict with each other, pull
+in opposite directions, or make one recommendation impossible or counterproductive.
+
+A contradiction is **not** simply two recommendations addressing the same area with
+different approaches — that is normal. A contradiction is when implementing A would
+undermine or negate the value of B, or when A and B prescribe opposing behaviors for
+the same decision point.
+
+For each contradiction found:
+- Name the two conflicting recommendations (e.g. "R2 vs R6")
+- State precisely what the conflict is
+- Give a **verdict**: which one to prioritize and why, or whether they can coexist
+  with a specific sequencing or scoping constraint
+
+If no contradictions are found, say so explicitly — don't leave it blank.
+
+### 5d: Write the merged file
+
+Determine the current timestamp:
+
+```bash
+date +"%Y%m%d_%H%M"
+```
+
+Write to `harness_upgrade_<timestamp>.md` in the **master branch working directory**
+(i.e., the current directory when running the skill):
+
+```markdown
+# Merged Harness Upgrade Recommendations
+
+**Generated:** <YYYY-MM-DD HH:MM>
+**Sources:** <list of worktree branch names that contributed>
+**Total worktrees with updates:** <N>
+
+---
+
+## Recommendations
+
+### R1: <short title>
+**Category:** `harness-split` | `harness-objective` | `harness-structure` | `params-tickers` | `params-timeframe` | `params-iterations`
+**Priority:** `high` | `medium` | `low`
+**Seen in:** `autoresearch/semis-mar22`, `autoresearch/financials-mar22`
+**Rationale:** <synthesized rationale combining observations from all contributing worktrees,
+citing specific numbers where available>
+**Suggested change:** <the concrete actionable recommendation>
+
+### R2: ...
+
+---
+
+## Contradictions
+
+### C1: R? vs R? — <short description of the conflict>
+**Conflict:** <precise statement of what the two recommendations prescribe that is
+incompatible or counterproductive when combined>
+**Verdict:** <which to prioritize, or how to sequence/scope them so both can coexist>
+
+### C2: ...
+
+*(If no contradictions: "No contradictions found among the N recommendations.")*
+```
+
+Report how many files were merged, how many unique recommendations were written, and
+how many contradictions were identified.
+
+---
+
+## Step 6: Run tests
 
 Always run after extraction to confirm the registry loads cleanly:
 
