@@ -158,6 +158,22 @@ fold1_test_pnl_min:              18.00
 (fold2 and fold3 blocks follow the same pattern)
 ---
 min_test_pnl:            -5.00
+```
+
+When `TICKER_HOLDOUT_FRAC > 0`, the following lines appear after `min_test_pnl:`:
+
+```
+---
+ticker_holdout_pnl:      $X.XX
+ticker_holdout_trades:   N
+```
+
+`ticker_holdout_pnl` is **informational only**; keep/discard continues to use `min_test_pnl`.
+If holdout PnL diverges sharply from walk-forward PnL (e.g., large positive `min_test_pnl` +
+negative `ticker_holdout_pnl`), flag it in the description column as a potential ticker-overfitting
+signal. Grep command: `grep "^ticker_holdout_pnl:" run.log`
+
+```
 ---
 silent_pnl: HIDDEN
 ```
@@ -244,6 +260,22 @@ If `ROBUSTNESS_SEEDS > 0`: also check whether any fold's `pnl_min:` line is nega
 To diagnose which trades are fragile, read `trades.tsv` — the first line is a comment
 `# pnl_min: $X.XX` showing the worst-case train-fold P&L under perturbation.
 
+`trades.tsv` schema (tab-separated):
+
+| Column | Description |
+|--------|-------------|
+| ticker | Stock symbol |
+| entry_date | Trade entry date (YYYY-MM-DD) |
+| exit_date | Trade exit date (YYYY-MM-DD) |
+| days_held | Calendar days position was held |
+| stop_type | Stop type at exit ('pivot' / 'fallback' / 'unknown') |
+| regime | 'bull' / 'bear' / 'unknown' — market regime at trade entry |
+| entry_price | Entry price (rounded to 4 dp) |
+| exit_price | Exit price (rounded to 4 dp) |
+| pnl | Trade P&L in dollars (rounded to 2 dp) |
+
+Grep command for agents: `awk -F'\t' '$6=="bear"' trades.tsv`
+
 9. If `min_test_pnl` is equal or lower → `git reset --hard HEAD~1` (revert to previous commit).
 10. When the configured number of iterations is reached, stop and report the best result to the user.
 
@@ -273,7 +305,15 @@ with full output mode enabled:
 2. Run: `uv run train.py > run.log 2>&1`
 3. Edit `WRITE_FINAL_OUTPUTS = False` (restore immediately)
 4. Collect `final_test_data.csv` — per-ticker daily OHLCV + indicators for the holdout window
-5. Read the per-ticker P&L table printed at the end of `run.log` (prefixed `holdout_`)
+5. Read the per-ticker P&L table and bootstrap CI printed at the end of `run.log` (prefixed `holdout_`).
+   The final output also prints:
+   ```
+   bootstrap_pnl_p05:       $X.XX
+   bootstrap_pnl_p95:       $X.XX
+   ```
+   These are 90% bootstrap CI bounds (5th/95th percentiles) on the total holdout P&L.
+   A narrow interval (< $50 spread) with < 10 trades indicates unreliable signal; interpret
+   the point estimate cautiously.
 6. Append per-ticker P&L to `results.tsv` — add an empty line after the last experiment row,
    then a header row, then one row per ticker (tab-separated):
 

@@ -115,7 +115,7 @@ def test_harness_below_do_not_edit_is_unchanged():
     # Golden hash of the harness at the time the DO NOT EDIT boundary was set.
     # To recompute: python -c "import hashlib; s=open('train.py').read();
     #   m='# ── DO NOT EDIT BELOW THIS LINE'; print(hashlib.sha256(s.partition(m)[2].encode()).hexdigest())"
-    GOLDEN_HASH = "8f2174487376cd0ac3e40a2dc8628ec374cc3753dbfb566cec2c6a16d5857bad"
+    GOLDEN_HASH = "9fba956b62e48a93d40a8ab6f386c6674bb96bd7efcfef793db198d4a078749e"
 
     _, _, below = _split_train_source()
     actual_hash = hashlib.sha256(below.encode("utf-8")).hexdigest()
@@ -897,3 +897,332 @@ def test_write_trades_tsv_no_annotation_when_none(tmp_path):
         )
     finally:
         os.chdir(orig_dir)
+
+
+# ── V3-D: R11 detect_regime tests ────────────────────────────────────────────
+
+def _make_regime_dataset(n_rows: int = 60, price_above_sma: bool = True) -> dict:
+    """
+    Synthetic ticker_dfs for regime tests.
+    n_rows >= 51 so SMA50 is valid. price_above_sma controls bull/bear vote.
+    """
+    dates = [pd.bdate_range(end="2026-03-20", periods=n_rows)[i].date() for i in range(n_rows)]
+    # Use a flat price so SMA50 == price for easy control
+    base = 100.0
+    prices = np.full(n_rows, base)
+    if price_above_sma:
+        # price_10am > close (SMA will be ≈ close), triggers bull vote
+        price_10am = np.full(n_rows, base + 5.0)
+    else:
+        price_10am = np.full(n_rows, base - 5.0)
+    df = pd.DataFrame(
+        {"open": prices, "high": prices + 1, "low": prices - 1,
+         "close": prices, "volume": np.full(n_rows, 1_000_000.0),
+         "price_10am": price_10am},
+        index=pd.Index(dates, name="date"),
+    )
+    return df
+
+
+def test_detect_regime_bull_when_majority_above_sma50():
+    """detect_regime returns 'bull' when all tickers have price_10am > SMA50."""
+    ticker_dfs = {
+        "A": _make_regime_dataset(price_above_sma=True),
+        "B": _make_regime_dataset(price_above_sma=True),
+        "C": _make_regime_dataset(price_above_sma=True),
+    }
+    today = ticker_dfs["A"].index[-1]
+    result = train.detect_regime(ticker_dfs, today)
+    assert result == "bull", f"Expected 'bull', got '{result}'"
+
+
+def test_detect_regime_bear_when_majority_below_sma50():
+    """detect_regime returns 'bear' when majority of tickers have price_10am < SMA50."""
+    ticker_dfs = {
+        "A": _make_regime_dataset(price_above_sma=False),
+        "B": _make_regime_dataset(price_above_sma=False),
+        "C": _make_regime_dataset(price_above_sma=True),
+    }
+    today = ticker_dfs["A"].index[-1]
+    result = train.detect_regime(ticker_dfs, today)
+    assert result == "bear", f"Expected 'bear', got '{result}'"
+
+
+def test_detect_regime_unknown_when_insufficient_history():
+    """detect_regime returns 'unknown' when fewer than 2 tickers have ≥51 rows."""
+    dates = [pd.bdate_range(end="2026-03-20", periods=10)[i].date() for i in range(10)]
+    prices = np.full(10, 100.0)
+    df = pd.DataFrame(
+        {"open": prices, "high": prices + 1, "low": prices - 1,
+         "close": prices, "volume": np.full(10, 1_000_000.0),
+         "price_10am": prices},
+        index=pd.Index(dates, name="date"),
+    )
+    ticker_dfs = {"A": df, "B": df}
+    today = df.index[-1]
+    result = train.detect_regime(ticker_dfs, today)
+    assert result == "unknown", f"Expected 'unknown' for < 51 rows, got '{result}'"
+
+
+def test_trade_records_include_regime_field():
+    """run_backtest() trade_records must include 'regime' key with valid value."""
+    # Use a dataset big enough to trigger at least one entry and exit
+    bdays = pd.bdate_range(end="2026-02-27", periods=200)
+    dates = [d.date() for d in bdays]
+    rng = np.random.default_rng(0)
+    prices = np.linspace(100.0, 150.0, 200) + rng.standard_normal(200) * 0.3
+    df = pd.DataFrame(
+        {"open": prices - 0.5, "high": prices + 1.0, "low": prices - 1.0,
+         "close": prices, "volume": np.full(200, 1_000_000.0), "price_10am": prices},
+        index=pd.Index(dates, name="date"),
+    )
+    ticker_dfs = {"SYNTHETIC": df}
+
+    def always_enter(hist, today):
+        if len(hist) < 2:
+            return None
+        price = float(hist["price_10am"].iloc[-1])
+        return {"stop": price - 10.0, "entry_price": price}
+
+    def no_op_manage(position, df):
+        return position["stop_price"]
+
+    with mock.patch.object(train, "screen_day", always_enter), \
+         mock.patch.object(train, "manage_position", no_op_manage):
+        stats = train.run_backtest(ticker_dfs)
+
+    valid = {"bull", "bear", "unknown"}
+    for rec in stats["trade_records"]:
+        assert "regime" in rec, f"'regime' key missing from trade record: {rec}"
+        assert rec["regime"] in valid, f"Unexpected regime value: {rec['regime']}"
+
+
+def test_regime_stats_in_run_backtest_return():
+    """run_backtest() must return 'regime_stats' key with proper structure."""
+    bdays = pd.bdate_range(end="2026-02-27", periods=200)
+    dates = [d.date() for d in bdays]
+    rng = np.random.default_rng(1)
+    prices = np.linspace(100.0, 150.0, 200) + rng.standard_normal(200) * 0.3
+    df = pd.DataFrame(
+        {"open": prices - 0.5, "high": prices + 1.0, "low": prices - 1.0,
+         "close": prices, "volume": np.full(200, 1_000_000.0), "price_10am": prices},
+        index=pd.Index(dates, name="date"),
+    )
+    ticker_dfs = {"SYNTHETIC": df}
+
+    def always_enter(hist, today):
+        if len(hist) < 2:
+            return None
+        price = float(hist["price_10am"].iloc[-1])
+        return {"stop": price - 10.0, "entry_price": price}
+
+    def no_op_manage(position, df):
+        return position["stop_price"]
+
+    with mock.patch.object(train, "screen_day", always_enter), \
+         mock.patch.object(train, "manage_position", no_op_manage):
+        stats = train.run_backtest(ticker_dfs)
+
+    assert "regime_stats" in stats, "'regime_stats' key missing from run_backtest return"
+    rs = stats["regime_stats"]
+    assert isinstance(rs, dict), f"regime_stats must be dict, got {type(rs)}"
+    total_regime_trades = sum(v["trades"] for v in rs.values())
+    assert total_regime_trades == stats["total_trades"], (
+        f"Sum of regime trades ({total_regime_trades}) != total_trades ({stats['total_trades']})"
+    )
+    for r, entry in rs.items():
+        assert "trades" in entry and "wins" in entry and "pnl" in entry, (
+            f"regime_stats['{r}'] missing sub-keys: {entry}"
+        )
+
+
+# ── V3-D: R10 _bootstrap_ci tests ────────────────────────────────────────────
+
+def test_bootstrap_ci_returns_valid_bounds():
+    """_bootstrap_ci returns (p_low, p_high) with p_low <= p_high, both finite."""
+    pnls = [10.0, 20.0, -5.0, 15.0, 8.0]
+    p_low, p_high = train._bootstrap_ci(pnls)
+    assert np.isfinite(p_low), f"p_low not finite: {p_low}"
+    assert np.isfinite(p_high), f"p_high not finite: {p_high}"
+    assert p_low <= p_high, f"p_low ({p_low}) > p_high ({p_high})"
+
+
+def test_bootstrap_ci_fewer_than_two_trades():
+    """_bootstrap_ci returns (0.0, 0.0) for empty and single-element input."""
+    assert train._bootstrap_ci([]) == (0.0, 0.0), "Empty list should return (0.0, 0.0)"
+    assert train._bootstrap_ci([5.0]) == (0.0, 0.0), "Single trade should return (0.0, 0.0)"
+
+
+def test_bootstrap_ci_is_deterministic():
+    """Two calls with the same input return identical results (seed 42)."""
+    pnls = [10.0, 20.0, -5.0, 15.0, 8.0]
+    result_a = train._bootstrap_ci(pnls)
+    result_b = train._bootstrap_ci(pnls)
+    assert result_a == result_b, f"Results differ: {result_a} vs {result_b}"
+
+
+def test_write_final_outputs_includes_bootstrap_lines(tmp_path, capsys):
+    """_write_final_outputs with trade_records prints bootstrap_pnl_p05 and p95 lines."""
+    bdays = pd.bdate_range(end="2026-03-20", periods=60)
+    dates = [d.date() for d in bdays]
+    prices = np.full(60, 100.0)
+    df = pd.DataFrame(
+        {"open": prices, "high": prices + 1, "low": prices - 1,
+         "close": prices, "volume": np.full(60, 1_000_000.0), "price_10am": prices},
+        index=pd.Index(dates, name="date"),
+    )
+    ticker_dfs = {"SYN": df}
+    trade_records = [
+        {"ticker": "SYN", "entry_date": "2026-02-01", "exit_date": "2026-02-10",
+         "days_held": 9, "stop_type": "atr", "regime": "bull",
+         "entry_price": 100.0, "exit_price": 110.0, "pnl": p}
+        for p in [10.0, -3.0, 7.0, 5.0, 12.0]
+    ]
+    orig_dir = os.getcwd()
+    try:
+        os.chdir(tmp_path)
+        train._write_final_outputs(
+            ticker_dfs, str(dates[50]), str(dates[-1]),
+            {"SYN": 31.0}, trade_records,
+        )
+    finally:
+        os.chdir(orig_dir)
+    captured = capsys.readouterr()
+    assert "bootstrap_pnl_p05:" in captured.out, (
+        f"Expected 'bootstrap_pnl_p05:' in output.\nstdout: {captured.out}"
+    )
+    assert "bootstrap_pnl_p95:" in captured.out, (
+        f"Expected 'bootstrap_pnl_p95:' in output.\nstdout: {captured.out}"
+    )
+
+
+def test_write_final_outputs_no_bootstrap_when_no_trade_records(tmp_path, capsys):
+    """_write_final_outputs with trade_records=None does NOT print bootstrap lines."""
+    bdays = pd.bdate_range(end="2026-03-20", periods=60)
+    dates = [d.date() for d in bdays]
+    prices = np.full(60, 100.0)
+    df = pd.DataFrame(
+        {"open": prices, "high": prices + 1, "low": prices - 1,
+         "close": prices, "volume": np.full(60, 1_000_000.0), "price_10am": prices},
+        index=pd.Index(dates, name="date"),
+    )
+    ticker_dfs = {"SYN": df}
+    orig_dir = os.getcwd()
+    try:
+        os.chdir(tmp_path)
+        train._write_final_outputs(
+            ticker_dfs, str(dates[50]), str(dates[-1]), {}, None
+        )
+    finally:
+        os.chdir(orig_dir)
+    captured = capsys.readouterr()
+    assert "bootstrap_pnl_p05:" not in captured.out, (
+        f"Expected no bootstrap lines when trade_records=None.\nstdout: {captured.out}"
+    )
+
+
+# ── V3-D: R6 ticker holdout tests ────────────────────────────────────────────
+
+def _compute_holdout_split(ticker_dfs: dict, frac: float):
+    """Mirror the R6 split logic from __main__ for use in tests."""
+    all_tickers_sorted = sorted(ticker_dfs.keys())
+    n_holdout = round(frac * len(all_tickers_sorted)) if frac > 0 else 0
+    holdout_set = set(all_tickers_sorted[-n_holdout:]) if n_holdout > 0 else set()
+    train_dfs = {t: df for t, df in ticker_dfs.items() if t not in holdout_set}
+    holdout_dfs = {t: df for t, df in ticker_dfs.items() if t in holdout_set}
+    if not train_dfs:
+        train_dfs = ticker_dfs
+    return train_dfs, holdout_dfs, holdout_set
+
+
+def test_ticker_holdout_zero_uses_all_tickers():
+    """With TICKER_HOLDOUT_FRAC=0.0, the holdout set is empty and all tickers are in training."""
+    tickers = {"A": None, "B": None, "C": None, "D": None, "E": None}
+    train_dfs, holdout_dfs, holdout_set = _compute_holdout_split(tickers, 0.0)
+    assert len(holdout_set) == 0, f"Expected empty holdout set, got {holdout_set}"
+    assert set(train_dfs.keys()) == set(tickers.keys()), "All tickers should be in training"
+
+
+def test_ticker_holdout_fraction_splits_correctly():
+    """With 5 sorted tickers and frac=0.4, last 2 tickers go to holdout."""
+    tickers = {"A": None, "B": None, "C": None, "D": None, "E": None}
+    train_dfs, holdout_dfs, holdout_set = _compute_holdout_split(tickers, 0.4)
+    assert len(holdout_set) == 2, f"Expected 2 holdout tickers, got {len(holdout_set)}"
+    assert holdout_set == {"D", "E"}, f"Expected {{D, E}} in holdout, got {holdout_set}"
+    assert set(train_dfs.keys()) == {"A", "B", "C"}, (
+        f"Expected {{A, B, C}} in training, got {set(train_dfs.keys())}"
+    )
+
+
+def test_ticker_holdout_deterministic():
+    """Same tickers and fraction produce the same holdout set on every call."""
+    tickers = {"A": None, "B": None, "C": None, "D": None, "E": None}
+    _, _, holdout_a = _compute_holdout_split(tickers, 0.4)
+    _, _, holdout_b = _compute_holdout_split(tickers, 0.4)
+    assert holdout_a == holdout_b, f"Holdout sets differ: {holdout_a} vs {holdout_b}"
+
+
+def test_main_outputs_ticker_holdout_pnl(capsys):
+    """When TICKER_HOLDOUT_FRAC > 0, __main__ output contains 'ticker_holdout_pnl:' line."""
+    def fake_backtest(ticker_dfs, start=None, end=None, **kw):
+        return {
+            "sharpe": 0.0, "total_trades": 2, "win_rate": 0.5,
+            "avg_pnl_per_trade": 5.0, "total_pnl": 10.0,
+            "ticker_pnl": {}, "backtest_start": start or train.BACKTEST_START,
+            "backtest_end": end or train.BACKTEST_END,
+            "trade_records": [], "max_drawdown": 0.0, "calmar": 0.0,
+            "pnl_consistency": 0.0, "pnl_min": 10.0, "regime_stats": {},
+        }
+
+    # Build a minimal dataset with 2 tickers so the holdout split leaves at least 1 in training
+    bdays = pd.bdate_range(end="2026-02-27", periods=200)
+    dates = [d.date() for d in bdays]
+    rng = np.random.default_rng(42)
+    prices = np.linspace(100.0, 150.0, 200) + rng.standard_normal(200) * 0.3
+    df = pd.DataFrame(
+        {"open": prices - 0.5, "high": prices + 1.0, "low": prices - 1.0,
+         "close": prices, "volume": np.full(200, 1_000_000.0), "price_10am": prices},
+        index=pd.Index(dates, name="date"),
+    )
+    two_tickers = {"AAAA": df, "BBBB": df}
+
+    _exec_main_block({
+        "load_all_ticker_data": lambda: two_tickers,
+        "run_backtest": fake_backtest,
+        "_write_trades_tsv": lambda records, annotation=None: None,
+        "TICKER_HOLDOUT_FRAC": 0.5,
+    })
+
+    captured = capsys.readouterr()
+    assert "ticker_holdout_pnl:" in captured.out, (
+        f"Expected 'ticker_holdout_pnl:' in output when TICKER_HOLDOUT_FRAC=0.5.\n"
+        f"stdout: {captured.out[:800]}"
+    )
+
+
+def test_main_no_ticker_holdout_output_when_frac_zero(capsys):
+    """When TICKER_HOLDOUT_FRAC=0.0, __main__ output does NOT contain 'ticker_holdout_pnl:' line."""
+    def fake_backtest(ticker_dfs, start=None, end=None, **kw):
+        return {
+            "sharpe": 0.0, "total_trades": 0, "win_rate": 0.0,
+            "avg_pnl_per_trade": 0.0, "total_pnl": 0.0,
+            "ticker_pnl": {}, "backtest_start": start or train.BACKTEST_START,
+            "backtest_end": end or train.BACKTEST_END,
+            "trade_records": [], "max_drawdown": 0.0, "calmar": 0.0,
+            "pnl_consistency": 0.0, "pnl_min": 0.0, "regime_stats": {},
+        }
+
+    minimal_df = _make_rising_dataset()
+
+    _exec_main_block({
+        "load_all_ticker_data": lambda: minimal_df,
+        "run_backtest": fake_backtest,
+        "_write_trades_tsv": lambda records, annotation=None: None,
+        "TICKER_HOLDOUT_FRAC": 0.0,
+    })
+
+    captured = capsys.readouterr()
+    assert "ticker_holdout_pnl:" not in captured.out, (
+        f"Expected no 'ticker_holdout_pnl:' in output when TICKER_HOLDOUT_FRAC=0.0.\n"
+        f"stdout: {captured.out[:800]}"
+    )

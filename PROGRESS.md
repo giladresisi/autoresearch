@@ -1,5 +1,30 @@
 # PROGRESS
 
+## Feature: V3-D Diagnostics and Advanced (R6, R10, R11)
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-22
+**Plan File**: .agents/plans/v3-d-diagnostics.md
+
+### Core Validation
+R11 `detect_regime()` added to the immutable zone — cross-sectional SMA50 majority vote classifies each trading day as `'bull'`/`'bear'`/`'unknown'`; regime stored in every trade record and surfaced in `regime_stats` return dict key and `trades.tsv` `regime` column. R10 `_bootstrap_ci()` added; `_write_final_outputs()` prints `bootstrap_pnl_p05:` / `bootstrap_pnl_p95:` when `trade_records` are passed (final run only). R6 deterministic ticker holdout (sorted tail split) added to `__main__`; walk-forward folds use training tickers only; `ticker_holdout_pnl:` / `ticker_holdout_trades:` printed after `min_test_pnl:` when holdout is non-empty. `TICKER_HOLDOUT_FRAC = 0.0` default leaves all existing behavior unchanged.
+
+### Test Status
+- Automated: ✅ 39 passed (+15 new V3-D unit tests), 1 pre-existing skip (git state)
+- Manual: none required
+
+### Notes
+- GOLDEN_HASH updated to `9fba956b62e48a93d40a8ab6f386c6674bb96bd7efcfef793db198d4a078749e`
+- `regime_stats: {}` added to early-exit guard return in `run_backtest()` so callers always see the key
+- Bootstrap uses `np.random.default_rng(42)` for fully deterministic output; `ci=0.90` so `p05`/`p95` key names match 5th/95th percentile math
+- `trades.tsv` DictWriter uses `restval=""` for backward compatibility on records missing `regime`
+- `detect_regime()` cached per trading day (hoisted before screening loop) — all entries on the same day share the same regime value
+- Code review fixes applied: bootstrap CI label mismatch (ci 0.95→0.90), program.md stop_type values corrected ('pivot'/'fallback'/'unknown'), look-ahead docstring note added
+
+**Reports:** `.agents/execution-reports/v3-d-diagnostics.md` | `.agents/code-reviews/v3-d-diagnostics.md`
+
+---
+
 ## Feature: V3-C Portfolio Robustness Controls (R8, R9-price-only)
 
 **Status**: ✅ Complete

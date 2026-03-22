@@ -42,6 +42,11 @@ CORRELATION_PENALTY_WEIGHT = 0.0   # penalty factor for correlated portfolios (0
 # R9: Robustness perturbation (price/stop jitter)
 ROBUSTNESS_SEEDS = 0               # 0 = off; 5 = recommended (runs 4 perturbed seeds + nominal)
 
+# R6: Ticker holdout — fraction of tickers withheld from all training folds
+# Set to 0.0 to disable; 0.2 = hold out the last-sorted 20% of the universe.
+# Holdout evaluation uses BACKTEST_START..TRAIN_END (same window as training folds).
+TICKER_HOLDOUT_FRAC = 0.0
+
 
 def load_ticker_data(ticker: str) -> pd.DataFrame | None:
     """Reads CACHE_DIR/{ticker}.parquet; returns None if file does not exist."""
@@ -298,6 +303,34 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
 # rerun `uv run pytest tests/test_optimization.py::test_harness_below_do_not_edit_is_unchanged`.
 # ──────────────────────────────────────────────────────────────────────────────
 
+def detect_regime(ticker_dfs: dict, today) -> str:
+    """
+    Classify today's market regime as 'bull' or 'bear' using cross-sectional SMA50 majority vote.
+    A ticker votes 'bull' if today's price_10am > its 50-day SMA (computed on history up to and
+    including today). Returns 'bull' if bull_count >= bear_count, else 'bear'.
+    Returns 'unknown' if fewer than 2 tickers have valid data for today.
+    Note: includes today's close in the SMA50 — one-bar look-ahead (~2% of the 50-bar window),
+    acceptable in this EOD data context since entry decisions use price_10am, not the close.
+    """
+    bull_count = 0
+    bear_count = 0
+    for ticker, df in ticker_dfs.items():
+        hist = df[df.index <= today]
+        if len(hist) < 51:
+            continue
+        sma50 = float(hist['close'].rolling(50).mean().iloc[-1])
+        price = float(hist['price_10am'].iloc[-1])
+        if pd.isna(sma50) or pd.isna(price):
+            continue
+        if price > sma50:
+            bull_count += 1
+        else:
+            bear_count += 1
+    if bull_count + bear_count < 2:
+        return 'unknown'
+    return 'bull' if bull_count >= bear_count else 'bear'
+
+
 def _compute_avg_correlation(ticker_dfs: dict, tickers: list, start, end) -> float:
     """
     Mean pairwise Pearson correlation of daily price_10am returns for the given tickers
@@ -346,7 +379,8 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
                 "avg_pnl_per_trade": 0.0, "total_pnl": 0.0,
                 "ticker_pnl": {}, "backtest_start": start or BACKTEST_START,
                 "backtest_end": end or BACKTEST_END, "trade_records": [],
-                "max_drawdown": 0.0, "calmar": 0.0, "pnl_consistency": 0.0, "pnl_min": 0.0}
+                "max_drawdown": 0.0, "calmar": 0.0, "pnl_consistency": 0.0, "pnl_min": 0.0,
+                "regime_stats": {}}
 
     portfolio: dict = {}   # ticker -> position dict
     trades: list = []      # list of pnl floats per closed trade
@@ -378,6 +412,7 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
                             "exit_date":    str(prev_day),
                             "days_held":    (prev_day - pos["entry_date"]).days,
                             "stop_type":    pos.get("stop_type", "unknown"),
+                            "regime":       pos.get("regime", "unknown"),       # R11
                             "entry_price":  round(pos["entry_price"], 4),
                             "exit_price":   round(pos["stop_price"], 4),
                             "pnl":          round(pnl, 2),
@@ -394,6 +429,8 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
             pos["stop_price"] = max(new_stop, pos["stop_price"])
 
         # 3. Screen for new entries
+        # Compute regime once per day — all entries on the same day share the same regime.
+        _today_regime = detect_regime(ticker_dfs, today)
         for ticker, df in ticker_dfs.items():
             if ticker in portfolio:
                 continue
@@ -407,6 +444,7 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
             stop_raw    = signal["stop"] + _stop_atr_bias * signal.get("atr14", 0.0)
             risk = entry_price - stop_raw
             shares = RISK_PER_TRADE / risk if risk > 0 else RISK_PER_TRADE / entry_price
+            _entry_regime = _today_regime
             portfolio[ticker] = {
                 "entry_price": entry_price,
                 "entry_date": today,
@@ -414,6 +452,7 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
                 "stop_price": stop_raw,
                 "stop_type": signal.get("stop_type", "unknown"),   # R5
                 "ticker": ticker,
+                "regime": _entry_regime,                            # R11
             }
 
         # 4. Mark-to-market: portfolio value = sum of (price_10am × shares) for open positions
@@ -444,6 +483,7 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
             "exit_date":    str(last_day),
             "days_held":    (last_day - pos["entry_date"]).days if last_day else 0,
             "stop_type":    pos.get("stop_type", "unknown"),
+            "regime":       pos.get("regime", "unknown"),       # R11
             "entry_price":  round(pos["entry_price"], 4),
             "exit_price":   round(last_price, 4),
             "pnl":          round(pnl, 2),
@@ -512,6 +552,19 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
             all_pnls.append(_perturbed["total_pnl"])
         pnl_min = round(min(all_pnls), 2)
 
+    # R11: Per-regime trade attribution
+    regime_stats: dict = {}
+    for _rec in trade_records:
+        _r = _rec.get("regime", "unknown")
+        if _r not in regime_stats:
+            regime_stats[_r] = {"trades": 0, "wins": 0, "pnl": 0.0}
+        regime_stats[_r]["trades"] += 1
+        if _rec["pnl"] > 0:
+            regime_stats[_r]["wins"] += 1
+        # Both operands are already 2dp (trade records are pre-rounded), so intermediate
+        # rounding is benign but kept for consistency with the pnl_min accumulation pattern.
+        regime_stats[_r]["pnl"] = round(regime_stats[_r]["pnl"] + _rec["pnl"], 2)
+
     return {
         "sharpe":            round(sharpe, 6),
         "total_trades":      total_trades,
@@ -526,6 +579,7 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         "calmar":            round(calmar, 4),
         "pnl_consistency":   round(pnl_consistency, 2),
         "pnl_min":           pnl_min,
+        "regime_stats":      regime_stats,   # R11
     }
 
 
@@ -544,8 +598,28 @@ def print_results(stats: dict, prefix: str = "") -> None:
     print(f"{prefix}pnl_min:             {stats.get('pnl_min', stats['total_pnl']):.2f}")
 
 
+def _bootstrap_ci(pnls: list, n_boot: int = 2000, ci: float = 0.90) -> tuple:
+    """
+    Bootstrap CI on total P&L by resampling closed trade P&Ls with replacement.
+    Uses a fixed seed (42) for deterministic output.
+    ci=0.90 → alpha=0.05 → 5th/95th percentile bounds, matching the p05/p95 print labels.
+    Returns (p_low, p_high) percentile bounds. Returns (0.0, 0.0) if fewer than 2 trades.
+    """
+    if len(pnls) < 2:
+        return (0.0, 0.0)
+    rng = np.random.default_rng(42)
+    pnl_arr = np.array(pnls, dtype=float)
+    boot_totals = np.array([
+        rng.choice(pnl_arr, size=len(pnl_arr), replace=True).sum()
+        for _ in range(n_boot)
+    ])
+    alpha = (1.0 - ci) / 2.0
+    return (float(np.percentile(boot_totals, 100.0 * alpha)),
+            float(np.percentile(boot_totals, 100.0 * (1.0 - alpha))))
+
+
 def _write_final_outputs(ticker_dfs: dict, test_start: str, test_end: str,
-                         ticker_pnl: dict) -> None:
+                         ticker_pnl: dict, trade_records: list | None = None) -> None:
     """Write final_test_data.csv and print per-ticker P&L table for the test window."""
     import csv
     s = date.fromisoformat(test_start)
@@ -584,6 +658,12 @@ def _write_final_outputs(ticker_dfs: dict, test_start: str, test_end: str,
         print("  " + "-" * 22)
         for t, p in sorted_pnl:
             print(f"  {t:<10} {p:>10.2f}")
+    # R10: Bootstrap CI on final test P&L
+    if trade_records:
+        _pnls = [r["pnl"] for r in trade_records]
+        _ci_low, _ci_high = _bootstrap_ci(_pnls)
+        print(f"bootstrap_pnl_p05:       {_ci_low:.2f}")
+        print(f"bootstrap_pnl_p95:       {_ci_high:.2f}")
 
 
 def _write_trades_tsv(trade_records: list, annotation: str | None = None) -> None:
@@ -591,11 +671,11 @@ def _write_trades_tsv(trade_records: list, annotation: str | None = None) -> Non
     If annotation is provided, writes it as a comment line before the header row."""
     import csv
     fieldnames = ["ticker", "entry_date", "exit_date", "days_held",
-                  "stop_type", "entry_price", "exit_price", "pnl"]
+                  "stop_type", "regime", "entry_price", "exit_price", "pnl"]
     with open("trades.tsv", "w", newline="", encoding="utf-8") as f:
         if annotation:
             f.write(f"# {annotation}\n")
-        w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+        w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", restval="")
         w.writeheader()
         w.writerows(trade_records)
 
@@ -605,6 +685,15 @@ if __name__ == "__main__":
     if not ticker_dfs:
         print(f"No cached data in {CACHE_DIR}. Run prepare.py first.", file=sys.stderr)
         sys.exit(1)
+
+    # R6: Ticker holdout — deterministic tail split of sorted ticker list
+    _all_tickers_sorted = sorted(ticker_dfs.keys())
+    _n_holdout = round(TICKER_HOLDOUT_FRAC * len(_all_tickers_sorted)) if TICKER_HOLDOUT_FRAC > 0 else 0
+    _holdout_set = set(_all_tickers_sorted[-_n_holdout:]) if _n_holdout > 0 else set()
+    _train_ticker_dfs = {t: df for t, df in ticker_dfs.items() if t not in _holdout_set}
+    _holdout_ticker_dfs = {t: df for t, df in ticker_dfs.items() if t in _holdout_set}
+    if not _train_ticker_dfs:
+        _train_ticker_dfs = ticker_dfs  # safety: if holdout fraction is too large, fall back
 
     # R2: Walk-forward CV — N folds with 10-business-day test windows
     # stepping back from TRAIN_END.
@@ -629,8 +718,8 @@ if __name__ == "__main__":
         _fold_test_end    = str(_fold_test_end_ts.date())
         _fold_n           = _i + 1
 
-        _fold_train_stats = run_backtest(ticker_dfs, start=BACKTEST_START, end=_fold_train_end)
-        _fold_test_stats  = run_backtest(ticker_dfs, start=_fold_test_start, end=_fold_test_end)
+        _fold_train_stats = run_backtest(_train_ticker_dfs, start=BACKTEST_START, end=_fold_train_end)
+        _fold_test_stats  = run_backtest(_train_ticker_dfs, start=_fold_test_start, end=_fold_test_end)
 
         print_results(_fold_train_stats, prefix=f"fold{_fold_n}_train_")
         print_results(_fold_test_stats,  prefix=f"fold{_fold_n}_test_")
@@ -643,6 +732,13 @@ if __name__ == "__main__":
     print("---")
     print(f"min_test_pnl:            {min_test_pnl:.2f}")
 
+    # R6: Evaluate on held-out tickers (generalization check)
+    if _holdout_ticker_dfs:
+        _holdout_stats = run_backtest(_holdout_ticker_dfs, start=BACKTEST_START, end=TRAIN_END)
+        print("---")
+        print(f"ticker_holdout_pnl:      {_holdout_stats['total_pnl']:.2f}")
+        print(f"ticker_holdout_trades:   {_holdout_stats['total_trades']}")
+
     # Write trades.tsv from the most recent training fold
     _last_fold_pnl_min = _fold_train_stats.get("pnl_min", _fold_train_stats["total_pnl"])
     _annotation = f"pnl_min: ${_last_fold_pnl_min:.2f}" if ROBUSTNESS_SEEDS > 0 else None
@@ -653,6 +749,8 @@ if __name__ == "__main__":
     print("---")
     if WRITE_FINAL_OUTPUTS:
         print_results(_silent_stats, prefix="holdout_")
-        _write_final_outputs(ticker_dfs, TRAIN_END, BACKTEST_END, _silent_stats["ticker_pnl"])
+        _write_final_outputs(ticker_dfs, TRAIN_END, BACKTEST_END,
+                             _silent_stats["ticker_pnl"],
+                             _silent_stats["trade_records"])   # R10: pass trade_records
     else:
         print(f"silent_pnl: HIDDEN")
