@@ -201,6 +201,11 @@ d4e5f6g	0.00	0.00	0.000000	0	0.000	crash	divide-by-zero in custom indicator
 6. If grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python traceback and attempt a fix. If you cannot fix it within a few attempts, give up: log status `crash`, run `git reset --hard HEAD~1`, and move on.
 7. Record the result in `results.tsv`.
 8. If `train_total_pnl` **improved (higher)** compared to the current best → keep the commit, advance the branch.
+
+> **Note:** `test_total_pnl` is printed for diagnostic purposes only. Do NOT use it to
+> decide whether to keep or discard an experiment. The sole keep/discard criterion is
+> `train_total_pnl`. Acting on test P&L during the loop contaminates the holdout window.
+
 9. If `train_total_pnl` is equal or lower → `git reset --hard HEAD~1` (revert to previous commit).
 10. When the configured number of iterations is reached, stop and report the best result to the user.
 

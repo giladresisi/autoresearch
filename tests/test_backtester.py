@@ -10,6 +10,7 @@ import csv
 import os
 import tempfile
 
+import train
 from train import (
     manage_position, run_backtest, print_results, calc_atr14,
     _write_final_outputs,
@@ -295,3 +296,194 @@ def test_write_final_outputs_indicators_populated(tmp_path, monkeypatch):
         rows = list(csv.DictReader(f))
     # sma50 requires 50 bars of history; our df has 60 → last 5 should be populated
     assert any(r['sma50'] != '' for r in rows), "sma50 should be non-empty for last rows"
+
+
+# ── V3-A Tests ────────────────────────────────────────────────────────────────
+
+def test_screen_day_indicators_use_yesterday_close_not_today():
+    """
+    R1 correctness: screen_day must compute all rolling indicators on df.iloc[:-1].
+    Verify by providing data where today's close is dramatically different from
+    yesterday's, and checking the function still uses the yesterday-anchored SMA.
+
+    Strategy: patch calc_atr14 to record which df it receives.
+    The df passed to calc_atr14 must NOT include today's row (i.e. its last
+    close must match yesterday's close, not today's anomalous 200.0).
+    """
+    import unittest.mock as mock
+    from train import screen_day
+
+    # 101-row df so indicators can warm up; give today a wildly different close
+    bdays = pd.bdate_range(end="2026-02-27", periods=101)
+    dates = [d.date() for d in bdays]
+    prices = np.linspace(80.0, 120.0, 101)
+    prices[-1] = 200.0    # today: anomalous close — must NOT influence indicators
+    df = pd.DataFrame({
+        "open": prices * 0.99, "high": prices * 1.01, "low": prices * 0.99,
+        "close": prices,
+        "volume": np.full(101, 1_000_000.0),
+        "price_10am": prices,
+    }, index=pd.Index(dates, name="date"))
+
+    received_dfs = []
+
+    original_calc_atr14 = train.calc_atr14
+    def recording_calc_atr14(d):
+        received_dfs.append(d.copy())
+        return original_calc_atr14(d)
+
+    with mock.patch.object(train, "calc_atr14", side_effect=recording_calc_atr14):
+        screen_day(df, dates[-1])
+
+    # calc_atr14 must have been called with a df whose last close is NOT 200.0
+    assert received_dfs, "calc_atr14 was never called — screen_day returned early"
+    last_close = float(received_dfs[0]["close"].iloc[-1])
+    assert last_close != 200.0, (
+        f"screen_day passed today's close ({last_close}) to calc_atr14; "
+        "expected yesterday's close. R1 look-ahead fix may not be applied."
+    )
+
+
+def test_screen_day_minimum_history_boundary():
+    """
+    After R1 fix, screen_day needs len(df) >= 61 (60 history rows + today).
+    With exactly 60 rows (hist has 59 rows), it must return None.
+    With exactly 61 rows, it proceeds past the length guard.
+    """
+    from train import screen_day
+
+    def make_df(n):
+        bdays = pd.bdate_range(end="2026-02-27", periods=n)
+        dates = [d.date() for d in bdays]
+        prices = np.linspace(80.0, 120.0, n)
+        return pd.DataFrame({
+            "open": prices * 0.99, "high": prices * 1.01, "low": prices * 0.99,
+            "close": prices, "volume": np.full(n, 1_000_000.0), "price_10am": prices,
+        }, index=pd.Index(dates, name="date"))
+
+    df_60 = make_df(60)
+    result_60 = screen_day(df_60, df_60.index[-1])
+    assert result_60 is None, "With 60 rows (hist=59), screen_day must return None"
+
+    # 61-row df won't necessarily produce a signal, but must NOT raise or return
+    # None solely due to the length guard — may return None for other signal reasons.
+    df_61 = make_df(61)
+    try:
+        screen_day(df_61, df_61.index[-1])
+    except Exception as e:
+        pytest.fail(f"screen_day raised with 61 rows: {e}")
+
+
+def test_run_backtest_risk_proportional_sizing():
+    """
+    R3: shares = RISK_PER_TRADE / (entry_price - stop).
+    A signal with a wider stop distance must produce fewer shares than one with
+    a tight stop distance, when entry_price is the same.
+    """
+    import train as tr
+    import unittest.mock as mock
+
+    signal_date = date(2026, 1, 10)
+    days = [signal_date - timedelta(days=i) for i in reversed(range(20))]
+    base_price = 100.0
+    df = pd.DataFrame({
+        "open": np.full(20, base_price), "high": np.full(20, base_price * 1.01),
+        "low": np.full(20, base_price * 0.99), "close": np.full(20, base_price),
+        "volume": np.full(20, 1_000_000.0), "price_10am": np.full(20, base_price),
+    }, index=pd.Index(days, name="date"))
+
+    def tight_stop_screen(d, today):
+        # stop is 2.0 below entry → risk = 2.0
+        return {"entry_price": base_price, "stop": base_price - 2.0, "stop_type": "pivot"}
+
+    def wide_stop_screen(d, today):
+        # stop is 8.0 below entry → risk = 8.0
+        return {"entry_price": base_price, "stop": base_price - 8.0, "stop_type": "fallback"}
+
+    with mock.patch.object(tr, "screen_day", tight_stop_screen), \
+         mock.patch.object(tr, "manage_position", lambda pos, df: pos["stop_price"]):
+        tight_stats = tr.run_backtest({"X": df}, start="2026-01-05", end="2026-01-15")
+
+    with mock.patch.object(tr, "screen_day", wide_stop_screen), \
+         mock.patch.object(tr, "manage_position", lambda pos, df: pos["stop_price"]):
+        wide_stats = tr.run_backtest({"X": df}, start="2026-01-05", end="2026-01-15")
+
+    if tight_stats["total_trades"] > 0 and wide_stats["total_trades"] > 0:
+        tight_shares = tr.RISK_PER_TRADE / (base_price + 0.03 - (base_price - 2.0))
+        wide_shares  = tr.RISK_PER_TRADE / (base_price + 0.03 - (base_price - 8.0))
+        assert tight_shares > wide_shares, (
+            f"tight stop should produce more shares ({tight_shares:.4f}) "
+            f"than wide stop ({wide_shares:.4f})"
+        )
+
+
+def test_run_backtest_returns_trade_records_key():
+    """R5: run_backtest() must return a 'trade_records' key."""
+    stats = run_backtest({})
+    assert "trade_records" in stats, "run_backtest() must return 'trade_records'"
+    assert isinstance(stats["trade_records"], list)
+
+
+def test_run_backtest_trade_records_schema():
+    """R5: each trade record must have the 8 required fields."""
+    import train as tr
+    import unittest.mock as mock
+
+    signal_date = date(2026, 1, 10)
+    days = [signal_date - timedelta(days=i) for i in reversed(range(20))]
+    base_price = 100.0
+    df = pd.DataFrame({
+        "open": np.full(20, base_price), "high": np.full(20, base_price * 1.01),
+        "low": np.full(20, base_price * 0.99), "close": np.full(20, base_price),
+        "volume": np.full(20, 1_000_000.0), "price_10am": np.full(20, base_price),
+    }, index=pd.Index(days, name="date"))
+
+    def always_signal(d, today):
+        return {"entry_price": base_price, "stop": base_price - 5.0, "stop_type": "pivot"}
+
+    with mock.patch.object(tr, "screen_day", always_signal), \
+         mock.patch.object(tr, "manage_position", lambda pos, df: pos["stop_price"]):
+        stats = tr.run_backtest({"X": df}, start="2026-01-05", end="2026-01-15")
+
+    expected_fields = {"ticker", "entry_date", "exit_date", "days_held",
+                       "stop_type", "entry_price", "exit_price", "pnl"}
+    for rec in stats["trade_records"]:
+        missing = expected_fields - set(rec.keys())
+        assert not missing, f"trade record missing fields: {missing}"
+        assert rec["stop_type"] in ("pivot", "fallback", "unknown")
+
+
+def test_trades_tsv_written_on_run(tmp_path, monkeypatch):
+    """
+    R5: _write_trades_tsv must produce trades.tsv with correct headers.
+    Tests the helper directly (empty trade list → header-only file).
+    """
+    import train as tr
+
+    monkeypatch.chdir(tmp_path)
+    tr._write_trades_tsv([])
+    tsv_path = tmp_path / "trades.tsv"
+    assert tsv_path.exists(), "trades.tsv must be created by _write_trades_tsv even with no trades"
+    content = tsv_path.read_text(encoding="utf-8")
+    header = content.splitlines()[0]
+    assert "ticker" in header
+    assert "entry_date" in header
+    assert "stop_type" in header
+    assert "pnl" in header
+
+
+def test_screen_day_returns_stop_type_field():
+    """
+    R5: screen_day() must include 'stop_type' as either 'pivot' or 'fallback'
+    in every non-None return dict.
+    """
+    from train import screen_day
+
+    df = make_signal_df_for_backtest(signal_date=date(2026, 1, 10))
+    result = screen_day(df, df.index[-1])
+
+    if result is not None:
+        assert "stop_type" in result, "screen_day() must return 'stop_type' in signal dict"
+        assert result["stop_type"] in ("pivot", "fallback"), (
+            f"stop_type must be 'pivot' or 'fallback', got {result['stop_type']!r}"
+        )

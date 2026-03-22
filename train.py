@@ -24,6 +24,9 @@ TEST_START  = "2026-03-06"   # same date as TRAIN_END (test window starts here)
 # Agent sets True, runs train.py, then immediately restores to False.
 WRITE_FINAL_OUTPUTS = False
 
+# Risk-proportional sizing: dollar risk per trade (V3-A R3)
+RISK_PER_TRADE = 50.0
+
 
 def load_ticker_data(ticker: str) -> pd.DataFrame | None:
     """Reads CACHE_DIR/{ticker}.parquet; returns None if file does not exist."""
@@ -175,25 +178,27 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     # Ensure no look-ahead: slice to today
     df = df.loc[:today]
 
-    # Minimum history for indicators
-    if len(df) < 60:
+    # Need at least 1 today row + 60 rows of history for indicators
+    if len(df) < 61:
         return None
 
-    # Compute indicators
-    df = df.copy()
-    df['_sma50']  = df['close'].rolling(50).mean()
-    df['_vm30']   = df['volume'].rolling(30).mean()
-    df['_atr14']  = calc_atr14(df)
-    df['_rsi14']  = calc_rsi14(df)
+    # Compute all indicators on history up to yesterday (no look-ahead)
+    hist = df.iloc[:-1].copy()
+    hist['_sma50']  = hist['close'].rolling(50).mean()
+    hist['_vm30']   = hist['volume'].rolling(30).mean()
+    hist['_atr14']  = calc_atr14(hist)
+    hist['_rsi14']  = calc_rsi14(hist)
 
-    sma50      = float(df['_sma50'].iloc[-1])
-    vm30       = float(df['_vm30'].iloc[-1])
-    atr        = float(df['_atr14'].iloc[-1])
-    rsi        = float(df['_rsi14'].iloc[-1])
+    sma50 = float(hist['_sma50'].iloc[-1])
+    vm30  = float(hist['_vm30'].iloc[-1])
+    atr   = float(hist['_atr14'].iloc[-1])
+    rsi   = float(hist['_rsi14'].iloc[-1])
+    # Today's observable data: only price_10am and partial-day volume
     price_10am = float(df['price_10am'].iloc[-1])
+    today_vol  = float(df['volume'].iloc[-1])
 
     # Guard NaN/zero
-    if pd.isna(price_10am) or pd.isna(sma50) or pd.isna(vm30) or pd.isna(atr) or pd.isna(rsi) or vm30 == 0 or atr == 0:
+    if pd.isna(price_10am) or pd.isna(sma50) or pd.isna(vm30) or pd.isna(atr) or pd.isna(rsi) or pd.isna(today_vol) or vm30 == 0 or atr == 0:
         return None
 
     # Rule 1: price above SMA50 (short-term uptrend)
@@ -201,17 +206,17 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
         return None
 
     # Rule 2a: price_10am breaks above the 20-day highest close (breakout)
-    high20 = float(df['close'].iloc[-21:-1].max())  # prior 20 days, exclude today
+    high20 = float(hist['close'].iloc[-20:].max())   # last 20 days of history
     if price_10am <= high20:
         return None
 
     # Rule 2b: price_10am also above yesterday's high (breakout continuation)
-    prev_high = float(df['high'].iloc[-2])
+    prev_high = float(hist['high'].iloc[-1])          # yesterday's high
     if price_10am <= prev_high:
         return None
 
     # Rule 3: today's volume >= 1.0× MA30 (average or above)
-    vol_ratio = float(df['volume'].iloc[-1]) / vm30
+    vol_ratio = today_vol / vm30
     if vol_ratio < 1.0:
         return None
 
@@ -220,26 +225,30 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
         return None
 
     # Rule 4: not stalling at ceiling
-    if is_stalling_at_ceiling(df):
+    if is_stalling_at_ceiling(hist):
         return None
 
     # Stop: prefer pivot-low stop, fall back to 2.0 ATR
-    stop = find_stop_price(df, price_10am, atr)
+    stop = find_stop_price(hist, price_10am, atr)
     if stop is None:
         stop = round(price_10am - 2.0 * atr, 2)
+        stop_type = 'fallback'
+    else:
+        stop_type = 'pivot'
 
     # 1.5 ATR buffer safety net
     if price_10am - stop < 1.5 * atr:
         return None
 
     # Resistance check: nearest overhead pivot >= 2 ATR away
-    res_atr = nearest_resistance_atr(df, price_10am, atr)
+    res_atr = nearest_resistance_atr(hist, price_10am, atr)
     if res_atr is not None and res_atr < 2.0:
         return None
 
     return {
         'stop':        stop,
         'entry_price': price_10am,
+        'stop_type':   stop_type,   # R5: 'pivot' or 'fallback'
         'atr14':       round(atr, 4),
         'sma50':       round(sma50, 4),
         'vol_ratio':   round(vol_ratio, 4),
@@ -295,10 +304,11 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         return {"sharpe": 0.0, "total_trades": 0, "win_rate": 0.0,
                 "avg_pnl_per_trade": 0.0, "total_pnl": 0.0,
                 "ticker_pnl": {}, "backtest_start": start or BACKTEST_START,
-                "backtest_end": end or BACKTEST_END}
+                "backtest_end": end or BACKTEST_END, "trade_records": []}
 
     portfolio: dict = {}   # ticker -> position dict
     trades: list = []      # list of pnl floats per closed trade
+    trade_records: list = []   # R5: per-trade attribution dicts
     daily_values: list = []
     ticker_pnl: dict[str, float] = {}
 
@@ -316,6 +326,16 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
                         pnl = (pos["stop_price"] - pos["entry_price"]) * pos["shares"]
                         trades.append(pnl)
                         ticker_pnl[ticker] = ticker_pnl.get(ticker, 0.0) + pnl
+                        trade_records.append({
+                            "ticker":       ticker,
+                            "entry_date":   str(pos["entry_date"]),
+                            "exit_date":    str(prev_day),
+                            "days_held":    (prev_day - pos["entry_date"]).days,
+                            "stop_type":    pos.get("stop_type", "unknown"),
+                            "entry_price":  round(pos["entry_price"], 4),
+                            "exit_price":   round(pos["stop_price"], 4),
+                            "pnl":          round(pnl, 2),
+                        })
                         to_close.append(ticker)
             for t in to_close:
                 del portfolio[t]
@@ -336,12 +356,14 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
             if signal is None:
                 continue
             entry_price = signal["entry_price"] + 0.03
-            shares = 500.0 / entry_price
+            risk = entry_price - signal["stop"]
+            shares = RISK_PER_TRADE / risk if risk > 0 else RISK_PER_TRADE / entry_price
             portfolio[ticker] = {
                 "entry_price": entry_price,
                 "entry_date": today,
                 "shares": shares,
                 "stop_price": signal["stop"],
+                "stop_type": signal.get("stop_type", "unknown"),   # R5
                 "ticker": ticker,
             }
 
@@ -354,12 +376,23 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         daily_values.append(portfolio_value)
 
     # End of backtest: close all remaining positions at last available price_10am
+    last_day = trading_days[-1] if trading_days else None
     for ticker, pos in portfolio.items():
         df = ticker_dfs[ticker]
         last_price = float(df["price_10am"].iloc[-1])
         pnl = (last_price - pos["entry_price"]) * pos["shares"]
         trades.append(pnl)
         ticker_pnl[ticker] = ticker_pnl.get(ticker, 0.0) + pnl
+        trade_records.append({
+            "ticker":       ticker,
+            "entry_date":   str(pos["entry_date"]),
+            "exit_date":    str(last_day),
+            "days_held":    (last_day - pos["entry_date"]).days if last_day else 0,
+            "stop_type":    pos.get("stop_type", "unknown"),
+            "entry_price":  round(pos["entry_price"], 4),
+            "exit_price":   round(last_price, 4),
+            "pnl":          round(pnl, 2),
+        })
 
     # Sharpe computation (PRD Feature 5): annualised daily-changes Sharpe
     arr = np.array(daily_values, dtype=float)
@@ -384,6 +417,7 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         "ticker_pnl":        ticker_pnl,
         "backtest_start":    start or BACKTEST_START,
         "backtest_end":      end or BACKTEST_END,
+        "trade_records":     trade_records,   # R5
     }
 
 
@@ -441,6 +475,17 @@ def _write_final_outputs(ticker_dfs: dict, test_start: str, test_end: str,
             print(f"  {t:<10} {p:>10.2f}")
 
 
+def _write_trades_tsv(trade_records: list) -> None:
+    """Write per-trade records to trades.tsv (tab-separated). Overwrites each run."""
+    import csv
+    fieldnames = ["ticker", "entry_date", "exit_date", "days_held",
+                  "stop_type", "entry_price", "exit_price", "pnl"]
+    with open("trades.tsv", "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+        w.writeheader()
+        w.writerows(trade_records)
+
+
 if __name__ == "__main__":
     ticker_dfs = load_all_ticker_data()
     if not ticker_dfs:
@@ -448,6 +493,7 @@ if __name__ == "__main__":
         sys.exit(1)
     train_stats = run_backtest(ticker_dfs, start=BACKTEST_START, end=TRAIN_END)
     print_results(train_stats, prefix="train_")
+    _write_trades_tsv(train_stats["trade_records"])   # R5
     test_stats = run_backtest(ticker_dfs, start=TEST_START, end=BACKTEST_END)
     print_results(test_stats, prefix="test_")
     if WRITE_FINAL_OUTPUTS:
