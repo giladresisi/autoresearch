@@ -21,14 +21,39 @@ import yfinance as yf
 # The agent loop setup will overwrite TICKERS, BACKTEST_START, and BACKTEST_END
 # based on the parameters the user specifies in their request. Edit the values
 # here directly when running prepare.py manually outside the agent loop.
-TICKERS = ["CTVA", "LIN", "XOM", "DBA", "SM", "IYE", "EOG", "APA", "EQT", "CTRA", "APD", "DVN", "BKR", "COP", "VLO", "HEI", "HAL"]
+TICKERS = [
+    # Tech / high-beta (25) — high ATR names test stop/sizing logic under volatility
+    "AAPL", "MSFT", "NVDA", "AMD", "META", "GOOGL", "AMZN", "TSLA", "AVGO", "ORCL",
+    "CRM", "ADBE", "QCOM", "MU", "AMAT", "NOW", "PLTR", "MSTR", "APP", "SMCI",
+    "NFLX", "COIN", "CRWD", "ZS", "PANW",
+    # Financials (12) — rate-sensitive, different volatility profile
+    "JPM", "GS", "BAC", "WFC", "MS", "BLK", "SCHW", "AXP", "COF", "SPGI", "V", "MA",
+    # Healthcare (12) — defensive, lower correlation to tech
+    "UNH", "LLY", "ABBV", "JNJ", "MRK", "PFE", "TMO", "ISRG", "AMGN", "GILD", "REGN", "VRTX",
+    # Energy (8) — commodity-driven, high sector correlation
+    "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "VLO", "OXY",
+    # Consumer Staples (8) — low-beta, regime stress test
+    "WMT", "PG", "KO", "PEP", "COST", "TGT", "PM", "CL",
+    # Industrials (8)
+    "CAT", "DE", "UPS", "FDX", "GE", "HON", "RTX", "LMT",
+    # Consumer Discretionary (7)
+    "HD", "MCD", "NKE", "SBUX", "LOW", "F", "GM",
+    # Materials (5)
+    "LIN", "APD", "NEM", "FCX", "NUE",
+]
 
-BACKTEST_START = "2025-12-20"  # first day of the backtest window (inclusive)
+BACKTEST_START = "2024-09-01"  # first day of the backtest window (inclusive)
 BACKTEST_END   = "2026-03-20"  # last day of the backtest window (exclusive)
 # ────────────────────────────────────────────────────────────────────────────
 
 # Derived (do not modify)
-HISTORY_START = (pd.Timestamp(BACKTEST_START) - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
+# yfinance 1h data is limited to ~730 days from today. Cap HISTORY_START so the request
+# is always within the available window. SMA50 needs ~50 bars (~2.5 months) of warmup;
+# the cap gives ~5 months of pre-backtest data when BACKTEST_START = 2024-09-01.
+HISTORY_START = max(
+    (pd.Timestamp(BACKTEST_START) - pd.DateOffset(years=1)).strftime("%Y-%m-%d"),
+    (pd.Timestamp(BACKTEST_END) - pd.DateOffset(days=720)).strftime("%Y-%m-%d"),
+)
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "stock_data")
 
 
