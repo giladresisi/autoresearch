@@ -35,6 +35,13 @@ SILENT_END = "2026-02-20"   # example; agent computes this at setup
 # Risk-proportional sizing: dollar risk per trade (V3-A R3)
 RISK_PER_TRADE = 50.0
 
+# R8: Position concentration controls
+MAX_SIMULTANEOUS_POSITIONS = 5     # cap on open positions at any time (set to large int to disable)
+CORRELATION_PENALTY_WEIGHT = 0.0   # penalty factor for correlated portfolios (0 = off)
+
+# R9: Robustness perturbation (price/stop jitter)
+ROBUSTNESS_SEEDS = 0               # 0 = off; 5 = recommended (runs 4 perturbed seeds + nominal)
+
 
 def load_ticker_data(ticker: str) -> pd.DataFrame | None:
     """Reads CACHE_DIR/{ticker}.parquet; returns None if file does not exist."""
@@ -291,7 +298,33 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
 # rerun `uv run pytest tests/test_optimization.py::test_harness_below_do_not_edit_is_unchanged`.
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = None) -> dict:
+def _compute_avg_correlation(ticker_dfs: dict, tickers: list, start, end) -> float:
+    """
+    Mean pairwise Pearson correlation of daily price_10am returns for the given tickers
+    over [start, end). Returns 0.0 if fewer than 2 tickers have data.
+    """
+    series = []
+    for t in tickers:
+        if t not in ticker_dfs:
+            continue
+        df = ticker_dfs[t]
+        sub = df[(df.index >= start) & (df.index < end)]["price_10am"].dropna()
+        if len(sub) >= 2:
+            series.append(sub.pct_change().dropna())
+    if len(series) < 2:
+        return 0.0
+    # Align on common index
+    aligned = pd.concat(series, axis=1).dropna()
+    if aligned.shape[0] < 2 or aligned.shape[1] < 2:
+        return 0.0
+    corr_matrix = aligned.corr().values
+    n = corr_matrix.shape[0]
+    off_diag = [(corr_matrix[i, j]) for i in range(n) for j in range(i + 1, n)]
+    return float(np.mean(off_diag)) if off_diag else 0.0
+
+
+def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = None,
+                 _price_bias: float = 0.0, _stop_atr_bias: float = 0.0) -> dict:
     """
     Run chronological backtest over start..end (defaults to BACKTEST_START..BACKTEST_END).
     Returns stats dict: sharpe, total_trades, win_rate, avg_pnl_per_trade, total_pnl,
@@ -313,7 +346,7 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
                 "avg_pnl_per_trade": 0.0, "total_pnl": 0.0,
                 "ticker_pnl": {}, "backtest_start": start or BACKTEST_START,
                 "backtest_end": end or BACKTEST_END, "trade_records": [],
-                "max_drawdown": 0.0, "calmar": 0.0, "pnl_consistency": 0.0}
+                "max_drawdown": 0.0, "calmar": 0.0, "pnl_consistency": 0.0, "pnl_min": 0.0}
 
     portfolio: dict = {}   # ticker -> position dict
     trades: list = []      # list of pnl floats per closed trade
@@ -364,18 +397,21 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         for ticker, df in ticker_dfs.items():
             if ticker in portfolio:
                 continue
+            if len(portfolio) >= MAX_SIMULTANEOUS_POSITIONS:   # R8: position cap
+                continue
             hist = df.loc[:today]
             signal = screen_day(hist, today)
             if signal is None:
                 continue
-            entry_price = signal["entry_price"] + 0.03
-            risk = entry_price - signal["stop"]
+            entry_price = (signal["entry_price"] + 0.03) * (1 + _price_bias)
+            stop_raw    = signal["stop"] + _stop_atr_bias * signal.get("atr14", 0.0)
+            risk = entry_price - stop_raw
             shares = RISK_PER_TRADE / risk if risk > 0 else RISK_PER_TRADE / entry_price
             portfolio[ticker] = {
                 "entry_price": entry_price,
                 "entry_date": today,
                 "shares": shares,
-                "stop_price": signal["stop"],
+                "stop_price": stop_raw,
                 "stop_type": signal.get("stop_type", "unknown"),   # R5
                 "ticker": ticker,
             }
@@ -427,6 +463,14 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
     win_rate     = (wins / total_trades) if total_trades > 0 else 0.0
     avg_pnl      = (total_pnl / total_trades) if total_trades > 0 else 0.0
 
+    # R8: Correlation penalty — discounts PnL for concentrated correlated portfolios.
+    # Only apply when total_pnl > 0: the formula total_pnl*(1 - weight*corr) inverts
+    # the penalty sign on negative PnL, which would soften losses instead of penalising them.
+    if CORRELATION_PENALTY_WEIGHT > 0.0 and len(ticker_pnl) >= 2 and total_pnl > 0:
+        _traded_tickers = list(ticker_pnl.keys())
+        _avg_corr = _compute_avg_correlation(ticker_dfs, _traded_tickers, s, e)
+        total_pnl = round(total_pnl - CORRELATION_PENALTY_WEIGHT * _avg_corr * total_pnl, 2)
+
     # R7: Equity curve metrics
     if equity_curve:
         eq_values = np.array([v for _, v in equity_curve], dtype=float)
@@ -450,6 +494,24 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         prev_eq = monthly_equity[mk]
     pnl_consistency = min(monthly_pnl_list) if monthly_pnl_list else total_pnl
 
+    # R9: Robustness perturbation — run additional seeds with jittered entries/stops
+    # Only run from the nominal call (both biases == 0) to avoid infinite recursion.
+    # Invariant: all vectors in _PERTURBATION_VECTORS must be non-zero so recursive
+    # perturbed calls always have a non-zero bias and skip this block.
+    _PERTURBATION_VECTORS = [
+        (-0.005, -0.3), (-0.005, +0.3),
+        (+0.005, -0.3), (+0.005, +0.3),
+    ]
+    pnl_min = total_pnl
+    if ROBUSTNESS_SEEDS > 0 and _price_bias == 0.0 and _stop_atr_bias == 0.0:
+        all_pnls = [total_pnl]
+        n_extra = min(ROBUSTNESS_SEEDS - 1, len(_PERTURBATION_VECTORS))
+        for _pb, _sb in _PERTURBATION_VECTORS[:n_extra]:
+            _perturbed = run_backtest(ticker_dfs, start=start, end=end,
+                                      _price_bias=_pb, _stop_atr_bias=_sb)
+            all_pnls.append(_perturbed["total_pnl"])
+        pnl_min = round(min(all_pnls), 2)
+
     return {
         "sharpe":            round(sharpe, 6),
         "total_trades":      total_trades,
@@ -463,6 +525,7 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         "max_drawdown":      round(max_drawdown, 2),
         "calmar":            round(calmar, 4),
         "pnl_consistency":   round(pnl_consistency, 2),
+        "pnl_min":           pnl_min,
     }
 
 
@@ -478,6 +541,7 @@ def print_results(stats: dict, prefix: str = "") -> None:
     print(f"{prefix}backtest_end:        {stats['backtest_end']}")
     print(f"{prefix}calmar:              {stats.get('calmar', 0.0):.4f}")
     print(f"{prefix}pnl_consistency:     {stats.get('pnl_consistency', 0.0):.2f}")
+    print(f"{prefix}pnl_min:             {stats.get('pnl_min', stats['total_pnl']):.2f}")
 
 
 def _write_final_outputs(ticker_dfs: dict, test_start: str, test_end: str,
@@ -522,12 +586,15 @@ def _write_final_outputs(ticker_dfs: dict, test_start: str, test_end: str,
             print(f"  {t:<10} {p:>10.2f}")
 
 
-def _write_trades_tsv(trade_records: list) -> None:
-    """Write per-trade records to trades.tsv (tab-separated). Overwrites each run."""
+def _write_trades_tsv(trade_records: list, annotation: str | None = None) -> None:
+    """Write per-trade records to trades.tsv (tab-separated). Overwrites each run.
+    If annotation is provided, writes it as a comment line before the header row."""
     import csv
     fieldnames = ["ticker", "entry_date", "exit_date", "days_held",
                   "stop_type", "entry_price", "exit_price", "pnl"]
     with open("trades.tsv", "w", newline="", encoding="utf-8") as f:
+        if annotation:
+            f.write(f"# {annotation}\n")
         w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
         w.writeheader()
         w.writerows(trade_records)
@@ -547,6 +614,7 @@ if __name__ == "__main__":
     _train_end_ts = _pd.Timestamp(TRAIN_END)
     fold_test_pnls: list = []
     last_fold_train_records: list = []
+    _fold_train_stats: dict = {}   # guard for WALK_FORWARD_WINDOWS=0
 
     for _i in range(WALK_FORWARD_WINDOWS):
         # Fold _i (0-indexed, oldest first).
@@ -576,7 +644,9 @@ if __name__ == "__main__":
     print(f"min_test_pnl:            {min_test_pnl:.2f}")
 
     # Write trades.tsv from the most recent training fold
-    _write_trades_tsv(last_fold_train_records)
+    _last_fold_pnl_min = _fold_train_stats.get("pnl_min", _fold_train_stats["total_pnl"])
+    _annotation = f"pnl_min: ${_last_fold_pnl_min:.2f}" if ROBUSTNESS_SEEDS > 0 else None
+    _write_trades_tsv(last_fold_train_records, annotation=_annotation)
 
     # R4-full: Silent holdout — [TRAIN_END, BACKTEST_END]
     _silent_stats = run_backtest(ticker_dfs, start=TRAIN_END, end=BACKTEST_END)

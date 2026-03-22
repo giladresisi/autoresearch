@@ -94,6 +94,8 @@ The following parameters can be specified in the user's query. If not specified,
 - Modify `screen_day()` in `train.py` — screener criteria, thresholds, indicator parameters, entry/exit rules, and any indicator helper functions it calls.
 - Modify `manage_position()` in `train.py` — stop management logic, breakeven trigger level, trailing stop behavior.
 - Add new indicator helper functions that `screen_day()` or `manage_position()` call.
+- Tune `MAX_SIMULTANEOUS_POSITIONS`, `CORRELATION_PENALTY_WEIGHT`, and `ROBUSTNESS_SEEDS`
+  in the mutable constants block to control position concentration and stop fragility.
 - Edit the `TICKERS`, `BACKTEST_START`, and `BACKTEST_END` lines in the `# ── USER CONFIGURATION ──` block of `prepare.py` **during setup only** (step 3 above). No other lines in `prepare.py` may be changed.
 
 ### What you CANNOT do
@@ -143,12 +145,14 @@ fold1_train_backtest_start:      2025-12-20
 fold1_train_backtest_end:        2026-01-09
 fold1_train_calmar:              2.5000
 fold1_train_pnl_consistency:     30.00
+fold1_train_pnl_min:             95.00
 ---
 fold1_test_sharpe:               0.234567
 ...
 fold1_test_total_pnl:            25.00
 fold1_test_backtest_start:       2026-01-09
 fold1_test_backtest_end:         2026-01-23
+fold1_test_pnl_min:              18.00
 ...
 ---
 (fold2 and fold3 blocks follow the same pattern)
@@ -168,6 +172,8 @@ grep "^fold3_train_win_rate:" run.log
 grep "^fold3_train_sharpe:" run.log
 grep "^fold3_train_calmar:" run.log
 grep "^fold3_train_pnl_consistency:" run.log
+grep "^fold3_train_pnl_min:" run.log
+grep "^fold3_test_pnl_min:" run.log
 ```
 
 Replace `fold3` with `fold${WALK_FORWARD_WINDOWS}` if you change `WALK_FORWARD_WINDOWS`.
@@ -196,7 +202,9 @@ Column definitions:
 7. `win_rate`: most recent fold's train win rate
 8. `train_calmar`: most recent fold's train Calmar ratio (diagnostic)
 9. `train_pnl_consistency`: most recent fold's train min monthly P&L (diagnostic)
-10. `status`: `keep`, `discard`, or `crash`
+10. `status`: `keep`, `discard`, `crash`, or `discard-fragile`
+    - `discard-fragile`: nominal `min_test_pnl > 0` but at least one fold's `pnl_min < 0` (strategy
+      collapses with small fill deviations); revert just like `discard`.
 11. `description`: short experiment description
 
 Example:
@@ -207,6 +215,7 @@ a1b2c3d	0.00	0.00	0.00	0.000000	0	0.000	0.0000	0.00	keep	baseline (no trades, st
 b2c3d4e	15.60	221.40	25.00	1.234567	12	0.583	2.5000	30.00	keep	relaxed volume ratio to 1.2
 c3d4e5f	-5.00	180.00	8.00	0.872000	9	0.444	1.2000	15.00	discard	removed volume filter
 d4e5f6g	0.00	0.00	0.00	0.000000	0	0.000	0.0000	0.00	crash	divide-by-zero in custom indicator
+e5f6g7h	8.00	300.00	30.00	2.100000	12	0.583	3.0000	50.00	discard-fragile	fragile stops — pnl_min -12.00
 ```
 
 **Do NOT commit `results.tsv`** — it is intentionally untracked.
@@ -229,6 +238,11 @@ d4e5f6g	0.00	0.00	0.00	0.000000	0	0.000	0.0000	0.00	crash	divide-by-zero in cust
 > **Note:** `silent_pnl` is hidden during the loop (`HIDDEN`). Do NOT attempt to infer or
 > act on the hidden holdout result. The sole keep/discard criterion is `min_test_pnl`.
 > `fold{N}_train_*` metrics are for diagnostics only.
+
+If `ROBUSTNESS_SEEDS > 0`: also check whether any fold's `pnl_min:` line is negative while
+`min_test_pnl > 0`. If so, log status `discard-fragile` and revert (`git reset --hard HEAD~1`).
+To diagnose which trades are fragile, read `trades.tsv` — the first line is a comment
+`# pnl_min: $X.XX` showing the worst-case train-fold P&L under perturbation.
 
 9. If `min_test_pnl` is equal or lower → `git reset --hard HEAD~1` (revert to previous commit).
 10. When the configured number of iterations is reached, stop and report the best result to the user.

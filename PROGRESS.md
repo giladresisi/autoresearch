@@ -1,5 +1,28 @@
 # PROGRESS
 
+## Feature: V3-C Portfolio Robustness Controls (R8, R9-price-only)
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-22
+**Plan**: .agents/plans/v3-c-portfolio-robustness.md
+
+### Core Validation
+R8 position cap (`MAX_SIMULTANEOUS_POSITIONS`) and correlation penalty (`CORRELATION_PENALTY_WEIGHT`) added to `run_backtest()`. R9 perturbation loop runs up to 4 jitter seeds (±0.5% price × ±0.3 ATR stop) and exposes `pnl_min` in return dict, `print_results()`, and `trades.tsv` annotation. End-to-end validated via live subprocess test (`test_live_train_py_subprocess_outputs_pnl_min`) that runs `train.py` with real cached data and asserts all fold `pnl_min` lines are present, parseable, and ≤ `total_pnl`.
+
+### Test Status
+- Automated: ✅ 24 passed (+9 new V3-C unit tests, +1 live subprocess test), 1 pre-existing skip (git state)
+- Manual: none required
+
+### Notes
+- All three new constants default to off; existing backtest behavior fully preserved
+- Correlation penalty gated on `total_pnl > 0` to prevent sign inversion on losing portfolios
+- GOLDEN_HASH updated to `8f2174487376cd0ac3e40a2dc8628ec374cc3753dbfb566cec2c6a16d5857bad`
+- `program.md` updated with `discard-fragile` status, loop instructions, and pnl_min grep commands
+
+**Execution Report:** `.agents/execution-reports/v3-c-portfolio-robustness.md`
+
+---
+
 ## Feature: V3-B Walk-Forward Evaluation Framework (R2, R4-full, R7)
 
 **Status**: ✅ Complete
