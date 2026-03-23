@@ -1,5 +1,34 @@
 # PROGRESS
 
+## Feature: V4-A Strategy Quality and Loop Control
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-24
+**Plan File**: .agents/plans/v4-a-strategy-quality.md
+
+### Core Validation
+R9: `screen_day()` now returns `None` for fallback-stop entries (no structural pivot support); `stop_type` is always `'pivot'` for returning signals. R8: earnings-proximity guard added — entries within 14 calendar days of next earnings are rejected; backward-compatible with old parquet files lacking `next_earnings_date`. R10: `manage_position()` forces exit at `max(current_stop, price_10am)` for positions held >30 business days with unrealised PnL < 30% of RISK_PER_TRADE. `prepare.py` extended with `_add_earnings_dates()` helper. `program.md` updated: FOLD_TEST_DAYS default 20→40 (R1), consistency floor auto-calibrated to `−RISK×MAX_SIMULTANEOUS_POSITIONS×10` (R3), deadlock detection pivot paragraph (R5), position-management priority in iterations 6–10 (R6).
+
+### Test Status
+- Automated: ✅ 64 passed (+18 new V4-A unit tests), 0 failures, 0 new regressions
+- Pre-implementation baseline: 46 passed (test_screener.py + test_backtester.py)
+- Pre-existing collection error in test_selector.py: not in scope, unchanged
+
+### Notes
+- Existing parquet files lack `next_earnings_date` column — delete cache and re-run `prepare.py` before next optimization session for R8 to take effect
+- Volume threshold co-changed from ≥1.0× to ≥1.9× MA30 alongside R9; fixtures updated accordingly
+- GOLDEN_HASH not modified — immutable zone untouched
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/v4-a-strategy-quality.md`
+- Detailed implementation summary
+- Divergences and resolutions (volume threshold co-change, ticker_obj re-instantiation)
+- Test results and metrics
+- 18/18 new tests pass, 0 new regressions
+
+---
+
 ## Feature: V3-G Harness Integrity and Objective Quality
 
 **Status**: ✅ Complete

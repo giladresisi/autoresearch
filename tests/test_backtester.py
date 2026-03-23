@@ -63,12 +63,21 @@ def make_signal_df_for_backtest(signal_date: date = date(2026, 1, 10)) -> pd.Dat
     volume = np.full(n, 1_000_000.0)
     volume[249] = 2_000_000.0   # last bar = 2× MA30 → vol_ratio = 2.0, passes ≥ 1.9
 
-    return pd.DataFrame({
+    df = pd.DataFrame({
         'open': close * 0.998, 'high': close * 1.005, 'low': close * 0.995,
         'close': close,
         'volume': volume,
         'price_10am': price_10am,
     }, index=pd.Index(dates, name='date'))
+    # Add pivot structure so find_stop_price() succeeds after R9 (no more fallback stop)
+    pivot_idx = n - 35
+    pivot_price = float(df['close'].iloc[pivot_idx]) * 0.85
+    df.iloc[pivot_idx, df.columns.get_loc('low')] = pivot_price
+    touch_idx = pivot_idx - 10
+    if touch_idx >= 0:
+        df.iloc[touch_idx, df.columns.get_loc('low')] = pivot_price * 0.99
+        df.iloc[touch_idx, df.columns.get_loc('high')] = pivot_price * 1.01
+    return df
 
 
 # ── manage_position tests ─────────────────────────────────────────────────────

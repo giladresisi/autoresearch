@@ -256,6 +256,14 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if pd.isna(price_10am) or pd.isna(sma20) or pd.isna(sma50) or pd.isna(vm30) or pd.isna(atr) or pd.isna(rsi) or pd.isna(today_vol) or vm30 == 0 or atr == 0:
         return None
 
+    # R8: skip entries within 14 calendar days of next earnings announcement
+    if 'next_earnings_date' in df.columns:
+        ned = df['next_earnings_date'].iloc[-1]
+        if pd.notna(ned):
+            days_to_earnings = (ned - today).days
+            if 0 <= days_to_earnings <= 14:
+                return None
+
     # Rule 1: price above SMA50 and SMA20 > SMA50 (near-term trend stronger than medium-term)
     if price_10am <= sma50 or sma20 <= sma50:
         return None
@@ -283,13 +291,11 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if is_stalling_at_ceiling(hist):
         return None
 
-    # Stop: prefer pivot-low stop, fall back to 2.0 ATR
+    # Stop: pivot-low required; no fallback (R9 — reject structurally unsupported entries)
     stop = find_stop_price(hist, price_10am, atr)
     if stop is None:
-        stop = round(price_10am - 2.0 * atr, 2)
-        stop_type = 'fallback'
-    else:
-        stop_type = 'pivot'
+        return None  # R9: reject entries with no structural pivot support
+    stop_type = 'pivot'
 
     # 1.5 ATR buffer safety net
     if price_10am - stop < 1.5 * atr:
@@ -303,7 +309,7 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     return {
         'stop':        stop,
         'entry_price': price_10am,
-        'stop_type':   stop_type,   # R5: 'pivot' or 'fallback'
+        'stop_type':   stop_type,   # always 'pivot' after R9 (fallback path removed)
         'atr14':       round(atr, 4),
         'sma50':       round(sma50, 4),
         'vol_ratio':   round(vol_ratio, 4),
@@ -324,6 +330,14 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
     if pd.isna(atr) or atr == 0:
         return current_stop
     price_10am = float(df['price_10am'].iloc[-1])
+
+    # R10: time-based capital-efficiency exit
+    # If held >30 business days and unrealised P&L < 30% of RISK_PER_TRADE, force exit
+    _today_date = df.index[-1]
+    _bdays_held = int(np.busday_count(position['entry_date'], _today_date))
+    _unrealised_pnl = (price_10am - entry_price) * position['shares']
+    if _bdays_held > 30 and _unrealised_pnl < 0.3 * RISK_PER_TRADE:
+        return max(current_stop, price_10am)  # force exit; never lower existing stop
 
     # Breakeven trigger
     be_stop = entry_price if price_10am >= entry_price + 1.5 * atr else current_stop

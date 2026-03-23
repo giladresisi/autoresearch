@@ -87,6 +87,26 @@ def make_signal_df(n: int = 250) -> pd.DataFrame:
     }, index=pd.Index(dates, name='date'))
 
 
+def make_pivot_signal_df(n: int = 250) -> pd.DataFrame:
+    """Like make_signal_df but with a clear pivot-low structure so find_stop_price() succeeds.
+
+    Adds a pivot dip ~35 bars from end (bar n-35) and a prior touch ~10 bars before it
+    (bar n-45), satisfying find_stop_price's R2 (prior touch) and buffer requirements.
+    After R9, screen_day() returns a non-None signal with stop_type == 'pivot'.
+    """
+    df = make_signal_df(n).copy()
+    pivot_idx = n - 35
+    # Dip well below price_10am=115 (at least 1.5×ATR≈1 away)
+    pivot_price = float(df['close'].iloc[pivot_idx]) * 0.85
+    df.iloc[pivot_idx, df.columns.get_loc('low')] = pivot_price
+    # Prior touch satisfies find_stop_price's R2 requirement (at least 1 historical touch)
+    touch_idx = pivot_idx - 10
+    if touch_idx >= 0:
+        df.iloc[touch_idx, df.columns.get_loc('low')] = pivot_price * 0.99
+        df.iloc[touch_idx, df.columns.get_loc('high')] = pivot_price * 1.01
+    return df
+
+
 # ── Indicator unit tests ──────────────────────────────────────────────────────
 
 def test_calc_cci_returns_series():
@@ -210,19 +230,19 @@ def test_screen_day_no_exception_on_pivot_df():
 
 
 def test_return_dict_has_stop_key():
-    df = make_signal_df(250)
+    df = make_pivot_signal_df(250)
     today = df.index[-1]
     result = screen_day(df, today)
-    assert result is not None, "make_signal_df must produce a passing signal"
+    assert result is not None, "make_pivot_signal_df must produce a passing signal"
     assert 'stop' in result
     assert isinstance(result['stop'], float)
 
 
 def test_stop_always_below_entry():
-    df = make_signal_df(250)
+    df = make_pivot_signal_df(250)
     today = df.index[-1]
     result = screen_day(df, today)
-    assert result is not None, "make_signal_df must produce a passing signal"
+    assert result is not None, "make_pivot_signal_df must produce a passing signal"
     assert result['stop'] < result['entry_price']
 
 

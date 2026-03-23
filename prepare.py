@@ -128,6 +128,28 @@ def validate_ticker_data(ticker: str, df: pd.DataFrame, backtest_start: str) -> 
         print(f"WARNING: {ticker} has {n_missing} backtest days with missing price_10am")
 
 
+def _add_earnings_dates(df_daily: pd.DataFrame, ticker_obj) -> pd.DataFrame:
+    """Add next_earnings_date column: for each trading day, the next upcoming earnings."""
+    try:
+        edf = ticker_obj.earnings_dates
+        if edf is None or len(edf) == 0:
+            df_daily['next_earnings_date'] = pd.NaT
+            return df_daily
+        # earnings_dates index is tz-aware; convert to plain dates
+        edates = sorted(set(d.date() for d in edf.index))
+    except Exception:
+        df_daily['next_earnings_date'] = pd.NaT
+        return df_daily
+
+    result = []
+    for day in df_daily.index:
+        future = [d for d in edates if d > day]
+        result.append(future[0] if future else None)
+    df_daily = df_daily.copy()
+    df_daily['next_earnings_date'] = pd.array(result, dtype='object')
+    return df_daily
+
+
 def write_trend_summary(tickers: list, backtest_start: str, backtest_end: str, cache_dir: str) -> None:
     """Compute sector price behaviour for the backtest window and write data_trend.md."""
     records = []
@@ -199,6 +221,7 @@ def process_ticker(ticker: str) -> bool:
         print(f"  {ticker}: no data returned — skipping")
         return False
     df_daily = resample_to_daily(df_hourly)
+    df_daily = _add_earnings_dates(df_daily, yf.Ticker(ticker))
     validate_ticker_data(ticker, df_daily, BACKTEST_START)
     os.makedirs(CACHE_DIR, exist_ok=True)
     df_daily.to_parquet(path)

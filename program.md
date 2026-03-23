@@ -52,17 +52,20 @@ The following parameters can be specified in the user's query. If not specified,
 
     **Walk-forward fold constants** (V3-E — set once at session setup, do NOT change during the loop):
     - `FOLD_TEST_DAYS` — test window width in business days per fold.
-      Default `20` (≈1 calendar month, ~40–100 trades on 85 tickers). Set to `10` to reproduce
-      legacy V3-B/D behavior (not recommended — too few trades per fold to be meaningful).
+      Default `40` (≈2 calendar months, ~80–200 trades on 85 tickers; better coverage for the
+      30–98 day hold durations observed in the multisector-mar23 run). Set to `10` for legacy
+      V3-B/D behavior only.
+      Add the note: Reduce `WALK_FORWARD_WINDOWS` to 7 if the total date range cannot
+      accommodate 9 folds of 40 days each.
     - `FOLD_TRAIN_DAYS` — training window width in business days.
       `0` = expanding (train from `BACKTEST_START`; more training data per fold; simpler).
       `120` = 6-month rolling window (exposes successive folds to genuinely different market
       slices; recommended when maximizing regime diversity is the goal).
       Default `0` (expanding).
     - `WALK_FORWARD_WINDOWS` — recommended values for the 19-month window (2024-09 → 2026-03):
-      - `9` with `FOLD_TEST_DAYS=20, FOLD_TRAIN_DAYS=0`: 9 months of test coverage (~Jun 2025
+      - `9` with `FOLD_TEST_DAYS=40, FOLD_TRAIN_DAYS=0`: 9 months of test coverage (~Jun 2025
         → Mar 2026), ~18 backtest calls/iteration, ~30–60 s per iteration.
-      - `13` with `FOLD_TEST_DAYS=20, FOLD_TRAIN_DAYS=120`: full 19-month coverage, ~26
+      - `13` with `FOLD_TEST_DAYS=40, FOLD_TRAIN_DAYS=120`: full 19-month coverage, ~26
         backtest calls/iteration, ~45–90 s per iteration.
       Leave at `3` only if the user explicitly specifies legacy configuration.
 
@@ -139,6 +142,8 @@ The following parameters can be specified in the user's query. If not specified,
 - Tune `MAX_SIMULTANEOUS_POSITIONS`, `CORRELATION_PENALTY_WEIGHT`, and `ROBUSTNESS_SEEDS`
   in the mutable constants block to control position concentration and stop fragility.
 - Edit the `TICKERS`, `BACKTEST_START`, and `BACKTEST_END` lines in the `# ── USER CONFIGURATION ──` block of `prepare.py` **during setup only** (step 3 above). No other lines in `prepare.py` may be changed.
+
+**Position management priority**: Explicitly test trailing-stop distance, breakeven trigger level, and stop-distance changes in iterations 6–10, before exhausting screener ideas. These changes are high-leverage and were systematically found last in the multisector-mar23 run (iterations 27–28 of 30).
 
 ### What you CANNOT do
 
@@ -264,7 +269,7 @@ Column definitions:
 10. `status`: `keep`, `discard`, `crash`, `discard-fragile`, or `discard-inconsistent`
     - `discard-fragile`: nominal `min_test_pnl > 0` but at least one fold's `pnl_min < 0` (strategy
       collapses with small fill deviations); revert just like `discard`.
-    - `discard-inconsistent`: `min_test_pnl` improved but `train_pnl_consistency < −RISK_PER_TRADE × 2` (monthly P&L floor violated); revert just like `discard`.
+    - `discard-inconsistent`: `min_test_pnl` improved but `train_pnl_consistency < −RISK_PER_TRADE × MAX_SIMULTANEOUS_POSITIONS × 10` (monthly P&L floor violated); revert just like `discard`.
 11. `description`: short experiment description
 
 Example:
@@ -295,7 +300,7 @@ e5f6g7h	8.00	300.00	30.00	2.100000	12	0.583	3.0000	50.00	discard-fragile	fragile
 7. Record the result in `results.tsv`.
 8. Keep a change only if **both** conditions hold:
    1. `min_test_pnl` improved (higher than current best)
-   2. `train_pnl_consistency` ≥ `−RISK_PER_TRADE × 2` (minimum monthly P&L is not catastrophically negative — e.g. ≥ −$100 when `RISK_PER_TRADE = 50.0`)
+   2. `train_pnl_consistency` ≥ `−RISK_PER_TRADE × MAX_SIMULTANEOUS_POSITIONS × 10` (minimum monthly P&L floor — e.g. ≥ −$2500 when `RISK_PER_TRADE=50`, `MAX_SIMULTANEOUS_POSITIONS=5` — scales with universe size and position cap)
 
    If condition 1 passes but condition 2 fails → log status `discard-inconsistent` and revert (`git reset --hard HEAD~1`).
 
@@ -312,6 +317,9 @@ If `ROBUSTNESS_SEEDS > 0`: also check whether any fold's `pnl_min:` line is nega
 - Try a different modification (different indicator, different constant).
 
 If 10 consecutive iterations all produce zero trades → log status `plateau`, run `git reset --hard HEAD~1` to revert to the last non-zero baseline, and notify the user that the screener has been over-constrained.
+
+**Deadlock detection pivot**: If `min_test_pnl` has not changed for 4 consecutive kept iterations (same value appearing 4+ times in the `keep` rows of `results.tsv`), switch objective: optimize `mean_test_pnl = mean(fold1_test_pnl…foldN_test_pnl)` for the next 3 iterations, then revert to `min_test_pnl`. Use this pivot to unlock improvement in folds that are not the minimum. Grep: `awk -F'\t' '$10=="keep"' results.tsv | tail -5`
+
 To diagnose which trades are fragile, read `trades.tsv` — the first line is a comment
 `# pnl_min: $X.XX` showing the worst-case train-fold P&L under perturbation.
 
