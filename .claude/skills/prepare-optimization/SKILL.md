@@ -18,6 +18,61 @@ configured by the agent in the new session when the user starts the loop.
 
 ---
 
+## Step 0: Branch Context Check
+
+Before doing anything else, check which branch you are on:
+
+```bash
+git branch --show-current
+```
+
+### Case A — On master, but user asked to START/RUN an optimization
+
+If the user's request is to **start, run, or begin** an optimization (not to prepare/create a
+worktree), and the current branch is `master`, stop and tell the user:
+
+> You're on the `master` branch. Optimization runs should be started inside a dedicated
+> worktree, not on master.
+>
+> Would you like me to create a new worktree for this run? Here are the defaults — let me know
+> if you'd like to change any of them before I create it:
+>
+> | Parameter | Default |
+> |-----------|---------|
+> | Tickers | AAPL, MSFT, NVDA, AMD, META, GOOGL, AMZN, TSLA, AVGO, ORCL, CRM, ADBE, QCOM, MU, AMAT, NOW, PLTR, MSTR, APP, SMCI, NFLX, COIN, CRWD, ZS, PANW, JPM, GS, BAC, WFC, MS, BLK, SCHW, AXP, COF, SPGI, V, MA, UNH, LLY, ABBV, JNJ, MRK, PFE, TMO, ISRG, AMGN, GILD, REGN, VRTX, XOM, CVX, COP, SLB, EOG, MPC, VLO, OXY, WMT, PG, KO, PEP, COST, TGT, PM, CL, CAT, DE, UPS, FDX, GE, HON, RTX, LMT, HD, MCD, NKE, SBUX, LOW, F, GM, LIN, APD, NEM, FCX, NUE |
+> | Timeframe | Past 1 year (train: first ~10.5 months, test: final ~6 weeks) |
+> | Iterations | 30 |
+
+Do not proceed further until the user confirms.
+
+### Case B — On a non-master worktree, but user asked to PREPARE/CREATE a worktree
+
+If the user's request is to **prepare, create, or set up** a new worktree, and the current
+branch is **not** `master`, stop and tell the user:
+
+> You're on branch `<current-branch>`, not `master`. Worktree preparation should be done from
+> the `master` branch so each run starts from a clean baseline.
+>
+> It looks like you're already in an optimization worktree. Would you like to start a new
+> optimization run here instead? The current parameters are:
+>
+> - **Tickers**: `<list from train.py TICKERS variable>`
+> - **Timeframe**: `<BACKTEST_START> → <BACKTEST_END>` (from train.py)
+> - **Iterations**: 30 (default — you can ask to change this)
+>
+> You can ask me to change any of these before starting.
+
+To get the current parameters, read the worktree's `train.py` and extract `TICKERS`,
+`BACKTEST_START`, and `BACKTEST_END`.
+
+Do not proceed further until the user confirms.
+
+### Case C — On master, user asked to PREPARE/CREATE a worktree
+
+This is the normal flow. Continue to Step 1 below.
+
+---
+
 ## Step 1: Identify Starting Strategy
 
 Check whether the user named a starting strategy in their message:
@@ -178,8 +233,8 @@ Run the optimization for the past 4 months, 40 iterations
 
 | Parameter | Default |
 |-----------|---------|
-| Tickers | CTVA, LIN, XOM, DBA, SM, IYE, EOG, APA, EQT, CTRA, APD, DVN, BKR, COP, VLO, HEI, HAL |
-| Timeframe | Past 3 months (train: first 2.5 months, test: final 2 weeks) |
+| Tickers | AAPL, MSFT, NVDA, AMD, META, GOOGL, AMZN, TSLA, AVGO, ORCL, CRM, ADBE, QCOM, MU, AMAT, NOW, PLTR, MSTR, APP, SMCI, NFLX, COIN, CRWD, ZS, PANW, JPM, GS, BAC, WFC, MS, BLK, SCHW, AXP, COF, SPGI, V, MA, UNH, LLY, ABBV, JNJ, MRK, PFE, TMO, ISRG, AMGN, GILD, REGN, VRTX, XOM, CVX, COP, SLB, EOG, MPC, VLO, OXY, WMT, PG, KO, PEP, COST, TGT, PM, CL, CAT, DE, UPS, FDX, GE, HON, RTX, LMT, HD, MCD, NKE, SBUX, LOW, F, GM, LIN, APD, NEM, FCX, NUE |
+| Timeframe | Past 1 year (train: first ~10.5 months, test: final ~6 weeks) |
 | Iterations | 30 |
 
 ---
