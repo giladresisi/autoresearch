@@ -237,11 +237,13 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
 
     # Compute all indicators on history up to yesterday (no look-ahead)
     hist = df.iloc[:-1].copy()
+    hist['_sma20']  = hist['close'].rolling(20).mean()
     hist['_sma50']  = hist['close'].rolling(50).mean()
     hist['_vm30']   = hist['volume'].rolling(30).mean()
     hist['_atr14']  = calc_atr14(hist)
     hist['_rsi14']  = calc_rsi14(hist)
 
+    sma20 = float(hist['_sma20'].iloc[-1])
     sma50 = float(hist['_sma50'].iloc[-1])
     vm30  = float(hist['_vm30'].iloc[-1])
     atr   = float(hist['_atr14'].iloc[-1])
@@ -251,11 +253,11 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     today_vol  = float(df['volume'].iloc[-1])
 
     # Guard NaN/zero
-    if pd.isna(price_10am) or pd.isna(sma50) or pd.isna(vm30) or pd.isna(atr) or pd.isna(rsi) or pd.isna(today_vol) or vm30 == 0 or atr == 0:
+    if pd.isna(price_10am) or pd.isna(sma20) or pd.isna(sma50) or pd.isna(vm30) or pd.isna(atr) or pd.isna(rsi) or pd.isna(today_vol) or vm30 == 0 or atr == 0:
         return None
 
-    # Rule 1: price above SMA50 (short-term uptrend)
-    if price_10am <= sma50:
+    # Rule 1: price above SMA50 and SMA20 > SMA50 (near-term trend stronger than medium-term)
+    if price_10am <= sma50 or sma20 <= sma50:
         return None
 
     # Rule 2a: price_10am breaks above the 20-day highest close (breakout)
@@ -268,9 +270,9 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if price_10am <= prev_high:
         return None
 
-    # Rule 3: today's volume >= 1.0× MA30 (average or above)
+    # Rule 3: today's volume >= 1.9× MA30 (high conviction required)
     vol_ratio = today_vol / vm30
-    if vol_ratio < 1.0:
+    if vol_ratio < 1.9:
         return None
 
     # Rule 3b: RSI between 50 and 75 (momentum building, not overbought)
@@ -311,8 +313,9 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
 
 def manage_position(position: dict, df: pd.DataFrame) -> float:
     """
-    Raise stop to breakeven (entry_price) once price_10am >= entry_price + 1 × ATR14.
-    Never lower the stop. Returns updated stop_price (>= position['stop_price']).
+    Breakeven once price_10am >= entry + 1.5 ATR.
+    Trail by 1.5 ATR below recent high once 2.0 ATR in profit.
+    Never lower the stop.
     """
     current_stop = position['stop_price']
     entry_price  = position['entry_price']
@@ -321,9 +324,15 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
     if pd.isna(atr) or atr == 0:
         return current_stop
     price_10am = float(df['price_10am'].iloc[-1])
-    if price_10am >= entry_price + 1.5 * atr:
-        return max(current_stop, entry_price)
-    return current_stop
+
+    # Breakeven trigger
+    be_stop = entry_price if price_10am >= entry_price + 1.5 * atr else current_stop
+
+    # Trailing stop: trail 1.5 ATR below recent high once 2.0 ATR in profit (earlier activation)
+    recent_high = float(df['price_10am'].dropna().iloc[-20:].max())
+    trail_stop = round(recent_high - 1.5 * atr, 2) if recent_high >= entry_price + 2.0 * atr else current_stop
+
+    return max(current_stop, be_stop, trail_stop)
 
 
 # ── DO NOT EDIT BELOW THIS LINE ───────────────────────────────────────────────

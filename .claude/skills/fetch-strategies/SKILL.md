@@ -133,9 +133,104 @@ If **no** `harness_upgrade.md` is found in any worktree, skip this step entirely
 Read each `harness_upgrade.md` using the Read tool. Note the worktree branch name
 and the `**Parameters:**` / `**Results:**` header block from each file.
 
+### 5b2: Analyze trades.tsv from each worktree
+
+For each worktree, check whether a `trades.tsv` file exists:
+
+```bash
+ls <worktree_path>/trades.tsv 2>/dev/null
+```
+
+If found, run the following analysis inline using Python (pipe to avoid writing temp files):
+
+```bash
+python3 - << 'EOF'
+import csv, sys
+from collections import defaultdict
+
+path = "<worktree_path>/trades.tsv"
+trades = []
+with open(path) as f:
+    for row in csv.DictReader(f, delimiter="\t"):
+        trades.append({
+            "ticker": row["ticker"], "entry": row["entry_date"],
+            "days": int(row["days_held"]), "stop": row["stop_type"],
+            "regime": row["regime"], "pnl": float(row["pnl"]),
+        })
+
+wins   = [t for t in trades if t["pnl"] > 0]
+losses = [t for t in trades if t["pnl"] < 0]
+bes    = [t for t in trades if t["pnl"] == 0]
+
+print(f"trades={len(trades)} wins={len(wins)} losses={len(losses)} bes={len(bes)}")
+if wins and losses:
+    print(f"win_rate={len(wins)/(len(wins)+len(losses)):.0%}  avg_win=${sum(t['pnl'] for t in wins)/len(wins):.2f}  avg_loss=${sum(t['pnl'] for t in losses)/len(losses):.2f}  ratio={abs(sum(t['pnl'] for t in wins)/len(wins))/abs(sum(t['pnl'] for t in losses)/len(losses)):.2f}x")
+
+# Stop type breakdown
+for st in ["pivot", "fallback"]:
+    g = [t for t in trades if t["stop"] == st]
+    if not g: continue
+    w = [t for t in g if t["pnl"] > 0]; l = [t for t in g if t["pnl"] < 0]
+    print(f"stop={st}: n={len(g)} win={len(w)} loss={len(l)} wr={len(w)/(len(w)+len(l)) if (w or l) else 'n/a':.0%} net=${sum(t['pnl'] for t in g):.2f}")
+
+# Days held buckets
+for lo, hi, label in [(0,0,"0d"),(1,5,"1-5d"),(6,14,"6-14d"),(15,30,"15-30d"),(31,60,"31-60d"),(61,999,"61+d")]:
+    g = [t for t in trades if lo <= t["days"] <= hi]
+    if not g: continue
+    w = [t for t in g if t["pnl"] > 0]; l = [t for t in g if t["pnl"] < 0]
+    print(f"days={label}: n={len(g)} wins={len(w)} losses={len(l)} net=${sum(t['pnl'] for t in g):.2f}")
+
+# Repeat tickers
+by_ticker = defaultdict(list)
+for t in trades: by_ticker[t["ticker"]].append(t)
+bad = [(k,v) for k,v in by_ticker.items() if len(v)>1 and sum(t['pnl'] for t in v)<0]
+for k,v in sorted(bad, key=lambda x: sum(t['pnl'] for t in x[1])):
+    outcomes = ["W" if t["pnl"]>0 else ("L" if t["pnl"]<0 else "B") for t in v]
+    print(f"repeat_loser={k}: {outcomes} net=${sum(t['pnl'] for t in v):.2f}")
+
+# Capital inefficiency: winners held >30d with pnl < 20
+sluggish = [t for t in wins if t["days"] > 30 and t["pnl"] < 20]
+for t in sorted(sluggish, key=lambda t: t["pnl"]/max(t["days"],1)):
+    print(f"sluggish={t['ticker']} {t['entry']} pnl=${t['pnl']:.2f} days={t['days']} $/day=${t['pnl']/t['days']:.2f}")
+EOF
+```
+
+Record the output for each worktree that has a `trades.tsv`. If no worktree has one,
+skip this step and note its absence in the merged file.
+
+Key signals to watch for and flag explicitly before step 5c:
+
+- **Fallback stop win rate < 40%** → strong candidate for screener filter (reject fallback entries)
+- **6–14 day bucket net negative** → trailing stop or breakeven timing may need tuning
+- **Win/loss ratio < 0.5×** → structural fragility; average win too small relative to average loss
+- **Repeat losers (same ticker, multiple full stops)** → candidate for "recent loser cooldown" rule
+- **Sluggish winners (>30 days, <$20 gain)** → candidate for time-based capital-efficiency exit
+
 ### 5c: Merge, deduplicate, and find contradictions (ultrathink)
 
 **Think as hard as you can** before writing the merged output.
+
+**Pass 0 — Trade pattern insights → new recommendations:**
+
+Using the trades.tsv analysis output from step 5b2, derive additional recommendations
+that are NOT already covered by any `harness_upgrade.md`. For each signal flagged in
+5b2, reason about whether it is strong enough to warrant a new recommendation:
+
+- **Fallback stop win rate < 40%**: Write a new recommendation to reject fallback-stop
+  entries in `screen_day()`. Cite the exact win rate and net P&L differential.
+- **6–14 day bucket net negative**: Write a new recommendation about trailing stop /
+  breakeven timing. Specify which direction (trigger earlier or later) based on whether
+  the bucket contains mostly quick stop-hits or stalled positions.
+- **Win/loss ratio < 0.5×**: Write a recommendation to add this metric as a harness
+  guard rail in `results.tsv` and in the keep/discard criteria.
+- **Repeat losers**: Write a recommendation for a "recent loser cooldown" screener rule.
+  Cite the tickers, their repeated outcome pattern, and the net P&L cost.
+- **Sluggish winners**: Write a recommendation for a time-based exit. Cite the specific
+  trades (ticker, days held, P&L, $/day) and propose concrete threshold values.
+
+If a signal is already covered by an existing `harness_upgrade.md` recommendation,
+merge the trade-pattern evidence into that recommendation's rationale rather than
+creating a duplicate.
 
 **Pass 1 — Deduplicate:**
 
@@ -187,6 +282,27 @@ Write to `harness_upgrade_<timestamp>.md` in the **master branch working directo
 **Generated:** <YYYY-MM-DD HH:MM>
 **Sources:** <list of worktree branch names that contributed>
 **Total worktrees with updates:** <N>
+**Worktrees with trades.tsv:** <N or "none">
+
+---
+
+## Trade Pattern Summary
+
+*Aggregated from trades.tsv analysis across <N> worktrees. Omit section if no
+trades.tsv was found.*
+
+| Metric | Value |
+|--------|-------|
+| Total trades | N |
+| Win rate | X% |
+| Avg win | $X |
+| Avg loss | $X |
+| Win/loss ratio | X× |
+| Fallback stop win rate | X% (N trades) |
+| Best days-held bucket | 15–30d: N wins, N losses, $X net |
+| Worst days-held bucket | 6–14d: N wins, N losses, $X net |
+| Repeat losers | TICKER (N trades, $X net), ... |
+| Sluggish winners | TICKER Nd $X ($X/day), ... |
 
 ---
 
@@ -196,6 +312,7 @@ Write to `harness_upgrade_<timestamp>.md` in the **master branch working directo
 **Category:** `harness-split` | `harness-objective` | `harness-structure` | `params-tickers` | `params-timeframe` | `params-iterations`
 **Priority:** `high` | `medium` | `low`
 **Seen in:** `autoresearch/semis-mar22`, `autoresearch/financials-mar22`
+**Source:** `harness_upgrade.md` | `trades.tsv analysis` | `both`
 **Rationale:** <synthesized rationale combining observations from all contributing worktrees,
 citing specific numbers where available>
 **Suggested change:** <the concrete actionable recommendation>

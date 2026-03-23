@@ -18,9 +18,9 @@ from strategies import energy_oos_sep25
 from strategies import financials_mar20
 from strategies import semis_mar20
 from strategies import utilities_mar20
-from strategies import master
 from strategies import energy_mar21
 from strategies import nasdaq100_mar21
+from strategies import multisector_mar23
 
 REGISTRY: dict = {
     "energy-momentum-v1": energy_momentum_v1,
@@ -30,7 +30,7 @@ REGISTRY: dict = {
     "financials-mar20": financials_mar20,
     "semis-mar20": semis_mar20,
     "utilities-mar20": utilities_mar20,
-    "master": master,
     "energy-mar21": energy_mar21,
     "nasdaq100-mar21": nasdaq100_mar21,
+    "multisector-mar23": multisector_mar23,
 }

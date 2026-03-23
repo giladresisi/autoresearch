@@ -8,13 +8,14 @@ The LLM agent modifies a single Python script (`train.py`) that embodies a compl
 
 **MVP Goal:** Enable autonomous LLM-driven experimentation on a configurable stock screening and position management strategy, with Sharpe ratio as the optimization target.
 
-The system is developed in three versioned harness generations, each building on the previous:
+The system is developed in four versioned harness generations, each building on the previous:
 
 | Version | Scope | Date |
 |---------|-------|------|
 | **V1** | Initial implementation: data pipeline, backtester, Sharpe metric, agent loop | 2026-01 |
 | **V2** | Train/test split, P&L objective, final outputs, sector registry, strategy selector | 2026-03-20 |
 | **V3** | Harness robustness: look-ahead fix, risk-proportional sizing, walk-forward CV, robustness controls, configurable fold sizing, test-universe holdout, harness integrity | 2026-03-22 |
+| **V4** | Signal quality and measurement fidelity: earnings filter, fallback-stop rejection, time-based exit, fold window fix, objective function fixes, win/loss tracking, post-Phase-1 cooldown | 2026-03-23 |
 
 ---
 
@@ -1331,6 +1332,158 @@ This is a `program.md`-only change. No code changes required.
 - After V3-G: only constants in the `# ══ STRATEGY TUNING ══` sub-section are valid agent optimization targets
 - The `strategies/` registry (V2 Enhancement 6) and `scripts/fetch_all_strategies.py` are unaffected by V3
 - **Out-of-scope items from V1 that V3 now addresses:** "Max concurrent positions cap" → R8; "Walk-forward validation" → R2; "Risk-per-trade sizing" → R3
+
+---
+
+## V4: Signal Quality and Measurement Fidelity (2026-03-23)
+
+### Background
+
+After completing the first wide-universe optimization run (`multisector-mar23`: 85 tickers, 9 GICS sectors, 19 months, 30 iterations), post-run analysis of `trades.tsv` and the fold-by-fold optimization history revealed two categories of structural problems. Full details are in `harness_upgrade_20260323_2249.md`.
+
+**Root causes discovered:**
+
+| Root cause | Effect | Addressed by |
+|---|---|---|
+| Fallback-stop entries (no structural support below price) | 25% win rate vs 79% for pivot-stop entries; −$135 net drag | R9 |
+| Earnings-proximity entries (within 14 days of next release) | 6 of 10 losses are earnings-day stop-hits; −$300 attributable | R8 |
+| FOLD_TEST_DAYS=20 too short for 30–98 day hold duration | Fold trade counts of 0–2; min_test_pnl measures entry quality, not position outcome | R1 |
+| Consistency floor hard-coded at −$100 (designed for small universes) | Genuine improvements tagged `discard-inconsistent`; wasted 6+ iterations | R3 |
+| min_test_pnl dominated by single trade when fold trade count < 3 | Optimization locked on unimprovable single-event outcomes for 17+ iterations | R2 |
+| Stalled positions hold slots for 88–98 days earning < $13 each | Capital inefficiency; best returns are in the 15–30 day cohort | R10 |
+| Deadlock: worst fold unchanged for 4+ consecutive iterations | Budget exhausted on one fold; other folds not improved | R5 |
+| Position management tested last, not early | Trail trigger and breakeven changes found at iter 27–28 out of 30 | R6 |
+| avg_win ($21) / avg_loss ($49) = 0.43× not tracked | Silent erosion of profitability ratio accepted by keep/discard loop | R11 |
+| avg_pnl_per_trade and win_rate not in primary output | Trade-count-dependent metric (`train_total_pnl`) is the only training signal | R4 |
+| Sector concentration not guarded at portfolio level | Multiple simultaneous positions in same sector amplify single-sector events | R7 |
+| Re-entries in recently stopped tickers ("dead-cat bounce") | UNH −$100 total, HD −$50 on re-entry, FCX −$43 on re-entry | R12 |
+
+**One contradiction identified:**
+
+- **C1: R9 vs R12** — R9 rejects fallback-stop entries; R12 rejects re-entries in recently stopped tickers. Three trades are blocked by both rules simultaneously (RTX), making it impossible to isolate causation if implemented together. **Verdict:** Apply R9 first (one-line, high-certainty gain). Implement R12 in a separate subsequent run and measure the incremental effect independently.
+
+---
+
+### Implementation Plans
+
+V4 is organized into three execution runs. **V4-A and V4-B are both prerequisites for Phase 1 sector worktrees** (see `after_baseline.md`). **V4-C must run after Phase 1 is complete** — it introduces a screener signature change that requires validation against sector-specific trade histories before being trusted.
+
+V4-A has no GOLDEN_HASH dependency (all changes are above the `DO NOT EDIT` boundary or in `program.md`/`prepare.py`). V4-B touches the immutable zone and requires a single GOLDEN_HASH update covering all three recommendations.
+
+---
+
+#### V4-A: Strategy Quality and Loop Control (R8, R9, R10, R1, R3, R5, R6)
+
+**Goal:** Fix the sources of systematic loss that no amount of screener iteration can address, and improve the agent loop instructions so the next 30 iterations are spent productively rather than deadlocked.
+
+**Pre-requisite:** Baseline strategy copied to master `train.py` (Phase 0 Step 2, already done).
+
+**Why group these together:** None touch the immutable zone. R8 and R9 both modify `screen_day()` and should be in the same diff to avoid boundary-crossing confusion. R10 modifies `manage_position()`. R1, R3, R5, R6 are `program.md`-only changes with no code risk. No GOLDEN_HASH update required for this run.
+
+| Rec | Description | Change |
+|-----|-------------|--------|
+| R9 | Reject fallback-stop entries | In `screen_day()`: change fallback branch (`stop = None`) from assigning `entry − 2.0×ATR` to `return None`. One line. Removes trades with no structural support below entry. |
+| R8 | Earnings-proximity filter | In `prepare.py`: add `next_earnings_date` column to each ticker's parquet using `yf.Ticker(t).earnings_dates` (covers ~4 years). In `screen_day()`: add guard `if 0 <= (next_earnings_date − today).days <= 14: return None` before all other checks. Re-run `prepare.py` to refresh parquet files after the code change. |
+| R10 | Time-based capital-efficiency exit | In `manage_position()`: if position held > 30 business days AND current unrealised P&L < 0.3 × RISK_PER_TRADE, return stop at current `price_10am` to force exit. Preserves APP (49d/+$81) and PLTR (72d/+$40); recycles COF (89d/+$7) and AMZN (98d/+$13). |
+| R1 | Widen FOLD_TEST_DAYS | In `program.md` setup instructions: change recommended `FOLD_TEST_DAYS` default from 20 to 40. Add note: reduce `WALK_FORWARD_WINDOWS` to 7 if the total date range cannot fit 9 folds of 40 days each. |
+| R3 | Auto-calibrate consistency floor | In `program.md` keep/discard instructions: replace `−RISK_PER_TRADE × 2` with `−RISK_PER_TRADE × MAX_SIMULTANEOUS_POSITIONS × 10`. Add a note that this scales with universe size. |
+| R5 | Deadlock detection pivot | In `program.md` loop instructions: add rule — if `min_test_pnl` has not changed for 4 consecutive kept iterations, pivot to optimizing `mean_test_pnl` for the next 3 iterations before returning to `min_test_pnl`. |
+| R6 | Test position management early | In `program.md` loop instructions: add explicit guidance to test trailing-stop distance, breakeven trigger, and stop distance in iterations 6–10, not only after screener ideas are exhausted. |
+
+**Files changed:**
+
+| File | Zone | Changes |
+|------|------|---------|
+| `prepare.py` | — | R8: fetch and store `next_earnings_date` per ticker |
+| `train.py` | Mutable (above boundary) | R8: earnings guard in `screen_day()`; R9: fallback-stop reject in `screen_day()`; R10: time-based exit in `manage_position()` |
+| `program.md` | — | R1: FOLD_TEST_DAYS default; R3: consistency floor formula; R5: deadlock pivot rule; R6: loop iteration order |
+
+**Validation:**
+- `python -c "import train"` — no errors
+- `screen_day()` returns None for a synthetic ticker with `next_earnings_date` within 14 days
+- `screen_day()` returns None for a synthetic signal where `find_stop_price()` returns None
+- `manage_position()` returns a stop at current price when days_held > 30 and unrealised PnL < $15
+- `prepare.py` writes `next_earnings_date` column to at least one parquet file; column is readable as a date in `screen_day()`
+- Full test suite passes; GOLDEN_HASH test passes (no immutable zone was touched)
+
+---
+
+#### V4-B: Harness Metric Improvements (R2, R4, R11, R7)
+
+**Goal:** Fix what the optimization loop measures and tracks. The fold-floor deadlock (R2), the absence of per-trade quality metrics (R4, R11), and the unguarded sector concentration (R7) all silently accept bad strategy states that a well-instrumented harness would catch automatically.
+
+**Pre-requisite:** V4-A complete.
+
+**Why group these together:** All touch the immutable zone (`run_backtest()`, `print_results()`, or `__main__`). One GOLDEN_HASH update covers all four. R4 and R11 are additive output changes; R2 is a guard condition; R7 is an optional concentration cap — low risk to combine.
+
+| Rec | Description | Change |
+|-----|-------------|--------|
+| R2 | min_test_pnl fold trade-count guard | In the walk-forward fold aggregation (immutable `__main__`): when computing `min_test_pnl`, exclude any fold whose test-window trade count is < 3. If all folds are excluded, fall back to the raw minimum. Print `min_test_pnl_folds_included: N` alongside `min_test_pnl`. |
+| R4 | Add avg_pnl_per_trade and win_rate to output | In `print_results()`: emit `train_avg_pnl_per_trade:` and `train_win_rate:` lines. Add both as columns to `results.tsv`. These are already computable from existing `run_backtest()` return values; no backtest logic changes required. |
+| R11 | Track win/loss dollar ratio | In `run_backtest()`: compute `avg_win_loss_ratio = mean(winning_trade_pnls) / abs(mean(losing_trade_pnls))`; return in stats dict. In `print_results()`: emit `train_win_loss_ratio:`. Add to `results.tsv`. In `program.md`: add a soft guard — if `avg_win_loss_ratio < 0.5` and `train_pnl_consistency < floor`, flag as `discard-fragile`. |
+| R7 | Sector concentration guard *(optional, low priority)* | In `run_backtest()`: add `MAX_POSITIONS_PER_SECTOR` constant (default: large int = disabled). Before opening a new position, count open positions in the same GICS sector; skip entry if count ≥ cap. Sector is read from a `sector` field in the `screen_day()` signal dict, which is derived from the ticker's parquet metadata or a static lookup. |
+
+**Files changed:**
+
+| File | Zone | Changes |
+|------|------|---------|
+| `train.py` | Mutable | R7 (if implemented): `MAX_POSITIONS_PER_SECTOR` constant |
+| `train.py` | Immutable | R2: fold exclusion guard in `__main__`; R4: new print lines + stats dict fields; R11: win/loss ratio computation + print line; R7: sector cap check in position-open logic |
+| `program.md` | — | R4: update results.tsv schema; R11: `discard-fragile` condition; R2: note on `min_test_pnl_folds_included` interpretation |
+| `tests/test_optimization.py` | — | Update `GOLDEN_HASH` |
+
+**Validation:**
+- `min_test_pnl_folds_included:` appears in run output; value is ≤ `WALK_FORWARD_WINDOWS`
+- `train_avg_pnl_per_trade:` and `train_win_rate:` appear in run output and are parseable floats
+- `train_win_loss_ratio:` appears in run output; value is positive
+- All new columns present in `results.tsv` header
+- GOLDEN_HASH test passes after update
+- Full test suite passes
+
+---
+
+#### V4-C: Post-Phase-1 — Recent Loser Cooldown (R12)
+
+**Pre-requisite:** Phase 1 sector worktrees complete (see `after_baseline.md` Steps 5–7). R12 must be validated against multiple sector trade histories before being trusted — a single-sector trade history is too thin to confirm the 90-day lookback window is correct.
+
+**Why after Phase 1:** R12 requires threading a `recently_stopped` set through the backtest loop into `screen_day()`, changing the function signature. This is the most invasive harness change in V4. Running Phase 1 first produces 11 independent sector trade histories that reveal whether repeat-loser re-entries are a systematic pattern (as in the baseline) or an artefact of the wide-universe setup. If the pattern does not appear in sector runs, R12 may not be necessary. If it does, the right cooldown window (60/90/120 days) can be calibrated from 11 data points rather than one.
+
+**Also evaluate at this point:**
+- Whether R8 (earnings filter) eliminated the pattern entirely — UNH Oct is both an earnings-day entry and a repeat loser. If R8 removes all cases that R12 would have caught, R12 may be redundant.
+- Whether R9 (fallback-stop reject) already eliminated the RTX re-entry case.
+
+| Rec | Description | Change |
+|-----|-------------|--------|
+| R12 | Recent loser cooldown | In `run_backtest()` (immutable): maintain a `recently_stopped: set[str]` of tickers that hit a full −1R stop (exit at initial stop, not trailing) within the last N calendar days (try N=60, 90, 120). Pass `recently_stopped` into each `screen_day()` call. In `screen_day()` (mutable): add `if ticker in recently_stopped: return None` as the first guard. **Note:** this changes `screen_day()`'s signature from `(df, today)` to `(df, today, recently_stopped=frozenset())`. All test fixtures and callers must be updated. |
+
+**Files changed:**
+
+| File | Zone | Changes |
+|------|------|---------|
+| `train.py` | Mutable (above boundary) | R12: `recently_stopped` parameter + guard in `screen_day()` |
+| `train.py` | Immutable | R12: `recently_stopped` set maintenance in `run_backtest()`; pass-through to `screen_day()` |
+| `tests/test_screener.py` | — | Update all `screen_day(df, today)` calls to include `recently_stopped` |
+| `tests/test_backtester.py` | — | Update mock patches and direct calls |
+| `tests/test_optimization.py` | — | Update `GOLDEN_HASH` |
+| `program.md` | — | Document the `recently_stopped` mechanism; recommend N=90 as default |
+
+**Validation:**
+- `screen_day()` returns None when called with `recently_stopped={'AAPL'}` and ticker is AAPL
+- `screen_day()` proceeds normally when `recently_stopped=frozenset()`
+- Trade history from at least one sector run confirms re-entry losses are not eliminated by R8/R9 alone
+- Full test suite passes; GOLDEN_HASH test passes after update
+
+---
+
+### V4 Compatibility Notes
+
+- **V4-A has no GOLDEN_HASH dependency** — all changes are in `screen_day()`, `manage_position()`, `prepare.py`, or `program.md`. The immutable zone is untouched.
+- **V4-B requires one GOLDEN_HASH update** covering R2, R4, R11, and optionally R7. Do all four in a single commit.
+- **V4-C requires a GOLDEN_HASH update** and changes `screen_day()`'s public signature. Run after Phase 1 validates the approach.
+- **Sequence dependency:** V4-A → V4-B → [Phase 1 from `after_baseline.md`] → V4-C. V4-A and V4-B are both prerequisites for Phase 1.
+- **R8 requires a data refresh:** after updating `prepare.py`, re-run `uv run prepare.py` for all tickers before the next optimization run. The `next_earnings_date` column will be absent from existing parquet files until this is done.
+- **R10 interacts with R12:** the time-based exit (R10) will reduce the number of long-held positions that accumulate into "stalled" entries. When calibrating R12's cooldown window in V4-C, verify that R10 is already active so its effect is not double-counted.
+- **Out-of-scope items from V1 now addressed:** "Multiple simultaneous entries in the same ticker" → partially addressed by R12's cooldown; "Portfolio-level risk limits" → R7 (sector cap); "Transaction costs" → remains out of scope.
 
 ---
 

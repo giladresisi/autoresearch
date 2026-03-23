@@ -116,7 +116,7 @@ def extract_above_boundary(commit: str) -> list[str] | None:
     try:
         result = subprocess.run(
             ["git", "show", f"{commit}:train.py"],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, encoding="utf-8", check=True,
         )
     except subprocess.CalledProcessError:
         return None
@@ -174,7 +174,7 @@ def parse_train_py_dates(commit: str) -> dict:
     try:
         result = subprocess.run(
             ["git", "show", f"{commit}:train.py"],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, encoding="utf-8", check=True,
         )
     except subprocess.CalledProcessError:
         return {}
@@ -285,6 +285,7 @@ def generate_description(strategy_lines: list[str], strategy_key: str) -> str:
             ["claude", "-p", prompt],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=60,
             env=env_passthrough,
         )

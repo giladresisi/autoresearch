@@ -69,13 +69,13 @@ def test_editable_section_stays_runnable_after_threshold_change():
     """
     above, marker, below = _split_train_source()
 
-    assert "vol_ratio < 1.0" in above, (
-        "Expected volume ratio threshold 'vol_ratio < 1.0' in the editable section of train.py. "
+    assert "vol_ratio < 1.9" in above, (
+        "Expected volume ratio threshold 'vol_ratio < 1.9' in the editable section of train.py. "
         "Update this test if the threshold expression changes."
     )
 
     # Simulate a threshold relaxation (the most common agent edit)
-    modified_source = above.replace("vol_ratio < 1.0", "vol_ratio < 1.2", 1) + marker + below
+    modified_source = above.replace("vol_ratio < 1.9", "vol_ratio < 1.2", 1) + marker + below
 
     # Must be syntactically valid Python
     ast.parse(modified_source)
@@ -149,7 +149,7 @@ def test_most_recent_train_commit_modified_only_editable_section():
     # Find the most recent commit that modified train.py
     log = subprocess.run(
         ["git", "log", "--oneline", "-1", "--", "train.py"],
-        capture_output=True, text=True, cwd=repo_root,
+        capture_output=True, text=True, encoding="utf-8", cwd=repo_root,
     )
     if not log.stdout.strip():
         import pytest
@@ -161,7 +161,7 @@ def test_most_recent_train_commit_modified_only_editable_section():
     def _show(ref):
         result = subprocess.run(
             ["git", "show", f"{ref}:train.py"],
-            capture_output=True, text=True, cwd=repo_root,
+            capture_output=True, text=True, encoding="utf-8", cwd=repo_root,
         )
         assert result.returncode == 0, f"git show {ref}:train.py failed: {result.stderr}"
         return result.stdout

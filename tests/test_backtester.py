@@ -60,10 +60,13 @@ def make_signal_df_for_backtest(signal_date: date = date(2026, 1, 10)) -> pd.Dat
     price_10am = close.copy()
     price_10am[249] = 115.0
 
+    volume = np.full(n, 1_000_000.0)
+    volume[249] = 2_000_000.0   # last bar = 2× MA30 → vol_ratio = 2.0, passes ≥ 1.9
+
     return pd.DataFrame({
         'open': close * 0.998, 'high': close * 1.005, 'low': close * 0.995,
         'close': close,
-        'volume': np.full(n, 1_000_000.0),
+        'volume': volume,
         'price_10am': price_10am,
     }, index=pd.Index(dates, name='date'))
 

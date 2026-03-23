@@ -48,11 +48,11 @@ def make_signal_df(n: int = 250) -> pd.DataFrame:
     """Synthetic DataFrame where screen_day returns a non-None dict.
 
     Design satisfies the current momentum-breakout screener:
-    - Bars 0-234: steady rise 60→97 (SMA50 at end ≈ 95)
+    - Bars 0-234: steady rise 60→97 (SMA50 ≈ 93, SMA20 ≈ 98 at end → SMA20 > SMA50)
     - Bars 235-249: 8 up-bars (+1) and 6 down-bars (−0.7), alternating
       → RSI14 ≈ 66 (within the required 50–75 band)
     - price_10am[-1] = 115: breaks above 20-day high close (~100) and yesterday high (~100.3)
-    - volume = VM30 everywhere → vol_ratio = 1.0 (passes ≥ 1.0 threshold)
+    - volume[-1] = 2×VM30 → vol_ratio = 2.0 (passes ≥ 1.9 threshold)
     - No overhead pivot high above 115 → resistance check passes
     - Stop: ATR-fallback = price_10am − 2×ATR (always satisfies the 1.5×ATR buffer)
     """
@@ -74,12 +74,15 @@ def make_signal_df(n: int = 250) -> pd.DataFrame:
     # Big jump on the last bar to trigger the 20-day breakout rule
     price_10am[249] = 115.0
 
+    volume = np.full(n, 1_000_000.0)
+    volume[249] = 2_000_000.0   # last bar = 2× MA30 → vol_ratio = 2.0, passes ≥ 1.9
+
     return pd.DataFrame({
         'open':       open_,
         'high':       high,
         'low':        low,
         'close':      close,
-        'volume':     np.full(n, 1_000_000.0),
+        'volume':     volume,
         'price_10am': price_10am,
     }, index=pd.Index(dates, name='date'))
 
