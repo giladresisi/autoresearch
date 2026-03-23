@@ -115,7 +115,7 @@ def test_harness_below_do_not_edit_is_unchanged():
     # Golden hash of the harness at the time the DO NOT EDIT boundary was set.
     # To recompute: python -c "import hashlib; s=open('train.py').read();
     #   m='# ── DO NOT EDIT BELOW THIS LINE'; print(hashlib.sha256(s.partition(m)[2].encode()).hexdigest())"
-    GOLDEN_HASH = "8e52c979a05340df9bef49dbfda0c7086621e6dd2ac2e7c3a9bf12772c04e0a7"
+    GOLDEN_HASH = "912907497f6da52e3f4907a43a0f176a4b71784194f9ebfab5faae133fd20ea9"
 
     _, _, below = _split_train_source()
     actual_hash = hashlib.sha256(below.encode("utf-8")).hexdigest()
@@ -1225,4 +1225,117 @@ def test_main_no_ticker_holdout_output_when_frac_zero(capsys):
     assert "ticker_holdout_pnl:" not in captured.out, (
         f"Expected no 'ticker_holdout_pnl:' in output when TICKER_HOLDOUT_FRAC=0.0.\n"
         f"stdout: {captured.out[:800]}"
+    )
+
+
+# ── V3-G tests ────────────────────────────────────────────────────────────────
+
+_TRAIN_PY_PATH = pathlib.Path(__file__).parent.parent / "train.py"
+_PROGRAM_MD_PATH = pathlib.Path(__file__).parent.parent / "program.md"
+
+
+def test_v3g_session_setup_header_present():
+    """train.py mutable section must contain the SESSION SETUP sub-section header."""
+    source = _TRAIN_PY_PATH.read_text(encoding="utf-8")
+    assert "# ══ SESSION SETUP" in source, (
+        "Expected '# ══ SESSION SETUP' header in train.py mutable section"
+    )
+
+
+def test_v3g_strategy_tuning_header_present():
+    """train.py mutable section must contain the STRATEGY TUNING sub-section header."""
+    source = _TRAIN_PY_PATH.read_text(encoding="utf-8")
+    assert "# ══ STRATEGY TUNING" in source, (
+        "Expected '# ══ STRATEGY TUNING' header in train.py mutable section"
+    )
+
+
+def test_v3g_session_setup_before_strategy_tuning():
+    """SESSION SETUP header must appear before STRATEGY TUNING header in train.py."""
+    lines = _TRAIN_PY_PATH.read_text(encoding="utf-8").splitlines()
+    setup_idx = next(
+        (i for i, l in enumerate(lines) if "# ══ SESSION SETUP" in l), None
+    )
+    tuning_idx = next(
+        (i for i, l in enumerate(lines) if "# ══ STRATEGY TUNING" in l), None
+    )
+    assert setup_idx is not None, "SESSION SETUP header not found in train.py"
+    assert tuning_idx is not None, "STRATEGY TUNING header not found in train.py"
+    assert setup_idx < tuning_idx, (
+        f"SESSION SETUP (line {setup_idx}) must come before STRATEGY TUNING (line {tuning_idx})"
+    )
+
+
+def test_v3g_risk_per_trade_in_session_setup():
+    """RISK_PER_TRADE assignment must appear after SESSION SETUP and before STRATEGY TUNING."""
+    lines = _TRAIN_PY_PATH.read_text(encoding="utf-8").splitlines()
+    setup_idx = next(i for i, l in enumerate(lines) if "# ══ SESSION SETUP" in l)
+    tuning_idx = next(i for i, l in enumerate(lines) if "# ══ STRATEGY TUNING" in l)
+    rpt_idx = next(
+        (i for i, l in enumerate(lines) if l.strip().startswith("RISK_PER_TRADE =")), None
+    )
+    assert rpt_idx is not None, "RISK_PER_TRADE assignment not found in train.py"
+    assert setup_idx < rpt_idx < tuning_idx, (
+        f"RISK_PER_TRADE (line {rpt_idx}) must be between SESSION SETUP (line {setup_idx}) "
+        f"and STRATEGY TUNING (line {tuning_idx})"
+    )
+
+
+def test_v3g_max_simultaneous_positions_in_strategy_tuning():
+    """MAX_SIMULTANEOUS_POSITIONS assignment must appear after STRATEGY TUNING header."""
+    lines = _TRAIN_PY_PATH.read_text(encoding="utf-8").splitlines()
+    tuning_idx = next(i for i, l in enumerate(lines) if "# ══ STRATEGY TUNING" in l)
+    msp_idx = next(
+        (i for i, l in enumerate(lines) if l.strip().startswith("MAX_SIMULTANEOUS_POSITIONS =")),
+        None,
+    )
+    assert msp_idx is not None, "MAX_SIMULTANEOUS_POSITIONS assignment not found in train.py"
+    assert msp_idx > tuning_idx, (
+        f"MAX_SIMULTANEOUS_POSITIONS (line {msp_idx}) must come after STRATEGY TUNING (line {tuning_idx})"
+    )
+
+
+def test_v3g_risk_per_trade_comment_warns_inflation():
+    """The RISK_PER_TRADE line or its adjacent comment must warn against inflating P&L."""
+    lines = _TRAIN_PY_PATH.read_text(encoding="utf-8").splitlines()
+    rpt_idx = next(
+        (i for i, l in enumerate(lines) if l.strip().startswith("RISK_PER_TRADE =")), None
+    )
+    assert rpt_idx is not None, "RISK_PER_TRADE assignment not found in train.py"
+    # Check the RISK_PER_TRADE line itself and the immediately preceding comment line
+    window = lines[max(0, rpt_idx - 2) : rpt_idx + 1]
+    combined = " ".join(window).lower()
+    assert "inflate" in combined, (
+        f"Expected 'inflate' warning near RISK_PER_TRADE (lines {max(0, rpt_idx-2)}–{rpt_idx}). "
+        f"Found: {window}"
+    )
+
+
+def test_v3g_program_md_contains_plateau():
+    """program.md must contain the zero-trade plateau early-stop rule."""
+    text = _PROGRAM_MD_PATH.read_text(encoding="utf-8")
+    assert "plateau" in text, "Expected 'plateau' in program.md (zero-trade plateau rule)"
+
+
+def test_v3g_program_md_contains_discard_inconsistent():
+    """program.md must define the discard-inconsistent status."""
+    text = _PROGRAM_MD_PATH.read_text(encoding="utf-8")
+    assert "discard-inconsistent" in text, (
+        "Expected 'discard-inconsistent' in program.md (status column definition)"
+    )
+
+
+def test_v3g_program_md_contains_ticker_holdout_frac_01():
+    """program.md must recommend TICKER_HOLDOUT_FRAC = 0.1 as the default."""
+    text = _PROGRAM_MD_PATH.read_text(encoding="utf-8")
+    assert "TICKER_HOLDOUT_FRAC = 0.1" in text, (
+        "Expected 'TICKER_HOLDOUT_FRAC = 0.1' recommended default in program.md"
+    )
+
+
+def test_v3g_program_md_contains_session_setup_instruction():
+    """program.md must contain the SESSION SETUP scope instruction (Edit A)."""
+    text = _PROGRAM_MD_PATH.read_text(encoding="utf-8")
+    assert "SESSION SETUP" in text, (
+        "Expected 'SESSION SETUP' scope instruction in program.md"
     )

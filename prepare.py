@@ -54,7 +54,12 @@ HISTORY_START = max(
     (pd.Timestamp(BACKTEST_START) - pd.DateOffset(years=1)).strftime("%Y-%m-%d"),
     (pd.Timestamp(BACKTEST_END) - pd.DateOffset(days=720)).strftime("%Y-%m-%d"),
 )
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "stock_data")
+# Cache directory for parquet files. Override with AUTORESEARCH_CACHE_DIR env var
+# to maintain independent datasets for different sessions or date ranges.
+CACHE_DIR = os.environ.get(
+    "AUTORESEARCH_CACHE_DIR",
+    os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "stock_data"),
+)
 
 
 def download_ticker(ticker: str) -> pd.DataFrame:

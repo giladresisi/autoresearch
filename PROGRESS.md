@@ -1,5 +1,62 @@
 # PROGRESS
 
+## Feature: V3-G Harness Integrity and Objective Quality
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-23
+**Plan File**: .agents/plans/v3-g-harness-integrity.md
+
+### Core Validation
+SESSION SETUP / STRATEGY TUNING comment headers added to `train.py` mutable section; `RISK_PER_TRADE` comment updated with "DO NOT raise to inflate P&L." `program.md` updated with five targeted edits: SESSION SETUP scope instruction, `TICKER_HOLDOUT_FRAC = 0.1` recommended default, dual keep/discard condition (`min_test_pnl` + `train_pnl_consistency` floor), zero-trade plateau early-stop rule (3-iteration direction reversal; 10-iteration `plateau` status + revert), and `discard-inconsistent` status added to column 10 definition. No GOLDEN_HASH update required — immutable zone untouched.
+
+### Test Status
+- Automated: ✅ 49 passed (+10 new V3-G unit tests), 1 pre-existing skip (git state), 0 new regressions
+- Manual: none required
+
+### Notes
+- All 10 V3-G tests are text/import-level assertions — no live parquet cache required
+- Baseline before V3-G: 39 passed, 1 skipped
+- Box-drawing characters (U+2550 `══`) in headers verified to survive save/re-read without corruption
+- `RISK_PER_TRADE` value unchanged at 50.0; `MAX_SIMULTANEOUS_POSITIONS` value unchanged at 5
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/v3-g-harness-integrity.md`
+- Detailed implementation summary
+- Divergences and resolutions (none)
+- Test results and metrics
+- 10/10 new tests pass, 0 new regressions
+
+---
+
+## Feature: V3-F Test-Universe Ticker Holdout and Per-Session Cache Path
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-22
+**Plan File**: .agents/plans/v3-f-test-universe-holdout-and-cache-path.md
+
+### Core Validation
+`TEST_EXTRA_TICKERS: list = []` added to mutable section after `TICKER_HOLDOUT_FRAC`. `CACHE_DIR` replaced with `os.environ.get("AUTORESEARCH_CACHE_DIR", <default>)` in both `train.py` and `prepare.py`. Immutable `__main__` block extended with `_extra_ticker_dfs` / `_test_ticker_dfs` construction; fold test call updated to use `_test_ticker_dfs`. `program.md` updated with session setup docs for both new mechanisms.
+
+### Test Status
+- Automated: ✅ 152 passed (+10 new V3-F unit tests), 1 pre-existing skip (git state), 15 pre-existing failures unchanged
+- Manual: live-cache scenarios non-blocking per plan
+
+### Notes
+- GOLDEN_HASH updated to `912907497f6da52e3f4907a43a0f176a4b71784194f9ebfab5faae133fd20ea9`
+- `TEST_EXTRA_TICKERS = []` and env-var fallback preserve all existing behavior — no migration required
+- Extra tickers absent from cache are silently skipped via `if t in ticker_dfs` guard
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/v3-f-test-universe-holdout-and-cache-path.md`
+- Detailed implementation summary
+- Divergences and resolutions (none)
+- Test results and metrics
+- 10/10 new tests pass, 0 new regressions
+
+---
+
 ## Feature: V3-E Configurable Walk-Forward Window Size and Rolling Training Windows
 
 **Status**: ✅ Complete

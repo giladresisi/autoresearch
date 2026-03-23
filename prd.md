@@ -14,7 +14,7 @@ The system is developed in three versioned harness generations, each building on
 |---------|-------|------|
 | **V1** | Initial implementation: data pipeline, backtester, Sharpe metric, agent loop | 2026-01 |
 | **V2** | Train/test split, P&L objective, final outputs, sector registry, strategy selector | 2026-03-20 |
-| **V3** | Harness robustness: look-ahead fix, risk-proportional sizing, walk-forward CV, robustness controls, configurable fold sizing | 2026-03-22 |
+| **V3** | Harness robustness: look-ahead fix, risk-proportional sizing, walk-forward CV, robustness controls, configurable fold sizing, test-universe holdout, harness integrity | 2026-03-22 |
 
 ---
 
@@ -1090,11 +1090,245 @@ WALK_FORWARD_WINDOWS = 13  # covers the full 19-month window; ~26 backtest calls
 
 ---
 
+#### V3-F: Test-Universe Ticker Holdout and Per-Session Cache Path
+
+**Pre-requisite:** V3-E complete.
+
+**Goal:** Expose the walk-forward test folds to additional tickers that are never seen during training, so the optimization objective rewards strategies that generalize across the ticker universe rather than overfitting to the 85 training names. Also, make the cache path configurable per session so operators can maintain independent datasets for different experiments.
+
+---
+
+**Problem 1 — Test and train folds use identical ticker universe**
+
+The walk-forward loop currently calls `run_backtest(_train_ticker_dfs, ...)` for both the training and test phases of every fold. The test fold therefore validates the strategy on exactly the tickers it was optimized for. Adding 2 unseen tickers per sector (~16 total) to the test folds would force `min_test_pnl` to measure "this signal works on tickers the agent has never adjusted parameters for", which is a significantly stronger generalization signal.
+
+**Problem 2 — Single global cache path prevents independent experiments**
+
+`CACHE_DIR` is hardcoded to `~/.cache/autoresearch/stock_data/`. All sessions share this directory. This is safe when sessions use the same date range (files are shared, no conflict), but creates silent data errors if two sessions need different history lengths for the same ticker — `prepare.py` skips existing files, so the second session silently uses stale data.
+
+---
+
+**Solution 1 — `TEST_EXTRA_TICKERS` mutable constant**
+
+Add a new mutable constant listing tickers to include in test folds but not in training:
+
+```python
+# Tickers included in walk-forward TEST folds only — never in training.
+# Used to measure out-of-universe generalization: min_test_pnl must hold on
+# tickers the agent has never directly optimized for.
+# These tickers must be downloaded by prepare.py before running.
+# Set at session setup. Do NOT change during the loop.
+TEST_EXTRA_TICKERS: list = []
+```
+
+In the immutable zone, after the train/holdout split, build a test-universe dict:
+
+```python
+_extra_ticker_dfs = {t: ticker_dfs[t] for t in TEST_EXTRA_TICKERS if t in ticker_dfs}
+_test_ticker_dfs  = {**_train_ticker_dfs, **_extra_ticker_dfs}
+```
+
+Then in the fold loop, pass `_test_ticker_dfs` to the test call only:
+
+```python
+_fold_train_stats = run_backtest(_train_ticker_dfs, start=_fold_train_start, end=_fold_train_end)
+_fold_test_stats  = run_backtest(_test_ticker_dfs,  start=_fold_test_start,  end=_fold_test_end)
+```
+
+The agent sees only `min_test_pnl` (an aggregated scalar) — it cannot observe per-ticker test breakdowns during the loop. The extra tickers therefore cannot be directly overfit to; they influence the objective only through the aggregate.
+
+**Interaction with R6 ticker holdout (`TICKER_HOLDOUT_FRAC`):** The existing R6 holdout splits the base training universe by a fraction of sorted tickers and evaluates them on the full training time range. `TEST_EXTRA_TICKERS` is orthogonal — it adds tickers to the test time range, not the training time range. When using `TEST_EXTRA_TICKERS`, set `TICKER_HOLDOUT_FRAC = 0` to avoid confusion between the two mechanisms.
+
+**Suggested extra tickers (2 per sector, not in the current 85-ticker training universe):**
+
+| Sector | Extra tickers |
+|--------|--------------|
+| Tech | INTC, CSCO |
+| Financials | TFC, USB |
+| Healthcare | BMY, CVS |
+| Energy | PSX, HES |
+| Consumer Staples | MDLZ, SYY |
+| Industrials | EMR, ITW |
+| Consumer Discretionary | DG, YUM |
+| Materials | DD, PKG |
+
+Download these by adding them to `TICKERS` in `prepare.py` before running `prepare.py`. Once cached, move them out of `TICKERS` and into `TEST_EXTRA_TICKERS` in `train.py` (they must remain in `prepare.py`'s `TICKERS` list so re-runs of `prepare.py` keep them fresh).
+
+---
+
+**Solution 2 — Per-session `CACHE_DIR`**
+
+Change `CACHE_DIR` from a hardcoded constant to one that reads an environment variable with a fallback to the current default:
+
+```python
+# Cache directory for parquet files. Override with AUTORESEARCH_CACHE_DIR env var
+# to maintain independent datasets for different sessions or date ranges.
+CACHE_DIR = os.environ.get(
+    "AUTORESEARCH_CACHE_DIR",
+    os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "stock_data")
+)
+```
+
+Apply the same change to `prepare.py`. Sessions with a non-default cache path set the env var before running:
+
+```bash
+export AUTORESEARCH_CACHE_DIR=~/.cache/autoresearch/stock_data_alt
+uv run prepare.py   # downloads to the alternate cache
+uv run train.py     # reads from the alternate cache
+```
+
+Default behavior is identical to the current hardcoded path — no breaking change.
+
+**When this matters:** Two sessions using overlapping tickers but different date ranges (e.g. one trained on 2024-09 → 2026-03, another on 2023-01 → 2025-01) must use separate cache dirs. Sessions with non-overlapping ticker universes or identical date ranges can safely share the default cache.
+
+---
+
+**Files changed:**
+
+| File | Zone | Changes |
+|------|------|---------|
+| `train.py` | Mutable | Add `TEST_EXTRA_TICKERS: list = []` constant |
+| `train.py` | Mutable | Change `CACHE_DIR` to env-var-with-fallback pattern |
+| `train.py` | Immutable | Build `_extra_ticker_dfs` and `_test_ticker_dfs` after train/holdout split; pass `_test_ticker_dfs` to `_fold_test_stats` call |
+| `prepare.py` | User config | Change `CACHE_DIR` to env-var-with-fallback pattern; add suggested extra tickers to `TICKERS` list |
+| `program.md` | — | Document `TEST_EXTRA_TICKERS` setup and `AUTORESEARCH_CACHE_DIR` env var in session setup steps |
+| `tests/test_optimization.py` | — | Update `GOLDEN_HASH` (immutable zone changes) |
+
+**Backward compatibility:** `TEST_EXTRA_TICKERS = []` (default) leaves `_test_ticker_dfs == _train_ticker_dfs`, reproducing current behavior exactly. `CACHE_DIR` fallback is the current hardcoded path, so existing sessions require no changes.
+
+**Validation:**
+- With `TEST_EXTRA_TICKERS = []`: fold test P&L identical to V3-E baseline (same tickers)
+- With `TEST_EXTRA_TICKERS = ["INTC", "CSCO"]`: fold test output includes trades from INTC/CSCO; training output does not
+- `AUTORESEARCH_CACHE_DIR=/tmp/test_cache uv run prepare.py` writes to `/tmp/test_cache/`; `uv run train.py` with same env var reads from there
+
+---
+
+#### V3-G: Harness Integrity and Objective Quality
+
+**Pre-requisite:** V3-F complete.
+
+**Goal:** Prevent the agent from gaming the `min_test_pnl` objective through position-sizing inflation, add a monthly P&L floor to the keep/discard criterion, add an early-stop signal for zero-trade plateaus, restructure the mutable section so session-setup constants are structurally separated from strategy-tuning constants, and make ticker holdout the recommended default.
+
+---
+
+**Background**
+
+Post-run analysis from a pre-V3-E session identified four remaining harness weaknesses not addressed by V3-A through V3-F:
+
+| # | Weakness | Addressed by |
+|---|----------|-------------|
+| 1 | `RISK_PER_TRADE` is in the strategy-tunable zone — agent can inflate all P&L by raising it | Mutable-section restructure + reinforced program.md |
+| 4 | No signal when screener plateaus at zero trades — agent loops indefinitely with no feedback | `program.md` early-stop instruction |
+| 5 | `pnl_consistency` (min monthly PnL) is printed but not enforced — agent can keep strategies with deeply negative monthly drawdowns | `program.md` keep/discard guard |
+| 6 | `TICKER_HOLDOUT_FRAC = 0.0` default means holdout is never used unless the session operator enables it explicitly | `program.md` session-setup recommendation |
+
+---
+
+**Problem 1 — RISK_PER_TRADE is agent-tunable**
+
+`RISK_PER_TRADE` lives in the mutable section alongside `MAX_SIMULTANEOUS_POSITIONS` and other constants the agent is expected to tune. An agent that raises `RISK_PER_TRADE` from 50 to 500 produces 10× the dollar P&L for the same strategy with no genuine improvement. This is the highest-priority integrity issue.
+
+Broader observation: the mutable section currently mixes two conceptually different constant types with no structural distinction:
+
+- **Session-setup constants** — set once at the start of a session by the session operator; must not change during the experiment loop (`BACKTEST_START`, `TRAIN_END`, `RISK_PER_TRADE`, `FOLD_TEST_DAYS`, `TICKER_HOLDOUT_FRAC`, etc.)
+- **Strategy-tuning constants** — the agent is explicitly expected to modify these during experiments (`MAX_SIMULTANEOUS_POSITIONS`, `CORRELATION_PENALTY_WEIGHT`, `ROBUSTNESS_SEEDS`)
+
+Without a visible boundary, the agent treats the entire mutable section as fair game.
+
+**Solution:** Add clear comment headers to sub-divide the mutable section into two labeled zones:
+
+```python
+# ══ SESSION SETUP — set once at session start; DO NOT change during experiments ══════
+# These constants define the evaluation framework. Changing them mid-session
+# invalidates comparisons across experiments.
+BACKTEST_START = ...
+BACKTEST_END   = ...
+TRAIN_END      = ...
+...
+RISK_PER_TRADE = 50.0       # dollar risk per trade; DO NOT raise to inflate P&L
+FOLD_TEST_DAYS = 20
+...
+TICKER_HOLDOUT_FRAC = 0.0
+
+# ══ STRATEGY TUNING — agent may modify these freely during experiments ════════════════
+# Only the constants below this line are valid optimization targets.
+MAX_SIMULTANEOUS_POSITIONS = 5
+CORRELATION_PENALTY_WEIGHT = 0.0
+ROBUSTNESS_SEEDS = 0
+```
+
+This is a mutable-zone-only change — no `GOLDEN_HASH` update required.
+
+`program.md` must also be updated: "Only modify constants in the STRATEGY TUNING sub-section during experiments. Never modify SESSION SETUP constants — doing so invalidates cross-experiment comparisons."
+
+---
+
+**Problem 4 — No early-stop when screener produces zero trades**
+
+If screener thresholds are tightened to the point that no signals fire across the entire training window, `total_trades: 0` is returned and `min_test_pnl = 0.0`. The agent may not recognize this as a dead-end and continue iterating with no informative signal.
+
+**Solution:** `program.md` instruction addition:
+
+> If `train_total_trades: 0` appears for 3 or more consecutive iterations, stop tuning screener thresholds in that direction. Relax the most recently tightened threshold back to its prior value and try a different modification. If 10 consecutive iterations all produce zero trades, log status `plateau` and stop the session; notify the user.
+
+This is a `program.md`-only change. No code changes required.
+
+---
+
+**Problem 5 — `pnl_consistency` not enforced in keep/discard**
+
+`pnl_consistency` (minimum monthly P&L, computed by `run_backtest()` since V3-B R7) is printed as a diagnostic but not used in the keep/discard decision. A strategy can achieve high `min_test_pnl` by making most of its P&L in one month while losing money in others — a pattern that is not robust.
+
+**Solution:** Add a secondary keep condition to `program.md`:
+
+> Keep a change only if **both** conditions hold:
+> 1. `min_test_pnl` improved (higher than current best)
+> 2. `train_pnl_consistency` ≥ `−RISK_PER_TRADE × 2` (minimum monthly P&L is not catastrophically negative)
+>
+> If `min_test_pnl` improved but `train_pnl_consistency` is below the floor, log status `discard-inconsistent` and revert.
+
+The threshold `−RISK_PER_TRADE × 2` scales with position sizing, avoiding a hardcoded dollar amount.
+
+This is a `program.md`-only change. The `results.tsv` schema should add a `train_pnl_consistency` column (the value is already printed in `run.log`).
+
+---
+
+**Problem 6 — Ticker holdout disabled by default**
+
+`TICKER_HOLDOUT_FRAC = 0.0` is the code default, and the session setup instructions do not recommend a non-zero value. As a result, the holdout mechanism added in V3-D is never activated unless the operator explicitly enables it. This leaves the most obvious generalization guard unused by default.
+
+**Solution:** Update `program.md` session setup step 4b:
+
+> Set `TICKER_HOLDOUT_FRAC = 0.1` as the recommended starting value (hold out the alphabetically last 10% of tickers as a silent training-universe holdout). Only set to `0.0` if the ticker universe is small (< 20 tickers) or if `TEST_EXTRA_TICKERS` is in use.
+
+This is a `program.md`-only change. No code changes required.
+
+---
+
+**Files changed:**
+
+| File | Zone | Changes |
+|------|------|---------|
+| `train.py` | Mutable | Add `# ══ SESSION SETUP ══` and `# ══ STRATEGY TUNING ══` sub-section headers; add explicit "DO NOT raise to inflate P&L" comment to `RISK_PER_TRADE` |
+| `program.md` | — | (1) "only modify STRATEGY TUNING sub-section during experiments"; (2) early-stop on zero-trade plateau; (3) `train_pnl_consistency` floor in keep/discard; (4) `TICKER_HOLDOUT_FRAC = 0.1` recommended default; (5) add `train_pnl_consistency` column to `results.tsv` schema |
+
+**No immutable-zone changes** — no `GOLDEN_HASH` update required.
+
+**Backward compatibility:** All changes are additive comments or `program.md` instructions. Existing worktrees and cached data are unaffected.
+
+**Validation:**
+- `python -c "import train"` — no errors
+- Confirm `# ══ SESSION SETUP ══` and `# ══ STRATEGY TUNING ══` headers present in `train.py` mutable section
+- `program.md` contains "plateau", "discard-inconsistent", "TICKER_HOLDOUT_FRAC = 0.1"
+
+---
+
 ### V3 Compatibility Notes
 
-- V3-A, V3-B, V3-C, V3-E each touch the immutable zone → each requires a `GOLDEN_HASH` update in `tests/test_optimization.py`
-- **Sequence dependency:** V3-A → V3-B → V3-C → V3-D → V3-E. V3-E must follow V3-D (all prior harness changes present).
-- All V3 mutable-section constants are agent-tunable during optimization runs
+- V3-A, V3-B, V3-C, V3-E, V3-F each touch the immutable zone → each requires a `GOLDEN_HASH` update in `tests/test_optimization.py`
+- V3-G touches the mutable zone and `program.md` only → **no `GOLDEN_HASH` update required**
+- **Sequence dependency:** V3-A → V3-B → V3-C → V3-D → V3-E → V3-F → V3-G. V3-G must follow V3-F (all prior harness changes present).
+- After V3-G: only constants in the `# ══ STRATEGY TUNING ══` sub-section are valid agent optimization targets
 - The `strategies/` registry (V2 Enhancement 6) and `scripts/fetch_all_strategies.py` are unaffected by V3
 - **Out-of-scope items from V1 that V3 now addresses:** "Max concurrent positions cap" → R8; "Walk-forward validation" → R2; "Risk-per-trade sizing" → R3
 

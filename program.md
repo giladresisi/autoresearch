@@ -66,6 +66,33 @@ The following parameters can be specified in the user's query. If not specified,
         backtest calls/iteration, ~45–90 s per iteration.
       Leave at `3` only if the user explicitly specifies legacy configuration.
 
+    **V3-F — Test-extra tickers and cache path**:
+    - `TEST_EXTRA_TICKERS` — tickers included in fold TEST calls only, never in training.
+      These tickers must already be downloaded by `prepare.py` (add them to `TICKERS` in
+      `prepare.py` before running; after caching, leave them in `prepare.py`'s `TICKERS`
+      but also list them in `TEST_EXTRA_TICKERS` in `train.py`).
+      Default `[]` (no extra tickers — fold test universe equals training universe).
+      When using `TEST_EXTRA_TICKERS`, set `TICKER_HOLDOUT_FRAC = 0` to avoid overlap.
+
+    **Recommended default**: Set `TICKER_HOLDOUT_FRAC = 0.1` (hold out the alphabetically last 10% of tickers as a silent training-universe holdout). Only set to `0.0` if the ticker universe is small (< 20 tickers) or if `TEST_EXTRA_TICKERS` is in use.
+      Suggested extras (2 per sector, not in the default 85-ticker universe):
+        Tech: INTC, CSCO | Financials: TFC, USB | Healthcare: BMY, CVS
+        Energy: PSX, HES | Consumer Staples: MDLZ, SYY | Industrials: EMR, ITW
+        Consumer Discretionary: DG, YUM | Materials: DD, PKG
+    - `AUTORESEARCH_CACHE_DIR` — if two sessions need different date ranges for overlapping
+      tickers, set this env var to an alternate cache directory before running both
+      `prepare.py` and `train.py`:
+        ```bash
+        export AUTORESEARCH_CACHE_DIR=~/.cache/autoresearch/stock_data_alt
+        uv run prepare.py
+        uv run train.py
+        ```
+      Default (env var absent): `~/.cache/autoresearch/stock_data` (unchanged behavior).
+
+    **Mutable section structure**: `train.py`'s mutable section is divided into two sub-sections:
+    - `# ══ SESSION SETUP ══` — set these constants once at session start; do NOT change them during experiments. Changing them invalidates cross-experiment comparisons.
+    - `# ══ STRATEGY TUNING ══` — only the constants below this header are valid optimization targets. Do NOT modify SESSION SETUP constants (including `RISK_PER_TRADE`) to inflate reported P&L.
+
 5. **Download data**: Run `uv run prepare.py`. Wait for it to complete. If it fails, report the error to the user and stop. Data is cached in `~/.cache/autoresearch/stock_data/` as `.parquet` files — one per ticker.
 
 6. **Read the in-scope files**: `README.md`, `train.py` (the file you modify in experiments).
@@ -118,7 +145,8 @@ The following parameters can be specified in the user's query. If not specified,
 - Modify anything below the `# DO NOT EDIT BELOW THIS LINE` comment in `train.py` — `run_backtest()`, `print_results()`, data loading functions, and the `__main__` block are the evaluation harness. Fixed. Must not be touched.
 - Modify `print_results()` or the output format block — the agent parses this output; changing it breaks the loop.
 - Modify `load_ticker_data()` or `load_all_ticker_data()` — fixed data loading infrastructure.
-- Modify `CACHE_DIR` in `train.py` — fixed cache path.
+- Modify `CACHE_DIR` in `train.py` — determined at startup from env var; do NOT modify in code.
+- Modify `TEST_EXTRA_TICKERS` — set at session setup; do NOT change during the loop.
 - Modify `prepare.py` beyond the three USER CONFIGURATION variables (`TICKERS`, `BACKTEST_START`, `BACKTEST_END`).
 - Modify the Sharpe computation formula inside `run_backtest()`.
 - Install new packages or add dependencies beyond what's in `pyproject.toml`.
@@ -127,7 +155,7 @@ The following parameters can be specified in the user's query. If not specified,
 ### Goal
 
 Maximize `min_test_pnl` — **higher minimum test P&L across all walk-forward folds is better**.
-Keep any change that increases `min_test_pnl`; discard any change that does not.
+Keep any change that increases `min_test_pnl` **and** satisfies the `train_pnl_consistency` floor (see step 8); discard any change that does not meet both conditions.
 
 `fold{N}_train_*` metrics are still computed and printed — use them as diagnostics,
 but they do not drive the keep/discard decision.
@@ -233,9 +261,10 @@ Column definitions:
 7. `win_rate`: most recent fold's train win rate
 8. `train_calmar`: most recent fold's train Calmar ratio (diagnostic)
 9. `train_pnl_consistency`: most recent fold's train min monthly P&L (diagnostic)
-10. `status`: `keep`, `discard`, `crash`, or `discard-fragile`
+10. `status`: `keep`, `discard`, `crash`, `discard-fragile`, or `discard-inconsistent`
     - `discard-fragile`: nominal `min_test_pnl > 0` but at least one fold's `pnl_min < 0` (strategy
       collapses with small fill deviations); revert just like `discard`.
+    - `discard-inconsistent`: `min_test_pnl` improved but `train_pnl_consistency < −RISK_PER_TRADE × 2` (monthly P&L floor violated); revert just like `discard`.
 11. `description`: short experiment description
 
 Example:
@@ -264,7 +293,11 @@ e5f6g7h	8.00	300.00	30.00	2.100000	12	0.583	3.0000	50.00	discard-fragile	fragile
 5. Extract results: `grep "^min_test_pnl:" run.log` and `grep "^fold${WALK_FORWARD_WINDOWS}_train_total_trades:" run.log`.
 6. If grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python traceback and attempt a fix. If you cannot fix it within a few attempts, give up: log status `crash`, run `git reset --hard HEAD~1`, and move on.
 7. Record the result in `results.tsv`.
-8. If `min_test_pnl` **improved (higher)** compared to the current best → keep the commit, advance the branch.
+8. Keep a change only if **both** conditions hold:
+   1. `min_test_pnl` improved (higher than current best)
+   2. `train_pnl_consistency` ≥ `−RISK_PER_TRADE × 2` (minimum monthly P&L is not catastrophically negative — e.g. ≥ −$100 when `RISK_PER_TRADE = 50.0`)
+
+   If condition 1 passes but condition 2 fails → log status `discard-inconsistent` and revert (`git reset --hard HEAD~1`).
 
 > **Note:** `silent_pnl` is hidden during the loop (`HIDDEN`). Do NOT attempt to infer or
 > act on the hidden holdout result. The sole keep/discard criterion is `min_test_pnl`.
@@ -272,6 +305,13 @@ e5f6g7h	8.00	300.00	30.00	2.100000	12	0.583	3.0000	50.00	discard-fragile	fragile
 
 If `ROBUSTNESS_SEEDS > 0`: also check whether any fold's `pnl_min:` line is negative while
 `min_test_pnl > 0`. If so, log status `discard-fragile` and revert (`git reset --hard HEAD~1`).
+
+**Zero-trade plateau rule**: If `train_total_trades: 0` (or `fold{N}_train_total_trades: 0`) appears for 3 or more **consecutive** iterations:
+- Stop tightening screener thresholds in the current direction.
+- Relax the most recently tightened threshold back to its prior value.
+- Try a different modification (different indicator, different constant).
+
+If 10 consecutive iterations all produce zero trades → log status `plateau`, run `git reset --hard HEAD~1` to revert to the last non-zero baseline, and notify the user that the screener has been over-constrained.
 To diagnose which trades are fragile, read `trades.tsv` — the first line is a comment
 `# pnl_min: $X.XX` showing the worst-case train-fold P&L under perturbation.
 

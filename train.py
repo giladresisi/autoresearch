@@ -1,15 +1,23 @@
 """
 train.py — Stock strategy screener, position manager, and backtester.
 Rewrite screener criteria, position manager logic, and entry/exit rules to optimize Sharpe ratio.
-Do NOT modify: CACHE_DIR, load_ticker_data(), Sharpe computation, or the output block format.
+Do NOT modify: CACHE_DIR (env-var driven; set AUTORESEARCH_CACHE_DIR instead), load_ticker_data(), Sharpe computation, or the output block format.
 """
 import os, sys
 from datetime import date
 import numpy as np
 import pandas as pd
 
-# Directory where prepare.py writes {ticker}.parquet files
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "stock_data")
+# Cache directory for parquet files. Override with AUTORESEARCH_CACHE_DIR env var
+# to maintain independent datasets for different sessions or date ranges.
+CACHE_DIR = os.environ.get(
+    "AUTORESEARCH_CACHE_DIR",
+    os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "stock_data"),
+)
+
+# ══ SESSION SETUP — set once at session start; DO NOT change during experiments ══════
+# These constants define the evaluation framework. Changing them mid-session
+# invalidates comparisons across experiments.
 
 # Backtest window — matches prepare.py; edit here to change the simulation period
 BACKTEST_START = "2025-12-20"
@@ -45,8 +53,25 @@ FOLD_TRAIN_DAYS = 0
 # Set by the agent at session setup. Do NOT change during the loop.
 SILENT_END = "2026-02-20"   # example; agent computes this at setup
 
-# Risk-proportional sizing: dollar risk per trade (V3-A R3)
+# Risk-proportional sizing: dollar risk per trade (V3-A R3). DO NOT raise to inflate P&L.
 RISK_PER_TRADE = 50.0
+
+# R6: Ticker holdout — fraction of tickers withheld from all training folds
+# Set to 0.0 to disable; 0.2 = hold out the last-sorted 20% of the universe.
+# Holdout evaluation uses BACKTEST_START..TRAIN_END (same window as training folds).
+TICKER_HOLDOUT_FRAC = 0.0
+
+# Tickers included in walk-forward TEST folds only — never in training.
+# Used to measure out-of-universe generalization: min_test_pnl must hold on
+# tickers the agent has never directly optimized for.
+# These tickers must be downloaded by prepare.py before running.
+# Set at session setup. Do NOT change during the loop.
+# When using TEST_EXTRA_TICKERS, set TICKER_HOLDOUT_FRAC = 0 to avoid
+# overlap between the two mechanisms.
+TEST_EXTRA_TICKERS: list = []
+
+# ══ STRATEGY TUNING — agent may modify these freely during experiments ════════════════
+# Only the constants below this line are valid optimization targets.
 
 # R8: Position concentration controls
 MAX_SIMULTANEOUS_POSITIONS = 5     # cap on open positions at any time (set to large int to disable)
@@ -54,11 +79,6 @@ CORRELATION_PENALTY_WEIGHT = 0.0   # penalty factor for correlated portfolios (0
 
 # R9: Robustness perturbation (price/stop jitter)
 ROBUSTNESS_SEEDS = 0               # 0 = off; 5 = recommended (runs 4 perturbed seeds + nominal)
-
-# R6: Ticker holdout — fraction of tickers withheld from all training folds
-# Set to 0.0 to disable; 0.2 = hold out the last-sorted 20% of the universe.
-# Holdout evaluation uses BACKTEST_START..TRAIN_END (same window as training folds).
-TICKER_HOLDOUT_FRAC = 0.0
 
 
 def load_ticker_data(ticker: str) -> pd.DataFrame | None:
@@ -708,6 +728,10 @@ if __name__ == "__main__":
     if not _train_ticker_dfs:
         _train_ticker_dfs = ticker_dfs  # safety: if holdout fraction is too large, fall back
 
+    # V3-F: Test-extra tickers — included in fold test calls only, never in training.
+    _extra_ticker_dfs = {t: ticker_dfs[t] for t in TEST_EXTRA_TICKERS if t in ticker_dfs}
+    _test_ticker_dfs  = {**_train_ticker_dfs, **_extra_ticker_dfs}
+
     # R2: Walk-forward CV — N folds with FOLD_TEST_DAYS-business-day test windows (V3-E)
     # stepping back from TRAIN_END.
     import pandas as _pd
@@ -738,7 +762,7 @@ if __name__ == "__main__":
         else:
             _fold_train_start = BACKTEST_START
         _fold_train_stats = run_backtest(_train_ticker_dfs, start=_fold_train_start, end=_fold_train_end)
-        _fold_test_stats  = run_backtest(_train_ticker_dfs, start=_fold_test_start, end=_fold_test_end)
+        _fold_test_stats  = run_backtest(_test_ticker_dfs,  start=_fold_test_start, end=_fold_test_end)
 
         print_results(_fold_train_stats, prefix=f"fold{_fold_n}_train_")
         print_results(_fold_test_stats,  prefix=f"fold{_fold_n}_test_")
