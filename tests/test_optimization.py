@@ -115,7 +115,7 @@ def test_harness_below_do_not_edit_is_unchanged():
     # Golden hash of the harness at the time the DO NOT EDIT boundary was set.
     # To recompute: python -c "import hashlib; s=open('train.py').read();
     #   m='# ── DO NOT EDIT BELOW THIS LINE'; print(hashlib.sha256(s.partition(m)[2].encode()).hexdigest())"
-    GOLDEN_HASH = "912907497f6da52e3f4907a43a0f176a4b71784194f9ebfab5faae133fd20ea9"
+    GOLDEN_HASH = "f81f0a5124e083eb297dd3854a0d3f4b199aad8e679861a9e4e73e6008a62f78"
 
     _, _, below = _split_train_source()
     actual_hash = hashlib.sha256(below.encode("utf-8")).hexdigest()

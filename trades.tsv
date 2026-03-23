@@ -1,7 +1,4 @@
 ticker	entry_date	exit_date	days_held	stop_type	regime	entry_price	exit_price	pnl
-LOW	2026-01-09	2026-01-28	19	pivot	bull	259.98	268.18	9.58
-LMT	2026-01-06	2026-02-04	29	pivot	bull	522.162	612.11	51.19
-RTX	2026-01-07	2026-02-04	28	pivot	bull	191.95	198.48	7.73
-XOM	2026-01-05	2026-02-05	31	pivot	bull	125.24	158.26	94.5
-AMAT	2026-01-15	2026-02-05	21	pivot	bull	325.38	340.74	9.45
-FCX	2026-01-29	2026-02-05	7	pivot	bull	69.42	52.48	-43.53
+XOM	2026-01-05	2026-01-06	1	pivot	bull	125.24	125.47	0.66
+LMT	2026-01-06	2026-01-07	1	pivot	bull	522.162	525.31	1.79
+RTX	2026-01-07	2026-01-08	1	pivot	bull	191.95	203.33	13.47

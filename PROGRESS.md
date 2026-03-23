@@ -1,5 +1,37 @@
 # PROGRESS
 
+## Feature: V4-B Harness Metric Improvements and Position Management Refinements
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-24
+**Plan File**: .agents/plans/v4-b-harness-metrics.md
+
+### Core Validation
+R16: `WALK_FORWARD_WINDOWS=7`, `FOLD_TEST_DAYS=40` in mutable zone. R13: trailing stop tightened 1.5× → 1.2× ATR in `manage_position()`. R15: early stall exit added — if `cal_days_held <= 5` and `price_10am < entry + 0.5×ATR`, stop raised to `max(current_stop, price_10am)`. R11: `avg_win_loss_ratio` computed in `run_backtest()`, emitted in `print_results()`, `discard-fragile` rule added to `program.md`. R2: `min_test_pnl` fold guard excludes folds with < 3 test trades; `min_test_pnl_folds_included` printed. R14: partial close at +1.0R appends `exit_type='partial'` record, halves `position['shares']`, fires exactly once. R4: `results.tsv` header expanded to 13 columns. GOLDEN_HASH updated for R2 + R11 + R14 immutable zone changes.
+
+### Test Status
+- Automated: ✅ 139 passed, 0 failures, 0 new regressions
+- Baseline: 114 passed, 3 pre-existing failures (test_program_md.py)
+- New tests: 20 (14 in test_v4_b.py + 6 in test_backtester.py)
+- Pre-existing failures fixed: 3
+
+### Notes
+- `test_run_backtest_win_loss_ratio_positive_formula` tests the formula directly (not via full backtest run) — simpler and equivalent for pure arithmetic
+- All R2 tests use `train.WALK_FORWARD_WINDOWS` dynamically; no hardcoded fold counts
+- R7 (sector concentration guard) not implemented — marked optional/low priority in PRD
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/v4-b-harness-metrics.md`
+- Detailed implementation summary
+- Divergences and resolutions (extra tests, formula-direct test, pre-existing fixes)
+- Test results and metrics
+- 20/20 new tests pass, 0 new regressions
+
+---
+
+---
+
 ## Feature: V4-A Strategy Quality and Loop Control
 
 **Status**: ✅ Complete

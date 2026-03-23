@@ -499,3 +499,262 @@ def test_screen_day_returns_stop_type_field():
         assert result["stop_type"] in ("pivot", "fallback"), (
             f"stop_type must be 'pivot' or 'fallback', got {result['stop_type']!r}"
         )
+
+
+# ── V4-B tests ──────────────────────────────────────────────────────────────────
+
+def test_manage_position_trail_uses_1_2_atr_not_1_5():
+    """
+    R13: trailing stop coefficient is 1.2× ATR (not 1.5×).
+    recent_high=110 >= entry(100) + 2.0×ATR(4) = 108 → trail activates.
+    Expected stop: 110 - 1.2×4 = 105.2  (old 1.5× would give 104.0).
+    R15 does not fire because cal_days_held = 29 > 5.
+    """
+    n = 30
+    # Build df with price_10am=110 for all rows so recent_high=110
+    # Use atr_spread=2.0 to get ATR14≈4.0
+    dates = [date(2025, 1, 2) + timedelta(days=i) for i in range(n)]
+    price = 110.0
+    atr_spread = 2.0
+    highs  = np.full(n, price + atr_spread)
+    lows   = np.full(n, price - atr_spread)
+    closes = np.full(n, price)
+    # Last row: price_10am backed off to 104 so it doesn't trigger breakeven at 100+1.5*4=106
+    price_10am_vals = np.full(n, 110.0)
+    price_10am_vals[-1] = 104.0
+    df = pd.DataFrame({
+        'open': closes, 'high': highs, 'low': lows, 'close': closes,
+        'volume': np.full(n, 1_000_000.0),
+        'price_10am': price_10am_vals,
+    }, index=pd.Index(dates, name='date'))
+
+    # entry_date = df.index[0] → cal_days_held = 29 > 5, R15 does NOT fire
+    pos = {'entry_price': 100.0, 'stop_price': 90.0, 'shares': 5.0,
+           'ticker': 'X', 'entry_date': dates[0]}
+    result = manage_position(pos, df)
+
+    expected_1_2 = round(110.0 - 1.2 * 4.0, 2)   # 105.2
+    wrong_1_5    = round(110.0 - 1.5 * 4.0, 2)    # 104.0
+    assert abs(result - expected_1_2) < 0.01, (
+        f"Expected trail stop ~{expected_1_2} (1.2× ATR), got {result}. "
+        f"Old 1.5× coefficient would give {wrong_1_5}."
+    )
+    assert abs(result - wrong_1_5) > 0.5, (
+        f"Got {result} which is too close to the old 1.5× value {wrong_1_5}."
+    )
+
+
+def test_run_backtest_partial_close_fires_at_1r():
+    """
+    R14: when price_10am reaches entry + atr14, a partial close record with
+    exit_type='partial' must appear in trade_records.
+
+    Note: run_backtest adds 0.03 slippage to entry_price, so the actual portfolio
+    entry_price is signal['entry_price'] + 0.03 = 100.03. The partial close fires
+    when price_10am >= portfolio_entry + atr14 = 105.03. We set price_10am to 106.0
+    on days after entry to ensure the condition is met.
+    """
+    import unittest.mock as mock
+    import train as tr
+
+    signal_date = date(2026, 1, 10)
+    entry_price = 100.0
+    atr14       = 5.0
+    stop        = 90.0
+    # Partial fires when price_10am >= (entry_price + 0.03) + atr14 = 105.03
+    partial_trigger_price = entry_price + atr14 + 0.10   # 105.10 > 105.03
+
+    # Build a df spanning signal_date + 10 more days
+    n = 15
+    days = [signal_date - timedelta(days=(n - 1 - i)) for i in range(n)]
+    base = np.full(n, entry_price)
+    price_10am_vals = base.copy()
+    entry_idx = n - 6   # signal fires on this index
+    # Day after entry: price_10am >= entry + atr14 + slippage
+    price_10am_vals[entry_idx + 1:] = partial_trigger_price
+
+    df = pd.DataFrame({
+        'open':       base,
+        'high':       base * 1.01,
+        'low':        base * 0.99,
+        'close':      base,
+        'volume':     np.full(n, 1_000_000.0),
+        'price_10am': price_10am_vals,
+    }, index=pd.Index(days, name='date'))
+
+    fake_signal = {
+        'entry_price': entry_price,
+        'stop':        stop,
+        'atr14':       atr14,
+        'stop_type':   'pivot',
+    }
+
+    call_count = [0]
+    def side_effect_screen(d, today):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return fake_signal
+        return None
+
+    with mock.patch.object(tr, 'screen_day', side_effect=side_effect_screen), \
+         mock.patch.object(tr, 'manage_position', lambda pos, df: pos['stop_price']):
+        stats = tr.run_backtest({'X': df},
+                                start=str(days[entry_idx]),
+                                end=str(days[-1] + timedelta(days=1)))
+
+    partial_records = [r for r in stats['trade_records'] if r.get('exit_type') == 'partial']
+    assert len(partial_records) >= 1, (
+        f"Expected at least one 'partial' exit_type record, got: {stats['trade_records']}"
+    )
+
+
+def test_run_backtest_partial_close_fires_only_once():
+    """
+    R14: partial close must fire exactly once even when price stays above entry+atr14
+    for multiple consecutive days.
+
+    Note: run_backtest adds 0.03 slippage, so partial triggers when
+    price_10am >= (entry_price + 0.03) + atr14 = 105.03. We use 105.10 > 105.03.
+    """
+    import unittest.mock as mock
+    import train as tr
+
+    signal_date = date(2026, 1, 10)
+    entry_price = 100.0
+    atr14       = 5.0
+    stop        = 90.0
+    partial_trigger_price = entry_price + atr14 + 0.10   # 105.10 > 105.03
+
+    n = 20
+    days = [signal_date - timedelta(days=(n - 1 - i)) for i in range(n)]
+    base = np.full(n, entry_price)
+    price_10am_vals = base.copy()
+    entry_idx = n - 10
+    # Price stays above the partial trigger for many days after entry
+    price_10am_vals[entry_idx + 1:] = partial_trigger_price
+
+    df = pd.DataFrame({
+        'open':       base,
+        'high':       base * 1.01,
+        'low':        base * 0.99,
+        'close':      base,
+        'volume':     np.full(n, 1_000_000.0),
+        'price_10am': price_10am_vals,
+    }, index=pd.Index(days, name='date'))
+
+    fake_signal = {
+        'entry_price': entry_price,
+        'stop':        stop,
+        'atr14':       atr14,
+        'stop_type':   'pivot',
+    }
+
+    call_count = [0]
+    def side_effect_screen(d, today):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return fake_signal
+        return None
+
+    with mock.patch.object(tr, 'screen_day', side_effect=side_effect_screen), \
+         mock.patch.object(tr, 'manage_position', lambda pos, df: pos['stop_price']):
+        stats = tr.run_backtest({'X': df},
+                                start=str(days[entry_idx]),
+                                end=str(days[-1] + timedelta(days=1)))
+
+    partial_records = [r for r in stats['trade_records'] if r.get('exit_type') == 'partial']
+    assert len(partial_records) == 1, (
+        f"Expected exactly 1 partial close, got {len(partial_records)}: {partial_records}"
+    )
+
+
+def test_manage_position_early_stall_exit_within_5_days():
+    """
+    R15: when cal_days_held <= 5 and price_10am < entry + 0.5*ATR,
+    manage_position must return max(current_stop, price_10am).
+    Uses n=30 rows for valid ATR14, but entry_date set near the end so cal_days=4.
+    """
+    n = 30
+    price = 101.0
+    atr_spread = 2.0   # ATR14 ≈ 4.0
+    dates = [date(2025, 1, 2) + timedelta(days=i) for i in range(n)]
+    highs  = np.full(n, price + atr_spread)
+    lows   = np.full(n, price - atr_spread)
+    closes = np.full(n, price)
+    df = pd.DataFrame({
+        'open': closes, 'high': highs, 'low': lows, 'close': closes,
+        'volume': np.full(n, 1_000_000.0),
+        'price_10am': np.full(n, price),
+    }, index=pd.Index(dates, name='date'))
+
+    # entry_date set 4 calendar days before df.index[-1] → cal_days_held = 4 ≤ 5
+    entry_date = dates[-1] - timedelta(days=4)
+    pos = {'entry_price': 100.0, 'stop_price': 90.0, 'shares': 5.0,
+           'ticker': 'X', 'entry_date': entry_date}
+
+    # Verify preconditions: ATR≈4, threshold=100+0.5*4=102, price_10am=101 < 102
+    result = manage_position(pos, df)
+    # R15 fires: max(90, 101) = 101.0
+    assert abs(result - 101.0) < 0.01, (
+        f"Expected R15 to raise stop to price_10am=101.0, got {result}"
+    )
+
+
+def test_manage_position_no_early_stall_after_5_days():
+    """
+    R15: when cal_days_held > 5, the early stall exit must NOT fire.
+    With price_10am=101 < breakeven(106) and recent_high(101) < trail activation(108),
+    stop should remain at 90.0.
+    """
+    n = 30
+    price = 101.0
+    atr_spread = 2.0   # ATR14 ≈ 4.0
+    dates = [date(2025, 1, 2) + timedelta(days=i) for i in range(n)]
+    highs  = np.full(n, price + atr_spread)
+    lows   = np.full(n, price - atr_spread)
+    closes = np.full(n, price)
+    df = pd.DataFrame({
+        'open': closes, 'high': highs, 'low': lows, 'close': closes,
+        'volume': np.full(n, 1_000_000.0),
+        'price_10am': np.full(n, price),
+    }, index=pd.Index(dates, name='date'))
+
+    # entry_date = df.index[0] → cal_days_held = 29 > 5, R15 does NOT fire
+    # R10: bdays_held = ~21 ≤ 30 → R10 does NOT fire
+    # Breakeven: 101 < 100 + 1.5*4 = 106 → no breakeven
+    # Trail: recent_high=101 < 100 + 2.0*4 = 108 → trail does NOT activate
+    pos = {'entry_price': 100.0, 'stop_price': 90.0, 'shares': 5.0,
+           'ticker': 'X', 'entry_date': dates[0]}
+    result = manage_position(pos, df)
+    assert abs(result - 90.0) < 0.01, (
+        f"Expected stop unchanged at 90.0 (no R15/R10/breakeven/trail triggers), got {result}"
+    )
+
+
+def test_manage_position_early_stall_not_fired_when_price_strong():
+    """
+    R15: when cal_days_held <= 5 but price_10am >= entry + 0.5*ATR,
+    the early stall condition is NOT met and stop should remain at 90.0.
+    """
+    n = 30
+    price = 103.0
+    atr_spread = 2.0   # ATR14 ≈ 4.0; threshold = 100 + 0.5*4 = 102
+    dates = [date(2025, 1, 2) + timedelta(days=i) for i in range(n)]
+    highs  = np.full(n, price + atr_spread)
+    lows   = np.full(n, price - atr_spread)
+    closes = np.full(n, price)
+    df = pd.DataFrame({
+        'open': closes, 'high': highs, 'low': lows, 'close': closes,
+        'volume': np.full(n, 1_000_000.0),
+        'price_10am': np.full(n, price),
+    }, index=pd.Index(dates, name='date'))
+
+    # entry_date set 4 calendar days before df.index[-1] → cal_days_held = 4 ≤ 5
+    # But price_10am=103 >= 102 → R15 condition NOT met
+    entry_date = dates[-1] - timedelta(days=4)
+    pos = {'entry_price': 100.0, 'stop_price': 90.0, 'shares': 5.0,
+           'ticker': 'X', 'entry_date': entry_date}
+    result = manage_position(pos, df)
+    assert abs(result - 90.0) < 0.01, (
+        f"Expected stop unchanged at 90.0 (price strong, R15 should not fire), got {result}"
+    )

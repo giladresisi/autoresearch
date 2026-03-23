@@ -1408,13 +1408,13 @@ V4-A has no GOLDEN_HASH dependency (all changes are above the `DO NOT EDIT` boun
 
 ---
 
-#### V4-B: Harness Metric Improvements (R2, R4, R11, R7)
+#### V4-B: Harness Metric Improvements + Position Management Refinements (R2, R4, R11, R7, R13, R14, R15)
 
-**Goal:** Fix what the optimization loop measures and tracks. The fold-floor deadlock (R2), the absence of per-trade quality metrics (R4, R11), and the unguarded sector concentration (R7) all silently accept bad strategy states that a well-instrumented harness would catch automatically.
+**Goal:** Fix what the optimization loop measures and tracks (R2, R4, R11, R7), and apply three position management refinements discovered from multisector-mar23 trade analysis (R13, R14, R15). The fold-floor deadlock (R2), the absence of per-trade quality metrics (R4, R11), and the unguarded sector concentration (R7) all silently accept bad strategy states. R13–R15 tighten exit mechanics to capture more of each winner and limit early stalls.
 
 **Pre-requisite:** V4-A complete.
 
-**Why group these together:** All touch the immutable zone (`run_backtest()`, `print_results()`, or `__main__`). One GOLDEN_HASH update covers all four. R4 and R11 are additive output changes; R2 is a guard condition; R7 is an optional concentration cap — low risk to combine.
+**Why group these together:** R2, R4, R11, R7 all touch the immutable zone (`run_backtest()`, `print_results()`, or `__main__`) and require one GOLDEN_HASH update. R13, R14, R15 are purely mutable zone (`manage_position()`) — no GOLDEN_HASH impact — but are small enough to include in the same execution run. R13 and R15 are one-line changes; R14 is the most complex (partial position close requires harness coordination, see note below).
 
 | Rec | Description | Change |
 |-----|-------------|--------|
@@ -1422,14 +1422,18 @@ V4-A has no GOLDEN_HASH dependency (all changes are above the `DO NOT EDIT` boun
 | R4 | Add avg_pnl_per_trade and win_rate to output | In `print_results()`: emit `train_avg_pnl_per_trade:` and `train_win_rate:` lines. Add both as columns to `results.tsv`. These are already computable from existing `run_backtest()` return values; no backtest logic changes required. |
 | R11 | Track win/loss dollar ratio | In `run_backtest()`: compute `avg_win_loss_ratio = mean(winning_trade_pnls) / abs(mean(losing_trade_pnls))`; return in stats dict. In `print_results()`: emit `train_win_loss_ratio:`. Add to `results.tsv`. In `program.md`: add a soft guard — if `avg_win_loss_ratio < 0.5` and `train_pnl_consistency < floor`, flag as `discard-fragile`. |
 | R7 | Sector concentration guard *(optional, low priority)* | In `run_backtest()`: add `MAX_POSITIONS_PER_SECTOR` constant (default: large int = disabled). Before opening a new position, count open positions in the same GICS sector; skip entry if count ≥ cap. Sector is read from a `sector` field in the `screen_day()` signal dict, which is derived from the ticker's parquet metadata or a static lookup. |
+| R13 | Tighten trailing stop distance 1.5× → 1.2× ATR | In `manage_position()`: change `round(recent_high - 1.5 * atr, 2)` to `round(recent_high - 1.2 * atr, 2)`. Simulation across 27 winning trades in multisector-mar23 shows zero early exits at 1.2×; the only winner clipped at 1.0× is APP Sep 2025 by $10.49, making 1.2× the safe floor. Locks in ~$3 more per exit on a $500 stock with $10 ATR without cutting any meaningful winners. |
+| R14 | Partial profit taking at +1R *(moderate complexity)* | In `manage_position()` and `run_backtest()`: when `price_10am >= entry_price + 1.0 * atr` for the first time, close 50% of the position at current price and halve `position['shares']`. The remaining half continues with the trailing stop. Converts the all-or-nothing payoff structure (avg win $21 vs avg loss $49) into a two-part payoff with a $25 floor on the first partial. **Note:** requires `run_backtest()` to support partial closes — record a partial trade exit row at the half-close price and continue tracking the remainder. If partial closes are not feasible, implement as a tighter profit target (exit 100% at +1.5R) instead. |
+| R15 | Early stall exit — no momentum after 5 days | In `manage_position()`, before the trailing stop logic: if `(current_date - entry_date).days <= 5` and `price_10am < entry_price + 0.5 * atr`, return a tightened stop at `price_10am` (or `entry_price - 0.3 * atr`) to force exit the next day. Targets the worst bucket (6–14 day, 5W/5L, −$162 net): SCHW 7d, UNH Oct 6d, RTX 0d, ORCL 1d were all stalling at day 5. Trades that move immediately (TSLA 8d, MSTR 2d, GOOGL 8d) clear the 0.5 ATR threshold within days 1–3 and are unaffected. Test with 3-day and 5-day windows and 0.3/0.5 ATR thresholds. |
 
 **Files changed:**
 
 | File | Zone | Changes |
 |------|------|---------|
-| `train.py` | Mutable | R7 (if implemented): `MAX_POSITIONS_PER_SECTOR` constant |
-| `train.py` | Immutable | R2: fold exclusion guard in `__main__`; R4: new print lines + stats dict fields; R11: win/loss ratio computation + print line; R7: sector cap check in position-open logic |
+| `train.py` | Mutable | R7 (if implemented): `MAX_POSITIONS_PER_SECTOR` constant; R13: trail distance 1.5×→1.2× in `manage_position()`; R14: partial-exit logic in `manage_position()`; R15: early stall guard in `manage_position()` |
+| `train.py` | Immutable | R2: fold exclusion guard in `__main__`; R4: new print lines + stats dict fields; R11: win/loss ratio computation + print line; R7: sector cap check in position-open logic; R14 (if partial closes needed): partial trade recording in `run_backtest()` |
 | `program.md` | — | R4: update results.tsv schema; R11: `discard-fragile` condition; R2: note on `min_test_pnl_folds_included` interpretation |
+| `tests/test_backtester.py` | — | R13/R15: update `manage_position` tests for new stop distances; R14: new partial-close tests |
 | `tests/test_optimization.py` | — | Update `GOLDEN_HASH` |
 
 **Validation:**
@@ -1437,6 +1441,9 @@ V4-A has no GOLDEN_HASH dependency (all changes are above the `DO NOT EDIT` boun
 - `train_avg_pnl_per_trade:` and `train_win_rate:` appear in run output and are parseable floats
 - `train_win_loss_ratio:` appears in run output; value is positive
 - All new columns present in `results.tsv` header
+- R13: `manage_position()` returns `recent_high - 1.2 * atr` (not 1.5) once trailing is active
+- R15: `manage_position()` returns a tightened stop when `days_held <= 5` and `price_10am < entry_price + 0.5 * atr`
+- R14: partial trade row recorded in `trades.tsv` when price reaches +1R
 - GOLDEN_HASH test passes after update
 - Full test suite passes
 
@@ -1478,7 +1485,7 @@ V4-A has no GOLDEN_HASH dependency (all changes are above the `DO NOT EDIT` boun
 ### V4 Compatibility Notes
 
 - **V4-A has no GOLDEN_HASH dependency** — all changes are in `screen_day()`, `manage_position()`, `prepare.py`, or `program.md`. The immutable zone is untouched.
-- **V4-B requires one GOLDEN_HASH update** covering R2, R4, R11, and optionally R7. Do all four in a single commit.
+- **V4-B requires one GOLDEN_HASH update** covering R2, R4, R11, and optionally R7. R13, R14, R15 are mutable-zone changes bundled in the same run but do not affect the hash. Do all immutable-zone changes (R2, R4, R11, R7) in a single commit.
 - **V4-C requires a GOLDEN_HASH update** and changes `screen_day()`'s public signature. Run after Phase 1 validates the approach.
 - **Sequence dependency:** V4-A → V4-B → [Phase 1 from `after_baseline.md`] → V4-C. V4-A and V4-B are both prerequisites for Phase 1.
 - **R8 requires a data refresh:** after updating `prepare.py`, re-run `uv run prepare.py` for all tickers before the next optimization run. The `next_earnings_date` column will be absent from existing parquet files until this is done.

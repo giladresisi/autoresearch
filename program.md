@@ -55,19 +55,33 @@ The following parameters can be specified in the user's query. If not specified,
       Default `40` (≈2 calendar months, ~80–200 trades on 85 tickers; better coverage for the
       30–98 day hold durations observed in the multisector-mar23 run). Set to `10` for legacy
       V3-B/D behavior only.
-      Add the note: Reduce `WALK_FORWARD_WINDOWS` to 7 if the total date range cannot
-      accommodate 9 folds of 40 days each.
     - `FOLD_TRAIN_DAYS` — training window width in business days.
       `0` = expanding (train from `BACKTEST_START`; more training data per fold; simpler).
       `120` = 6-month rolling window (exposes successive folds to genuinely different market
       slices; recommended when maximizing regime diversity is the goal).
       Default `0` (expanding).
-    - `WALK_FORWARD_WINDOWS` — recommended values for the 19-month window (2024-09 → 2026-03):
+    - `WALK_FORWARD_WINDOWS` — production default is `7` for the 19-month window (2024-09 → 2026-03).
+      Reduce to `7` if the total date range cannot accommodate 9 folds of 40 days each.
+      Recommended values:
+      - `7` with `FOLD_TEST_DAYS=40, FOLD_TRAIN_DAYS=0` **(production default)**: 7 folds of test
+        coverage (~Apr 2025 → Mar 2026), ~14 backtest calls/iteration, ~25–50 s per iteration.
       - `9` with `FOLD_TEST_DAYS=40, FOLD_TRAIN_DAYS=0`: 9 months of test coverage (~Jun 2025
         → Mar 2026), ~18 backtest calls/iteration, ~30–60 s per iteration.
       - `13` with `FOLD_TEST_DAYS=40, FOLD_TRAIN_DAYS=120`: full 19-month coverage, ~26
         backtest calls/iteration, ~45–90 s per iteration.
       Leave at `3` only if the user explicitly specifies legacy configuration.
+
+    **Fold schedule (WALK_FORWARD_WINDOWS = 7, FOLD_TEST_DAYS = 40, BACKTEST_START = 2024-09):**
+
+    | Fold | Test window (approx)        | Fold 1 train |
+    |------|-----------------------------|--------------|
+    | 1    | Apr – Jun 2025              | Sep 2024 – Mar 2025 |
+    | 2    | Jun – Aug 2025              | Sep 2024 – May 2025 |
+    | 3    | Aug – Oct 2025              | Sep 2024 – Jul 2025 |
+    | 4    | Oct – Dec 2025              | Sep 2024 – Sep 2025 |
+    | 5    | Dec 2025 – Jan 2026         | Sep 2024 – Nov 2025 |
+    | 6    | Jan – Feb 2026              | Sep 2024 – Jan 2026 |
+    | 7    | Feb – Mar 2026              | Sep 2024 – Feb 2026 |
 
     **V3-F — Test-extra tickers and cache path**:
     - `TEST_EXTRA_TICKERS` — tickers included in fold TEST calls only, never in training.
@@ -180,7 +194,7 @@ Always run the strategy as-is (unmodified) as the very first run to establish th
 When the script completes successfully it prints N×2 fold blocks (N = `WALK_FORWARD_WINDOWS`),
 then a `min_test_pnl` summary, then a `silent_pnl` line.
 
-For `WALK_FORWARD_WINDOWS = 3`, the output is:
+For `WALK_FORWARD_WINDOWS = 7`, the output is:
 
 ```
 ---
@@ -203,10 +217,13 @@ fold1_test_backtest_end:         2026-01-23
 fold1_test_pnl_min:              18.00
 ...
 ---
-(fold2 and fold3 blocks follow the same pattern)
+(fold2 through fold7 blocks follow the same pattern)
 ---
 min_test_pnl:            -5.00
+min_test_pnl_folds_included: 7
 ```
+
+`min_test_pnl_folds_included: N` — number of folds with ≥ 3 test trades used to compute the minimum. If N < WALK_FORWARD_WINDOWS, at least one fold was sparse (< 3 trades) and excluded. If N = 0 (all folds sparse), the raw minimum is used. Treat the metric as less reliable when N ≤ 1.
 
 When `TICKER_HOLDOUT_FRAC > 0`, the following lines appear after `min_test_pnl:`:
 
@@ -230,17 +247,18 @@ Extract the key metrics from `run.log`:
 
 ```bash
 grep "^min_test_pnl:" run.log
-grep "^fold3_train_total_pnl:" run.log
-grep "^fold3_train_total_trades:" run.log
-grep "^fold3_train_win_rate:" run.log
-grep "^fold3_train_sharpe:" run.log
-grep "^fold3_train_calmar:" run.log
-grep "^fold3_train_pnl_consistency:" run.log
-grep "^fold3_train_pnl_min:" run.log
-grep "^fold3_test_pnl_min:" run.log
+grep "^fold7_train_total_pnl:" run.log
+grep "^fold7_train_total_trades:" run.log
+grep "^fold7_train_win_rate:" run.log
+grep "^fold7_train_sharpe:" run.log
+grep "^fold7_train_calmar:" run.log
+grep "^fold7_train_pnl_consistency:" run.log
+grep "^fold7_train_win_loss_ratio:" run.log
+grep "^fold7_train_pnl_min:" run.log
+grep "^fold7_test_pnl_min:" run.log
 ```
 
-Replace `fold3` with `fold${WALK_FORWARD_WINDOWS}` if you change `WALK_FORWARD_WINDOWS`.
+Replace `fold7` with `fold${WALK_FORWARD_WINDOWS}` if you change `WALK_FORWARD_WINDOWS`.
 
 Exit code 0 on success. Exit code 1 if the cache is empty (no parquet files found).
 
@@ -253,7 +271,7 @@ Log every run to `results.tsv` (tab-separated — NOT comma-separated; commas br
 Header row (tab-separated):
 
 ```
-commit	min_test_pnl	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	train_calmar	train_pnl_consistency	status	description
+commit	min_test_pnl	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	train_avg_pnl_per_trade	train_win_loss_ratio	train_calmar	train_pnl_consistency	status	description
 ```
 
 Column definitions:
@@ -264,23 +282,25 @@ Column definitions:
 5. `train_sharpe`: most recent fold's train Sharpe
 6. `total_trades`: most recent fold's train trade count
 7. `win_rate`: most recent fold's train win rate
-8. `train_calmar`: most recent fold's train Calmar ratio (diagnostic)
-9. `train_pnl_consistency`: most recent fold's train min monthly P&L (diagnostic)
-10. `status`: `keep`, `discard`, `crash`, `discard-fragile`, or `discard-inconsistent`
+8. `train_avg_pnl_per_trade`: most recent fold's average P&L per trade (diagnostic)
+9. `train_win_loss_ratio`: most recent fold's ratio of average winner to average loser size (diagnostic)
+10. `train_calmar`: most recent fold's train Calmar ratio (diagnostic)
+11. `train_pnl_consistency`: most recent fold's train min monthly P&L (diagnostic)
+12. `status`: `keep`, `discard`, `crash`, `discard-fragile`, or `discard-inconsistent`
     - `discard-fragile`: nominal `min_test_pnl > 0` but at least one fold's `pnl_min < 0` (strategy
       collapses with small fill deviations); revert just like `discard`.
     - `discard-inconsistent`: `min_test_pnl` improved but `train_pnl_consistency < −RISK_PER_TRADE × MAX_SIMULTANEOUS_POSITIONS × 10` (monthly P&L floor violated); revert just like `discard`.
-11. `description`: short experiment description
+13. `description`: short experiment description
 
 Example:
 
 ```
-commit	min_test_pnl	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	train_calmar	train_pnl_consistency	status	description
-a1b2c3d	0.00	0.00	0.00	0.000000	0	0.000	0.0000	0.00	keep	baseline (no trades, strict screener)
-b2c3d4e	15.60	221.40	25.00	1.234567	12	0.583	2.5000	30.00	keep	relaxed volume ratio to 1.2
-c3d4e5f	-5.00	180.00	8.00	0.872000	9	0.444	1.2000	15.00	discard	removed volume filter
-d4e5f6g	0.00	0.00	0.00	0.000000	0	0.000	0.0000	0.00	crash	divide-by-zero in custom indicator
-e5f6g7h	8.00	300.00	30.00	2.100000	12	0.583	3.0000	50.00	discard-fragile	fragile stops — pnl_min -12.00
+commit	min_test_pnl	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	train_avg_pnl_per_trade	train_win_loss_ratio	train_calmar	train_pnl_consistency	status	description
+a1b2c3d	0.00	0.00	0.00	0.000000	0	0.000	0.00	0.000	0.0000	0.00	keep	baseline (no trades, strict screener)
+b2c3d4e	15.60	221.40	25.00	1.234567	12	0.583	18.45	1.250	2.5000	30.00	keep	relaxed volume ratio to 1.2
+c3d4e5f	-5.00	180.00	8.00	0.872000	9	0.444	20.00	1.100	1.2000	15.00	discard	removed volume filter
+d4e5f6g	0.00	0.00	0.00	0.000000	0	0.000	0.00	0.000	0.0000	0.00	crash	divide-by-zero in custom indicator
+e5f6g7h	8.00	300.00	30.00	2.100000	12	0.583	25.00	1.350	3.0000	50.00	discard-fragile	fragile stops — pnl_min -12.00
 ```
 
 **Do NOT commit `results.tsv`** — it is intentionally untracked.
@@ -303,6 +323,8 @@ e5f6g7h	8.00	300.00	30.00	2.100000	12	0.583	3.0000	50.00	discard-fragile	fragile
    2. `train_pnl_consistency` ≥ `−RISK_PER_TRADE × MAX_SIMULTANEOUS_POSITIONS × 10` (minimum monthly P&L floor — e.g. ≥ −$2500 when `RISK_PER_TRADE=50`, `MAX_SIMULTANEOUS_POSITIONS=5` — scales with universe size and position cap)
 
    If condition 1 passes but condition 2 fails → log status `discard-inconsistent` and revert (`git reset --hard HEAD~1`).
+
+   If `train_win_loss_ratio < 0.5` **and** `train_pnl_consistency < floor`: log status `discard-fragile` and revert (`git reset --hard HEAD~1`). A ratio below 0.5 means average losers are more than 2× the size of average winners — the strategy is loss-amplifying and unlikely to hold out-of-sample. Grep: `grep "^fold${WALK_FORWARD_WINDOWS}_train_win_loss_ratio:" run.log`
 
 > **Note:** `silent_pnl` is hidden during the loop (`HIDDEN`). Do NOT attempt to infer or
 > act on the hidden holdout result. The sole keep/discard criterion is `min_test_pnl`.

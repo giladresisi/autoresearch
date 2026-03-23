@@ -33,12 +33,12 @@ TEST_START  = "2026-03-06"   # same date as TRAIN_END (test window starts here)
 WRITE_FINAL_OUTPUTS = False
 
 # Walk-forward evaluation: number of rolling test folds (V3-B R2)
-WALK_FORWARD_WINDOWS = 3
+WALK_FORWARD_WINDOWS = 7
 
 # Test window width in business days per fold.
 # 20 ≈ 1 calendar month → ~40–100 trades on 85 tickers; enough to distinguish skill from noise.
 # Set at session setup. Do NOT change during the loop.
-FOLD_TEST_DAYS = 20
+FOLD_TEST_DAYS = 40
 
 # Training window width in business days.
 # 0 = expanding: each fold trains from BACKTEST_START to its test window's start (all prior history).
@@ -320,7 +320,7 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
 def manage_position(position: dict, df: pd.DataFrame) -> float:
     """
     Breakeven once price_10am >= entry + 1.5 ATR.
-    Trail by 1.5 ATR below recent high once 2.0 ATR in profit.
+    Trail by 1.2 ATR below recent high once 2.0 ATR in profit.
     Never lower the stop.
     """
     current_stop = position['stop_price']
@@ -339,12 +339,18 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
     if _bdays_held > 30 and _unrealised_pnl < 0.3 * RISK_PER_TRADE:
         return max(current_stop, price_10am)  # force exit; never lower existing stop
 
+    # R15: Early stall exit — force exit if price stalls in first 5 calendar days.
+    # Targets the 6–14 day loss cluster where price never builds momentum.
+    _cal_days_held = (_today_date - position['entry_date']).days
+    if _cal_days_held <= 5 and price_10am < entry_price + 0.5 * atr:
+        return max(current_stop, price_10am)  # force exit; never lower existing stop
+
     # Breakeven trigger
     be_stop = entry_price if price_10am >= entry_price + 1.5 * atr else current_stop
 
-    # Trailing stop: trail 1.5 ATR below recent high once 2.0 ATR in profit (earlier activation)
+    # Trailing stop: trail 1.2 ATR below recent high once 2.0 ATR in profit (earlier activation)
     recent_high = float(df['price_10am'].dropna().iloc[-20:].max())
-    trail_stop = round(recent_high - 1.5 * atr, 2) if recent_high >= entry_price + 2.0 * atr else current_stop
+    trail_stop = round(recent_high - 1.2 * atr, 2) if recent_high >= entry_price + 2.0 * atr else current_stop
 
     return max(current_stop, be_stop, trail_stop)
 
@@ -436,7 +442,7 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
                 "ticker_pnl": {}, "backtest_start": start or BACKTEST_START,
                 "backtest_end": end or BACKTEST_END, "trade_records": [],
                 "max_drawdown": 0.0, "calmar": 0.0, "pnl_consistency": 0.0, "pnl_min": 0.0,
-                "regime_stats": {}}
+                "avg_win_loss_ratio": 0.0, "regime_stats": {}}
 
     portfolio: dict = {}   # ticker -> position dict
     trades: list = []      # list of pnl floats per closed trade
@@ -480,6 +486,35 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         # 2. Manage existing positions (before screening, so new entries are excluded)
         for ticker, pos in portfolio.items():
             df = ticker_dfs[ticker]
+            if today in df.index:
+                price_10am = float(df.loc[today, "price_10am"])
+            else:
+                price_10am = pos["entry_price"]
+
+            # R14: Partial close at +1 ATR — close 50% of position on first up-move of +1 ATR.
+            if not pos.get("partial_taken", False):
+                _atr_entry = pos.get("atr14", 0.0)
+                if _atr_entry > 0 and price_10am >= pos["entry_price"] + _atr_entry:
+                    _close_shares = pos["shares"] * 0.5
+                    _partial_pnl  = round(_close_shares * (price_10am - pos["entry_price"]), 2)
+                    trades.append(_partial_pnl)
+                    cumulative_realized += _partial_pnl
+                    ticker_pnl[ticker] = ticker_pnl.get(ticker, 0.0) + _partial_pnl
+                    trade_records.append({
+                        "ticker":      ticker,
+                        "entry_date":  str(pos["entry_date"]),
+                        "exit_date":   str(today),
+                        "days_held":   (today - pos["entry_date"]).days,
+                        "stop_type":   pos.get("stop_type", "unknown"),
+                        "regime":      pos.get("regime", "unknown"),
+                        "entry_price": round(pos["entry_price"], 4),
+                        "exit_price":  round(price_10am, 4),
+                        "pnl":         _partial_pnl,
+                        "exit_type":   "partial",
+                    })
+                    pos["shares"]        *= 0.5
+                    pos["partial_taken"]  = True
+
             hist = df.loc[:today]
             new_stop = manage_position(pos, hist)
             pos["stop_price"] = max(new_stop, pos["stop_price"])
@@ -509,6 +544,8 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
                 "stop_type": signal.get("stop_type", "unknown"),   # R5
                 "ticker": ticker,
                 "regime": _entry_regime,                            # R11
+                "atr14": signal.get("atr14", 0.0),                  # R14: ATR at entry for partial close
+                "partial_taken": False,                             # R14: guard against re-firing
             }
 
         # 4. Mark-to-market: portfolio value = sum of (price_10am × shares) for open positions
@@ -608,6 +645,17 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
             all_pnls.append(_perturbed["total_pnl"])
         pnl_min = round(min(all_pnls), 2)
 
+    # V4-B R11: Win/loss dollar ratio — mean winner P&L divided by |mean loser P&L|.
+    # Returns 0.0 when there are no winners or no losers (avoids division by zero).
+    _winning_pnls = [p for p in trades if p > 0]
+    _losing_pnls  = [p for p in trades if p < 0]
+    if _winning_pnls and _losing_pnls:
+        avg_win_loss_ratio = round(
+            float(np.mean(_winning_pnls) / abs(np.mean(_losing_pnls))), 3
+        )
+    else:
+        avg_win_loss_ratio = 0.0
+
     # R11: Per-regime trade attribution
     regime_stats: dict = {}
     for _rec in trade_records:
@@ -635,6 +683,7 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         "calmar":            round(calmar, 4),
         "pnl_consistency":   round(pnl_consistency, 2),
         "pnl_min":           pnl_min,
+        "avg_win_loss_ratio": avg_win_loss_ratio,
         "regime_stats":      regime_stats,   # R11
     }
 
@@ -652,6 +701,7 @@ def print_results(stats: dict, prefix: str = "") -> None:
     print(f"{prefix}calmar:              {stats.get('calmar', 0.0):.4f}")
     print(f"{prefix}pnl_consistency:     {stats.get('pnl_consistency', 0.0):.2f}")
     print(f"{prefix}pnl_min:             {stats.get('pnl_min', stats['total_pnl']):.2f}")
+    print(f"{prefix}win_loss_ratio:      {stats.get('avg_win_loss_ratio', 0.0):.3f}")
 
 
 def _bootstrap_ci(pnls: list, n_boot: int = 2000, ci: float = 0.90) -> tuple:
@@ -790,13 +840,22 @@ if __name__ == "__main__":
         print_results(_fold_train_stats, prefix=f"fold{_fold_n}_train_")
         print_results(_fold_test_stats,  prefix=f"fold{_fold_n}_test_")
 
-        fold_test_pnls.append(_fold_test_stats["total_pnl"])
+        fold_test_pnls.append((_fold_test_stats["total_pnl"], _fold_test_stats["total_trades"]))
         if _fold_n == WALK_FORWARD_WINDOWS:
             last_fold_train_records = _fold_train_stats["trade_records"]
 
-    min_test_pnl = min(fold_test_pnls) if fold_test_pnls else 0.0
+    # R2: Exclude folds with < 3 test trades — sparse folds are noise-dominated.
+    # If all folds are excluded, fall back to the raw minimum of all folds.
+    _qualified   = [(p, t) for p, t in fold_test_pnls if t >= 3]
+    if _qualified:
+        min_test_pnl = min(p for p, t in _qualified)
+        _n_included  = len(_qualified)
+    else:
+        min_test_pnl = min(p for p, t in fold_test_pnls) if fold_test_pnls else 0.0
+        _n_included  = len(fold_test_pnls)
     print("---")
     print(f"min_test_pnl:            {min_test_pnl:.2f}")
+    print(f"min_test_pnl_folds_included: {_n_included}")
 
     # R6: Evaluate on held-out tickers (generalization check)
     if _holdout_ticker_dfs:
