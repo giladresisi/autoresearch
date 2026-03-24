@@ -52,10 +52,10 @@ def _make_daily_df(n_rows: int, backtest_start: str = BACKTEST_START,
     """Build a minimal daily DataFrame for validate_ticker_data tests."""
     start = pd.Timestamp(backtest_start).date()
     dates = [start + datetime.timedelta(days=i) for i in range(n_rows)]
-    price_10am = [np.nan if nan_10am and i < 3 else 100.0 + i for i in range(n_rows)]
+    price_1030am = [np.nan if nan_10am and i < 3 else 100.0 + i for i in range(n_rows)]
     return pd.DataFrame({
         "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5,
-        "volume": 1_000_000.0, "price_10am": price_10am,
+        "volume": 1_000_000.0, "price_1030am": price_1030am,
     }, index=pd.Index(dates, name="date"))
 
 
@@ -63,22 +63,20 @@ def _make_daily_df(n_rows: int, backtest_start: str = BACKTEST_START,
 
 def test_resample_produces_expected_columns():
     df = resample_to_daily(_make_hourly_df(5))
-    assert set(df.columns) == {"open", "high", "low", "close", "volume", "price_10am"}
+    assert set(df.columns) == {"open", "high", "low", "close", "volume", "price_1030am"}
 
 
-def test_price_10am_is_open_of_10am_bar():
+def test_price_1030am_is_close_of_930_bar():
+    """price_1030am should be the Close of the 9:30 AM bar (= ~10:30 AM price)."""
     hourly = _make_hourly_df(5)
     daily = resample_to_daily(hourly)
-    # Convert hourly index to ET for comparison
     hourly_et = hourly.copy()
     hourly_et.index = hourly_et.index.tz_convert("America/New_York")
     for d, row in daily.iterrows():
-        # yfinance 1h bars start at 9:30 AM ET (no 10:00 AM bar exists).
-        # price_10am is extracted from the 9:30 AM bar (market open).
         mask = (hourly_et.index.date == d) & (hourly_et.index.time == datetime.time(9, 30))
         assert mask.sum() == 1, f"Expected one 9:30am bar for {d}"
-        expected = hourly_et.loc[mask, "Open"].iloc[0]
-        assert row["price_10am"] == pytest.approx(expected)
+        expected = hourly_et.loc[mask, "Close"].iloc[0]   # Close, not Open
+        assert row["price_1030am"] == pytest.approx(expected)
 
 
 def test_open_is_first_bar_of_day():
@@ -162,7 +160,7 @@ def test_process_ticker_saves_parquet(tmp_path):
     path = tmp_path / "TEST.parquet"
     assert path.exists()
     loaded = pd.read_parquet(path)
-    assert "price_10am" in loaded.columns
+    assert "price_1030am" in loaded.columns
 
 
 # ── Validation warning tests (3) ─────────────────────────────────────────────
@@ -189,7 +187,7 @@ def test_warn_if_missing_10am_on_backtest_dates(capsys):
     validate_ticker_data("XYZ", df, BACKTEST_START)
     out = capsys.readouterr().out
     assert "WARNING" in out
-    assert "missing price_10am" in out
+    assert "missing price_1030am" in out
 
 
 # ── Integration test (1, live network) ───────────────────────────────────────
@@ -202,7 +200,7 @@ def test_download_ticker_returns_expected_schema():
     if df_hourly.empty:
         pytest.skip("yfinance returned empty — network unavailable")
     df_daily = resample_to_daily(df_hourly)
-    assert set(df_daily.columns) == {"open", "high", "low", "close", "volume", "price_10am"}
+    assert set(df_daily.columns) == {"open", "high", "low", "close", "volume", "price_1030am"}
     assert all(isinstance(d, datetime.date) for d in df_daily.index)
     assert df_daily.index.name == "date"
     assert len(df_daily) > 0
@@ -217,7 +215,7 @@ def _make_parquet(tmp_path, ticker, prices):
     dates = [base + datetime.timedelta(days=i) for i in range(len(prices))]
     df = pd.DataFrame({
         'open': prices, 'high': prices, 'low': prices, 'close': prices,
-        'volume': [1_000_000.0] * len(prices), 'price_10am': prices,
+        'volume': [1_000_000.0] * len(prices), 'price_1030am': prices,
     }, index=pd.Index(dates, name='date'))
     df.to_parquet(tmp_path / f"{ticker}.parquet")
 
@@ -278,8 +276,9 @@ def test_main_exits_1_when_tickers_empty():
     source = (project_root / "prepare.py").read_text(encoding="utf-8")
     # Override TICKERS to empty list to exercise the early-exit guard.
     # Use regex so the test stays robust when the ticker list changes.
-    patched = re.sub(r'^TICKERS = \[.*\]', 'TICKERS = []', source, count=1, flags=re.MULTILINE)
-    assert patched != source, "Failed to patch TICKERS — check that prepare.py has a TICKERS = [...] line"
+    # TICKERS may be a multiline list — match from the opening bracket to its closing bracket
+    patched = re.sub(r'^TICKERS = \[.*?\]', 'TICKERS = []', source, count=1, flags=re.MULTILINE | re.DOTALL)
+    assert patched != source, "Failed to patch TICKERS — check that prepare.py has a TICKERS = [...] list"
     with tempfile.NamedTemporaryFile(
         suffix=".py", delete=False, mode="w", encoding="utf-8"
     ) as f:

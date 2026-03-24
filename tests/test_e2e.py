@@ -7,7 +7,7 @@ from prepare import CACHE_DIR, BACKTEST_START
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 EXPECTED_TICKERS = ["AAPL", "MSFT", "NVDA", "JPM", "TSLA"]
-EXPECTED_COLUMNS = {"open", "high", "low", "close", "volume", "price_10am"}
+EXPECTED_COLUMNS = {"open", "high", "low", "close", "volume", "price_1030am"}
 
 
 @pytest.fixture(scope="module")
@@ -94,15 +94,16 @@ def test_train_exits_zero_with_pnl_output(skip_if_cache_missing):
         f"stderr:\n{result.stderr[-2000:]}\n"
         f"stdout:\n{result.stdout[-500:]}"
     )
+    # Walk-forward output uses fold-prefixed lines: "fold1_train_total_pnl:", etc.
     pnl_lines = [
         line for line in result.stdout.splitlines()
-        if line.startswith("train_total_pnl:")
+        if "train_total_pnl:" in line
     ]
-    assert len(pnl_lines) == 1, (
-        f"Expected exactly one 'train_total_pnl:' line in output, got {len(pnl_lines)}.\n"
+    assert len(pnl_lines) >= 1, (
+        f"Expected at least one 'train_total_pnl:' line in output, got {len(pnl_lines)}.\n"
         f"stdout:\n{result.stdout}"
     )
-    # P&L value must be parseable as float
+    # P&L value must be parseable as float (check the first matching line)
     value_str = pnl_lines[0].split(":", 1)[1].strip()
     pnl_value = float(value_str)  # raises ValueError if not parseable
     assert isinstance(pnl_value, float)
@@ -121,13 +122,15 @@ def test_output_has_all_seven_fields(skip_if_cache_missing):
         cwd=REPO_ROOT,
     )
     assert result.returncode == 0, f"train.py crashed: {result.stderr[-1000:]}"
+    # Walk-forward output uses fold-prefixed lines: "fold1_train_sharpe:", etc.
+    # Match by substring so any fold prefix is accepted.
     required_fields = [
         "train_sharpe:", "train_total_trades:", "train_win_rate:",
         "train_avg_pnl_per_trade:", "train_total_pnl:",
         "train_backtest_start:", "train_backtest_end:",
     ]
     for field in required_fields:
-        assert any(line.startswith(field) for line in result.stdout.splitlines()), (
+        assert any(field in line for line in result.stdout.splitlines()), (
             f"Missing output field '{field}' in train.py output.\n"
             f"stdout:\n{result.stdout}"
         )
@@ -184,7 +187,7 @@ def test_agent_loop_two_iterations_multi_ticker(all_ticker_dfs, backtest_stats):
     """
     Simulates two sequential agent loop iterations on all cached tickers (≥ 2 required).
 
-    Iteration 1 — relax volume threshold (vol_ratio 1.0 → 0.8):
+    Iteration 1 — relax volume threshold (vol_ratio 2.5 → 2.0):
       Accepts slightly below-average volume days.
     Iteration 2 — relax RSI upper bound (75 → 80) + resistance gate (2.0 → 0.1 ATR):
       Builds on whichever source was *kept* from iteration 1, exactly as the real
@@ -230,8 +233,8 @@ def test_agent_loop_two_iterations_multi_ticker(all_ticker_dfs, backtest_stats):
     history = [best_pnl]
 
     # ── Iteration 1: relax volume threshold ───────────────────────────────────
-    assert "vol_ratio < 1.0" in train_source, "Volume pattern changed — update test"
-    src1 = train_source.replace("vol_ratio < 1.0", "vol_ratio < 0.8", 1)
+    assert "vol_ratio < 2.5" in train_source, "Volume pattern changed — update test"
+    src1 = train_source.replace("vol_ratio < 2.5", "vol_ratio < 2.0", 1)
     ast.parse(src1)  # mutation must be valid Python
 
     stats1 = run_source(src1, "train_iter1")
@@ -263,7 +266,7 @@ def test_agent_loop_two_iterations_multi_ticker(all_ticker_dfs, backtest_stats):
     # Apply all mutations from the original source and verify ≥ 1 trade fires
     # across the full ticker set. This confirms the pipeline ran real positions
     # (not just returned empty stats) on a multi-ticker dataset.
-    src_full = train_source.replace("vol_ratio < 1.0", "vol_ratio < 0.8", 1)
+    src_full = train_source.replace("vol_ratio < 2.5", "vol_ratio < 2.0", 1)
     src_full = src_full.replace("rsi <= 75", "rsi <= 80", 1)
     src_full = src_full.replace("res_atr < 2.0", "res_atr < 0.1", 1)
     ast.parse(src_full)
@@ -280,7 +283,7 @@ def test_agent_loop_threshold_mutation_no_crash(all_ticker_dfs, backtest_stats):
     """
     Simulates the first agent loop iteration on real data:
       1. Baseline Sharpe from the default (strict) screener — from fixture.
-      2. Relaxed screener (vol_ratio 1.0 → 0.8, RSI 75 → 80, res_atr 2.0 → 0.1).
+      2. Relaxed screener (vol_ratio 2.5 → 2.0, RSI 75 → 80, res_atr 2.0 → 0.1).
       3. Both runs complete without error.
       4. Relaxed screener must produce ≥ 1 trade — proves agent has a viable path.
 
@@ -290,8 +293,8 @@ def test_agent_loop_threshold_mutation_no_crash(all_ticker_dfs, backtest_stats):
     import os as _os
 
     train_source = REPO_ROOT.joinpath("train.py").read_text(encoding="utf-8")
-    assert "vol_ratio < 1.0" in train_source, (
-        "Volume threshold 'vol_ratio < 1.0' not found in train.py editable section. "
+    assert "vol_ratio < 2.5" in train_source, (
+        "Volume threshold 'vol_ratio < 2.5' not found in train.py editable section. "
         "Update this test if the threshold expression was changed."
     )
     assert "rsi <= 75" in train_source, (
@@ -299,9 +302,9 @@ def test_agent_loop_threshold_mutation_no_crash(all_ticker_dfs, backtest_stats):
         "Update this test if the RSI expression was changed."
     )
     # Simulate an agent loop mutation sweep across two screener parameters:
-    #   1. Volume threshold: vol_ratio < 1.0 → 0.8 (accept slightly below-average volume)
+    #   1. Volume threshold: vol_ratio < 2.5 → 2.0 (accept slightly below-average volume)
     #   2. RSI upper bound: rsi <= 75 → rsi <= 80 (allow more momentum)
-    relaxed_source = train_source.replace("vol_ratio < 1.0", "vol_ratio < 0.8", 1)
+    relaxed_source = train_source.replace("vol_ratio < 2.5", "vol_ratio < 2.0", 1)
     relaxed_source = relaxed_source.replace("rsi <= 75", "rsi <= 80", 1)
     assert "res_atr < 2.0" in relaxed_source, (
         "Resistance threshold 'res_atr < 2.0' not found. "

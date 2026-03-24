@@ -21,7 +21,7 @@ from train import (
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 def make_position_df(n=30, price=100.0, atr_spread=2.0):
-    """Returns df where price_10am is constant at `price` and ATR14 ≈ atr_spread."""
+    """Returns df where price_1030am is constant at `price` and ATR14 ≈ atr_spread."""
     dates = [date(2025, 1, 2) + timedelta(days=i) for i in range(n)]
     highs  = np.full(n, price + atr_spread)
     lows   = np.full(n, price - atr_spread)
@@ -29,7 +29,7 @@ def make_position_df(n=30, price=100.0, atr_spread=2.0):
     return pd.DataFrame({
         'open': closes, 'high': highs, 'low': lows, 'close': closes,
         'volume': np.full(n, 1_000_000.0),
-        'price_10am': np.full(n, price),
+        'price_1030am': np.full(n, price),
     }, index=pd.Index(dates, name='date'))
 
 
@@ -42,7 +42,7 @@ def make_minimal_df(trading_days: list, base_price: float = 100.0) -> pd.DataFra
         'low':        np.full(n, base_price * 0.99),
         'close':      np.full(n, base_price),
         'volume':     np.full(n, 1_000_000.0),
-        'price_10am': np.full(n, base_price),
+        'price_1030am': np.full(n, base_price),
     }, index=pd.Index(trading_days, name='date'))
 
 
@@ -57,17 +57,17 @@ def make_signal_df_for_backtest(signal_date: date = date(2026, 1, 10)) -> pd.Dat
     close[235:250] = [97.0, 98.0, 97.3, 98.3, 97.6, 98.6, 97.9, 98.9,
                       98.2, 99.2, 98.5, 99.5, 98.8, 99.8, 100.8]
 
-    price_10am = close.copy()
-    price_10am[249] = 115.0
+    price_1030am = close.copy()
+    price_1030am[249] = 115.0
 
     volume = np.full(n, 1_000_000.0)
-    volume[249] = 2_000_000.0   # last bar = 2× MA30 → vol_ratio = 2.0, passes ≥ 1.9
+    volume[249] = 3_000_000.0   # last bar = 3× MA30 → vol_ratio = 3.0, passes ≥ 2.5
 
     df = pd.DataFrame({
         'open': close * 0.998, 'high': close * 1.005, 'low': close * 0.995,
         'close': close,
         'volume': volume,
-        'price_10am': price_10am,
+        'price_1030am': price_1030am,
     }, index=pd.Index(dates, name='date'))
     # Add pivot structure so find_stop_price() succeeds after R9 (no more fallback stop)
     pivot_idx = n - 35
@@ -84,7 +84,7 @@ def make_signal_df_for_backtest(signal_date: date = date(2026, 1, 10)) -> pd.Dat
 
 def test_manage_position_no_raise_below_threshold():
     # TR = (price+atr_spread)-(price-atr_spread) = 2*atr_spread → ATR14 ≈ 4.0
-    # price_10am=100 < entry(100)+ATR(4)=104 → stop unchanged
+    # price_1030am=100 < entry(100)+ATR(4)=104 → stop unchanged
     df = make_position_df(price=100.0, atr_spread=2.0)
     pos = {'entry_price': 100.0, 'stop_price': 90.0, 'shares': 5.0,
            'ticker': 'X', 'entry_date': date(2025, 1, 2)}
@@ -94,7 +94,7 @@ def test_manage_position_no_raise_below_threshold():
 
 def test_manage_position_raises_to_breakeven():
     # ATR14 = TR = (price+1)-(price-1) = 2.0 with atr_spread=1.0
-    # price_10am=103 >= entry(100)+ATR(2)=102 → stop raised to entry_price=100
+    # price_1030am=103 >= entry(100)+ATR(2)=102 → stop raised to entry_price=100
     df = make_position_df(price=103.0, atr_spread=1.0)
     pos = {'entry_price': 100.0, 'stop_price': 90.0, 'shares': 5.0,
            'ticker': 'X', 'entry_date': date(2025, 1, 2)}
@@ -128,7 +128,7 @@ def test_manage_position_zero_atr():
     df = pd.DataFrame({
         'open': closes, 'high': closes, 'low': closes, 'close': closes,
         'volume': np.full(n, 1_000_000.0),
-        'price_10am': np.full(n, 103.0),
+        'price_1030am': np.full(n, 103.0),
     }, index=pd.Index(dates, name='date'))
     pos = {'entry_price': 100.0, 'stop_price': 90.0, 'shares': 5.0,
            'ticker': 'X', 'entry_date': date(2025, 1, 2)}
@@ -256,7 +256,7 @@ def _make_test_window_df() -> pd.DataFrame:
     return pd.DataFrame({
         'open': close * 0.998, 'high': close * 1.005, 'low': close * 0.995,
         'close': close, 'volume': np.full(n, 1_000_000.0),
-        'price_10am': close * 1.002,
+        'price_1030am': close * 1.002,
     }, index=pd.Index(dates, name='date'))
 
 
@@ -325,16 +325,19 @@ def test_screen_day_indicators_use_yesterday_close_not_today():
     import unittest.mock as mock
     from train import screen_day
 
-    # 101-row df so indicators can warm up; give today a wildly different close
-    bdays = pd.bdate_range(end="2026-02-27", periods=101)
+    # 102-row df (screen_day requires ≥ 102); give today a wildly different close
+    n = 102
+    bdays = pd.bdate_range(end="2026-02-27", periods=n)
     dates = [d.date() for d in bdays]
-    prices = np.linspace(80.0, 120.0, 101)
+    prices = np.linspace(80.0, 120.0, n)
     prices[-1] = 200.0    # today: anomalous close — must NOT influence indicators
+    volume = np.full(n, 1_000_000.0)
+    volume[-1] = 3_000_000.0   # vol_ratio=3.0 so screen_day passes the volume gate
     df = pd.DataFrame({
         "open": prices * 0.99, "high": prices * 1.01, "low": prices * 0.99,
         "close": prices,
-        "volume": np.full(101, 1_000_000.0),
-        "price_10am": prices,
+        "volume": volume,
+        "price_1030am": prices,
     }, index=pd.Index(dates, name="date"))
 
     received_dfs = []
@@ -370,7 +373,7 @@ def test_screen_day_minimum_history_boundary():
         prices = np.linspace(80.0, 120.0, n)
         return pd.DataFrame({
             "open": prices * 0.99, "high": prices * 1.01, "low": prices * 0.99,
-            "close": prices, "volume": np.full(n, 1_000_000.0), "price_10am": prices,
+            "close": prices, "volume": np.full(n, 1_000_000.0), "price_1030am": prices,
         }, index=pd.Index(dates, name="date"))
 
     df_60 = make_df(60)
@@ -401,7 +404,7 @@ def test_run_backtest_risk_proportional_sizing():
     df = pd.DataFrame({
         "open": np.full(20, base_price), "high": np.full(20, base_price * 1.01),
         "low": np.full(20, base_price * 0.99), "close": np.full(20, base_price),
-        "volume": np.full(20, 1_000_000.0), "price_10am": np.full(20, base_price),
+        "volume": np.full(20, 1_000_000.0), "price_1030am": np.full(20, base_price),
     }, index=pd.Index(days, name="date"))
 
     def tight_stop_screen(d, today):
@@ -447,7 +450,7 @@ def test_run_backtest_trade_records_schema():
     df = pd.DataFrame({
         "open": np.full(20, base_price), "high": np.full(20, base_price * 1.01),
         "low": np.full(20, base_price * 0.99), "close": np.full(20, base_price),
-        "volume": np.full(20, 1_000_000.0), "price_10am": np.full(20, base_price),
+        "volume": np.full(20, 1_000_000.0), "price_1030am": np.full(20, base_price),
     }, index=pd.Index(days, name="date"))
 
     def always_signal(d, today):
@@ -511,7 +514,7 @@ def test_manage_position_trail_uses_1_2_atr_not_1_5():
     R15 does not fire because cal_days_held = 29 > 5.
     """
     n = 30
-    # Build df with price_10am=110 for all rows so recent_high=110
+    # Build df with price_1030am=110 for all rows so recent_high=110
     # Use atr_spread=2.0 to get ATR14≈4.0
     dates = [date(2025, 1, 2) + timedelta(days=i) for i in range(n)]
     price = 110.0
@@ -519,13 +522,13 @@ def test_manage_position_trail_uses_1_2_atr_not_1_5():
     highs  = np.full(n, price + atr_spread)
     lows   = np.full(n, price - atr_spread)
     closes = np.full(n, price)
-    # Last row: price_10am backed off to 104 so it doesn't trigger breakeven at 100+1.5*4=106
-    price_10am_vals = np.full(n, 110.0)
-    price_10am_vals[-1] = 104.0
+    # Last row: price_1030am backed off to 104 so it doesn't trigger breakeven at 100+1.5*4=106
+    price_1030am_vals = np.full(n, 110.0)
+    price_1030am_vals[-1] = 104.0
     df = pd.DataFrame({
         'open': closes, 'high': highs, 'low': lows, 'close': closes,
         'volume': np.full(n, 1_000_000.0),
-        'price_10am': price_10am_vals,
+        'price_1030am': price_1030am_vals,
     }, index=pd.Index(dates, name='date'))
 
     # entry_date = df.index[0] → cal_days_held = 29 > 5, R15 does NOT fire
@@ -546,12 +549,12 @@ def test_manage_position_trail_uses_1_2_atr_not_1_5():
 
 def test_run_backtest_partial_close_fires_at_1r():
     """
-    R14: when price_10am reaches entry + atr14, a partial close record with
+    R14: when price_1030am reaches entry + atr14, a partial close record with
     exit_type='partial' must appear in trade_records.
 
     Note: run_backtest adds 0.03 slippage to entry_price, so the actual portfolio
     entry_price is signal['entry_price'] + 0.03 = 100.03. The partial close fires
-    when price_10am >= portfolio_entry + atr14 = 105.03. We set price_10am to 106.0
+    when price_1030am >= portfolio_entry + atr14 = 105.03. We set price_1030am to 106.0
     on days after entry to ensure the condition is met.
     """
     import unittest.mock as mock
@@ -561,17 +564,17 @@ def test_run_backtest_partial_close_fires_at_1r():
     entry_price = 100.0
     atr14       = 5.0
     stop        = 90.0
-    # Partial fires when price_10am >= (entry_price + 0.03) + atr14 = 105.03
+    # Partial fires when price_1030am >= (entry_price + 0.03) + atr14 = 105.03
     partial_trigger_price = entry_price + atr14 + 0.10   # 105.10 > 105.03
 
     # Build a df spanning signal_date + 10 more days
     n = 15
     days = [signal_date - timedelta(days=(n - 1 - i)) for i in range(n)]
     base = np.full(n, entry_price)
-    price_10am_vals = base.copy()
+    price_1030am_vals = base.copy()
     entry_idx = n - 6   # signal fires on this index
-    # Day after entry: price_10am >= entry + atr14 + slippage
-    price_10am_vals[entry_idx + 1:] = partial_trigger_price
+    # Day after entry: price_1030am >= entry + atr14 + slippage
+    price_1030am_vals[entry_idx + 1:] = partial_trigger_price
 
     df = pd.DataFrame({
         'open':       base,
@@ -579,7 +582,7 @@ def test_run_backtest_partial_close_fires_at_1r():
         'low':        base * 0.99,
         'close':      base,
         'volume':     np.full(n, 1_000_000.0),
-        'price_10am': price_10am_vals,
+        'price_1030am': price_1030am_vals,
     }, index=pd.Index(days, name='date'))
 
     fake_signal = {
@@ -614,7 +617,7 @@ def test_run_backtest_partial_close_fires_only_once():
     for multiple consecutive days.
 
     Note: run_backtest adds 0.03 slippage, so partial triggers when
-    price_10am >= (entry_price + 0.03) + atr14 = 105.03. We use 105.10 > 105.03.
+    price_1030am >= (entry_price + 0.03) + atr14 = 105.03. We use 105.10 > 105.03.
     """
     import unittest.mock as mock
     import train as tr
@@ -628,10 +631,10 @@ def test_run_backtest_partial_close_fires_only_once():
     n = 20
     days = [signal_date - timedelta(days=(n - 1 - i)) for i in range(n)]
     base = np.full(n, entry_price)
-    price_10am_vals = base.copy()
+    price_1030am_vals = base.copy()
     entry_idx = n - 10
     # Price stays above the partial trigger for many days after entry
-    price_10am_vals[entry_idx + 1:] = partial_trigger_price
+    price_1030am_vals[entry_idx + 1:] = partial_trigger_price
 
     df = pd.DataFrame({
         'open':       base,
@@ -639,7 +642,7 @@ def test_run_backtest_partial_close_fires_only_once():
         'low':        base * 0.99,
         'close':      base,
         'volume':     np.full(n, 1_000_000.0),
-        'price_10am': price_10am_vals,
+        'price_1030am': price_1030am_vals,
     }, index=pd.Index(days, name='date'))
 
     fake_signal = {
@@ -670,8 +673,8 @@ def test_run_backtest_partial_close_fires_only_once():
 
 def test_manage_position_early_stall_exit_within_5_days():
     """
-    R15: when cal_days_held <= 5 and price_10am < entry + 0.5*ATR,
-    manage_position must return max(current_stop, price_10am).
+    R15: when cal_days_held <= 5 and price_1030am < entry + 0.5*ATR,
+    manage_position must return max(current_stop, price_1030am).
     Uses n=30 rows for valid ATR14, but entry_date set near the end so cal_days=4.
     """
     n = 30
@@ -684,7 +687,7 @@ def test_manage_position_early_stall_exit_within_5_days():
     df = pd.DataFrame({
         'open': closes, 'high': highs, 'low': lows, 'close': closes,
         'volume': np.full(n, 1_000_000.0),
-        'price_10am': np.full(n, price),
+        'price_1030am': np.full(n, price),
     }, index=pd.Index(dates, name='date'))
 
     # entry_date set 4 calendar days before df.index[-1] → cal_days_held = 4 ≤ 5
@@ -692,18 +695,18 @@ def test_manage_position_early_stall_exit_within_5_days():
     pos = {'entry_price': 100.0, 'stop_price': 90.0, 'shares': 5.0,
            'ticker': 'X', 'entry_date': entry_date}
 
-    # Verify preconditions: ATR≈4, threshold=100+0.5*4=102, price_10am=101 < 102
+    # Verify preconditions: ATR≈4, threshold=100+0.5*4=102, price_1030am=101 < 102
     result = manage_position(pos, df)
     # R15 fires: max(90, 101) = 101.0
     assert abs(result - 101.0) < 0.01, (
-        f"Expected R15 to raise stop to price_10am=101.0, got {result}"
+        f"Expected R15 to raise stop to price_1030am=101.0, got {result}"
     )
 
 
 def test_manage_position_no_early_stall_after_5_days():
     """
     R15: when cal_days_held > 5, the early stall exit must NOT fire.
-    With price_10am=101 < breakeven(106) and recent_high(101) < trail activation(108),
+    With price_1030am=101 < breakeven(106) and recent_high(101) < trail activation(108),
     stop should remain at 90.0.
     """
     n = 30
@@ -716,7 +719,7 @@ def test_manage_position_no_early_stall_after_5_days():
     df = pd.DataFrame({
         'open': closes, 'high': highs, 'low': lows, 'close': closes,
         'volume': np.full(n, 1_000_000.0),
-        'price_10am': np.full(n, price),
+        'price_1030am': np.full(n, price),
     }, index=pd.Index(dates, name='date'))
 
     # entry_date = df.index[0] → cal_days_held = 29 > 5, R15 does NOT fire
@@ -733,7 +736,7 @@ def test_manage_position_no_early_stall_after_5_days():
 
 def test_manage_position_early_stall_not_fired_when_price_strong():
     """
-    R15: when cal_days_held <= 5 but price_10am >= entry + 0.5*ATR,
+    R15: when cal_days_held <= 5 but price_1030am >= entry + 0.5*ATR,
     the early stall condition is NOT met and stop should remain at 90.0.
     """
     n = 30
@@ -746,11 +749,11 @@ def test_manage_position_early_stall_not_fired_when_price_strong():
     df = pd.DataFrame({
         'open': closes, 'high': highs, 'low': lows, 'close': closes,
         'volume': np.full(n, 1_000_000.0),
-        'price_10am': np.full(n, price),
+        'price_1030am': np.full(n, price),
     }, index=pd.Index(dates, name='date'))
 
     # entry_date set 4 calendar days before df.index[-1] → cal_days_held = 4 ≤ 5
-    # But price_10am=103 >= 102 → R15 condition NOT met
+    # But price_1030am=103 >= 102 → R15 condition NOT met
     entry_date = dates[-1] - timedelta(days=4)
     pos = {'entry_price': 100.0, 'stop_price': 90.0, 'shares': 5.0,
            'ticker': 'X', 'entry_date': entry_date}

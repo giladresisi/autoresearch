@@ -223,7 +223,7 @@ def nearest_resistance_atr(df, entry_price, atr, lookback=90):
 
 def screen_day(df: pd.DataFrame, today) -> "dict | None":
     """
-    Momentum breakout strategy: enter when price_10am breaks above 20-day high
+    Momentum breakout strategy: enter when price_1030am breaks above 20-day high
     with above-average volume, price above SMA50, and sufficient room above resistance.
     df: full daily history up to and including today
     Returns None if no signal, or dict with at minimum {'stop': float}
@@ -235,10 +235,10 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if len(df) < 102:
         return None
 
-    # Today's observable data: only price_10am and partial-day volume
-    price_10am = float(df['price_10am'].iloc[-1])
+    # Today's observable data: only price_1030am and partial-day volume
+    price_1030am = float(df['price_1030am'].iloc[-1])
     today_vol  = float(df['volume'].iloc[-1])
-    if pd.isna(price_10am) or pd.isna(today_vol):
+    if pd.isna(price_1030am) or pd.isna(today_vol):
         return None
 
     # R8: skip entries within 14 calendar days of next earnings announcement
@@ -262,7 +262,7 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
         return None
 
     # Rule 1: SMA alignment — most tickers fail here; check before volume/ATR/RSI
-    if price_10am <= sma50 or price_10am <= sma100 or sma20 <= sma50 or sma50 <= sma100:
+    if price_1030am <= sma50 or price_1030am <= sma100 or sma20 <= sma50 or sma50 <= sma100:
         return None
 
     # Rule 1b: SMA20 slope must not be materially declining (allow up to 0.5% dip vs 5d ago)
@@ -279,14 +279,14 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if vol_ratio < 2.5:
         return None
 
-    # Rule 2a: price_10am breaks above the 20-day highest close (breakout)
+    # Rule 2a: price_1030am breaks above the 20-day highest close (breakout)
     high20 = float(close_hist.iloc[-20:].max())
-    if price_10am <= high20:
+    if price_1030am <= high20:
         return None
 
-    # Rule 2b: price_10am also above yesterday's high (breakout continuation)
+    # Rule 2b: price_1030am also above yesterday's high (breakout continuation)
     prev_high = float(hist['high'].iloc[-1])
-    if price_10am <= prev_high:
+    if price_1030am <= prev_high:
         return None
 
     # Compute ATR14 and RSI14 only for tickers that pass the fast filters above.
@@ -305,23 +305,23 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
         return None
 
     # Stop: pivot-low required; no fallback (R9 — reject structurally unsupported entries)
-    stop = find_stop_price(hist, price_10am, atr)
+    stop = find_stop_price(hist, price_1030am, atr)
     if stop is None:
         return None  # R9: reject entries with no structural pivot support
     stop_type = 'pivot'
 
     # 1.5 ATR buffer safety net
-    if price_10am - stop < 1.5 * atr:
+    if price_1030am - stop < 1.5 * atr:
         return None
 
     # Resistance check: nearest overhead pivot >= 2 ATR away
-    res_atr = nearest_resistance_atr(hist, price_10am, atr)
+    res_atr = nearest_resistance_atr(hist, price_1030am, atr)
     if res_atr is not None and res_atr < 2.0:
         return None
 
     return {
         'stop':        stop,
-        'entry_price': price_10am,
+        'entry_price': price_1030am,
         'stop_type':   stop_type,   # always 'pivot' after R9 (fallback path removed)
         'atr14':       round(atr, 4),
         'sma50':       round(sma50, 4),
@@ -332,7 +332,7 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
 
 def manage_position(position: dict, df: pd.DataFrame) -> float:
     """
-    Breakeven once price_10am >= entry + 1.5 ATR.
+    Breakeven once price_1030am >= entry + 1.5 ATR.
     Trail by 1.2 ATR below recent high once 2.0 ATR in profit.
     Never lower the stop.
     """
@@ -342,27 +342,27 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
     atr          = float(atr_series.iloc[-1])
     if pd.isna(atr) or atr == 0:
         return current_stop
-    price_10am = float(df['price_10am'].iloc[-1])
+    price_1030am = float(df['price_1030am'].iloc[-1])
 
     # R10: time-based capital-efficiency exit
     # If held >30 business days and unrealised P&L < 30% of RISK_PER_TRADE, force exit
     _today_date = df.index[-1]
     _bdays_held = int(np.busday_count(position['entry_date'], _today_date))
-    _unrealised_pnl = (price_10am - entry_price) * position['shares']
+    _unrealised_pnl = (price_1030am - entry_price) * position['shares']
     if _bdays_held > 30 and _unrealised_pnl < 0.3 * RISK_PER_TRADE:
-        return max(current_stop, price_10am)  # force exit; never lower existing stop
+        return max(current_stop, price_1030am)  # force exit; never lower existing stop
 
     # R15: Early stall exit — force exit if price stalls in first 5 calendar days.
     # Targets the 6–14 day loss cluster where price never builds momentum.
     _cal_days_held = (_today_date - position['entry_date']).days
-    if _cal_days_held <= 5 and price_10am < entry_price + 0.5 * atr:
-        return max(current_stop, price_10am)  # force exit; never lower existing stop
+    if _cal_days_held <= 5 and price_1030am < entry_price + 0.5 * atr:
+        return max(current_stop, price_1030am)  # force exit; never lower existing stop
 
     # Breakeven trigger
-    be_stop = entry_price if price_10am >= entry_price + 1.5 * atr else current_stop
+    be_stop = entry_price if price_1030am >= entry_price + 1.5 * atr else current_stop
 
     # Trailing stop: trail 1.2 ATR below recent high once 2.0 ATR in profit (earlier activation)
-    recent_high = float(df['price_10am'].dropna().iloc[-20:].max())
+    recent_high = float(df['price_1030am'].dropna().iloc[-20:].max())
     trail_stop = round(recent_high - 1.2 * atr, 2) if recent_high >= entry_price + 2.0 * atr else current_stop
 
     return max(current_stop, be_stop, trail_stop)
@@ -381,11 +381,11 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
 def detect_regime(ticker_dfs: dict, today) -> str:
     """
     Classify today's market regime as 'bull' or 'bear' using cross-sectional SMA50 majority vote.
-    A ticker votes 'bull' if today's price_10am > its 50-day SMA (computed on history up to and
+    A ticker votes 'bull' if today's price_1030am > its 50-day SMA (computed on history up to and
     including today). Returns 'bull' if bull_count >= bear_count, else 'bear'.
     Returns 'unknown' if fewer than 2 tickers have valid data for today.
     Note: includes today's close in the SMA50 — one-bar look-ahead (~2% of the 50-bar window),
-    acceptable in this EOD data context since entry decisions use price_10am, not the close.
+    acceptable in this EOD data context since entry decisions use price_1030am, not the close.
     """
     bull_count = 0
     bear_count = 0
@@ -394,7 +394,7 @@ def detect_regime(ticker_dfs: dict, today) -> str:
         if len(hist) < 51:
             continue
         sma50 = float(hist['close'].rolling(50).mean().iloc[-1])
-        price = float(hist['price_10am'].iloc[-1])
+        price = float(hist['price_1030am'].iloc[-1])
         if pd.isna(sma50) or pd.isna(price):
             continue
         if price > sma50:
@@ -408,7 +408,7 @@ def detect_regime(ticker_dfs: dict, today) -> str:
 
 def _compute_avg_correlation(ticker_dfs: dict, tickers: list, start, end) -> float:
     """
-    Mean pairwise Pearson correlation of daily price_10am returns for the given tickers
+    Mean pairwise Pearson correlation of daily price_1030am returns for the given tickers
     over [start, end). Returns 0.0 if fewer than 2 tickers have data.
     """
     series = []
@@ -416,7 +416,7 @@ def _compute_avg_correlation(ticker_dfs: dict, tickers: list, start, end) -> flo
         if t not in ticker_dfs:
             continue
         df = ticker_dfs[t]
-        sub = df[(df.index >= start) & (df.index < end)]["price_10am"].dropna()
+        sub = df[(df.index >= start) & (df.index < end)]["price_1030am"].dropna()
         if len(sub) >= 2:
             series.append(sub.pct_change().dropna())
     if len(series) < 2:
@@ -438,6 +438,15 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
     Returns stats dict: sharpe, total_trades, win_rate, avg_pnl_per_trade, total_pnl,
                         ticker_pnl, backtest_start, backtest_end.
     """
+    def _mfe_mae(pos: dict) -> tuple:
+        """Returns (mfe_atr, mae_atr) normalized by ATR at entry. Returns (0.0, 0.0) if atr14 == 0."""
+        atr = pos.get("atr14", 0.0)
+        if atr == 0.0:
+            return 0.0, 0.0
+        mfe = (pos.get("high_since_entry", pos["entry_price"]) - pos["entry_price"]) / atr
+        mae = (pos["entry_price"] - pos.get("low_since_entry", pos["entry_price"])) / atr
+        return round(mfe, 4), round(mae, 4)
+
     s = date.fromisoformat(start or BACKTEST_START)
     e = date.fromisoformat(end or BACKTEST_END)
 
@@ -481,6 +490,11 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
                         trades.append(pnl)
                         cumulative_realized += pnl
                         ticker_pnl[ticker] = ticker_pnl.get(ticker, 0.0) + pnl
+                        _mfe, _mae = _mfe_mae(pos)
+                        _initial_stop = pos.get("initial_stop", pos["stop_price"])
+                        _r = round((pos["stop_price"] - pos["entry_price"]) /
+                                   (pos["entry_price"] - _initial_stop), 4) \
+                             if (pos["entry_price"] - _initial_stop) > 0 else ""
                         trade_records.append({
                             "ticker":       ticker,
                             "entry_date":   str(pos["entry_date"]),
@@ -491,6 +505,10 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
                             "entry_price":  round(pos["entry_price"], 4),
                             "exit_price":   round(pos["stop_price"], 4),
                             "pnl":          round(pnl, 2),
+                            "exit_type":    "stop_hit",   # P0-C
+                            "mfe_atr":      _mfe,         # P0-B
+                            "mae_atr":      _mae,         # P0-B
+                            "r_multiple":   _r,           # P0-D
                         })
                         to_close.append(ticker)
             for t in to_close:
@@ -500,19 +518,28 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
         for ticker, pos in portfolio.items():
             df = ticker_dfs[ticker]
             if today in df.index:
-                price_10am = float(df.loc[today, "price_10am"])
+                price_1030am = float(df.loc[today, "price_1030am"])
             else:
-                price_10am = pos["entry_price"]
+                price_1030am = pos["entry_price"]
+
+            # P0-B: update extremes before any close check so partial MFE/MAE reflects today's price
+            if not np.isnan(price_1030am):
+                pos["high_since_entry"] = max(pos.get("high_since_entry", price_1030am), price_1030am)
+                pos["low_since_entry"]  = min(pos.get("low_since_entry",  price_1030am), price_1030am)
 
             # R14: Partial close at +1 ATR — close 50% of position on first up-move of +1 ATR.
             if not pos.get("partial_taken", False):
                 _atr_entry = pos.get("atr14", 0.0)
-                if _atr_entry > 0 and price_10am >= pos["entry_price"] + _atr_entry:
+                if _atr_entry > 0 and price_1030am >= pos["entry_price"] + _atr_entry:
                     _close_shares = pos["shares"] * 0.5
-                    _partial_pnl  = round(_close_shares * (price_10am - pos["entry_price"]), 2)
+                    _partial_pnl  = round(_close_shares * (price_1030am - pos["entry_price"]), 2)
                     trades.append(_partial_pnl)
                     cumulative_realized += _partial_pnl
                     ticker_pnl[ticker] = ticker_pnl.get(ticker, 0.0) + _partial_pnl
+                    _mfe, _mae = _mfe_mae(pos)
+                    _r_partial = round((price_1030am - pos["entry_price"]) /
+                                       (pos["entry_price"] - pos.get("initial_stop", pos["stop_price"])), 4) \
+                                 if (pos["entry_price"] - pos.get("initial_stop", pos["stop_price"])) > 0 else ""
                     trade_records.append({
                         "ticker":      ticker,
                         "entry_date":  str(pos["entry_date"]),
@@ -521,9 +548,12 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
                         "stop_type":   pos.get("stop_type", "unknown"),
                         "regime":      pos.get("regime", "unknown"),
                         "entry_price": round(pos["entry_price"], 4),
-                        "exit_price":  round(price_10am, 4),
+                        "exit_price":  round(price_1030am, 4),
                         "pnl":         _partial_pnl,
-                        "exit_type":   "partial",
+                        "exit_type":   "partial",   # P0-C
+                        "mfe_atr":     _mfe,         # P0-B
+                        "mae_atr":     _mae,         # P0-B
+                        "r_multiple":  _r_partial,   # P0-D
                     })
                     pos["shares"]        *= 0.5
                     pos["partial_taken"]  = True
@@ -550,39 +580,46 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
             shares = RISK_PER_TRADE / risk if risk > 0 else RISK_PER_TRADE / entry_price
             _entry_regime = _today_regime
             portfolio[ticker] = {
-                "entry_price": entry_price,
-                "entry_date": today,
-                "shares": shares,
-                "stop_price": stop_raw,
-                "stop_type": signal.get("stop_type", "unknown"),   # R5
-                "ticker": ticker,
-                "regime": _entry_regime,                            # R11
-                "atr14": signal.get("atr14", 0.0),                  # R14: ATR at entry for partial close
-                "partial_taken": False,                             # R14: guard against re-firing
+                "entry_price":      entry_price,
+                "entry_date":       today,
+                "shares":           shares,
+                "stop_price":       stop_raw,
+                "stop_type":        signal.get("stop_type", "unknown"),   # R5
+                "ticker":           ticker,
+                "regime":           _entry_regime,                         # R11
+                "atr14":            signal.get("atr14", 0.0),              # R14: ATR at entry for partial close
+                "partial_taken":    False,                                  # R14: guard against re-firing
+                "initial_stop":     stop_raw,                              # P0-D: reference stop for r_multiple
+                "high_since_entry": entry_price,                           # P0-B: tracks max price seen
+                "low_since_entry":  entry_price,                           # P0-B: tracks min price seen
             }
 
-        # 4. Mark-to-market: portfolio value = sum of (price_10am × shares) for open positions
+        # 4. Mark-to-market: portfolio value = sum of (price_1030am × shares) for open positions
         # Skip NaN prices (e.g. data gaps) to avoid poisoning the Sharpe and equity-curve metrics.
         portfolio_value = 0.0
         for ticker, pos in portfolio.items():
             df = ticker_dfs[ticker]
             if today in df.index:
-                price = float(df.loc[today, "price_10am"])
+                price = float(df.loc[today, "price_1030am"])
                 if not np.isnan(price):
                     portfolio_value += price * pos["shares"]
         daily_values.append(portfolio_value)
         # R7: equity = realized gains so far + current open position MTM
         equity_curve.append((today, cumulative_realized + portfolio_value))
 
-    # End of backtest: close all remaining positions at last available price_10am
+    # End of backtest: close all remaining positions at last available price_1030am
     last_day = trading_days[-1] if trading_days else None
     for ticker, pos in portfolio.items():
         df = ticker_dfs[ticker]
-        last_price = float(df["price_10am"].iloc[-1])
+        last_price = float(df["price_1030am"].iloc[-1])
         pnl = (last_price - pos["entry_price"]) * pos["shares"]
         trades.append(pnl)
         cumulative_realized += pnl
         ticker_pnl[ticker] = ticker_pnl.get(ticker, 0.0) + pnl
+        _mfe, _mae = _mfe_mae(pos)
+        _r_eob = round((last_price - pos["entry_price"]) /
+                       (pos["entry_price"] - pos.get("initial_stop", pos["stop_price"])), 4) \
+                 if (pos["entry_price"] - pos.get("initial_stop", pos["stop_price"])) > 0 else ""
         trade_records.append({
             "ticker":       ticker,
             "entry_date":   str(pos["entry_date"]),
@@ -593,6 +630,10 @@ def run_backtest(ticker_dfs: dict, start: str | None = None, end: str | None = N
             "entry_price":  round(pos["entry_price"], 4),
             "exit_price":   round(last_price, 4),
             "pnl":          round(pnl, 2),
+            "exit_type":    "end_of_backtest",   # P0-C
+            "mfe_atr":      _mfe,                # P0-B
+            "mae_atr":      _mae,                # P0-B
+            "r_multiple":   _r_eob,              # P0-D
         })
 
     # Sharpe computation (PRD Feature 5): annualised daily-changes Sharpe
@@ -761,7 +802,7 @@ def _write_final_outputs(ticker_dfs: dict, test_start: str, test_end: str,
                 "date": str(idx_date),
                 **{c: round(float(row[c]), 4) if not pd.isna(row[c]) else ""
                    for c in ["open", "high", "low", "close", "volume",
-                              "price_10am", "sma50", "rsi14", "atr14", "vm30"]},
+                              "price_1030am", "sma50", "rsi14", "atr14", "vm30"]},
             })
     if rows:
         fieldnames = list(rows[0].keys())
@@ -790,7 +831,8 @@ def _write_trades_tsv(trade_records: list, annotation: str | None = None) -> Non
     If annotation is provided, writes it as a comment line before the header row."""
     import csv
     fieldnames = ["ticker", "entry_date", "exit_date", "days_held",
-                  "stop_type", "regime", "entry_price", "exit_price", "pnl"]
+                  "stop_type", "regime", "entry_price", "exit_price", "pnl",
+                  "exit_type", "mfe_atr", "mae_atr", "r_multiple"]
     with open("trades.tsv", "w", newline="", encoding="utf-8") as f:
         if annotation:
             f.write(f"# {annotation}\n")

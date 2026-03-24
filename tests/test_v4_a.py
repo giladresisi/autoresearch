@@ -111,25 +111,25 @@ def _make_long_position(n=50, entry_price=100.0, stop_price=90.0):
 
 
 def test_manage_position_forces_exit_stalled_position():
-    # Held >30 bdays, unrealised_pnl = 0 < 0.3*RISK_PER_TRADE=15 → returns price_10am
+    # Held >30 bdays, unrealised_pnl = 0 < 0.3*RISK_PER_TRADE=15 → returns price_1030am
     df, pos = _make_long_position(n=50, entry_price=100.0, stop_price=90.0)
     result = manage_position(pos, df)
-    price_10am = float(df['price_10am'].iloc[-1])
-    assert result == max(pos['stop_price'], price_10am)
-    assert result == price_10am  # stop_price=90 < price_10am=100
+    price_1030am = float(df['price_1030am'].iloc[-1])
+    assert result == max(pos['stop_price'], price_1030am)
+    assert result == price_1030am  # stop_price=90 < price_1030am=100
 
 
 def test_manage_position_no_force_exit_when_short_hold():
     # Held ≤30 bdays → R10 guard does not fire; normal stop management applies
     df, pos = _make_long_position(n=20, entry_price=100.0, stop_price=90.0)
     result = manage_position(pos, df)
-    # Normal: price_10am=100.0, entry=100.0, ATR≈4 → no breakeven → stop stays at 90
+    # Normal: price_1030am=100.0, entry=100.0, ATR≈4 → no breakeven → stop stays at 90
     assert result == 90.0
 
 
 def test_manage_position_no_force_exit_when_profitable():
     # Held >30 bdays but unrealised_pnl >= threshold → R10 guard does not fire
-    # price_10am=100, entry=80 → unrealised_pnl = (100-80)*shares >> 0.3*RISK_PER_TRADE
+    # price_1030am=100, entry=80 → unrealised_pnl = (100-80)*shares >> 0.3*RISK_PER_TRADE
     df = make_position_df(n=50, price=100.0, atr_spread=2.0)
     shares = RISK_PER_TRADE / (80.0 - 75.0)  # sized on 80→75 stop distance
     pos = {
@@ -140,26 +140,26 @@ def test_manage_position_no_force_exit_when_profitable():
         'entry_date': df.index[0],
     }
     result = manage_position(pos, df)
-    price_10am = float(df['price_10am'].iloc[-1])  # 100.0
-    # R10 does not fire (pnl = (100-80)*10 = 200 >> threshold=15) → stop < price_10am
-    assert result < price_10am
+    price_1030am = float(df['price_1030am'].iloc[-1])  # 100.0
+    # R10 does not fire (pnl = (100-80)*10 = 200 >> threshold=15) → stop < price_1030am
+    assert result < price_1030am
 
 
 def test_manage_position_force_exit_never_lowers_stop():
-    # R10 fires but existing stop is already above price_10am → return existing stop
+    # R10 fires but existing stop is already above price_1030am → return existing stop
     df, pos = _make_long_position(n=50, entry_price=100.0, stop_price=105.0)
     result = manage_position(pos, df)
-    price_10am = float(df['price_10am'].iloc[-1])  # 100.0
-    assert result == max(pos['stop_price'], price_10am)  # max(105, 100) = 105
+    price_1030am = float(df['price_1030am'].iloc[-1])  # 100.0
+    assert result == max(pos['stop_price'], price_1030am)  # max(105, 100) = 105
     assert result == 105.0
 
 
 def test_manage_position_force_exit_respects_current_price():
-    # Basic R10: force exit returns stop == price_10am when price_10am > current_stop
+    # Basic R10: force exit returns stop == price_1030am when price_1030am > current_stop
     df, pos = _make_long_position(n=50, entry_price=100.0, stop_price=90.0)
     result = manage_position(pos, df)
-    price_10am = float(df['price_10am'].iloc[-1])  # 100.0
-    assert result == price_10am
+    price_1030am = float(df['price_1030am'].iloc[-1])  # 100.0
+    assert result == price_1030am
 
 
 # ── program.md text assertions ────────────────────────────────────────────────

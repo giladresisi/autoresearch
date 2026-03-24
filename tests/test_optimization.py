@@ -48,7 +48,7 @@ def _make_rising_dataset() -> dict[str, pd.DataFrame]:
             "low":        prices - 1.0,
             "close":      prices,
             "volume":     np.full(200, 1_000_000.0),
-            "price_10am": prices,
+            "price_1030am": prices,
         },
         index=pd.Index(dates, name="date"),
     )
@@ -69,13 +69,13 @@ def test_editable_section_stays_runnable_after_threshold_change():
     """
     above, marker, below = _split_train_source()
 
-    assert "vol_ratio < 1.9" in above, (
-        "Expected volume ratio threshold 'vol_ratio < 1.9' in the editable section of train.py. "
+    assert "vol_ratio < 2.5" in above, (
+        "Expected volume ratio threshold 'vol_ratio < 2.5' in the editable section of train.py. "
         "Update this test if the threshold expression changes."
     )
 
     # Simulate a threshold relaxation (the most common agent edit)
-    modified_source = above.replace("vol_ratio < 1.9", "vol_ratio < 1.2", 1) + marker + below
+    modified_source = above.replace("vol_ratio < 2.5", "vol_ratio < 1.2", 1) + marker + below
 
     # Must be syntactically valid Python
     ast.parse(modified_source)
@@ -115,7 +115,7 @@ def test_harness_below_do_not_edit_is_unchanged():
     # Golden hash of the harness at the time the DO NOT EDIT boundary was set.
     # To recompute: python -c "import hashlib; s=open('train.py').read();
     #   m='# ── DO NOT EDIT BELOW THIS LINE'; print(hashlib.sha256(s.partition(m)[2].encode()).hexdigest())"
-    GOLDEN_HASH = "f81f0a5124e083eb297dd3854a0d3f4b199aad8e679861a9e4e73e6008a62f78"
+    GOLDEN_HASH = "bb802aa39feaeced16f8ba0600631b5a5e34d0cbf1af69df7939c4e97542a670"
 
     _, _, below = _split_train_source()
     actual_hash = hashlib.sha256(below.encode("utf-8")).hexdigest()
@@ -233,7 +233,7 @@ def test_optimization_feasible_on_synthetic_data():
         # Always fires when there is data — simulates a threshold relaxation
         if len(df) < 2:
             return None
-        price = float(df["price_10am"].iloc[-1])
+        price = float(df["price_1030am"].iloc[-1])
         return {"stop": price - 10.0, "entry_price": price}
 
     def no_op_manage(position, df):
@@ -298,7 +298,7 @@ def test_max_drawdown_is_non_negative():
     def always_enter(df, today):
         if len(df) < 2:
             return None
-        price = float(df["price_10am"].iloc[-1])
+        price = float(df["price_1030am"].iloc[-1])
         return {"stop": price - 10.0, "entry_price": price, "stop_type": "fallback"}
 
     def no_op_manage(position, df):
@@ -342,7 +342,7 @@ def test_pnl_consistency_equals_min_monthly_pnl():
         "low":        prices - 1.0,
         "close":      prices,
         "volume":     np.full(len(dates), 1_000_000.0),
-        "price_10am": prices,
+        "price_1030am": prices,
     }, index=pd.Index(dates, name="date"))
     ticker_dfs = {"SYNTH": df}
 
@@ -351,7 +351,7 @@ def test_pnl_consistency_equals_min_monthly_pnl():
             return None
         if len(df_arg) < 2:
             return None
-        price = float(df_arg["price_10am"].iloc[-1])
+        price = float(df_arg["price_1030am"].iloc[-1])
         return {"stop": price - 5.0, "entry_price": price, "stop_type": "fallback"}
 
     def no_op_manage(position, df_arg):
@@ -536,7 +536,7 @@ _live = _pytest.mark.skipif(not _CACHE_AVAILABLE, reason="no parquet cache found
 def test_live_run_backtest_r7_metrics_are_finite():
     """
     On real cached data, R7 metrics must be finite floats with no NaN.
-    Guards against data gaps (e.g. missing price_10am) poisoning the equity curve.
+    Guards against data gaps (e.g. missing price_1030am) poisoning the equity curve.
     """
     ticker_dfs = train.load_all_ticker_data()
     stats = train.run_backtest(ticker_dfs)
@@ -682,7 +682,7 @@ def _make_multi_ticker_dataset(tickers=("SYNTH1", "SYNTH2", "SYNTH3")) -> dict[s
                 "low":        prices - 1.0,
                 "close":      prices,
                 "volume":     np.full(200, 1_000_000.0),
-                "price_10am": prices,
+                "price_1030am": prices,
             },
             index=pd.Index(dates, name="date"),
         )
@@ -703,7 +703,7 @@ def test_position_cap_limits_simultaneous_positions():
     def always_enter(df, today):
         if len(df) < 2:
             return None
-        price = float(df["price_10am"].iloc[-1])
+        price = float(df["price_1030am"].iloc[-1])
         return {"stop": price - 10.0, "entry_price": price}
 
     def no_op_manage(position, df):
@@ -731,7 +731,7 @@ def test_position_cap_does_not_fire_when_unlimited():
     def always_enter(df, today):
         if len(df) < 2:
             return None
-        price = float(df["price_10am"].iloc[-1])
+        price = float(df["price_1030am"].iloc[-1])
         return {"stop": price - 10.0, "entry_price": price}
 
     def no_op_manage(position, df):
@@ -757,7 +757,7 @@ def test_correlation_penalty_reduces_pnl_when_positive():
     def always_enter(df, today):
         if len(df) < 2:
             return None
-        price = float(df["price_10am"].iloc[-1])
+        price = float(df["price_1030am"].iloc[-1])
         return {"stop": price - 10.0, "entry_price": price}
 
     def no_op_manage(position, df):
@@ -791,7 +791,7 @@ def test_correlation_penalty_zero_when_weight_is_zero():
     def always_enter(df, today):
         if len(df) < 2:
             return None
-        price = float(df["price_10am"].iloc[-1])
+        price = float(df["price_1030am"].iloc[-1])
         return {"stop": price - 10.0, "entry_price": price}
 
     def no_op_manage(position, df):
@@ -836,7 +836,7 @@ def test_robustness_seeds_nonzero_returns_pnl_min():
     def always_enter(df, today):
         if len(df) < 2:
             return None
-        price = float(df["price_10am"].iloc[-1])
+        price = float(df["price_1030am"].iloc[-1])
         return {"stop": price - 10.0, "entry_price": price}
 
     def no_op_manage(position, df):
@@ -911,21 +911,21 @@ def _make_regime_dataset(n_rows: int = 60, price_above_sma: bool = True) -> dict
     base = 100.0
     prices = np.full(n_rows, base)
     if price_above_sma:
-        # price_10am > close (SMA will be ≈ close), triggers bull vote
-        price_10am = np.full(n_rows, base + 5.0)
+        # price_1030am > close (SMA will be ≈ close), triggers bull vote
+        price_1030am = np.full(n_rows, base + 5.0)
     else:
-        price_10am = np.full(n_rows, base - 5.0)
+        price_1030am = np.full(n_rows, base - 5.0)
     df = pd.DataFrame(
         {"open": prices, "high": prices + 1, "low": prices - 1,
          "close": prices, "volume": np.full(n_rows, 1_000_000.0),
-         "price_10am": price_10am},
+         "price_1030am": price_1030am},
         index=pd.Index(dates, name="date"),
     )
     return df
 
 
 def test_detect_regime_bull_when_majority_above_sma50():
-    """detect_regime returns 'bull' when all tickers have price_10am > SMA50."""
+    """detect_regime returns 'bull' when all tickers have price_1030am > SMA50."""
     ticker_dfs = {
         "A": _make_regime_dataset(price_above_sma=True),
         "B": _make_regime_dataset(price_above_sma=True),
@@ -937,7 +937,7 @@ def test_detect_regime_bull_when_majority_above_sma50():
 
 
 def test_detect_regime_bear_when_majority_below_sma50():
-    """detect_regime returns 'bear' when majority of tickers have price_10am < SMA50."""
+    """detect_regime returns 'bear' when majority of tickers have price_1030am < SMA50."""
     ticker_dfs = {
         "A": _make_regime_dataset(price_above_sma=False),
         "B": _make_regime_dataset(price_above_sma=False),
@@ -955,7 +955,7 @@ def test_detect_regime_unknown_when_insufficient_history():
     df = pd.DataFrame(
         {"open": prices, "high": prices + 1, "low": prices - 1,
          "close": prices, "volume": np.full(10, 1_000_000.0),
-         "price_10am": prices},
+         "price_1030am": prices},
         index=pd.Index(dates, name="date"),
     )
     ticker_dfs = {"A": df, "B": df}
@@ -973,7 +973,7 @@ def test_trade_records_include_regime_field():
     prices = np.linspace(100.0, 150.0, 200) + rng.standard_normal(200) * 0.3
     df = pd.DataFrame(
         {"open": prices - 0.5, "high": prices + 1.0, "low": prices - 1.0,
-         "close": prices, "volume": np.full(200, 1_000_000.0), "price_10am": prices},
+         "close": prices, "volume": np.full(200, 1_000_000.0), "price_1030am": prices},
         index=pd.Index(dates, name="date"),
     )
     ticker_dfs = {"SYNTHETIC": df}
@@ -981,7 +981,7 @@ def test_trade_records_include_regime_field():
     def always_enter(hist, today):
         if len(hist) < 2:
             return None
-        price = float(hist["price_10am"].iloc[-1])
+        price = float(hist["price_1030am"].iloc[-1])
         return {"stop": price - 10.0, "entry_price": price}
 
     def no_op_manage(position, df):
@@ -1005,7 +1005,7 @@ def test_regime_stats_in_run_backtest_return():
     prices = np.linspace(100.0, 150.0, 200) + rng.standard_normal(200) * 0.3
     df = pd.DataFrame(
         {"open": prices - 0.5, "high": prices + 1.0, "low": prices - 1.0,
-         "close": prices, "volume": np.full(200, 1_000_000.0), "price_10am": prices},
+         "close": prices, "volume": np.full(200, 1_000_000.0), "price_1030am": prices},
         index=pd.Index(dates, name="date"),
     )
     ticker_dfs = {"SYNTHETIC": df}
@@ -1013,7 +1013,7 @@ def test_regime_stats_in_run_backtest_return():
     def always_enter(hist, today):
         if len(hist) < 2:
             return None
-        price = float(hist["price_10am"].iloc[-1])
+        price = float(hist["price_1030am"].iloc[-1])
         return {"stop": price - 10.0, "entry_price": price}
 
     def no_op_manage(position, df):
@@ -1068,7 +1068,7 @@ def test_write_final_outputs_includes_bootstrap_lines(tmp_path, capsys):
     prices = np.full(60, 100.0)
     df = pd.DataFrame(
         {"open": prices, "high": prices + 1, "low": prices - 1,
-         "close": prices, "volume": np.full(60, 1_000_000.0), "price_10am": prices},
+         "close": prices, "volume": np.full(60, 1_000_000.0), "price_1030am": prices},
         index=pd.Index(dates, name="date"),
     )
     ticker_dfs = {"SYN": df}
@@ -1103,7 +1103,7 @@ def test_write_final_outputs_no_bootstrap_when_no_trade_records(tmp_path, capsys
     prices = np.full(60, 100.0)
     df = pd.DataFrame(
         {"open": prices, "high": prices + 1, "low": prices - 1,
-         "close": prices, "volume": np.full(60, 1_000_000.0), "price_10am": prices},
+         "close": prices, "volume": np.full(60, 1_000_000.0), "price_1030am": prices},
         index=pd.Index(dates, name="date"),
     )
     ticker_dfs = {"SYN": df}
@@ -1181,7 +1181,7 @@ def test_main_outputs_ticker_holdout_pnl(capsys):
     prices = np.linspace(100.0, 150.0, 200) + rng.standard_normal(200) * 0.3
     df = pd.DataFrame(
         {"open": prices - 0.5, "high": prices + 1.0, "low": prices - 1.0,
-         "close": prices, "volume": np.full(200, 1_000_000.0), "price_10am": prices},
+         "close": prices, "volume": np.full(200, 1_000_000.0), "price_1030am": prices},
         index=pd.Index(dates, name="date"),
     )
     two_tickers = {"AAAA": df, "BBBB": df}

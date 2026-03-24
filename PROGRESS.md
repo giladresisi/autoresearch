@@ -2,8 +2,34 @@
 
 ## Feature: P0 — Price Fix and Trade Instrumentation
 
-**Status**: ✅ Planned
+**Status**: ✅ Complete
+**Completed**: 2026-03-24
 **Plan File**: .agents/plans/p0-price-fix-and-instrumentation.md
+
+### Core Changes
+P0-A: `prepare.py` now uses `Close` of the 9:30 AM bar (not `Open`) and produces column `price_1030am`. All `price_10am` references renamed to `price_1030am` throughout `train.py`, strategy files, and all test files.
+P0-B: MFE/MAE (`mfe_atr`, `mae_atr`) added to all trade records, tracked via `high_since_entry`/`low_since_entry` in position dict. Normalized by ATR at entry.
+P0-C: `exit_type` field now present in all trade records: `stop_hit`, `end_of_backtest`, `partial`.
+P0-D: `r_multiple` added to all trade records: `(exit − entry) / (entry − initial_stop)`.
+`_write_trades_tsv` fieldnames expanded to include `exit_type`, `mfe_atr`, `mae_atr`, `r_multiple`. GOLDEN_HASH updated.
+
+### Cache and Ticker Expansion
+- TICKERS expanded from 85 → 389 (copied from `global-mar24` worktree): all 10 GICS sectors + high-vol ETFs
+- Fresh parquet cache downloaded for all 389 tickers (381/389 succeeded; 8 failed: `DFS`, `FI`, `SQ`, `SKX`, `K`, `PARA`, `HES`, `MRO` — yfinance delisted/symbol conflicts)
+- Cache uses correct `price_1030am` (9:30 bar Close) throughout
+
+### Test Status
+- Automated: ✅ 210 passed, 0 failed, 0 skipped (all 12 previously-cache-gated tests now run)
+- 7 new P0 unit tests pass; 4 `test_e2e.py` tests updated for walk-forward output format and vol_ratio threshold change
+- Pre-existing selector tests excluded (collection error, out of scope)
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/p0-price-fix-and-instrumentation.md`
+- Detailed implementation summary
+- Divergences and resolutions (T9 deferral, _make_trade_run() design choice)
+- Test results and metrics
+- 7/7 new tests pass, 0 new regressions
 
 ---
 

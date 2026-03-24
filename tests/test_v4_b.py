@@ -326,3 +326,134 @@ def test_program_md_walk_forward_windows_default_is_7():
     assert 'WALK_FORWARD_WINDOWS = 7' in text or 'WALK_FORWARD_WINDOWS=7' in text or (
         'WALK_FORWARD_WINDOWS' in text and '7' in text
     ), "Expected WALK_FORWARD_WINDOWS and 7 to appear in program.md"
+
+
+# ── P0-B/C/D: MFE/MAE, exit_type, R-multiple ─────────────────────────────────
+
+import unittest.mock as mock
+import pandas as pd
+from datetime import date, timedelta
+
+
+def _make_trade_run(prices_after_entry: list, stop: float = 90.0, atr14: float = 5.0,
+                    entry_price: float = 100.0) -> dict:
+    """
+    Build a minimal run_backtest result with one trade.
+    screen_day fires once on the first day; manage_position keeps stop fixed.
+    prices_after_entry: price_1030am values for days after the entry signal.
+    """
+    signal_date = date(2026, 1, 10)
+    n = 1 + len(prices_after_entry)
+    days = [signal_date + timedelta(days=i) for i in range(n)]
+
+    prices_all = [entry_price] + list(prices_after_entry)
+    prices_arr = __import__('numpy').array(prices_all)
+
+    df = pd.DataFrame({
+        'open':        prices_arr,
+        'high':        prices_arr + 1.0,
+        'low':         prices_arr - 1.0,
+        'close':       prices_arr,
+        'volume':      __import__('numpy').full(n, 1_000_000.0),
+        'price_1030am': prices_arr,
+    }, index=pd.Index(days, name='date'))
+
+    fake_signal = {'entry_price': entry_price, 'stop': stop, 'atr14': atr14, 'stop_type': 'pivot'}
+    fired = [False]
+
+    def _screen(d, today):
+        if not fired[0]:
+            fired[0] = True
+            return fake_signal
+        return None
+
+    with mock.patch.object(train, 'screen_day', side_effect=_screen), \
+         mock.patch.object(train, 'manage_position', lambda pos, df: pos['stop_price']):
+        return train.run_backtest({'X': df},
+                                  start=str(days[0]),
+                                  end=str(days[-1] + timedelta(days=1)))
+
+
+# ── P0-B: MFE/MAE ────────────────────────────────────────────────────────────
+
+def test_mfe_atr_positive_for_winning_trade():
+    """A trade where prices rise after entry should have mfe_atr > 0."""
+    # Prices rise from 100 to 110 over 5 days → MFE = (110−100)/5 = 2.0
+    result = _make_trade_run(prices_after_entry=[102, 105, 108, 110, 110])
+    records = result["trade_records"]
+    assert len(records) > 0, "Expected at least one trade record"
+    for r in records:
+        assert "mfe_atr" in r, f"Missing mfe_atr in {r}"
+    # The end-of-backtest record should reflect the run-up
+    eob = [r for r in records if r.get("exit_type") == "end_of_backtest"]
+    assert len(eob) > 0
+    assert eob[-1]["mfe_atr"] > 0, f"Expected mfe_atr > 0, got {eob[-1]['mfe_atr']}"
+
+
+def test_mae_atr_non_negative():
+    """MAE (adverse excursion) must always be >= 0 for any trade."""
+    result = _make_trade_run(prices_after_entry=[100, 101, 102, 103])
+    for r in result["trade_records"]:
+        assert r.get("mae_atr", 0.0) >= 0.0, f"Negative MAE in {r}"
+
+
+# ── P0-C: exit_type ───────────────────────────────────────────────────────────
+
+def test_exit_type_present_in_all_trade_records():
+    """Every trade record must contain a non-empty exit_type."""
+    result = _make_trade_run(prices_after_entry=[100, 101, 102])
+    for r in result["trade_records"]:
+        assert "exit_type" in r, f"Missing exit_type in {r}"
+        assert r["exit_type"] in {"stop_hit", "end_of_backtest", "partial"}, \
+            f"Unknown exit_type: {r['exit_type']}"
+
+
+def test_partial_exit_type_unchanged():
+    """Partial close records must have exit_type == 'partial'."""
+    # entry=100, atr=5 → partial fires when price_1030am >= 100.03+5=105.03
+    result = _make_trade_run(prices_after_entry=[106, 106, 106], atr14=5.0)
+    partials = [r for r in result["trade_records"] if r.get("exit_type") == "partial"]
+    assert len(partials) >= 1, "Expected at least one partial record — price 106 should trigger partial at +1ATR"
+    for r in partials:
+        assert r["exit_type"] == "partial"
+
+
+# ── P0-D: R-multiple ─────────────────────────────────────────────────────────
+
+def test_r_multiple_present_in_all_trade_records():
+    """Every trade record must have an r_multiple field."""
+    result = _make_trade_run(prices_after_entry=[100, 101])
+    for r in result["trade_records"]:
+        assert "r_multiple" in r, f"Missing r_multiple in {r}"
+
+
+def test_r_multiple_positive_for_winning_trade():
+    """Winning end-of-backtest trade exited above entry → r_multiple > 0."""
+    # entry=100, initial_stop=90, exit=110 → R = (110−100)/(100−90) = 1.0
+    result = _make_trade_run(prices_after_entry=[110, 110], stop=90.0, atr14=5.0)
+    for r in result["trade_records"]:
+        if r.get("exit_type") == "end_of_backtest" and r["pnl"] > 0:
+            assert isinstance(r["r_multiple"], float) and r["r_multiple"] > 0, \
+                f"Expected positive r_multiple for winner: {r}"
+
+
+# ── P0-B/C/D: _write_trades_tsv fieldnames ───────────────────────────────────
+
+def test_trades_tsv_fieldnames_include_p0_columns(tmp_path, monkeypatch):
+    """_write_trades_tsv must write exit_type, mfe_atr, mae_atr, r_multiple columns."""
+    import csv
+    monkeypatch.chdir(tmp_path)
+    record = {
+        "ticker": "X", "entry_date": "2026-01-01", "exit_date": "2026-01-10",
+        "days_held": 9, "stop_type": "pivot", "regime": "bull",
+        "entry_price": 100.0, "exit_price": 110.0, "pnl": 10.0,
+        "exit_type": "end_of_backtest", "mfe_atr": 2.0, "mae_atr": 0.5, "r_multiple": 1.0,
+    }
+    train._write_trades_tsv([record])
+    with open(tmp_path / "trades.tsv", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        fieldnames = reader.fieldnames
+    assert "exit_type"  in fieldnames, "exit_type missing from trades.tsv"
+    assert "mfe_atr"    in fieldnames, "mfe_atr missing from trades.tsv"
+    assert "mae_atr"    in fieldnames, "mae_atr missing from trades.tsv"
+    assert "r_multiple" in fieldnames, "r_multiple missing from trades.tsv"

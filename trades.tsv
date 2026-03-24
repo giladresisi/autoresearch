@@ -1,4 +1,7 @@
-ticker	entry_date	exit_date	days_held	stop_type	regime	entry_price	exit_price	pnl
-XOM	2026-01-05	2026-01-06	1	pivot	bull	125.24	125.47	0.66
-LMT	2026-01-06	2026-01-07	1	pivot	bull	522.162	525.31	1.79
-RTX	2026-01-07	2026-01-08	1	pivot	bull	191.95	203.33	13.47
+ticker	entry_date	exit_date	days_held	stop_type	regime	entry_price	exit_price	pnl	exit_type	mfe_atr	mae_atr	r_multiple
+HAL	2026-01-05	2026-01-06	1	pivot	bull	32.4599	30.95	-6.73	stop_hit	0.0	2.0172	-0.1346
+COHU	2026-01-06	2026-01-07	1	pivot	bull	26.46	26.715	1.67	stop_hit	0.3561	0.0	0.0334
+WDC	2026-01-06	2026-01-07	1	pivot	bull	208.875	201.6241	-4.57	stop_hit	0.0	0.7609	-0.0915
+IBB	2026-01-07	2026-01-08	1	pivot	bull	175.46	163.01	-22.96	end_of_backtest	0.0	0.4511	-0.4592
+F	2026-01-08	2026-01-08	0	pivot	bull	14.25	11.52	-46.27	end_of_backtest	0.0	0.0	-0.9254
+HII	2026-01-08	2026-01-08	0	pivot	bull	384.51	416.37	12.88	end_of_backtest	0.0	0.0	0.2577

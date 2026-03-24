@@ -27,7 +27,7 @@ def make_passing_df(n: int = 250) -> pd.DataFrame:
         'low':        close * 0.990,
         'close':      close,
         'volume':     np.full(n, 1_000_000.0),
-        'price_10am': close * 0.998,
+        'price_1030am': close * 0.998,
     }, index=pd.Index(dates, name='date'))
 
 
@@ -51,16 +51,16 @@ def make_signal_df(n: int = 250) -> pd.DataFrame:
     - Bars 0-234: steady rise 60→97 (SMA50 ≈ 93, SMA20 ≈ 98 at end → SMA20 > SMA50)
     - Bars 235-249: 8 up-bars (+1) and 6 down-bars (−0.7), alternating
       → RSI14 ≈ 66 (within the required 50–75 band)
-    - price_10am[-1] = 115: breaks above 20-day high close (~100) and yesterday high (~100.3)
-    - volume[-1] = 2×VM30 → vol_ratio = 2.0 (passes ≥ 1.9 threshold)
+    - price_1030am[-1] = 115: breaks above 20-day high close (~100) and yesterday high (~100.3)
+    - volume[-1] = 3×VM30 → vol_ratio = 3.0 (passes ≥ 2.5 threshold)
     - No overhead pivot high above 115 → resistance check passes
-    - Stop: ATR-fallback = price_10am − 2×ATR (always satisfies the 1.5×ATR buffer)
+    - Stop: ATR-fallback = price_1030am − 2×ATR (always satisfies the 1.5×ATR buffer)
     """
     base = date(2024, 1, 2)
     dates = [base + timedelta(days=i) for i in range(n)]
 
     close = np.zeros(n, dtype=float)
-    # Steady rise builds SMA50 to ~95 well below the breakout price_10am of 115
+    # Steady rise builds SMA50 to ~95 well below the breakout price_1030am of 115
     close[:235] = np.linspace(60.0, 97.0, 235)
     # Alternating oscillation: 8 ups of +1, 6 downs of −0.7 → RSI14 ≈ 66
     close[235:250] = [97.0, 98.0, 97.3, 98.3, 97.6, 98.6, 97.9, 98.9,
@@ -70,12 +70,12 @@ def make_signal_df(n: int = 250) -> pd.DataFrame:
     low   = close * 0.995
     open_ = close * 0.998
 
-    price_10am = close.copy()
+    price_1030am = close.copy()
     # Big jump on the last bar to trigger the 20-day breakout rule
-    price_10am[249] = 115.0
+    price_1030am[249] = 115.0
 
     volume = np.full(n, 1_000_000.0)
-    volume[249] = 2_000_000.0   # last bar = 2× MA30 → vol_ratio = 2.0, passes ≥ 1.9
+    volume[249] = 3_000_000.0   # last bar = 3× MA30 → vol_ratio = 3.0, passes ≥ 2.5
 
     return pd.DataFrame({
         'open':       open_,
@@ -83,7 +83,7 @@ def make_signal_df(n: int = 250) -> pd.DataFrame:
         'low':        low,
         'close':      close,
         'volume':     volume,
-        'price_10am': price_10am,
+        'price_1030am': price_1030am,
     }, index=pd.Index(dates, name='date'))
 
 
@@ -96,7 +96,7 @@ def make_pivot_signal_df(n: int = 250) -> pd.DataFrame:
     """
     df = make_signal_df(n).copy()
     pivot_idx = n - 35
-    # Dip well below price_10am=115 (at least 1.5×ATR≈1 away)
+    # Dip well below price_1030am=115 (at least 1.5×ATR≈1 away)
     pivot_price = float(df['close'].iloc[pivot_idx]) * 0.85
     df.iloc[pivot_idx, df.columns.get_loc('low')] = pivot_price
     # Prior touch satisfies find_stop_price's R2 requirement (at least 1 historical touch)
@@ -192,8 +192,8 @@ def test_r1_pass_150_rows():
 
 def test_rule1_fail_below_sma():
     df = make_passing_df(250)
-    # Set price_10am to 1.0 — far below any SMA150
-    df.iloc[-1, df.columns.get_loc('price_10am')] = 1.0
+    # Set price_1030am to 1.0 — far below any SMA150
+    df.iloc[-1, df.columns.get_loc('price_1030am')] = 1.0
     today = df.index[-1]
     assert screen_day(df, today) is None
 
@@ -247,18 +247,18 @@ def test_stop_always_below_entry():
 
 
 def test_rule2b_fail_price_not_above_prev_high():
-    # Rule 2b: price_10am must exceed yesterday's high.
-    # Raise yesterday's high above price_10am (115) → Rule 2b fails → return None.
+    # Rule 2b: price_1030am must exceed yesterday's high.
+    # Raise yesterday's high above price_1030am (115) → Rule 2b fails → return None.
     df = make_signal_df(250)
-    df.iloc[-2, df.columns.get_loc('high')] = 120.0  # prev_high=120 > price_10am=115
+    df.iloc[-2, df.columns.get_loc('high')] = 120.0  # prev_high=120 > price_1030am=115
     today = df.index[-1]
     assert screen_day(df, today) is None
 
 
 # ── Edge case tests ───────────────────────────────────────────────────────────
 
-def test_missing_price_10am_raises():
-    df = make_passing_df(250).drop(columns=['price_10am'])
+def test_missing_price_1030am_raises():
+    df = make_passing_df(250).drop(columns=['price_1030am'])
     today = df.index[-1]
     with pytest.raises(KeyError):
         screen_day(df, today)

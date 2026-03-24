@@ -23,7 +23,7 @@ def _make_df(n=200, seed=42):
         "low":        prices - 1.0,
         "close":      prices,
         "volume":     np.full(n, 1_000_000.0),
-        "price_10am": prices,
+        "price_1030am": prices,
     }, index=pd.Index(dates, name="date"))
 
 

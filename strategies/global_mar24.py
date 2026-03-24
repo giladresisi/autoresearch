@@ -16,7 +16,7 @@ METADATA = {
     "train_sharpe": 0.041287,
     "train_trades": 118,
     "description":  (
-        "This strategy enters long positions when price_10am breaks above both the 20-day highest close and the prior day's high, with volume at least 2.5× the 30-day average, RSI(14) between 50 and 75, and a bullish SMA stack (price > SMA50 > SMA100, SMA20 > SMA50, SMA20 slope not down more than 0.5% over 5 days). A structural pivot-low stop is required — placed 0.3 ATR(14) below the nearest prior-touch pivot low — and the entry is rejected if the entry-to-stop gap is under 1.5 ATR or if the nearest overhead resistance pivot is less than 2.0 ATR away. Stops trail to breakeven at +1.5 ATR profit, then trail 1.2 ATR below the 20-bar high once +2.0 ATR in profit, with a forced exit if the trade stalls below +0.5 ATR within the first 5 calendar days or holds beyond 30 business days with unrealized P&L under $15; this strategy suits trending, higher-momentum market regimes where mid-cap and large-cap stocks are making new 20-day highs on volume surges above established SMA support."
+        "This strategy enters long positions when price_1030am breaks above both the 20-day highest close and the prior day's high, with volume at least 2.5× the 30-day average, RSI(14) between 50 and 75, and a bullish SMA stack (price > SMA50 > SMA100, SMA20 > SMA50, SMA20 slope not down more than 0.5% over 5 days). A structural pivot-low stop is required — placed 0.3 ATR(14) below the nearest prior-touch pivot low — and the entry is rejected if the entry-to-stop gap is under 1.5 ATR or if the nearest overhead resistance pivot is less than 2.0 ATR away. Stops trail to breakeven at +1.5 ATR profit, then trail 1.2 ATR below the 20-bar high once +2.0 ATR in profit, with a forced exit if the trade stalls below +0.5 ATR within the first 5 calendar days or holds beyond 30 business days with unrealized P&L under $15; this strategy suits trending, higher-momentum market regimes where mid-cap and large-cap stocks are making new 20-day highs on volume surges above established SMA support."
     ),
 }
 
@@ -245,7 +245,7 @@ def nearest_resistance_atr(df, entry_price, atr, lookback=90):
 
 def screen_day(df: pd.DataFrame, today) -> "dict | None":
     """
-    Momentum breakout strategy: enter when price_10am breaks above 20-day high
+    Momentum breakout strategy: enter when price_1030am breaks above 20-day high
     with above-average volume, price above SMA50, and sufficient room above resistance.
     df: full daily history up to and including today
     Returns None if no signal, or dict with at minimum {'stop': float}
@@ -257,10 +257,10 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if len(df) < 102:
         return None
 
-    # Today's observable data: only price_10am and partial-day volume
-    price_10am = float(df['price_10am'].iloc[-1])
+    # Today's observable data: only price_1030am and partial-day volume
+    price_1030am = float(df['price_1030am'].iloc[-1])
     today_vol  = float(df['volume'].iloc[-1])
-    if pd.isna(price_10am) or pd.isna(today_vol):
+    if pd.isna(price_1030am) or pd.isna(today_vol):
         return None
 
     # R8: skip entries within 14 calendar days of next earnings announcement
@@ -284,7 +284,7 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
         return None
 
     # Rule 1: SMA alignment — most tickers fail here; check before volume/ATR/RSI
-    if price_10am <= sma50 or price_10am <= sma100 or sma20 <= sma50 or sma50 <= sma100:
+    if price_1030am <= sma50 or price_1030am <= sma100 or sma20 <= sma50 or sma50 <= sma100:
         return None
 
     # Rule 1b: SMA20 slope must not be materially declining (allow up to 0.5% dip vs 5d ago)
@@ -301,14 +301,14 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if vol_ratio < 2.5:
         return None
 
-    # Rule 2a: price_10am breaks above the 20-day highest close (breakout)
+    # Rule 2a: price_1030am breaks above the 20-day highest close (breakout)
     high20 = float(close_hist.iloc[-20:].max())
-    if price_10am <= high20:
+    if price_1030am <= high20:
         return None
 
-    # Rule 2b: price_10am also above yesterday's high (breakout continuation)
+    # Rule 2b: price_1030am also above yesterday's high (breakout continuation)
     prev_high = float(hist['high'].iloc[-1])
-    if price_10am <= prev_high:
+    if price_1030am <= prev_high:
         return None
 
     # Compute ATR14 and RSI14 only for tickers that pass the fast filters above.
@@ -327,23 +327,23 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
         return None
 
     # Stop: pivot-low required; no fallback (R9 — reject structurally unsupported entries)
-    stop = find_stop_price(hist, price_10am, atr)
+    stop = find_stop_price(hist, price_1030am, atr)
     if stop is None:
         return None  # R9: reject entries with no structural pivot support
     stop_type = 'pivot'
 
     # 1.5 ATR buffer safety net
-    if price_10am - stop < 1.5 * atr:
+    if price_1030am - stop < 1.5 * atr:
         return None
 
     # Resistance check: nearest overhead pivot >= 2 ATR away
-    res_atr = nearest_resistance_atr(hist, price_10am, atr)
+    res_atr = nearest_resistance_atr(hist, price_1030am, atr)
     if res_atr is not None and res_atr < 2.0:
         return None
 
     return {
         'stop':        stop,
-        'entry_price': price_10am,
+        'entry_price': price_1030am,
         'stop_type':   stop_type,   # always 'pivot' after R9 (fallback path removed)
         'atr14':       round(atr, 4),
         'sma50':       round(sma50, 4),
@@ -354,7 +354,7 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
 
 def manage_position(position: dict, df: pd.DataFrame) -> float:
     """
-    Breakeven once price_10am >= entry + 1.5 ATR.
+    Breakeven once price_1030am >= entry + 1.5 ATR.
     Trail by 1.2 ATR below recent high once 2.0 ATR in profit.
     Never lower the stop.
     """
@@ -364,27 +364,27 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
     atr          = float(atr_series.iloc[-1])
     if pd.isna(atr) or atr == 0:
         return current_stop
-    price_10am = float(df['price_10am'].iloc[-1])
+    price_1030am = float(df['price_1030am'].iloc[-1])
 
     # R10: time-based capital-efficiency exit
     # If held >30 business days and unrealised P&L < 30% of RISK_PER_TRADE, force exit
     _today_date = df.index[-1]
     _bdays_held = int(np.busday_count(position['entry_date'], _today_date))
-    _unrealised_pnl = (price_10am - entry_price) * position['shares']
+    _unrealised_pnl = (price_1030am - entry_price) * position['shares']
     if _bdays_held > 30 and _unrealised_pnl < 0.3 * RISK_PER_TRADE:
-        return max(current_stop, price_10am)  # force exit; never lower existing stop
+        return max(current_stop, price_1030am)  # force exit; never lower existing stop
 
     # R15: Early stall exit — force exit if price stalls in first 5 calendar days.
     # Targets the 6–14 day loss cluster where price never builds momentum.
     _cal_days_held = (_today_date - position['entry_date']).days
-    if _cal_days_held <= 5 and price_10am < entry_price + 0.5 * atr:
-        return max(current_stop, price_10am)  # force exit; never lower existing stop
+    if _cal_days_held <= 5 and price_1030am < entry_price + 0.5 * atr:
+        return max(current_stop, price_1030am)  # force exit; never lower existing stop
 
     # Breakeven trigger
-    be_stop = entry_price if price_10am >= entry_price + 1.5 * atr else current_stop
+    be_stop = entry_price if price_1030am >= entry_price + 1.5 * atr else current_stop
 
     # Trailing stop: trail 1.2 ATR below recent high once 2.0 ATR in profit (earlier activation)
-    recent_high = float(df['price_10am'].dropna().iloc[-20:].max())
+    recent_high = float(df['price_1030am'].dropna().iloc[-20:].max())
     trail_stop = round(recent_high - 1.2 * atr, 2) if recent_high >= entry_price + 2.0 * atr else current_stop
 
     return max(current_stop, be_stop, trail_stop)

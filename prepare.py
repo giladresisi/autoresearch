@@ -22,24 +22,64 @@ import yfinance as yf
 # based on the parameters the user specifies in their request. Edit the values
 # here directly when running prepare.py manually outside the agent loop.
 TICKERS = [
-    # Tech / high-beta (25) — high ATR names test stop/sizing logic under volatility
-    "AAPL", "MSFT", "NVDA", "AMD", "META", "GOOGL", "AMZN", "TSLA", "AVGO", "ORCL",
-    "CRM", "ADBE", "QCOM", "MU", "AMAT", "NOW", "PLTR", "MSTR", "APP", "SMCI",
-    "NFLX", "COIN", "CRWD", "ZS", "PANW",
-    # Financials (12) — rate-sensitive, different volatility profile
-    "JPM", "GS", "BAC", "WFC", "MS", "BLK", "SCHW", "AXP", "COF", "SPGI", "V", "MA",
-    # Healthcare (12) — defensive, lower correlation to tech
-    "UNH", "LLY", "ABBV", "JNJ", "MRK", "PFE", "TMO", "ISRG", "AMGN", "GILD", "REGN", "VRTX",
-    # Energy (8) — commodity-driven, high sector correlation
-    "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "VLO", "OXY",
-    # Consumer Staples (8) — low-beta, regime stress test
-    "WMT", "PG", "KO", "PEP", "COST", "TGT", "PM", "CL",
-    # Industrials (8)
-    "CAT", "DE", "UPS", "FDX", "GE", "HON", "RTX", "LMT",
-    # Consumer Discretionary (7)
-    "HD", "MCD", "NKE", "SBUX", "LOW", "F", "GM",
-    # Materials (5)
-    "LIN", "APD", "NEM", "FCX", "NUE",
+    # Technology — 55 tickers (source: tickers.md multisector-mar23)
+    "NVDA", "AMD", "TSLA", "PLTR", "MSTR", "APP", "SMCI", "COIN", "CRWD", "META",
+    "GOOGL", "AMZN", "NFLX", "AAPL", "MSFT", "AVGO", "ORCL", "CRM", "ADBE", "NOW",
+    "INTU", "IBM", "QCOM", "MU", "AMAT", "LRCX", "KLAC", "ADI", "MRVL", "MCHP",
+    "ON", "MPWR", "TXN", "INTC", "ZS", "PANW", "FTNT", "OKTA", "NET", "DDOG",
+    "SNOW", "MDB", "TEAM", "HUBS", "DELL", "HPQ", "PSTG", "AKAM", "WDC", "STX",
+    "VRT", "KEYS", "EPAM", "RBLX", "TTD",
+    # Technology additions to reach ~400
+    "TWLO", "U", "ACLS", "ONTO", "MKSI", "IPGP", "COHU", "WOLF", "SLAB",
+    # Healthcare — 45 tickers
+    "LLY", "ABBV", "JNJ", "MRK", "PFE", "AMGN", "GILD", "REGN", "VRTX", "BIIB",
+    "MRNA", "ILMN", "INCY", "ALNY", "BMRN", "IONS", "ARWR", "RXRX", "TMO", "ISRG",
+    "ABT", "DHR", "SYK", "BSX", "MDT", "EW", "DXCM", "PODD", "IDXX", "ALGN",
+    "HOLX", "ZBH", "BDX", "GEHC", "RMD", "UNH", "CI", "HUM", "ELV", "MOH",
+    "CVS", "MCK", "IQV", "HCA", "THC",
+    # Healthcare additions to reach ~400
+    "EXAS", "ACAD", "PTGX", "TGTX", "NKTR", "PRGO", "VTRS", "JAZZ", "NBIX", "OMCL",
+    # Financials — 42 tickers
+    "JPM", "GS", "BAC", "WFC", "MS", "C", "USB", "PNC", "TFC", "ALLY",
+    "COF", "DFS", "SYF", "KEY", "RF", "FITB", "MTB", "CFG", "BLK", "SCHW",
+    "SPGI", "MCO", "ICE", "CME", "CBOE", "MKTX", "IBKR", "LPLA", "V", "MA",
+    "AXP", "PYPL", "FI", "FIS", "GPN", "HOOD", "NU", "AFRM", "SOFI", "SQ",
+    "WEX", "EVTC",
+    # Consumer Discretionary — 38 tickers
+    "HD", "LOW", "TJX", "ROST", "BBY", "ULTA", "WSM", "RH", "ORLY", "AZO",
+    "NKE", "LULU", "DECK", "SKX", "CROX", "ONON", "ELF", "F", "GM", "RIVN",
+    "UBER", "ABNB", "BKNG", "MGM", "LVS", "WYNN", "DKNG", "MCD", "CMG", "SBUX",
+    "YUM", "DRI", "QSR", "TSCO", "CPRI", "RL", "PVH", "LYFT",
+    # Consumer Staples — 27 tickers
+    "WMT", "PG", "KO", "PEP", "COST", "TGT", "PM", "CL", "MO", "EL",
+    "CHD", "KMB", "HRL", "CPB", "GIS", "K", "HSY", "MDLZ", "STZ", "KDP",
+    "CELH", "SYY", "BJ", "GO", "USFD", "PFGC", "COTY",
+    # Industrials — 42 tickers
+    "LMT", "RTX", "NOC", "BA", "LHX", "GD", "HII", "TDG", "TXT", "HEI",
+    "CAT", "DE", "CMI", "PCAR", "ITW", "EMR", "ROK", "PH", "ETN", "CARR",
+    "OTIS", "UPS", "FDX", "DAL", "UAL", "AAL", "LUV", "JBHT", "SAIA", "ODFL",
+    "CSX", "UNP", "GE", "HON", "WM", "RSG", "VRSK", "CTAS", "ROP", "FAST",
+    "IEX", "XYL",
+    # Communication Services — 20 tickers
+    "DIS", "CMCSA", "VZ", "T", "TMUS", "CHTR", "WBD", "PARA", "SNAP", "PINS",
+    "RDDT", "SPOT", "TTWO", "EA", "MTCH", "IAC", "FOX", "SIRI", "ZM", "DOCU",
+    # Energy — 27 tickers
+    "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "VLO", "OXY", "DVN", "FANG",
+    "HES", "APA", "AR", "EQT", "RRC", "HAL", "BKR", "MRO", "WMB", "KMI",
+    "OKE", "LNG", "TRGP", "PSX", "NOV", "RIG", "CTRA",
+    # Materials — 23 tickers
+    "LIN", "APD", "SHW", "ECL", "PPG", "NEM", "GOLD", "AEM", "WPM", "FCX",
+    "SCCO", "AA", "ALB", "SQM", "MP", "BALL", "IP", "PKG", "NUE", "CF",
+    "MOS", "DD", "EMN",
+    # Real Estate — 22 tickers
+    "PLD", "AMT", "CCI", "EQIX", "PSA", "EXR", "AVB", "EQR", "O", "VICI",
+    "IRM", "DLR", "SBAC", "WELL", "INVH", "CPT", "MAA", "ARE", "KIM", "STAG",
+    "GLPI", "NLY",
+    # Utilities — 19 tickers
+    "NEE", "SO", "DUK", "D", "AEP", "EXC", "SRE", "PCG", "ED", "ES",
+    "ETR", "FE", "PPL", "CMS", "WEC", "AWK", "ATO", "LNT", "EVRG",
+    # High-Volatility ETFs — 10 tickers
+    "SMH", "SOXX", "XBI", "GDX", "GDXJ", "XOP", "IBB", "ARKK", "KWEB", "BOTZ",
 ]
 
 BACKTEST_START = "2024-09-01"  # first day of the backtest window (inclusive)
@@ -79,7 +119,7 @@ def download_ticker(ticker: str) -> pd.DataFrame:
 
 def resample_to_daily(df_hourly: pd.DataFrame) -> pd.DataFrame:
     """
-    Convert hourly yfinance data to daily OHLCV + price_10am.
+    Convert hourly yfinance data to daily OHLCV + price_1030am.
     Index becomes Python date objects named 'date'; columns are all lowercase.
     """
     df = df_hourly.copy()
@@ -89,13 +129,14 @@ def resample_to_daily(df_hourly: pd.DataFrame) -> pd.DataFrame:
         df.index = df.index.tz_localize("UTC")
     df.index = df.index.tz_convert("America/New_York")
 
-    # Extract the 9:30 AM ET open price for each trading day.
-    # yfinance 1h bars are labeled at the start of each period (9:30, 10:30, ...),
-    # so there is no 10:00 AM bar. Use the 9:30 AM bar (market open) as price_10am.
+    # Extract the ~10:30 AM ET price for each trading day.
+    # yfinance 1h bars are labeled at bar open (9:30, 10:30, ...).
+    # The Close of the 9:30 AM bar represents the price at ~10:30 AM,
+    # after the open-volatility spike settles — better entry-price proxy than Open.
     mask = df.index.time == datetime.time(9, 30)
-    df_10am = df[mask][["Open"]].copy()
+    df_10am = df[mask][["Close"]].copy()
     df_10am.index = pd.Index([ts.date() for ts in df_10am.index], name="date")
-    price_10am_series = df_10am["Open"].rename("price_10am")
+    price_1030am_series = df_10am["Close"].rename("price_1030am")
 
     # Resample to calendar-day OHLCV; drop non-trading days (NaN rows)
     daily = df.resample("D").agg({
@@ -109,7 +150,7 @@ def resample_to_daily(df_hourly: pd.DataFrame) -> pd.DataFrame:
     # Use list comprehension to produce date objects (not pd.Timestamp) to match train.py slicing
     daily.index = pd.Index([ts.date() for ts in daily.index], name="date")
 
-    daily = daily.join(price_10am_series, how="left")
+    daily = daily.join(price_1030am_series, how="left")
     daily.columns = [c.lower() for c in daily.columns]
     daily.index.name = "date"
 
@@ -119,13 +160,13 @@ def resample_to_daily(df_hourly: pd.DataFrame) -> pd.DataFrame:
 def validate_ticker_data(ticker: str, df: pd.DataFrame, backtest_start: str) -> None:
     """Print warnings for insufficient history or missing 10am bars in the backtest window."""
     if len(df) < 200:
-        print(f"WARNING: {ticker} has only {len(df)} rows — insufficient indicator history (need ≥ 200)")
+        print(f"WARNING: {ticker} has only {len(df)} rows -- insufficient indicator history (need >= 200)")
 
     backtest_mask = df.index >= pd.Timestamp(backtest_start).date()
     backtest_df = df[backtest_mask]
-    n_missing = int(backtest_df["price_10am"].isna().sum())
+    n_missing = int(backtest_df["price_1030am"].isna().sum())
     if n_missing > 0:
-        print(f"WARNING: {ticker} has {n_missing} backtest days with missing price_10am")
+        print(f"WARNING: {ticker} has {n_missing} backtest days with missing price_1030am")
 
 
 def _add_earnings_dates(df_daily: pd.DataFrame, ticker_obj) -> pd.DataFrame:
