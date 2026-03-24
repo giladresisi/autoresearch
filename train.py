@@ -231,29 +231,14 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     # Ensure no look-ahead: slice to today
     df = df.loc[:today]
 
-    # Need at least 1 today row + 60 rows of history for indicators
-    if len(df) < 61:
+    # Need at least 1 today row + 101 rows of history (SMA100 requires 100 history bars)
+    if len(df) < 102:
         return None
 
-    # Compute all indicators on history up to yesterday (no look-ahead)
-    hist = df.iloc[:-1].copy()
-    hist['_sma20']  = hist['close'].rolling(20).mean()
-    hist['_sma50']  = hist['close'].rolling(50).mean()
-    hist['_vm30']   = hist['volume'].rolling(30).mean()
-    hist['_atr14']  = calc_atr14(hist)
-    hist['_rsi14']  = calc_rsi14(hist)
-
-    sma20 = float(hist['_sma20'].iloc[-1])
-    sma50 = float(hist['_sma50'].iloc[-1])
-    vm30  = float(hist['_vm30'].iloc[-1])
-    atr   = float(hist['_atr14'].iloc[-1])
-    rsi   = float(hist['_rsi14'].iloc[-1])
     # Today's observable data: only price_10am and partial-day volume
     price_10am = float(df['price_10am'].iloc[-1])
     today_vol  = float(df['volume'].iloc[-1])
-
-    # Guard NaN/zero
-    if pd.isna(price_10am) or pd.isna(sma20) or pd.isna(sma50) or pd.isna(vm30) or pd.isna(atr) or pd.isna(rsi) or pd.isna(today_vol) or vm30 == 0 or atr == 0:
+    if pd.isna(price_10am) or pd.isna(today_vol):
         return None
 
     # R8: skip entries within 14 calendar days of next earnings announcement
@@ -264,23 +249,51 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
             if 0 <= days_to_earnings <= 14:
                 return None
 
-    # Rule 1: price above SMA50 and SMA20 > SMA50 (near-term trend stronger than medium-term)
-    if price_10am <= sma50 or sma20 <= sma50:
+    # History up to yesterday (no look-ahead). Use a view — no copy needed.
+    hist = df.iloc[:-1]
+    close_hist = hist['close']
+
+    # Fast SMA checks using direct tail-slicing (equivalent to rolling().mean().iloc[-1]
+    # but only computes the last window instead of the full series — much faster).
+    sma20  = float(close_hist.iloc[-20:].mean())
+    sma50  = float(close_hist.iloc[-50:].mean())
+    sma100 = float(close_hist.iloc[-100:].mean())
+    if pd.isna(sma20) or pd.isna(sma50) or pd.isna(sma100):
+        return None
+
+    # Rule 1: SMA alignment — most tickers fail here; check before volume/ATR/RSI
+    if price_10am <= sma50 or price_10am <= sma100 or sma20 <= sma50 or sma50 <= sma100:
+        return None
+
+    # Rule 1b: SMA20 slope must not be materially declining (allow up to 0.5% dip vs 5d ago)
+    # Filters hard corrections while allowing temporarily-flat uptrends to enter
+    sma20_5d_ago = float(close_hist.iloc[-25:-5].mean())
+    if sma20 < sma20_5d_ago * 0.995:
+        return None
+
+    # Volume check — second most selective filter
+    vm30 = float(hist['volume'].iloc[-30:].mean())
+    if pd.isna(vm30) or vm30 == 0:
+        return None
+    vol_ratio = today_vol / vm30
+    if vol_ratio < 2.5:
         return None
 
     # Rule 2a: price_10am breaks above the 20-day highest close (breakout)
-    high20 = float(hist['close'].iloc[-20:].max())   # last 20 days of history
+    high20 = float(close_hist.iloc[-20:].max())
     if price_10am <= high20:
         return None
 
     # Rule 2b: price_10am also above yesterday's high (breakout continuation)
-    prev_high = float(hist['high'].iloc[-1])          # yesterday's high
+    prev_high = float(hist['high'].iloc[-1])
     if price_10am <= prev_high:
         return None
 
-    # Rule 3: today's volume >= 1.9× MA30 (high conviction required)
-    vol_ratio = today_vol / vm30
-    if vol_ratio < 1.9:
+    # Compute ATR14 and RSI14 only for tickers that pass the fast filters above.
+    # Tail-slicing: rolling(14) needs ≥15 rows for ATR, ≥15 for RSI; use 30/60 for stability.
+    atr = float(calc_atr14(hist.iloc[-30:]).iloc[-1])
+    rsi = float(calc_rsi14(hist.iloc[-60:]).iloc[-1])
+    if pd.isna(atr) or atr == 0 or pd.isna(rsi):
         return None
 
     # Rule 3b: RSI between 50 and 75 (momentum building, not overbought)

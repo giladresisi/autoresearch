@@ -24,10 +24,6 @@ def test_registry_is_dict():
     assert isinstance(REGISTRY, dict)
 
 
-def test_registry_has_energy_momentum_v1():
-    from strategies import REGISTRY
-    assert "energy-momentum-v1" in REGISTRY
-
 
 def test_all_strategies_have_required_metadata():
     from strategies import REGISTRY
@@ -50,43 +46,6 @@ def test_all_strategies_have_manage_position():
         assert callable(getattr(module, "manage_position", None)), \
             f"{name} missing callable manage_position()"
 
-
-# ── energy_momentum_v1 METADATA values ───────────────────────────────────────
-
-def test_energy_momentum_v1_metadata_values():
-    from strategies import energy_momentum_v1
-    m = energy_momentum_v1.METADATA
-    assert m["name"] == "energy-momentum-v1"
-    assert m["sector"] == "energy/materials"
-    assert isinstance(m["tickers"], list) and len(m["tickers"]) > 0
-    assert m["train_pnl"] == pytest.approx(952.88)
-    assert m["train_sharpe"] == pytest.approx(5.791)
-    assert m["train_trades"] == 18
-    assert m["source_commit"] == "e9886df"
-    assert m["source_branch"] == "autoresearch/mar20"
-    assert m["train_start"] == "2025-12-20"
-    assert m["train_end"] == "2026-03-06"
-    assert m["test_start"] == "2026-03-06"
-    assert m["test_end"] == "2026-03-20"
-    assert isinstance(m["description"], str) and len(m["description"]) > 0
-
-
-def test_energy_momentum_v1_screen_day_returns_none_on_short_df():
-    """screen_day should return None when df has fewer than 60 rows (insufficient history)."""
-    from strategies.energy_momentum_v1 import screen_day
-    n = 30
-    base = date(2025, 1, 2)
-    dates = [base + timedelta(days=i) for i in range(n)]
-    df = pd.DataFrame({
-        "open":       np.full(n, 100.0),
-        "high":       np.full(n, 101.0),
-        "low":        np.full(n, 99.0),
-        "close":      np.full(n, 100.0),
-        "volume":     np.full(n, 1_000_000.0),
-        "price_10am": np.full(n, 100.0),
-    }, index=pd.Index(dates, name="date"))
-    result = screen_day(df, dates[-1])
-    assert result is None
 
 
 # ── base_indicators ───────────────────────────────────────────────────────────

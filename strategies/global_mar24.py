@@ -1,21 +1,23 @@
 """
-strategies/multisector_mar23.py — Extracted from master @ 5738750
+strategies/global_mar24.py — Extracted from autoresearch/global-mar24 @ 6ad6edd
 """
 
 METADATA = {
-    "name":         'multisector-mar23',
-    "sector":       "multi-sector",
-    "tickers":      ['AAPL', 'MSFT', 'NVDA', 'AMD', 'META', 'GOOGL', 'AMZN', 'TSLA', 'AVGO', 'ORCL', 'CRM', 'ADBE', 'QCOM', 'MU', 'AMAT', 'NOW', 'PLTR', 'MSTR', 'APP', 'SMCI', 'NFLX', 'COIN', 'CRWD', 'ZS', 'PANW', 'JPM', 'GS', 'BAC', 'WFC', 'MS', 'BLK', 'SCHW', 'AXP', 'COF', 'SPGI', 'V', 'MA', 'UNH', 'LLY', 'ABBV', 'JNJ', 'MRK', 'PFE', 'TMO', 'ISRG', 'AMGN', 'GILD', 'REGN', 'VRTX', 'XOM', 'CVX', 'COP', 'SLB', 'EOG', 'MPC', 'VLO', 'OXY', 'WMT', 'PG', 'KO', 'PEP', 'COST', 'TGT', 'PM', 'CL', 'CAT', 'DE', 'UPS', 'FDX', 'GE', 'HON', 'RTX', 'LMT', 'HD', 'MCD', 'NKE', 'SBUX', 'LOW', 'F', 'GM', 'LIN', 'APD', 'NEM', 'FCX', 'NUE'],
+    "name":         'global-mar24',
+    "sector":       'unknown',
+    "tickers":      ['NVDA', 'AMD', 'TSLA', 'PLTR', 'MSTR', 'APP', 'SMCI', 'COIN', 'CRWD', 'META', 'GOOGL', 'AMZN', 'NFLX', 'AAPL', 'MSFT', 'AVGO', 'ORCL', 'CRM', 'ADBE', 'NOW', 'INTU', 'IBM', 'QCOM', 'MU', 'AMAT', 'LRCX', 'KLAC', 'ADI', 'MRVL', 'MCHP', 'ON', 'MPWR', 'TXN', 'INTC', 'ZS', 'PANW', 'FTNT', 'OKTA', 'NET', 'DDOG', 'SNOW', 'MDB', 'TEAM', 'HUBS', 'DELL', 'HPQ', 'PSTG', 'AKAM', 'WDC', 'STX', 'VRT', 'KEYS', 'EPAM', 'RBLX', 'TTD', 'TWLO', 'U', 'ACLS', 'ONTO', 'MKSI', 'IPGP', 'COHU', 'WOLF', 'SLAB', 'LLY', 'ABBV', 'JNJ', 'MRK', 'PFE', 'AMGN', 'GILD', 'REGN', 'VRTX', 'BIIB', 'MRNA', 'ILMN', 'INCY', 'ALNY', 'BMRN', 'IONS', 'ARWR', 'RXRX', 'TMO', 'ISRG', 'ABT', 'DHR', 'SYK', 'BSX', 'MDT', 'EW', 'DXCM', 'PODD', 'IDXX', 'ALGN', 'HOLX', 'ZBH', 'BDX', 'GEHC', 'RMD', 'UNH', 'CI', 'HUM', 'ELV', 'MOH', 'CVS', 'MCK', 'IQV', 'HCA', 'THC', 'EXAS', 'ACAD', 'PTGX', 'TGTX', 'NKTR', 'PRGO', 'VTRS', 'JAZZ', 'NBIX', 'OMCL', 'JPM', 'GS', 'BAC', 'WFC', 'MS', 'C', 'USB', 'PNC', 'TFC', 'ALLY', 'COF', 'DFS', 'SYF', 'KEY', 'RF', 'FITB', 'MTB', 'CFG', 'BLK', 'SCHW', 'SPGI', 'MCO', 'ICE', 'CME', 'CBOE', 'MKTX', 'IBKR', 'LPLA', 'V', 'MA', 'AXP', 'PYPL', 'FI', 'FIS', 'GPN', 'HOOD', 'NU', 'AFRM', 'SOFI', 'SQ', 'WEX', 'EVTC', 'HD', 'LOW', 'TJX', 'ROST', 'BBY', 'ULTA', 'WSM', 'RH', 'ORLY', 'AZO', 'NKE', 'LULU', 'DECK', 'SKX', 'CROX', 'ONON', 'ELF', 'F', 'GM', 'RIVN', 'UBER', 'ABNB', 'BKNG', 'MGM', 'LVS', 'WYNN', 'DKNG', 'MCD', 'CMG', 'SBUX', 'YUM', 'DRI', 'QSR', 'TSCO', 'CPRI', 'RL', 'PVH', 'LYFT', 'WMT', 'PG', 'KO', 'PEP', 'COST', 'TGT', 'PM', 'CL', 'MO', 'EL', 'CHD', 'KMB', 'HRL', 'CPB', 'GIS', 'K', 'HSY', 'MDLZ', 'STZ', 'KDP', 'CELH', 'SYY', 'BJ', 'GO', 'USFD', 'PFGC', 'COTY', 'LMT', 'RTX', 'NOC', 'BA', 'LHX', 'GD', 'HII', 'TDG', 'TXT', 'HEI', 'CAT', 'DE', 'CMI', 'PCAR', 'ITW', 'EMR', 'ROK', 'PH', 'ETN', 'CARR', 'OTIS', 'UPS', 'FDX', 'DAL', 'UAL', 'AAL', 'LUV', 'JBHT', 'SAIA', 'ODFL', 'CSX', 'UNP', 'GE', 'HON', 'WM', 'RSG', 'VRSK', 'CTAS', 'ROP', 'FAST', 'IEX', 'XYL', 'DIS', 'CMCSA', 'VZ', 'T', 'TMUS', 'CHTR', 'WBD', 'PARA', 'SNAP', 'PINS', 'RDDT', 'SPOT', 'TTWO', 'EA', 'MTCH', 'IAC', 'FOX', 'SIRI', 'ZM', 'DOCU', 'XOM', 'CVX', 'COP', 'SLB', 'EOG', 'MPC', 'VLO', 'OXY', 'DVN', 'FANG', 'HES', 'APA', 'AR', 'EQT', 'RRC', 'HAL', 'BKR', 'MRO', 'WMB', 'KMI', 'OKE', 'LNG', 'TRGP', 'PSX', 'NOV', 'RIG', 'CTRA', 'LIN', 'APD', 'SHW', 'ECL', 'PPG', 'NEM', 'GOLD', 'AEM', 'WPM', 'FCX', 'SCCO', 'AA', 'ALB', 'SQM', 'MP', 'BALL', 'IP', 'PKG', 'NUE', 'CF', 'MOS', 'DD', 'EMN', 'PLD', 'AMT', 'CCI', 'EQIX', 'PSA', 'EXR', 'AVB', 'EQR', 'O', 'VICI', 'IRM', 'DLR', 'SBAC', 'WELL', 'INVH', 'CPT', 'MAA', 'ARE', 'KIM', 'STAG', 'GLPI', 'NLY', 'NEE', 'SO', 'DUK', 'D', 'AEP', 'EXC', 'SRE', 'PCG', 'ED', 'ES', 'ETR', 'FE', 'PPL', 'CMS', 'WEC', 'AWK', 'ATO', 'LNT', 'EVRG', 'SMH', 'SOXX', 'XBI', 'GDX', 'GDXJ', 'XOP', 'IBB', 'ARKK', 'KWEB', 'BOTZ'],
     "train_start":  '2024-09-01',
     "train_end":    '2026-03-06',
     "test_start":   '2026-03-06',
     "test_end":     '2026-03-20',
-    "source_branch": 'master',
-    "source_commit": '5738750',
-    "train_pnl":    None,
-    "train_sharpe": 5.791497,
-    "train_trades": 18,
-    "description":  "This momentum breakout strategy enters long when a stock's 10am price exceeds both its 20-day highest close and the prior day's high, confirming a breakout with volume at least 1.9x its 30-day average, RSI(14) between 50–75, price above SMA50, and SMA20 above SMA50. The stop is placed 0.3 ATR below the nearest qualifying pivot low (requiring at least one prior historical touch within 90 bars and fewer than 10 zone touches), with a minimum 1.5 ATR buffer between entry and stop, and entry is rejected if the nearest overhead pivot high is less than 2.0 ATR away. Position management moves the stop to breakeven once price reaches entry +1.5 ATR, then trails at 1.2 ATR below the 20-bar recent high once +2.0 ATR in profit, with forced exits for time-inefficient positions (>30 business days held with unrealized P&L below 30% of risk) or early stalls (price below entry +0.5 ATR within the first 5 calendar days). This strategy suits trending, low-volatility bull markets where individual stocks make clean breakouts above consolidation ranges with high-conviction volume surges.",
+    "source_branch": 'autoresearch/global-mar24',
+    "source_commit": '6ad6edd',
+    "train_pnl":    335.73,
+    "train_sharpe": 0.041287,
+    "train_trades": 118,
+    "description":  (
+        "This strategy enters long positions when price_10am breaks above both the 20-day highest close and the prior day's high, with volume at least 2.5× the 30-day average, RSI(14) between 50 and 75, and a bullish SMA stack (price > SMA50 > SMA100, SMA20 > SMA50, SMA20 slope not down more than 0.5% over 5 days). A structural pivot-low stop is required — placed 0.3 ATR(14) below the nearest prior-touch pivot low — and the entry is rejected if the entry-to-stop gap is under 1.5 ATR or if the nearest overhead resistance pivot is less than 2.0 ATR away. Stops trail to breakeven at +1.5 ATR profit, then trail 1.2 ATR below the 20-bar high once +2.0 ATR in profit, with a forced exit if the trade stalls below +0.5 ATR within the first 5 calendar days or holds beyond 30 business days with unrealized P&L under $15; this strategy suits trending, higher-momentum market regimes where mid-cap and large-cap stocks are making new 20-day highs on volume surges above established SMA support."
+    ),
 }
 
 """
@@ -40,7 +42,7 @@ CACHE_DIR = os.environ.get(
 # invalidates comparisons across experiments.
 
 # Backtest window — matches prepare.py; edit here to change the simulation period
-BACKTEST_START = "2025-12-20"
+BACKTEST_START = "2024-09-01"
 BACKTEST_END   = "2026-03-20"
 
 # Train/test split — last 14 calendar days of the backtest window are held out as test set.
@@ -79,7 +81,7 @@ RISK_PER_TRADE = 50.0
 # R6: Ticker holdout — fraction of tickers withheld from all training folds
 # Set to 0.0 to disable; 0.2 = hold out the last-sorted 20% of the universe.
 # Holdout evaluation uses BACKTEST_START..TRAIN_END (same window as training folds).
-TICKER_HOLDOUT_FRAC = 0.0
+TICKER_HOLDOUT_FRAC = 0.1
 
 # Tickers included in walk-forward TEST folds only — never in training.
 # Used to measure out-of-universe generalization: min_test_pnl must hold on
@@ -251,29 +253,14 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     # Ensure no look-ahead: slice to today
     df = df.loc[:today]
 
-    # Need at least 1 today row + 60 rows of history for indicators
-    if len(df) < 61:
+    # Need at least 1 today row + 101 rows of history (SMA100 requires 100 history bars)
+    if len(df) < 102:
         return None
 
-    # Compute all indicators on history up to yesterday (no look-ahead)
-    hist = df.iloc[:-1].copy()
-    hist['_sma20']  = hist['close'].rolling(20).mean()
-    hist['_sma50']  = hist['close'].rolling(50).mean()
-    hist['_vm30']   = hist['volume'].rolling(30).mean()
-    hist['_atr14']  = calc_atr14(hist)
-    hist['_rsi14']  = calc_rsi14(hist)
-
-    sma20 = float(hist['_sma20'].iloc[-1])
-    sma50 = float(hist['_sma50'].iloc[-1])
-    vm30  = float(hist['_vm30'].iloc[-1])
-    atr   = float(hist['_atr14'].iloc[-1])
-    rsi   = float(hist['_rsi14'].iloc[-1])
     # Today's observable data: only price_10am and partial-day volume
     price_10am = float(df['price_10am'].iloc[-1])
     today_vol  = float(df['volume'].iloc[-1])
-
-    # Guard NaN/zero
-    if pd.isna(price_10am) or pd.isna(sma20) or pd.isna(sma50) or pd.isna(vm30) or pd.isna(atr) or pd.isna(rsi) or pd.isna(today_vol) or vm30 == 0 or atr == 0:
+    if pd.isna(price_10am) or pd.isna(today_vol):
         return None
 
     # R8: skip entries within 14 calendar days of next earnings announcement
@@ -284,23 +271,51 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
             if 0 <= days_to_earnings <= 14:
                 return None
 
-    # Rule 1: price above SMA50 and SMA20 > SMA50 (near-term trend stronger than medium-term)
-    if price_10am <= sma50 or sma20 <= sma50:
+    # History up to yesterday (no look-ahead). Use a view — no copy needed.
+    hist = df.iloc[:-1]
+    close_hist = hist['close']
+
+    # Fast SMA checks using direct tail-slicing (equivalent to rolling().mean().iloc[-1]
+    # but only computes the last window instead of the full series — much faster).
+    sma20  = float(close_hist.iloc[-20:].mean())
+    sma50  = float(close_hist.iloc[-50:].mean())
+    sma100 = float(close_hist.iloc[-100:].mean())
+    if pd.isna(sma20) or pd.isna(sma50) or pd.isna(sma100):
+        return None
+
+    # Rule 1: SMA alignment — most tickers fail here; check before volume/ATR/RSI
+    if price_10am <= sma50 or price_10am <= sma100 or sma20 <= sma50 or sma50 <= sma100:
+        return None
+
+    # Rule 1b: SMA20 slope must not be materially declining (allow up to 0.5% dip vs 5d ago)
+    # Filters hard corrections while allowing temporarily-flat uptrends to enter
+    sma20_5d_ago = float(close_hist.iloc[-25:-5].mean())
+    if sma20 < sma20_5d_ago * 0.995:
+        return None
+
+    # Volume check — second most selective filter
+    vm30 = float(hist['volume'].iloc[-30:].mean())
+    if pd.isna(vm30) or vm30 == 0:
+        return None
+    vol_ratio = today_vol / vm30
+    if vol_ratio < 2.5:
         return None
 
     # Rule 2a: price_10am breaks above the 20-day highest close (breakout)
-    high20 = float(hist['close'].iloc[-20:].max())   # last 20 days of history
+    high20 = float(close_hist.iloc[-20:].max())
     if price_10am <= high20:
         return None
 
     # Rule 2b: price_10am also above yesterday's high (breakout continuation)
-    prev_high = float(hist['high'].iloc[-1])          # yesterday's high
+    prev_high = float(hist['high'].iloc[-1])
     if price_10am <= prev_high:
         return None
 
-    # Rule 3: today's volume >= 1.9× MA30 (high conviction required)
-    vol_ratio = today_vol / vm30
-    if vol_ratio < 1.9:
+    # Compute ATR14 and RSI14 only for tickers that pass the fast filters above.
+    # Tail-slicing: rolling(14) needs ≥15 rows for ATR, ≥15 for RSI; use 30/60 for stability.
+    atr = float(calc_atr14(hist.iloc[-30:]).iloc[-1])
+    rsi = float(calc_rsi14(hist.iloc[-60:]).iloc[-1])
+    if pd.isna(atr) or atr == 0 or pd.isna(rsi):
         return None
 
     # Rule 3b: RSI between 50 and 75 (momentum building, not overbought)
@@ -373,3 +388,5 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
     trail_stop = round(recent_high - 1.2 * atr, 2) if recent_high >= entry_price + 2.0 * atr else current_stop
 
     return max(current_stop, be_stop, trail_stop)
+
+

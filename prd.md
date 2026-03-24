@@ -16,6 +16,7 @@ The system is developed in four versioned harness generations, each building on 
 | **V2** | Train/test split, P&L objective, final outputs, sector registry, strategy selector | 2026-03-20 |
 | **V3** | Harness robustness: look-ahead fix, risk-proportional sizing, walk-forward CV, robustness controls, configurable fold sizing, test-universe holdout, harness integrity | 2026-03-22 |
 | **V4** | Signal quality and measurement fidelity: earnings filter, fallback-stop rejection, time-based exit, fold window fix, objective function fixes, win/loss tracking, post-Phase-1 cooldown | 2026-03-23 |
+| **V5** | Instrumentation and data correctness: price fix (Close not Open), MFE/MAE, exit-type tagging, R-multiple | 2026-03-24 |
 
 ---
 
@@ -1491,6 +1492,106 @@ V4-A has no GOLDEN_HASH dependency (all changes are above the `DO NOT EDIT` boun
 - **R8 requires a data refresh:** after updating `prepare.py`, re-run `uv run prepare.py` for all tickers before the next optimization run. The `next_earnings_date` column will be absent from existing parquet files until this is done.
 - **R10 interacts with R12:** the time-based exit (R10) will reduce the number of long-held positions that accumulate into "stalled" entries. When calibrating R12's cooldown window in V4-C, verify that R10 is already active so its effect is not double-counted.
 - **Out-of-scope items from V1 now addressed:** "Multiple simultaneous entries in the same ticker" → partially addressed by R12's cooldown; "Portfolio-level risk limits" → R7 (sector cap); "Transaction costs" → remains out of scope.
+
+---
+
+## V5: Instrumentation and Data Correctness (2026-03-24)
+
+**Context:** After 27 optimization iterations on the global-mar24 worktree, all metrics are
+based on incorrect data (9:30 AM open price instead of ~10:30 AM price) and the trade log
+lacks the columns needed to diagnose exit quality. V5 fixes both before any further experiments.
+
+**Plan file:** `.agents/plans/p0-price-fix-and-instrumentation.md`
+
+### V5-A: Price Fix and Trade Instrumentation
+
+Four tightly-coupled changes that must ship together before the next optimization run.
+
+**Affected files:** `prepare.py`, `train.py` (mutable and immutable zones), `tests/test_prepare.py`,
+`tests/test_optimization.py`, `tests/test_e2e.py`, `tests/test_v4_a.py`, `tests/test_v4_b.py`,
+`tests/test_backtester.py`
+
+#### P0-A: Fix price extraction (Close not Open) + column rename
+
+`prepare.py` currently extracts the **Open** of the 9:30 AM hourly bar as `price_10am` — the
+market-open price, the most volatile moment of the trading day. The strategy's premise of
+waiting for post-open volatility to settle is defeated by using the open price.
+
+**Fix:** Switch to the **Close** of the 9:30 AM bar (~10:30 AM, post-opening-volatility).
+Rename `price_10am` → `price_1030am` throughout `prepare.py`, `train.py`, and all test fixtures.
+
+```python
+# prepare.py — BEFORE:
+df_10am = df[mask][["Open"]].copy()
+price_10am_series = df_10am["Open"].rename("price_10am")
+
+# prepare.py — AFTER:
+df_10am = df[mask][["Close"]].copy()
+price_1030am_series = df_10am["Close"].rename("price_1030am")
+```
+
+**Impact:** All 27 prior optimization iterations used the wrong price. Re-running iter21
+(`6ad6edd`) with the corrected price establishes a new baseline. The old parquet cache
+(`stock_data/*.parquet`) is semantically invalid — must be deleted and regenerated via
+`prepare.py` before the next optimization run.
+
+**GOLDEN_HASH:** The rename in the immutable zone (`run_backtest()`, `_write_trades_tsv()`)
+requires a GOLDEN_HASH update as the final step of V5-A.
+
+#### P0-B: MFE/MAE columns in trades.tsv
+
+Track per-trade Maximum Favorable Excursion and Maximum Adverse Excursion in ATR units:
+- `mfe_atr = (max_price_seen − entry_price) / ATR14`
+- `mae_atr = (entry_price − min_price_seen) / ATR14`
+
+Implementation: add `high_since_entry` and `low_since_entry` fields to the open position dict.
+Update them on each mark-to-market step. Compute MFE/MAE at close via `_mfe_mae(pos)` helper.
+
+ATR units (not raw %) make MFE/MAE directly comparable to stop and trail thresholds already
+expressed in ATR. Without this, it is impossible to diagnose whether exit loosening would help.
+
+#### P0-C: Exit-type tagging
+
+Add `exit_type` column to all trade records with values: `stop_hit`, `end_of_backtest`,
+`partial`. (The `partial` exit type is already present from V4-B; P0-C ensures the other
+two paths are also tagged consistently.)
+
+#### P0-D: R-multiple
+
+```
+r_multiple = (exit_price − entry_price) / (entry_price − initial_stop)
+```
+
+Log at exit for every trade. Store `initial_stop` in the position dict at entry time. If
+initial risk is zero, write empty string. A healthy momentum strategy shows winners clustering
+at +1.5–3.0R and losers at -1.0R. A mass near 0R indicates the breakeven trigger is the
+primary W/L suppressor.
+
+### V5-A Acceptance Criteria
+
+- [ ] `prepare.py:resample_to_daily()` uses `Close` of 9:30 AM bar; column named `price_1030am`
+- [ ] Zero occurrences of `"price_10am"` in `prepare.py`, `train.py`, `tests/test_prepare.py`,
+  `tests/test_optimization.py`, `tests/test_e2e.py`
+- [ ] `trades.tsv` schema includes `exit_type`, `mfe_atr`, `mae_atr`, `r_multiple` columns
+- [ ] All trade records have a non-empty `exit_type` in `{"stop_hit", "end_of_backtest", "partial"}`
+- [ ] MFE ≥ 0 and MAE ≥ 0 for all records; R-multiple sign is correct (positive for winners)
+- [ ] `test_harness_below_marker_matches_golden_hash` passes with new GOLDEN_HASH
+- [ ] Full test suite passes with 0 new failures (`python -m pytest tests/ -q`)
+- [ ] PROGRESS.md updated with cache invalidation action note
+
+### V5 Compatibility Notes
+
+- **V5-A requires cache invalidation:** After updating `prepare.py`, delete all
+  `stock_data/*.parquet` files and re-run `prepare.py`. Old parquet files contain the
+  incorrect `price_10am` column (9:30 AM open — market open spike). New files will contain
+  `price_1030am` (9:30 bar close — post-open-volatility price).
+- **All prior iteration metrics are invalidated:** The 27 global-mar24 iterations and the
+  iter21 baseline were evaluated on the wrong price. Treat pre-V5 metrics as approximate.
+  Establish a new clean baseline after V5-A before running further exit experiments.
+- **GOLDEN_HASH update is mandatory and must be last:** All immutable-zone changes (rename +
+  P0-B/C/D) must be complete before recomputing the hash. The hash covers everything below
+  the `# ── DO NOT EDIT BELOW THIS LINE` marker in `train.py`.
+- **Sequence dependency:** V5-A must complete before Phase 0 exit experiments (phases.md).
 
 ---
 

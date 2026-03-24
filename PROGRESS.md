@@ -1,5 +1,12 @@
 # PROGRESS
 
+## Feature: P0 — Price Fix and Trade Instrumentation
+
+**Status**: ✅ Planned
+**Plan File**: .agents/plans/p0-price-fix-and-instrumentation.md
+
+---
+
 ## Feature: V4-B Harness Metric Improvements and Position Management Refinements
 
 **Status**: ✅ Complete
