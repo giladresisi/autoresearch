@@ -53,6 +53,21 @@ A healthy momentum strategy shows winners clustering at +1.5–3.0R and losers a
 If winners cluster near 0R, the breakeven trigger is the dominant suppressor. If losers
 cluster at -0.3 to -0.6R, the stop is being hit too early.
 
+**P0-E: Volume criterion redesign** ✅ Done (2026-03-25)
+
+The backtested `vol_ratio` rule (`today_vol / vm30 >= 2.5`) is structurally wrong — `today_vol`
+is unavailable pre-market (`= 0`) and only reaches a reliable reading well after the 10:30am
+entry window. Replace with two prior-data-only checks:
+
+| New rule | Condition | Rationale |
+|---|---|---|
+| **Rule 3a** — recent trend | `mean(vol[-5:]) / vm30 >= 1.0` | Confirms building institutional interest over the past week |
+| **Rule 3b** — yesterday not dead | `vol[-2] / vm30 >= 0.8` | Rejects setups where the prior session itself was unusually quiet |
+
+`today_vol` removed from entry logic entirely. Return dict gains `prev_vol_ratio` and
+`vol_trend_ratio` (replacing `vol_ratio`). Applied before Phase 0.2 re-calibration so the
+new volume rules are baked into the baseline.
+
 ---
 
 ### Phase 0.2 — Baseline Re-establishment After F1
@@ -539,8 +554,8 @@ Behavior:
 1. Load all `*.parquet` files from `CACHE_DIR` (same path `train.py` uses).
 2. Fetch pre-market price for each ticker via `yfinance.Ticker(t).fast_info['last_price']`.
    - Fall back to previous close if `last_price` is unavailable (weekend / pre-open gap).
-3. Append a synthetic "today" row to each df with `price_10am = current_price` and `volume = 0`
-   (today's volume is unavailable pre-market and unreliable at 10am — see volume redesign below).
+3. Append a synthetic "today" row to each df with `price_1030am = current_price` and `volume = 0`
+   (today's volume is unavailable pre-market; volume rules use prior-day data only — see P0-E).
 4. Call `screen_day(df, today, current_price=current_price)` from `train.py` (import directly).
 5. Print armed candidates sorted by `prev_vol_ratio` descending.
 
@@ -557,28 +572,6 @@ candidate identification only — "these 12 tickers meet all indicator condition
 $183.50, currently at $181 pre-market." The **confirmed signal** fires at 9:30 AM when the actual
 opening price is checked against the threshold. Never make final entry decisions on pre-market prices
 alone.
-
-#### Volume criterion redesign
-
-The backtested `vol_ratio` rule (`today_vol / vm30 >= 1.9`) is structurally wrong for live use:
-- Pre-market: `today_vol = 0` → every candidate fails
-- At 10am (30 min in): ~15–20% of daily volume has accumulated → a genuine 1.9× day shows ~0.3×
-- By the time today's volume actually confirms at 1.9×, price has already moved past the entry
-
-**Fix:** remove `today_vol` from `screen_day()` entry logic entirely. Replace Rule 3 with two
-prior-data-only checks:
-
-| New rule | Condition | Rationale |
-|---|---|---|
-| **Rule 3a** — recent trend | `mean(vol[-5:]) / vm30 >= 1.0` | Confirms building institutional interest over the past week |
-| **Rule 3b** — yesterday not dead | `vol[-2] / vm30 >= 0.8` | Rejects setups where the prior session itself was unusually quiet |
-
-Both use only data available pre-market. The price breakout above `high20` at 10am is already
-strong confirmation of buying pressure; prior volume trend is sufficient to filter low-conviction setups.
-
-`today_vol` is still appended as `volume = 0` in the synthetic row so `screen_day()` compiles,
-but the volume rules no longer reference it. `prev_vol_ratio` and `vol_trend_ratio` are added to the
-output dict for display.
 
 #### Gap filter (pre-entry guard)
 

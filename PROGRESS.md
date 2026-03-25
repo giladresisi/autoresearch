@@ -1,5 +1,47 @@
 # PROGRESS
 
+## Feature: Volume Criterion Redesign
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-25
+**Plan**: system_upgrade_phases.md — "Volume criterion redesign" subsection
+
+### Core Validation
+`screen_day()` volume filter replaced with two prior-data-only rules that work correctly pre-market: Rule 3a (`vol_trend_ratio >= 1.0`: 5-day avg >= MA30) and Rule 3b (`prev_vol_ratio >= 0.8`: yesterday >= 0.8× MA30). `today_vol` removed from entry logic entirely. `prev_vol_ratio` and `vol_trend_ratio` added to return dict replacing `vol_ratio`. Tests updated to use `vol_trend_ratio < 1.0` as the mutation target. `strategy_selector.py` fixed to handle `train_pnl = None` in strategy METADATA.
+
+### Test Status
+- Automated: ✅ 238 passed, 1 skipped, 0 failed (full suite)
+- Pre-existing skip: `test_most_recent_train_commit_modified_only_editable_section` — git artefact from ecbc2d2 (Phase 0.1 harness rename)
+
+### Notes
+- Code review (`v5-b-volume-criterion-redesign.md`): 1 High / 2 Medium / 2 Low findings, all pre-existing test structure issues unrelated to this change
+- `BACKTEST_START` corrected to `"2024-09-01"` (from `"2025-12-20"`) to match global-mar24 session dates
+
+---
+
+## Feature: Dedicated Small Test Parquet Fixture
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-25
+**Plan File**: .agents/plans/dedicated-test-parquet-fixture.md
+
+### Core Changes
+- `tests/conftest.py` — session-scoped `test_parquet_fixtures` fixture downloads AAPL/MSFT/NVDA via yfinance, caches to `~/.cache/autoresearch/test_fixtures/`. Dates: history `2024-04-01` (yfinance 1h 730-day limit), backtest `2024-09-01..2025-11-01`.
+- `train.py` mutable — `_compute_fold_params()` added; auto-detects short windows (< 130 bdays → 1 fold).
+- `train.py` `__main__` — fold loop uses `_effective_n_folds` / `_effective_fold_test_days` from `_compute_fold_params`.
+- `tests/test_fold_auto_detect.py` — 13 unit tests for fold logic and ticker split constraints.
+- `tests/test_e2e.py` — all 9 integration tests wired to `test_parquet_fixtures`; subprocess tests inject `AUTORESEARCH_CACHE_DIR`.
+- `tests/test_optimization.py` — 3 `@_live` tests (previously skipped without 389-ticker cache) converted to `@pytest.mark.integration` using the small fixture.
+- GOLDEN_HASH updated to `efea3141a0df8870e77df15f987fdf61f89745225fcb7d6f54cff9c790779732`.
+
+### Test Status
+- 13/13 `test_fold_auto_detect.py` — ✅ passed
+- 9/9 `test_e2e.py -m integration` — ✅ passed
+- 3/3 `test_optimization.py` integration tests — ✅ passed
+- Full suite: 222 passed, 1 pre-existing failure (`test_most_recent_train_commit_modified_only_editable_section` — git history artefact from commit ecbc2d2, predates this feature), 0 new failures
+
+---
+
 ## Feature: P0 — Price Fix and Trade Instrumentation
 
 **Status**: ✅ Complete

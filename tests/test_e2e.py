@@ -1,25 +1,26 @@
 """tests/test_e2e.py — Phase 5 end-to-end integration tests. All @pytest.mark.integration."""
-import ast, importlib.util, pathlib, subprocess, tempfile
+import ast, importlib.util, os, pathlib, subprocess, tempfile
 import pandas as pd
 import pytest
 import train
-from prepare import CACHE_DIR, BACKTEST_START
+from prepare import BACKTEST_START
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-EXPECTED_TICKERS = ["AAPL", "MSFT", "NVDA", "JPM", "TSLA"]
+EXPECTED_TICKERS = ["AAPL", "MSFT", "NVDA"]
 EXPECTED_COLUMNS = {"open", "high", "low", "close", "volume", "price_1030am"}
 
 
 @pytest.fixture(scope="module")
-def all_parquet_paths():
-    p = pathlib.Path(CACHE_DIR)
-    return sorted(p.glob("*.parquet")) if p.is_dir() else []
+def all_parquet_paths(test_parquet_fixtures):
+    """Returns parquet paths from the dedicated small test dataset."""
+    tmpdir = test_parquet_fixtures["tmpdir"]
+    return sorted(tmpdir.glob("*.parquet"))
 
 
 @pytest.fixture(scope="module")
-def skip_if_cache_missing(all_parquet_paths):
-    if not all_parquet_paths:
-        pytest.skip(f"Cache empty at {CACHE_DIR}. Run `uv run prepare.py` first.")
+def skip_if_cache_missing(test_parquet_fixtures):
+    """No-op: integration tests always have data via test_parquet_fixtures."""
+    pass
 
 
 @pytest.fixture(scope="module")
@@ -28,8 +29,9 @@ def first_parquet_df(all_parquet_paths, skip_if_cache_missing):
 
 
 @pytest.fixture(scope="module")
-def all_ticker_dfs(skip_if_cache_missing):
-    return train.load_all_ticker_data()
+def all_ticker_dfs(test_parquet_fixtures):
+    """Returns all 3 test tickers (AAPL, MSFT, NVDA) from the small test dataset."""
+    return test_parquet_fixtures["all_dfs"]
 
 
 @pytest.fixture(scope="module")
@@ -78,23 +80,24 @@ def test_parquet_index_is_date_objects(first_parquet_df, skip_if_cache_missing):
 
 
 @pytest.mark.integration
-def test_train_exits_zero_with_pnl_output(skip_if_cache_missing):
+def test_train_exits_zero_with_pnl_output(test_parquet_fixtures):
     """
     `uv run train.py` must exit with code 0 and print 'train_total_pnl: <float>' to stdout.
-    This is the primary integration smoke test — if this passes, the agent loop works.
+    Uses the small test dataset (AAPL, MSFT, NVDA) via AUTORESEARCH_CACHE_DIR.
     """
+    env = {**os.environ, "AUTORESEARCH_CACHE_DIR": str(test_parquet_fixtures["tmpdir"])}
     result = subprocess.run(
         ["uv", "run", "train.py"],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
+        env=env,
     )
     assert result.returncode == 0, (
         f"train.py exited with code {result.returncode}.\n"
         f"stderr:\n{result.stderr[-2000:]}\n"
         f"stdout:\n{result.stdout[-500:]}"
     )
-    # Walk-forward output uses fold-prefixed lines: "fold1_train_total_pnl:", etc.
     pnl_lines = [
         line for line in result.stdout.splitlines()
         if "train_total_pnl:" in line
@@ -103,27 +106,22 @@ def test_train_exits_zero_with_pnl_output(skip_if_cache_missing):
         f"Expected at least one 'train_total_pnl:' line in output, got {len(pnl_lines)}.\n"
         f"stdout:\n{result.stdout}"
     )
-    # P&L value must be parseable as float (check the first matching line)
     value_str = pnl_lines[0].split(":", 1)[1].strip()
-    pnl_value = float(value_str)  # raises ValueError if not parseable
+    pnl_value = float(value_str)
     assert isinstance(pnl_value, float)
 
 
 @pytest.mark.integration
-def test_output_has_all_seven_fields(skip_if_cache_missing):
-    """
-    The output block parsed by the agent must contain all 7 required fields.
-    Runs train.py via subprocess and checks stdout for each field name.
-    """
+def test_output_has_all_seven_fields(test_parquet_fixtures):
+    env = {**os.environ, "AUTORESEARCH_CACHE_DIR": str(test_parquet_fixtures["tmpdir"])}
     result = subprocess.run(
         ["uv", "run", "train.py"],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
+        env=env,
     )
     assert result.returncode == 0, f"train.py crashed: {result.stderr[-1000:]}"
-    # Walk-forward output uses fold-prefixed lines: "fold1_train_sharpe:", etc.
-    # Match by substring so any fold prefix is accepted.
     required_fields = [
         "train_sharpe:", "train_total_trades:", "train_win_rate:",
         "train_avg_pnl_per_trade:", "train_total_pnl:",
@@ -232,9 +230,9 @@ def test_agent_loop_two_iterations_multi_ticker(all_ticker_dfs, backtest_stats):
     best_source = train_source
     history = [best_pnl]
 
-    # ── Iteration 1: relax volume threshold ───────────────────────────────────
-    assert "vol_ratio < 2.5" in train_source, "Volume pattern changed — update test"
-    src1 = train_source.replace("vol_ratio < 2.5", "vol_ratio < 2.0", 1)
+    # ── Iteration 1: relax volume trend threshold ─────────────────────────────
+    assert "vol_trend_ratio < 1.0" in train_source, "Volume pattern changed — update test"
+    src1 = train_source.replace("vol_trend_ratio < 1.0", "vol_trend_ratio < 0.7", 1)
     ast.parse(src1)  # mutation must be valid Python
 
     stats1 = run_source(src1, "train_iter1")
@@ -266,7 +264,7 @@ def test_agent_loop_two_iterations_multi_ticker(all_ticker_dfs, backtest_stats):
     # Apply all mutations from the original source and verify ≥ 1 trade fires
     # across the full ticker set. This confirms the pipeline ran real positions
     # (not just returned empty stats) on a multi-ticker dataset.
-    src_full = train_source.replace("vol_ratio < 2.5", "vol_ratio < 2.0", 1)
+    src_full = train_source.replace("vol_trend_ratio < 1.0", "vol_trend_ratio < 0.7", 1)
     src_full = src_full.replace("rsi <= 75", "rsi <= 80", 1)
     src_full = src_full.replace("res_atr < 2.0", "res_atr < 0.1", 1)
     ast.parse(src_full)
@@ -283,7 +281,7 @@ def test_agent_loop_threshold_mutation_no_crash(all_ticker_dfs, backtest_stats):
     """
     Simulates the first agent loop iteration on real data:
       1. Baseline Sharpe from the default (strict) screener — from fixture.
-      2. Relaxed screener (vol_ratio 2.5 → 2.0, RSI 75 → 80, res_atr 2.0 → 0.1).
+      2. Relaxed screener (vol_trend_ratio 1.0 → 0.7, RSI 75 → 80, res_atr 2.0 → 0.1).
       3. Both runs complete without error.
       4. Relaxed screener must produce ≥ 1 trade — proves agent has a viable path.
 
@@ -293,8 +291,8 @@ def test_agent_loop_threshold_mutation_no_crash(all_ticker_dfs, backtest_stats):
     import os as _os
 
     train_source = REPO_ROOT.joinpath("train.py").read_text(encoding="utf-8")
-    assert "vol_ratio < 2.5" in train_source, (
-        "Volume threshold 'vol_ratio < 2.5' not found in train.py editable section. "
+    assert "vol_trend_ratio < 1.0" in train_source, (
+        "Volume trend threshold 'vol_trend_ratio < 1.0' not found in train.py editable section. "
         "Update this test if the threshold expression was changed."
     )
     assert "rsi <= 75" in train_source, (
@@ -302,9 +300,9 @@ def test_agent_loop_threshold_mutation_no_crash(all_ticker_dfs, backtest_stats):
         "Update this test if the RSI expression was changed."
     )
     # Simulate an agent loop mutation sweep across two screener parameters:
-    #   1. Volume threshold: vol_ratio < 2.5 → 2.0 (accept slightly below-average volume)
+    #   1. Volume trend threshold: vol_trend_ratio < 1.0 → 0.7 (accept slightly below-trend volume)
     #   2. RSI upper bound: rsi <= 75 → rsi <= 80 (allow more momentum)
-    relaxed_source = train_source.replace("vol_ratio < 2.5", "vol_ratio < 2.0", 1)
+    relaxed_source = train_source.replace("vol_trend_ratio < 1.0", "vol_trend_ratio < 0.7", 1)
     relaxed_source = relaxed_source.replace("rsi <= 75", "rsi <= 80", 1)
     assert "res_atr < 2.0" in relaxed_source, (
         "Resistance threshold 'res_atr < 2.0' not found. "
@@ -332,7 +330,7 @@ def test_agent_loop_threshold_mutation_no_crash(all_ticker_dfs, backtest_stats):
     # Key Phase 5 viability requirement (PRD: "Phase 5 validation explicitly
     # checks for at least 1 trade before handing off to the agent")
     assert relaxed_stats["total_trades"] >= 1, (
-        f"Relaxed screener (vol_ratio 0.8, RSI 80, res_atr 0.1) produced 0 trades over "
+        f"Relaxed screener (vol_trend_ratio 0.7, RSI 80, res_atr 0.1) produced 0 trades over "
         f"{BACKTEST_START} to {train.BACKTEST_END} on {len(all_ticker_dfs)} tickers. "
         "Extend BACKTEST_START/BACKTEST_END and re-run `uv run prepare.py`."
     )

@@ -20,7 +20,7 @@ CACHE_DIR = os.environ.get(
 # invalidates comparisons across experiments.
 
 # Backtest window — matches prepare.py; edit here to change the simulation period
-BACKTEST_START = "2025-12-20"
+BACKTEST_START = "2024-09-01"
 BACKTEST_END   = "2026-03-20"
 
 # Train/test split — last 14 calendar days of the backtest window are held out as test set.
@@ -235,10 +235,9 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if len(df) < 102:
         return None
 
-    # Today's observable data: only price_1030am and partial-day volume
+    # Today's observable data: only price_1030am (today_vol excluded — 0 pre-market)
     price_1030am = float(df['price_1030am'].iloc[-1])
-    today_vol  = float(df['volume'].iloc[-1])
-    if pd.isna(price_1030am) or pd.isna(today_vol):
+    if pd.isna(price_1030am):
         return None
 
     # R8: skip entries within 14 calendar days of next earnings announcement
@@ -271,12 +270,17 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
     if sma20 < sma20_5d_ago * 0.995:
         return None
 
-    # Volume check — second most selective filter
+    # Volume check using prior-data-only rules (today_vol excluded — unavailable pre-market)
     vm30 = float(hist['volume'].iloc[-30:].mean())
     if pd.isna(vm30) or vm30 == 0:
         return None
-    vol_ratio = today_vol / vm30
-    if vol_ratio < 2.5:
+    # Rule 3a: recent 5-day avg volume >= MA30 (building institutional interest)
+    vol_trend_ratio = float(hist['volume'].iloc[-5:].mean()) / vm30
+    # Rule 3b: yesterday not dead (prior session >= 0.8× MA30)
+    prev_vol_ratio  = float(hist['volume'].iloc[-1])        / vm30
+    if vol_trend_ratio < 1.0:
+        return None
+    if prev_vol_ratio < 0.8:
         return None
 
     # Rule 2a: price_1030am breaks above the 20-day highest close (breakout)
@@ -320,13 +324,14 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
         return None
 
     return {
-        'stop':        stop,
-        'entry_price': price_1030am,
-        'stop_type':   stop_type,   # always 'pivot' after R9 (fallback path removed)
-        'atr14':       round(atr, 4),
-        'sma50':       round(sma50, 4),
-        'vol_ratio':   round(vol_ratio, 4),
-        'high20':      round(high20, 4),
+        'stop':             stop,
+        'entry_price':      price_1030am,
+        'stop_type':        stop_type,   # always 'pivot' after R9 (fallback path removed)
+        'atr14':            round(atr, 4),
+        'sma50':            round(sma50, 4),
+        'prev_vol_ratio':   round(prev_vol_ratio, 4),
+        'vol_trend_ratio':  round(vol_trend_ratio, 4),
+        'high20':           round(high20, 4),
     }
 
 
@@ -366,6 +371,38 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
     trail_stop = round(recent_high - 1.2 * atr, 2) if recent_high >= entry_price + 2.0 * atr else current_stop
 
     return max(current_stop, be_stop, trail_stop)
+
+
+def _compute_fold_params(
+    backtest_start: str,
+    train_end: str,
+    n_folds: int,
+    fold_test_days: int,
+) -> tuple:
+    """
+    Auto-detect short timeframes and return effective fold parameters.
+
+    If total business days from backtest_start to train_end < 130 (~6 months):
+      - effective_n_folds = 1
+      - effective_fold_test_days = max(1, min(10, total_bdays // 2))
+        (at least 1 bday, at most 50% of total, targeting 10 = 2 weeks)
+    Otherwise returns (n_folds, fold_test_days) unchanged.
+
+    Args:
+        backtest_start: ISO date string for start of backtest window
+        train_end: ISO date string for end of training window (= TRAIN_END)
+        n_folds: WALK_FORWARD_WINDOWS constant
+        fold_test_days: FOLD_TEST_DAYS constant
+    Returns:
+        (effective_n_folds, effective_fold_test_days)
+    """
+    import pandas as _pd_fold
+    total_bdays = len(_pd_fold.bdate_range(backtest_start, train_end))
+    short_threshold = 130  # ~6 calendar months of business days
+    if total_bdays < short_threshold:
+        effective_test_days = max(1, min(10, total_bdays // 2))
+        return 1, effective_test_days
+    return n_folds, fold_test_days
 
 
 # ── DO NOT EDIT BELOW THIS LINE ───────────────────────────────────────────────
@@ -870,12 +907,19 @@ if __name__ == "__main__":
     last_fold_train_records: list = []
     _fold_train_stats: dict = {}   # guard for WALK_FORWARD_WINDOWS=0
 
-    for _i in range(WALK_FORWARD_WINDOWS):
+    # Auto-detect short timeframes and adjust fold parameters.
+    # If total bdays from BACKTEST_START to TRAIN_END < 130 (~6 months):
+    #   uses 1 fold with test window = max(1, min(10, total//2)) bdays.
+    _effective_n_folds, _effective_fold_test_days = _compute_fold_params(
+        BACKTEST_START, TRAIN_END, WALK_FORWARD_WINDOWS, FOLD_TEST_DAYS
+    )
+
+    for _i in range(_effective_n_folds):
         # Fold _i (0-indexed, oldest first).
-        # Fold WALK_FORWARD_WINDOWS-1 (newest) has test window ending at TRAIN_END.
-        _steps_back = WALK_FORWARD_WINDOWS - 1 - _i
-        _fold_test_end_ts   = _train_end_ts - _BDay(_steps_back * FOLD_TEST_DAYS)
-        _fold_test_start_ts = _fold_test_end_ts - _BDay(FOLD_TEST_DAYS)
+        # Fold _effective_n_folds-1 (newest) has test window ending at TRAIN_END.
+        _steps_back = _effective_n_folds - 1 - _i
+        _fold_test_end_ts   = _train_end_ts - _BDay(_steps_back * _effective_fold_test_days)
+        _fold_test_start_ts = _fold_test_end_ts - _BDay(_effective_fold_test_days)
         _fold_train_end_ts  = _fold_test_start_ts
 
         _fold_train_end   = str(_fold_train_end_ts.date())
@@ -896,7 +940,7 @@ if __name__ == "__main__":
         print_results(_fold_test_stats,  prefix=f"fold{_fold_n}_test_")
 
         fold_test_pnls.append((_fold_test_stats["total_pnl"], _fold_test_stats["total_trades"]))
-        if _fold_n == WALK_FORWARD_WINDOWS:
+        if _fold_n == _effective_n_folds:
             last_fold_train_records = _fold_train_stats["trade_records"]
 
     # R2: Exclude folds with < 3 test trades — sparse folds are noise-dominated.

@@ -1567,6 +1567,20 @@ initial risk is zero, write empty string. A healthy momentum strategy shows winn
 at +1.5–3.0R and losers at -1.0R. A mass near 0R indicates the breakeven trigger is the
 primary W/L suppressor.
 
+#### P0-E: Volume criterion redesign ✅ Done (2026-03-25)
+
+The backtested `vol_ratio` rule (`today_vol / vm30 >= 2.5`) uses today's partial volume,
+which is 0 pre-market and only ~15–20% of daily volume at 10:30am — a genuine 1.9× day
+registers as ~0.3× at entry time. The rule structurally eliminates all pre-market candidates
+and misses real breakout days.
+
+**Fix:** remove `today_vol` from `screen_day()` entry logic. Replace with two prior-data-only
+rules: 5-day avg volume ≥ MA30 (Rule 3a) and yesterday's volume ≥ 0.8× MA30 (Rule 3b).
+Return dict gains `prev_vol_ratio` and `vol_trend_ratio` (replacing `vol_ratio`).
+
+Applied before Phase 0.2 re-calibration (2026-03-25) so the corrected volume rules are
+baked into the new baseline from the start.
+
 ### V5-A Acceptance Criteria
 
 - [ ] `prepare.py:resample_to_daily()` uses `Close` of 9:30 AM bar; column named `price_1030am`
@@ -1578,6 +1592,29 @@ primary W/L suppressor.
 - [ ] `test_harness_below_marker_matches_golden_hash` passes with new GOLDEN_HASH
 - [ ] Full test suite passes with 0 new failures (`python -m pytest tests/ -q`)
 - [ ] PROGRESS.md updated with cache invalidation action note
+
+### V5-B: Dedicated Test Parquet Fixture (2026-03-25)
+
+Self-contained test dataset so integration and E2E tests run reliably in CI and fresh-clone
+environments without a pre-populated 389-ticker cache.
+
+**Changes:**
+- `tests/conftest.py` — session-scoped `test_parquet_fixtures` downloads AAPL/MSFT/NVDA via
+  yfinance on first run, caches to `~/.cache/autoresearch/test_fixtures/`. History: 2024-04-01
+  (yfinance 1h 730-day limit); backtest window: 2024-09-01..2025-11-01.
+- `train._compute_fold_params()` — auto-detects short backtest windows (< 130 bdays → 1 fold)
+  so the harness doesn't crash with a tiny dataset.
+- `tests/test_e2e.py` — all 9 `@pytest.mark.integration` tests wired to fixture; subprocess
+  tests inject `AUTORESEARCH_CACHE_DIR` instead of using the full cache.
+- `tests/test_optimization.py` — 3 `@_live` tests (formerly skipped without 389-ticker cache)
+  converted to `@pytest.mark.integration` using the small fixture.
+- GOLDEN_HASH updated for `_compute_fold_params` call in `__main__`.
+
+**Acceptance criteria:**
+- [ ] `pytest tests/test_fold_auto_detect.py` → 13 passed
+- [ ] `pytest tests/test_e2e.py -m integration` → 9 passed, 0 skipped
+- [ ] `pytest tests/test_optimization.py -m integration` → 3 passed (no longer skip)
+- [ ] Full suite (`pytest tests/ --ignore=tests/test_selector.py`) → no new failures
 
 ### V5 Compatibility Notes
 

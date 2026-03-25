@@ -111,12 +111,13 @@ def _build_prompt(ticker: str, snapshot: dict, today: date) -> str:
     strategies_text = []
     for name, module in REGISTRY.items():
         m = module.METADATA
+        pnl_str = "N/A" if m["train_pnl"] is None else f"${m['train_pnl']:.2f}"
         strategies_text.append(
             f"Strategy: {name}\n"
             f"  sector: {m['sector']}\n"
             f"  description: {m['description']}\n"
             f"  trained: {m['train_start']} to {m['train_end']}\n"
-            f"  train_pnl: ${m['train_pnl']:.2f}  "
+            f"  train_pnl: {pnl_str}  "
             f"train_sharpe: {m['train_sharpe']:.3f}  "
             f"trades: {m['train_trades']}\n"
         )
