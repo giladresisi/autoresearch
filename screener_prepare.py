@@ -33,33 +33,45 @@ HISTORY_DAYS = 90  # calendar days of data to maintain in the screener cache
 MAX_WORKERS = int(os.environ.get("SCREENER_PREPARE_WORKERS", "10"))
 
 
+# Tickers not covered by the Russell 1000 (US-domiciled stocks only):
+# foreign-listed mega-caps and sector ETFs used in the harness.
+SUPPLEMENTAL_TICKERS = [
+    # Foreign-listed large-caps (ADRs / foreign primary listings)
+    "TSM",   # Taiwan Semi — largest chip foundry (~$800B)
+    "NVO",   # Novo Nordisk — GLP-1 leader (~$300B)
+    "ASML",  # ASML — EUV lithography monopoly
+    "SHOP",  # Shopify — Canadian e-commerce
+    "ARM",   # ARM Holdings — UK-domiciled chip IP
+    "MELI",  # MercadoLibre — LatAm e-commerce/fintech
+    "SE",    # Sea Limited — SE Asia tech
+    "BABA",  # Alibaba ADR
+    "PDD",   # Pinduoduo / Temu ADR
+    "JD",    # JD.com ADR
+    # Broad market benchmarks
+    "SPY", "QQQ", "IWM",
+    # SPDR sector ETFs — full 11-sector S&P 500 breakdown
+    "XLK", "XLF", "XLE", "XLV", "XLI", "XLU", "XLY", "XLP", "XLB", "XLRE", "XLC",
+    # Subsector / thematic ETFs used in the harness TICKERS list
+    "SMH", "SOXX", "XBI", "GDX", "GDXJ", "XOP", "IBB", "ARKK", "KWEB", "BOTZ",
+    # Software subsector
+    "IGV",
+]
+
+
 def fetch_screener_universe() -> list:
     """
-    Fetch current S&P 500 (Wikipedia) + Russell 1000 (iShares IWB holdings).
-    Falls back to prepare.py TICKERS list if both sources fail.
+    Fetch Russell 1000 (iShares IWB holdings) + supplemental tickers.
+
+    S&P 500 is omitted — it is entirely contained within the Russell 1000.
+    SUPPLEMENTAL_TICKERS adds foreign-listed mega-caps and sector ETFs that
+    the Russell 1000 (US-domiciled stocks only) does not include.
+    Falls back to prepare.py TICKERS list if the Russell 1000 fetch fails.
     Returns a deduplicated list of ticker strings.
     """
     import requests
-    from bs4 import BeautifulSoup
 
     headers = {"User-Agent": "Mozilla/5.0"}
     tickers = []
-
-    # S&P 500 from Wikipedia
-    try:
-        r = requests.get(
-            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-            headers=headers,
-            timeout=15,
-        )
-        soup = BeautifulSoup(r.text, "html.parser")
-        table = soup.find("table", {"id": "constituents"})
-        rows = table.find_all("tr")[1:]
-        sp500 = [row.find_all("td")[0].text.strip().replace(".", "-") for row in rows]
-        tickers += sp500
-        print(f"  S&P 500:      {len(sp500)} tickers")
-    except Exception as e:
-        print(f"  S&P 500 fetch failed: {e}")
 
     # Russell 1000 from iShares IWB CSV
     try:
@@ -79,6 +91,10 @@ def fetch_screener_universe() -> list:
     except Exception as e:
         print(f"  Russell 1000 fetch failed: {e}")
 
+    # Append supplemental tickers (foreign mega-caps + ETFs not in Russell 1000)
+    tickers += SUPPLEMENTAL_TICKERS
+    print(f"  Supplemental: {len(SUPPLEMENTAL_TICKERS)} tickers")
+
     # Deduplicate, preserve order
     seen, unique = set(), []
     for t in tickers:
@@ -87,7 +103,7 @@ def fetch_screener_universe() -> list:
             unique.append(t)
 
     if not unique:
-        print("  WARNING: all sources failed, using prepare.py TICKERS fallback")
+        print("  WARNING: Russell 1000 fetch failed, using prepare.py TICKERS fallback")
         unique = list(PREPARE_TICKERS)
 
     return unique
