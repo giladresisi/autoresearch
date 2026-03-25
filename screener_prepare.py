@@ -27,7 +27,8 @@ SCREENER_CACHE_DIR = os.environ.get(
     "AUTORESEARCH_SCREENER_CACHE_DIR",
     os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "screener_data"),
 )
-HISTORY_DAYS = 180  # calendar days of data to maintain in the screener cache (~126 trading days)
+HISTORY_DAYS = 300  # calendar days of data to maintain in the screener cache (~210 trading days)
+                     # 300 days required for SMA200: 200 trading days × (365/252) ≈ 290 calendar days
 # Number of parallel download threads. Raise carefully — Yahoo Finance rate-limits
 # aggressive clients. 10 is a safe default that gives ~10x speedup without triggering bans.
 MAX_WORKERS = int(os.environ.get("SCREENER_PREPARE_WORKERS", "10"))

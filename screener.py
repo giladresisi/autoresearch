@@ -34,7 +34,7 @@ GAP_THRESHOLD = -0.03  # -3%: candidates with gap < this are flagged but not arm
 # Ordered list of rejection rule labels (matches screen_day filter chain).
 _RULES = [
     "too_few_rows", "no_price", "earnings_soon",
-    "sma_misaligned", "sma20_declining",
+    "sma_misaligned", "death_cross", "sma20_declining",
     "vol_trend_low", "prev_vol_dead",
     "no_breakout", "no_breakout_cont",
     "rsi_out_of_range", "ceiling_stall",
@@ -70,11 +70,32 @@ def _rejection_reason(df: pd.DataFrame, today, current_price: float) -> str:
     sma100 = float(close_hist.iloc[-100:].mean())
     if pd.isna(sma20) or pd.isna(sma50) or pd.isna(sma100):
         return "sma_misaligned"
-    if price_1030am <= sma50 or price_1030am <= sma100 or sma20 <= sma50 or sma50 <= sma100:
+
+    # Mirror screen_day's two-path check so rejection diagnosis matches the actual gate that fired.
+    sma200 = float(close_hist.iloc[-200:].mean()) if len(hist) >= 200 else None
+    bull_path = (
+        price_1030am > sma50 and
+        price_1030am > sma100 and
+        sma20 > sma50 and
+        sma50 > sma100
+    )
+    recovery_path = (
+        sma200 is not None and
+        sma50 > sma200 and
+        price_1030am <= sma50 and
+        price_1030am > sma20
+    )
+    if not bull_path and not recovery_path:
+        # Both paths blocked: return the most specific alignment label.
+        if sma200 is not None and sma50 <= sma200:
+            return "death_cross"
         return "sma_misaligned"
+    signal_path = "bull" if bull_path else "recovery"
 
     sma20_5d_ago = float(close_hist.iloc[-25:-5].mean())
-    if sma20 < sma20_5d_ago * 0.995:
+    # Use the same slope tolerance as screen_day to avoid misattributing recovery rejections.
+    slope_floor = 0.990 if signal_path == "recovery" else 0.995
+    if sma20 < sma20_5d_ago * slope_floor:
         return "sma20_declining"
 
     vm30 = float(hist["volume"].iloc[-30:].mean())
@@ -99,7 +120,9 @@ def _rejection_reason(df: pd.DataFrame, today, current_price: float) -> str:
     rsi = float(calc_rsi14(hist.iloc[-60:]).iloc[-1])
     if pd.isna(atr) or atr == 0 or pd.isna(rsi):
         return "rsi_out_of_range"
-    if not (50 <= rsi <= 75):
+    # Use path-aware RSI range matching screen_day.
+    rsi_lo, rsi_hi = (40, 65) if signal_path == "recovery" else (50, 75)
+    if not (rsi_lo <= rsi <= rsi_hi):
         return "rsi_out_of_range"
 
     if is_stalling_at_ceiling(hist):
@@ -248,6 +271,8 @@ def run_screener() -> None:
                 "gap_pct":         round(gap_pct, 4),
                 "res_atr":         signal["res_atr"],
                 "days_to_earnings": days_to_earnings,
+                # signal_path distinguishes bull (price>SMA50) from recovery (price<=SMA50, SMA50>SMA200)
+                "signal_path":     signal.get("signal_path", "bull"),
             }
 
             if gap_pct < GAP_THRESHOLD:
@@ -274,7 +299,7 @@ def run_screener() -> None:
 
     # Print armed candidates table
     header = (
-        f"{'TICKER':<7} {'PRICE':>8} {'ENTRY_THR':>10} {'STOP':>8} "
+        f"{'TICKER':<7} {'PATH':<6} {'PRICE':>8} {'ENTRY_THR':>10} {'STOP':>8} "
         f"{'ATR14':>7} {'RSI14':>6} {'VOL_PREV':>9} {'VOL_TRD':>8} "
         f"{'GAP%':>7} {'RES_ATR':>8} {'EARN_DAYS':>10}"
     )
@@ -288,7 +313,7 @@ def run_screener() -> None:
             res_atr_str = f"{r['res_atr']:>8.2f}" if r["res_atr"] is not None else f"{'None':>8}"
             earn_str = f"{r['days_to_earnings']:>10d}" if r["days_to_earnings"] is not None else f"{'None':>10}"
             print(
-                f"{r['ticker']:<7} {r['current_price']:>8.2f} {r['entry_threshold']:>10.2f} "
+                f"{r['ticker']:<7} {r['signal_path']:<6} {r['current_price']:>8.2f} {r['entry_threshold']:>10.2f} "
                 f"{r['suggested_stop']:>8.2f} {r['atr14']:>7.4f} {r['rsi14']:>6.2f} "
                 f"{r['prev_vol_ratio']:>9.4f} {r['vol_trend_ratio']:>8.4f} "
                 f"{r['gap_pct']*100:>6.2f}% {res_atr_str} {earn_str}"
@@ -305,7 +330,7 @@ def run_screener() -> None:
             res_atr_str = f"{r['res_atr']:>8.2f}" if r["res_atr"] is not None else f"{'None':>8}"
             earn_str = f"{r['days_to_earnings']:>10d}" if r["days_to_earnings"] is not None else f"{'None':>10}"
             print(
-                f"{r['ticker']:<7} {r['current_price']:>8.2f} {r['entry_threshold']:>10.2f} "
+                f"{r['ticker']:<7} {r['signal_path']:<6} {r['current_price']:>8.2f} {r['entry_threshold']:>10.2f} "
                 f"{r['suggested_stop']:>8.2f} {r['atr14']:>7.4f} {r['rsi14']:>6.2f} "
                 f"{r['prev_vol_ratio']:>9.4f} {r['vol_trend_ratio']:>8.4f} "
                 f"{r['gap_pct']*100:>6.2f}% {res_atr_str} {earn_str}"

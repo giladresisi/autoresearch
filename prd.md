@@ -17,6 +17,7 @@ The system is developed in four versioned harness generations, each building on 
 | **V3** | Harness robustness: look-ahead fix, risk-proportional sizing, walk-forward CV, robustness controls, configurable fold sizing, test-universe holdout, harness integrity | 2026-03-22 |
 | **V4** | Signal quality and measurement fidelity: earnings filter, fallback-stop rejection, time-based exit, fold window fix, objective function fixes, win/loss tracking, post-Phase-1 cooldown | 2026-03-23 |
 | **V5** | Instrumentation and data correctness: price fix (Close not Open), MFE/MAE, exit-type tagging, R-multiple | 2026-03-24 |
+| **V6** | Signal coverage expansion | 2026-03-25 |
 
 ---
 
@@ -1629,6 +1630,60 @@ environments without a pre-populated 389-ticker cache.
   P0-B/C/D) must be complete before recomputing the hash. The hash covers everything below
   the `# ── DO NOT EDIT BELOW THIS LINE` marker in `train.py`.
 - **Sequence dependency:** V5-A must complete before Phase 0 exit experiments (phases.md).
+
+---
+
+## V6: Signal Coverage Expansion
+
+### V6-A: Recovery Mode Signal Path (2026-03-25)
+
+Add a second signal path to `screen_day()` that fires during corrections within ongoing
+uptrends. The current strategy requires full SMA bull-stack alignment (`price > SMA50 >
+SMA100`, `SMA20 > SMA50`), which produces zero candidates in broadly corrective markets
+(observed: 80% of tickers rejected at `sma_misaligned` on 2026-03-25).
+
+**Recovery path fires when:**
+- `SMA50 > SMA200` — long-term trend structurally intact (no death cross)
+- `price ≤ SMA50` — stock is in a correction
+- `price > SMA20` — short-term momentum recovering
+- All stop, resistance, volume, earnings, and stall guards still apply
+- RSI range tightened to 40–65 (vs 50–75 for bull) to target early-recovery entries
+- Rule 1b SMA20 slope tolerance relaxed to 1% in recovery mode (vs 0.5% in bull) — a
+  stock early in its reversal naturally has a still-declining SMA20
+
+**Changes:**
+- `train.py` `screen_day()` — two-path SMA check; `signal_path: "bull" | "recovery"` added
+  to return dict; path-appropriate RSI range; relaxed Rule 1b slope floor for recovery
+- `screener.py` — `PATH` column in armed/gap-skipped output; `"death_cross"` bucket added
+  to `_rejection_reason()` and `_RULES`
+- `screener_prepare.py` — `HISTORY_DAYS` 180 → 300 (SMA200 requires ~200 trading days ≈
+  290 calendar days; 300 gives a 10-day buffer)
+- `tests/test_screener.py` — 7 new unit tests for recovery path
+- `tests/test_screener_script.py` — 1 integration test: screener finds ≥ 1 armed candidate
+  from synthetic recovery-mode parquet (regression guard for corrective-market coverage)
+
+**Acceptance criteria:**
+- [ ] `screen_day()` returns signals when `price < SMA50` provided `SMA50 > SMA200` and `price > SMA20`
+- [ ] `screen_day()` bull path unaffected (no regression)
+- [ ] `signal_path: "bull" | "recovery"` present in return dict
+- [ ] Recovery path silently skipped when hist < 200 rows
+- [ ] RSI range 40–65 for recovery, 50–75 for bull
+- [ ] Rule 1b slope floor 0.990 for recovery, 0.995 for bull
+- [ ] Recovery path blocked when `SMA50 ≤ SMA200` (death cross)
+- [ ] `screener.py` PATH column visible in output
+- [ ] `_rejection_reason()` returns `"death_cross"` for death-cross rejections
+- [ ] All 8 new tests pass: `python -m pytest tests/test_screener.py tests/test_screener_script.py -v`
+- [ ] Full suite no new failures: `python -m pytest tests/ -q`
+
+**Cache note (manual, post-execution):**
+After bumping `HISTORY_DAYS` to 300, the existing cache must be cleared and rebuilt before
+recovery mode fires in the live screener. Rebuild takes ~10 min:
+```bash
+python -c "import os,glob; from pathlib import Path; [os.remove(f) for f in glob.glob(os.path.join(Path.home(),'.cache','autoresearch','screener_data','*.parquet'))]; print('Cache cleared')"
+uv run screener_prepare.py
+```
+
+**Plan file:** `.agents/plans/recovery-mode-signal.md`
 
 ---
 

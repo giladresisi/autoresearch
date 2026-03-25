@@ -1,5 +1,33 @@
 # PROGRESS
 
+## Feature: Recovery Mode Signal Path
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-25
+**Plan File**: .agents/plans/recovery-mode-signal.md
+
+### Core Changes
+- `train.py` `screen_day()` — added SMA200 computation, two-path check (bull/recovery), `signal_path` variable, relaxed `slope_floor` (0.990 recovery vs 0.995 bull), relaxed RSI range (40–65 recovery vs 50–75 bull), `signal_path` in return dict
+- `screener.py` — added `signal_path` to per-ticker row dict, `PATH` column in output tables, `death_cross` added to `_RULES`, `_rejection_reason()` returns `"death_cross"` when SMA50 <= SMA200
+- `screener_prepare.py` — `HISTORY_DAYS` increased from 180 to 300 for SMA200 support
+- `tests/test_screener.py` — `make_recovery_signal_df` fixture + 7 recovery unit tests
+- `tests/test_screener_script.py` — `_write_recovery_parquet` helper + `test_screener_finds_candidate_in_bearish_period` integration test
+- `tests/test_e2e.py` — RSI string anchors updated for 2 agent-loop mutation tests (unplanned fix required by RSI tuple refactor)
+
+### Test Status
+- Automated: ✅ 289 passed, 1 skipped, 1 pre-existing failure (`test_select_strategy_real_claude_code`)
+- New tests: 8 (7 unit in test_screener.py, 1 integration in test_screener_script.py)
+- All 8 plan-specified test scenarios: ✅ pass
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/recovery-mode-signal.md`
+- Detailed implementation summary
+- Divergences and resolutions (fixture geometry adjustments, unplanned e2e fix)
+- Test results and metrics: 289/290 passing, 8 new tests, 0 new regressions
+
+---
+
 ## Feature: train.py Performance Optimization
 
 **Status**: ✅ Complete

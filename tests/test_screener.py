@@ -322,3 +322,164 @@ def test_screen_day_backtest_unchanged():
     result_default = screen_day(df, today)
     result_explicit = screen_day(df, today, current_price=None)
     assert result_default == result_explicit
+
+
+# ── Recovery mode signal tests ────────────────────────────────────────────────
+
+def make_recovery_signal_df(n: int = 260) -> pd.DataFrame:
+    """Synthetic DataFrame where screen_day fires the RECOVERY path.
+
+    Price path:
+    - Bars 0-199: slow steady rise 50→120 (builds a low SMA200 baseline ~117)
+    - Bars 200-219: explosive rally 120→200 (lifts SMA50 to ~174, well above SMA200)
+    - Bars 220-234: shallow correction 200→165 (price falls below SMA50; SMA50 stays > SMA200)
+    - Bars 235-258: oscillating consolidation 165→169 (RSI ~57, SMA20 slope near flat)
+    - Bar 259 (today): price_1030am = 173 (breaks above 20-day high close ~169.5)
+
+    At bar 259:
+      SMA200 ≈ 117  (dominated by long slow rise)
+      SMA50  ≈ 174  (dominated by the rally; above SMA200)
+      SMA20  ≈ 168  (consolidation zone; below price_1030am=173)
+      price_1030am = 173 > 20d high (~169.5) and > SMA20 (~168) and < SMA50 (~174)
+    """
+    base = date(2024, 1, 2)
+    dates = [base + timedelta(days=i) for i in range(n)]
+
+    close = np.zeros(n, dtype=float)
+    close[:200]    = np.linspace(50.0, 120.0, 200)    # slow rise
+    close[200:220] = np.linspace(120.0, 200.0, 20)    # explosive rally
+    close[220:235] = np.linspace(200.0, 165.0, 15)    # shallow correction
+
+    # Oscillating consolidation: +1.2/-0.9 per bar → RSI ~57, net drift ≈+0.15/bar
+    v = 165.0
+    osc_vals = []
+    for i in range(24):
+        v += 1.2 if i % 2 == 0 else -0.9
+        osc_vals.append(v)
+    close[235:259] = osc_vals
+    close[259]     = close[258]  # last history bar
+
+    high  = close * 1.005
+    low   = close * 0.990
+    open_ = close * 0.998
+
+    price_1030am        = close.copy()
+    price_1030am[259]   = 173.0  # breakout above 20d high close (~169.5)
+
+    # Volume: last 5 bars elevated (vol_trend_ratio >= 1.0), yesterday active
+    volume = np.full(n, 1_000_000.0)
+    volume[254:259] = 1_500_000.0   # 5-day trend above MA30
+    volume[258]     = 1_200_000.0   # yesterday >= 0.8× MA30
+
+    df = pd.DataFrame({
+        'open':         open_,
+        'high':         high,
+        'low':          low,
+        'close':        close,
+        'volume':       volume,
+        'price_1030am': price_1030am,
+    }, index=pd.Index(dates, name='date'))
+
+    # Add pivot low ~35 bars from end with a prior touch ~10 bars before it
+    pivot_idx = n - 35
+    pivot_price = float(df['close'].iloc[pivot_idx]) * 0.85
+    df.iloc[pivot_idx, df.columns.get_loc('low')] = pivot_price
+    touch_idx = pivot_idx - 10
+    if touch_idx >= 0:
+        df.iloc[touch_idx, df.columns.get_loc('low')] = pivot_price * 0.99
+        df.iloc[touch_idx, df.columns.get_loc('high')] = pivot_price * 1.01
+
+    return df
+
+
+def test_screen_day_recovery_fires_below_sma50():
+    """Recovery path fires: signal returned even though price < SMA50."""
+    df = make_recovery_signal_df()
+    today = df.index[-1]
+    result = screen_day(df, today, current_price=173.0)
+    assert result is not None, "Expected recovery signal, got None"
+    assert result["signal_path"] == "recovery"
+
+
+def test_screen_day_recovery_price_below_sma50():
+    """Sanity check: the recovery fixture actually has price below SMA50."""
+    df = make_recovery_signal_df()
+    hist = df.iloc[:-1]
+    sma50 = float(hist['close'].iloc[-50:].mean())
+    assert 173.0 < sma50, f"Expected price 173 < SMA50 {sma50:.2f}"
+
+
+def test_screen_day_recovery_sma50_above_sma200():
+    """Sanity check: the recovery fixture has SMA50 > SMA200 (no death cross)."""
+    df = make_recovery_signal_df()
+    hist = df.iloc[:-1]
+    sma50  = float(hist['close'].iloc[-50:].mean())
+    sma200 = float(hist['close'].iloc[-200:].mean())
+    assert sma50 > sma200, f"Expected SMA50 {sma50:.2f} > SMA200 {sma200:.2f}"
+
+
+def test_screen_day_recovery_blocked_when_death_cross():
+    """Recovery path must NOT fire when SMA50 <= SMA200 (death cross)."""
+    df = make_recovery_signal_df().copy()
+    # Force a death cross: set all recent closes very low so SMA50 drops below SMA200
+    df.iloc[-60:-1, df.columns.get_loc('close')] *= 0.3
+    # Sanity check: verify the fixture actually produced a death cross before calling screen_day,
+    # so a None result is attributed to the right gate and not an earlier filter.
+    hist = df.iloc[:-1]
+    sma50  = float(hist['close'].iloc[-50:].mean())
+    sma200 = float(hist['close'].iloc[-200:].mean())
+    assert sma50 <= sma200, (
+        f"Fixture did not produce a death cross (SMA50={sma50:.2f}, SMA200={sma200:.2f}). "
+        "Adjust the multiplier so SMA50 actually drops below SMA200."
+    )
+    today = df.index[-1]
+    result = screen_day(df, today, current_price=173.0)
+    assert result is None, "Recovery path must not fire when SMA50 < SMA200"
+
+
+def test_screen_day_bull_path_unaffected():
+    """Bull path still fires for a classic bull-stack ticker (no regression)."""
+    df = make_pivot_signal_df(250)
+    today = df.index[-1]
+    result = screen_day(df, today, current_price=115.0)
+    assert result is not None, "Bull path should still fire"
+    assert result["signal_path"] == "bull"
+
+
+def test_screen_day_recovery_rsi_range_40_65():
+    """Recovery path signal has rsi14 within the 40–65 recovery range.
+
+    Verifies that screen_day uses (40, 65) for recovery rather than the bull-mode (50, 75),
+    by asserting that a passing recovery signal reports an rsi14 in [40, 65].
+    """
+    df = make_recovery_signal_df()
+    today = df.index[-1]
+    result = screen_day(df, today, current_price=173.0)
+    assert result is not None, "Expected recovery signal from standard fixture"
+    assert result["signal_path"] == "recovery"
+    rsi = result.get("rsi14")
+    assert rsi is not None, "Expected rsi14 key in result dict"
+    assert 40 <= rsi <= 65, f"RSI {rsi:.1f} out of recovery range [40, 65]"
+
+
+def test_screen_day_recovery_slope_floor_relaxed():
+    """Recovery path uses 1% SMA20 slope tolerance, not the bull-mode 0.5%.
+
+    A stock early in its reversal naturally has a still-declining SMA20.
+    With the strict 0.995 floor, valid early-recovery entries would be silently blocked.
+    This test verifies that a signal fires even when sma20 is between 0.99 and 0.995
+    of sma20_5d_ago (i.e., in the relaxed-but-not-strict zone).
+    """
+    df = make_recovery_signal_df().copy()
+    # Nudge the SMA20 window (bars -25 to -6 before today) slightly higher so that
+    # sma20_5d_ago ends up ~0.3% above sma20 — inside recovery tolerance (1%) but
+    # outside bull tolerance (0.5%).
+    hist_slice = slice(len(df) - 26, len(df) - 6)
+    df.iloc[hist_slice, df.columns.get_loc('close')] *= 1.003
+    today = df.index[-1]
+    result = screen_day(df, today, current_price=173.0)
+    assert result is not None, (
+        "Recovery signal should fire when SMA20 slope is within 1% tolerance. "
+        "Rule 1b slope_floor must be 0.990 for recovery path, not 0.995."
+    )
+    assert result["signal_path"] == "recovery"

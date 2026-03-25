@@ -243,9 +243,9 @@ def test_agent_loop_two_iterations_multi_ticker(all_ticker_dfs, backtest_stats):
 
     # ── Iteration 2: relax RSI upper bound + relax resistance ─────────────────
     # Starts from best_source — correctly reflects the keep/discard outcome above.
-    assert "rsi <= 75" in best_source, "RSI pattern changed — update test"
+    assert "50, 75)" in best_source, "RSI pattern changed — update test"
     assert "res_atr < 2.0" in best_source, "Resistance pattern changed — update test"
-    src2 = best_source.replace("rsi <= 75", "rsi <= 80", 1)
+    src2 = best_source.replace("50, 75)", "50, 80)", 1)
     src2 = src2.replace("res_atr < 2.0", "res_atr < 0.1", 1)
     ast.parse(src2)
 
@@ -265,7 +265,7 @@ def test_agent_loop_two_iterations_multi_ticker(all_ticker_dfs, backtest_stats):
     # across the full ticker set. This confirms the pipeline ran real positions
     # (not just returned empty stats) on a multi-ticker dataset.
     src_full = train_source.replace("vol_trend_ratio < 1.0", "vol_trend_ratio < 0.7", 1)
-    src_full = src_full.replace("rsi <= 75", "rsi <= 80", 1)
+    src_full = src_full.replace("50, 75)", "50, 80)", 1)
     src_full = src_full.replace("res_atr < 2.0", "res_atr < 0.1", 1)
     ast.parse(src_full)
 
@@ -295,15 +295,15 @@ def test_agent_loop_threshold_mutation_no_crash(all_ticker_dfs, backtest_stats):
         "Volume trend threshold 'vol_trend_ratio < 1.0' not found in train.py editable section. "
         "Update this test if the threshold expression was changed."
     )
-    assert "rsi <= 75" in train_source, (
-        "RSI threshold 'rsi <= 75' not found in train.py editable section. "
+    assert "50, 75)" in train_source, (
+        "RSI threshold '50, 75)' not found in train.py editable section. "
         "Update this test if the RSI expression was changed."
     )
     # Simulate an agent loop mutation sweep across two screener parameters:
     #   1. Volume trend threshold: vol_trend_ratio < 1.0 → 0.7 (accept slightly below-trend volume)
-    #   2. RSI upper bound: rsi <= 75 → rsi <= 80 (allow more momentum)
+    #   2. RSI upper bound: bull-mode rsi_hi 75 → 80 (allow more momentum)
     relaxed_source = train_source.replace("vol_trend_ratio < 1.0", "vol_trend_ratio < 0.7", 1)
-    relaxed_source = relaxed_source.replace("rsi <= 75", "rsi <= 80", 1)
+    relaxed_source = relaxed_source.replace("50, 75)", "50, 80)", 1)
     assert "res_atr < 2.0" in relaxed_source, (
         "Resistance threshold 'res_atr < 2.0' not found. "
         "Update this test if the resistance check was changed."

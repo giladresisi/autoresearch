@@ -267,15 +267,39 @@ def screen_day(df: pd.DataFrame, today, current_price: "float | None" = None) ->
     sma100 = float(close_hist.iloc[-100:].mean())
     if pd.isna(sma20) or pd.isna(sma50) or pd.isna(sma100):
         return None
+    # SMA200 used only for the recovery path; None when history is insufficient so the
+    # path is silently unavailable rather than raising an error or skipping the ticker entirely.
+    sma200 = float(close_hist.iloc[-200:].mean()) if len(hist) >= 200 else None
 
-    # Rule 1: SMA alignment — most tickers fail here; check before volume/ATR/RSI
-    if price_1030am <= sma50 or price_1030am <= sma100 or sma20 <= sma50 or sma50 <= sma100:
+    # Rule 1: SMA alignment — most tickers fail here; check before volume/ATR/RSI.
+    # Two signal paths: bull (full SMA stack) or recovery (correction within uptrend).
+    # Bull path: classic full alignment — price above both SMAs, SMAs stacked ascending.
+    bull_path = (
+        price_1030am > sma50 and
+        price_1030am > sma100 and
+        sma20 > sma50 and
+        sma50 > sma100
+    )
+    # Recovery path: long-term trend intact (SMA50 > SMA200 = no death cross), but price
+    # has pulled back below SMA50 and is now recovering above SMA20.
+    # Requires 200 bars of history; silently skipped when data is insufficient.
+    recovery_path = (
+        sma200 is not None and
+        sma50 > sma200 and
+        price_1030am <= sma50 and
+        price_1030am > sma20
+    )
+    if not bull_path and not recovery_path:
         return None
+    signal_path = "bull" if bull_path else "recovery"
 
     # Rule 1b: SMA20 slope must not be materially declining (allow up to 0.5% dip vs 5d ago)
     # Filters hard corrections while allowing temporarily-flat uptrends to enter
     sma20_5d_ago = float(close_hist.iloc[-25:-5].mean())
-    if sma20 < sma20_5d_ago * 0.995:
+    # Recovery stocks have a naturally declining SMA20 early in the reversal;
+    # use a wider tolerance so valid early-recovery entries aren't blocked.
+    slope_floor = 0.990 if signal_path == "recovery" else 0.995
+    if sma20 < sma20_5d_ago * slope_floor:
         return None
 
     # Volume check using prior-data-only rules (today_vol excluded — unavailable pre-market)
@@ -308,8 +332,9 @@ def screen_day(df: pd.DataFrame, today, current_price: "float | None" = None) ->
     if pd.isna(atr) or atr == 0 or pd.isna(rsi):
         return None
 
-    # Rule 3b: RSI between 50 and 75 (momentum building, not overbought)
-    if not (50 <= rsi <= 75):
+    # RSI range differs by path: recovery stocks are earlier in their move (lower RSI floor).
+    rsi_lo, rsi_hi = (40, 65) if signal_path == "recovery" else (50, 75)
+    if not (rsi_lo <= rsi <= rsi_hi):
         return None
 
     # Rule 4: not stalling at ceiling
@@ -342,6 +367,7 @@ def screen_day(df: pd.DataFrame, today, current_price: "float | None" = None) ->
         'high20':           round(high20, 4),
         'rsi14':            round(rsi, 4),
         'res_atr':          round(res_atr, 2) if res_atr is not None else None,
+        'signal_path':      signal_path,
     }
 
 

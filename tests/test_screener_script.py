@@ -209,3 +209,57 @@ class _FakeYFNaN:
                 import math
                 return math.nan
         return _FI()
+
+
+# ── Recovery / bearish-period screener test ───────────────────────────────────
+
+def _write_recovery_parquet(path):
+    """Write a synthetic parquet representing a recovery-mode setup.
+
+    Last row is yesterday so the screener appends a fresh synthetic today row.
+    Uses the same price path as make_recovery_signal_df: slow rise → rally →
+    correction → mini-recovery → breakout.
+    """
+    from tests.test_screener import make_recovery_signal_df
+    df = make_recovery_signal_df(260)
+    # Shift index to end at yesterday so screener's today row doesn't duplicate
+    yesterday = datetime.date.today() - datetime.timedelta(days=1)
+    new_index = [yesterday - datetime.timedelta(days=i) for i in range(len(df) - 1, -1, -1)]
+    df.index = pd.Index(new_index, name="date")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    df.to_parquet(path)
+    return df
+
+
+def test_screener_finds_candidate_in_bearish_period(screener_cache_tmpdir, monkeypatch, capsys):
+    """Regression guard: screener must find >= 1 armed candidate from a recovery-mode ticker.
+
+    This test exists to catch regressions where strategy changes inadvertently break
+    recovery-mode signal generation. If this test fails, the screener will produce zero
+    candidates in corrective/bearish markets.
+
+    Uses a synthetic parquet engineered to satisfy recovery-mode conditions:
+    price below SMA50 but SMA50 > SMA200, with a 20-day breakout and valid pivot stop.
+    """
+    import screener as sc
+    path = os.path.join(str(screener_cache_tmpdir), "RECOVERY.parquet")
+    df = _write_recovery_parquet(path)
+
+    # Inject breakout price — must be > 20-day high of all 260 hist bars (~169.5) and <= SMA50 (~174.7)
+    # With prev_close ~168.6, a breakout_price of 171 gives gap_pct ≈ +1.4%, above -10% threshold
+    breakout_price = 171.0
+    monkeypatch.setattr("screener._fetch_last_price", lambda t: breakout_price)
+    # Ensure GAP_THRESHOLD doesn't filter it out
+    monkeypatch.setattr(sc, "GAP_THRESHOLD", -0.10)
+
+    sc.run_screener()
+    captured = capsys.readouterr()
+
+    assert "ARMED BUY SIGNALS" in captured.out, (
+        "Expected armed candidates section in output — recovery-mode signal did not fire. "
+        "This means screen_day() is not returning signals for below-SMA50 recovery setups."
+    )
+    assert "RECOVERY" in captured.out, (
+        "Expected RECOVERY ticker in armed candidates. "
+        "Recovery-mode signal path is not working."
+    )
