@@ -200,6 +200,92 @@ def test_download_and_cache_falls_back_to_full_on_corrupt_existing(screener_cach
     assert not result.empty
 
 
+# ── Parallel download tests ───────────────────────────────────────────────────
+
+def test_process_one_returns_skip_for_current_ticker(screener_cache_tmpdir, monkeypatch):
+    """_process_one returns SKIP status for a ticker that is already current."""
+    import screener_prepare
+    yesterday = datetime.date.today() - datetime.timedelta(days=1)
+    path = os.path.join(str(screener_cache_tmpdir), "AAPL.parquet")
+    _write_parquet(path, yesterday)
+    ticker, status = screener_prepare._process_one("AAPL", "2024-01-01")
+    assert ticker == "AAPL"
+    assert "SKIP" in status
+
+
+def test_process_one_returns_cached_after_download(screener_cache_tmpdir, monkeypatch):
+    """_process_one returns 'cached' status after a successful download."""
+    import screener_prepare
+
+    class FakeTicker:
+        def history(self, **kwargs):
+            return _make_hourly_df()
+
+    monkeypatch.setattr("screener_prepare.yf.Ticker", lambda t: FakeTicker())
+    ticker, status = screener_prepare._process_one("AAPL", "2024-01-01")
+    assert ticker == "AAPL"
+    assert "cached" in status
+
+
+def test_process_one_returns_fail_on_empty_download(screener_cache_tmpdir, monkeypatch):
+    """_process_one returns FAIL status when yfinance returns empty data."""
+    import screener_prepare
+
+    class FakeTicker:
+        def history(self, **kwargs):
+            return pd.DataFrame()
+
+    monkeypatch.setattr("screener_prepare.yf.Ticker", lambda t: FakeTicker())
+    ticker, status = screener_prepare._process_one("AAPL", "2024-01-01")
+    assert ticker == "AAPL"
+    assert "FAIL" in status
+
+
+def test_parallel_all_tickers_processed(screener_cache_tmpdir, monkeypatch):
+    """With 3 tickers and MAX_WORKERS=2, all 3 are processed (none silently dropped)."""
+    import screener_prepare
+    monkeypatch.setattr(screener_prepare, "MAX_WORKERS", 2)
+
+    downloaded = []
+
+    class FakeTicker:
+        def __init__(self, t):
+            self._t = t
+        def history(self, **kwargs):
+            downloaded.append(self._t)
+            return _make_hourly_df()
+
+    monkeypatch.setattr("screener_prepare.yf.Ticker", FakeTicker)
+    monkeypatch.setattr("screener_prepare.fetch_screener_universe", lambda: ["AAPL", "MSFT", "NVDA"])
+
+    # Simulate __main__ parallel loop
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    today = datetime.date.today()
+    history_start = (today - datetime.timedelta(days=90)).strftime("%Y-%m-%d")
+    os.makedirs(str(screener_cache_tmpdir), exist_ok=True)
+    universe = screener_prepare.fetch_screener_universe()
+    statuses = {}
+    with ThreadPoolExecutor(max_workers=screener_prepare.MAX_WORKERS) as executor:
+        futures = {executor.submit(screener_prepare._process_one, t, history_start): t for t in universe}
+        for future in as_completed(futures):
+            t, status = future.result()
+            statuses[t] = status
+
+    assert set(statuses.keys()) == {"AAPL", "MSFT", "NVDA"}
+
+
+def test_max_workers_reads_from_env(monkeypatch):
+    """MAX_WORKERS is set from SCREENER_PREPARE_WORKERS env var at import time."""
+    import importlib
+    monkeypatch.setenv("SCREENER_PREPARE_WORKERS", "7")
+    import screener_prepare
+    importlib.reload(screener_prepare)
+    assert screener_prepare.MAX_WORKERS == 7
+    # Restore
+    monkeypatch.delenv("SCREENER_PREPARE_WORKERS", raising=False)
+    importlib.reload(screener_prepare)
+
+
 def _make_hourly_df(start="2024-01-02 09:30", periods=70):
     """Create a minimal hourly DataFrame that resample_to_daily can process."""
     import numpy as np

@@ -1,5 +1,29 @@
 # PROGRESS
 
+## Feature: Parallel Download Thread Pool
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-25
+**Plan File**: .agents/plans/parallel-download-threadpool.md
+
+### Core Changes
+- `screener_prepare.py` — added `MAX_WORKERS` (env: `SCREENER_PREPARE_WORKERS`, default 10), module-level `_process_one(ticker, history_start) -> tuple` helper, replaced sequential `for` loop with `ThreadPoolExecutor` + `as_completed`.
+- `prepare.py` — added `MAX_WORKERS` (env: `PREPARE_WORKERS`, default 10), replaced sequential `for ticker in TICKERS` loop with `executor.map(process_ticker, TICKERS)`.
+
+### Test Status
+- Automated: ✅ 282 passed, 1 pre-existing failure (`test_selector.py::test_select_strategy_real_claude_code`), 0 new failures
+- New tests: 9 (5 in test_screener_prepare.py, 4 in test_prepare.py)
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/parallel-download-threadpool.md`
+- Detailed implementation summary
+- No divergences from plan
+- Test results and metrics
+- 9/9 new tests pass, 0 new regressions
+
+---
+
 ## Feature: Phase 1 — Pre-Market Signal CLI
 
 **Status**: ✅ Complete

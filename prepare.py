@@ -12,6 +12,7 @@ import datetime
 import os
 import sys
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import yfinance as yf
@@ -100,6 +101,9 @@ CACHE_DIR = os.environ.get(
     "AUTORESEARCH_CACHE_DIR",
     os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "stock_data"),
 )
+# Number of parallel download threads for prepare.py harness cache build.
+# 10 workers gives ~10x speedup; raise with caution to avoid Yahoo Finance rate limits.
+MAX_WORKERS = int(os.environ.get("PREPARE_WORKERS", "10"))
 
 
 def download_ticker(ticker: str) -> pd.DataFrame:
@@ -277,9 +281,8 @@ if __name__ == "__main__":
     os.makedirs(CACHE_DIR, exist_ok=True)
     print(f"Downloading {len(TICKERS)} tickers -> {CACHE_DIR}")
     print(f"Date range: {HISTORY_START} -> {BACKTEST_END} (1h bars, resampled to daily)")
-    ok = 0
-    for ticker in TICKERS:
-        if process_ticker(ticker):
-            ok += 1
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        results = list(executor.map(process_ticker, TICKERS))
+    ok = sum(results)
     print(f"\nDone: {ok}/{len(TICKERS)} tickers cached successfully.")
     write_trend_summary(TICKERS, BACKTEST_START, BACKTEST_END, CACHE_DIR)

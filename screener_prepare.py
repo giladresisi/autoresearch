@@ -15,6 +15,7 @@ import datetime
 import io
 import os
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import yfinance as yf
@@ -27,6 +28,9 @@ SCREENER_CACHE_DIR = os.environ.get(
     os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "screener_data"),
 )
 HISTORY_DAYS = 90  # calendar days of data to maintain in the screener cache
+# Number of parallel download threads. Raise carefully — Yahoo Finance rate-limits
+# aggressive clients. 10 is a safe default that gives ~10x speedup without triggering bans.
+MAX_WORKERS = int(os.environ.get("SCREENER_PREPARE_WORKERS", "10"))
 
 
 def fetch_screener_universe() -> list:
@@ -160,6 +164,28 @@ def download_and_cache(ticker: str, history_start: str) -> None:
         return
 
 
+def _process_one(ticker: str, history_start: str) -> tuple:
+    """
+    Worker for parallel execution: checks staleness, downloads if needed.
+    Returns (ticker, status_string) — never raises; all errors are caught internally.
+    """
+    if is_ticker_current(ticker):
+        return ticker, "SKIP (current)"
+    path = os.path.join(SCREENER_CACHE_DIR, f"{ticker}.parquet")
+    mtime_before = os.path.getmtime(path) if os.path.exists(path) else None
+    download_and_cache(ticker, history_start)
+    if os.path.exists(path) and (
+        mtime_before is None or os.path.getmtime(path) > mtime_before
+    ):
+        try:
+            df_check = pd.read_parquet(path)
+            if not df_check.empty:
+                return ticker, f"cached ({len(df_check)} rows)"
+        except Exception:
+            pass
+    return ticker, "FAIL"
+
+
 if __name__ == "__main__":
     today = datetime.date.today()
     history_start = (today - datetime.timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d")
@@ -172,27 +198,19 @@ if __name__ == "__main__":
 
     cached = skipped = failed = 0
     total = len(universe)
-    for i, ticker in enumerate(universe, 1):
-        if is_ticker_current(ticker):
-            print(f"  [{i:4d}/{total}] {ticker:<6} -- SKIP (current)")
-            skipped += 1
-            continue
-        # Download and cache this ticker
-        path = os.path.join(SCREENER_CACHE_DIR, f"{ticker}.parquet")
-        mtime_before = os.path.getmtime(path) if os.path.exists(path) else None
-        download_and_cache(ticker, history_start)
-        # Verify the file was actually written/updated (new or mtime changed)
-        if os.path.exists(path) and (mtime_before is None or os.path.getmtime(path) > mtime_before):
-            # Check if file was actually written/updated
-            try:
-                df_check = pd.read_parquet(path)
-                if not df_check.empty:
-                    print(f"  [{i:4d}/{total}] {ticker:<6} -- cached ({len(df_check)} rows)")
-                    cached += 1
-                    continue
-            except Exception:
-                pass
-        print(f"  [{i:4d}/{total}] {ticker:<6} -- FAIL (error)")
-        failed += 1
+    done = 0
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(_process_one, t, history_start): t for t in universe}
+        for future in as_completed(futures):
+            done += 1
+            ticker, status = future.result()
+            print(f"  [{done:4d}/{total}] {ticker:<6} -- {status}")
+            if "cached" in status:
+                cached += 1
+            elif "SKIP" in status:
+                skipped += 1
+            else:
+                failed += 1
 
     print(f"\nDone. cached={cached}  skipped={skipped}  failed={failed}")

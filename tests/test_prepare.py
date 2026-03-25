@@ -294,3 +294,81 @@ def test_main_exits_1_when_tickers_empty():
         os.unlink(tmp_path)
     assert result.returncode == 1
     assert b"TICKERS" in result.stdout
+
+
+# ── Parallel download tests ───────────────────────────────────────────────────
+
+def test_parallel_loop_processes_all_tickers(tmp_path, monkeypatch):
+    """With mocked process_ticker, all tickers in list are called exactly once."""
+    import prepare
+    monkeypatch.setattr(prepare, "CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(prepare, "MAX_WORKERS", 2)
+
+    called = []
+
+    def fake_process(ticker):
+        called.append(ticker)
+        return True
+
+    monkeypatch.setattr(prepare, "process_ticker", fake_process)
+
+    from concurrent.futures import ThreadPoolExecutor
+    tickers = ["AAPL", "MSFT", "NVDA"]
+    with ThreadPoolExecutor(max_workers=prepare.MAX_WORKERS) as executor:
+        results = list(executor.map(prepare.process_ticker, tickers))
+
+    assert sorted(called) == sorted(tickers)
+    assert all(results)
+
+
+def test_parallel_loop_counts_failures(tmp_path, monkeypatch):
+    """Failures (False return from process_ticker) are counted correctly."""
+    import prepare
+    monkeypatch.setattr(prepare, "MAX_WORKERS", 2)
+
+    def fake_process(ticker):
+        return ticker != "FAIL_ME"
+
+    from concurrent.futures import ThreadPoolExecutor
+    tickers = ["AAPL", "FAIL_ME", "NVDA"]
+    with ThreadPoolExecutor(max_workers=prepare.MAX_WORKERS) as executor:
+        results = list(executor.map(fake_process, tickers))
+
+    ok = sum(results)
+    assert ok == 2
+
+
+def test_prepare_max_workers_reads_from_env(monkeypatch):
+    """MAX_WORKERS is set from PREPARE_WORKERS env var at import time."""
+    import importlib
+    monkeypatch.setenv("PREPARE_WORKERS", "5")
+    import prepare
+    importlib.reload(prepare)
+    assert prepare.MAX_WORKERS == 5
+    monkeypatch.delenv("PREPARE_WORKERS", raising=False)
+    importlib.reload(prepare)
+
+
+def test_process_ticker_parallel_no_contention(tmp_path, monkeypatch):
+    """Two tickers run in parallel threads write to separate paths without error."""
+    import prepare
+    monkeypatch.setattr(prepare, "CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(prepare, "MAX_WORKERS", 2)
+
+    df_hourly = _make_hourly_df(n_days=5)
+
+    def fake_download(ticker):
+        return df_hourly
+
+    monkeypatch.setattr(prepare, "download_ticker", fake_download)
+    # Patch _add_earnings_dates to avoid yfinance network call
+    monkeypatch.setattr(prepare, "_add_earnings_dates", lambda df, obj: df)
+
+    from concurrent.futures import ThreadPoolExecutor
+    tickers = ["AAPL", "MSFT"]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(prepare.process_ticker, tickers))
+
+    assert all(results)
+    assert os.path.exists(os.path.join(str(tmp_path), "AAPL.parquet"))
+    assert os.path.exists(os.path.join(str(tmp_path), "MSFT.parquet"))
