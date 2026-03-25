@@ -146,6 +146,27 @@ The following parameters can be specified in the user's query. If not specified,
 
 ---
 
+## Session Override
+
+**Active**: NO
+
+When Active is NO (default), the agent ignores this section entirely and uses the
+standard keep/discard rules from the Goal section.
+
+When Active is YES, this section takes precedence over the Goal section's
+keep/discard criterion for this session only. Set Active back to NO after the
+session ends.
+
+**Baseline commit**: [fill in — git hash to use as the session starting point;
+run `git checkout <hash>` in the worktree before starting the session]
+**Keep criterion override**: [fill in — replaces the min_test_pnl criterion;
+example: "keep if mean_test_pnl improves by > $20, regardless of min_test_pnl;
+still apply 110-trade floor and pnl_consistency floor"]
+**Rationale**: [fill in — what triggered the override and what you are testing]
+**Revert after session**: YES — set Active back to NO when done
+
+---
+
 ## Experimentation rules
 
 ### What you CAN do
@@ -157,7 +178,12 @@ The following parameters can be specified in the user's query. If not specified,
   in the mutable constants block to control position concentration and stop fragility.
 - Edit the `TICKERS`, `BACKTEST_START`, and `BACKTEST_END` lines in the `# ── USER CONFIGURATION ──` block of `prepare.py` **during setup only** (step 3 above). No other lines in `prepare.py` may be changed.
 
-**Position management priority**: Explicitly test trailing-stop distance, breakeven trigger level, and stop-distance changes in iterations 6–10, before exhausting screener ideas. These changes are high-leverage and were systematically found last in the multisector-mar23 run (iterations 27–28 of 30).
+**Position management priority**: Explicitly test trailing-stop distance, breakeven
+trigger level, and stop-distance changes in iterations 2–4, BEFORE screener work.
+These are the highest-leverage parameters (trailing stop activation 2.0→1.5 ATR was
+the single largest improvement in the previous run, +$34.79 min_test_pnl). Screening
+results are meaningless until position management is calibrated against the new fold
+configuration.
 
 ### What you CANNOT do
 
@@ -176,12 +202,27 @@ The following parameters can be specified in the user's query. If not specified,
 Maximize `min_test_pnl` — **higher minimum test P&L across all walk-forward folds is better**.
 Keep any change that increases `min_test_pnl` **and** satisfies the `train_pnl_consistency` floor (see step 8); discard any change that does not meet both conditions.
 
+**Minimum trade floor**: If `total_trades` (last fold's training trade count) < 110,
+mark the result `discard-thin` regardless of min_test_pnl. A strategy with fewer than
+110 training trades is statistically unreliable — min_test_pnl from sparse folds is
+noise-dominated. This floor prevents over-filtering: any screener change that cuts
+more than ~27% of trades from the baseline is automatically rejected.
+
 `fold{N}_train_*` metrics are still computed and printed — use them as diagnostics,
 but they do not drive the keep/discard decision.
 
 ### Simplicity criterion
 
 All else being equal, simpler is better. A small `sharpe` improvement that adds ugly complexity is not worth it. A simplification that maintains equal or better `sharpe` is always a win. Prefer interpretable threshold changes over convoluted logic.
+
+**Structural vs threshold screener changes**: When trade count is high (> 150 per
+training fold on 100+ tickers), prioritize structural screener improvements (SMA
+alignment, trend slope requirements, dollar volume thresholds) over indicator
+threshold tightening (RSI range, volume ratio floors). In the price-volume-updates
+run, RSI tightening degraded min_test_pnl by −$108.56 while structural SMA gap
+filters improved it by +$13.59. RSI/volume threshold tightening cuts signal count
+without improving entry quality; structural filters eliminate weak-trend setups
+entirely.
 
 ### First run
 
@@ -271,36 +312,50 @@ Log every run to `results.tsv` (tab-separated — NOT comma-separated; commas br
 Header row (tab-separated):
 
 ```
-commit	min_test_pnl	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	train_avg_pnl_per_trade	train_win_loss_ratio	train_calmar	train_pnl_consistency	status	description
+commit	min_test_pnl	mean_test_pnl	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	train_avg_pnl_per_trade	train_win_loss_ratio	train_calmar	train_pnl_consistency	status	description
 ```
 
 Column definitions:
 1. `commit`: git commit hash (short, 7 chars)
 2. `min_test_pnl`: minimum test P&L across all walk-forward folds — the keep/discard criterion
-3. `train_pnl`: most recent fold's (fold N) train total P&L
-4. `test_pnl`: most recent fold's (fold N) test total P&L
-5. `train_sharpe`: most recent fold's train Sharpe
-6. `total_trades`: most recent fold's train trade count
-7. `win_rate`: most recent fold's train win rate
-8. `train_avg_pnl_per_trade`: most recent fold's average P&L per trade (diagnostic)
-9. `train_win_loss_ratio`: most recent fold's ratio of average winner to average loser size (diagnostic)
-10. `train_calmar`: most recent fold's train Calmar ratio (diagnostic)
-11. `train_pnl_consistency`: most recent fold's train min monthly P&L (diagnostic)
-12. `status`: `keep`, `discard`, `crash`, `discard-fragile`, or `discard-inconsistent`
+3. `mean_test_pnl`: arithmetic mean of all fold test P&Ls (diagnostic). Compute
+from the fold{N}_test_total_pnl lines in run.log:
+    grep "^fold[0-9]*_test_total_pnl:" run.log | awk -F: '{sum+=$2; n++} END {printf "%.2f\n", sum/n}'
+A strategy with high min_test_pnl but low or negative mean_test_pnl is being pulled
+up by one or two exceptional folds. Track but do not use as a keep/discard criterion
+in any run — use for pattern diagnostics only.
+
+**Manual-review flag**: If `mean_test_pnl` improves by > $50 relative to the current
+baseline AND `min_test_pnl` worsened, do NOT use a plain `discard` status. Instead
+mark the iteration `discard-manual-review` and include in the description field:
+`mean_delta=+$X min_delta=-$Y`. This signals a potentially interesting trade-off for
+the user to inspect after the run. The iteration is still reverted — the flag is
+informational only and does not change the keep/discard outcome.
+
+4. `train_pnl`: most recent fold's (fold N) train total P&L
+5. `test_pnl`: most recent fold's (fold N) test total P&L
+6. `train_sharpe`: most recent fold's train Sharpe
+7. `total_trades`: most recent fold's train trade count
+8. `win_rate`: most recent fold's train win rate
+9. `train_avg_pnl_per_trade`: most recent fold's average P&L per trade (diagnostic)
+10. `train_win_loss_ratio`: most recent fold's ratio of average winner to average loser size (diagnostic)
+11. `train_calmar`: most recent fold's train Calmar ratio (diagnostic)
+12. `train_pnl_consistency`: most recent fold's train min monthly P&L (diagnostic)
+13. `status`: `keep`, `discard`, `crash`, `discard-fragile`, or `discard-inconsistent`
     - `discard-fragile`: nominal `min_test_pnl > 0` but at least one fold's `pnl_min < 0` (strategy
       collapses with small fill deviations); revert just like `discard`.
     - `discard-inconsistent`: `min_test_pnl` improved but `train_pnl_consistency < −RISK_PER_TRADE × MAX_SIMULTANEOUS_POSITIONS × 10` (monthly P&L floor violated); revert just like `discard`.
-13. `description`: short experiment description
+14. `description`: short experiment description
 
 Example:
 
 ```
-commit	min_test_pnl	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	train_avg_pnl_per_trade	train_win_loss_ratio	train_calmar	train_pnl_consistency	status	description
-a1b2c3d	0.00	0.00	0.00	0.000000	0	0.000	0.00	0.000	0.0000	0.00	keep	baseline (no trades, strict screener)
-b2c3d4e	15.60	221.40	25.00	1.234567	12	0.583	18.45	1.250	2.5000	30.00	keep	relaxed volume ratio to 1.2
-c3d4e5f	-5.00	180.00	8.00	0.872000	9	0.444	20.00	1.100	1.2000	15.00	discard	removed volume filter
-d4e5f6g	0.00	0.00	0.00	0.000000	0	0.000	0.00	0.000	0.0000	0.00	crash	divide-by-zero in custom indicator
-e5f6g7h	8.00	300.00	30.00	2.100000	12	0.583	25.00	1.350	3.0000	50.00	discard-fragile	fragile stops — pnl_min -12.00
+commit	min_test_pnl	mean_test_pnl	train_pnl	test_pnl	train_sharpe	total_trades	win_rate	train_avg_pnl_per_trade	train_win_loss_ratio	train_calmar	train_pnl_consistency	status	description
+a1b2c3d	0.00	0.00	0.00	0.00	0.000000	0	0.000	0.00	0.000	0.0000	0.00	keep	baseline (no trades, strict screener)
+b2c3d4e	15.60	22.30	221.40	25.00	1.234567	12	0.583	18.45	1.250	2.5000	30.00	keep	relaxed volume ratio to 1.2
+c3d4e5f	-5.00	3.10	180.00	8.00	0.872000	9	0.444	20.00	1.100	1.2000	15.00	discard	removed volume filter
+d4e5f6g	0.00	0.00	0.00	0.00	0.000000	0	0.000	0.00	0.000	0.0000	0.00	crash	divide-by-zero in custom indicator
+e5f6g7h	8.00	18.50	300.00	30.00	2.100000	12	0.583	25.00	1.350	3.0000	50.00	discard-fragile	fragile stops — pnl_min -12.00
 ```
 
 **Do NOT commit `results.tsv`** — it is intentionally untracked.
@@ -502,3 +557,48 @@ Write your conclusions to `harness_upgrade.md` in this worktree using exactly th
 - Be critical of the harness and parameters even when the run looked "good" —
   a good train result with a weak test result is a problem, not a success.
 - Do NOT commit `harness_upgrade.md` — it is intentionally untracked (like `results.tsv`).
+
+---
+
+## Run A Agenda
+
+Run exactly 10 iterations after the baseline. Follow this sequence:
+
+### Iterations 2–4: Position Management Calibration
+Re-validate trailing stop activation with the new 6×60 fold configuration.
+The 1.5 ATR activation (from price-volume-updates run) was optimal for 7×40 folds;
+verify it holds under 6×60 before using it as the baseline for screener experiments.
+
+Test in order (one per iteration):
+- Iter 2: trailing stop activation at 1.2 ATR (more aggressive protection)
+- Iter 3: trailing stop activation at 1.8 ATR (more patient)
+- Iter 4: trailing stop trail distance at 1.0 ATR vs current 1.2 ATR
+
+Keep whichever produces best min_test_pnl. If 1.5 ATR still wins after iter 3,
+that is the validated baseline — proceed to iter 4 regardless.
+
+### Iterations 5–8: Dollar Volume Threshold Calibration
+Test the effect of different MIN_DOLLAR_VOLUME thresholds. Goal: find the floor
+that maximizes entry quality (min_test_pnl improvement) while keeping
+total_trades >= 110.
+
+Test in order:
+- Iter 5: MIN_DOLLAR_VOLUME = $100M/day (broader, ~200 tickers)
+- Iter 6: MIN_DOLLAR_VOLUME = $200M/day (stricter, ~100 tickers)
+- Iter 7: MIN_DOLLAR_VOLUME = $250M/day (tightest, ~80 tickers; expect thin trades —
+  discard-thin if total_trades < 110)
+- Iter 8: (if iter 7 was discarded) try $175M/day as intermediate
+
+After iter 8: record the kept MIN_DOLLAR_VOLUME level. Also record
+fold6_train_total_trades at the kept baseline for Run B gate assessment.
+
+### Iterations 9–10: Structural Screener Additions
+With position management calibrated and universe size fixed, attempt one structural
+screener improvement:
+- Iter 9: Add SMA20 slope requirement — require SMA20 (as of yesterday's close) > SMA20 5 days ago ×
+  1.002 (stock must be in active upslope, not flat or declining). This is a stricter
+  form of the existing slope_floor check.
+- Iter 10: Add minimum days-since-52-week-low requirement — reject entries where
+  the stock made a 52-week low within the last 30 trading days. Use
+  `hist['close'].iloc[-252:].min()` vs `hist['close'].iloc[-30:].min()`.
+  Discard if this proves overly restrictive (total_trades < 110).

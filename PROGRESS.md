@@ -1,5 +1,30 @@
 # PROGRESS
 
+## Optimization Run Series: Dollar-Vol Entry Quality
+
+**Status**: Run A Setup Complete
+**Plan Files**:
+- Run A: `.agents/plans/run-a-eval-foundation.md`
+- Run B: `.agents/plans/run-b-exit-timing.md` (conditional on Run A gate)
+- Run C: `.agents/plans/run-c-hardening.md` (conditional on Run B gate or Run A if B skipped)
+
+### Summary
+Three-run optimization series addressing the price-volume-updates post-mortem finding
+that 89% of trades in the 1–5d bucket are collectively losing −$120.97 while 40 trades
+held 6+ days generate all positive P&L. Config: 6 folds × 60 days, 14-day holdout,
+110-trade discard floor. Run A: entry quality via dollar volume filter + fold reconfig.
+Run B: exit timing protection (conditional). Run C: combined criteria hardening.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/run-a-eval-foundation.md`
+- Detailed implementation summary
+- Divergences and resolutions (pre-existing ATR fix, fixture volume updates)
+- Test results and metrics: 290/290 passing, 0 regressions
+- Baseline validation: exit 0, 6 folds, fold6_train_total_trades=324 >= 110
+
+---
+
 ## Feature: Recovery Mode Signal Path
 
 **Status**: ✅ Complete

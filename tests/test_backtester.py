@@ -60,8 +60,9 @@ def make_signal_df_for_backtest(signal_date: date = date(2026, 1, 10)) -> pd.Dat
     price_1030am = close.copy()
     price_1030am[249] = 115.0
 
-    volume = np.full(n, 1_000_000.0)
-    volume[249] = 3_000_000.0   # last bar = 3× MA30 → vol_ratio = 3.0, passes ≥ 2.5
+    # 2M base: avg_dol_vol = close(~100) × 2M = $200M ≥ MIN_DOLLAR_VOLUME ($150M)
+    volume = np.full(n, 2_000_000.0)
+    volume[249] = 3_000_000.0   # signal day — excluded from dollar-vol calc (hist=df.iloc[:-1])
 
     df = pd.DataFrame({
         'open': close * 0.998, 'high': close * 1.005, 'low': close * 0.995,
@@ -94,8 +95,9 @@ def test_manage_position_no_raise_below_threshold():
 
 def test_manage_position_raises_to_breakeven():
     # ATR14 = TR = (price+1)-(price-1) = 2.0 with atr_spread=1.0
-    # price_1030am=103 >= entry(100)+ATR(2)=102 → stop raised to entry_price=100
-    df = make_position_df(price=103.0, atr_spread=1.0)
+    # Breakeven triggers at entry(100)+1.0×ATR(2)=102; use price=102.5 so BE fires
+    # but trail does NOT (trail activates at recent_high >= 100+1.5×2=103; 102.5 < 103)
+    df = make_position_df(price=102.5, atr_spread=1.0)
     pos = {'entry_price': 100.0, 'stop_price': 90.0, 'shares': 5.0,
            'ticker': 'X', 'entry_date': date(2025, 1, 2)}
     result = manage_position(pos, df)
@@ -103,8 +105,9 @@ def test_manage_position_raises_to_breakeven():
 
 
 def test_manage_position_never_lowers_existing_stop():
-    # stop_price already at 100; condition fires → max(entry=100, current=100)=100; no lowering
-    df = make_position_df(price=103.0, atr_spread=1.0)
+    # stop_price already at 100; BE fires → max(entry=100, current=100)=100; no lowering
+    # Use price=102.5: BE triggers (>=100+1.0×2=102), trail does NOT (recent_high<103)
+    df = make_position_df(price=102.5, atr_spread=1.0)
     pos = {'entry_price': 100.0, 'stop_price': 100.0, 'shares': 5.0,
            'ticker': 'X', 'entry_date': date(2025, 1, 2)}
     result = manage_position(pos, df)
@@ -331,8 +334,9 @@ def test_screen_day_indicators_use_yesterday_close_not_today():
     dates = [d.date() for d in bdays]
     prices = np.linspace(80.0, 120.0, n)
     prices[-1] = 200.0    # today: anomalous close — must NOT influence indicators
-    volume = np.full(n, 1_000_000.0)
-    volume[-1] = 3_000_000.0   # vol_ratio=3.0 so screen_day passes the volume gate
+    # 2M base: avg_dol_vol = close(~100) × 2M = $200M ≥ MIN_DOLLAR_VOLUME ($150M)
+    volume = np.full(n, 2_000_000.0)
+    volume[-1] = 3_000_000.0   # signal day volume (excluded from dollar-vol calc)
     df = pd.DataFrame({
         "open": prices * 0.99, "high": prices * 1.01, "low": prices * 0.99,
         "close": prices,
@@ -506,11 +510,12 @@ def test_screen_day_returns_stop_type_field():
 
 # ── V4-B tests ──────────────────────────────────────────────────────────────────
 
-def test_manage_position_trail_uses_1_2_atr_not_1_5():
+def test_manage_position_trail_uses_1_0_atr():
     """
-    R13: trailing stop coefficient is 1.2× ATR (not 1.5×).
-    recent_high=110 >= entry(100) + 2.0×ATR(4) = 108 → trail activates.
-    Expected stop: 110 - 1.2×4 = 105.2  (old 1.5× would give 104.0).
+    Trailing stop coefficient is 1.0× ATR (updated from 1.2× in price-volume-updates merge).
+    Activation threshold is 1.5× ATR (updated from 2.0×).
+    recent_high=110 >= entry(100) + 1.5×ATR(4) = 106 → trail activates.
+    Expected stop: 110 - 1.0×4 = 106.0  (old 1.2× would give 105.2).
     R15 does not fire because cal_days_held = 29 > 5.
     """
     n = 30
@@ -522,9 +527,9 @@ def test_manage_position_trail_uses_1_2_atr_not_1_5():
     highs  = np.full(n, price + atr_spread)
     lows   = np.full(n, price - atr_spread)
     closes = np.full(n, price)
-    # Last row: price_1030am backed off to 104 so it doesn't trigger breakeven at 100+1.5*4=106
+    # Last row: price_1030am at 103.5 — below BE trigger (100+1.0×4=104) so BE doesn't fire
     price_1030am_vals = np.full(n, 110.0)
-    price_1030am_vals[-1] = 104.0
+    price_1030am_vals[-1] = 103.5
     df = pd.DataFrame({
         'open': closes, 'high': highs, 'low': lows, 'close': closes,
         'volume': np.full(n, 1_000_000.0),
@@ -536,14 +541,11 @@ def test_manage_position_trail_uses_1_2_atr_not_1_5():
            'ticker': 'X', 'entry_date': dates[0]}
     result = manage_position(pos, df)
 
-    expected_1_2 = round(110.0 - 1.2 * 4.0, 2)   # 105.2
-    wrong_1_5    = round(110.0 - 1.5 * 4.0, 2)    # 104.0
-    assert abs(result - expected_1_2) < 0.01, (
-        f"Expected trail stop ~{expected_1_2} (1.2× ATR), got {result}. "
-        f"Old 1.5× coefficient would give {wrong_1_5}."
-    )
-    assert abs(result - wrong_1_5) > 0.5, (
-        f"Got {result} which is too close to the old 1.5× value {wrong_1_5}."
+    expected_1_0 = round(110.0 - 1.0 * 4.0, 2)   # 106.0
+    old_1_2      = round(110.0 - 1.2 * 4.0, 2)    # 105.2
+    assert abs(result - expected_1_0) < 0.01, (
+        f"Expected trail stop ~{expected_1_0} (1.0× ATR), got {result}. "
+        f"Old 1.2× coefficient would give {old_1_2}."
     )
 
 

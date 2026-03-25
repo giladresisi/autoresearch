@@ -33,12 +33,12 @@ TEST_START  = "2026-03-06"   # same date as TRAIN_END (test window starts here)
 WRITE_FINAL_OUTPUTS = False
 
 # Walk-forward evaluation: number of rolling test folds (V3-B R2)
-WALK_FORWARD_WINDOWS = 7
+WALK_FORWARD_WINDOWS = 6
 
 # Test window width in business days per fold.
-# 20 ≈ 1 calendar month → ~40–100 trades on 85 tickers; enough to distinguish skill from noise.
+# 60 ≈ 3 calendar months → ~120–300 trades on 85 tickers; enough to distinguish skill from noise.
 # Set at session setup. Do NOT change during the loop.
-FOLD_TEST_DAYS = 40
+FOLD_TEST_DAYS = 60
 
 # Training window width in business days.
 # 0 = expanding: each fold trains from BACKTEST_START to its test window's start (all prior history).
@@ -79,6 +79,11 @@ CORRELATION_PENALTY_WEIGHT = 0.0   # penalty factor for correlated portfolios (0
 
 # R9: Robustness perturbation (price/stop jitter)
 ROBUSTNESS_SEEDS = 0               # 0 = off; 5 = recommended (runs 4 perturbed seeds + nominal)
+
+# Dollar volume threshold: skip tickers below this 60-day avg daily $ volume.
+# Targets ~150 highest-liquidity tickers. Autoresearch tunes this value.
+# At 381 tickers: $150M/day ≈ top 150; $100M/day ≈ top 200; $200M/day ≈ top 100.
+MIN_DOLLAR_VOLUME = 150_000_000
 
 
 def load_ticker_data(ticker: str) -> pd.DataFrame | None:
@@ -316,6 +321,12 @@ def screen_day(df: pd.DataFrame, today, current_price: "float | None" = None) ->
     if prev_vol_ratio < 0.8:
         return None
 
+    # Dollar volume filter: skip tickers with insufficient daily liquidity.
+    # Uses 60-day lookback on yesterday's data only (no look-ahead).
+    avg_dol_vol = float((hist['close'] * hist['volume']).iloc[-60:].mean())
+    if avg_dol_vol < MIN_DOLLAR_VOLUME:
+        return None
+
     # Rule 2a: price_1030am breaks above the 20-day highest close (breakout)
     high20 = float(close_hist.iloc[-20:].max())
     if price_1030am <= high20:
@@ -374,8 +385,8 @@ def screen_day(df: pd.DataFrame, today, current_price: "float | None" = None) ->
 
 def manage_position(position: dict, df: pd.DataFrame) -> float:
     """
-    Breakeven once price_1030am >= entry + 1.5 ATR.
-    Trail by 1.2 ATR below recent high once 2.0 ATR in profit.
+    Breakeven once price_1030am >= entry + 1.0 ATR.
+    Trail by 1.0 ATR below recent high once 1.5 ATR in profit.
     Never lower the stop.
     """
     current_stop = position['stop_price']

@@ -183,6 +183,6 @@ def test_program_md_deadlock_detection_rule_present():
 
 
 def test_program_md_position_management_iteration_guidance_present():
-    # R6: position management priority mentions iterations 6
+    # Position management priority now targets iterations 2–4 (updated in run-a-eval-foundation)
     text = open('program.md', encoding='utf-8').read()
-    assert 'iterations 6' in text
+    assert 'iterations 2' in text

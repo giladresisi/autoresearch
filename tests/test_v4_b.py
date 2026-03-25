@@ -305,17 +305,17 @@ def test_main_fold_exclusion_included_count_equals_qualifying_folds(capsys):
 
 # ── R16: walk-forward fold defaults ───────────────────────────────────────────
 
-def test_train_walk_forward_windows_default_is_7():
-    """WALK_FORWARD_WINDOWS must default to 7."""
-    assert train.WALK_FORWARD_WINDOWS == 7, (
-        f"Expected WALK_FORWARD_WINDOWS=7, got {train.WALK_FORWARD_WINDOWS}"
+def test_train_walk_forward_windows_default_is_6():
+    """WALK_FORWARD_WINDOWS must default to 6 (updated from 7 in run-a-eval-foundation)."""
+    assert train.WALK_FORWARD_WINDOWS == 6, (
+        f"Expected WALK_FORWARD_WINDOWS=6, got {train.WALK_FORWARD_WINDOWS}"
     )
 
 
-def test_train_fold_test_days_default_is_40():
-    """FOLD_TEST_DAYS must default to 40."""
-    assert train.FOLD_TEST_DAYS == 40, (
-        f"Expected FOLD_TEST_DAYS=40, got {train.FOLD_TEST_DAYS}"
+def test_train_fold_test_days_default_is_60():
+    """FOLD_TEST_DAYS must default to 60 (updated from 40 in run-a-eval-foundation)."""
+    assert train.FOLD_TEST_DAYS == 60, (
+        f"Expected FOLD_TEST_DAYS=60, got {train.FOLD_TEST_DAYS}"
     )
 
 

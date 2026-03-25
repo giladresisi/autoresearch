@@ -74,8 +74,9 @@ def make_signal_df(n: int = 250) -> pd.DataFrame:
     # Big jump on the last bar to trigger the 20-day breakout rule
     price_1030am[249] = 115.0
 
-    volume = np.full(n, 1_000_000.0)
-    volume[249] = 3_000_000.0   # last bar = 3× MA30 → vol_ratio = 3.0, passes ≥ 2.5
+    # 2M base volume: avg_dol_vol = close(~100) × 2M = $200M ≥ MIN_DOLLAR_VOLUME ($150M)
+    volume = np.full(n, 2_000_000.0)
+    volume[249] = 3_000_000.0   # signal day — excluded from dollar-vol calc (hist=df.iloc[:-1])
 
     return pd.DataFrame({
         'open':       open_,

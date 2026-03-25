@@ -1633,7 +1633,7 @@ environments without a pre-populated 389-ticker cache.
 
 ---
 
-## V6: Signal Coverage Expansion
+## V6: Signal Quality, Coverage & Eval Foundation
 
 ### V6-A: Recovery Mode Signal Path (2026-03-25)
 
@@ -1684,6 +1684,48 @@ uv run screener_prepare.py
 ```
 
 **Plan file:** `.agents/plans/recovery-mode-signal.md`
+
+---
+
+### V6-B: Eval Foundation + Entry Quality (2026-03-25)
+
+Re-baseline the evaluation infrastructure and attack the root cause identified in the
+price-volume-updates post-mortem: 89% of trades lived in the 1–5 day bucket at a
+near-coin-flip win rate (49%), collectively losing −$120.97. Hypothesis: the 381-ticker
+universe generates too many marginal breakouts that immediately reverse. Fix is entry
+quality, not exit timing: constrain the universe to high-liquidity tickers via a dollar
+volume threshold, and widen evaluation folds so autoresearch improvements signal true
+edge rather than sparse-fold noise.
+
+**Changes:**
+
+- `train.py` — `FOLD_TEST_DAYS` 40 → 60, `WALK_FORWARD_WINDOWS` 7 → 6 (6×60 folds
+  give ~27 test trades per fold at 150 tickers vs ~17 previously); `MIN_DOLLAR_VOLUME =
+  150_000_000` constant added; dollar volume filter in `screen_day()` using
+  60-day avg daily dollar volume on yesterday-only data (no look-ahead)
+- `program.md` — position management priority moved to iterations 2–4 (highest-leverage
+  parameters calibrated before screener work); 110-trade `discard-thin` floor added to
+  Goal section; `mean_test_pnl` added as column 3 in results.tsv with `discard-manual-review`
+  flag rule; structural vs threshold screener guidance added; Session Override block added
+  (Active: NO); Run A Agenda appended (10-iteration plan: position mgmt → dollar volume
+  calibration → structural screener additions)
+
+**Acceptance criteria:**
+- [ ] `FOLD_TEST_DAYS = 60` and `WALK_FORWARD_WINDOWS = 6` in SESSION SETUP block
+- [ ] `MIN_DOLLAR_VOLUME` constant in STRATEGY TUNING block; filter in `screen_day()` using `hist` (no look-ahead)
+- [ ] `program.md`: position management priority at iterations 2–4
+- [ ] `program.md`: 110-trade `discard-thin` floor in Goal section
+- [ ] `program.md`: `mean_test_pnl` logging as column 3 in results.tsv
+- [ ] `program.md`: structural vs threshold screener guidance present
+- [ ] `program.md`: Session Override block (Active: NO) and Run A Agenda appended
+- [ ] Baseline exits 0; `fold6_train_total_trades ≥ 110`; `min_test_pnl_folds_included ≥ 4`
+- [ ] Full test suite passes without regressions
+
+**Baseline result:** fold6_train_total_trades = 324, min_test_pnl_folds_included = 6,
+min_test_pnl = −3.72 (fold5). MIN_DOLLAR_VOLUME = $150M is well-calibrated at this
+universe size; no adjustment needed.
+
+**Plan file:** `.agents/plans/run-a-eval-foundation.md`
 
 ---
 

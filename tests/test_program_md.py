@@ -33,7 +33,7 @@ def test_verify_cache_instruction():
 
 def test_results_tsv_header():
     c = _content()
-    assert "commit\tmin_test_pnl\ttrain_pnl\ttest_pnl\ttrain_sharpe\ttotal_trades\twin_rate\ttrain_avg_pnl_per_trade\ttrain_win_loss_ratio\ttrain_calmar\ttrain_pnl_consistency\tstatus\tdescription" in c
+    assert "commit\tmin_test_pnl\tmean_test_pnl\ttrain_pnl\ttest_pnl\ttrain_sharpe\ttotal_trades\twin_rate\ttrain_avg_pnl_per_trade\ttrain_win_loss_ratio\ttrain_calmar\ttrain_pnl_consistency\tstatus\tdescription" in c
 
 
 def test_grep_train_pnl_command():
