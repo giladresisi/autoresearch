@@ -313,6 +313,8 @@ e5f6g7h	8.00	300.00	30.00	2.100000	12	0.583	25.00	1.350	3.0000	50.00	discard-fra
 
 1. Check git state: verify current branch and commit hash (`git log --oneline -1`).
 2. Modify `train.py` with an experimental idea. Edit the file directly. **Only edit code above the `# DO NOT EDIT BELOW THIS LINE` comment** — everything below it is the evaluation harness and must not be touched.
+
+   After making any code edit, apply the `python-performance-optimization` skill to the modified function(s) to verify the new code is fully optimized for performance. Use `/python-performance-optimization` and pass the function name and file. Reject any implementation that introduces Python loops iterating over pandas rows (use numpy vectorization instead).
 3. `git commit` the change to `train.py` only; leave `results.tsv` untracked.
 4. Run: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee).
 5. Extract results: `grep "^min_test_pnl:" run.log` and `grep "^fold${WALK_FORWARD_WINDOWS}_train_total_trades:" run.log`.

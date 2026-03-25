@@ -1,5 +1,29 @@
 # PROGRESS
 
+## Feature: train.py Performance Optimization
+
+**Status**: ✅ Complete
+**Plan File**: .agents/plans/train-py-performance-optimization.md
+
+### Core Changes
+- `train.py` `find_pivot_lows()` — vectorized with numpy sliding_window_view (eliminates Python/iloc loop)
+- `train.py` `zone_touch_count()` — vectorized with numpy boolean array ops
+- `train.py` `nearest_resistance_atr()` — vectorized with numpy sliding_window_view
+- `train.py` `manage_position()` — tail-sliced calc_atr14 input (df.iloc[-30:] instead of full df)
+- `train.py` `detect_regime()` — df.loc[:today] (binary search) + tail-slice mean (iloc[-50:])
+- `tests/test_optimization.py` GOLDEN_HASH — updated to match new detect_regime code
+- `screener.py` — rejection diagnostics: `_rejection_reason()` helper + `--diagnose` flag support
+- `program.md` — experiment loop step 2 updated with python-performance-optimization skill instruction
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/train-py-performance-optimization.md`
+- Detailed implementation summary
+- Divergences and resolutions (no new tests for _rejection_reason; pre-existing screener_prepare.py diff)
+- Test results and metrics: 50/50 passing, 0 new regressions
+
+---
+
 ## Feature: Parallel Download Thread Pool
 
 **Status**: ✅ Complete

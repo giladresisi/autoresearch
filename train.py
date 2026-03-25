@@ -136,22 +136,25 @@ def calc_atr14(df):
 # ── R2 + R6: Pivot-low-anchored stop ─────────────────────────────────────────
 
 def find_pivot_lows(df, bars=4):
-    # A pivot low is the lowest bar in a symmetric window of `bars` on each side
-    pivots = []
-    for i in range(bars, len(df) - bars):
-        l = float(df['low'].iloc[i])
-        if all(l <= float(df['low'].iloc[i+k]) for k in range(-bars, bars+1) if k != 0):
-            pivots.append((i, l))
-    return pivots
+    # A pivot low is the lowest bar in a symmetric window of `bars` on each side.
+    # Vectorized: sliding_window_view extracts all (2*bars+1)-wide windows in one call;
+    # a center bar is a pivot low iff its value equals the window minimum.
+    lows = df['low'].values
+    n = len(lows)
+    if n < 2 * bars + 1:
+        return []
+    windows = np.lib.stride_tricks.sliding_window_view(lows, 2 * bars + 1)
+    window_mins = windows.min(axis=1)
+    center_lows = lows[bars:n - bars]
+    is_pivot = center_lows <= window_mins
+    indices = np.where(is_pivot)[0] + bars
+    return [(int(i), float(lows[i])) for i in indices]
 
 
 def zone_touch_count(df, level, lookback=90, band_pct=0.015):
     window = df.iloc[-lookback:]
     lo, hi = level * (1 - band_pct), level * (1 + band_pct)
-    return int(sum(
-        1 for i in range(len(window))
-        if float(window['low'].iloc[i]) <= hi and float(window['high'].iloc[i]) >= lo
-    ))
+    return int(((window['low'].values <= hi) & (window['high'].values >= lo)).sum())
 
 
 def find_stop_price(df, entry_price, atr):
@@ -204,19 +207,22 @@ def is_stalling_at_ceiling(df, band_pct=0.03):
 # ── R5: Nearest pivot-high resistance >= 2x ATR ───────────────────────────────
 
 def nearest_resistance_atr(df, entry_price, atr, lookback=90):
-    # Returns distance to nearest overhead pivot high in ATR units, or None if none exists above entry
-    window = df.iloc[-lookback:].copy().reset_index(drop=True)
-    bars, pivot_highs = 4, []
-    for i in range(bars, len(window) - bars):
-        h = float(window['high'].iloc[i])
-        if h > entry_price and all(
-            h >= float(window['high'].iloc[i+k])
-            for k in range(-bars, bars+1) if k != 0
-        ):
-            pivot_highs.append(h)
-    if not pivot_highs:
+    # Returns distance to nearest overhead pivot high in ATR units, or None if none exists above entry.
+    # Vectorized: a pivot high is a bar that equals the window maximum and exceeds entry_price.
+    window = df.iloc[-lookback:]
+    bars = 4
+    highs = window['high'].values
+    n = len(highs)
+    if n < 2 * bars + 1:
         return None
-    return (min(pivot_highs) - entry_price) / atr
+    windows = np.lib.stride_tricks.sliding_window_view(highs, 2 * bars + 1)
+    window_maxes = windows.max(axis=1)
+    center_highs = highs[bars:n - bars]
+    is_pivot_high = (center_highs >= window_maxes) & (center_highs > entry_price)
+    pivot_highs = center_highs[is_pivot_high]
+    if len(pivot_highs) == 0:
+        return None
+    return (float(pivot_highs.min()) - entry_price) / atr
 
 
 # ── Screener, position manager, backtester stubs ─────────────────────────────
@@ -347,7 +353,7 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
     """
     current_stop = position['stop_price']
     entry_price  = position['entry_price']
-    atr_series   = calc_atr14(df)
+    atr_series   = calc_atr14(df.iloc[-30:])
     atr          = float(atr_series.iloc[-1])
     if pd.isna(atr) or atr == 0:
         return current_stop
@@ -431,10 +437,10 @@ def detect_regime(ticker_dfs: dict, today) -> str:
     bull_count = 0
     bear_count = 0
     for ticker, df in ticker_dfs.items():
-        hist = df[df.index <= today]
+        hist = df.loc[:today]
         if len(hist) < 51:
             continue
-        sma50 = float(hist['close'].rolling(50).mean().iloc[-1])
+        sma50 = float(hist['close'].iloc[-50:].mean())
         price = float(hist['price_1030am'].iloc[-1])
         if pd.isna(sma50) or pd.isna(price):
             continue

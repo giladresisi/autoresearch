@@ -16,16 +16,104 @@ Override cache path:
 """
 import datetime
 import os
+import sys
 import warnings
 
 import pandas as pd
 import yfinance as yf
 
 from screener_prepare import SCREENER_CACHE_DIR
-from train import screen_day
+from train import (
+    screen_day, calc_atr14, calc_rsi14,
+    is_stalling_at_ceiling, find_stop_price, nearest_resistance_atr,
+)
 
 # Update this after running analyze_gaps.py to calibrate the gap filter
 GAP_THRESHOLD = -0.03  # -3%: candidates with gap < this are flagged but not armed
+
+# Ordered list of rejection rule labels (matches screen_day filter chain).
+_RULES = [
+    "too_few_rows", "no_price", "earnings_soon",
+    "sma_misaligned", "sma20_declining",
+    "vol_trend_low", "prev_vol_dead",
+    "no_breakout", "no_breakout_cont",
+    "rsi_out_of_range", "ceiling_stall",
+    "no_pivot_stop", "resistance_too_close",
+]
+
+
+def _rejection_reason(df: pd.DataFrame, today, current_price: float) -> str:
+    """
+    Mirror screen_day's filter chain and return the label of the first rule that rejects.
+    Returns "unknown" if no rule fires (should not happen on a ticker that returned None).
+    """
+    df = df.loc[:today]
+    if len(df) < 102:
+        return "too_few_rows"
+
+    price_1030am = current_price
+    if pd.isna(price_1030am):
+        return "no_price"
+
+    if "next_earnings_date" in df.columns:
+        ned = df["next_earnings_date"].iloc[-1]
+        if pd.notna(ned):
+            days_to_earnings = (ned - today).days
+            if 0 <= days_to_earnings <= 14:
+                return "earnings_soon"
+
+    hist = df.iloc[:-1]
+    close_hist = hist["close"]
+
+    sma20  = float(close_hist.iloc[-20:].mean())
+    sma50  = float(close_hist.iloc[-50:].mean())
+    sma100 = float(close_hist.iloc[-100:].mean())
+    if pd.isna(sma20) or pd.isna(sma50) or pd.isna(sma100):
+        return "sma_misaligned"
+    if price_1030am <= sma50 or price_1030am <= sma100 or sma20 <= sma50 or sma50 <= sma100:
+        return "sma_misaligned"
+
+    sma20_5d_ago = float(close_hist.iloc[-25:-5].mean())
+    if sma20 < sma20_5d_ago * 0.995:
+        return "sma20_declining"
+
+    vm30 = float(hist["volume"].iloc[-30:].mean())
+    if pd.isna(vm30) or vm30 == 0:
+        return "vol_trend_low"
+    vol_trend_ratio = float(hist["volume"].iloc[-5:].mean()) / vm30
+    prev_vol_ratio  = float(hist["volume"].iloc[-1]) / vm30
+    if vol_trend_ratio < 1.0:
+        return "vol_trend_low"
+    if prev_vol_ratio < 0.8:
+        return "prev_vol_dead"
+
+    high20 = float(close_hist.iloc[-20:].max())
+    if price_1030am <= high20:
+        return "no_breakout"
+
+    prev_high = float(hist["high"].iloc[-1])
+    if price_1030am <= prev_high:
+        return "no_breakout_cont"
+
+    atr = float(calc_atr14(hist.iloc[-30:]).iloc[-1])
+    rsi = float(calc_rsi14(hist.iloc[-60:]).iloc[-1])
+    if pd.isna(atr) or atr == 0 or pd.isna(rsi):
+        return "rsi_out_of_range"
+    if not (50 <= rsi <= 75):
+        return "rsi_out_of_range"
+
+    if is_stalling_at_ceiling(hist):
+        return "ceiling_stall"
+
+    stop = find_stop_price(hist, price_1030am, atr)
+    if stop is None:
+        return "no_pivot_stop"
+
+    res_atr = nearest_resistance_atr(hist, price_1030am, atr)
+    if res_atr is not None and res_atr < 2.0:
+        return "resistance_too_close"
+
+    return "unknown"
 
 
 def _fetch_last_price(ticker: str) -> float | None:
@@ -92,12 +180,17 @@ def run_screener() -> None:
 
     armed = []
     gap_skipped = []
+    # Diagnostic counters — tallied in the main loop below via _rejection_reason()
+    rejection_counts = {r: 0 for r in _RULES}
+    total_checked = 0
 
     for path in parquet_paths:
         ticker = os.path.splitext(os.path.basename(path))[0]
         try:
             df = pd.read_parquet(path)
+            total_checked += 1
             if df.empty or len(df) < 102:
+                rejection_counts["too_few_rows"] += 1
                 continue
 
             prev_close = float(df["close"].iloc[-1])
@@ -139,6 +232,8 @@ def run_screener() -> None:
 
             signal = screen_day(df_extended, today, current_price=current_price)
             if signal is None:
+                reason = _rejection_reason(df_extended, today, current_price)
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
                 continue
 
             row = {
@@ -165,6 +260,17 @@ def run_screener() -> None:
 
     # Sort armed list by prev_vol_ratio descending
     armed.sort(key=lambda r: r["prev_vol_ratio"], reverse=True)
+
+    # Print rejection breakdown when --diagnose is passed or no signals fire
+    diagnose = "--diagnose" in sys.argv
+    if diagnose or not armed:
+        print(f"\n=== REJECTION BREAKDOWN ({total_checked} tickers evaluated) ===")
+        sorted_reasons = sorted(rejection_counts.items(), key=lambda x: x[1], reverse=True)
+        for rule, count in sorted_reasons:
+            if count == 0:
+                continue
+            pct = 100 * count / total_checked if total_checked else 0
+            print(f"  {rule:<25}: {count:>5}  ({pct:.1f}%)")
 
     # Print armed candidates table
     header = (
