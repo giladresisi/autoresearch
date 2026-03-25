@@ -274,11 +274,12 @@ def screen_day(df: pd.DataFrame, today, current_price: "float | None" = None) ->
     # Rule 1: SMA alignment — most tickers fail here; check before volume/ATR/RSI.
     # Two signal paths: bull (full SMA stack) or recovery (correction within uptrend).
     # Bull path: classic full alignment — price above both SMAs, SMAs stacked ascending.
+    # SMA20 >= 1% above SMA50, SMA50 >= 0.5% above SMA100 — full-stack trend quality.
     bull_path = (
         price_1030am > sma50 and
         price_1030am > sma100 and
-        sma20 > sma50 and
-        sma50 > sma100
+        sma20 > sma50 * 1.01 and
+        sma50 > sma100 * 1.005
     )
     # Recovery path: long-term trend intact (SMA50 > SMA200 = no death cross), but price
     # has pulled back below SMA50 and is now recovering above SMA20.
@@ -400,11 +401,11 @@ def manage_position(position: dict, df: pd.DataFrame) -> float:
         return max(current_stop, price_1030am)  # force exit; never lower existing stop
 
     # Breakeven trigger
-    be_stop = entry_price if price_1030am >= entry_price + 1.5 * atr else current_stop
+    be_stop = entry_price if price_1030am >= entry_price + 1.0 * atr else current_stop
 
-    # Trailing stop: trail 1.2 ATR below recent high once 2.0 ATR in profit (earlier activation)
+    # Trailing stop: trail 1.0 ATR below recent high once 1.5 ATR in profit (earlier activation)
     recent_high = float(df['price_1030am'].dropna().iloc[-20:].max())
-    trail_stop = round(recent_high - 1.2 * atr, 2) if recent_high >= entry_price + 2.0 * atr else current_stop
+    trail_stop = round(recent_high - 1.0 * atr, 2) if recent_high >= entry_price + 1.5 * atr else current_stop
 
     return max(current_stop, be_stop, trail_stop)
 

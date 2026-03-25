@@ -13,8 +13,10 @@ direct edits to strategy logic on master (see prd.md §6a branching policy).
 """
 from strategies import multisector_mar23
 from strategies import global_mar24
+from strategies import price_volume_updates
 
 REGISTRY: dict = {
     "multisector-mar23": multisector_mar23,
     "global-mar24": global_mar24,
+    "price-volume-updates": price_volume_updates,
 }
