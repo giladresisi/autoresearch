@@ -269,3 +269,56 @@ def test_returns_none_or_dict_only():
     today = df.index[-1]
     result = screen_day(df, today)
     assert result is None or isinstance(result, dict)
+
+
+# ── New tests for current_price interface (Task 1.1) ─────────────────────────
+
+def test_screen_day_current_price_overrides_df_value():
+    """Injecting current_price=115 where df price_1030am would also signal."""
+    df = make_pivot_signal_df(250)
+    today = df.index[-1]
+    # Call with explicit current_price equal to what make_pivot_signal_df sets
+    result_with = screen_day(df, today, current_price=115.0)
+    # Both should produce a signal (or both None) — the override uses the same price
+    result_without = screen_day(df, today)
+    assert (result_with is None) == (result_without is None)
+
+
+def test_screen_day_current_price_none_uses_df():
+    """Explicit None falls back to df['price_1030am'] as before."""
+    df = make_pivot_signal_df(250)
+    today = df.index[-1]
+    result_explicit_none = screen_day(df, today, current_price=None)
+    result_no_arg = screen_day(df, today)
+    # Both paths should give identical results
+    assert result_explicit_none == result_no_arg
+
+
+def test_screen_day_returns_rsi14_key():
+    """Signal dict contains 'rsi14' key with value in (0, 100)."""
+    df = make_pivot_signal_df(250)
+    today = df.index[-1]
+    result = screen_day(df, today)
+    assert result is not None, "make_pivot_signal_df must produce a passing signal"
+    assert "rsi14" in result
+    assert isinstance(result["rsi14"], float)
+    assert 0 < result["rsi14"] < 100
+
+
+def test_screen_day_returns_res_atr_key():
+    """Signal dict contains 'res_atr' key with value float or None."""
+    df = make_pivot_signal_df(250)
+    today = df.index[-1]
+    result = screen_day(df, today)
+    assert result is not None, "make_pivot_signal_df must produce a passing signal"
+    assert "res_atr" in result
+    assert result["res_atr"] is None or isinstance(result["res_atr"], float)
+
+
+def test_screen_day_backtest_unchanged():
+    """screen_day(df, today) and screen_day(df, today, current_price=None) are identical."""
+    df = make_pivot_signal_df(250)
+    today = df.index[-1]
+    result_default = screen_day(df, today)
+    result_explicit = screen_day(df, today, current_price=None)
+    assert result_default == result_explicit

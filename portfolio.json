@@ -1,0 +1,13 @@
+{
+  "_comment": "Delete this example position before first use. Edit fields to match your open trades.",
+  "positions": [
+    {
+      "ticker":       "AAPL",
+      "entry_price":  182.50,
+      "entry_date":   "2026-03-10",
+      "shares":       10,
+      "stop_price":   174.20,
+      "notes":        "optional free text"
+    }
+  ]
+}

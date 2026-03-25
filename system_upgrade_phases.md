@@ -289,7 +289,7 @@ loser exit AND losers take multiple days to reach their stop (days_held > 2 on a
 losing trades).*
 
 In `manage_position`, add end-of-day check: if `daily_close < sma20` while position is open,
-flag for exit at next morning's open (or next available `price_10am`). The SMA20 value must
+flag for exit at next morning's open (or next available `price_1030am`). The SMA20 value must
 be re-computed or passed daily — it requires the daily close series to be available inside
 the position manager, which may require a small interface change to pass it in.
 
@@ -542,16 +542,46 @@ signals (existing positions), triggered manually from the terminal, on the local
 User edits this file manually after each trade (entry and exit). The two scripts read it read-only.
 Schema is extended in Phase 3 when OpenClaw takes over portfolio management.
 
+#### `screener_prepare.py`
+
+Builds and refreshes the screener parquet cache — a separate dataset from the optimization harness cache.
+
+```
+uv run screener_prepare.py
+```
+
+**Why a separate cache:** The screener runs on a different machine (VPS in Phase 3) with a larger ticker
+universe and a shorter history window than the optimization harness requires. Sharing the harness cache
+would couple the two machines and force the screener to carry years of backtest history it does not need.
+
+**`SCREENER_CACHE_DIR`:** Controlled by the `AUTORESEARCH_SCREENER_CACHE_DIR` env var, defaulting to
+`~/.cache/autoresearch/screener_data`. This path is used by `screener.py` and `position_monitor.py`
+and must not be confused with the harness `AUTORESEARCH_CACHE_DIR`.
+
+Behavior:
+1. Download the last 90 days of 1h OHLCV data from yfinance for the screener ticker universe (S&P 500 +
+   Russell 1000 — defined as a constant in the script). Use the same `resample_to_daily()` logic as
+   `prepare.py` to produce daily OHLCV + `price_1030am`.
+2. Write each ticker to `SCREENER_CACHE_DIR/{TICKER}.parquet`. Skip tickers whose file already exists
+   and whose last row is from yesterday or later (idempotent).
+3. The Phase 3 EOD cron will call this script for incremental nightly appends (one new bar per ticker).
+   No data transfer from the harness machine is needed — all data comes directly from yfinance.
+
+Run `screener_prepare.py` once before the first `screener.py` run, and again whenever the cache is
+stale (e.g., after a multi-day gap). A stale cache check at the start of `screener.py` prints a warning
+if the most recent bar is more than 2 trading days old.
+
 #### `screener.py`
 
-Scans all tickers in the parquet cache for BUY signals.
+Scans all tickers in the screener parquet cache for BUY signals.
 
 ```
 uv run screener.py
 ```
 
 Behavior:
-1. Load all `*.parquet` files from `CACHE_DIR` (same path `train.py` uses).
+1. Load all `*.parquet` files from `SCREENER_CACHE_DIR` (see `screener_prepare.py` above;
+   distinct from the harness `CACHE_DIR` used by `train.py`).
 2. Fetch pre-market price for each ticker via `yfinance.Ticker(t).fast_info['last_price']`.
    - Fall back to previous close if `last_price` is unavailable (weekend / pre-open gap).
 3. Append a synthetic "today" row to each df with `price_1030am = current_price` and `volume = 0`
@@ -563,7 +593,7 @@ Output columns: ticker, current_price, entry_threshold (high20 + 0.01), suggeste
 prev_vol_ratio, vol_trend_ratio, gap_pct, resistance_atr, days_to_earnings.
 
 **`current_price` interface:** `screen_day()` must accept an optional `current_price=None` parameter.
-When `None` (harness path), it reads `df["price_10am"]` as before — no change to backtesting behavior.
+When `None` (harness path), it reads `df["price_1030am"]` as before — no change to backtesting behavior.
 When passed a value (live path), it uses that price instead. This is the only coupling to break between
 the harness and live use; all other strategy logic is interval-agnostic.
 
@@ -592,9 +622,12 @@ Before implementing the filter, establish the threshold empirically from `trades
 **Step 2 — gap filter in `screener.py`:**
 
 After the EOD candidate list is generated, add a 9:30am gap check before committing to entry:
-- Compute `gap = (today_open − prev_close) / prev_close` for each candidate
-  (use `yfinance.Ticker(t).fast_info['open']` at market open, or pre-market quoted price as
-  an earlier estimate — pre-market prices are thin/noisy but useful for early warning)
+- `prev_close` is the `close` column value from the last row of the screener cache parquet —
+  the EOD regular-session close (~4pm) from the previous trading day. No extra download needed;
+  it is already present in the screener cache.
+- Compute `gap = (today_open − prev_close) / prev_close` for each candidate.
+  Use `yfinance.Ticker(t).fast_info['open']` at market open for `today_open`, or the pre-market
+  `last_price` as an earlier estimate (thin/noisy but useful for early warning).
 - Skip entries where `gap < −X%` (threshold set from the analysis above)
 
 This filter is not backtestable with pre-market data but is fully backtestable using the actual
@@ -611,7 +644,7 @@ uv run position_monitor.py
 
 Behavior:
 1. Read `portfolio.json`.
-2. For each position, load its ticker's parquet from `CACHE_DIR`.
+2. For each position, load its ticker's parquet from `SCREENER_CACHE_DIR` (same cache as `screener.py`).
 3. Fetch current price via `yfinance.Ticker(t).fast_info['last_price']` and append as today row.
 4. Call `manage_position(position_dict, df)` from `train.py` (import directly).
 5. Print RAISE-STOP signals where `new_stop > position['stop_price']`.

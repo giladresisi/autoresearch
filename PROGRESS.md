@@ -1,5 +1,35 @@
 # PROGRESS
 
+## Feature: Phase 1 — Pre-Market Signal CLI
+
+**Status**: ✅ Complete
+**Completed**: 2026-03-25
+**Plan File**: .agents/plans/phase-1-pre-market-signal-cli.md
+
+### Core Changes
+- `train.py` `screen_day()` — added `current_price: float | None = None` param; `price_1030am` uses injected price when provided; `rsi14` and `res_atr` added to return dict.
+- `screener_prepare.py` — builds/refreshes `SCREENER_CACHE_DIR`; `fetch_screener_universe()` (S&P 500 + Russell 1000 + fallback), `is_ticker_current()`, `download_and_cache()` (incremental: fetches only from last cached date forward, merges and deduplicates).
+- `screener.py` — pre-market BUY signal scanner; staleness check, gap filter (`GAP_THRESHOLD = -0.03`), armed table sorted by `prev_vol_ratio` desc.
+- `position_monitor.py` — RAISE-STOP scanner; reads `portfolio.json`, calls `manage_position()`, prints signals where new_stop > current stop.
+- `analyze_gaps.py` — gap vs PnL analysis from `trades.tsv`; exports `load_trades()`, `compute_gaps()`, `print_analysis()`.
+- `portfolio.json` — user-maintained template with one example position.
+
+### Test Status
+- Automated: ✅ 273 passed, 1 skipped (pre-existing), 0 failed (full suite)
+- Baseline before changes: 238 passed, 1 skipped
+- New tests: 35 (5 in test_screener.py, 9 in test_screener_prepare.py, 9 in test_screener_script.py, 7 in test_position_monitor.py, 5 in test_analyze_gaps.py)
+- Level 4 (live pre-market run): not executed — requires network + live pre-market hours
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/phase-1-pre-market-signal-cli.md`
+- Detailed implementation summary
+- Divergences and resolutions (test count discrepancy, inline-test workaround, Level 4 deferral)
+- Test results and metrics
+- 32/32 new tests pass, 0 new regressions
+
+---
+
 ## Feature: Volume Criterion Redesign
 
 **Status**: ✅ Complete

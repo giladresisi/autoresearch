@@ -221,11 +221,13 @@ def nearest_resistance_atr(df, entry_price, atr, lookback=90):
 
 # ── Screener, position manager, backtester stubs ─────────────────────────────
 
-def screen_day(df: pd.DataFrame, today) -> "dict | None":
+def screen_day(df: pd.DataFrame, today, current_price: "float | None" = None) -> "dict | None":
     """
     Momentum breakout strategy: enter when price_1030am breaks above 20-day high
     with above-average volume, price above SMA50, and sufficient room above resistance.
     df: full daily history up to and including today
+    current_price: optional live price override; if provided, used instead of
+        df['price_1030am'] so callers can inject a real-time quote at signal time.
     Returns None if no signal, or dict with at minimum {'stop': float}
     """
     # Ensure no look-ahead: slice to today
@@ -236,7 +238,7 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
         return None
 
     # Today's observable data: only price_1030am (today_vol excluded — 0 pre-market)
-    price_1030am = float(df['price_1030am'].iloc[-1])
+    price_1030am = current_price if current_price is not None else float(df['price_1030am'].iloc[-1])
     if pd.isna(price_1030am):
         return None
 
@@ -332,6 +334,8 @@ def screen_day(df: pd.DataFrame, today) -> "dict | None":
         'prev_vol_ratio':   round(prev_vol_ratio, 4),
         'vol_trend_ratio':  round(vol_trend_ratio, 4),
         'high20':           round(high20, 4),
+        'rsi14':            round(rsi, 4),
+        'res_atr':          round(res_atr, 2) if res_atr is not None else None,
     }
 
 
