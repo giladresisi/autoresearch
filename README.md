@@ -1,91 +1,121 @@
-# autoresearch
+# auto-co-trader
 
-![teaser](progress.png)
+An autonomous trading strategy optimizer and real-time signal generator, forked from [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) and adapted for quantitative trading.
 
-*One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
+Instead of iterating on an LLM training loop, an AI agent here iterates on a stock screener and position management strategy — modifying `train.py`, running a walk-forward backtest, checking if the result improved, keeping or discarding, and repeating. You come back to a log of experiments and (hopefully) a better strategy. The same strategy then powers a real-time screener that produces entry signals and manages stops on open positions.
 
-The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069).
+---
+
+## Join in
+
+**This repo is open for forks, issues, and pull requests.** Whether you want to contribute a better baseline strategy, improve the harness, add new signal types, or share results — all of it helps. The goal is a shared, community-improved strategy optimizer and co-trader that everyone can benefit from. Open an issue or PR, or fork it and take it in your own direction.
+
+---
 
 ## How it works
 
-The repo is deliberately kept small and only really has three files that matter:
+Three files do all the work:
 
-- **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
-- **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
-- **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
+- **`prepare.py`** — one-time data download and caching for all tickers. Fetches OHLCV history via yfinance. Not modified during optimization.
+- **`train.py`** — the single file the agent edits. Contains the full strategy: screener (`screen_day`), position manager (`manage_position`), and the walk-forward evaluation harness. **This is what the agent iterates on.**
+- **`program.md`** — instructions for the optimization agent: objective, keep/discard criteria, experiment sequence, closed directions, and harness configuration. **This is what you iterate on as the human.**
 
-By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
+The agent runs a walk-forward backtest over a historical window, computes fold-level metrics, decides whether to keep or revert the change, and logs the result to `results.tsv`. Repeat for N iterations.
 
-If you are new to neural networks, this ["Dummy's Guide"](https://x.com/hooeem/status/2030720614752039185) looks pretty good for a lot more context.
+The same `screen_day` and `manage_position` functions in `train.py` are used directly by the real-time screener to generate daily entry signals and stop updates on live positions.
+
+---
+
+## Current configuration
+
+**Optimization harness:**
+- **Backtest window:** September 2024 → March 2026 (∼19 months)
+- **Universe:** ∼400 tickers across sectors (large-cap US equities)
+- **Evaluation:** 6-fold walk-forward cross-validation, 60 business days per test fold
+- **Primary objective:** `mean_test_pnl` — arithmetic mean of out-of-sample P&L across all folds (higher is better)
+- **Floor constraint:** `min_test_pnl > −$30` (worst single fold must not exceed this loss)
+- **Latest baseline:** mean_test_pnl ≈ $251, min_test_pnl ≈ −$3 (commit `141aa8e`)
+
+**Real-time screener:**
+- **History window:** 300 days of daily OHLCV per ticker
+- **Universe:** Full Russell 1000 + select mega-caps and major indexes
+- **Output:** Daily entry signals (bull continuation and recovery paths) + intraday stop levels for open positions
+
+All of the above — universe, window, fold count, objective — are configuration values that can be updated in `prepare.py`, `train.py`, and `program.md` to suit different goals or time periods.
+
+---
 
 ## Quick start
 
-**Requirements:** A single NVIDIA GPU (tested on H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
+**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/). No GPU required — backtests run on CPU.
 
 ```bash
-
-# 1. Install uv project manager (if you don't already have it)
+# 1. Install uv (if you don't already have it)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 2. Install dependencies
 uv sync
 
-# 3. Download data and train tokenizer (one-time, ~2 min)
+# 3. Download and cache ticker data (one-time, takes a few minutes)
 uv run prepare.py
 
-# 4. Manually run a single training experiment (~5 min)
+# 4. Run a single backtest manually to verify setup
 uv run train.py
 ```
 
-If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+---
 
-## Running the agent
+## Running the optimization agent
 
-Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:
+Open Claude Code (or any capable coding agent) in this repo and prompt:
 
 ```
-Hi have a look at program.md and let's kick off a new experiment! let's do the setup first.
+Have a look at program.md and let's kick off a new optimization run.
 ```
 
-The `program.md` file is essentially a super lightweight "skill".
+The agent will read `program.md`, set up the walk-forward constants, run the baseline, and begin iterating. Results are logged to `results.tsv` (untracked — intentionally not committed).
+
+For isolated optimization runs, use the `prepare-optimization` skill to create a dedicated git worktree so experiments don't touch the master strategy.
+
+---
+
+## Recommended Claude Code skill
+
+Install the [python-performance-optimization](https://skills.sh/wshobson/agents/python-performance-optimization) skill alongside this repo. It profiles and vectorizes the Python code the agent writes, keeping hot paths fast. The optimization agent is instructed to invoke it after every `train.py` edit — numpy vectorization matters when backtesting hundreds of tickers across dozens of folds per iteration.
+
+---
 
 ## Project structure
 
 ```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
+prepare.py      — ticker data download and caching (do not modify during optimization)
+train.py        — strategy: screener, position manager, walk-forward harness (agent modifies this)
+program.md      — agent instructions: objective, experiment sequence, closed directions
+screen.py       — real-time screener (uses screen_day / manage_position from train.py)
 pyproject.toml  — dependencies
+results.tsv     — experiment log (untracked)
+strategies/     — registry of named strategy snapshots for reuse across runs
+.agents/plans/  — implementation plans
 ```
 
-## Design choices
+---
 
-- **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
-- **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
-- **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
+## Design notes
 
-## Platform support
+- **Single file to modify.** The agent only touches `train.py` above the `# DO NOT EDIT BELOW THIS LINE` boundary. Diffs are small and reviewable.
+- **Walk-forward evaluation.** Each iteration runs N folds of out-of-sample backtests. The fold structure prevents in-sample overfitting and gives a realistic picture of how the strategy would have performed across different market regimes.
+- **Harness and screener are decoupled.** The evaluation harness in `train.py` and the real-time screener in `screen.py` share the same strategy functions, so an improvement validated by the harness automatically applies to live signalling.
+- **Multi-strategy potential.** Currently there is a single global strategy applied to all tickers. Splitting into niche strategies — each optimized for a specific sector, signal type, or market regime — would likely produce better metrics and more accurate signals. The harness structure supports this; it's an open direction.
 
-This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. I'm not 100% sure that I want to take this on personally right now. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions (e.g. a Flash Attention 3 kernels fallback implementation, generic device support, autodetection, etc.), feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
+---
 
-Seeing as there seems to be a lot of interest in tinkering with autoresearch on much smaller compute platforms than an H100, a few extra words. If you're going to try running autoresearch on smaller computers (Macbooks etc.), I'd recommend one of the forks below. On top of this, here are some recommendations for how to tune the defaults for much smaller models for aspiring forks:
+## Limitations
 
-1. To get half-decent results I'd use a dataset with a lot less entropy, e.g. this [TinyStories dataset](https://huggingface.co/datasets/karpathy/tinystories-gpt4-clean). These are GPT-4 generated short stories. Because the data is a lot narrower in scope, you will see reasonable results with a lot smaller models (if you try to sample from them after training).
-2. You might experiment with decreasing `vocab_size`, e.g. from 8192 down to 4096, 2048, 1024, or even - simply byte-level tokenizer with 256 possibly bytes after utf-8 encoding.
-3. In `prepare.py`, you'll want to lower `MAX_SEQ_LEN` a lot, depending on the computer even down to 256 etc. As you lower `MAX_SEQ_LEN`, you may want to experiment with increasing `DEVICE_BATCH_SIZE` in `train.py` slightly to compensate. The number of tokens per fwd/bwd pass is the product of these two.
-4. Also in `prepare.py`, you'll want to decrease `EVAL_TOKENS` so that your validation loss is evaluated on a lot less data.
-5. In `train.py`, the primary single knob that controls model complexity is the `DEPTH` (default 8, here). A lot of variables are just functions of this, so e.g. lower it down to e.g. 4.
-6. You'll want to most likely use `WINDOW_PATTERN` of just "L", because "SSSL" uses alternating banded attention pattern that may be very inefficient for you. Try it.
-7. You'll want to lower `TOTAL_BATCH_SIZE` a lot, but keep it powers of 2, e.g. down to `2**14` (~16K) or so even, hard to tell.
+The optimization harness is effective at **tweaking and improving an existing strategy** that already shows a positive edge. Given a proven baseline, it reliably finds parameter improvements, entry filters, and exit refinements that hold out-of-sample.
 
-I think these would be the reasonable hyperparameters to play with. Ask your favorite coding agent for help and copy paste them this guide, as well as the full source code.
+It is less effective at **building a strategy from scratch**. Without a clear starting signal and a well-specified objective, the agent tends to find local improvements that don't generalize. Attempts to optimize for total P&L from a blank slate without constraining the strategy direction have so far not converged to consistently meaningful results. The harness is best used as an optimizer, not a strategy designer.
 
-## Notable forks
-
-- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) (MacOS)
-- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS)
-- [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (Windows)
-- [andyluo7/autoresearch](https://github.com/andyluo7/autoresearch) (AMD)
+---
 
 ## License
 
