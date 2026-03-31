@@ -105,7 +105,14 @@ def test_extra_ticker_not_in_cache_is_skipped():
 
 def test_cache_dir_env_var_overrides_default(monkeypatch, tmp_path):
     """AUTORESEARCH_CACHE_DIR env var must override the default cache path."""
+    import json, os as _os
     custom = str(tmp_path / "custom_cache")
+    _os.makedirs(custom, exist_ok=True)
+    # Create a minimal manifest so train.py can import with the custom cache dir
+    with open(_os.path.join(custom, "manifest.json"), "w") as _f:
+        json.dump({"tickers": [], "backtest_start": "2024-09-01",
+                   "backtest_end": "2026-03-20", "fetch_interval": "1h",
+                   "source": "yfinance"}, _f)
     monkeypatch.setenv("AUTORESEARCH_CACHE_DIR", custom)
     # Reimport to pick up the env var (module-level constant)
     import sys

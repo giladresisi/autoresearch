@@ -1,5 +1,10 @@
 """tests/conftest.py — Session-scoped fixture providing a small, fixed test dataset.
 
+pytest_configure hook (at bottom of this file) ensures CACHE_DIR contains a
+manifest.json before any test module is imported, so `import train` works on
+fresh checkouts and CI machines that haven't run prepare.py yet.
+
+
 Downloads AAPL (training), MSFT (training), NVDA (test-only) for a fixed 2-month
 backtest window (2024-09-01..2024-11-01) using yfinance + prepare.resample_to_daily().
 History starts 2024-04-01 (yfinance 1h data is only available for the last 730 days).
@@ -124,3 +129,31 @@ def test_parquet_fixtures():
 
     # Cleanup tmpdir only (persistent cache is kept)
     shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ── Manifest bootstrap ────────────────────────────────────────────────────────
+
+def pytest_configure(config):
+    """Create a minimal manifest.json in CACHE_DIR if one doesn't exist.
+
+    train.py calls _load_manifest() at module level, so this must run before
+    any test file is collected (pytest_configure fires before collection).
+    Without this, `import train` raises FileNotFoundError on any machine that
+    hasn't run prepare.py — breaking CI and fresh worktrees.
+    """
+    import json
+    cache_dir = os.environ.get(
+        "AUTORESEARCH_CACHE_DIR",
+        os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "stock_data"),
+    )
+    manifest_path = os.path.join(cache_dir, "manifest.json")
+    if not os.path.exists(manifest_path):
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "tickers": [],
+                "backtest_start": "2024-09-01",
+                "backtest_end": "2026-03-20",
+                "fetch_interval": "1h",
+                "source": "yfinance",
+            }, f, indent=2)

@@ -9,13 +9,17 @@ Data is cached in ~/.cache/autoresearch/stock_data/{TICKER}.parquet.
 Running again skips tickers whose file already exists (idempotent).
 """
 import datetime
+import json
 import os
 import sys
 import warnings
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
+
+from data.sources import DataSource, YFinanceSource, IBGatewaySource
 
 # ── USER CONFIGURATION ──────────────────────────────────────────────────────
 # These are the DEFAULT values used by the agent loop (see program.md).
@@ -104,21 +108,10 @@ CACHE_DIR = os.environ.get(
 # Number of parallel download threads for prepare.py harness cache build.
 # 10 workers gives ~10x speedup; raise with caution to avoid Yahoo Finance rate limits.
 MAX_WORKERS = int(os.environ.get("PREPARE_WORKERS", "10"))
-
-
-def download_ticker(ticker: str) -> pd.DataFrame:
-    """Fetch hourly OHLCV from yfinance for the full history + backtest window."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        ticker_obj = yf.Ticker(ticker)
-        df = ticker_obj.history(
-            start=HISTORY_START,
-            end=BACKTEST_END,
-            interval="1h",
-            auto_adjust=True,
-            prepost=False,
-        )
-    return df
+# Data source selection: "yfinance" (default) or "ib"
+PREPARE_SOURCE = os.environ.get("PREPARE_SOURCE", "yfinance")
+# Fetch interval passed to DataSource.fetch(): "1h" (default), "1m", "1d", etc.
+PREPARE_INTERVAL = os.environ.get("PREPARE_INTERVAL", "1h")
 
 
 def resample_to_daily(df_hourly: pd.DataFrame) -> pd.DataFrame:
@@ -195,11 +188,33 @@ def _add_earnings_dates(df_daily: pd.DataFrame, ticker_obj) -> pd.DataFrame:
     return df_daily
 
 
-def write_trend_summary(tickers: list, backtest_start: str, backtest_end: str, cache_dir: str) -> None:
+def write_manifest(
+    tickers: list[str],
+    backtest_start: str,
+    backtest_end: str,
+    fetch_interval: str,
+    source_name: str,
+    cache_dir: str,
+) -> None:
+    """Write run configuration to {cache_dir}/manifest.json."""
+    manifest = {
+        "tickers": tickers,
+        "backtest_start": backtest_start,
+        "backtest_end": backtest_end,
+        "fetch_interval": fetch_interval,
+        "source": source_name,
+    }
+    path = os.path.join(cache_dir, "manifest.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"manifest.json written -> {path}")
+
+
+def write_trend_summary(tickers: list, backtest_start: str, backtest_end: str, cache_dir: str, interval: str = "1h") -> None:
     """Compute sector price behaviour for the backtest window and write data_trend.md."""
     records = []
     for ticker in tickers:
-        path = os.path.join(cache_dir, f"{ticker}.parquet")
+        path = os.path.join(cache_dir, interval, f"{ticker}.parquet")
         if not os.path.exists(path):
             continue
         df = pd.read_parquet(path)
@@ -255,20 +270,24 @@ def write_trend_summary(tickers: list, backtest_start: str, backtest_end: str, c
     print("data_trend.md written")
 
 
-def process_ticker(ticker: str) -> bool:
+def process_ticker(ticker: str, source: DataSource, interval: str) -> bool:
     """Download, resample, validate, and cache one ticker. Returns True on success."""
-    path = os.path.join(CACHE_DIR, f"{ticker}.parquet")
+    interval_dir = os.path.join(CACHE_DIR, interval)
+    path = os.path.join(interval_dir, f"{ticker}.parquet")
     if os.path.exists(path):
         print(f"  {ticker}: already cached, skipping")
         return True
-    df_hourly = download_ticker(ticker)
-    if df_hourly.empty:
+    df_hourly = source.fetch(ticker, HISTORY_START, BACKTEST_END, interval)
+    if df_hourly is None or df_hourly.empty:
         print(f"  {ticker}: no data returned — skipping")
         return False
     df_daily = resample_to_daily(df_hourly)
+    # Earnings dates always come from yfinance regardless of PREPARE_SOURCE —
+    # IB has no calendar endpoint, so this yfinance call is intentional even
+    # when source is IBGatewaySource.
     df_daily = _add_earnings_dates(df_daily, yf.Ticker(ticker))
     validate_ticker_data(ticker, df_daily, BACKTEST_START)
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(interval_dir, exist_ok=True)
     df_daily.to_parquet(path)
     print(f"  {ticker}: saved {len(df_daily)} days -> {path}")
     return True
@@ -280,9 +299,15 @@ if __name__ == "__main__":
         sys.exit(1)
     os.makedirs(CACHE_DIR, exist_ok=True)
     print(f"Downloading {len(TICKERS)} tickers -> {CACHE_DIR}")
-    print(f"Date range: {HISTORY_START} -> {BACKTEST_END} (1h bars, resampled to daily)")
+    print(f"Date range: {HISTORY_START} -> {BACKTEST_END} ({PREPARE_INTERVAL} bars, resampled to daily)")
+    print(f"Source: {PREPARE_SOURCE}")
+    if PREPARE_SOURCE == "ib":
+        source: DataSource = IBGatewaySource()
+    else:
+        source = YFinanceSource()
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        results = list(executor.map(process_ticker, TICKERS))
+        results = list(executor.map(lambda t: process_ticker(t, source, PREPARE_INTERVAL), TICKERS))
     ok = sum(results)
     print(f"\nDone: {ok}/{len(TICKERS)} tickers cached successfully.")
-    write_trend_summary(TICKERS, BACKTEST_START, BACKTEST_END, CACHE_DIR)
+    write_manifest(TICKERS, BACKTEST_START, BACKTEST_END, PREPARE_INTERVAL, PREPARE_SOURCE, CACHE_DIR)
+    write_trend_summary(TICKERS, BACKTEST_START, BACKTEST_END, CACHE_DIR, PREPARE_INTERVAL)

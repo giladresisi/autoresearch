@@ -102,25 +102,28 @@ CORRELATION_PENALTY_WEIGHT = 0.0   # penalty factor for correlated portfolios (0
 # R9: Robustness perturbation (price/stop jitter)
 ROBUSTNESS_SEEDS = 0               # 0 = off; 5 = recommended (runs 4 perturbed seeds + nominal)
 
+# Fetch interval — must match the interval used by prepare.py when building the cache.
+_FETCH_INTERVAL: str = os.environ.get("PREPARE_INTERVAL", "1h")
+
 
 def load_ticker_data(ticker: str) -> pd.DataFrame | None:
-    """Reads CACHE_DIR/{ticker}.parquet; returns None if file does not exist."""
-    path = os.path.join(CACHE_DIR, f"{ticker}.parquet")
+    """Reads CACHE_DIR/{interval}/{ticker}.parquet; returns None if file does not exist."""
+    path = os.path.join(CACHE_DIR, _FETCH_INTERVAL, f"{ticker}.parquet")
     if not os.path.exists(path):
         return None
     return pd.read_parquet(path)
 
 
 def load_all_ticker_data() -> dict[str, pd.DataFrame]:
-    """Loads all *.parquet files from CACHE_DIR. Returns {} if directory is empty or missing."""
-    if not os.path.isdir(CACHE_DIR):
+    """Loads all *.parquet from CACHE_DIR/{interval}/. Returns {} if missing."""
+    interval_dir = os.path.join(CACHE_DIR, _FETCH_INTERVAL)
+    if not os.path.isdir(interval_dir):
         return {}
     result = {}
-    for fname in os.listdir(CACHE_DIR):
+    for fname in os.listdir(interval_dir):
         if fname.endswith(".parquet"):
             ticker = fname[:-len(".parquet")]
-            path = os.path.join(CACHE_DIR, fname)
-            result[ticker] = pd.read_parquet(path)
+            result[ticker] = pd.read_parquet(os.path.join(interval_dir, fname))
     return result
 
 

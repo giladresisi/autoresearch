@@ -3,8 +3,10 @@ train.py — Stock strategy screener, position manager, and backtester.
 Rewrite screener criteria, position manager logic, and entry/exit rules to optimize Sharpe ratio.
 Do NOT modify: CACHE_DIR (env-var driven; set AUTORESEARCH_CACHE_DIR instead), load_ticker_data(), Sharpe computation, or the output block format.
 """
+import json
 import os, sys
 from datetime import date
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -15,13 +17,27 @@ CACHE_DIR = os.environ.get(
     os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "stock_data"),
 )
 
+
+def _load_manifest() -> dict:
+    """Load run config written by prepare.py. Raises FileNotFoundError if missing."""
+    path = Path(CACHE_DIR) / "manifest.json"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No manifest.json found at {path}. Run prepare.py first."
+        )
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+_manifest = _load_manifest()
+_FETCH_INTERVAL: str = _manifest.get("fetch_interval", "1h")
+
 # ══ SESSION SETUP — set once at session start; DO NOT change during experiments ══════
 # These constants define the evaluation framework. Changing them mid-session
 # invalidates comparisons across experiments.
 
-# Backtest window — matches prepare.py; edit here to change the simulation period
-BACKTEST_START = "2024-09-01"
-BACKTEST_END   = "2026-03-20"
+# Backtest window — loaded from manifest.json written by prepare.py — do not edit here.
+BACKTEST_START: str = _manifest["backtest_start"]
+BACKTEST_END:   str = _manifest["backtest_end"]
 
 # Train/test split — last 14 calendar days of the backtest window are held out as test set.
 # Written by the agent at setup time. Do NOT modify during the experiment loop.
@@ -87,23 +103,23 @@ MIN_DOLLAR_VOLUME = 150_000_000
 
 
 def load_ticker_data(ticker: str) -> pd.DataFrame | None:
-    """Reads CACHE_DIR/{ticker}.parquet; returns None if file does not exist."""
-    path = os.path.join(CACHE_DIR, f"{ticker}.parquet")
+    """Reads CACHE_DIR/{interval}/{ticker}.parquet; returns None if file does not exist."""
+    path = os.path.join(CACHE_DIR, _FETCH_INTERVAL, f"{ticker}.parquet")
     if not os.path.exists(path):
         return None
     return pd.read_parquet(path)
 
 
 def load_all_ticker_data() -> dict[str, pd.DataFrame]:
-    """Loads all *.parquet files from CACHE_DIR. Returns {} if directory is empty or missing."""
-    if not os.path.isdir(CACHE_DIR):
+    """Loads all *.parquet from CACHE_DIR/{interval}/. Returns {} if missing."""
+    interval_dir = os.path.join(CACHE_DIR, _FETCH_INTERVAL)
+    if not os.path.isdir(interval_dir):
         return {}
     result = {}
-    for fname in os.listdir(CACHE_DIR):
+    for fname in os.listdir(interval_dir):
         if fname.endswith(".parquet"):
             ticker = fname[:-len(".parquet")]
-            path = os.path.join(CACHE_DIR, fname)
-            result[ticker] = pd.read_parquet(path)
+            result[ticker] = pd.read_parquet(os.path.join(interval_dir, fname))
     return result
 
 

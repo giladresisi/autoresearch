@@ -6,7 +6,12 @@ import pytest
 import numpy as np
 import pandas as pd
 
-from prepare import resample_to_daily, validate_ticker_data, process_ticker, write_trend_summary, CACHE_DIR, BACKTEST_START
+from prepare import (
+    resample_to_daily, validate_ticker_data, process_ticker,
+    write_trend_summary, write_manifest,
+    CACHE_DIR, BACKTEST_START, PREPARE_INTERVAL,
+)
+from data.sources import YFinanceSource
 
 
 def _make_hourly_df(n_days: int = 10) -> pd.DataFrame:
@@ -132,32 +137,36 @@ def test_all_columns_lowercase():
 # ── Caching / idempotency tests (3) ──────────────────────────────────────────
 
 def test_process_ticker_skips_existing_file(tmp_path):
-    # Create empty file at expected path to simulate existing cache
-    path = tmp_path / "SKIP.parquet"
+    # Create empty file at expected interval subdir path to simulate existing cache
+    interval_dir = tmp_path / PREPARE_INTERVAL
+    interval_dir.mkdir()
+    path = interval_dir / "SKIP.parquet"
     path.write_bytes(b"")
-    with mock.patch("prepare.CACHE_DIR", str(tmp_path)), \
-         mock.patch("prepare.download_ticker") as mock_dl:
-        result = process_ticker("SKIP")
-    mock_dl.assert_not_called()
+    mock_source = mock.MagicMock(spec=YFinanceSource)
+    with mock.patch("prepare.CACHE_DIR", str(tmp_path)):
+        result = process_ticker("SKIP", mock_source, PREPARE_INTERVAL)
+    mock_source.fetch.assert_not_called()
     assert result is True
 
 
 def test_process_ticker_skips_empty_download(tmp_path):
+    mock_source = mock.MagicMock(spec=YFinanceSource)
+    mock_source.fetch.return_value = None
     with mock.patch("prepare.CACHE_DIR", str(tmp_path)), \
-         mock.patch("prepare.download_ticker", return_value=pd.DataFrame()) as mock_dl, \
          mock.patch("prepare.resample_to_daily") as mock_resample:
-        result = process_ticker("EMPTY")
-    mock_dl.assert_called_once_with("EMPTY")
+        result = process_ticker("EMPTY", mock_source, PREPARE_INTERVAL)
+    mock_source.fetch.assert_called_once_with("EMPTY", mock.ANY, mock.ANY, PREPARE_INTERVAL)
     mock_resample.assert_not_called()
     assert result is False
 
 
 def test_process_ticker_saves_parquet(tmp_path):
-    with mock.patch("prepare.CACHE_DIR", str(tmp_path)), \
-         mock.patch("prepare.download_ticker", return_value=_make_hourly_df(5)):
-        result = process_ticker("TEST")
+    mock_source = mock.MagicMock(spec=YFinanceSource)
+    mock_source.fetch.return_value = _make_hourly_df(5)
+    with mock.patch("prepare.CACHE_DIR", str(tmp_path)):
+        result = process_ticker("TEST", mock_source, PREPARE_INTERVAL)
     assert result is True
-    path = tmp_path / "TEST.parquet"
+    path = tmp_path / PREPARE_INTERVAL / "TEST.parquet"
     assert path.exists()
     loaded = pd.read_parquet(path)
     assert "price_1030am" in loaded.columns
@@ -195,9 +204,10 @@ def test_warn_if_missing_10am_on_backtest_dates(capsys):
 @pytest.mark.integration
 def test_download_ticker_returns_expected_schema():
     """Live yfinance call — requires internet. Verifies schema contract end-to-end."""
-    from prepare import download_ticker, resample_to_daily
-    df_hourly = download_ticker("AAPL")
-    if df_hourly.empty:
+    from prepare import resample_to_daily, HISTORY_START, BACKTEST_END
+    src = YFinanceSource()
+    df_hourly = src.fetch("AAPL", HISTORY_START, BACKTEST_END, "1h")
+    if df_hourly is None or df_hourly.empty:
         pytest.skip("yfinance returned empty — network unavailable")
     df_daily = resample_to_daily(df_hourly)
     assert set(df_daily.columns) == {"open", "high", "low", "close", "volume", "price_1030am"}
@@ -208,7 +218,7 @@ def test_download_ticker_returns_expected_schema():
 
 # ── write_trend_summary tests (4) ────────────────────────────────────────────
 
-def _make_parquet(tmp_path, ticker, prices):
+def _make_parquet(tmp_path, ticker, prices, interval=PREPARE_INTERVAL):
     """Write a minimal parquet file so write_trend_summary can load it."""
     import pandas as pd
     base = datetime.date(2026, 1, 1)
@@ -217,14 +227,16 @@ def _make_parquet(tmp_path, ticker, prices):
         'open': prices, 'high': prices, 'low': prices, 'close': prices,
         'volume': [1_000_000.0] * len(prices), 'price_1030am': prices,
     }, index=pd.Index(dates, name='date'))
-    df.to_parquet(tmp_path / f"{ticker}.parquet")
+    interval_dir = tmp_path / interval
+    interval_dir.mkdir(exist_ok=True)
+    df.to_parquet(interval_dir / f"{ticker}.parquet")
 
 
 def test_write_trend_summary_creates_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     prices = list(range(100, 160))   # 60 days, monotone rise
     _make_parquet(tmp_path, 'AAA', prices)
-    write_trend_summary(['AAA'], '2026-01-01', '2026-03-01', str(tmp_path))
+    write_trend_summary(['AAA'], '2026-01-01', '2026-03-01', str(tmp_path), PREPARE_INTERVAL)
     assert (tmp_path / 'data_trend.md').exists()
 
 
@@ -234,7 +246,7 @@ def test_write_trend_summary_content(tmp_path, monkeypatch):
     prices_b = list(range(160, 100, -1))      # −37% fall
     _make_parquet(tmp_path, 'AAA', prices_a)
     _make_parquet(tmp_path, 'BBB', prices_b)
-    write_trend_summary(['AAA', 'BBB'], '2026-01-01', '2026-03-01', str(tmp_path))
+    write_trend_summary(['AAA', 'BBB'], '2026-01-01', '2026-03-01', str(tmp_path), PREPARE_INTERVAL)
     content = (tmp_path / 'data_trend.md').read_text()
     assert 'AAA' in content
     assert 'BBB' in content
@@ -247,14 +259,14 @@ def test_write_trend_summary_missing_ticker_skipped(tmp_path, monkeypatch):
     prices = list(range(100, 160))
     _make_parquet(tmp_path, 'REAL', prices)
     # GHOST has no parquet file — must not raise
-    write_trend_summary(['REAL', 'GHOST'], '2026-01-01', '2026-03-01', str(tmp_path))
+    write_trend_summary(['REAL', 'GHOST'], '2026-01-01', '2026-03-01', str(tmp_path), PREPARE_INTERVAL)
     content = (tmp_path / 'data_trend.md').read_text()
     assert 'REAL' in content
 
 
 def test_write_trend_summary_no_data_writes_fallback(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    write_trend_summary(['NONE'], '2026-01-01', '2026-03-01', str(tmp_path))
+    write_trend_summary(['NONE'], '2026-01-01', '2026-03-01', str(tmp_path), PREPARE_INTERVAL)
     content = (tmp_path / 'data_trend.md').read_text()
     assert 'No data available' in content
 
@@ -285,10 +297,14 @@ def test_main_exits_1_when_tickers_empty():
         f.write(patched)
         tmp_path = f.name
     try:
+        env = os.environ.copy()
+        # Ensure data/ package is importable from the project root when running a temp file
+        env["PYTHONPATH"] = str(project_root)
         result = subprocess.run(
             ["uv", "run", "python", tmp_path],
             capture_output=True,
             cwd=project_root,
+            env=env,
         )
     finally:
         os.unlink(tmp_path)
@@ -301,12 +317,14 @@ def test_main_exits_1_when_tickers_empty():
 def test_parallel_loop_processes_all_tickers(tmp_path, monkeypatch):
     """With mocked process_ticker, all tickers in list are called exactly once."""
     import prepare
+    from data.sources import YFinanceSource
     monkeypatch.setattr(prepare, "CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(prepare, "MAX_WORKERS", 2)
 
     called = []
+    mock_source = mock.MagicMock(spec=YFinanceSource)
 
-    def fake_process(ticker):
+    def fake_process(ticker, source, interval):
         called.append(ticker)
         return True
 
@@ -315,7 +333,10 @@ def test_parallel_loop_processes_all_tickers(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     tickers = ["AAPL", "MSFT", "NVDA"]
     with ThreadPoolExecutor(max_workers=prepare.MAX_WORKERS) as executor:
-        results = list(executor.map(prepare.process_ticker, tickers))
+        results = list(executor.map(
+            lambda t: prepare.process_ticker(t, mock_source, PREPARE_INTERVAL),
+            tickers,
+        ))
 
     assert sorted(called) == sorted(tickers)
     assert all(results)
@@ -356,19 +377,46 @@ def test_process_ticker_parallel_no_contention(tmp_path, monkeypatch):
     monkeypatch.setattr(prepare, "MAX_WORKERS", 2)
 
     df_hourly = _make_hourly_df(n_days=5)
-
-    def fake_download(ticker):
-        return df_hourly
-
-    monkeypatch.setattr(prepare, "download_ticker", fake_download)
+    mock_source = mock.MagicMock(spec=YFinanceSource)
+    mock_source.fetch.return_value = df_hourly
     # Patch _add_earnings_dates to avoid yfinance network call
     monkeypatch.setattr(prepare, "_add_earnings_dates", lambda df, obj: df)
 
     from concurrent.futures import ThreadPoolExecutor
     tickers = ["AAPL", "MSFT"]
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(prepare.process_ticker, tickers))
+        results = list(executor.map(
+            lambda t: prepare.process_ticker(t, mock_source, PREPARE_INTERVAL),
+            tickers,
+        ))
 
     assert all(results)
-    assert os.path.exists(os.path.join(str(tmp_path), "AAPL.parquet"))
-    assert os.path.exists(os.path.join(str(tmp_path), "MSFT.parquet"))
+    assert os.path.exists(os.path.join(str(tmp_path), PREPARE_INTERVAL, "AAPL.parquet"))
+    assert os.path.exists(os.path.join(str(tmp_path), PREPARE_INTERVAL, "MSFT.parquet"))
+
+
+# ── write_manifest tests (3) ─────────────────────────────────────────────────
+
+def test_write_manifest_creates_file(tmp_path):
+    write_manifest(["AAPL", "MSFT"], "2024-09-01", "2026-03-20", "1h", "yfinance", str(tmp_path))
+    assert (tmp_path / "manifest.json").exists()
+
+
+def test_write_manifest_content(tmp_path):
+    write_manifest(["AAPL"], "2024-09-01", "2026-03-20", "1h", "yfinance", str(tmp_path))
+    import json
+    data = json.loads((tmp_path / "manifest.json").read_text())
+    assert data["backtest_start"] == "2024-09-01"
+    assert data["backtest_end"] == "2026-03-20"
+    assert data["fetch_interval"] == "1h"
+    assert data["source"] == "yfinance"
+    assert "AAPL" in data["tickers"]
+
+
+def test_write_manifest_interval_field(tmp_path):
+    """fetch_interval in manifest reflects PREPARE_INTERVAL passed in."""
+    write_manifest(["AAPL"], "2024-09-01", "2026-03-20", "1m", "ib", str(tmp_path))
+    import json
+    data = json.loads((tmp_path / "manifest.json").read_text())
+    assert data["fetch_interval"] == "1m"
+    assert data["source"] == "ib"
