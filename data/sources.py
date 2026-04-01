@@ -151,6 +151,81 @@ def _to_et(ts_str: str) -> pd.Timestamp:
     return ts.tz_localize("America/New_York")
 
 
+class DatabentSource:
+    """Fetch OHLCV from Databento for CME Globex futures (GLBX.MDP3).
+
+    Requires DATABENTO_API_KEY environment variable.
+    Downloads 1m bars and optionally resamples to 5m.
+    Returns tz-aware (America/New_York) DataFrame or None on failure.
+    """
+
+    def __init__(self) -> None:
+        import os
+        api_key = os.environ.get("DATABENTO_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "DATABENTO_API_KEY environment variable is required for DatabentSource"
+            )
+        self._api_key = api_key
+
+    def fetch(
+        self,
+        ticker: str,
+        start: str,
+        end: str,
+        interval: str = "5m",
+        **kwargs,
+    ) -> pd.DataFrame | None:
+        import databento as db
+
+        if interval not in ("1m", "5m"):
+            raise ValueError(
+                f"DatabentSource only supports 1m and 5m intervals, got {interval!r}"
+            )
+        try:
+            client = db.Historical(key=self._api_key)
+            data = client.timeseries.get_range(
+                dataset="GLBX.MDP3",
+                symbols=[ticker],
+                schema="ohlcv-1m",
+                start=start,
+                end=end,
+                stype_in="continuous",
+            )
+            df = data.to_df()
+        except Exception as exc:
+            import sys
+            print(f"DatabentSource: error fetching {ticker}: {exc}", file=sys.stderr)
+            return None
+
+        if df.empty:
+            return None
+
+        # Rename to standard uppercase OHLCV columns
+        df = df.rename(columns={
+            "open": "Open", "high": "High", "low": "Low",
+            "close": "Close", "volume": "Volume",
+        })
+        df = df[["Open", "High", "Low", "Close", "Volume"]]
+
+        # Resample 1m → 5m if requested
+        if interval == "5m":
+            df = df.resample("5min").agg({
+                "Open": "first",
+                "High": "max",
+                "Low": "min",
+                "Close": "last",
+                "Volume": "sum",
+            }).dropna()
+
+        # Convert UTC → America/New_York
+        if df.index.tzinfo is None:
+            df.index = df.index.tz_localize("UTC")
+        df.index = df.index.tz_convert("America/New_York")
+
+        return df if not df.empty else None
+
+
 class IBGatewaySource:
     """Fetch OHLCV from Interactive Brokers via ib_insync.
 

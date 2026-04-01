@@ -8,6 +8,19 @@ from data.sources import YFinanceSource, IBGatewaySource, DataSource, _IB_BAR_SI
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
+def _make_1m_ohlcv(n_bars: int = 10) -> pd.DataFrame:
+    """Synthetic 1-minute UTC DataFrame matching Databento .to_df() output."""
+    base = pd.Timestamp("2025-01-02 14:30:00", tz="UTC")
+    idx = pd.date_range(start=base, periods=n_bars, freq="1min")
+    return pd.DataFrame({
+        "open":   [100.0 + i for i in range(n_bars)],
+        "high":   [101.0 + i for i in range(n_bars)],
+        "low":    [99.0  + i for i in range(n_bars)],
+        "close":  [100.5 + i for i in range(n_bars)],
+        "volume": [500] * n_bars,
+    }, index=idx)
+
+
 def _make_tz_aware_ohlcv(n_bars: int = 10) -> pd.DataFrame:
     """Synthetic hourly DataFrame matching yfinance output format."""
     base = pd.Timestamp("2025-01-02 14:30:00", tz="UTC")  # 9:30 ET
@@ -435,3 +448,156 @@ def test_ibgateway_future_by_conid_live_fetch(ib_src):
     # All bars should fall in the requested window
     assert df.index.min() >= pd.Timestamp("2025-10-01").tz_localize("America/New_York")
     assert df.index.max() < pd.Timestamp("2025-10-08").tz_localize("America/New_York")
+
+# ── DatabentSource tests ──────────────────────────────────────────────────────
+
+class TestDatabentSourceInit:
+    def test_raises_runtime_error_when_api_key_missing(self, monkeypatch):
+        """DatabentSource.__init__ must raise RuntimeError if DATABENTO_API_KEY unset."""
+        monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
+        from data.sources import DatabentSource
+        with pytest.raises(RuntimeError, match="DATABENTO_API_KEY"):
+            DatabentSource()
+
+    def test_init_succeeds_when_api_key_present(self, monkeypatch):
+        """DatabentSource.__init__ succeeds with DATABENTO_API_KEY set."""
+        monkeypatch.setenv("DATABENTO_API_KEY", "test-key-123")
+        from data.sources import DatabentSource
+        src = DatabentSource()  # should not raise
+        assert src is not None
+
+
+class TestDatabentSourceFetch:
+    @pytest.fixture
+    def src(self, monkeypatch):
+        monkeypatch.setenv("DATABENTO_API_KEY", "test-key-123")
+        from data.sources import DatabentSource
+        return DatabentSource()
+
+    def test_calls_get_range_with_correct_args(self, src, monkeypatch):
+        """fetch() must call timeseries.get_range with GLBX.MDP3, ohlcv-1m, correct symbols."""
+        mock_data = mock.MagicMock()
+        mock_data.to_df.return_value = _make_1m_ohlcv(10)
+        mock_client = mock.MagicMock()
+        mock_client.timeseries.get_range.return_value = mock_data
+        mock_db = mock.MagicMock()
+        mock_db.Historical.return_value = mock_client
+        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "5m")
+        mock_client.timeseries.get_range.assert_called_once_with(
+            dataset="GLBX.MDP3",
+            symbols=["MNQ.c.0"],
+            schema="ohlcv-1m",
+            start="2024-01-01",
+            end="2024-01-31",
+            stype_in="continuous",
+        )
+
+    def test_resamples_1m_to_5m(self, src, monkeypatch):
+        """fetch() with interval='5m' returns 5-minute bars (fewer rows than 1m input)."""
+        mock_data = mock.MagicMock()
+        mock_data.to_df.return_value = _make_1m_ohlcv(60)  # 60 x 1m bars -> 12 x 5m bars
+        mock_client = mock.MagicMock()
+        mock_client.timeseries.get_range.return_value = mock_data
+        mock_db = mock.MagicMock()
+        mock_db.Historical.return_value = mock_client
+        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        df = src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "5m")
+        assert df is not None
+        assert len(df) == 12  # 60 1m bars -> 12 5m bars
+
+    def test_returns_ohlcv_columns_uppercase(self, src, monkeypatch):
+        """fetch() returns DataFrame with uppercase {Open,High,Low,Close,Volume} columns."""
+        mock_data = mock.MagicMock()
+        mock_data.to_df.return_value = _make_1m_ohlcv(5)
+        mock_client = mock.MagicMock()
+        mock_client.timeseries.get_range.return_value = mock_data
+        mock_db = mock.MagicMock()
+        mock_db.Historical.return_value = mock_client
+        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        df = src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "5m")
+        assert df is not None
+        assert set(df.columns) == {"Open", "High", "Low", "Close", "Volume"}
+
+    def test_returns_et_timezone_index(self, src, monkeypatch):
+        """fetch() returns DataFrame with America/New_York timezone index."""
+        mock_data = mock.MagicMock()
+        mock_data.to_df.return_value = _make_1m_ohlcv(5)
+        mock_client = mock.MagicMock()
+        mock_client.timeseries.get_range.return_value = mock_data
+        mock_db = mock.MagicMock()
+        mock_db.Historical.return_value = mock_client
+        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        df = src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "5m")
+        assert df is not None
+        assert str(df.index.tzinfo) == "America/New_York"
+
+    def test_returns_none_on_bento_error(self, src, monkeypatch):
+        """fetch() returns None (no raise) when BentoError occurs."""
+        mock_client = mock.MagicMock()
+        mock_client.timeseries.get_range.side_effect = Exception("BentoError: unauthorized")
+        mock_db = mock.MagicMock()
+        mock_db.Historical.return_value = mock_client
+        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        result = src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "5m")
+        assert result is None
+
+    def test_returns_none_on_empty_dataframe(self, src, monkeypatch):
+        """fetch() returns None when Databento returns zero rows."""
+        mock_data = mock.MagicMock()
+        mock_data.to_df.return_value = pd.DataFrame()
+        mock_client = mock.MagicMock()
+        mock_client.timeseries.get_range.return_value = mock_data
+        mock_db = mock.MagicMock()
+        mock_db.Historical.return_value = mock_client
+        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        result = src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "5m")
+        assert result is None
+
+    def test_raises_value_error_on_unsupported_interval(self, src, monkeypatch):
+        """fetch() raises ValueError for intervals other than 1m/5m."""
+        monkeypatch.setenv("DATABENTO_API_KEY", "test-key-123")
+        with pytest.raises(ValueError, match="only supports 1m and 5m"):
+            src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "1h")
+
+    def test_1m_interval_skips_resampling(self, src, monkeypatch):
+        """fetch() with interval='1m' returns raw 1m bars without resampling."""
+        mock_data = mock.MagicMock()
+        mock_data.to_df.return_value = _make_1m_ohlcv(10)
+        mock_client = mock.MagicMock()
+        mock_client.timeseries.get_range.return_value = mock_data
+        mock_db = mock.MagicMock()
+        mock_db.Historical.return_value = mock_client
+        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        df = src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "1m")
+        assert df is not None
+        assert len(df) == 10  # unchanged
+
+    def test_conforms_to_protocol(self, monkeypatch):
+        """DatabentSource satisfies the DataSource protocol."""
+        monkeypatch.setenv("DATABENTO_API_KEY", "test-key-123")
+        from data.sources import DatabentSource
+        assert isinstance(DatabentSource(), DataSource)
+
+
+@pytest.mark.integration
+class TestDatabentSourceIntegration:
+    """Live integration tests -- auto-skipped if DATABENTO_API_KEY not set."""
+
+    @pytest.fixture(autouse=True)
+    def skip_if_no_key(self):
+        import os
+        if not os.environ.get("DATABENTO_API_KEY"):
+            pytest.skip("DATABENTO_API_KEY not set -- skipping live Databento test")
+
+    def test_fetch_5day_window_returns_valid_schema(self):
+        """Live fetch: 5 trading days of MNQ.c.0 5m bars, validates OHLCV + ET timezone."""
+        from data.sources import DatabentSource
+        src = DatabentSource()
+        df = src.fetch("MNQ.c.0", "2025-01-06", "2025-01-10", "5m")
+        assert df is not None, "Expected data, got None"
+        assert set(df.columns) == {"Open", "High", "Low", "Close", "Volume"}
+        assert str(df.index.tzinfo) == "America/New_York"
+        assert len(df) > 0
+        assert df["Open"].dtype == float
+        assert df["Volume"].dtype in (float, int, "int64", "float64")

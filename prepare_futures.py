@@ -1,15 +1,16 @@
-"""prepare_futures.py — Download MNQ/MES 5m futures bars from IB-Gateway.
+"""prepare_futures.py — Download MNQ/MES 5m futures bars from Databento.
 
 Usage:
     uv run prepare_futures.py
 
-Requires IB-Gateway running on localhost:4002.
-Data cached to ~/.cache/autoresearch/futures_data/5m/.
+Downloads from Databento (GLBX.MDP3, MNQ.c.0/MES.c.0) to data/historical/.
+Requires DATABENTO_API_KEY in environment (or .env file).
 Running again skips tickers whose file already exists (idempotent).
 
-Uses specific quarterly contracts (MNQM6/MESM6) identified by IB conId with explicit
-`endDateTime` pagination, giving ~6.5 months of 5m history (vs 45 days for ContFuture).
-MNQM6/MESM6 expire 2026-06-18 — update CONIDS to MNQU6/MESU6 after rollover.
+Lookup priority per ticker:
+  1. data/historical/{ticker}.parquet  — Databento permanent store (2024-01-01 Databento window)
+  2. {CACHE_DIR}/5m/{ticker}.parquet   — IB ephemeral cache (legacy fallback)
+  3. Live Databento download
 """
 import datetime
 import json
@@ -20,7 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from data.sources import IBGatewaySource
+from data.sources import IBGatewaySource, DatabentSource
 
 # ── USER CONFIGURATION ──────────────────────────────────────────────────────
 TICKERS = ["MNQ", "MES"]
@@ -32,13 +33,18 @@ CONIDS = {
     "MES": "770561194",   # MESM6 (Jun 2026)
 }
 
-# Specific quarterly contracts allow explicit endDateTime — no 45-day cap.
-# BACKTEST_START must be >= 2025-09-24 (earliest reliable bar in MNQM6/MESM6).
-# Jun–Aug 2025 is thin (contract newly listed, not front-month) and Sep 1-23 is a
-# known IB data gap — both periods produce 0 SMT signals in practice.
-BACKTEST_START = "2025-09-24"
+BACKTEST_START = "2024-01-01"
 _TODAY         = datetime.date.today()
 BACKTEST_END   = _TODAY.isoformat()
+
+# Databento permanent store — survives cache clears
+HISTORICAL_DATA_DIR = Path("data/historical")
+
+# Databento continuous front-month symbols (volume-roll, stype_in="continuous")
+DATABENTO_SYMBOLS = {
+    "MNQ": "MNQ.v.0",
+    "MES": "MES.v.0",
+}
 # ────────────────────────────────────────────────────────────────────────────
 
 # No warmup needed — SMT strategy uses no daily SMAs
@@ -60,28 +66,44 @@ MAX_WORKERS = 2
 
 
 def process_ticker(ticker: str) -> bool:
-    """Fetch and cache futures bars at INTERVAL resolution for one ticker. Returns True on success."""
-    out_path = Path(CACHE_DIR) / INTERVAL / f"{ticker}.parquet"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if out_path.exists():
-        print(f"  {ticker}: already cached, skipping")
+    """Fetch and cache futures bars. Returns True on success.
+
+    Priority:
+      1. data/historical/{ticker}.parquet  — Databento permanent store
+      2. {CACHE_DIR}/5m/{ticker}.parquet   — IB ephemeral cache
+      3. Live Databento download
+    """
+    # Level 1: Databento permanent store
+    historical_path = HISTORICAL_DATA_DIR / f"{ticker}.parquet"
+    if historical_path.exists():
+        print(f"  {ticker}: found in data/historical/, skipping download")
         return True
-    # Use high client_ids (30+) to avoid collisions with test suite (clientId=1)
-    # and any lingering connections from previous runs.
-    client_id = 30 + TICKERS.index(ticker)
-    source = IBGatewaySource(host=IB_HOST, port=IB_PORT, client_id=client_id)
-    df = source.fetch(
-        CONIDS[ticker],
-        HISTORY_START,
-        BACKTEST_END,
-        INTERVAL,
-        contract_type="future_by_conid",
-    )
-    if df is None or df.empty:
-        print(f"  {ticker}: no data returned")
+
+    # Level 2: IB ephemeral cache (legacy data from previous runs)
+    ib_path = Path(CACHE_DIR) / INTERVAL / f"{ticker}.parquet"
+    if ib_path.exists():
+        print(f"  {ticker}: found in IB cache ({ib_path}), skipping download")
+        return True
+
+    # Level 3: Download from Databento
+    HISTORICAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        source = DatabentSource()
+    except RuntimeError as exc:
+        print(f"  {ticker}: Databento init failed — {exc}", file=sys.stderr)
         return False
-    df.to_parquet(out_path)
-    print(f"  {ticker}: saved {len(df)} bars to {out_path}")
+
+    db_ticker = DATABENTO_SYMBOLS.get(ticker)
+    if db_ticker is None:
+        print(f"  {ticker}: no Databento symbol mapping found", file=sys.stderr)
+        return False
+    df = source.fetch(db_ticker, HISTORY_START, BACKTEST_END, INTERVAL)
+    if df is None or df.empty:
+        print(f"  {ticker}: no data returned from Databento", file=sys.stderr)
+        return False
+
+    df.to_parquet(historical_path)
+    print(f"  {ticker}: saved {len(df)} bars to {historical_path}")
     return True
 
 
@@ -96,7 +118,8 @@ def write_manifest() -> None:
                 "backtest_start": BACKTEST_START,
                 "backtest_end": BACKTEST_END,
                 "fetch_interval": INTERVAL,
-                "source": "ib",
+                "source": "databento",
+                "databento_symbols": DATABENTO_SYMBOLS,
             },
             f,
             indent=2,
@@ -105,12 +128,12 @@ def write_manifest() -> None:
 
 
 if __name__ == "__main__":
-    print(f"Downloading futures data to {CACHE_DIR}")
+    print(f"Downloading futures data to {HISTORICAL_DATA_DIR}")
     # ib_insync uses asyncio (eventkit) which requires an event loop in the calling thread.
     # ThreadPoolExecutor worker threads have no event loop, so fetch sequentially.
     results = [process_ticker(ticker) for ticker in TICKERS]
     if not all(results):
-        print("Some tickers failed. Check IB-Gateway connection.", file=sys.stderr)
+        print("Some tickers failed. Check DATABENTO_API_KEY and network connectivity.", file=sys.stderr)
         sys.exit(1)
     write_manifest()
     print("Done.")

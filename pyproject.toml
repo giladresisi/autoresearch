@@ -5,6 +5,7 @@ description = "Autonomous pretraining research swarm"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "databento>=0.74.0",
     "ib-insync>=0.9",
     "matplotlib>=3.10.8",
     "numpy>=2.2.6",

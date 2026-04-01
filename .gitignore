@@ -30,3 +30,6 @@ harness_upgrade.md
 
 # Environment variables
 .env
+
+# Databento permanent parquet store (large, not committed)
+data/historical/*.parquet
