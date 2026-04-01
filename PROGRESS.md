@@ -1,5 +1,37 @@
 # PROGRESS
 
+## Feature: SMT Divergence Strategy on MNQ1!
+
+**Status**: ✅ Complete
+**Started / Completed**: 2026-03-31
+**Plan File**: `.agents/plans/smt-divergence-mnq-strategy.md`
+
+### What was completed
+- Task 1.1: `data/sources.py` — ContFuture support; IB 1m data uses ContFuture + `endDateTime=''`
+  - Root cause discovery: IB error 10339 (explicit endDateTime rejected for ContFuture 1m)
+  - Solution: `endDateTime=''` capped at `_IB_CONTFUTURE_MAX_DAYS=7` to prevent timeouts
+- Task 1.2: `prepare_futures.py` — downloads MNQ/MES 1m bars; dynamic dates (7-day window)
+  - Live test ✅ — 6900 bars each for MNQ and MES downloaded successfully
+- Task 2.1: `train_smt.py` strategy functions + constants
+  - Auto-loads BACKTEST_START/BACKTEST_END from futures_manifest.json at module load
+  - `_compute_fold_params` auto-detects short windows (< 130 bdays → 1 fold, minimal test days)
+- Task 2.2: `tests/test_smt_strategy.py` — 24 unit tests, all passing
+- Task 3.1: `train_smt.py` harness — run_backtest, _compute_metrics, fold loop
+- Task 4.1: `tests/test_smt_backtest.py` — 10 integration tests, all passing
+- Task 4.2: `tests/conftest.py` futures bootstrap + `program_smt.md`
+- Task DS: 4 ContFuture / futures tests in `tests/test_data_sources.py`
+- Live end-to-end ✅ — `uv run train_smt.py` ran full backtest on live IB data
+
+### IB Data Limitation
+IB rejects explicit `endDateTime` for CME equity-index futures 1m bars (error 10339 for ContFuture; silent cancellation for specific quarterly contracts). Only `endDateTime=''` (most recent data) is accepted, limiting 1m futures history to ~7 calendar days per download. The `_compute_fold_params` harness auto-detects this and reduces to 1 fold with minimal test days. For longer-window backtesting, supply pre-downloaded parquet files from an external data provider.
+
+### Test Status
+- 346 passed, 2 skipped (2026-03-31)
+- New tests: 24 unit (test_smt_strategy.py) + 10 integration (test_smt_backtest.py) + 4 data source (test_data_sources.py)
+- All pre-existing failures fixed: manifest.json + interval subdir for conftest fixture
+
+---
+
 ## Feature: Data Layer Abstraction (Multi-Source / Multi-Interval)
 
 **Status**: ✅ Complete

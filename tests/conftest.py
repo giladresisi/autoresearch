@@ -116,9 +116,26 @@ def test_parquet_fixtures():
 
     # Write all 3 parquets to a fresh tmpdir for subprocess tests that need
     # AUTORESEARCH_CACHE_DIR pointing to a real directory of parquet files.
+    # Flat layout (tmpdir/*.parquet): used by in-process tests (all_parquet_paths fixture).
+    # Interval subdir (tmpdir/1h/*.parquet): required by train.py which expects CACHE_DIR/{interval}/*.
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="autoresearch_itest_"))
+    interval_dir = tmpdir / "1h"
+    interval_dir.mkdir()
     for ticker, df in all_dfs.items():
         df.to_parquet(tmpdir / f"{ticker}.parquet")
+        df.to_parquet(interval_dir / f"{ticker}.parquet")
+    # train.py loads manifest.json at module level; write one so subprocess tests don't crash.
+    import json as _json
+    (tmpdir / "manifest.json").write_text(
+        _json.dumps({
+            "tickers": TEST_ALL_TICKERS,
+            "backtest_start": TEST_BACKTEST_START,
+            "backtest_end": TEST_BACKTEST_END,
+            "fetch_interval": "1h",
+            "source": "yfinance",
+        }),
+        encoding="utf-8",
+    )
 
     yield {
         "tmpdir":        tmpdir,
@@ -157,3 +174,24 @@ def pytest_configure(config):
                 "fetch_interval": "1h",
                 "source": "yfinance",
             }, f, indent=2)
+
+    # ── Futures manifest bootstrap ────────────────────────────────────────────
+    futures_cache_dir = os.environ.get(
+        "FUTURES_CACHE_DIR",
+        os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "futures_data"),
+    )
+    futures_manifest_path = os.path.join(futures_cache_dir, "futures_manifest.json")
+    if not os.path.exists(futures_manifest_path):
+        os.makedirs(futures_cache_dir, exist_ok=True)
+        with open(futures_manifest_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tickers": ["MNQ", "MES"],
+                    "backtest_start": "2024-09-01",
+                    "backtest_end": "2026-03-20",
+                    "fetch_interval": "1m",
+                    "source": "ib",
+                },
+                f,
+                indent=2,
+            )

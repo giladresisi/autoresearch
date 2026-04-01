@@ -71,6 +71,11 @@ _IB_BAR_SIZE: dict[str, str] = {
     "1d":  "1 day",
 }
 
+# Max calendar days for a single ContFuture reqHistoricalData call with endDateTime=''.
+# IB only allows endDateTime='' for ContFuture 1m bars (error 10339 for explicit dates).
+# Empirically, requests >~10 D of 1m data timeout; 7 D is a safe ceiling.
+_IB_CONTFUTURE_MAX_DAYS = 7
+
 # Max calendar days to request per IB call at each interval
 # (conservative — IB limits vary by subscription; these are safe defaults)
 _IB_CHUNK_DAYS: dict[str, int] = {
@@ -84,6 +89,51 @@ _IB_CHUNK_DAYS: dict[str, int] = {
     "4h":  365,
     "1d":  3650,
 }
+
+
+def _third_friday(year: int, month: int) -> pd.Timestamp:
+    """Return the 3rd Friday of the given year/month as a tz-naive Timestamp.
+
+    CME equity-index futures (MNQ, MES, ES, NQ) expire on the 3rd Friday of
+    their expiry month. IB requires the exact last-trade date in YYYYMMDD format.
+    """
+    import calendar as _cal
+    # monthcalendar returns weeks as lists [Mon, Tue, Wed, Thu, Fri, Sat, Sun]
+    fridays = [week[4] for week in _cal.monthcalendar(year, month) if week[4] != 0]
+    return pd.Timestamp(year=year, month=month, day=fridays[2])  # index 2 = 3rd Friday
+
+
+def _quarterly_future_ranges(
+    ticker: str, start_dt: pd.Timestamp, end_dt: pd.Timestamp
+) -> list[tuple[str, pd.Timestamp, pd.Timestamp]]:
+    """Return (YYYYMMDD, period_start, period_end) for CME quarterly futures covering [start_dt, end_dt].
+
+    CME equity-index futures (MNQ, MES, ES, NQ) expire on the 3rd Friday of
+    Mar/Jun/Sep/Dec. Each tuple's period runs from the previous expiry to the
+    current one so the full date range is covered without gaps or double-fetching.
+    IB requires the exact expiry date (YYYYMMDD) for historical data on specific
+    Future contracts.
+    """
+    QUARTER_MONTHS = [3, 6, 9, 12]
+    result: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+    prev_boundary = start_dt
+
+    for year in range(start_dt.year - 1, end_dt.year + 2):
+        for month in QUARTER_MONTHS:
+            expiry_naive = _third_friday(year, month)
+            expiry = expiry_naive.tz_localize(start_dt.tzinfo) if start_dt.tzinfo else expiry_naive
+            if expiry <= start_dt:
+                prev_boundary = expiry
+                continue
+            period_start = max(prev_boundary, start_dt)
+            period_end = min(expiry, end_dt)
+            if period_start < period_end:
+                result.append((expiry_naive.strftime("%Y%m%d"), period_start, period_end))
+            prev_boundary = expiry
+            if expiry >= end_dt:
+                return result
+
+    return result
 
 
 def _to_et(ts_str: str) -> pd.Timestamp:
@@ -120,8 +170,9 @@ class IBGatewaySource:
         start: str,
         end: str,
         interval: str = "1h",
+        contract_type: str = "stock",
     ) -> pd.DataFrame | None:
-        from ib_insync import IB, Stock, util
+        from ib_insync import IB, Stock, Future, util
 
         if interval not in _IB_BAR_SIZE:
             print(f"  IBGatewaySource: unsupported interval '{interval}'")
@@ -133,34 +184,57 @@ class IBGatewaySource:
         ib = IB()
         try:
             ib.connect(self.host, self.port, clientId=self.client_id)
-            contract = Stock(ticker, "SMART", "USD")
-            ib.qualifyContracts(contract)
 
             # Normalize to ET regardless of whether the caller passed a tz-aware string
             start_dt = _to_et(start)
             end_dt   = _to_et(end)
             all_bars: list = []
 
-            # Paginate backwards from end_dt to start_dt in chunk_days windows.
-            # start_dt / end_dt are already ET-aware after _to_et() above.
-            chunk_end = end_dt
-            while chunk_end > start_dt:
-                chunk_start = max(start_dt, chunk_end - pd.Timedelta(days=chunk_days))
-                duration_days = (chunk_end - chunk_start).days
-                duration_str = f"{duration_days} D"
-
+            if contract_type == "contfuture":
+                # IB rejects all explicit endDateTime for CME equity-index futures 1m bars
+                # (error 10339 for ContFuture; error 162 / silent for specific contracts).
+                # Only endDateTime='' (most recent data) works reliably.
+                # IB limits 1m bar history to ≤30 calendar days per request.
+                # We therefore fetch the most recent window bounded by:
+                #   min(requested_window_days, chunk_days)
+                from ib_insync import ContFuture
+                contract = ContFuture(ticker, "CME", "USD")
+                ib.qualifyContracts(contract)
+                requested_days = max(1, (end_dt - start_dt).days)
+                # Cap at _IB_CONTFUTURE_MAX_DAYS — larger requests reliably timeout
+                duration_days = min(requested_days, _IB_CONTFUTURE_MAX_DAYS)
                 bars = ib.reqHistoricalData(
                     contract,
-                    endDateTime=chunk_end.strftime("%Y%m%d %H:%M:%S"),
-                    durationStr=duration_str,
+                    endDateTime="",  # '' = most recent; any explicit date is rejected by IB
+                    durationStr=f"{duration_days} D",
                     barSizeSetting=bar_size,
                     whatToShow="TRADES",
-                    useRTH=True,
-                    formatDate=2,  # returns datetime objects
+                    useRTH=False,
+                    formatDate=2,
                 )
                 if bars:
                     all_bars.extend(bars)
-                chunk_end = chunk_start
+            else:
+                contract = Stock(ticker, "SMART", "USD")
+                ib.qualifyContracts(contract)
+
+                # Paginate backwards from end_dt to start_dt in chunk_days windows.
+                chunk_end = end_dt
+                while chunk_end > start_dt:
+                    chunk_start = max(start_dt, chunk_end - pd.Timedelta(days=chunk_days))
+                    duration_days = max(1, (chunk_end - chunk_start).days)
+                    bars = ib.reqHistoricalData(
+                        contract,
+                        endDateTime=chunk_end.strftime("%Y%m%d %H:%M:%S"),
+                        durationStr=f"{duration_days} D",
+                        barSizeSetting=bar_size,
+                        whatToShow="TRADES",
+                        useRTH=True,
+                        formatDate=2,
+                    )
+                    if bars:
+                        all_bars.extend(bars)
+                    chunk_end = chunk_start
 
             if not all_bars:
                 return None

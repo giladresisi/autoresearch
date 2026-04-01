@@ -67,15 +67,33 @@ uv run train.py
 
 ## Running the optimization agent
 
-Open Claude Code (or any capable coding agent) in this repo and prompt:
+For isolated runs, use the `prepare-optimization` skill first to create a dedicated git worktree so experiments don't touch the master strategy.
+
+### Equity strategy (large-cap US stocks)
+
+Open Claude Code in this repo and prompt:
 
 ```
-Have a look at program.md and let's kick off a new optimization run.
+Have a look at program.md and run 30 iterations of the equity strategy optimizer.
 ```
 
-The agent will read `program.md`, set up the walk-forward constants, run the baseline, and begin iterating. Results are logged to `results.tsv` (untracked — intentionally not committed).
+The agent reads `program.md`, sets up walk-forward constants, runs the baseline, and iterates — modifying `train.py` above the boundary, running the backtest, keeping or reverting each change. Results logged to `results.tsv`.
 
-For isolated optimization runs, use the `prepare-optimization` skill to create a dedicated git worktree so experiments don't touch the master strategy.
+### SMT divergence strategy (MNQ/MES futures)
+
+Requires IB-Gateway running on port 4002. Download futures data first:
+
+```bash
+uv run prepare_futures.py
+```
+
+Then open Claude Code and prompt:
+
+```
+Have a look at program_smt.md and run 30 iterations of the SMT divergence strategy optimizer.
+```
+
+The agent reads `program_smt.md`, runs the baseline on MNQ1!/MES1! 1m data, and iterates — modifying `train_smt.py` above the boundary. Both strategies are fully isolated; optimizing one never touches the other.
 
 ---
 
@@ -88,14 +106,18 @@ Install the [python-performance-optimization](https://skills.sh/wshobson/agents/
 ## Project structure
 
 ```
-prepare.py      — ticker data download and caching (do not modify during optimization)
-train.py        — strategy: screener, position manager, walk-forward harness (agent modifies this)
-program.md      — agent instructions: objective, experiment sequence, closed directions
-screen.py       — real-time screener (uses screen_day / manage_position from train.py)
-pyproject.toml  — dependencies
-results.tsv     — experiment log (untracked)
-strategies/     — registry of named strategy snapshots for reuse across runs
-.agents/plans/  — implementation plans
+prepare.py           — equity data download and caching (yfinance)
+prepare_futures.py   — MNQ/MES 1m futures data download (IB-Gateway)
+train.py             — equity strategy: screener, position manager, walk-forward harness
+train_smt.py         — SMT divergence strategy: signal logic + intraday backtest harness
+program.md           — equity optimizer instructions: objective, experiment sequence
+program_smt.md       — SMT optimizer instructions: kill zone, divergence tuning
+screen.py            — real-time screener (uses screen_day / manage_position from train.py)
+data/sources.py      — data source abstraction (yfinance + IB-Gateway)
+pyproject.toml       — dependencies
+results.tsv          — experiment log (untracked)
+strategies/          — registry of named strategy snapshots for reuse across runs
+.agents/plans/       — implementation plans
 ```
 
 ---
