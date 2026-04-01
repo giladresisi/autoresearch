@@ -15,6 +15,112 @@
 
 ---
 
+## Feature: Databento Historical Data Pipeline
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/databento-historical-pipeline.md`
+
+### Problem
+
+With IB as the sole data source, the SMT backtest window is capped at ~6 months
+(Sep 24, 2025 → today), producing only ~30 test trades across 2 active folds.
+Walk-forward optimization on 30 trades overfits badly — a minimum of ~100 test
+trades across multiple folds is needed for parameters to be statistically meaningful.
+
+IB chaining (fetching expired quarterly contracts by conId) was investigated and
+ruled out: `reqContractDetails` returns Error 200 for all expired contracts, and the
+public REST endpoint (`contract.ibkr.info`) returns 404. IB drops expired contracts
+from its definition API at rollover. No code changes can work around this.
+
+### Solution
+
+Integrate **Databento** as a historical data source for MNQ and MES.
+- Dataset: `GLBX.MDP3` (CME Globex MDP 3.0)
+- Symbols: `MNQ.c.0` and `MES.c.0` (continuous front-month — Databento handles roll stitching)
+- Schema: `ohlcv-1m` (no native 5m; resample to 5m in code)
+- Date range: `2024-01-01` → today (~2 years, ~120+ expected trades)
+- Estimated cost: ~$4.93 one-time for Jan 2024 → Mar 2026 (75.6 MB); trivial
+
+### Authentication
+
+`DATABENTO_API_KEY` is already set in `.env`. The user has created a Databento account.
+
+### Data persistence
+
+Databento data must survive cache clears. Store in a **project-level directory**
+`data/historical/` (gitignored, kept on disk), separate from the ephemeral
+`~/.cache/autoresearch/futures_data/` IB cache.
+
+`prepare_futures.py` lookup priority:
+1. `data/historical/{ticker}.parquet` — Databento download (permanent)
+2. `~/.cache/autoresearch/futures_data/5m/{ticker}.parquet` — IB cache (ephemeral)
+3. Live download via Databento API (if neither exists)
+
+### Implementation requirements
+
+**`data/sources.py`**
+- Add `DatabentSource` class implementing the `DataSource` abstract interface
+- `fetch(ticker, start, end, interval, ...)` — calls Databento `client.timeseries.get_range()` with dataset `GLBX.MDP3`, schema `ohlcv-1m`, symbols `[ticker]` (e.g. `"MNQ.c.0"`)
+- Resample 1m → 5m using `df.resample("5min").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"})` after download
+- Return standard OHLCV DataFrame with tz-aware ET DatetimeIndex (same contract as existing sources)
+- Handle `databento.BentoError` and connection failures gracefully (return None)
+- Load `DATABENTO_API_KEY` from environment; raise `RuntimeError` at init if missing
+
+**`prepare_futures.py`**
+- Add `HISTORICAL_DATA_DIR = "data/historical"` constant
+- Add `DATABENTO_SYMBOLS = {"MNQ": "MNQ.c.0", "MES": "MES.c.0"}` constant
+- Update `process_ticker()` to check `data/historical/{ticker}.parquet` first; if present, skip download
+- If not present: download via `DatabentSource`, save to `data/historical/{ticker}.parquet`
+- IB fetch (existing path) remains as fallback or can be removed in favour of Databento-only — decision for planner
+- Update `BACKTEST_START = "2024-01-01"` to match the full Databento window
+- Update manifest to reflect the new start date
+
+**`data/historical/`**
+- Create directory with a `.gitkeep` and add `data/historical/*.parquet` to `.gitignore`
+
+**Tests**
+- Unit test: `DatabentSource.fetch()` with mocked `databento.client` — verify correct dataset, schema, symbol, and resampling logic
+- Unit test: `DatabentSource` returns `None` on `BentoError` without raising
+- Unit test: `DatabentSource` raises `RuntimeError` at init when `DATABENTO_API_KEY` is missing
+- Regression test: existing `IBGatewaySource` tests still pass (no regressions)
+- Integration test (live, auto-skipped if no key): fetches a 5-day window for `MNQ.c.0` and validates OHLCV schema + ET timezone
+
+### Key technical details
+
+- Databento Python client: `databento` package (`pip install databento`)
+- API call pattern:
+  ```python
+  import databento as db
+  client = db.Historical(key=api_key)
+  data = client.timeseries.get_range(
+      dataset="GLBX.MDP3",
+      symbols=["MNQ.c.0"],
+      schema="ohlcv-1m",
+      start="2024-01-01",
+      end="2026-04-01",
+  )
+  df = data.to_df()
+  ```
+- Column mapping from Databento: `open`, `high`, `low`, `close`, `volume` → rename to `Open`, `High`, `Low`, `Close`, `Volume`
+- Timezone: Databento returns UTC timestamps — convert to `America/New_York`
+- Continuous contract (`MNQ.c.0`) vs specific expiry: use continuous for clean stitched history; the `.c.0` suffix means front-month roll-adjusted
+
+### Expected outcome after implementation
+
+- `uv run prepare_futures.py` downloads ~2 years of 5m MNQ/MES bars from Databento and saves to `data/historical/`
+- `uv run python train_smt.py` runs with 6 walk-forward folds, each test fold having 15–25 trades, total ~120 test trades
+- Parameter optimization (grid search over stop ratios, session window) becomes statistically meaningful
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/databento-historical-pipeline.md`
+- Detailed implementation summary
+- No divergences from plan
+- Test results and metrics: 357 passed (+11 unit tests), 0 failed, 14 deselected (integration)
+- All acceptance criteria met; ready for live run with `DATABENTO_API_KEY`
+
+---
+
 ## Feature: Expand Historical Data via IB Quarterly Contracts
 
 **Status**: ✅ Complete
@@ -732,3 +838,109 @@ All phases complete. Pipeline operational:
 3. Agent loop (via `program.md`) — autonomously mutates `train.py`, commits, backtests, keeps or reverts
 
 To start an experiment session: open a Claude Code conversation in this repo and describe your desired run parameters (tickers, timeframe, iterations).
+
+---
+
+## Next: SMT Parameter Optimization Run
+
+**Status**: ✅ Planned
+**Date scoped**: 2026-04-02
+**Plan File**: .agents/plans/smt-optimization-run-setup.md
+
+### Baseline (2-year Databento run, default params)
+
+- **Data**: `data/historical/MNQ.parquet` + `data/historical/MES.parquet`
+  - Source: Databento GLBX.MDP3, MNQ.v.0 / MES.v.0 (volume-roll continuous), `stype_in="continuous"`
+  - Range: 2024-01-01 → 2026-04-01 (~158,847 1m bars resampled to 5m)
+- **Walk-forward**: 6 folds × 60 business-day test windows (≈ 3 months each)
+- **Total test trades**: 105
+
+| Fold | Test Trades | Win Rate | Test PnL | Sharpe | avg_rr |
+|------|------------|----------|----------|--------|--------|
+| 1    | 17         | 52.9%    | $806     | 2.75   | 2.24   |
+| 2    | 17         | 52.9%    | $1,225   | 3.41   | 3.50   |
+| 3    | 18         | 55.6%    | $938     | 3.62   | 2.72   |
+| 4    | 18         | 50.0%    | $677     | 2.76   | 2.50   |
+| 5    | 16         | 50.0%    | $640     | 2.22   | 2.05   |
+| 6    | 19         | 52.6%    | $697     | 2.26   | 1.80   |
+
+- **Mean test PnL/fold**: $830
+- **Worst-fold test PnL** (`min_test_pnl`): $640 (fold 5)
+- **W/L ratio**: 55W / 50L = 1.10 across all test folds
+- **Expectation per trade**: ~$41–48 (formula: `W% × avg_rr × R − L% × R`, R=$50)
+- **Stop-hit rate**: ~50% (stops slightly outnumber TPs across all folds)
+
+### Parameters at baseline
+
+```python
+SESSION_START          = "09:00"
+SESSION_END            = "10:30"
+MIN_BARS_BEFORE_SIGNAL = 5          # 25 min warm-up at 5m
+TRADE_DIRECTION        = "both"
+TDO_VALIDITY_CHECK     = True
+MIN_STOP_POINTS        = 5.0
+LONG_STOP_RATIO        = 0.45       # → theoretical RR ~2.22
+SHORT_STOP_RATIO       = 0.45
+```
+
+### Proposed tweaks for next run (priority order)
+
+#### 1. Asymmetric stop ratios — HIGHEST PRIORITY
+`LONG_STOP_RATIO` and `SHORT_STOP_RATIO` are both `0.45` (RR ≈ 2.22 for both sides).
+Longs and shorts perform differently across folds (e.g., fold 1 test: long $334 / short $472;
+fold 6: long $472 / short $225). Tuning each independently is the lever most likely to improve
+the worst-fold score.
+- Suggested search space: `LONG_STOP_RATIO` ∈ [0.30, 0.55], `SHORT_STOP_RATIO` ∈ [0.30, 0.55]
+- Optimise for: `mean_test_pnl` (primary), `min_test_pnl` > 0 (guard)
+
+#### 2. Session window — HIGH PRIORITY
+Kill zone is 9:00–10:30. Pre-cash (9:00–9:30) and RTH open (9:30–10:30) behave differently.
+Pre-9:30 divergences target a TDO that hasn't printed yet, making those signals more speculative.
+- Candidates: `("09:30", "10:30")`, `("09:00", "10:00")`, `("09:30", "11:00")`
+- Watch: narrowing window reduces trade count — need ≥80 test trades total to stay meaningful
+
+#### 3. Minimum divergence magnitude — MEDIUM PRIORITY
+`detect_smt_divergence` fires on any MES breach, even 0.25 points past the session
+high/low. A weak liquidity sweep is less meaningful than a decisive one.
+- Add a `MIN_DIVERGENCE_POINTS` constant (e.g., 2–8 MNQ points) — currently absent.
+- Expected effect: fewer signals, lower stop-out rate, higher avg_rr.
+
+#### 4. MIN_BARS_BEFORE_SIGNAL — MEDIUM PRIORITY
+Currently 5 bars = 25 min warm-up. ~50% stop-out rate suggests signals may still fire
+too early before structure is established.
+- Suggested search space: 2–8 bars (10–40 min at 5m)
+- Trade-off: more bars = fewer signals but stronger context.
+
+#### 5. Entry confirmation tightening — LOWER PRIORITY
+`find_entry_bar` accepts any bearish/bullish bar whose wick pierces a prior close.
+Requiring the confirmation bar to also close in the top/bottom X% of its range
+(e.g., close in bottom 30% for shorts) would ensure conviction rather than a wick touch.
+- Add `ENTRY_CLOSE_STRENGTH` constant ∈ [0.0, 0.5] (0.0 = current behaviour, disabled)
+
+#### 6. TDO definition variant — LOWER PRIORITY
+`compute_tdo` uses the 9:30 RT open. For pre-9:30 signals, TDO is unknown at signal
+time. Alternatives:
+- Previous session close
+- 4am globex open (first available bar)
+- Flag pre-9:30 signals separately and compare their stats vs post-9:30
+
+### Optimisation objective
+
+Primary: **maximise `mean_test_pnl`** (average fold P&L) — maximises total return across regimes.
+Secondary: **`min_test_pnl` > 0** (all qualified folds profitable), **Sharpe ≥ 2.0 in every fold**, total test trades ≥ 80.
+
+### Agent instructions for next run
+
+1. Read this section and `train_smt.py` (above the boundary at line 436).
+2. Implement tweaks in priority order; each tweak is an independent constant change.
+3. Run `uv run python train_smt.py` after each change and compare `mean_test_pnl` (primary) and `min_test_pnl` (guard).
+4. Keep changes that improve `mean_test_pnl` without dropping total test trades below 80 or `min_test_pnl` below 0.
+5. Do not modify anything below `# DO NOT EDIT BELOW THIS LINE` (line 436).
+6. Update this section with results after each accepted change.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-optimization-run-setup.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics

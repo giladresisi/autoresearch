@@ -90,6 +90,12 @@ MIN_STOP_POINTS = 5.0
 
 # Per-direction stop placement ratios (fraction of |entry - TDO| distance).
 # Both default to 0.45, matching the original hardcoded value.
+#
+# ITERATION 1 — Asymmetric stop ratios (HIGHEST PRIORITY)
+# Tune LONG_STOP_RATIO and SHORT_STOP_RATIO independently.
+# Search space: each ∈ [0.30, 0.55] (step 0.05 suggested for initial grid).
+# Optimise for: mean_test_pnl (primary), min_test_pnl > 0 (secondary guard).
+# Constraint: total test trades ≥ 80 across all folds.
 LONG_STOP_RATIO  = 0.45
 SHORT_STOP_RATIO = 0.45
 
@@ -115,8 +121,11 @@ def _load_futures_manifest() -> dict:
 
 
 def load_futures_data() -> dict[str, pd.DataFrame]:
-    """Load MNQ and MES futures parquets from FUTURES_CACHE_DIR/{interval}/.
+    """Load MNQ and MES futures parquets.
 
+    Checks in priority order:
+      1. data/historical/{ticker}.parquet  — Databento permanent store
+      2. FUTURES_CACHE_DIR/{interval}/{ticker}.parquet  — IB ephemeral cache
     Returns {"MNQ": df, "MES": df} with tz-aware ET DatetimeIndex.
     Raises FileNotFoundError if parquets are missing (run prepare_futures.py).
     """
@@ -124,10 +133,15 @@ def load_futures_data() -> dict[str, pd.DataFrame]:
     interval = manifest.get("fetch_interval", "1m")
     result: dict[str, pd.DataFrame] = {}
     for ticker in ["MNQ", "MES"]:
-        path = Path(FUTURES_CACHE_DIR) / interval / f"{ticker}.parquet"
-        if not path.exists():
+        historical_path = Path("data/historical") / f"{ticker}.parquet"
+        ib_path = Path(FUTURES_CACHE_DIR) / interval / f"{ticker}.parquet"
+        if historical_path.exists():
+            path = historical_path
+        elif ib_path.exists():
+            path = ib_path
+        else:
             raise FileNotFoundError(
-                f"Missing futures parquet: {path}. Run prepare_futures.py."
+                f"Missing futures parquet for {ticker}. Run prepare_futures.py."
             )
         result[ticker] = pd.read_parquet(path)
     # Align MNQ and MES to their common timestamps so run_backtest can apply
@@ -738,13 +752,18 @@ if __name__ == "__main__":
     # R2: Exclude folds with < 3 test trades — sparse folds are noise-dominated
     _qualified = [(p, t) for p, t in fold_test_pnls if t >= 3]
     if _qualified:
-        min_test_pnl = min(p for p, t in _qualified)
-        _n_included  = len(_qualified)
+        min_test_pnl  = min(p for p, t in _qualified)
+        mean_test_pnl = sum(p for p, t in _qualified) / len(_qualified)
+        _n_included   = len(_qualified)
     else:
-        min_test_pnl = min(p for p, t in fold_test_pnls) if fold_test_pnls else 0.0
-        _n_included  = len(fold_test_pnls)
+        # Sentinel prevents division-by-zero; _n_included counts real folds, not the sentinel.
+        _source       = fold_test_pnls if fold_test_pnls else [(0.0, 0)]
+        min_test_pnl  = min(p for p, t in _source)
+        mean_test_pnl = sum(p for p, t in _source) / len(_source)
+        _n_included   = len(fold_test_pnls)
 
     print("---")
+    print(f"mean_test_pnl:               {mean_test_pnl:.2f}")
     print(f"min_test_pnl:                {min_test_pnl:.2f}")
     print(f"min_test_pnl_folds_included: {_n_included}")
 
