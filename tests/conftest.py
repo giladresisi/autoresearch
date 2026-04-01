@@ -189,7 +189,7 @@ def pytest_configure(config):
                     "tickers": ["MNQ", "MES"],
                     "backtest_start": "2024-09-01",
                     "backtest_end": "2026-03-20",
-                    "fetch_interval": "1m",
+                    "fetch_interval": "5m",
                     "source": "ib",
                 },
                 f,

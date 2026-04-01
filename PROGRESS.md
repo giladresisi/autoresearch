@@ -1,5 +1,90 @@
 # PROGRESS
 
+## Feature: SMT Direction Control Refactor
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-direction-control.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-direction-control.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics (360 passed, 2 skipped, 0 failures)
+- Live backtest: 8 trades (down from 12), shorts $541.75, longs $115.25
+
+---
+
+## Feature: Expand Historical Data via IB Quarterly Contracts
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/ib-quarterly-conid-fetch.md`
+
+Research completed 2026-04-01. MNQM6/MESM6 (conIds `770561201`/`770561194`) accept explicit `endDateTime` with good data from Sep 24, 2025 → ~6.5 months, ~37 expected trades. Full implementation spec and test cases in plan file.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/ib-quarterly-conid-fetch.md`
+- Detailed implementation summary
+- Divergences and resolutions (train_smt.py index alignment fix, qualifyContracts retention)
+- Test results and metrics: 366 passed, 2 skipped, 6 new tests
+- Live validation: MNQ 35,375 bars / MES 34,133 bars, 6 folds, 42 trades
+
+
+## Feature: SMT Strategy — 5m Optimization Harness + Real-Time Screener Architecture
+
+**Status**: ✅ Planned
+**Plan File**: `.agents/plans/smt-5m-optimizer.md`
+
+### Background
+The current `train_smt.py` harness runs on 1m bars. IB-Gateway's ContFuture API only provides
+~14 days of 1m history per request (`endDateTime=''` restriction — error 10339 for explicit dates),
+which yields too few trades for meaningful walk-forward optimization.
+
+### Architectural split (decided 2026-04-01)
+
+**Optimizer** (`train_smt.py` + `prepare_futures.py`):
+- Switch from 1m to **5m bars**
+- IB ContFuture + `endDateTime=''` supports `durationStr='3 M'` for 5m bars → ~3 months of data per download
+- 3 months of 5m data gives ~40–60 kill-zone sessions → enough trades for walk-forward stats
+- Signal logic (SMT divergence, kill zone window, TDO take-profit) is resolution-agnostic and adapts cleanly to 5m
+
+**Real-time screener** (future `screen_smt.py`, not yet built):
+- Subscribes to live 1m bars from IB-Gateway (via `reqRealTimeBars` or `reqMktData`)
+- Runs `screen_session()` and `manage_position()` at 1m resolution for precise intraday execution
+- Does NOT use the historical parquet cache — operates on streaming bars only
+
+### Tasks for next agent
+
+**Task A — Update optimizer to 5m bars**
+1. `prepare_futures.py`: change `INTERVAL = "1m"` → `"5m"`, update `BACKTEST_START` to today − 90 days
+2. `data/sources.py`: verify `_IB_CONTFUTURE_MAX_DAYS` is not applied to 5m (it shouldn't be — 5m uses the standard `chunk_days` path and `durationStr='90 D'` should not timeout). If needed, add a `_IB_CONTFUTURE_MAX_DAYS_5M` constant or make the cap interval-aware.
+3. `train_smt.py` editable section: no signal logic changes needed; `SESSION_START`/`SESSION_END` constants already work at any bar resolution. Verify the harness slices bars correctly for 5m (index alignment, bar count thresholds like `MIN_BARS_BEFORE_SIGNAL`).
+4. `tests/conftest.py`: update futures fixture to write 5m parquets and update the manifest `fetch_interval`.
+5. `tests/test_smt_backtest.py`: update synthetic bar fixtures from 1m to 5m.
+6. Run `prepare_futures.py` with IB-Gateway active, confirm 3 months of data downloads, run `train_smt.py` and confirm walk-forward produces multiple folds with sufficient trades.
+
+**Task B — Plan real-time SMT screener** (separate feature, after Task A)
+- Design `screen_smt.py` mirroring `screen.py` for the equity strategy
+- Uses live IB streaming bars at 1m resolution (not historical parquet)
+- Calls `screen_session()` at session open, then `manage_position()` each new 1m bar
+- Outputs: active signal (direction, entry, stop, TP) + open position status
+
+### Key constraints
+- `_IB_CONTFUTURE_MAX_DAYS = 14` cap in `data/sources.py` is a 1m-specific limit; 5m requests use `_IB_CHUNK_DAYS["5m"] = 60` and are not affected by this constant (the cap is only applied in the `contfuture` branch — verify this during implementation)
+- The `_compute_fold_params` short-window guard (< 130 bdays → 1 fold) will no longer trigger once 3 months of 5m data are available — the full 6-fold walk-forward will run normally
+- `MIN_BARS_BEFORE_SIGNAL = 5` was calibrated for 1m bars; for 5m bars each bar is 5× wider so the value may need recalibration (5 × 5m = 25 minutes before signal — reasonable for the kill zone)
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-5m-optimizer.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics
+- Wave 3 (live IB-Gateway) deferred — pending user action
+
+---
+
 ## Feature: SMT Divergence Strategy on MNQ1!
 
 **Status**: ✅ Complete

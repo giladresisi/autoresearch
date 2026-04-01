@@ -310,3 +310,128 @@ def test_ibgateway_source_fetch_unsupported_interval_returns_none(ib_src):
     """Unsupported interval must return None even when IB-Gateway is reachable."""
     result = ib_src.fetch("AAPL", "2025-01-02", "2025-01-10", interval="3h")
     assert result is None
+
+
+# ── future_by_conid unit tests ────────────────────────────────────────────────
+
+def test_ibgateway_future_by_conid_uses_contract_not_stock():
+    """contract_type='future_by_conid' must use Contract(conId=...) not Stock or ContFuture."""
+    mock_ib = mock.MagicMock()
+    mock_ib.isConnected.return_value = True
+    mock_ib.reqHistoricalData.return_value = []
+    mock_ib.qualifyContracts.return_value = None
+
+    mock_contract_cls = mock.MagicMock()
+
+    with mock.patch("ib_insync.IB", return_value=mock_ib), \
+         mock.patch("ib_insync.Stock") as mock_stock_cls, \
+         mock.patch("ib_insync.ContFuture") as mock_cf_cls, \
+         mock.patch("ib_insync.Contract", mock_contract_cls):
+        src = IBGatewaySource()
+        src.fetch("770561201", "2025-09-24", "2025-10-01", interval="5m",
+                  contract_type="future_by_conid")
+
+    # Contract(conId=770561201, exchange="CME") must be used
+    mock_contract_cls.assert_called_once_with(conId=770561201, exchange="CME")
+    mock_stock_cls.assert_not_called()
+    mock_cf_cls.assert_not_called()
+
+
+def test_ibgateway_future_by_conid_uses_explicit_enddatetime():
+    """future_by_conid must NOT use endDateTime='' — it must pass an explicit datetime string."""
+    mock_ib = mock.MagicMock()
+    mock_ib.isConnected.return_value = True
+    mock_ib.reqHistoricalData.return_value = []
+    mock_ib.qualifyContracts.return_value = None
+
+    with mock.patch("ib_insync.IB", return_value=mock_ib), \
+         mock.patch("ib_insync.Contract"):
+        src = IBGatewaySource()
+        src.fetch("770561201", "2025-09-24", "2025-10-01", interval="5m",
+                  contract_type="future_by_conid")
+
+    assert mock_ib.reqHistoricalData.called
+    for call in mock_ib.reqHistoricalData.call_args_list:
+        end_dt = call.kwargs.get("endDateTime", call.args[1] if len(call.args) > 1 else "")
+        assert end_dt != "", "future_by_conid must not use endDateTime='' (ContFuture pattern)"
+        assert len(end_dt) >= 8, f"Expected a real datetime string, got {end_dt!r}"
+
+
+def test_ibgateway_future_by_conid_paginates_multiple_chunks():
+    """A request spanning >60 days must call reqHistoricalData more than once."""
+    mock_ib = mock.MagicMock()
+    mock_ib.isConnected.return_value = True
+    mock_ib.reqHistoricalData.return_value = []
+    mock_ib.qualifyContracts.return_value = None
+
+    with mock.patch("ib_insync.IB", return_value=mock_ib), \
+         mock.patch("ib_insync.Contract"):
+        src = IBGatewaySource()
+        # 6.5-month window; chunk_days for 5m = 60 → at least 4 calls
+        src.fetch("770561201", "2025-09-24", "2026-04-01", interval="5m",
+                  contract_type="future_by_conid")
+
+    assert mock_ib.reqHistoricalData.call_count >= 4, (
+        f"Expected ≥4 pagination calls for 6.5-month window, "
+        f"got {mock_ib.reqHistoricalData.call_count}"
+    )
+
+
+def test_ibgateway_future_by_conid_returns_none_on_exception():
+    """Connection failure during future_by_conid fetch returns None without raising."""
+    mock_ib = mock.MagicMock()
+    mock_ib.connect.side_effect = ConnectionRefusedError("refused")
+    mock_ib.isConnected.return_value = False
+
+    with mock.patch("ib_insync.IB", return_value=mock_ib), \
+         mock.patch("ib_insync.Contract"):
+        src = IBGatewaySource()
+        result = src.fetch("770561201", "2025-09-24", "2026-04-01", interval="5m",
+                           contract_type="future_by_conid")
+
+    assert result is None
+
+
+def test_ibgateway_contfuture_path_unchanged_after_refactor():
+    """Regression: contfuture path must still use endDateTime='' after adding future_by_conid."""
+    mock_ib = mock.MagicMock()
+    mock_ib.isConnected.return_value = True
+    mock_ib.reqHistoricalData.return_value = []
+    mock_ib.qualifyContracts.return_value = None
+
+    with mock.patch("ib_insync.IB", return_value=mock_ib), \
+         mock.patch("ib_insync.ContFuture"):
+        src = IBGatewaySource()
+        src.fetch("MNQ", "2026-03-01", "2026-03-31", interval="5m",
+                  contract_type="contfuture")
+
+    assert mock_ib.reqHistoricalData.call_count == 1
+    call_kwargs = mock_ib.reqHistoricalData.call_args.kwargs
+    assert call_kwargs.get("endDateTime") == "", "contfuture path must still use endDateTime=''"
+
+
+# ── future_by_conid integration test ─────────────────────────────────────────
+
+@pytest.mark.integration
+def test_ibgateway_future_by_conid_live_fetch(ib_src):
+    """Live fetch from MNQM6 via conId returns 5m bars for a 5-day window.
+
+    Uses conId=770561201 (MNQM6, Jun 2026), confirmed 2026-04-01.
+    Skipped automatically if IB-Gateway is not reachable (ib_src fixture handles this).
+    """
+    df = ib_src.fetch(
+        "770561201",
+        "2025-10-01",
+        "2025-10-08",
+        interval="5m",
+        contract_type="future_by_conid",
+    )
+    assert df is not None, "Expected 5m bars from MNQM6 for Oct 2025"
+    assert set(df.columns) == {"Open", "High", "Low", "Close", "Volume"}
+    assert len(df) >= 50, f"Expected ≥50 bars for 5 trading days at 5m, got {len(df)}"
+    assert df.index.tzinfo is not None
+    assert df.index.is_unique
+    assert df.index.is_monotonic_increasing
+    # All bars should fall in the requested window
+    assert df.index.min() >= pd.Timestamp("2025-10-01").tz_localize("America/New_York")
+    assert df.index.max() < pd.Timestamp("2025-10-08").tz_localize("America/New_York")

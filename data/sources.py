@@ -72,9 +72,12 @@ _IB_BAR_SIZE: dict[str, str] = {
 }
 
 # Max calendar days for a single ContFuture reqHistoricalData call with endDateTime=''.
-# IB only allows endDateTime='' for ContFuture 1m bars (error 10339 for explicit dates).
-# Empirically, requests >~10 D of 1m data timeout; 7 D is a safe ceiling.
-_IB_CONTFUTURE_MAX_DAYS = 7
+# error 10339 blocks explicit endDateTime for ContFuture at ALL intervals — must use ''.
+# Empirically tested limits (ib_insync, 2026-04):
+#   1m  → ≤14 D before timeout   → _IB_CONTFUTURE_MAX_DAYS
+#   5m  → ≤45 D before timeout   → _IB_5M_CONTFUTURE_MAX_DAYS
+_IB_CONTFUTURE_MAX_DAYS = 14
+_IB_5M_CONTFUTURE_MAX_DAYS = 45
 
 # Max calendar days to request per IB call at each interval
 # (conservative — IB limits vary by subscription; these are safe defaults)
@@ -172,6 +175,10 @@ class IBGatewaySource:
         interval: str = "1h",
         contract_type: str = "stock",
     ) -> pd.DataFrame | None:
+        # contract_type accepted values:
+        #   "stock"            — equity via Stock(ticker, "SMART", "USD") with useRTH=True
+        #   "contfuture"       — continuous CME future via ContFuture + endDateTime='' (most recent ≤45d)
+        #   "future_by_conid"  — specific CME quarterly future identified by conId (ticker arg = conId string)
         from ib_insync import IB, Stock, Future, util
 
         if interval not in _IB_BAR_SIZE:
@@ -201,8 +208,14 @@ class IBGatewaySource:
                 contract = ContFuture(ticker, "CME", "USD")
                 ib.qualifyContracts(contract)
                 requested_days = max(1, (end_dt - start_dt).days)
-                # Cap at _IB_CONTFUTURE_MAX_DAYS — larger requests reliably timeout
-                duration_days = min(requested_days, _IB_CONTFUTURE_MAX_DAYS)
+                # Each interval has its own empirical cap with endDateTime=''.
+                # Caps prevent timeouts; values verified against live IB-Gateway (2026-04).
+                if interval == "1m":
+                    duration_days = min(requested_days, _IB_CONTFUTURE_MAX_DAYS)
+                elif interval == "5m":
+                    duration_days = min(requested_days, _IB_5M_CONTFUTURE_MAX_DAYS)
+                else:
+                    duration_days = requested_days
                 bars = ib.reqHistoricalData(
                     contract,
                     endDateTime="",  # '' = most recent; any explicit date is rejected by IB
@@ -214,6 +227,31 @@ class IBGatewaySource:
                 )
                 if bars:
                     all_bars.extend(bars)
+            elif contract_type == "future_by_conid":
+                # Fetch a specific futures contract by conId with explicit endDateTime
+                # pagination. Avoids error 10339 that blocks ContFuture from using
+                # explicit endDateTime — only works for non-ContFuture specific contracts.
+                # `ticker` carries the conId string; exchange is always CME for MNQ/MES.
+                from ib_insync import Contract as _IBContract
+                contract = _IBContract(conId=int(ticker), exchange="CME")
+                # No qualifyContracts: conId uniquely identifies the contract;
+                # qualification is unnecessary and fails for expired contracts.
+                chunk_end = end_dt
+                while chunk_end > start_dt:
+                    chunk_start = max(start_dt, chunk_end - pd.Timedelta(days=chunk_days))
+                    duration_days = max(1, (chunk_end - chunk_start).days)
+                    bars = ib.reqHistoricalData(
+                        contract,
+                        endDateTime=chunk_end.strftime("%Y%m%d %H:%M:%S"),
+                        durationStr=f"{duration_days} D",
+                        barSizeSetting=bar_size,
+                        whatToShow="TRADES",
+                        useRTH=False,
+                        formatDate=2,
+                    )
+                    if bars:
+                        all_bars.extend(bars)
+                    chunk_end = chunk_start
             else:
                 contract = Stock(ticker, "SMART", "USD")
                 ib.qualifyContracts(contract)

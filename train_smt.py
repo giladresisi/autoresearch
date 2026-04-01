@@ -69,9 +69,33 @@ WRITE_FINAL_OUTPUTS = False
 SESSION_START = "09:00"
 SESSION_END   = "10:30"
 
-# Minimum bars elapsed since session open before a divergence signal can fire.
-# Prevents signals on the very first bar where session extremes aren't meaningful.
+# Minimum wall-clock minutes before a divergence signal can fire after session open.
+# Converted to bar count at runtime by _bars_for_minutes() so it works at any interval.
+# At 1m: 5 bars = 5 min. At 5m: 1 bar = 5 min.
 MIN_BARS_BEFORE_SIGNAL = 5
+
+# Direction filter: "both" = trade longs and shorts | "long" = longs only | "short" = shorts only
+TRADE_DIRECTION = "both"
+
+# TDO validity gate: skip signals where the take-profit target is geometrically inverted.
+# For LONG: TDO must be above entry (price bounces up to the open).
+# For SHORT: TDO must be below entry (price fades down to the open).
+# Set False to disable and restore legacy behavior.
+TDO_VALIDITY_CHECK = True
+
+# Minimum stop distance in MNQ points. Signals with |entry - stop| < this value are skipped.
+# Prevents degenerate sizing when TDO is very close to entry.
+# Set 0.0 to disable.
+MIN_STOP_POINTS = 5.0
+
+# Per-direction stop placement ratios (fraction of |entry - TDO| distance).
+# Both default to 0.45, matching the original hardcoded value.
+LONG_STOP_RATIO  = 0.45
+SHORT_STOP_RATIO = 0.45
+
+# Print per-direction win rate, avg PnL, and exit breakdown after each fold.
+# Set False to suppress — does not affect frozen print_results output.
+PRINT_DIRECTION_BREAKDOWN = True
 
 # MNQ futures P&L per point per contract.
 MNQ_PNL_PER_POINT = 2.0
@@ -91,7 +115,7 @@ def _load_futures_manifest() -> dict:
 
 
 def load_futures_data() -> dict[str, pd.DataFrame]:
-    """Load MNQ and MES 1m parquets from FUTURES_CACHE_DIR/1m/.
+    """Load MNQ and MES futures parquets from FUTURES_CACHE_DIR/{interval}/.
 
     Returns {"MNQ": df, "MES": df} with tz-aware ET DatetimeIndex.
     Raises FileNotFoundError if parquets are missing (run prepare_futures.py).
@@ -106,7 +130,30 @@ def load_futures_data() -> dict[str, pd.DataFrame]:
                 f"Missing futures parquet: {path}. Run prepare_futures.py."
             )
         result[ticker] = pd.read_parquet(path)
+    # Align MNQ and MES to their common timestamps so run_backtest can apply
+    # a single session_mask across both DataFrames without a length mismatch.
+    # Bars missing from either instrument are silently dropped from both —
+    # correct for SMT divergence which requires simultaneous bars.
+    if "MNQ" in result and "MES" in result:
+        common_idx = result["MNQ"].index.intersection(result["MES"].index)
+        result["MNQ"] = result["MNQ"].loc[common_idx]
+        result["MES"] = result["MES"].loc[common_idx]
     return result
+
+
+def _bars_for_minutes(df: pd.DataFrame, minutes: int) -> int:
+    """Return the number of bars spanning `minutes` wall-clock minutes.
+
+    Infers bar size from the gap between the first two index entries.
+    Falls back to 1 if the DataFrame has fewer than 2 rows or the gap is zero.
+    """
+    if len(df) < 2:
+        return 1
+    delta_secs = (df.index[1] - df.index[0]).total_seconds()
+    if delta_secs <= 0:
+        return 1
+    bar_mins = delta_secs / 60
+    return max(1, round(minutes / bar_mins))
 
 
 def detect_smt_divergence(
@@ -114,6 +161,7 @@ def detect_smt_divergence(
     mnq_bars: pd.DataFrame,
     bar_idx: int,
     session_start_idx: int,
+    _min_bars: int | None = None,
 ) -> str | None:
     """Check for SMT divergence at bar_idx.
 
@@ -122,12 +170,14 @@ def detect_smt_divergence(
     Returns None if no divergence or not enough bars since session start.
 
     Args:
-        mes_bars: 1m OHLCV DataFrame for MES, index = ET datetime
-        mnq_bars: 1m OHLCV DataFrame for MNQ, same index alignment
+        mes_bars: OHLCV DataFrame for MES, index = ET datetime (any bar interval)
+        mnq_bars: OHLCV DataFrame for MNQ, same index alignment
         bar_idx: current bar position in the session slice
         session_start_idx: first bar index of current session
+        _min_bars: Override bar threshold; if None, falls back to MIN_BARS_BEFORE_SIGNAL global.
     """
-    if bar_idx - session_start_idx < MIN_BARS_BEFORE_SIGNAL:
+    _threshold = _min_bars if _min_bars is not None else MIN_BARS_BEFORE_SIGNAL
+    if bar_idx - session_start_idx < _threshold:
         return None
 
     # Compare current bar's extreme against session high/low (excluding current bar)
@@ -217,6 +267,40 @@ def compute_tdo(mnq_bars: pd.DataFrame, date: datetime.date) -> float | None:
     return float(day_bars.iloc[0]["Open"])
 
 
+def print_direction_breakdown(stats: dict, prefix: str = "") -> None:
+    """Print per-direction trade count, win rate, avg PnL, and exit breakdown.
+
+    Uses the same {prefix}{key}: {value} format as print_results so autoresearch
+    agents can parse direction metrics alongside the standard fold output.
+
+    Reads from stats["trade_records"]. Prints nothing if trade_records is absent
+    or empty. Controlled by PRINT_DIRECTION_BREAKDOWN constant (caller's responsibility
+    to check before calling).
+
+    Args:
+        stats:  Dict returned by run_backtest or _compute_metrics.
+        prefix: String prepended to every printed key (e.g. "fold1_train_").
+    """
+    trades = stats.get("trade_records", [])
+    if not trades:
+        return
+    for direction in ("long", "short"):
+        subset = [t for t in trades if t["direction"] == direction]
+        n = len(subset)
+        wins = sum(1 for t in subset if t["pnl"] > 0)
+        total_pnl = sum(t["pnl"] for t in subset)
+        win_rate  = round(wins / n, 4) if n > 0 else 0.0
+        avg_pnl   = round(total_pnl / n, 2) if n > 0 else 0.0
+        print(f"{prefix}{direction}_trades: {n}")
+        print(f"{prefix}{direction}_win_rate: {win_rate}")
+        print(f"{prefix}{direction}_avg_pnl: {avg_pnl}")
+        exits: dict[str, int] = {}
+        for t in subset:
+            exits[t["exit_type"]] = exits.get(t["exit_type"], 0) + 1
+        for exit_type, count in exits.items():
+            print(f"{prefix}{direction}_exit_{exit_type}: {count}")
+
+
 def screen_session(
     mnq_bars: pd.DataFrame,
     mes_bars: pd.DataFrame,
@@ -232,10 +316,17 @@ def screen_session(
         entry_price:     float  (close of confirmation bar)
         entry_time:      pd.Timestamp
         take_profit:     float  (TDO)
-        stop_price:      float  (entry ± 0.45 × |entry - TDO|)
+        stop_price:      float  (entry ± ratio × |entry - TDO|)
         tdo:             float
         divergence_bar:  int    (index within session slice)
         entry_bar:       int    (index within session slice)
+
+    Guards controlled by constants:
+        TRADE_DIRECTION:      filter signals by direction ("long", "short", "both")
+        TDO_VALIDITY_CHECK:   skip geometrically inverted TDO setups
+        MIN_STOP_POINTS:      skip signals with sub-noise stop distances
+        LONG_STOP_RATIO:      fraction of |entry - TDO| used for long stop placement
+        SHORT_STOP_RATIO:     fraction of |entry - TDO| used for short stop placement
     """
     # Slice the kill-zone window for this date
     session_mask = (
@@ -252,14 +343,20 @@ def screen_session(
     n_bars = len(mnq_session)
 
     # Scan bars left-to-right for the first divergence
-    for bar_idx in range(MIN_BARS_BEFORE_SIGNAL, n_bars):
+    _min_bars = _bars_for_minutes(mnq_session, MIN_BARS_BEFORE_SIGNAL)
+    for bar_idx in range(_min_bars, n_bars):
         direction = detect_smt_divergence(
             mes_session.reset_index(drop=True),
             mnq_session.reset_index(drop=True),
             bar_idx,
             0,
+            _min_bars,
         )
         if direction is None:
+            continue
+
+        # Direction filter: skip if this signal's direction is not allowed
+        if TRADE_DIRECTION != "both" and direction != TRADE_DIRECTION:
             continue
 
         # Look for confirmation entry after divergence bar
@@ -276,12 +373,23 @@ def screen_session(
         entry_bar = mnq_reset.iloc[entry_idx]
         entry_price = float(entry_bar["Close"])
 
-        # Stop placed 0.45× the distance from entry to TDO, on the losing side
+        # TDO validity gate: skip if TDO is on the wrong side of entry
+        if TDO_VALIDITY_CHECK:
+            if direction == "long" and tdo <= entry_price:
+                continue
+            if direction == "short" and tdo >= entry_price:
+                continue
+
+        # Per-direction stop placement using configurable ratios
         distance_to_tdo = abs(entry_price - tdo)
         if direction == "long":
-            stop_price = entry_price - 0.45 * distance_to_tdo
+            stop_price = entry_price - LONG_STOP_RATIO * distance_to_tdo
         else:
-            stop_price = entry_price + 0.45 * distance_to_tdo
+            stop_price = entry_price + SHORT_STOP_RATIO * distance_to_tdo
+
+        # Minimum stop distance guard: reject sub-noise stops
+        if MIN_STOP_POINTS > 0 and abs(entry_price - stop_price) < MIN_STOP_POINTS:
+            continue
 
         entry_time = mnq_session.index[entry_idx]
 

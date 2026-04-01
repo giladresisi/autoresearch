@@ -1,6 +1,6 @@
 """tests/test_smt_backtest.py -- Integration tests for run_backtest() in train_smt.py.
 
-Uses synthetic 1m DataFrames written to a tmpdir. No IB connection required.
+Uses synthetic 5m DataFrames written to a tmpdir. No IB connection required.
 """
 import datetime
 import json
@@ -16,7 +16,7 @@ import pytest
 def _build_short_signal_bars(date, base=20000.0, n=90):
     """Build MNQ/MES bars that should produce a bearish SMT signal."""
     start_ts = pd.Timestamp(date + " 09:00:00", tz="America/New_York")
-    idx = pd.date_range(start=start_ts, periods=n, freq="1min")
+    idx = pd.date_range(start=start_ts, periods=n, freq="5min")
     mes_highs = [base + 5] * n
     mnq_highs = [base + 5] * n
     mes_lows  = [base - 5] * n
@@ -41,7 +41,7 @@ def _build_short_signal_bars(date, base=20000.0, n=90):
 def _build_long_signal_bars(date, base=20000.0, n=90):
     """Build MNQ/MES bars that should produce a bullish SMT signal."""
     start_ts = pd.Timestamp(date + " 09:00:00", tz="America/New_York")
-    idx = pd.date_range(start=start_ts, periods=n, freq="1min")
+    idx = pd.date_range(start=start_ts, periods=n, freq="5min")
     mes_lows  = [base - 5] * n
     mnq_lows  = [base - 5] * n
     mes_highs = [base + 5] * n
@@ -68,7 +68,7 @@ def futures_tmpdir(tmp_path, monkeypatch):
     """Fixture: sets FUTURES_CACHE_DIR to a fresh tmpdir and bootstraps manifest."""
     import train_smt
     cache_dir = tmp_path / "futures_data"
-    interval_dir = cache_dir / "1m"
+    interval_dir = cache_dir / "5m"
     interval_dir.mkdir(parents=True)
 
     monkeypatch.setattr(train_smt, "FUTURES_CACHE_DIR", str(cache_dir))
@@ -79,7 +79,7 @@ def futures_tmpdir(tmp_path, monkeypatch):
         "tickers": ["MNQ", "MES"],
         "backtest_start": "2025-01-02",
         "backtest_end": "2025-03-01",
-        "fetch_interval": "1m",
+        "fetch_interval": "5m",
         "source": "ib",
     }
     (cache_dir / "futures_manifest.json").write_text(
@@ -221,7 +221,7 @@ def test_one_trade_per_day_max(futures_tmpdir):
 
     n = 90
     start_ts = pd.Timestamp("2025-01-02 09:00:00", tz="America/New_York")
-    idx = pd.date_range(start=start_ts, periods=n, freq="1min")
+    idx = pd.date_range(start=start_ts, periods=n, freq="5min")
     base = 20000.0
     opens  = [base] * n
     closes = [base] * n
@@ -245,7 +245,7 @@ def test_fold_loop_smoke(futures_tmpdir):
     all_bars = []
     for d in dates:
         start_ts = pd.Timestamp(str(d.date()) + " 09:00:00", tz="America/New_York")
-        idx = pd.date_range(start=start_ts, periods=90, freq="1min")
+        idx = pd.date_range(start=start_ts, periods=18, freq="5min")
         df = pd.DataFrame(
             {"Open": 20000.0, "High": 20005.0, "Low": 19995.0, "Close": 20000.0, "Volume": 1000.0},
             index=idx,
@@ -279,3 +279,21 @@ def test_metrics_shape(futures_tmpdir):
         "avg_rr", "exit_type_breakdown", "trade_records",
     }
     assert required_keys.issubset(set(stats.keys()))
+
+
+# -- Test 35: New defaults integration ---------------------------------------
+
+def test_new_defaults_produce_valid_results(futures_tmpdir, monkeypatch):
+    """New default constants (validity gate + min stop) don't crash run_backtest."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", True)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 5.0)
+    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
+    monkeypatch.setattr(train_smt, "LONG_STOP_RATIO", 0.45)
+    monkeypatch.setattr(train_smt, "SHORT_STOP_RATIO", 0.45)
+
+    mnq, mes = _build_short_signal_bars("2025-01-02")
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    assert "total_trades" in stats
+    assert "trade_records" in stats
+    assert stats["total_trades"] >= 0

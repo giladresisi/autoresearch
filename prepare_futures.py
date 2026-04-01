@@ -1,20 +1,15 @@
-"""prepare_futures.py — Download MNQ/MES 1m futures bars from IB-Gateway.
+"""prepare_futures.py — Download MNQ/MES 5m futures bars from IB-Gateway.
 
 Usage:
     uv run prepare_futures.py
 
 Requires IB-Gateway running on localhost:4002.
-Data cached to ~/.cache/autoresearch/futures_data/1m/.
+Data cached to ~/.cache/autoresearch/futures_data/5m/.
 Running again skips tickers whose file already exists (idempotent).
 
-IB LIMITATION — 1m ContFuture historical data:
-IB rejects explicit endDateTime for ContFuture contracts (error 10339), so only
-the most recent 29 calendar days of 1m data are available.  BACKTEST_START and
-BACKTEST_END below are computed dynamically so the downloaded parquet always
-contains valid data.  Delete the cached parquets to re-download with updated dates.
-
-To backtest over a longer window, supply pre-downloaded parquet files in the
-cache directory and update BACKTEST_START/BACKTEST_END in train_smt.py manually.
+Uses specific quarterly contracts (MNQM6/MESM6) identified by IB conId with explicit
+`endDateTime` pagination, giving ~6.5 months of 5m history (vs 45 days for ContFuture).
+MNQM6/MESM6 expire 2026-06-18 — update CONIDS to MNQU6/MESU6 after rollover.
 """
 import datetime
 import json
@@ -28,22 +23,28 @@ import pandas as pd
 from data.sources import IBGatewaySource
 
 # ── USER CONFIGURATION ──────────────────────────────────────────────────────
-# IB ContFuture symbols (without the TradingView 1! suffix)
 TICKERS = ["MNQ", "MES"]
 
-# Dynamic dates: IB only allows endDateTime='' for ContFuture 1m bars (error 10339 for
-# explicit dates). Requests >7 calendar days reliably timeout. BACKTEST_START and
-# BACKTEST_END are computed to match the 7-day fetch window so the parquet and manifest
-# are always consistent with what was actually downloaded.
-_TODAY          = datetime.date.today()
-BACKTEST_END    = _TODAY.isoformat()
-BACKTEST_START  = (_TODAY - datetime.timedelta(days=7)).isoformat()
+# IB conIds for the active quarterly contracts.
+# MNQM6/MESM6 expire 2026-06-18 — update to MNQU6/MESU6 (793356225/793356217) after rollover.
+CONIDS = {
+    "MNQ": "770561201",   # MNQM6 (Jun 2026)
+    "MES": "770561194",   # MESM6 (Jun 2026)
+}
+
+# Specific quarterly contracts allow explicit endDateTime — no 45-day cap.
+# BACKTEST_START must be >= 2025-09-24 (earliest reliable bar in MNQM6/MESM6).
+# Jun–Aug 2025 is thin (contract newly listed, not front-month) and Sep 1-23 is a
+# known IB data gap — both periods produce 0 SMT signals in practice.
+BACKTEST_START = "2025-09-24"
+_TODAY         = datetime.date.today()
+BACKTEST_END   = _TODAY.isoformat()
 # ────────────────────────────────────────────────────────────────────────────
 
 # No warmup needed — SMT strategy uses no daily SMAs
 HISTORY_START = BACKTEST_START
 
-INTERVAL = "1m"
+INTERVAL = "5m"
 
 # Cache directory: separate from equity cache to avoid collisions
 CACHE_DIR = os.environ.get(
@@ -59,7 +60,7 @@ MAX_WORKERS = 2
 
 
 def process_ticker(ticker: str) -> bool:
-    """Fetch and cache 1m bars for one futures ticker. Returns True on success."""
+    """Fetch and cache futures bars at INTERVAL resolution for one ticker. Returns True on success."""
     out_path = Path(CACHE_DIR) / INTERVAL / f"{ticker}.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.exists():
@@ -69,7 +70,13 @@ def process_ticker(ticker: str) -> bool:
     # and any lingering connections from previous runs.
     client_id = 30 + TICKERS.index(ticker)
     source = IBGatewaySource(host=IB_HOST, port=IB_PORT, client_id=client_id)
-    df = source.fetch(ticker, HISTORY_START, BACKTEST_END, INTERVAL, contract_type="contfuture")
+    df = source.fetch(
+        CONIDS[ticker],
+        HISTORY_START,
+        BACKTEST_END,
+        INTERVAL,
+        contract_type="future_by_conid",
+    )
     if df is None or df.empty:
         print(f"  {ticker}: no data returned")
         return False
