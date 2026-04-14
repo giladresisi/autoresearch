@@ -1,5 +1,12 @@
 # PROGRESS
 
+## Feature: signal_smt.py + train_smt.py Refactoring
+
+**Status**: ✅ Planned
+**Plan File**: `.agents/plans/signal-smt-implementation.md`
+
+---
+
 ## Feature: SMT Direction Control Refactor
 
 **Status**: ✅ Complete
