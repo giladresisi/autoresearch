@@ -138,8 +138,8 @@ def test_run_backtest_session_force_exit(futures_tmpdir):
     mnq, mes = _build_short_signal_bars("2025-01-02")
     original_screen = train_smt.screen_session
 
-    def patched_screen(mnq_b, mes_b, d):
-        sig = original_screen(mnq_b, mes_b, d)
+    def patched_screen(mnq_b, mes_b, tdo):
+        sig = original_screen(mnq_b, mes_b, tdo)
         if sig is not None:
             if sig["direction"] == "short":
                 sig["take_profit"] = sig["entry_price"] - 10000
@@ -165,8 +165,8 @@ def test_run_backtest_end_of_backtest_exit(futures_tmpdir):
     mnq, mes = _build_short_signal_bars("2025-01-02")
     original_screen = train_smt.screen_session
 
-    def patched_screen(mnq_b, mes_b, d):
-        sig = original_screen(mnq_b, mes_b, d)
+    def patched_screen(mnq_b, mes_b, tdo):
+        sig = original_screen(mnq_b, mes_b, tdo)
         if sig is not None:
             sig["take_profit"] = sig["entry_price"] + 50000
             sig["stop_price"] = sig["entry_price"] - 50000
@@ -212,9 +212,9 @@ def test_one_trade_per_day_max(futures_tmpdir):
     signal_count = 0
     original_screen = train_smt.screen_session
 
-    def counting_screen(mnq_b, mes_b, d):
+    def counting_screen(mnq_b, mes_b, tdo):
         nonlocal signal_count
-        sig = original_screen(mnq_b, mes_b, d)
+        sig = original_screen(mnq_b, mes_b, tdo)
         if sig is not None:
             signal_count += 1
         return sig

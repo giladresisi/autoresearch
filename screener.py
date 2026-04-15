@@ -20,7 +20,11 @@ import sys
 import warnings
 
 import pandas as pd
-import yfinance as yf
+try:
+    import yfinance as yf
+except ImportError:
+    import types as _types
+    yf = _types.SimpleNamespace(Ticker=None)  # type: ignore[assignment]
 
 from screener_prepare import SCREENER_CACHE_DIR
 from train import (

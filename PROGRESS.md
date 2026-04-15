@@ -1,9 +1,32 @@
 # PROGRESS
 
+## Feature: signal_smt.py — Tick-Based 1s Bar Ingestion
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/signal-smt-tick-ingestion.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/signal-smt-tick-ingestion.md`
+- Detailed implementation summary
+- Divergences and resolutions (none — 10/10 alignment)
+- Test results and metrics (27 passed, +7 tests; 291/293 full suite, 0 regressions)
+- Manual-only gap: live per-tick callback firing (requires live IB Gateway)
+
+---
+
 ## Feature: signal_smt.py + train_smt.py Refactoring
 
-**Status**: ✅ Planned
+**Status**: ✅ Complete
 **Plan File**: `.agents/plans/signal-smt-implementation.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/signal-smt-implementation.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics (70 passed, 0 failures; +22 new tests)
+- Manual-only gaps: live IB connection + dual subscriptions; live 1s stop/TP detection
 
 ---
 

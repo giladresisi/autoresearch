@@ -1,0 +1,548 @@
+# signal_smt.py
+# Realtime SMT divergence signal generator for MNQ1!/MES1!.
+# Subscribes to dual 1m IB streams + reqTickByTickData("AllLast") per instrument; detects signals on each 1s bar
+# via screen_session, then manages the position through the session using manage_position.
+"""
+Usage: python signal_smt.py
+
+Requires IB Gateway (or TWS) running at IB_HOST:IB_PORT with API enabled.
+State machine: SCANNING → MANAGING, one trade per session.
+"""
+from pathlib import Path
+import datetime
+import json
+
+import pandas as pd
+from ib_insync import IB, Future, util
+
+from train_smt import screen_session, manage_position, compute_tdo
+
+# ── Connection constants ──────────────────────────────────────────────────────
+IB_HOST      = "127.0.0.1"
+IB_PORT      = 4002
+IB_CLIENT_ID = 10
+
+# ── Contract identifiers (quarterly; update after rollover) ───────────────────
+# MNQM6/MESM6 expire 2026-06-18; next: MNQU6=793356225, MESU6=793356217
+MNQ_CONID = "770561201"
+MES_CONID = "770561194"
+
+# ── Session window (caller-side only; never passed to screen_session) ─────────
+SESSION_START = "09:00"   # ET
+SESSION_END   = "13:30"   # ET
+
+# ── Trade configuration ───────────────────────────────────────────────────────
+# 2-tick adverse fill; 1 tick = 0.25 MNQ points
+ENTRY_SLIPPAGE_TICKS = 2
+MAX_LOOKBACK_DAYS    = 30
+MNQ_PNL_PER_POINT    = 2.0
+
+# ── Realtime data paths ───────────────────────────────────────────────────────
+REALTIME_DATA_DIR = Path("data/realtime")
+POSITION_FILE     = REALTIME_DATA_DIR / "position.json"
+
+# ── Module-level state (set in main()) ───────────────────────────────────────
+_ib: IB = None
+_mnq_contract = None
+_mes_contract = None
+
+_mnq_1m_df: pd.DataFrame = None   # loaded from parquet + gap-filled
+_mes_1m_df: pd.DataFrame = None
+_mnq_1s_buf: pd.DataFrame = None  # current-minute 1s bars, cleared on each new 1m bar
+_mes_1s_buf: pd.DataFrame = None
+
+# Per-instrument tick accumulators for the current in-progress second
+_mnq_tick_bar: dict | None = None   # running OHLCV accumulator for in-progress second
+_mes_tick_bar: dict | None = None
+
+_state: str = "SCANNING"          # "SCANNING" | "MANAGING"
+_position: dict | None = None
+_startup_ts: pd.Timestamp | None = None
+
+# Guard against re-detecting a signal that fired before this session's first exit
+_last_exit_ts: pd.Timestamp = pd.Timestamp("1970-01-01", tz="America/New_York")
+
+# Derived time objects (set from SESSION_START/END strings in main())
+_session_start_time = None
+_session_end_time   = None
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _empty_bar_df() -> pd.DataFrame:
+    """Return an empty OHLCV DataFrame with a tz-aware ET DatetimeIndex."""
+    return pd.DataFrame(
+        columns=["Open", "High", "Low", "Close", "Volume"],
+        index=pd.DatetimeIndex([], tz="America/New_York"),
+        dtype=float,
+    )
+
+
+def _apply_slippage(signal: dict) -> float:
+    """Compute assumed fill price after adverse slippage.
+
+    Slippage is applied against the trade: long pays more, short receives less.
+    """
+    if signal["direction"] == "long":
+        return signal["entry_price"] + ENTRY_SLIPPAGE_TICKS * 0.25
+    return signal["entry_price"] - ENTRY_SLIPPAGE_TICKS * 0.25
+
+
+def _compute_pnl(position: dict, exit_price: float) -> float:
+    """P&L in dollars for one MNQ contract given exit price."""
+    sign = 1 if position["direction"] == "long" else -1
+    return sign * (exit_price - position["assumed_entry"]) * position["contracts"] * MNQ_PNL_PER_POINT
+
+
+def _format_signal_line(ts: pd.Timestamp, signal: dict, assumed_entry: float) -> str:
+    """Human-readable signal log line."""
+    dist = abs(signal["entry_price"] - signal["take_profit"])
+    stop_dist = abs(signal["entry_price"] - signal["stop_price"])
+    rr = dist / stop_dist if stop_dist > 0 else 0.0
+    slip_label = f"+{ENTRY_SLIPPAGE_TICKS}t slip" if signal["direction"] == "long" else f"-{ENTRY_SLIPPAGE_TICKS}t slip"
+    return (
+        f"[{ts.strftime('%H:%M:%S')}] SIGNAL    {signal['direction']:<5} | "
+        f"entry ~{assumed_entry:.2f} ({slip_label}) | "
+        f"stop {signal['stop_price']:.2f} | "
+        f"TP {signal['take_profit']:.2f} | "
+        f"RR ~{rr:.1f}x"
+    )
+
+
+def _format_exit_line(
+    ts: pd.Timestamp, exit_type: str, exit_price: float, pnl: float, contracts: int
+) -> str:
+    """Human-readable exit log line."""
+    label = exit_type.replace("exit_", "").replace("_session_end", " (session)")
+    pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+    return (
+        f"[{ts.strftime('%H:%M:%S')}] EXIT      {label:<6} | "
+        f"filled {exit_price:.2f} | "
+        f"P&L {pnl_str} | "
+        f"{contracts} MNQ1! contract{'s' if contracts != 1 else ''}"
+    )
+
+
+def _build_1s_buffer_df() -> pd.DataFrame:
+    """Factory alias for _empty_bar_df; used in tests to verify buffer schema."""
+    return _empty_bar_df()
+
+
+class _SyntheticBar:
+    """Minimal bar-like object built from a finalized tick accumulator.
+
+    Allows on_mnq_tick to pass a finalized second's data to _process()
+    without modifying _process(), _process_scanning(), or _process_managing().
+    """
+    __slots__ = ("date", "open", "high", "low", "close", "volume")
+
+    def __init__(self, acc: dict) -> None:
+        self.date   = acc["second_ts"]
+        self.open   = acc["open"]
+        self.high   = acc["high"]
+        self.low    = acc["low"]
+        self.close  = acc["close"]
+        self.volume = acc["volume"]
+
+
+def _update_tick_accumulator(
+    acc: dict | None, price: float, size: float, second_ts: pd.Timestamp
+) -> tuple[dict, dict | None]:
+    """Update or create a tick accumulator for the current second.
+
+    Returns (new_acc, finalized_acc_or_None). A non-None finalized value means
+    a second boundary was crossed and the returned acc is the finalized bar.
+    """
+    if acc is None or second_ts != acc["second_ts"]:
+        # Second boundary crossed — finalize old accumulator, start a new one
+        finalized = acc
+        new_acc = {"open": price, "high": price, "low": price,
+                   "close": price, "volume": size, "second_ts": second_ts}
+        return new_acc, finalized
+    # Same second — update running OHLCV
+    acc["high"]   = max(acc["high"], price)
+    acc["low"]    = min(acc["low"], price)
+    acc["close"]  = price
+    acc["volume"] += size
+    return acc, None
+
+
+def _acc_to_df_row(acc: dict) -> pd.DataFrame:
+    """Convert a finalized tick accumulator to a one-row OHLCV DataFrame.
+
+    Output schema is identical to _append_1s_bar: columns Open/High/Low/Close/Volume,
+    ET-localized DatetimeIndex.
+    """
+    return pd.DataFrame(
+        [[acc["open"], acc["high"], acc["low"], acc["close"], acc["volume"]]],
+        columns=["Open", "High", "Low", "Close", "Volume"],
+        index=pd.DatetimeIndex([acc["second_ts"]]),
+    )
+
+
+def _append_1s_bar(buf: pd.DataFrame, bar) -> pd.DataFrame:
+    """Append an ib_insync bar object to a 1s buffer DataFrame.
+
+    Returns the updated buffer. Caller must reassign the module variable.
+    """
+    bar_ts = _bar_timestamp(bar)
+    row = pd.DataFrame(
+        [[float(bar.open), float(bar.high), float(bar.low), float(bar.close), float(bar.volume)]],
+        columns=["Open", "High", "Low", "Close", "Volume"],
+        index=pd.DatetimeIndex([bar_ts]),
+    )
+    return pd.concat([buf, row])
+
+
+def _bar_timestamp(bar) -> pd.Timestamp:
+    # bar.date from ib_insync is typically a naive datetime; localize if needed
+    ts = pd.Timestamp(bar.date)
+    if ts.tz is None:
+        return ts.tz_localize("America/New_York")
+    return ts.tz_convert("America/New_York")
+
+
+def _load_parquets() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load cached 1m parquet files. Returns empty DataFrames if files don't exist."""
+    mnq_path = REALTIME_DATA_DIR / "MNQ_1m.parquet"
+    mes_path  = REALTIME_DATA_DIR / "MES_1m.parquet"
+    mnq_df = pd.read_parquet(mnq_path) if mnq_path.exists() else _empty_bar_df()
+    mes_df = pd.read_parquet(mes_path) if mes_path.exists() else _empty_bar_df()
+    return mnq_df, mes_df
+
+
+def _gap_fill_1m(
+    mnq_df: pd.DataFrame, mes_df: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Fetch any missing 1m bars from IB and append to the DataFrames.
+
+    Uses a separate IB client ID to avoid conflicts with the live subscription connection.
+    Caps the lookback at MAX_LOOKBACK_DAYS regardless of parquet age.
+    """
+    from data.sources import IBGatewaySource
+
+    now = pd.Timestamp.now(tz="America/New_York")
+    lookback_floor = now - pd.Timedelta(days=MAX_LOOKBACK_DAYS)
+
+    # Start from last cached bar or the 30-day floor, whichever is later
+    if not mnq_df.empty:
+        last_ts = mnq_df.index[-1]
+        start_ts = max(last_ts, lookback_floor)
+    else:
+        start_ts = lookback_floor
+
+    start_str = start_ts.isoformat()
+    end_str   = now.isoformat()
+
+    # Use a different client ID for the gap-fill fetch (avoids clash with main IB connection)
+    source = IBGatewaySource(host=IB_HOST, port=IB_PORT, client_id=IB_CLIENT_ID + 1)
+
+    mnq_new = source.fetch(MNQ_CONID, start_str, end_str, interval="1m", contract_type="future_by_conid")
+    mes_new = source.fetch(MES_CONID, start_str, end_str, interval="1m", contract_type="future_by_conid")
+
+    if mnq_new is not None and not mnq_new.empty:
+        mnq_df = pd.concat([mnq_df, mnq_new]).sort_index()
+        mnq_df = mnq_df[~mnq_df.index.duplicated(keep="last")]
+
+    if mes_new is not None and not mes_new.empty:
+        mes_df = pd.concat([mes_df, mes_new]).sort_index()
+        mes_df = mes_df[~mes_df.index.duplicated(keep="last")]
+
+    # Persist updated caches
+    REALTIME_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    mnq_df.to_parquet(REALTIME_DATA_DIR / "MNQ_1m.parquet")
+    mes_df.to_parquet(REALTIME_DATA_DIR / "MES_1m.parquet")
+
+    return mnq_df, mes_df
+
+
+# ── IB bar callbacks ──────────────────────────────────────────────────────────
+
+def on_mnq_1m_bar(bars, hasNewBar):
+    """Fired when a new completed 1m MNQ bar arrives.
+
+    Appends the bar to the persistent 1m DataFrame, saves the parquet,
+    and clears the 1s buffer and tick accumulator so the next minute starts fresh.
+    """
+    global _mnq_1m_df, _mnq_1s_buf, _mnq_tick_bar
+    if not hasNewBar:
+        return
+    bar = bars[-1]
+    bar_ts = _bar_timestamp(bar)
+    row = pd.DataFrame(
+        [[float(bar.open), float(bar.high), float(bar.low), float(bar.close), float(bar.volume)]],
+        columns=["Open", "High", "Low", "Close", "Volume"],
+        index=pd.DatetimeIndex([bar_ts]),
+    )
+    _mnq_1m_df = pd.concat([_mnq_1m_df, row])
+    _mnq_1m_df = _mnq_1m_df[~_mnq_1m_df.index.duplicated(keep="last")]
+    _mnq_1m_df.to_parquet(REALTIME_DATA_DIR / "MNQ_1m.parquet")
+    _mnq_1s_buf = _empty_bar_df()
+    # Reset tick accumulator so the last second of the expiring minute is not
+    # re-appended to the fresh buffer on the first tick of the next minute.
+    _mnq_tick_bar = None
+
+
+def on_mes_1m_bar(bars, hasNewBar):
+    """Fired when a new completed 1m MES bar arrives.
+
+    Appends to the persistent 1m DataFrame and saves the parquet.
+    """
+    global _mes_1m_df, _mes_1s_buf, _mes_tick_bar
+    if not hasNewBar:
+        return
+    bar = bars[-1]
+    bar_ts = _bar_timestamp(bar)
+    row = pd.DataFrame(
+        [[float(bar.open), float(bar.high), float(bar.low), float(bar.close), float(bar.volume)]],
+        columns=["Open", "High", "Low", "Close", "Volume"],
+        index=pd.DatetimeIndex([bar_ts]),
+    )
+    _mes_1m_df = pd.concat([_mes_1m_df, row])
+    _mes_1m_df = _mes_1m_df[~_mes_1m_df.index.duplicated(keep="last")]
+    _mes_1m_df.to_parquet(REALTIME_DATA_DIR / "MES_1m.parquet")
+    _mes_1s_buf = _empty_bar_df()
+    # Reset tick accumulator alongside 1s buffer to avoid stale second bleeding
+    # into the next minute's buffer on the first tick.
+    _mes_tick_bar = None
+
+
+def _tick_second_ts(t) -> pd.Timestamp:
+    """Convert an IB tick timestamp to an ET-localized second boundary.
+
+    Guards against tz-naive timestamps, which IB can send on reconnect.
+    """
+    ts = pd.Timestamp(t.time)
+    if ts.tz is None:
+        ts = ts.tz_localize("UTC")
+    return ts.tz_convert("America/New_York").floor("s")
+
+
+def on_mes_tick(ticker) -> None:
+    """Fired on each trade tick for MES via reqTickByTickData("AllLast").
+
+    Accumulates ticks into per-second OHLCV. Appends the completed bar to
+    _mes_1s_buf when the first tick of a new second arrives (boundary crossing).
+    MES is passive — never calls _process().
+    """
+    global _mes_tick_bar, _mes_1s_buf
+    if not ticker.tickByTicks:
+        return
+    t = ticker.tickByTicks[-1]
+    second_ts = _tick_second_ts(t)
+    _mes_tick_bar, finalized = _update_tick_accumulator(_mes_tick_bar, t.price, t.size, second_ts)
+    if finalized is not None:
+        _mes_1s_buf = pd.concat([_mes_1s_buf, _acc_to_df_row(finalized)])
+
+
+def on_mnq_tick(ticker) -> None:
+    """Fired on each trade tick for MNQ via reqTickByTickData("AllLast").
+
+    Accumulates ticks into per-second OHLCV. On second boundary crossing,
+    appends the completed bar to _mnq_1s_buf and triggers _process() for
+    signal detection / position management.
+    """
+    global _mnq_tick_bar, _mnq_1s_buf
+    if not ticker.tickByTicks:
+        return
+    t = ticker.tickByTicks[-1]
+    second_ts = _tick_second_ts(t)
+    _mnq_tick_bar, finalized = _update_tick_accumulator(_mnq_tick_bar, t.price, t.size, second_ts)
+    if finalized is not None:
+        _mnq_1s_buf = pd.concat([_mnq_1s_buf, _acc_to_df_row(finalized)])
+        _process(_SyntheticBar(finalized))
+
+
+# ── State machine ─────────────────────────────────────────────────────────────
+
+def _process(bar) -> None:
+    """Route each 1s bar to the appropriate state handler."""
+    bar_ts   = _bar_timestamp(bar)
+    bar_time = bar_ts.time()
+
+    if _state == "SCANNING":
+        _process_scanning(bar, bar_ts, bar_time)
+    else:
+        _process_managing(bar, bar_ts, bar_time)
+
+
+def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
+    """SCANNING state: check all gates then attempt signal detection on each 1s bar."""
+    global _state, _position, _last_exit_ts
+
+    # 1. Session gate: only scan during kill zone
+    if bar_time < _session_start_time or bar_time > _session_end_time:
+        return
+
+    # 2. Alignment gate: MES 1s buffer must be current (same latest ts as MNQ)
+    if _mes_1s_buf.empty or _mes_1s_buf.index[-1] != _mnq_1s_buf.index[-1]:
+        return
+
+    # 3. Build combined 1m + 1s DataFrames for signal detection
+    combined_mnq = pd.concat([_mnq_1m_df, _mnq_1s_buf]).sort_index() if not _mnq_1s_buf.empty else _mnq_1m_df
+    combined_mes = pd.concat([_mes_1m_df, _mes_1s_buf]).sort_index() if not _mes_1s_buf.empty else _mes_1m_df
+
+    # 4. Slice to today's session window
+    today = bar_ts.date()
+    session_mask = (
+        (combined_mnq.index.date == today)
+        & (combined_mnq.index.time >= _session_start_time)
+        & (combined_mnq.index.time <= _session_end_time)
+    )
+    mnq_session = combined_mnq[session_mask]
+    mes_session = combined_mes[
+        (combined_mes.index.date == today)
+        & (combined_mes.index.time >= _session_start_time)
+        & (combined_mes.index.time <= _session_end_time)
+    ]
+
+    # 5. Compute TDO from the full 1m parquet (needs the midnight bar)
+    tdo = compute_tdo(_mnq_1m_df, today)
+    if tdo is None:
+        return
+
+    # 6. Detect signal
+    signal = screen_session(mnq_session, mes_session, tdo)
+    if signal is None:
+        return
+
+    # 7. Stale startup guard: skip signals that fired before this process started
+    if _startup_ts is not None and signal["entry_time"] <= _startup_ts:
+        return
+
+    # 8. Re-detection guard: skip signals at or before the last exit timestamp
+    if signal["entry_time"] <= _last_exit_ts:
+        return
+
+    # 9. Open position with slippage-adjusted assumed fill
+    assumed_entry = _apply_slippage(signal)
+    _position = {
+        **signal,
+        "assumed_entry": assumed_entry,
+        "contracts": 1,
+        "instrument": "MNQ1!",
+        "entry_time": str(signal["entry_time"]),
+    }
+    POSITION_FILE.write_text(json.dumps(_position, indent=2))
+    print(_format_signal_line(bar_ts, signal, assumed_entry), flush=True)
+    _state = "MANAGING"
+
+
+def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
+    """MANAGING state: check exit conditions on each 1s bar.
+
+    Exits on TP, stop, or session end; prints exit line and resets to SCANNING.
+    """
+    global _state, _position, _last_exit_ts
+
+    bar_series = pd.Series(
+        {
+            "Open":   float(bar.open),
+            "High":   float(bar.high),
+            "Low":    float(bar.low),
+            "Close":  float(bar.close),
+            "Volume": float(bar.volume),
+        },
+        name=bar_ts,
+    )
+
+    result = manage_position(_position, bar_series)
+
+    if result == "hold":
+        if bar_time >= _session_end_time:
+            # Force close at session end — no TP/stop triggered
+            result = "exit_session_end"
+            exit_price = float(bar.close)
+        else:
+            return
+
+    if result == "exit_tp":
+        exit_price = _position["take_profit"]
+    elif result == "exit_stop":
+        exit_price = _position["stop_price"]
+    elif result != "exit_session_end":
+        # Unknown exit type — log and bail rather than corrupt state with unbound exit_price
+        return
+
+    pnl = _compute_pnl(_position, exit_price)
+    print(_format_exit_line(bar_ts, result, exit_price, pnl, _position["contracts"]), flush=True)
+
+    _last_exit_ts = bar_ts
+    POSITION_FILE.unlink(missing_ok=True)
+    _position = None
+    _state = "SCANNING"
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main() -> None:
+    global _ib, _mnq_contract, _mes_contract, _mnq_1m_df, _mes_1m_df
+    global _mnq_1s_buf, _mes_1s_buf, _state, _position, _startup_ts
+    global _session_start_time, _session_end_time
+    global _mnq_tick_bar, _mes_tick_bar
+
+    REALTIME_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Parse session window into time objects used by callbacks
+    _session_start_time = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
+    _session_end_time   = pd.Timestamp(f"2000-01-01 {SESSION_END}").time()
+
+    _mnq_1s_buf = _empty_bar_df()
+    _mes_1s_buf = _empty_bar_df()
+    _mnq_tick_bar = None
+    _mes_tick_bar = None
+
+    # Load and gap-fill the persistent 1m parquet caches
+    _mnq_1m_df, _mes_1m_df = _load_parquets()
+    _mnq_1m_df, _mes_1m_df = _gap_fill_1m(_mnq_1m_df, _mes_1m_df)
+
+    # Restore open position from disk if the process was restarted mid-trade
+    if POSITION_FILE.exists():
+        _position = json.loads(POSITION_FILE.read_text())
+        _state = "MANAGING"
+        _startup_ts = None
+    else:
+        _state = "SCANNING"
+        # Startup guard timestamp: any signal entry_time <= this is considered stale
+        _startup_ts = pd.Timestamp.now(tz="America/New_York")
+
+    # Connect to IB Gateway
+    _ib = IB()
+    _ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
+
+    mnq_contract = Future(conId=int(MNQ_CONID), exchange="CME")
+    mes_contract = Future(conId=int(MES_CONID), exchange="CME")
+
+    # Request 1m bar streams (keepUpToDate=True → callbacks fire on each new bar)
+    mnq_1m = _ib.reqHistoricalData(
+        mnq_contract, endDateTime="", durationStr="1 D",
+        barSizeSetting="1 min", whatToShow="TRADES",
+        useRTH=False, formatDate=2, keepUpToDate=True,
+    )
+    mes_1m = _ib.reqHistoricalData(
+        mes_contract, endDateTime="", durationStr="1 D",
+        barSizeSetting="1 min", whatToShow="TRADES",
+        useRTH=False, formatDate=2, keepUpToDate=True,
+    )
+
+    # Subscribe to per-tick data; fire handler on each completed second (boundary crossing)
+    mnq_tick = _ib.reqTickByTickData(mnq_contract, "AllLast", 0, False)
+    mes_tick  = _ib.reqTickByTickData(mes_contract, "AllLast", 0, False)
+
+    mnq_1m.updateEvent   += on_mnq_1m_bar
+    mes_1m.updateEvent   += on_mes_1m_bar
+    mnq_tick.updateEvent += on_mnq_tick
+    mes_tick.updateEvent += on_mes_tick
+
+    try:
+        util.run()
+    finally:
+        # Graceful shutdown: disconnect from IB Gateway so clientIds are released.
+        # After loop.stop() the loop is stopped (not closed) and run_until_complete()
+        # works normally, so _ib.disconnect() (which calls it internally) is safe here.
+        if _ib and _ib.isConnected():
+            _ib.disconnect()
+
+
+if __name__ == "__main__":
+    main()

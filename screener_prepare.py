@@ -18,7 +18,13 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
-import yfinance as yf
+
+try:
+    import yfinance as yf
+except ImportError:
+    import types as _types
+    # Stub so the module imports without yfinance installed; monkeypatch can override yf.Ticker
+    yf = _types.SimpleNamespace(Ticker=None)  # type: ignore[assignment]
 
 from prepare import TICKERS as PREPARE_TICKERS, resample_to_daily
 

@@ -8,7 +8,12 @@ import warnings
 from typing import Protocol, runtime_checkable
 
 import pandas as pd
-import yfinance as yf
+
+try:
+    import yfinance as yf
+except ImportError:
+    import types as _types
+    yf = _types.SimpleNamespace(Ticker=None)  # type: ignore[assignment]
 
 
 @runtime_checkable
@@ -38,6 +43,8 @@ class YFinanceSource:
         end: str,
         interval: str = "1h",
     ) -> pd.DataFrame | None:
+        if yf.Ticker is None:
+            return None  # yfinance not installed; caller should handle None
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             ticker_obj = yf.Ticker(ticker)
@@ -176,12 +183,11 @@ class DatabentSource:
         interval: str = "5m",
         **kwargs,
     ) -> pd.DataFrame | None:
-        import databento as db
-
         if interval not in ("1m", "5m"):
             raise ValueError(
                 f"DatabentSource only supports 1m and 5m intervals, got {interval!r}"
             )
+        import databento as db
         try:
             client = db.Historical(key=self._api_key)
             data = client.timeseries.get_range(

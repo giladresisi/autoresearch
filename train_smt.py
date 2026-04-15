@@ -265,13 +265,12 @@ def find_entry_bar(
 
 
 def compute_tdo(mnq_bars: pd.DataFrame, date: datetime.date) -> float | None:
-    """Return True Day Open = opening price of the 9:30 AM ET bar for given date.
+    """Return True Day Open = opening price of the 00:00 ET bar for given date.
 
-    Falls back to the first available bar on that date if 9:30 bar is absent
-    (e.g., for signals detected before 9:30 AM in the 9:00–9:30 window).
+    Falls back to the first available bar on that date if the 00:00 bar is absent.
     Returns None if no bars exist for the date.
     """
-    target_time = pd.Timestamp(f"{date} 09:30:00", tz="America/New_York")
+    target_time = pd.Timestamp(f"{date} 00:00:00", tz="America/New_York")
     if target_time in mnq_bars.index:
         return float(mnq_bars.loc[target_time, "Open"])
     # Proxy: use the first available bar on that date
@@ -316,14 +315,15 @@ def print_direction_breakdown(stats: dict, prefix: str = "") -> None:
 
 
 def screen_session(
-    mnq_bars: pd.DataFrame,
-    mes_bars: pd.DataFrame,
-    date: datetime.date,
+    mnq_bars: pd.DataFrame,   # pre-sliced to session window by caller
+    mes_bars: pd.DataFrame,   # pre-sliced to session window by caller
+    tdo: float,               # True Day Open, pre-computed by caller
 ) -> dict | None:
     """Run the full SMT signal pipeline for one session.
 
-    Slices SESSION_START–SESSION_END bars, scans for the first divergence,
-    then looks for a confirmation entry bar. Returns a signal dict or None.
+    Caller is responsible for pre-slicing mnq_bars/mes_bars to the session
+    window (SESSION_START–SESSION_END) and pre-computing TDO. This function
+    does not reference SESSION_START, SESSION_END, or compute_tdo internally.
 
     Signal dict keys:
         direction:       "long" | "short"
@@ -342,26 +342,21 @@ def screen_session(
         LONG_STOP_RATIO:      fraction of |entry - TDO| used for long stop placement
         SHORT_STOP_RATIO:     fraction of |entry - TDO| used for short stop placement
     """
-    # Slice the kill-zone window for this date
-    session_mask = (
-        (mnq_bars.index.date == date)
-        & (mnq_bars.index.time >= pd.Timestamp(f"2000-01-01 {SESSION_START}").time())
-        & (mnq_bars.index.time <= pd.Timestamp(f"2000-01-01 {SESSION_END}").time())
-    )
-    mnq_session = mnq_bars[session_mask]
-    mes_session = mes_bars[session_mask]
-
-    if mnq_session.empty or mes_session.empty:
+    if mnq_bars.empty or mes_bars.empty:
         return None
 
-    n_bars = len(mnq_session)
+    # Reject degenerate TDO before scanning — no valid signal can be placed
+    if tdo is None or tdo == 0.0:
+        return None
+
+    n_bars = len(mnq_bars)
 
     # Scan bars left-to-right for the first divergence
-    _min_bars = _bars_for_minutes(mnq_session, MIN_BARS_BEFORE_SIGNAL)
+    _min_bars = _bars_for_minutes(mnq_bars, MIN_BARS_BEFORE_SIGNAL)
     for bar_idx in range(_min_bars, n_bars):
         direction = detect_smt_divergence(
-            mes_session.reset_index(drop=True),
-            mnq_session.reset_index(drop=True),
+            mes_bars.reset_index(drop=True),
+            mnq_bars.reset_index(drop=True),
             bar_idx,
             0,
             _min_bars,
@@ -374,14 +369,9 @@ def screen_session(
             continue
 
         # Look for confirmation entry after divergence bar
-        mnq_reset = mnq_session.reset_index(drop=True)
+        mnq_reset = mnq_bars.reset_index(drop=True)
         entry_idx = find_entry_bar(mnq_reset, direction, bar_idx, n_bars)
         if entry_idx is None:
-            continue
-
-        # Compute TDO as take-profit target
-        tdo = compute_tdo(mnq_bars, date)
-        if tdo is None:
             continue
 
         entry_bar = mnq_reset.iloc[entry_idx]
@@ -405,7 +395,7 @@ def screen_session(
         if MIN_STOP_POINTS > 0 and abs(entry_price - stop_price) < MIN_STOP_POINTS:
             continue
 
-        entry_time = mnq_session.index[entry_idx]
+        entry_time = mnq_bars.index[entry_idx]
 
         return {
             "direction":      direction,
@@ -517,7 +507,12 @@ def run_backtest(
         day_pnl = 0.0
 
         if position is None:
-            signal = screen_session(mnq_session, mes_session, day)
+            mnq_day = mnq_df[mnq_df.index.date == day]
+            day_tdo = compute_tdo(mnq_day, day)
+            if day_tdo is None:
+                equity_curve.append(equity_curve[-1])
+                continue
+            signal = screen_session(mnq_session, mes_session, day_tdo)
             if signal:
                 risk_per_contract = (
                     abs(signal["entry_price"] - signal["stop_price"]) * MNQ_PNL_PER_POINT

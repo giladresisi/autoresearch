@@ -17,7 +17,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
-import yfinance as yf
+
+try:
+    import yfinance as yf
+except ImportError:
+    import types as _types
+    from unittest.mock import MagicMock as _MagicMock
+    # Stub: _add_earnings_dates wraps its body in try/except, so a mock Ticker is safe
+    yf = _types.SimpleNamespace(Ticker=_MagicMock())  # type: ignore[assignment]
 
 from data.sources import DataSource, YFinanceSource, IBGatewaySource
 

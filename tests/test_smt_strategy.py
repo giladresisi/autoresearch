@@ -199,23 +199,23 @@ def test_find_entry_requires_wick_past_body():
 
 # ══ compute_tdo tests ════════════════════════════════════════════════════════
 
-def test_compute_tdo_finds_930_bar():
-    """9:30 bar exists → returns its open."""
+def test_compute_tdo_finds_midnight_bar():
+    """00:00 ET bar exists → returns its open."""
     import train_smt
     mnq = _make_1m_bars(
         opens= [100, 105, 110],
         highs= [101, 106, 111],
         lows=  [ 99, 104, 109],
         closes=[100, 105, 110],
-        start_time="2025-01-02 09:28:00",
+        start_time="2025-01-02 00:00:00",
     )
     date = datetime.date(2025, 1, 2)
     tdo = train_smt.compute_tdo(mnq, date)
-    assert tdo == 110.0  # bar at 09:30
+    assert tdo == 100.0  # bar at 00:00
 
 
-def test_compute_tdo_proxy_no_930_bar():
-    """9:30 bar absent → returns first available bar's open."""
+def test_compute_tdo_proxy_no_midnight_bar():
+    """00:00 bar absent → returns first available bar's open."""
     import train_smt
     mnq = _make_1m_bars(
         opens= [100, 105],
@@ -284,17 +284,8 @@ def test_tp_equals_tdo():
         closes=[200, 200, 200, 200, 200, 200, 198, 200],  # bar 6: bearish confirm
         start_time="2025-01-02 09:00:00",
     )
-    # Add a 9:30 bar so compute_tdo works
-    tdo_bar = _make_1m_bars(
-        opens= [195],
-        highs= [196],
-        lows=  [194],
-        closes=[195],
-        start_time="2025-01-02 09:30:00",
-    )
-    mnq_full = pd.concat([mnq, tdo_bar]).sort_index()
-    mes_full = pd.concat([mes, tdo_bar]).sort_index()
-    signal = train_smt.screen_session(mnq_full, mes_full, datetime.date(2025, 1, 2))
+    # Pass tdo directly; caller is responsible for computing it
+    signal = train_smt.screen_session(mnq, mes, 195.0)
     if signal is not None:
         assert signal["take_profit"] == signal["tdo"]
 
@@ -314,11 +305,13 @@ def test_rr_ratio():
 # ══ screen_session tests ═════════════════════════════════════════════════════
 
 def _build_short_session():
-    """Helper: synthetic session with a short SMT divergence signal."""
-    # 10 bars from 09:00; bar 7 MES new high, MNQ doesn't; bar 8 bearish confirm
-    # Bar 5: MNQ bullish (close=202 > open=199) — required for find_entry_bar "short"
-    # Bar 7: MES breaks session high (103 > 101), MNQ does not (201 <= 201)
-    # Bar 8: MNQ bearish (close=198 < open=200) with high=203 > bull-body-close=202 → confirms
+    """Helper: synthetic session with a short SMT divergence signal.
+
+    Returns pre-sliced session bars and the TDO float — caller passes both to screen_session.
+    Bar 5: MNQ bullish (close=202 > open=199) — required for find_entry_bar "short"
+    Bar 7: MES breaks session high (103 > 101), MNQ does not (201 <= 201)
+    Bar 8: MNQ bearish (close=198 < open=200) with high=203 > bull-body-close=202 → confirms
+    """
     mes = _make_1m_bars(
         opens= [100]*10,
         highs= [101, 101, 101, 101, 101, 101, 101, 103, 102, 102],
@@ -333,19 +326,18 @@ def _build_short_session():
         closes=[200, 200, 200, 200, 200, 202, 200, 200, 198, 200],
         start_time="2025-01-02 09:00:00",
     )
-    # 9:30 bar for TDO
-    tdo_bar_mes = _make_1m_bars([100],[101],[99],[100], start_time="2025-01-02 09:30:00")
-    tdo_bar_mnq = _make_1m_bars([195],[196],[194],[195], start_time="2025-01-02 09:30:00")
-    mes_full = pd.concat([mes, tdo_bar_mes]).sort_index()
-    mnq_full = pd.concat([mnq, tdo_bar_mnq]).sort_index()
-    return mnq_full, mes_full
+    # TDO=195.0: below entry_price≈198 → valid for a short signal
+    return mnq, mes, 195.0
 
 
 def _build_long_session():
-    """Helper: synthetic session with a long SMT divergence signal."""
-    # Bar 5: MNQ bearish (close=198 < open=201) — required for find_entry_bar "long"
-    # Bar 7: MES breaks session low (97 < 99), MNQ does not (199 >= 199)
-    # Bar 8: MNQ bullish (close=202 > open=198) with low=194 < bear-body-close=198 → confirms
+    """Helper: synthetic session with a long SMT divergence signal.
+
+    Returns pre-sliced session bars and the TDO float — caller passes both to screen_session.
+    Bar 5: MNQ bearish (close=198 < open=201) — required for find_entry_bar "long"
+    Bar 7: MES breaks session low (97 < 99), MNQ does not (199 >= 199)
+    Bar 8: MNQ bullish (close=202 > open=198) with low=194 < bear-body-close=198 → confirms
+    """
     mes = _make_1m_bars(
         opens= [100]*10,
         highs= [101]*10,
@@ -360,11 +352,8 @@ def _build_long_session():
         closes=[200, 200, 200, 200, 200, 198, 200, 200, 202, 200],
         start_time="2025-01-02 09:00:00",
     )
-    tdo_bar_mes = _make_1m_bars([100],[101],[99],[100], start_time="2025-01-02 09:30:00")
-    tdo_bar_mnq = _make_1m_bars([205],[206],[204],[205], start_time="2025-01-02 09:30:00")
-    mes_full = pd.concat([mes, tdo_bar_mes]).sort_index()
-    mnq_full = pd.concat([mnq, tdo_bar_mnq]).sort_index()
-    return mnq_full, mes_full
+    # TDO=205.0: above entry_price≈202 → valid for a long signal
+    return mnq, mes, 205.0
 
 
 def test_screen_session_returns_short_signal(monkeypatch):
@@ -372,8 +361,8 @@ def test_screen_session_returns_short_signal(monkeypatch):
     import train_smt
     # Disable MIN_STOP_POINTS guard: synthetic bars have TDO very close to entry
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    mnq_full, mes_full = _build_short_session()
-    signal = train_smt.screen_session(mnq_full, mes_full, datetime.date(2025, 1, 2))
+    mnq, mes, tdo = _build_short_session()
+    signal = train_smt.screen_session(mnq, mes, tdo)
     assert signal is not None, "Expected a short signal from the synthetic bearish SMT session"
     assert signal["direction"] == "short"
     assert "entry_price" in signal
@@ -386,8 +375,8 @@ def test_screen_session_returns_long_signal(monkeypatch):
     import train_smt
     # Disable MIN_STOP_POINTS guard: synthetic bars have TDO very close to entry
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    mnq_full, mes_full = _build_long_session()
-    signal = train_smt.screen_session(mnq_full, mes_full, datetime.date(2025, 1, 2))
+    mnq, mes, tdo = _build_long_session()
+    signal = train_smt.screen_session(mnq, mes, tdo)
     assert signal is not None, "Expected a long signal from the synthetic bullish SMT session"
     assert signal["direction"] == "long"
     assert signal["take_profit"] == signal["tdo"]
@@ -411,7 +400,7 @@ def test_screen_session_no_divergence_returns_none():
         closes=[200]*10,
         start_time="2025-01-02 09:00:00",
     )
-    signal = train_smt.screen_session(mnq, mes, datetime.date(2025, 1, 2))
+    signal = train_smt.screen_session(mnq, mes, 20000.0)
     assert signal is None
 
 
@@ -549,8 +538,7 @@ def test_trade_direction_short_blocks_long(monkeypatch):
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     mnq, mes = _make_long_session_bars()
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda bars, date: 20100.0)
-    result = train_smt.screen_session(mnq, mes, mnq.index[0].date())
+    result = train_smt.screen_session(mnq, mes, 20100.0)
     assert result is None
 
 
@@ -561,8 +549,7 @@ def test_trade_direction_long_blocks_short(monkeypatch):
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     mnq, mes = _make_short_session_bars()
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda bars, date: 19900.0)
-    result = train_smt.screen_session(mnq, mes, mnq.index[0].date())
+    result = train_smt.screen_session(mnq, mes, 19900.0)
     assert result is None
 
 
@@ -573,8 +560,7 @@ def test_trade_direction_both_passes_short(monkeypatch):
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     mnq, mes = _make_short_session_bars()
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda bars, date: 19900.0)
-    result = train_smt.screen_session(mnq, mes, mnq.index[0].date())
+    result = train_smt.screen_session(mnq, mes, 19900.0)
     assert result is not None
     assert result["direction"] == "short"
 
@@ -589,8 +575,7 @@ def test_tdo_validity_blocks_inverted_long(monkeypatch):
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     mnq, mes = _make_long_session_bars()
     # TDO below entry (entry ≈ base+2=20002) → inverted long
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda bars, date: 19950.0)
-    result = train_smt.screen_session(mnq, mes, mnq.index[0].date())
+    result = train_smt.screen_session(mnq, mes, 19950.0)
     assert result is None
 
 
@@ -602,8 +587,7 @@ def test_tdo_validity_passes_valid_long(monkeypatch):
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     mnq, mes = _make_long_session_bars()
     # TDO well above entry (entry ≈ base+2=20002) → valid long
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda bars, date: 20100.0)
-    result = train_smt.screen_session(mnq, mes, mnq.index[0].date())
+    result = train_smt.screen_session(mnq, mes, 20100.0)
     assert result is not None
     assert result["direction"] == "long"
     assert result["take_profit"] > result["entry_price"]
@@ -617,8 +601,7 @@ def test_tdo_validity_blocks_inverted_short(monkeypatch):
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     mnq, mes = _make_short_session_bars()
     # TDO above entry (entry ≈ base-2=19998) → inverted short
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda bars, date: 20100.0)
-    result = train_smt.screen_session(mnq, mes, mnq.index[0].date())
+    result = train_smt.screen_session(mnq, mes, 20100.0)
     assert result is None
 
 
@@ -630,8 +613,7 @@ def test_tdo_validity_false_passes_inverted(monkeypatch):
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     mnq, mes = _make_short_session_bars()
     # TDO above entry → inverted short, but gate is off
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda bars, date: 20100.0)
-    result = train_smt.screen_session(mnq, mes, mnq.index[0].date())
+    result = train_smt.screen_session(mnq, mes, 20100.0)
     assert result is not None  # passes through despite inversion
 
 
@@ -645,8 +627,7 @@ def test_min_stop_points_filters_tiny_stop(monkeypatch):
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 50.0)
     mnq, mes = _make_short_session_bars()
     # TDO just 5 pts below entry (entry≈19998) → stop = 0.45*5 = 2.25 pts → filtered
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda bars, date: 19995.0)
-    result = train_smt.screen_session(mnq, mes, mnq.index[0].date())
+    result = train_smt.screen_session(mnq, mes, 19995.0)
     assert result is None
 
 
@@ -657,8 +638,7 @@ def test_min_stop_points_zero_disables_guard(monkeypatch):
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     mnq, mes = _make_short_session_bars()
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda bars, date: 19995.0)
-    result = train_smt.screen_session(mnq, mes, mnq.index[0].date())
+    result = train_smt.screen_session(mnq, mes, 19995.0)
     # tiny stop but guard is off — signal should come through
     assert result is not None
 
@@ -674,8 +654,7 @@ def test_long_stop_ratio_applied(monkeypatch):
     monkeypatch.setattr(train_smt, "LONG_STOP_RATIO", 0.3)
     mnq, mes = _make_long_session_bars()
     tdo_val = 20100.0
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda bars, date: tdo_val)
-    result = train_smt.screen_session(mnq, mes, mnq.index[0].date())
+    result = train_smt.screen_session(mnq, mes, tdo_val)
     assert result is not None
     assert result["direction"] == "long"
     expected_stop = result["entry_price"] - 0.3 * abs(result["entry_price"] - tdo_val)
@@ -691,8 +670,7 @@ def test_short_stop_ratio_applied(monkeypatch):
     monkeypatch.setattr(train_smt, "SHORT_STOP_RATIO", 0.6)
     mnq, mes = _make_short_session_bars()
     tdo_val = 19900.0
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda bars, date: tdo_val)
-    result = train_smt.screen_session(mnq, mes, mnq.index[0].date())
+    result = train_smt.screen_session(mnq, mes, tdo_val)
     assert result is not None
     assert result["direction"] == "short"
     expected_stop = result["entry_price"] + 0.6 * abs(result["entry_price"] - tdo_val)
