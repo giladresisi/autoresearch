@@ -126,6 +126,23 @@ The worktree lands at `../<tag>`.
 
 ---
 
+## Step 3.5: Copy data/historical/ (if present)
+
+After the worktree is created, check whether `data/historical/` exists in the current repo.
+If it does, copy it into the new worktree so the optimization run can use cached historical
+data without re-downloading:
+
+```bash
+if [ -d "data/historical" ]; then
+  cp -r data/historical "../<tag>/data/historical"
+  echo "Copied data/historical"
+fi
+```
+
+If the directory does not exist, skip silently — the optimization will download data as needed.
+
+---
+
 ## Step 4: Inject Starting Strategy (only if user named one)
 
 *Skip if using the default train.py.*
