@@ -97,10 +97,14 @@ def test_detect_smt_both_confirm_none():
     assert result is None
 
 
-def test_detect_smt_min_bars_suppresses(monkeypatch):
-    """bar_idx - session_start_idx < MIN_BARS_BEFORE_SIGNAL → None."""
+def test_detect_smt_min_bars_suppresses():
+    """bar_idx - session_start_idx < _min_bars → None.
+
+    detect_smt_divergence no longer reads MIN_BARS_BEFORE_SIGNAL globally;
+    callers must pass _min_bars explicitly (screen_session uses a wall-clock
+    timedelta instead).
+    """
     import train_smt
-    monkeypatch.setattr(train_smt, "MIN_BARS_BEFORE_SIGNAL", 5)
     mes = _make_1m_bars(
         opens= [100, 100, 100],
         highs= [101, 102, 103],
@@ -113,8 +117,8 @@ def test_detect_smt_min_bars_suppresses(monkeypatch):
         lows=  [199, 199, 199],
         closes=[200, 200, 200],
     )
-    # bar_idx=2, session_start_idx=0 → difference=2 < 5
-    result = train_smt.detect_smt_divergence(mes, mnq, bar_idx=2, session_start_idx=0)
+    # bar_idx=2, session_start_idx=0 → difference=2 < _min_bars=5 → suppressed
+    result = train_smt.detect_smt_divergence(mes, mnq, bar_idx=2, session_start_idx=0, _min_bars=5)
     assert result is None
 
 
@@ -375,6 +379,9 @@ def test_screen_session_returns_long_signal(monkeypatch):
     import train_smt
     # Disable MIN_STOP_POINTS guard: synthetic bars have TDO very close to entry
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    # TRADE_DIRECTION is frozen at "short" in production; override here to test
+    # the long path in isolation.
+    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
     mnq, mes, tdo = _build_long_session()
     signal = train_smt.screen_session(mnq, mes, tdo)
     assert signal is not None, "Expected a long signal from the synthetic bullish SMT session"

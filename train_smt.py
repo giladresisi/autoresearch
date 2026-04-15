@@ -58,24 +58,24 @@ try:
 except Exception:
     pass
 
-# Dollar risk per trade — used for position sizing.
-RISK_PER_TRADE = 50.0
-
 # Set True only for the special post-loop final test run.
 WRITE_FINAL_OUTPUTS = False
 
 # ══ STRATEGY TUNING ══════════════════════════════════════════════════════════
 # Kill zone: NY open session window (America/New_York).
 SESSION_START = "09:00"
-SESSION_END   = "10:30"
+SESSION_END   = "13:30"
 
 # Minimum wall-clock minutes before a divergence signal can fire after session open.
-# Converted to bar count at runtime by _bars_for_minutes() so it works at any interval.
-# At 1m: 5 bars = 5 min. At 5m: 1 bar = 5 min.
-MIN_BARS_BEFORE_SIGNAL = 5
+# Used as a timedelta in screen_session, so it is interval-agnostic.
+# Set 0 to disable (bar 0 is naturally suppressed by the empty prior-session slice
+# in detect_smt_divergence, so the first real signal opportunity is bar 1 regardless).
+MIN_BARS_BEFORE_SIGNAL = 0
 
 # Direction filter: "both" = trade longs and shorts | "long" = longs only | "short" = shorts only
-TRADE_DIRECTION = "both"
+# Frozen at "short": post-fix walk-forward shows long PnL negative in 5/6 folds (structural
+# asymmetry — SMT divergence at session highs is a stronger signal than at session lows).
+TRADE_DIRECTION = "short"
 
 # TDO validity gate: skip signals where the take-profit target is geometrically inverted.
 # For LONG: TDO must be above entry (price bounces up to the open).
@@ -86,18 +86,19 @@ TDO_VALIDITY_CHECK = True
 # Minimum stop distance in MNQ points. Signals with |entry - stop| < this value are skipped.
 # Prevents degenerate sizing when TDO is very close to entry.
 # Set 0.0 to disable.
-MIN_STOP_POINTS = 5.0
+MIN_STOP_POINTS = 2.5
 
 # Per-direction stop placement ratios (fraction of |entry - TDO| distance).
-# Both default to 0.45, matching the original hardcoded value.
 #
-# ITERATION 1 — Asymmetric stop ratios (HIGHEST PRIORITY)
-# Tune LONG_STOP_RATIO and SHORT_STOP_RATIO independently.
-# Search space: each ∈ [0.30, 0.55] (step 0.05 suggested for initial grid).
-# Optimise for: mean_test_pnl (primary), min_test_pnl > 0 (secondary guard).
-# Constraint: total test trades ≥ 80 across all folds.
-LONG_STOP_RATIO  = 0.45
-SHORT_STOP_RATIO = 0.45
+# SHORT_STOP_RATIO: optimizer search space [0.25, 0.30, 0.35, 0.40, 0.45] (step 0.05).
+# 0.05 was noise-level tight (~3 pts on a 20–40 pt wick instrument → 95% stop-outs).
+# Widening to 0.25+ reduces contracts (via position sizer) but raises win rate enough
+# to turn expected value positive.
+#
+# LONG_STOP_RATIO: frozen at 0.05 — longs disabled (TRADE_DIRECTION = "short"),
+# value is irrelevant but kept valid to avoid breaking the position-sizing path.
+LONG_STOP_RATIO  = 0.05
+SHORT_STOP_RATIO = 0.25
 
 # Print per-direction win rate, avg PnL, and exit breakdown after each fold.
 # Set False to suppress — does not affect frozen print_results output.
@@ -105,6 +106,38 @@ PRINT_DIRECTION_BREAKDOWN = True
 
 # MNQ futures P&L per point per contract.
 MNQ_PNL_PER_POINT = 2.0
+
+# Breakeven stop management.
+# After the position moves this many MNQ points in our favor, the stop is moved
+# to the entry price (breakeven). Set 0.0 to disable.
+# Optimizer search space: [0.0, 5.0, 10.0, 15.0, 20.0, 25.0].
+BREAKEVEN_TRIGGER_PTS = 0.0
+
+# After breakeven is set, trail the stop this many points behind the best price seen.
+# Set 0.0 to disable trailing (stop stays at entry after breakeven triggers).
+# Example: 5.0 means stop = best_price + 5.0 for shorts (best_price - 5.0 for longs).
+# Optimizer search space: [0.0, 5.0].
+TRAIL_AFTER_BREAKEVEN_PTS = 0.0
+
+# Minimum TDO distance filter: skip signals where |entry - TDO| < this value in MNQ pts.
+# Filters out degenerate setups where TDO is very close to entry — these produce 4-contract
+# positions with ~6 pt stops that are noise-level tight.
+# Set 0.0 to disable.
+# Optimizer search space: [0.0, 10.0, 15.0, 20.0, 25.0].
+MIN_TDO_DISTANCE_PTS = 0.0
+
+# Signal blackout window: skip divergence signals whose entry bar falls in this time range.
+# Both values are "HH:MM" strings in the session's local timezone; "" disables the filter.
+# Proposed: block 11:00–12:00 (NY morning dead zone, avg −$18.2 across 48 trades).
+# Optimizer search space: ["", "11:00"] for START; ["", "12:00"] for END.
+SIGNAL_BLACKOUT_START = ""
+SIGNAL_BLACKOUT_END   = ""
+
+# Trail-after-TP: instead of exiting at TDO, convert TP into a trailing stop.
+# When price first crosses TDO the position stays open; the stop is then trailed
+# this many points behind the best post-TDO price. Set 0.0 to disable (exit at TDO).
+# Optimizer search space: [0.0, 5.0, 10.0, 20.0].
+TRAIL_AFTER_TP_PTS = 0.0
 
 
 # ══ STRATEGY FUNCTIONS ═══════════════════════════════════════════════════════
@@ -155,43 +188,31 @@ def load_futures_data() -> dict[str, pd.DataFrame]:
     return result
 
 
-def _bars_for_minutes(df: pd.DataFrame, minutes: int) -> int:
-    """Return the number of bars spanning `minutes` wall-clock minutes.
-
-    Infers bar size from the gap between the first two index entries.
-    Falls back to 1 if the DataFrame has fewer than 2 rows or the gap is zero.
-    """
-    if len(df) < 2:
-        return 1
-    delta_secs = (df.index[1] - df.index[0]).total_seconds()
-    if delta_secs <= 0:
-        return 1
-    bar_mins = delta_secs / 60
-    return max(1, round(minutes / bar_mins))
-
 
 def detect_smt_divergence(
     mes_bars: pd.DataFrame,
     mnq_bars: pd.DataFrame,
     bar_idx: int,
     session_start_idx: int,
-    _min_bars: int | None = None,
+    _min_bars: int = 0,
 ) -> str | None:
     """Check for SMT divergence at bar_idx.
 
     Returns "short" if MES makes new session high but MNQ does not.
     Returns "long"  if MES makes new session low  but MNQ does not.
-    Returns None if no divergence or not enough bars since session start.
+    Returns None if no divergence or the bar-count guard fires.
 
     Args:
         mes_bars: OHLCV DataFrame for MES, index = ET datetime (any bar interval)
         mnq_bars: OHLCV DataFrame for MNQ, same index alignment
         bar_idx: current bar position in the session slice
         session_start_idx: first bar index of current session
-        _min_bars: Override bar threshold; if None, falls back to MIN_BARS_BEFORE_SIGNAL global.
+        _min_bars: Skip bars where bar_idx - session_start_idx < _min_bars.
+            Default 0 disables the guard — callers should apply their own
+            time-based threshold (e.g. screen_session uses MIN_BARS_BEFORE_SIGNAL
+            as a wall-clock timedelta, which is interval-agnostic).
     """
-    _threshold = _min_bars if _min_bars is not None else MIN_BARS_BEFORE_SIGNAL
-    if bar_idx - session_start_idx < _threshold:
+    if bar_idx - session_start_idx < _min_bars:
         return None
 
     # Compare current bar's extreme against session high/low (excluding current bar)
@@ -265,12 +286,13 @@ def find_entry_bar(
 
 
 def compute_tdo(mnq_bars: pd.DataFrame, date: datetime.date) -> float | None:
-    """Return True Day Open = opening price of the 00:00 ET bar for given date.
+    """Return True Day Open = opening price of the 9:30 AM ET bar for given date.
 
-    Falls back to the first available bar on that date if the 00:00 bar is absent.
+    Falls back to the first available bar on that date if 9:30 bar is absent
+    (e.g., for signals detected before 9:30 AM in the 9:00–9:30 window).
     Returns None if no bars exist for the date.
     """
-    target_time = pd.Timestamp(f"{date} 00:00:00", tz="America/New_York")
+    target_time = pd.Timestamp(f"{date} 09:30:00", tz="America/New_York")
     if target_time in mnq_bars.index:
         return float(mnq_bars.loc[target_time, "Open"])
     # Proxy: use the first available bar on that date
@@ -351,15 +373,24 @@ def screen_session(
 
     n_bars = len(mnq_bars)
 
-    # Scan bars left-to-right for the first divergence
-    _min_bars = _bars_for_minutes(mnq_bars, MIN_BARS_BEFORE_SIGNAL)
-    for bar_idx in range(_min_bars, n_bars):
+    # Compute the earliest bar timestamp eligible for a divergence signal.
+    # Using a wall-clock timedelta makes this interval-agnostic: MIN_BARS_BEFORE_SIGNAL
+    # is treated as minutes, so 10 minutes means "skip bars starting before
+    # session_open + 10 min" regardless of whether bars are 1s, 1m, 5m, etc.
+    min_signal_ts = mnq_bars.index[0] + pd.Timedelta(minutes=MIN_BARS_BEFORE_SIGNAL)
+
+    mes_reset = mes_bars.reset_index(drop=True)
+    mnq_reset = mnq_bars.reset_index(drop=True)
+
+    for bar_idx in range(n_bars):
+        if mnq_bars.index[bar_idx] < min_signal_ts:
+            continue
+
         direction = detect_smt_divergence(
-            mes_bars.reset_index(drop=True),
-            mnq_bars.reset_index(drop=True),
+            mes_reset,
+            mnq_reset,
             bar_idx,
             0,
-            _min_bars,
         )
         if direction is None:
             continue
@@ -369,7 +400,6 @@ def screen_session(
             continue
 
         # Look for confirmation entry after divergence bar
-        mnq_reset = mnq_bars.reset_index(drop=True)
         entry_idx = find_entry_bar(mnq_reset, direction, bar_idx, n_bars)
         if entry_idx is None:
             continue
@@ -395,7 +425,17 @@ def screen_session(
         if MIN_STOP_POINTS > 0 and abs(entry_price - stop_price) < MIN_STOP_POINTS:
             continue
 
+        # Minimum TDO distance guard: skip degenerate setups with very tight TP targets
+        if MIN_TDO_DISTANCE_PTS > 0 and distance_to_tdo < MIN_TDO_DISTANCE_PTS:
+            continue
+
         entry_time = mnq_bars.index[entry_idx]
+
+        # Signal blackout filter: skip entries whose bar falls in the configured window
+        if SIGNAL_BLACKOUT_START and SIGNAL_BLACKOUT_END:
+            t = entry_time.strftime("%H:%M")
+            if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
+                continue
 
         return {
             "direction":      direction,
@@ -415,30 +455,193 @@ def manage_position(
     position: dict,
     current_bar: pd.Series,
 ) -> str:
-    """Check exit conditions for an open position against one 1m bar.
+    """Check exit conditions for an open position against one bar.
 
     Returns one of: "hold" | "exit_tp" | "exit_stop" | "exit_time"
 
     For longs:  stop hit if low  <= stop_price; TP hit if high >= take_profit
     For shorts: stop hit if high >= stop_price; TP hit if low  <= take_profit
     Exit-time is handled by the harness (not this function).
-    """
-    direction = position["direction"]
-    stop      = position["stop_price"]
-    tp        = position["take_profit"]
 
+    Breakeven/trailing stop:
+        If BREAKEVEN_TRIGGER_PTS > 0 and price has moved that many points in our
+        favor, stop_price is moved to entry_price (breakeven). If
+        TRAIL_AFTER_BREAKEVEN_PTS > 0, stop trails behind best_price instead.
+        Mutations are applied directly to the position dict so subsequent bars
+        use the updated stop level. Stop only ever tightens, never widens.
+
+    Trail-after-TP:
+        If TRAIL_AFTER_TP_PTS > 0, exit_tp is suppressed when TDO is first
+        crossed; instead the stop trails TRAIL_AFTER_TP_PTS points behind the
+        best post-TDO price, letting profits run further.
+    """
+    direction   = position["direction"]
+    entry_price = position["entry_price"]
+    tp          = position["take_profit"]
+
+    # ── Trail-after-TP: stay in trade past TDO, trail stop behind best price ──
+    if TRAIL_AFTER_TP_PTS > 0:
+        if position.get("tp_breached"):
+            # Already past TDO — update trailing stop each bar
+            if direction == "short":
+                best = min(position.get("best_after_tp", tp), current_bar["Low"])
+                position["best_after_tp"] = best
+                position["stop_price"]    = best + TRAIL_AFTER_TP_PTS
+            else:
+                best = max(position.get("best_after_tp", tp), current_bar["High"])
+                position["best_after_tp"] = best
+                position["stop_price"]    = best - TRAIL_AFTER_TP_PTS
+        else:
+            # Check if TDO was crossed this bar for the first time
+            crossed = (direction == "short" and current_bar["Low"]  <= tp) or \
+                      (direction == "long"  and current_bar["High"] >= tp)
+            if crossed:
+                position["tp_breached"] = True
+                if direction == "short":
+                    position["best_after_tp"] = min(tp, current_bar["Low"])
+                    position["stop_price"]    = position["best_after_tp"] + TRAIL_AFTER_TP_PTS
+                else:
+                    position["best_after_tp"] = max(tp, current_bar["High"])
+                    position["stop_price"]    = position["best_after_tp"] - TRAIL_AFTER_TP_PTS
+                return "hold"
+
+    # ── Breakeven / trailing stop update ─────────────────────────────────────
+    # Skip breakeven management once we are trailing past TDO (stop is already ahead of entry)
+    if BREAKEVEN_TRIGGER_PTS > 0 and not position.get("tp_breached"):
+        # Track the most favorable price excursion seen so far.
+        # best_price is initialized lazily from entry_price on first call.
+        if direction == "long":
+            best      = max(position.get("best_price", entry_price), current_bar["High"])
+            excursion = best - entry_price
+        else:  # short
+            best      = min(position.get("best_price", entry_price), current_bar["Low"])
+            excursion = entry_price - best
+
+        position["best_price"] = best
+
+        if excursion >= BREAKEVEN_TRIGGER_PTS:
+            if TRAIL_AFTER_BREAKEVEN_PTS > 0:
+                # Trail: stop follows best price at a fixed distance behind it
+                new_stop = best + TRAIL_AFTER_BREAKEVEN_PTS if direction == "short" else best - TRAIL_AFTER_BREAKEVEN_PTS
+            else:
+                # Flat breakeven: move stop to entry price
+                new_stop = entry_price
+
+            # Only tighten the stop, never widen it
+            if direction == "long":
+                position["stop_price"] = max(position["stop_price"], new_stop)
+            else:
+                position["stop_price"] = min(position["stop_price"], new_stop)
+
+    stop = position["stop_price"]
+
+    # ── Exit checks ───────────────────────────────────────────────────────────
+    # exit_tp is only used when trail-after-TP is disabled; otherwise the stop
+    # takes over once TDO is breached (handled in the block above).
     if direction == "long":
-        if current_bar["Low"]  <= stop: return "exit_stop"
-        if current_bar["High"] >= tp:   return "exit_tp"
+        if current_bar["Low"]  <= stop:                            return "exit_stop"
+        if TRAIL_AFTER_TP_PTS == 0 and current_bar["High"] >= tp: return "exit_tp"
     else:  # short
-        if current_bar["High"] >= stop: return "exit_stop"
-        if current_bar["Low"]  <= tp:   return "exit_tp"
+        if current_bar["High"] >= stop:                            return "exit_stop"
+        if TRAIL_AFTER_TP_PTS == 0 and current_bar["Low"]  <= tp: return "exit_tp"
     return "hold"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DO NOT EDIT BELOW THIS LINE — harness is frozen
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Dollar risk per trade — fixed at $50 to reflect a single-trader risk budget.
+# Do NOT change during optimization — risk scaling is not a strategy improvement.
+RISK_PER_TRADE = 50.0
+
+# Maximum contracts per trade — reflects a realistic single-trader position limit.
+# This cap prevents the optimizer from exploiting degenerate sizing (e.g. a
+# 0.001-point stop that implies 50 000 contracts). Do NOT change during optimization.
+MAX_CONTRACTS = 4
+
+
+def _scan_bars_for_exit(
+    position: dict,
+    bars: pd.DataFrame,
+    session_end_ts: "pd.Timestamp | None" = None,
+) -> "tuple[str | None, pd.Series | None]":
+    """Iterate *bars* and return (exit_result, exit_bar) on the first trigger.
+
+    Interval-agnostic: each bar's end time is inferred as the next bar's start
+    timestamp (or *session_end_ts* for the last bar).  If a bar's end time
+    reaches or passes *session_end_ts* before a stop/TP fires, the function
+    returns ("session_close", bar) so that wide bars (e.g. 5-min, 1-hour) that
+    straddle the session boundary are handled correctly regardless of interval.
+
+    Pass session_end_ts=None (default) to suppress the session-close check,
+    e.g. when scanning the entry-day remainder where overnight holds are allowed.
+
+    Returns (None, None) if no exit condition is met within the supplied bars.
+    """
+    n = len(bars)
+    for i, (_ts, bar) in enumerate(bars.iterrows()):
+        result = manage_position(position, bar)
+        if result != "hold":
+            return result, bar
+
+        if session_end_ts is not None:
+            # Bar end = start of the next bar, or session_end_ts if this is
+            # the last bar in the slice (conservative: assume it ends on time).
+            bar_end = bars.index[i + 1] if i + 1 < n else session_end_ts
+            if bar_end >= session_end_ts:
+                return "session_close", bar
+
+    return None, None
+
+
+def _build_trade_record(
+    position: dict,
+    exit_result: str,
+    exit_bar: pd.Series,
+    pnl_per_point: float,
+) -> "tuple[dict, float]":
+    """Build the trade dict and compute PnL from a closed position."""
+    direction_sign = 1 if position["direction"] == "long" else -1
+    if exit_result == "exit_tp":
+        exit_price = position["take_profit"]
+    elif exit_result == "exit_stop":
+        exit_price = position["stop_price"]
+    else:
+        exit_price = float(exit_bar["Close"])
+
+    pnl = (
+        direction_sign
+        * (exit_price - position["entry_price"])
+        * position["contracts"]
+        * pnl_per_point
+    )
+
+    entry_time = position["entry_time"]
+    trade = {
+        "entry_date":     str(position["entry_date"]),
+        "entry_time":     (
+            str(entry_time.time())[:5]
+            if hasattr(entry_time, "time")
+            else str(entry_time)
+        ),
+        "exit_time":      (
+            str(exit_bar.name.time())[:5]
+            if hasattr(exit_bar.name, "time")
+            else ""
+        ),
+        "direction":      position["direction"],
+        "entry_price":    round(position["entry_price"], 4),
+        "exit_price":     round(exit_price, 4),
+        "tdo":            round(position["tdo"], 4),
+        "stop_price":     round(position["stop_price"], 4),
+        "contracts":      position["contracts"],
+        "pnl":            round(pnl, 2),
+        "exit_type":      exit_result,
+        "divergence_bar": position["divergence_bar"],
+        "entry_bar":      position["entry_bar"],
+    }
+    return trade, pnl
 
 
 def _compute_fold_params(
@@ -471,10 +674,16 @@ def run_backtest(
 ) -> dict:
     """Walk-forward intraday backtest for the SMT divergence strategy.
 
+    Interval-agnostic: works with any bar width (1s, 1m, 5m, 1d, mixed).
+    Each bar's end time is inferred from the next bar's start timestamp so that
+    bars straddling a session boundary are handled correctly.
+
     For each trading day in [start, end]:
-      1. Slice SESSION_START–SESSION_END 1m bars
-      2. If no open position: call screen_session(); if signal → open position
-      3. If open position: call manage_position() bar by bar until exit or SESSION_END
+      1. Slice SESSION_START–SESSION_END bars (matched by bar start timestamp)
+      2. If no open position: call screen_session(); if signal → open position,
+         then immediately scan the remaining session bars for stop/TP/session_close
+      3. If open position from a prior day: scan all session bars for exit;
+         session_close fires when a bar's end time reaches SESSION_END
       4. Record each closed trade
 
     Returns a stats dict with all performance metrics.
@@ -504,6 +713,12 @@ def run_backtest(
             equity_curve.append(equity_curve[-1])
             continue
 
+        # Session end as a tz-aware timestamp — used by _scan_bars_for_exit to
+        # detect bars that straddle the session boundary regardless of bar width.
+        session_end_ts = pd.Timestamp(
+            f"{day} {SESSION_END}", tz=mnq_session.index.tz
+        )
+
         day_pnl = 0.0
 
         if position is None:
@@ -518,7 +733,7 @@ def run_backtest(
                     abs(signal["entry_price"] - signal["stop_price"]) * MNQ_PNL_PER_POINT
                 )
                 contracts = (
-                    max(1, int(RISK_PER_TRADE / risk_per_contract))
+                    min(MAX_CONTRACTS, max(1, int(RISK_PER_TRADE / risk_per_contract)))
                     if risk_per_contract > 0
                     else 1
                 )
@@ -534,60 +749,35 @@ def run_backtest(
                     "divergence_bar": signal["divergence_bar"],
                     "entry_bar":      signal["entry_bar"],
                 }
+                # Scan remaining bars of the entry session for stop/TP/session_close.
+                # Passing session_end_ts ensures the position is always closed by
+                # session end — no overnight holds.
+                remaining = mnq_session.iloc[signal["entry_bar"] + 1:]
+                exit_result, exit_bar = _scan_bars_for_exit(
+                    position, remaining, session_end_ts
+                )
+                if exit_result is not None:
+                    trade, day_pnl = _build_trade_record(
+                        position, exit_result, exit_bar, MNQ_PNL_PER_POINT
+                    )
+                    trades.append(trade)
+                    position = None
         else:
-            exit_result: str | None = None
-            exit_bar = None
-            for ts, bar in mnq_session.iterrows():
-                result = manage_position(position, bar)
-                if result != "hold":
-                    exit_result = result
-                    exit_bar = bar
-                    break
+            # Position carried over from a prior day.  Pass session_end_ts so
+            # that bars wider than the remaining session window trigger a
+            # session_close rather than being scanned past the boundary.
+            exit_result, exit_bar = _scan_bars_for_exit(
+                position, mnq_session, session_end_ts
+            )
 
             if exit_result is None:
                 exit_result = "session_close"
                 exit_bar = mnq_session.iloc[-1]
 
-            direction_sign = 1 if position["direction"] == "long" else -1
-            if exit_result == "exit_tp":
-                exit_price = position["take_profit"]
-            elif exit_result == "exit_stop":
-                exit_price = position["stop_price"]
-            else:
-                exit_price = float(exit_bar["Close"])
-
-            pnl = (
-                direction_sign
-                * (exit_price - position["entry_price"])
-                * position["contracts"]
-                * MNQ_PNL_PER_POINT
+            trade, day_pnl = _build_trade_record(
+                position, exit_result, exit_bar, MNQ_PNL_PER_POINT
             )
-
-            entry_time = position["entry_time"]
-            trades.append({
-                "entry_date":    str(position["entry_date"]),
-                "entry_time":    (
-                    str(entry_time.time())[:5]
-                    if hasattr(entry_time, "time")
-                    else str(entry_time)
-                ),
-                "exit_time":     (
-                    str(exit_bar.name.time())[:5]
-                    if hasattr(exit_bar.name, "time")
-                    else ""
-                ),
-                "direction":     position["direction"],
-                "entry_price":   round(position["entry_price"], 4),
-                "exit_price":    round(exit_price, 4),
-                "tdo":           round(position["tdo"], 4),
-                "stop_price":    round(position["stop_price"], 4),
-                "contracts":     position["contracts"],
-                "pnl":           round(pnl, 2),
-                "exit_type":     exit_result,
-                "divergence_bar": position["divergence_bar"],
-                "entry_bar":     position["entry_bar"],
-            })
-            day_pnl = pnl
+            trades.append(trade)
             position = None
 
         equity_curve.append(equity_curve[-1] + day_pnl)
@@ -597,34 +787,11 @@ def run_backtest(
         last_bars = mnq_df[mnq_df.index.date < end_dt]
         if not last_bars.empty:
             last_bar = last_bars.iloc[-1]
-            direction_sign = 1 if position["direction"] == "long" else -1
-            exit_price = float(last_bar["Close"])
-            pnl = (
-                direction_sign
-                * (exit_price - position["entry_price"])
-                * position["contracts"]
-                * MNQ_PNL_PER_POINT
+            trade, pnl = _build_trade_record(
+                position, "end_of_backtest", last_bar, MNQ_PNL_PER_POINT
             )
-            entry_time = position["entry_time"]
-            trades.append({
-                "entry_date":    str(position["entry_date"]),
-                "entry_time":    (
-                    str(entry_time.time())[:5]
-                    if hasattr(entry_time, "time")
-                    else str(entry_time)
-                ),
-                "exit_time":     "",
-                "direction":     position["direction"],
-                "entry_price":   round(position["entry_price"], 4),
-                "exit_price":    round(exit_price, 4),
-                "tdo":           round(position["tdo"], 4),
-                "stop_price":    round(position["stop_price"], 4),
-                "contracts":     position["contracts"],
-                "pnl":           round(pnl, 2),
-                "exit_type":     "end_of_backtest",
-                "divergence_bar": position["divergence_bar"],
-                "entry_bar":     position["entry_bar"],
-            })
+            trade["exit_time"] = ""   # no meaningful bar time at backtest end
+            trades.append(trade)
             equity_curve.append(equity_curve[-1] + pnl)
 
     return _compute_metrics(trades, equity_curve)

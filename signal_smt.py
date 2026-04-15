@@ -454,6 +454,9 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
             result = "exit_session_end"
             exit_price = float(bar.close)
         else:
+            # Persist any stop mutations (breakeven, trail-after-TP) so that a
+            # process restart restores the correct stop_price, tp_breached, etc.
+            POSITION_FILE.write_text(json.dumps(_position, indent=2))
             return
 
     if result == "exit_tp":
