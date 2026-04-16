@@ -98,7 +98,7 @@ MIN_STOP_POINTS = 2.5
 # LONG_STOP_RATIO: frozen at 0.05 — longs disabled (TRADE_DIRECTION = "short"),
 # value is irrelevant but kept valid to avoid breaking the position-sizing path.
 LONG_STOP_RATIO  = 0.05
-SHORT_STOP_RATIO = 0.25
+SHORT_STOP_RATIO = 0.40
 
 # Print per-direction win rate, avg PnL, and exit breakdown after each fold.
 # Set False to suppress — does not affect frozen print_results output.
@@ -123,21 +123,26 @@ TRAIL_AFTER_BREAKEVEN_PTS = 0.0
 # Filters out degenerate setups where TDO is very close to entry — these produce 4-contract
 # positions with ~6 pt stops that are noise-level tight.
 # Set 0.0 to disable.
-# Optimizer search space: [0.0, 10.0, 15.0, 20.0, 25.0].
-MIN_TDO_DISTANCE_PTS = 0.0
+# Optimizer search space: [15, 25, 40, 50, 65].
+MIN_TDO_DISTANCE_PTS = 50.0
+
+# Allowed weekdays for trading (Python weekday: Mon=0 … Sun=6).
+# Thursday (3) excluded: 25% win rate vs 40.8% for all other days (Finding 2).
+# Set frozenset({0,1,2,3,4}) to re-enable all weekdays.
+ALLOWED_WEEKDAYS = frozenset({0, 1, 2, 4})
 
 # Signal blackout window: skip divergence signals whose entry bar falls in this time range.
 # Both values are "HH:MM" strings in the session's local timezone; "" disables the filter.
-# Proposed: block 11:00–12:00 (NY morning dead zone, avg −$18.2 across 48 trades).
-# Optimizer search space: ["", "11:00"] for START; ["", "12:00"] for END.
-SIGNAL_BLACKOUT_START = ""
-SIGNAL_BLACKOUT_END   = ""
+# Blocks 11:00–13:30: 11:xx dead zone + 13:xx drag (only negative-PnL slot, Finding 3).
+# Optimizer search space: ["", "11:00"] for START; ["", "13:00", "13:30"] for END.
+SIGNAL_BLACKOUT_START = "11:00"
+SIGNAL_BLACKOUT_END   = "13:30"
 
 # Trail-after-TP: instead of exiting at TDO, convert TP into a trailing stop.
 # When price first crosses TDO the position stays open; the stop is then trailed
 # this many points behind the best post-TDO price. Set 0.0 to disable (exit at TDO).
 # Optimizer search space: [0.0, 5.0, 10.0, 20.0].
-TRAIL_AFTER_TP_PTS = 0.0
+TRAIL_AFTER_TP_PTS = 1.0
 
 
 # ══ STRATEGY FUNCTIONS ═══════════════════════════════════════════════════════
@@ -371,7 +376,7 @@ def screen_session(
     if tdo is None or tdo == 0.0:
         return None
 
-    n_bars = len(mnq_bars)
+    n_bars = min(len(mnq_bars), len(mes_bars))
 
     # Compute the earliest bar timestamp eligible for a divergence signal.
     # Using a wall-clock timedelta makes this interval-agnostic: MIN_BARS_BEFORE_SIGNAL
@@ -701,6 +706,10 @@ def run_backtest(
     equity_curve: list[float] = [0.0]
 
     for day in trading_days:
+        # Weekday filter: skip disallowed trading days (e.g. Thursday)
+        if day.weekday() not in ALLOWED_WEEKDAYS:
+            continue
+
         session_mask = (
             (mnq_df.index.date == day)
             & (mnq_df.index.time >= pd.Timestamp(f"2000-01-01 {SESSION_START}").time())
@@ -864,6 +873,43 @@ def print_results(stats: dict, prefix: str = "") -> None:
         print(f"{prefix}exit_{exit_type}: {count}")
 
 
+def _write_results_tsv(row: dict) -> None:
+    """Append one experiment row to results.tsv (tab-separated). Creates with header if missing.
+    Schema matches first-smt-opt/results.tsv. status and description are left blank."""
+    import csv
+    import subprocess
+
+    fieldnames = [
+        "iter", "commit", "mean_test_pnl", "min_test_pnl", "total_test_trades",
+        "avg_win_rate", "avg_rr", "avg_sharpe", "avg_calmar",
+        "avg_expectancy", "wl_ratio", "status", "description",
+    ]
+    path = "results.tsv"
+    # iter = number of data rows already in the file (header not counted)
+    try:
+        with open(path, encoding="utf-8") as _f:
+            _lines = [l for l in _f if not l.startswith("iter\t") and l.strip()]
+        _iter = len(_lines)
+    except FileNotFoundError:
+        _iter = 0
+    write_header = not os.path.exists(path) or os.path.getsize(path) == 0
+    try:
+        commit = subprocess.check_output(
+            ["git", "log", "--format=%h", "-1"], text=True
+        ).strip()
+    except Exception:
+        commit = "unknown"
+    row["iter"] = _iter
+    row["commit"] = commit
+    row.setdefault("status", "")
+    row.setdefault("description", "")
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")
+        if write_header:
+            w.writeheader()
+        w.writerow(row)
+
+
 if __name__ == "__main__":
     dfs = load_futures_data()
     mnq_df = dfs["MNQ"]
@@ -883,6 +929,7 @@ if __name__ == "__main__":
     )
 
     fold_test_pnls: list = []
+    _fold_test_stats_list: list = []  # collect per-fold stats for TSV aggregates
 
     for _i in range(_effective_n_folds):
         _steps_back         = _effective_n_folds - 1 - _i
@@ -910,6 +957,7 @@ if __name__ == "__main__":
         print_results(_fold_test_stats,  prefix=f"fold{_fold_n}_test_")
 
         fold_test_pnls.append((_fold_test_stats["total_pnl"], _fold_test_stats["total_trades"]))
+        _fold_test_stats_list.append(_fold_test_stats)
 
     # R2: Exclude folds with < 3 test trades — sparse folds are noise-dominated
     _qualified = [(p, t) for p, t in fold_test_pnls if t >= 3]
@@ -937,3 +985,24 @@ if __name__ == "__main__":
     else:
         print(f"holdout_total_pnl:    {_silent_stats['total_pnl']:.2f}")
         print(f"holdout_total_trades: {_silent_stats['total_trades']}")
+
+    # Compute per-fold averages for results.tsv (only folds with trades)
+    _active = [s for s in _fold_test_stats_list if s["total_trades"] >= 3]
+    _n_act  = len(_active) or 1
+    _avg_wr  = sum(s["win_rate"]           for s in _active) / _n_act
+    _avg_rr  = sum(s["avg_rr"]             for s in _active) / _n_act
+    _avg_sh  = sum(s["sharpe"]             for s in _active) / _n_act
+    _avg_cal = sum(s["calmar"]             for s in _active) / _n_act
+    _avg_exp = sum(s["avg_pnl_per_trade"]  for s in _active) / _n_act
+    _wl      = _avg_wr / (1 - _avg_wr) if _avg_wr < 1.0 else float("inf")
+    _write_results_tsv({
+        "mean_test_pnl":    f"{mean_test_pnl:.2f}",
+        "min_test_pnl":     f"{min_test_pnl:.2f}",
+        "total_test_trades": sum(t for _, t in fold_test_pnls),
+        "avg_win_rate":     f"{_avg_wr:.4f}",
+        "avg_rr":           f"{_avg_rr:.4f}",
+        "avg_sharpe":       f"{_avg_sh:.4f}",
+        "avg_calmar":       f"{_avg_cal:.4f}",
+        "avg_expectancy":   f"{_avg_exp:.2f}",
+        "wl_ratio":         f"{_wl:.4f}",
+    })

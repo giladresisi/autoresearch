@@ -33,3 +33,6 @@ harness_upgrade.md
 
 # Databento permanent parquet store (large, not committed)
 data/historical/*.parquet
+
+# Realtime intraday parquet data (large, not committed)
+data/realtime/*.parquet
