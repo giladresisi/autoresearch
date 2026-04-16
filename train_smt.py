@@ -169,8 +169,9 @@ def load_futures_data() -> dict[str, pd.DataFrame]:
     """Load MNQ and MES futures parquets.
 
     Checks in priority order:
-      1. data/historical/{ticker}.parquet  — Databento permanent store
-      2. FUTURES_CACHE_DIR/{interval}/{ticker}.parquet  — IB ephemeral cache
+      1. data/historical/{ticker}_{interval}.parquet  — interval-specific Databento file
+      2. data/historical/{ticker}.parquet             — default Databento file
+      3. FUTURES_CACHE_DIR/{interval}/{ticker}.parquet — IB ephemeral cache
     Returns {"MNQ": df, "MES": df} with tz-aware ET DatetimeIndex.
     Raises FileNotFoundError if parquets are missing (run prepare_futures.py).
     """
@@ -178,9 +179,12 @@ def load_futures_data() -> dict[str, pd.DataFrame]:
     interval = manifest.get("fetch_interval", "1m")
     result: dict[str, pd.DataFrame] = {}
     for ticker in ["MNQ", "MES"]:
+        interval_path   = Path("data/historical") / f"{ticker}_{interval}.parquet"
         historical_path = Path("data/historical") / f"{ticker}.parquet"
-        ib_path = Path(FUTURES_CACHE_DIR) / interval / f"{ticker}.parquet"
-        if historical_path.exists():
+        ib_path         = Path(FUTURES_CACHE_DIR) / interval / f"{ticker}.parquet"
+        if interval_path.exists():
+            path = interval_path
+        elif historical_path.exists():
             path = historical_path
         elif ib_path.exists():
             path = ib_path
@@ -642,6 +646,15 @@ def _build_trade_record(
         "exit_type":      exit_result,
         "divergence_bar": position["divergence_bar"],
         "entry_bar":      position["entry_bar"],
+        # Wick gap: distance from the bar extreme that triggered the stop to bar close.
+        # Non-zero only for exit_stop; used by diagnose_bar_resolution.py.
+        "stop_bar_wick_pts": (
+            round(abs(
+                (float(exit_bar["High"]) if position["direction"] == "short" else float(exit_bar["Low"]))
+                - float(exit_bar["Close"])
+            ), 2)
+            if exit_result == "exit_stop" else None
+        ),
     }
     return trade, pnl
 

@@ -45,11 +45,11 @@ You may modify ONLY these elements:
 - `SHORT_STOP_RATIO` — fraction of |entry − TDO| for short stop (current 0.40)
 - `LONG_STOP_RATIO` — frozen at 0.05 (longs disabled)
 - `MIN_STOP_POINTS` — minimum stop distance in MNQ points (current 2.5)
-- `MIN_TDO_DISTANCE_PTS` — minimum |entry − TDO| filter (current 50.0)
+- `MIN_TDO_DISTANCE_PTS` — minimum |entry − TDO| filter (current 15.0)
 - `ALLOWED_WEEKDAYS` — weekdays eligible for trading; Thursday excluded (frozenset({0,1,2,4}))
 - `SIGNAL_BLACKOUT_START` / `SIGNAL_BLACKOUT_END` — entry suppression window (current "11:00"–"13:30")
 - `TRAIL_AFTER_TP_PTS` — trail stop past TDO (current 1.0)
-- `REENTRY_MAX_MOVE_PTS` — max favorable move before re-entry is disallowed (default 20.0)
+- `REENTRY_MAX_MOVE_PTS` — max favorable move before re-entry is disallowed (default 0.0)
 - `BREAKEVEN_TRIGGER_PCT` — fraction of |entry − TDO| before stop locks to entry (default 0.0)
 - `MAX_HOLD_BARS` — time-based exit N bars after entry (default 0 = disabled)
 - `MNQ_PNL_PER_POINT` — do NOT change (2.0)
@@ -123,12 +123,14 @@ When two iterations both satisfy all guards, prefer the one with higher `mean_te
 
 Work through priorities in order.
 
-**Baseline:** SHORT_STOP_RATIO=0.40, MIN_TDO_DISTANCE_PTS=15,
+**Baseline (1m bars):** SHORT_STOP_RATIO=0.40, MIN_TDO_DISTANCE_PTS=15,
 SIGNAL_BLACKOUT=11:00–13:30, Thursday excluded, TRAIL_AFTER_TP_PTS=1.0,
 REENTRY_MAX_MOVE_PTS=0.0, BREAKEVEN_TRIGGER_PCT=0.0.
-`mean_test_pnl=+904.25`, `min_test_pnl=+93.50`, 139 test trades, all 6 folds profitable.
-Exit mix: ~83% stop (incl. trailing stop after TDO), ~17% session_close, 0% hard TP.
-avg_rr: 3.5–4.9 across folds. Win rates: 50%, 19%, 41%, 30%, 31%, 36%.
+`mean_test_pnl=+1049.03`, `min_test_pnl=+53.20`, 361 test trades, all 6 folds profitable.
+Exit mix: ~94% stop (incl. 1pt trail post-TDO), ~6% session_close, 0% hard TP.
+avg_rr: 1.9–3.0 across folds. Win rates: 35%, 42%, 35%, 38%, 36%, 34% (tight band).
+Note: TRAIL_AFTER_TP_PTS=1.0 is genuinely 1pt at 1m (was functionally 5–10pt on 5m bars).
+Optimising this is Priority 1 — it caps all post-TDO capture.
 
 ### Priority 1 — Trail width past TDO (HIGHEST PRIORITY)
 Grid search: TRAIL_AFTER_TP_PTS ∈ [0.0, 1.0, 5.0, 10.0, 20.0]
@@ -144,35 +146,42 @@ at MIN_TDO=50 — needs fresh measurement at MIN_TDO=15. Re-evaluate jointly.
 Search: SIGNAL_BLACKOUT_END ∈ ["12:00", "13:00", "13:30"]; ALLOWED_WEEKDAYS ∈ [all, no-Thu].
 Optimise for: mean_test_pnl (primary), min_test_pnl > 0 (secondary).
 
-### Priority 3 — Pre-TDO progress stop lock-in
+### Priority 3 — Stop ratio fine-tune
+Grid search: SHORT_STOP_RATIO ∈ [0.25, 0.30, 0.35, 0.40]
+**Why third:** At 5m bars, false wicks required a wide stop (0.40) for breathing room. At 1m, wick
+noise is substantially reduced (wick gaps are much smaller bar-by-bar), so a tighter ratio may be
+viable without increasing stop-outs. Tighter stop → higher R:R → better expected value if win rate
+holds. Search downward from the baseline 0.40.
+Optimise for: mean_test_pnl (primary), avg_rr and win_rate (secondary).
+
+### Priority 4 — Pre-TDO progress stop lock-in
 Grid search: BREAKEVEN_TRIGGER_PCT ∈ [0.0, 0.50, 0.60, 0.65, 0.70, 0.75]
-**Why third:** Stop-out rate is ~83%. Locking stop to entry once price is 50–75% toward TDO converts
-some losing stops into breakevens. Only viable after Priority 1 widens the effective stop gap.
+**Why fourth:** Stop-out rate is ~94% at 1m. Locking stop to entry once price is 50–75% toward TDO
+converts some losing stops into breakevens. Only viable after Priority 1 widens the effective stop gap.
 Optimise for: mean_test_pnl (primary), reduction in max_drawdown (secondary).
 
-### Priority 4 — Fine-tune MIN_TDO_DISTANCE_PTS
+### Priority 5 — Fine-tune MIN_TDO_DISTANCE_PTS
 Grid search: [0.0, 10.0, 15.0, 20.0, 25.0]
 **Note:** Isolation testing showed raising MIN_TDO from 15→50 was a -793 regression. 15 is the
 empirically best baseline; search around it for marginal gains only.
 Optimise for: avg_pnl_per_trade (primary), total_test_trades ≥ 8/fold (secondary).
 
-### Priority 4b — Re-entry threshold (low confidence)
+### Priority 5b — Re-entry threshold (low confidence)
 Grid search: REENTRY_MAX_MOVE_PTS ∈ [0.0, 5.0, 10.0, 20.0]
 **Note:** Isolation testing showed re-entry at 20.0 was net negative (-110 mean, -142 min).
 Only revisit after Priority 1 changes the post-TDO exit profile — a wider trail may change
 whether post-stop divergences are worth re-entering.
 Optimise for: mean_test_pnl with total_trades guard ≥ 8/fold.
 
-### Priority 5 — Time-based stop (MAX_HOLD_BARS)
-Grid search: MAX_HOLD_BARS ∈ [0, 30, 60, 90, 120] (bars at 5m resolution)
-**Warning:** Session-close exits account for 31% of trades at ~82% win rate historically — these are
-the most profitable exit type. Cutting them early with MAX_HOLD_BARS risks removing winners.
+### Priority 6 — Time-based stop (MAX_HOLD_BARS)
+Grid search: MAX_HOLD_BARS ∈ [0, 60, 120, 180, 240] (bars at 1m resolution = 1–4 hours)
+**Note:** Session-close exits are ~6% of trades at 1m (was ~31% at 5m) — far less at risk.
 Only useful if analysis shows long-held losing trades dominating the stop-out population.
 Optimise for: mean_test_pnl net of session-close trade count.
 
-### Priority 6 — Intermediate TP (INTERMEDIATE_TP_RATIO)
+### Priority 7 — Intermediate TP (INTERMEDIATE_TP_RATIO)
 Add INTERMEDIATE_TP_RATIO ∈ [0.0, 0.3, 0.5, 0.7] — partial exit before TDO.
-Only implement if Priorities 1–5 leave residual session-close drag. Requires new constant + exit
+Only implement if Priorities 1–6 leave residual session-close drag. Requires new constant + exit
 check in manage_position — not yet wired.
 
 ---
@@ -215,9 +224,8 @@ Write a one-paragraph reflection labeled **"Agenda Reassessment"** before each i
 - **Direction**: shorts only (`TRADE_DIRECTION = "short"`); longs structurally lose across 5/6 walk-forward folds
 - **Kill zone**: 9:00–13:30 ET; entry analysis shows 12:xx is strongest (56% win rate), 11:xx is the dead zone (21%, −18.2 avg)
 - **TDO anchor**: 9:30 AM ET bar open is both TP target and stop-placement basis; first-bar proxy if 9:30 bar absent
-- **Stop formula**: `entry + SHORT_STOP_RATIO × |entry − TDO|` for shorts (current ratio: 0.25 → ~14.6 pt median stop)
-- **R:R at 0.25**: approximately 3.0 : 1 (1 / 0.25) — low win rate (~25–30%) is compensated by high RR
-- **Exit mix (baseline)**: 73% stop-outs, 16% TP, 11% session-close; session-close exits are 82% profitable
+- **Stop formula**: `entry + SHORT_STOP_RATIO × |entry − TDO|` for shorts (current ratio: 0.40 → ~2.5:1 R:R)
+- **Exit mix (1m baseline)**: ~94% stop-outs (incl. 1pt trail after TDO), ~6% session-close, 0% hard TP; session-close exits are profitable at high rates
 - **SMT divergence**: bearish = MES new session high + MNQ failure; bullish = MES new session low + MNQ failure
 - **Ticker naming**: IB uses `MNQ` / `MES` (not `MNQ1!` / `MES1!`)
 
