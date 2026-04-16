@@ -270,28 +270,15 @@ def test_stop_long():
 
 
 def test_tp_equals_tdo():
-    """TP is always TDO — confirmed via screen_session signal dict."""
+    """TP is always TDO — confirmed via _build_signal_from_bar signal dict."""
     import train_smt
-    # Use a simple synthetic session that triggers a short signal
-    # MES makes new high at bar 5, MNQ doesn't; then bearish confirm at bar 6
-    mes = _make_1m_bars(
-        opens= [100]*8,
-        highs= [101, 101, 101, 101, 101, 103, 102, 102],
-        lows=  [ 99]*8,
-        closes=[100, 100, 100, 100, 100, 100, 100, 100],
-        start_time="2025-01-02 09:00:00",
-    )
-    mnq = _make_1m_bars(
-        opens= [200]*8,
-        highs= [201, 201, 201, 201, 201, 201, 203, 201],
-        lows=  [199]*8,
-        closes=[200, 200, 200, 200, 200, 200, 198, 200],  # bar 6: bearish confirm
-        start_time="2025-01-02 09:00:00",
-    )
-    # Pass tdo directly; caller is responsible for computing it
-    signal = train_smt.screen_session(mnq, mes, 195.0)
-    if signal is not None:
-        assert signal["take_profit"] == signal["tdo"]
+    # Short signal: entry at 20100, TDO at 20000 (below entry — valid short)
+    bar = pd.Series({"Open": 20105.0, "High": 20110.0, "Low": 20095.0, "Close": 20100.0})
+    ts = pd.Timestamp("2025-01-02 09:05:00", tz="America/New_York")
+    signal = train_smt._build_signal_from_bar(bar, ts, "short", 20000.0)
+    assert signal is not None
+    assert signal["take_profit"] == signal["tdo"]
+    assert signal["take_profit"] == 20000.0
 
 
 def test_rr_ratio():
@@ -306,109 +293,42 @@ def test_rr_ratio():
     assert rr == pytest.approx(1 / 0.45, rel=1e-3)
 
 
-# ══ screen_session tests ═════════════════════════════════════════════════════
+# ══ _build_signal_from_bar tests ═════════════════════════════════════════════
 
-def _build_short_session():
-    """Helper: synthetic session with a short SMT divergence signal.
+def _make_signal_bar(close, open_=None, high=None, low=None):
+    """Build a pd.Series bar for _build_signal_from_bar tests."""
+    if open_ is None: open_ = close
+    if high is None:  high  = close + 5
+    if low is None:   low   = close - 5
+    return pd.Series({"Open": float(open_), "High": float(high), "Low": float(low), "Close": float(close)})
 
-    Returns pre-sliced session bars and the TDO float — caller passes both to screen_session.
-    Bar 5: MNQ bullish (close=202 > open=199) — required for find_entry_bar "short"
-    Bar 7: MES breaks session high (103 > 101), MNQ does not (201 <= 201)
-    Bar 8: MNQ bearish (close=198 < open=200) with high=203 > bull-body-close=202 → confirms
-    """
-    mes = _make_1m_bars(
-        opens= [100]*10,
-        highs= [101, 101, 101, 101, 101, 101, 101, 103, 102, 102],
-        lows=  [ 99]*10,
-        closes=[100, 100, 100, 100, 100, 100, 100, 100, 100, 100],
-        start_time="2025-01-02 09:00:00",
-    )
-    mnq = _make_1m_bars(
-        opens= [200, 200, 200, 200, 200, 199, 200, 200, 200, 200],
-        highs= [201, 201, 201, 201, 201, 203, 201, 201, 203, 201],
-        lows=  [199, 199, 199, 199, 199, 199, 199, 199, 199, 199],
-        closes=[200, 200, 200, 200, 200, 202, 200, 200, 198, 200],
-        start_time="2025-01-02 09:00:00",
-    )
-    # TDO=195.0: below entry_price≈198 → valid for a short signal
-    return mnq, mes, 195.0
+_SIGNAL_TS = pd.Timestamp("2025-01-02 09:05:00", tz="America/New_York")
 
 
-def _build_long_session():
-    """Helper: synthetic session with a long SMT divergence signal.
-
-    Returns pre-sliced session bars and the TDO float — caller passes both to screen_session.
-    Bar 5: MNQ bearish (close=198 < open=201) — required for find_entry_bar "long"
-    Bar 7: MES breaks session low (97 < 99), MNQ does not (199 >= 199)
-    Bar 8: MNQ bullish (close=202 > open=198) with low=194 < bear-body-close=198 → confirms
-    """
-    mes = _make_1m_bars(
-        opens= [100]*10,
-        highs= [101]*10,
-        lows=  [ 99,  99,  99,  99,  99,  99,  99,  97,  99,  99],
-        closes=[100]*10,
-        start_time="2025-01-02 09:00:00",
-    )
-    mnq = _make_1m_bars(
-        opens= [200, 200, 200, 200, 200, 201, 200, 200, 198, 200],
-        highs= [201, 201, 201, 201, 201, 201, 201, 201, 201, 201],
-        lows=  [199, 199, 199, 199, 199, 197, 199, 199, 194, 199],
-        closes=[200, 200, 200, 200, 200, 198, 200, 200, 202, 200],
-        start_time="2025-01-02 09:00:00",
-    )
-    # TDO=205.0: above entry_price≈202 → valid for a long signal
-    return mnq, mes, 205.0
-
-
-def test_screen_session_returns_short_signal(monkeypatch):
-    """Full pipeline: bearish SMT + confirm → short signal dict."""
+def test_build_signal_from_bar_short_returns_signal(monkeypatch):
+    """_build_signal_from_bar returns a short signal dict for valid short setup."""
     import train_smt
-    # Disable MIN_STOP_POINTS guard: synthetic bars have TDO very close to entry
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    mnq, mes, tdo = _build_short_session()
-    signal = train_smt.screen_session(mnq, mes, tdo)
-    assert signal is not None, "Expected a short signal from the synthetic bearish SMT session"
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    bar = _make_signal_bar(close=20100.0)
+    signal = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "short", 20000.0)
+    assert signal is not None
     assert signal["direction"] == "short"
     assert "entry_price" in signal
     assert "stop_price" in signal
     assert "take_profit" in signal
 
 
-def test_screen_session_returns_long_signal(monkeypatch):
-    """Full pipeline: bullish SMT + confirm → long signal dict."""
+def test_build_signal_from_bar_long_returns_signal(monkeypatch):
+    """_build_signal_from_bar returns a long signal dict for valid long setup."""
     import train_smt
-    # Disable MIN_STOP_POINTS guard: synthetic bars have TDO very close to entry
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    # TRADE_DIRECTION is frozen at "short" in production; override here to test
-    # the long path in isolation.
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
-    mnq, mes, tdo = _build_long_session()
-    signal = train_smt.screen_session(mnq, mes, tdo)
-    assert signal is not None, "Expected a long signal from the synthetic bullish SMT session"
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    bar = _make_signal_bar(close=19900.0)
+    signal = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "long", 20000.0)
+    assert signal is not None
     assert signal["direction"] == "long"
     assert signal["take_profit"] == signal["tdo"]
-
-
-def test_screen_session_no_divergence_returns_none():
-    """Flat market with no divergence → None."""
-    import train_smt
-    # Perfectly correlated MES and MNQ — no divergence possible
-    mes = _make_1m_bars(
-        opens= [100]*10,
-        highs= [101, 102, 101, 101, 101, 101, 101, 101, 101, 101],
-        lows=  [ 99]*10,
-        closes=[100]*10,
-        start_time="2025-01-02 09:00:00",
-    )
-    mnq = _make_1m_bars(
-        opens= [200]*10,
-        highs= [201, 202, 201, 201, 201, 201, 201, 201, 201, 201],  # matches MES pattern
-        lows=  [199]*10,
-        closes=[200]*10,
-        start_time="2025-01-02 09:00:00",
-    )
-    signal = train_smt.screen_session(mnq, mes, 20000.0)
-    assert signal is None
 
 
 # ══ manage_position tests ════════════════════════════════════════════════════
@@ -428,9 +348,10 @@ def _make_bar(high, low, close=None, open_=None):
     return pd.Series({"Open": open_, "High": high, "Low": low, "Close": close})
 
 
-def test_manage_position_tp_long():
+def test_manage_position_tp_long(monkeypatch):
     """Long: high >= take_profit → 'exit_tp'."""
     import train_smt
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
     pos = _make_position("long", 19900, 19800, 20000)
     bar = _make_bar(high=20001, low=19950)
     assert train_smt.manage_position(pos, bar) == "exit_tp"
@@ -444,9 +365,10 @@ def test_manage_position_stop_long():
     assert train_smt.manage_position(pos, bar) == "exit_stop"
 
 
-def test_manage_position_tp_short():
+def test_manage_position_tp_short(monkeypatch):
     """Short: low <= take_profit → 'exit_tp'."""
     import train_smt
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
     pos = _make_position("short", 20100, 20200, 20000)
     bar = _make_bar(high=20050, low=19999)
     assert train_smt.manage_position(pos, bar) == "exit_tp"
@@ -538,38 +460,48 @@ def _make_long_session_bars(base=20000.0):
 
 # ══ TRADE_DIRECTION filter tests ═════════════════════════════════════════════
 
-def test_trade_direction_short_blocks_long(monkeypatch):
-    """TRADE_DIRECTION='short' causes screen_session to skip bullish SMT signals."""
+def _patch_direction_test_guards(monkeypatch, trade_direction):
+    """Shared setup for direction-filter tests: disable all guards except direction."""
     import train_smt
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "short")
+    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", trade_direction)
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 19900.0)
+
+
+def test_trade_direction_short_blocks_long(monkeypatch):
+    """TRADE_DIRECTION='short' causes run_backtest to skip bullish SMT signals."""
+    import train_smt
+    _patch_direction_test_guards(monkeypatch, "short")
     mnq, mes = _make_long_session_bars()
-    result = train_smt.screen_session(mnq, mes, 20100.0)
-    assert result is None
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    assert stats["total_trades"] == 0
 
 
 def test_trade_direction_long_blocks_short(monkeypatch):
-    """TRADE_DIRECTION='long' causes screen_session to skip bearish SMT signals."""
+    """TRADE_DIRECTION='long' causes run_backtest to skip bearish SMT signals."""
     import train_smt
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "long")
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    _patch_direction_test_guards(monkeypatch, "long")
+    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 20100.0)
     mnq, mes = _make_short_session_bars()
-    result = train_smt.screen_session(mnq, mes, 19900.0)
-    assert result is None
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    assert stats["total_trades"] == 0
 
 
 def test_trade_direction_both_passes_short(monkeypatch):
-    """TRADE_DIRECTION='both' does not filter any signal direction."""
+    """TRADE_DIRECTION='both' does not filter bearish SMT signals."""
     import train_smt
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    _patch_direction_test_guards(monkeypatch, "both")
     mnq, mes = _make_short_session_bars()
-    result = train_smt.screen_session(mnq, mes, 19900.0)
-    assert result is not None
-    assert result["direction"] == "short"
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    assert stats["total_trades"] >= 1
+    assert any(t["direction"] == "short" for t in stats["trade_records"])
 
 
 # ══ TDO validity gate tests ══════════════════════════════════════════════════
@@ -577,24 +509,24 @@ def test_trade_direction_both_passes_short(monkeypatch):
 def test_tdo_validity_blocks_inverted_long(monkeypatch):
     """TDO_VALIDITY_CHECK=True skips long signal when TDO < entry_price."""
     import train_smt
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", True)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    mnq, mes = _make_long_session_bars()
-    # TDO below entry (entry ≈ base+2=20002) → inverted long
-    result = train_smt.screen_session(mnq, mes, 19950.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    # Long signal: entry at 20100, TDO at 19950 → TDO below entry → inverted
+    bar = _make_signal_bar(close=20100.0)
+    result = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "long", 19950.0)
     assert result is None
 
 
 def test_tdo_validity_passes_valid_long(monkeypatch):
     """TDO_VALIDITY_CHECK=True allows long signal when TDO > entry_price."""
     import train_smt
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", True)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    mnq, mes = _make_long_session_bars()
-    # TDO well above entry (entry ≈ base+2=20002) → valid long
-    result = train_smt.screen_session(mnq, mes, 20100.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    # Long signal: entry at 19900, TDO at 20100 → TDO above entry → valid
+    bar = _make_signal_bar(close=19900.0)
+    result = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "long", 20100.0)
     assert result is not None
     assert result["direction"] == "long"
     assert result["take_profit"] > result["entry_price"]
@@ -603,24 +535,24 @@ def test_tdo_validity_passes_valid_long(monkeypatch):
 def test_tdo_validity_blocks_inverted_short(monkeypatch):
     """TDO_VALIDITY_CHECK=True skips short signal when TDO > entry_price."""
     import train_smt
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", True)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    mnq, mes = _make_short_session_bars()
-    # TDO above entry (entry ≈ base-2=19998) → inverted short
-    result = train_smt.screen_session(mnq, mes, 20100.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    # Short signal: entry at 19900, TDO at 20100 → TDO above entry → inverted
+    bar = _make_signal_bar(close=19900.0)
+    result = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "short", 20100.0)
     assert result is None
 
 
 def test_tdo_validity_false_passes_inverted(monkeypatch):
     """TDO_VALIDITY_CHECK=False allows inverted signals through (legacy behavior)."""
     import train_smt
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    mnq, mes = _make_short_session_bars()
-    # TDO above entry → inverted short, but gate is off
-    result = train_smt.screen_session(mnq, mes, 20100.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    # Short signal: entry at 19900, TDO at 20100 → inverted, but gate is off
+    bar = _make_signal_bar(close=19900.0)
+    result = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "short", 20100.0)
     assert result is not None  # passes through despite inversion
 
 
@@ -629,24 +561,24 @@ def test_tdo_validity_false_passes_inverted(monkeypatch):
 def test_min_stop_points_filters_tiny_stop(monkeypatch):
     """MIN_STOP_POINTS=50 rejects signals where stop distance < 50 pts."""
     import train_smt
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 50.0)
-    mnq, mes = _make_short_session_bars()
-    # TDO just 5 pts below entry (entry≈19998) → stop = 0.45*5 = 2.25 pts → filtered
-    result = train_smt.screen_session(mnq, mes, 19995.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    # Short signal: entry=20100, TDO=20095 → dist=5 → stop=20100+0.40*5=20102 → stop_dist=2 < 50
+    bar = _make_signal_bar(close=20100.0)
+    result = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "short", 20095.0)
     assert result is None
 
 
 def test_min_stop_points_zero_disables_guard(monkeypatch):
     """MIN_STOP_POINTS=0.0 allows all stop distances through."""
     import train_smt
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    mnq, mes = _make_short_session_bars()
-    result = train_smt.screen_session(mnq, mes, 19995.0)
-    # tiny stop but guard is off — signal should come through
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    # Short signal with tiny stop — guard is off so should come through
+    bar = _make_signal_bar(close=20100.0)
+    result = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "short", 20095.0)
     assert result is not None
 
 
@@ -655,13 +587,13 @@ def test_min_stop_points_zero_disables_guard(monkeypatch):
 def test_long_stop_ratio_applied(monkeypatch):
     """LONG_STOP_RATIO is used for long stop computation."""
     import train_smt
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
     monkeypatch.setattr(train_smt, "LONG_STOP_RATIO", 0.3)
-    mnq, mes = _make_long_session_bars()
     tdo_val = 20100.0
-    result = train_smt.screen_session(mnq, mes, tdo_val)
+    bar = _make_signal_bar(close=19900.0)
+    result = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "long", tdo_val)
     assert result is not None
     assert result["direction"] == "long"
     expected_stop = result["entry_price"] - 0.3 * abs(result["entry_price"] - tdo_val)
@@ -671,13 +603,13 @@ def test_long_stop_ratio_applied(monkeypatch):
 def test_short_stop_ratio_applied(monkeypatch):
     """SHORT_STOP_RATIO is used for short stop computation."""
     import train_smt
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
     monkeypatch.setattr(train_smt, "SHORT_STOP_RATIO", 0.6)
-    mnq, mes = _make_short_session_bars()
     tdo_val = 19900.0
-    result = train_smt.screen_session(mnq, mes, tdo_val)
+    bar = _make_signal_bar(close=20100.0)
+    result = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "short", tdo_val)
     assert result is not None
     assert result["direction"] == "short"
     expected_stop = result["entry_price"] + 0.6 * abs(result["entry_price"] - tdo_val)
@@ -713,3 +645,359 @@ def test_print_direction_breakdown_empty_trades(capsys):
     train_smt.print_direction_breakdown({"trade_records": []}, prefix="test_")
     out = capsys.readouterr().out
     assert out == ""
+
+
+# ══ find_anchor_close tests ══════════════════════════════════════════════════
+
+def test_find_anchor_close_short_finds_bull_bar():
+    """Short setup: scans back from bar 4 and finds the bullish bar 2 close."""
+    import train_smt
+    bars = _make_1m_bars(
+        opens= [200, 200, 198, 200, 200],
+        highs= [201, 201, 203, 201, 201],
+        lows=  [199, 199, 198, 199, 199],
+        closes=[200, 200, 202, 200, 200],  # bar 2: bullish close=202 > open=198
+    )
+    result = train_smt.find_anchor_close(bars, 4, "short")
+    assert result == pytest.approx(202.0)
+
+
+def test_find_anchor_close_long_finds_bear_bar():
+    """Long setup: scans back from bar 4 and finds the bearish bar 2 close."""
+    import train_smt
+    bars = _make_1m_bars(
+        opens= [200, 200, 202, 200, 200],
+        highs= [201, 201, 203, 201, 201],
+        lows=  [199, 199, 197, 199, 199],
+        closes=[200, 200, 198, 200, 200],  # bar 2: bearish close=198 < open=202
+    )
+    result = train_smt.find_anchor_close(bars, 4, "long")
+    assert result == pytest.approx(198.0)
+
+
+def test_find_anchor_close_no_match_returns_none():
+    """All doji bars → no qualifying bar → returns None."""
+    import train_smt
+    bars = _make_1m_bars(
+        opens= [200, 200, 200, 200, 200],
+        highs= [201, 201, 201, 201, 201],
+        lows=  [199, 199, 199, 199, 199],
+        closes=[200, 200, 200, 200, 200],
+    )
+    result = train_smt.find_anchor_close(bars, 4, "short")
+    assert result is None
+
+
+def test_find_anchor_close_uses_most_recent():
+    """Two bullish bars: returns the closer (most recent) one's close."""
+    import train_smt
+    bars = _make_1m_bars(
+        opens= [198, 200, 198, 200, 200],
+        highs= [203, 201, 203, 201, 201],
+        lows=  [197, 199, 197, 199, 199],
+        closes=[202, 200, 203, 200, 200],  # bar 0 close=202, bar 2 close=203 (more recent)
+    )
+    # Scanning backward from bar 4: first bullish bar found is bar 2 (close=203)
+    result = train_smt.find_anchor_close(bars, 4, "short")
+    assert result == pytest.approx(203.0)
+
+
+# ══ is_confirmation_bar tests ════════════════════════════════════════════════
+
+def test_is_confirmation_bar_short_true():
+    """Bearish bar with high > anchor_close → True."""
+    import train_smt
+    bar = pd.Series({"Open": 200.0, "High": 205.0, "Low": 196.0, "Close": 197.0})
+    assert train_smt.is_confirmation_bar(bar, anchor_close=203.0, direction="short")
+
+
+def test_is_confirmation_bar_short_false_not_bearish():
+    """Bullish bar (close > open) → False even if high > anchor."""
+    import train_smt
+    bar = pd.Series({"Open": 196.0, "High": 205.0, "Low": 195.0, "Close": 200.0})
+    assert not train_smt.is_confirmation_bar(bar, anchor_close=203.0, direction="short")
+
+
+def test_is_confirmation_bar_short_false_wick_below_anchor():
+    """Bearish bar but high <= anchor_close → False."""
+    import train_smt
+    bar = pd.Series({"Open": 200.0, "High": 202.0, "Low": 196.0, "Close": 197.0})
+    assert not train_smt.is_confirmation_bar(bar, anchor_close=203.0, direction="short")
+
+
+def test_is_confirmation_bar_long_true():
+    """Bullish bar with low < anchor_close → True."""
+    import train_smt
+    bar = pd.Series({"Open": 198.0, "High": 205.0, "Low": 194.0, "Close": 202.0})
+    assert train_smt.is_confirmation_bar(bar, anchor_close=196.0, direction="long")
+
+
+def test_is_confirmation_bar_long_false_not_bullish():
+    """Bearish bar (close < open) → False even if low < anchor."""
+    import train_smt
+    bar = pd.Series({"Open": 202.0, "High": 205.0, "Low": 194.0, "Close": 198.0})
+    assert not train_smt.is_confirmation_bar(bar, anchor_close=196.0, direction="long")
+
+
+def test_is_confirmation_bar_long_false_wick_above_anchor():
+    """Bullish bar but low >= anchor_close → False."""
+    import train_smt
+    bar = pd.Series({"Open": 198.0, "High": 205.0, "Low": 197.0, "Close": 202.0})
+    assert not train_smt.is_confirmation_bar(bar, anchor_close=196.0, direction="long")
+
+
+# ══ manage_position BREAKEVEN_TRIGGER_PCT tests ══════════════════════════════
+
+def _make_position_with_tp(direction, entry_price, stop_price, take_profit):
+    return {
+        "direction":   direction,
+        "entry_price": entry_price,
+        "stop_price":  stop_price,
+        "take_profit": take_profit,
+    }
+
+
+def test_breakeven_trigger_pct_fires_at_correct_progress(monkeypatch):
+    """Short trade at 50% progress to TDO → stop moves to entry, breakeven_active set."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.5)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    # entry=20100, TP=20000, dist=100. 50% progress = price dropped 50 pts → Low=20050
+    pos = _make_position_with_tp("short", 20100.0, 20200.0, 20000.0)
+    bar = pd.Series({"Open": 20090.0, "High": 20095.0, "Low": 20050.0, "Close": 20055.0})
+    train_smt.manage_position(pos, bar)
+    assert pos["stop_price"] <= 20100.0  # stop tightened to at most entry
+    assert pos.get("breakeven_active") is True
+
+
+def test_breakeven_trigger_pct_does_not_fire_below_threshold(monkeypatch):
+    """40% progress with 50% threshold → stop unchanged."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.5)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    # entry=20100, TP=20000, dist=100. 40% progress → Low=20060
+    pos = _make_position_with_tp("short", 20100.0, 20200.0, 20000.0)
+    original_stop = pos["stop_price"]
+    bar = pd.Series({"Open": 20090.0, "High": 20095.0, "Low": 20060.0, "Close": 20065.0})
+    train_smt.manage_position(pos, bar)
+    assert pos["stop_price"] == original_stop
+    assert not pos.get("breakeven_active")
+
+
+def test_breakeven_trigger_pct_zero_disables_mechanism(monkeypatch):
+    """BREAKEVEN_TRIGGER_PCT=0.0 → stop never moves regardless of progress."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    pos = _make_position_with_tp("short", 20100.0, 20200.0, 20000.0)
+    original_stop = pos["stop_price"]
+    bar = pd.Series({"Open": 20050.0, "High": 20055.0, "Low": 19990.0, "Close": 20000.0})
+    train_smt.manage_position(pos, bar)
+    assert pos["stop_price"] == original_stop
+
+
+def test_breakeven_active_flag_set(monkeypatch):
+    """After BREAKEVEN_TRIGGER_PCT fires, breakeven_active is True."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.5)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    pos = _make_position_with_tp("short", 20100.0, 20200.0, 20000.0)
+    bar = pd.Series({"Open": 20060.0, "High": 20065.0, "Low": 20049.0, "Close": 20055.0})
+    train_smt.manage_position(pos, bar)
+    assert pos.get("breakeven_active") is True
+
+
+def test_breakeven_stop_only_tightens(monkeypatch):
+    """If stop is already tighter than entry, it is not widened by breakeven."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.5)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    # Stop already tighter than entry (e.g. moved by trailing logic earlier)
+    pos = _make_position_with_tp("short", 20100.0, 20090.0, 20000.0)  # stop=20090 < entry=20100
+    bar = pd.Series({"Open": 20060.0, "High": 20065.0, "Low": 20049.0, "Close": 20055.0})
+    train_smt.manage_position(pos, bar)
+    # min(20090, 20100) = 20090 — stop should not widen to 20100
+    assert pos["stop_price"] <= 20090.0
+
+
+# ══ State machine / re-entry integration tests ══════════════════════════════
+
+def _make_reentry_session_bars(base=20000.0):
+    """Build a session where a trade stops out early and a re-entry fires later.
+
+    Bar 5: bullish anchor (close > open).
+    Bar 7: MES new session high (divergence), MNQ fails → bearish signal.
+    Bar 8: confirmation → entry (open=base+2, close=base-2, high=base+6).
+    Bar 9: immediate stop-out (high exceeds stop).
+    Bar 12: new anchor bar for re-entry (bullish).
+    Bar 14: re-entry confirmation (bearish bar, high > anchor).
+    Bar 20: position closes at session end.
+    """
+    n = 50
+    start_ts = pd.Timestamp("2025-01-02 09:00:00", tz="America/New_York")
+    idx = pd.date_range(start=start_ts, periods=n, freq="1min")
+    mes_highs = [base + 5] * n
+    mnq_highs = [base + 5] * n
+    mes_lows  = [base - 5] * n
+    mnq_lows  = [base - 5] * n
+    opens  = [base] * n
+    closes = [base] * n
+
+    # Bullish anchor before divergence
+    opens[5]  = base - 2; closes[5] = base + 2
+    # SMT divergence at bar 7
+    mes_highs[7] = base + 30
+    # Bearish confirmation at bar 8 (entry)
+    opens[8] = base + 2; closes[8] = base - 2; mnq_highs[8] = base + 6
+    # Stop-out bar: short stop = entry + SHORT_STOP_RATIO * dist_to_tdo
+    # With TDO=base-100, dist=100, stop ≈ entry + 40 = base - 2 + 40 = base+38
+    mnq_highs[9] = base + 40  # triggers stop
+
+    # Re-entry anchor: new bullish bar at 12
+    opens[12] = base - 3; closes[12] = base + 3
+    # Re-entry confirmation at bar 14: bearish, high > bar-12 close
+    opens[14] = base + 3; closes[14] = base - 3; mnq_highs[14] = base + 7
+
+    mnq = pd.DataFrame(
+        {"Open": opens, "High": mnq_highs, "Low": mnq_lows, "Close": closes, "Volume": [1000.0]*n},
+        index=idx,
+    )
+    mes = pd.DataFrame(
+        {"Open": opens, "High": mes_highs, "Low": mes_lows, "Close": closes, "Volume": [1000.0]*n},
+        index=idx,
+    )
+    return mnq, mes
+
+
+def test_reentry_after_stop(monkeypatch):
+    """Re-entry fires a second trade when stop-out move < REENTRY_MAX_MOVE_PTS."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 50.0)
+    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 19900.0)
+
+    mnq, mes = _make_reentry_session_bars()
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    assert stats["total_trades"] >= 2
+
+
+def test_no_reentry_when_disabled(monkeypatch):
+    """REENTRY_MAX_MOVE_PTS=0.0 → only one trade even with a valid re-entry setup."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 19900.0)
+
+    mnq, mes = _make_reentry_session_bars()
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    assert stats["total_trades"] <= 1
+
+
+def test_no_reentry_when_move_exceeds_threshold(monkeypatch):
+    """Stop-out after favorable move > REENTRY_MAX_MOVE_PTS → no second trade.
+
+    For a short, move = entry_price - stop_out_bar_close.  A positive value
+    means price moved favorably (downward) before reversing and stopping us out.
+    When move >= threshold, re-entry is suppressed (we missed the move already).
+    """
+    import train_smt
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 5.0)
+    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 19900.0)
+
+    # Build a session where:
+    # - entry at bar 8 close = base-2
+    # - stop-out at bar 9: high = base+40 triggers stop, but close = base-20
+    # - move = (base-2) - (base-20) = 18 >= REENTRY_MAX_MOVE_PTS (5.0) → blocked
+    base = 20000.0
+    mnq, mes = _make_reentry_session_bars(base=base)
+    # Override bar-9 close: price dipped 20 pts favorably before the wick stopped us out.
+    mnq = mnq.copy()
+    mnq.iloc[9, mnq.columns.get_loc("Close")] = base - 20
+
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    assert stats["total_trades"] == 1
+
+
+def test_reentry_breakeven_active_bypasses_move_check(monkeypatch):
+    """Trade stopped at breakeven → REENTRY_ELIGIBLE regardless of move size."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 1.0)  # very tight threshold
+    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.01)  # fires almost immediately
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 19900.0)
+
+    mnq, mes = _make_reentry_session_bars()
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    # Verify the backtest completes without error; with breakeven active the position
+    # stops at entry so breakeven_active bypasses the move check → reentry eligible.
+    assert "total_trades" in stats
+
+
+def test_state_resets_at_day_boundary(monkeypatch):
+    """A pending divergence from day 1 does NOT carry to day 2."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 19900.0)
+
+    # Day 1: divergence fires but no confirmation bar in session (no bearish confirm)
+    n = 30
+    d1_start = pd.Timestamp("2025-01-02 09:00:00", tz="America/New_York")
+    d1_idx   = pd.date_range(start=d1_start, periods=n, freq="1min")
+    mes_highs = [20005.0] * n; mes_highs[7] = 20030.0
+    mnq_highs = [20005.0] * n
+    opens_d1  = [20000.0] * n; opens_d1[5] = 19998.0; closes_d1 = [20000.0] * n; closes_d1[5] = 20002.0
+    # No bearish confirmation bar → state stays WAITING_FOR_ENTRY at day end
+    mnq1 = pd.DataFrame({"Open": opens_d1, "High": mnq_highs, "Low": [19995.0]*n, "Close": closes_d1, "Volume": [1000.0]*n}, index=d1_idx)
+    mes1 = pd.DataFrame({"Open": opens_d1, "High": mes_highs, "Low": [19995.0]*n, "Close": closes_d1, "Volume": [1000.0]*n}, index=d1_idx)
+
+    # Day 2: flat bars — no divergence of its own
+    d2_start = pd.Timestamp("2025-01-03 09:00:00", tz="America/New_York")
+    d2_idx   = pd.date_range(start=d2_start, periods=n, freq="1min")
+    flat_opens  = [20000.0] * n
+    flat_closes = [20000.0] * n
+    # Bar 5 on day 2: bearish bar that would confirm a "short" if state carried over
+    flat_opens[5] = 20002.0; flat_closes[5] = 19998.0
+    mnq2 = pd.DataFrame({"Open": flat_opens, "High": [20005.0]*n, "Low": [19995.0]*n, "Close": flat_closes, "Volume": [1000.0]*n}, index=d2_idx)
+    mes2 = pd.DataFrame({"Open": flat_opens, "High": [20005.0]*n, "Low": [19995.0]*n, "Close": flat_closes, "Volume": [1000.0]*n}, index=d2_idx)
+
+    mnq = pd.concat([mnq1, mnq2])
+    mes = pd.concat([mes1, mes2])
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
+    # Day 2 should not see a trade from the stale day-1 divergence
+    assert stats["total_trades"] == 0

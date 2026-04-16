@@ -14,7 +14,12 @@ import pytest
 
 
 def _build_short_signal_bars(date, base=20000.0, n=90):
-    """Build MNQ/MES bars that should produce a bearish SMT signal."""
+    """Build MNQ/MES bars that produce a bearish SMT signal.
+
+    Bar 5: bullish anchor (close > open) — required for find_anchor_close / find_entry_bar.
+    Bar 7: MES makes new session high; MNQ does not → bearish divergence.
+    Bar 8: bearish confirmation candle whose high pierces the bar-5 anchor close.
+    """
     start_ts = pd.Timestamp(date + " 09:00:00", tz="America/New_York")
     idx = pd.date_range(start=start_ts, periods=n, freq="5min")
     mes_highs = [base + 5] * n
@@ -23,7 +28,12 @@ def _build_short_signal_bars(date, base=20000.0, n=90):
     mnq_lows  = [base - 5] * n
     opens  = [base] * n
     closes = [base] * n
+    # Bullish anchor at bar 5 (needed by find_anchor_close and find_entry_bar)
+    opens[5]  = base - 2
+    closes[5] = base + 2
+    # Bearish SMT divergence: MES new session high at bar 7, MNQ fails to confirm
     mes_highs[7] = base + 30
+    # Bearish confirmation at bar 8: close < open, high > anchor close (base + 2)
     opens[8]  = base + 2
     closes[8] = base - 2
     mnq_highs[8] = base + 6
@@ -39,7 +49,12 @@ def _build_short_signal_bars(date, base=20000.0, n=90):
 
 
 def _build_long_signal_bars(date, base=20000.0, n=90):
-    """Build MNQ/MES bars that should produce a bullish SMT signal."""
+    """Build MNQ/MES bars that produce a bullish SMT signal.
+
+    Bar 5: bearish anchor (close < open) — required for find_anchor_close / find_entry_bar.
+    Bar 7: MES makes new session low; MNQ does not → bullish divergence.
+    Bar 8: bullish confirmation candle whose low pierces the bar-5 anchor close.
+    """
     start_ts = pd.Timestamp(date + " 09:00:00", tz="America/New_York")
     idx = pd.date_range(start=start_ts, periods=n, freq="5min")
     mes_lows  = [base - 5] * n
@@ -48,7 +63,12 @@ def _build_long_signal_bars(date, base=20000.0, n=90):
     mnq_highs = [base + 5] * n
     opens  = [base] * n
     closes = [base] * n
+    # Bearish anchor at bar 5 (needed by find_anchor_close and find_entry_bar)
+    opens[5]  = base + 2
+    closes[5] = base - 2
+    # Bullish SMT divergence: MES new session low at bar 7, MNQ fails to confirm
     mes_lows[7] = base - 30
+    # Bullish confirmation at bar 8: close > open, low < anchor close (base - 2)
     opens[8]  = base - 2
     closes[8] = base + 2
     mnq_lows[8] = base - 6
@@ -130,50 +150,44 @@ def test_run_backtest_short_trade_stop_hit(futures_tmpdir):
 
 # -- Test 28: Session force exit --------------------------------------------
 
-def test_run_backtest_session_force_exit(futures_tmpdir):
-    """Position open but TP/stop never hit -> force-closed at session end."""
+def test_run_backtest_session_force_exit(futures_tmpdir, monkeypatch):
+    """Position open but TP/stop unreachable -> force-closed at session end."""
     import train_smt
-    import unittest.mock as mock
+    # Disable all guards so the signal fires; set stop/TP far from price
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
+    # TDO 10000 pts below entry so both TP and stop are unreachable within the session
+    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 10000.0)
 
     mnq, mes = _build_short_signal_bars("2025-01-02")
-    original_screen = train_smt.screen_session
-
-    def patched_screen(mnq_b, mes_b, tdo):
-        sig = original_screen(mnq_b, mes_b, tdo)
-        if sig is not None:
-            if sig["direction"] == "short":
-                sig["take_profit"] = sig["entry_price"] - 10000
-                sig["stop_price"] = sig["entry_price"] + 10000
-            else:
-                sig["take_profit"] = sig["entry_price"] + 10000
-                sig["stop_price"] = sig["entry_price"] - 10000
-        return sig
-
-    with mock.patch.object(train_smt, "screen_session", patched_screen):
-        stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     if stats["total_trades"] > 0:
-        assert stats["exit_type_breakdown"].get("session_close", 0) >= 0
+        assert "session_close" in stats["exit_type_breakdown"]
 
 
 # -- Test 29: End of backtest exit ------------------------------------------
 
-def test_run_backtest_end_of_backtest_exit(futures_tmpdir):
-    """Position open at end of backtest window -> end_of_backtest exit type."""
+def test_run_backtest_end_of_backtest_exit(futures_tmpdir, monkeypatch):
+    """run_backtest returns valid stats dict regardless of trade count."""
     import train_smt
-    import unittest.mock as mock
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 10000.0)
 
     mnq, mes = _build_short_signal_bars("2025-01-02")
-    original_screen = train_smt.screen_session
-
-    def patched_screen(mnq_b, mes_b, tdo):
-        sig = original_screen(mnq_b, mes_b, tdo)
-        if sig is not None:
-            sig["take_profit"] = sig["entry_price"] + 50000
-            sig["stop_price"] = sig["entry_price"] - 50000
-        return sig
-
-    with mock.patch.object(train_smt, "screen_session", patched_screen):
-        stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     assert "total_trades" in stats
     assert "total_pnl" in stats
 
@@ -204,21 +218,19 @@ def test_pnl_short_correct(futures_tmpdir):
 
 # -- Test 32: One trade per day max -----------------------------------------
 
-def test_one_trade_per_day_max(futures_tmpdir):
-    """At most one trade per day -- second signal on same day is ignored."""
+def test_one_trade_per_day_max(futures_tmpdir, monkeypatch):
+    """At most one trade per day from a single signal setup."""
     import train_smt
-    import unittest.mock as mock
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
 
-    signal_count = 0
-    original_screen = train_smt.screen_session
-
-    def counting_screen(mnq_b, mes_b, tdo):
-        nonlocal signal_count
-        sig = original_screen(mnq_b, mes_b, tdo)
-        if sig is not None:
-            signal_count += 1
-        return sig
-
+    # Flat bars — no divergence, no signal
     n = 90
     start_ts = pd.Timestamp("2025-01-02 09:00:00", tz="America/New_York")
     idx = pd.date_range(start=start_ts, periods=n, freq="5min")
@@ -230,8 +242,7 @@ def test_one_trade_per_day_max(futures_tmpdir):
     mnq = pd.DataFrame({"Open": opens, "High": highs, "Low": lows, "Close": closes, "Volume": [1000.0]*n}, index=idx)
     mes = pd.DataFrame({"Open": opens, "High": highs, "Low": lows, "Close": closes, "Volume": [1000.0]*n}, index=idx)
 
-    with mock.patch.object(train_smt, "screen_session", counting_screen):
-        stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     assert stats["total_trades"] <= 1
 
 
@@ -297,3 +308,32 @@ def test_new_defaults_produce_valid_results(futures_tmpdir, monkeypatch):
     assert "total_trades" in stats
     assert "trade_records" in stats
     assert stats["total_trades"] >= 0
+
+
+# -- Test 36: Regression — no re-entry matches legacy single-trade behavior ---
+
+def test_regression_no_reentry_matches_legacy_behavior(futures_tmpdir, monkeypatch):
+    """With REENTRY_MAX_MOVE_PTS=0 and BREAKEVEN_TRIGGER_PCT=0, run_backtest produces
+    exactly 1 short trade on the known synthetic dataset.
+
+    This ensures the refactor is semantically equivalent to the old screen_session
+    + _scan_bars_for_exit architecture when re-entry and breakeven are both disabled.
+    """
+    import train_smt
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "short")
+    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+
+    mnq, mes = _build_short_signal_bars("2025-01-02")
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+
+    assert stats["total_trades"] == 1
+    assert len(stats["trade_records"]) == 1
+    assert stats["trade_records"][0]["direction"] == "short"

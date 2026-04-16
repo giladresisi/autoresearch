@@ -39,26 +39,32 @@ Autonomous SMT divergence strategy optimizer: iterates on signal logic and tunin
 You may modify ONLY these elements:
 
 ### Tunable Constants
-- `SESSION_START` — kill zone start time (default `"09:00"` ET)
-- `SESSION_END` — kill zone end time (default `"13:30"` ET)
-- `MIN_BARS_BEFORE_SIGNAL` — wall-clock minutes before divergence can fire (default `0`, treated as timedelta — interval-agnostic)
-- `SHORT_STOP_RATIO` — stop fraction for shorts as a fraction of |entry − TDO| (default `0.25`)
-- `LONG_STOP_RATIO` — stop fraction for longs; currently frozen at `0.05` (longs disabled)
-- `MIN_STOP_POINTS` — minimum stop distance in MNQ points; signals below this are rejected (default `2.5`)
-- `MIN_TDO_DISTANCE_PTS` — minimum |entry − TDO| in MNQ points; filters degenerate tight-TP setups (default `0.0`)
-- `SIGNAL_BLACKOUT_START` / `SIGNAL_BLACKOUT_END` — "HH:MM" window in which new entries are suppressed (default `""`)
-- `BREAKEVEN_TRIGGER_PTS` — move stop to entry after this many favorable MNQ points (default `0.0`)
-- `TRAIL_AFTER_BREAKEVEN_PTS` — trail stop this many points behind best price once breakeven triggers (default `0.0`)
-- `TRAIL_AFTER_TP_PTS` — trail stop past TDO instead of exiting hard; set points behind best post-TDO price (default `0.0`)
-- `MNQ_PNL_PER_POINT` — dollar value per point per contract (default `2.0`, do NOT change)
-- `RISK_PER_TRADE` — dollar risk per trade for position sizing (default `50.0`, do NOT change)
+- `SESSION_START` / `SESSION_END` — kill zone window (currently "09:00"–"13:30" ET)
+- `MIN_BARS_BEFORE_SIGNAL` — wall-clock minutes before divergence can fire (default 0)
+- `TRADE_DIRECTION` — frozen at "short" (longs structurally lose across 5/6 folds)
+- `SHORT_STOP_RATIO` — fraction of |entry − TDO| for short stop (current 0.40)
+- `LONG_STOP_RATIO` — frozen at 0.05 (longs disabled)
+- `MIN_STOP_POINTS` — minimum stop distance in MNQ points (current 2.5)
+- `MIN_TDO_DISTANCE_PTS` — minimum |entry − TDO| filter (current 50.0)
+- `ALLOWED_WEEKDAYS` — weekdays eligible for trading; Thursday excluded (frozenset({0,1,2,4}))
+- `SIGNAL_BLACKOUT_START` / `SIGNAL_BLACKOUT_END` — entry suppression window (current "11:00"–"13:30")
+- `TRAIL_AFTER_TP_PTS` — trail stop past TDO (current 1.0)
+- `REENTRY_MAX_MOVE_PTS` — max favorable move before re-entry is disallowed (default 20.0)
+- `BREAKEVEN_TRIGGER_PCT` — fraction of |entry − TDO| before stop locks to entry (default 0.0)
+- `MAX_HOLD_BARS` — time-based exit N bars after entry (default 0 = disabled)
+- `MNQ_PNL_PER_POINT` — do NOT change (2.0)
+- `RISK_PER_TRADE` — do NOT change (50.0)
 
 ### Strategy Functions
-- `detect_smt_divergence()` — signal detection logic (divergence threshold, lookback window)
-- `find_entry_bar()` — entry confirmation candle logic
-- `compute_tdo()` — True Day Open calculation (9:30 AM ET bar; first-bar proxy fallback)
-- `screen_session()` — session pipeline (stop/TP placement, R:R ratio, guards)
-- `manage_position()` — bar-by-bar exit check with breakeven/trail/trail-after-TP logic
+- `detect_smt_divergence()` — signal detection logic; unchanged
+- `find_anchor_close()` — finds most recent opposite-direction bar's close at divergence bar
+- `is_confirmation_bar()` — single-bar confirmation check; replaces find_entry_bar() forward scan
+- `find_entry_bar()` — still present; used by existing tests
+- `_build_signal_from_bar()` — applies TDO_VALIDITY_CHECK / MIN_STOP_POINTS / MIN_TDO_DISTANCE_PTS guards
+- `screen_session()` — compatibility shim for signal_smt.py live trading (uses new helpers)
+- `compute_tdo()` — True Day Open (9:30 AM ET bar; first-bar proxy fallback); unchanged
+- `manage_position()` — bar-by-bar exit; BREAKEVEN_TRIGGER_PCT replaces BREAKEVEN_TRIGGER_PTS
+- `run_backtest()` — per-bar state machine; four states: IDLE / WAITING_FOR_ENTRY / IN_TRADE / REENTRY_ELIGIBLE
 
 ### Forbidden Changes
 - Do NOT modify anything below `# DO NOT EDIT BELOW THIS LINE`
@@ -67,6 +73,7 @@ You may modify ONLY these elements:
 - Do NOT change `TRADE_DIRECTION` away from `"short"` (longs show structural losses across 5/6 folds)
 - Do NOT change `FUTURES_CACHE_DIR`, `BACKTEST_START`, `BACKTEST_END` (loaded from manifest)
 - Do NOT add external imports outside the standard library and pandas/numpy
+- Do NOT modify `BREAKEVEN_TRIGGER_PTS` or `TRAIL_AFTER_BREAKEVEN_PTS` — frozen below boundary
 
 ---
 
@@ -114,53 +121,59 @@ When two iterations both satisfy all guards, prefer the one with higher `mean_te
 
 ## Optimization Agenda
 
-Work through priorities in order. After completing each, follow the **Post-Iteration Analysis Protocol** before proceeding. All infrastructure is already wired — no new code required for priorities 1–5.
+Work through priorities in order.
 
-**Baseline (current configuration):** `mean_test_pnl = +170.85`, `min_test_pnl = −407`, 4/6 positive folds. Stop exits account for 73% of trades and are the sole loss source.
+**Baseline:** SHORT_STOP_RATIO=0.40, MIN_TDO_DISTANCE_PTS=15,
+SIGNAL_BLACKOUT=11:00–13:30, Thursday excluded, TRAIL_AFTER_TP_PTS=1.0,
+REENTRY_MAX_MOVE_PTS=0.0, BREAKEVEN_TRIGGER_PCT=0.0.
+`mean_test_pnl=+904.25`, `min_test_pnl=+93.50`, 139 test trades, all 6 folds profitable.
+Exit mix: ~83% stop (incl. trailing stop after TDO), ~17% session_close, 0% hard TP.
+avg_rr: 3.5–4.9 across folds. Win rates: 50%, 19%, 41%, 30%, 31%, 36%.
 
-### Priority 1 — Widen stop ratio (HIGHEST PRIORITY)
+### Priority 1 — Trail width past TDO (HIGHEST PRIORITY)
+Grid search: TRAIL_AFTER_TP_PTS ∈ [0.0, 1.0, 5.0, 10.0, 20.0]
+**Why first:** Baseline shows 0% TP exits — current 1.0 pt trail is effectively a hard TP with 1-bar lag,
+capturing none of the post-TDO continuation (historical median: 54.5 pts past TDO). This lever touches
+every trade that reaches TDO and is clearly mistuned. Include 0.0 as a diagnostic (revert to hard TP).
+Optimise for: mean_test_pnl (primary), exit_tp avg_pnl (secondary).
 
-**What:** grid search over `SHORT_STOP_RATIO`
-**Search space:** `[0.25, 0.30, 0.35, 0.40, 0.45]` (step 0.05)
-**Why first:** touches every trade, largest expected impact on EV. At the current 14.6 pt median stop, normal intrabar wicks on a 20–40 pt instrument still reach the stop too often. Every 0.05 step adds ~3–4 pts to the median stop. Also widens the stop gap that makes breakeven and trailing viable later.
-**Watch for:** win rate climbing but avg_rr compressing as contracts drop to 1.
-**Optimise for:** `mean_test_pnl` primary, `min_test_pnl > 0` secondary.
+### Priority 2 — Blackout and weekday re-evaluation
+**Why second:** The current SIGNAL_BLACKOUT_END=13:30 and Thursday exclusion were set before
+MIN_TDO was restored to 15. Isolation testing showed the blackout extension has mixed fold effects
+at MIN_TDO=50 — needs fresh measurement at MIN_TDO=15. Re-evaluate jointly.
+Search: SIGNAL_BLACKOUT_END ∈ ["12:00", "13:00", "13:30"]; ALLOWED_WEEKDAYS ∈ [all, no-Thu].
+Optimise for: mean_test_pnl (primary), min_test_pnl > 0 (secondary).
 
-### Priority 2 — Filter degenerate tight-stop setups
+### Priority 3 — Pre-TDO progress stop lock-in
+Grid search: BREAKEVEN_TRIGGER_PCT ∈ [0.0, 0.50, 0.60, 0.65, 0.70, 0.75]
+**Why third:** Stop-out rate is ~83%. Locking stop to entry once price is 50–75% toward TDO converts
+some losing stops into breakevens. Only viable after Priority 1 widens the effective stop gap.
+Optimise for: mean_test_pnl (primary), reduction in max_drawdown (secondary).
 
-**What:** grid search over `MIN_TDO_DISTANCE_PTS`
-**Search space:** `[0.0, 10.0, 15.0, 20.0, 25.0]`
-**Why second:** when TDO is only ~25 pts from entry, position sizing assigns 4 contracts with ~6 pt stops — noise level on this instrument. Filtering these out removes structurally broken trades before any other lever is tuned. Can be swept jointly with Priority 1 as a 2D grid without significant compute cost.
-**Watch for:** trade count dropping too aggressively (target: <10% reduction from baseline).
-**Optimise for:** `avg_pnl_per_trade` primary, trade count secondary.
+### Priority 4 — Fine-tune MIN_TDO_DISTANCE_PTS
+Grid search: [0.0, 10.0, 15.0, 20.0, 25.0]
+**Note:** Isolation testing showed raising MIN_TDO from 15→50 was a -793 regression. 15 is the
+empirically best baseline; search around it for marginal gains only.
+Optimise for: avg_pnl_per_trade (primary), total_test_trades ≥ 8/fold (secondary).
 
-### Priority 3 — Block the 11:xx dead zone
+### Priority 4b — Re-entry threshold (low confidence)
+Grid search: REENTRY_MAX_MOVE_PTS ∈ [0.0, 5.0, 10.0, 20.0]
+**Note:** Isolation testing showed re-entry at 20.0 was net negative (-110 mean, -142 min).
+Only revisit after Priority 1 changes the post-TDO exit profile — a wider trail may change
+whether post-stop divergences are worth re-entering.
+Optimise for: mean_test_pnl with total_trades guard ≥ 8/fold.
 
-**What:** set `SIGNAL_BLACKOUT_START = "11:00"` / `SIGNAL_BLACKOUT_END = "12:00"`
-**Why third:** 48 trades at −18.2 avg PnL = −874 drag. Removing them lifts both mean and min test PnL without touching the profitable 12:xx (56% win rate, +28.7 avg) and 13:xx windows. Binary toggle — no search needed.
-**Run after:** Priorities 1 + 2, so the stop ratio and quality filter are already at their optimum before measuring the blackout's marginal effect.
-**Implementation:** change `SIGNAL_BLACKOUT_START` and `SIGNAL_BLACKOUT_END` values only.
+### Priority 5 — Time-based stop (MAX_HOLD_BARS)
+Grid search: MAX_HOLD_BARS ∈ [0, 30, 60, 90, 120] (bars at 5m resolution)
+**Warning:** Session-close exits account for 31% of trades at ~82% win rate historically — these are
+the most profitable exit type. Cutting them early with MAX_HOLD_BARS risks removing winners.
+Only useful if analysis shows long-held losing trades dominating the stop-out population.
+Optimise for: mean_test_pnl net of session-close trade count.
 
-### Priority 4 — Trail the stop past TDO
-
-**What:** grid search over `TRAIL_AFTER_TP_PTS`
-**Search space:** `[0.0, 5.0, 10.0, 20.0]`
-**Why fourth:** 89% of TP exits continued ≥5 pts past TDO; median further move is 54.5 pts. Exiting hard at TDO forfeits the best part of these trades. Trailing captures incremental gains proportional to momentum.
-**Watch for:** trail too tight → premature exit on normal retracement; trail too wide → gives back too much TDO profit.
-**Optimise for:** `exit_tp avg_pnl` primary (lift above current +173.6), total PnL secondary.
-
-### Priority 5 — Breakeven trigger
-
-**What:** grid search over `BREAKEVEN_TRIGGER_PTS`; pair with `TRAIL_AFTER_BREAKEVEN_PTS`
-**Search space:** `BREAKEVEN_TRIGGER_PTS` ∈ [0.0, 5.0, 10.0, 15.0, 20.0, 25.0]; `TRAIL_AFTER_BREAKEVEN_PTS` ∈ [0.0, 5.0]
-**Why fifth:** only viable once Priority 1 has widened the stop to 0.35+ (~20 pt median). At the current 14.6 pt median, a 10 pt breakeven trigger is 68% of the stop — too aggressive. Pairs with `TRAIL_AFTER_TP_PTS` (Priority 4): breakeven protects pre-TDO profit; trail-after-TP protects post-TDO gains.
-
-### Priority 6 — Intermediate TP (partial exit before full TDO)
-
-**What:** add `INTERMEDIATE_TP_RATIO` — exit at a fraction of TDO distance
-**Search space:** `[0.0, 0.3, 0.5, 0.7]`
-**Why sixth (lowest):** targets session-close exits (33 trades, 82% win rate, +72 avg) by locking in partial gains on in-progress winners. Lower impact than Priority 4 (46 TP trades vs 33 session-close trades, and payoff per trade is smaller).
-**Implementation:** requires a new constant and an additional exit check in `manage_position` — not yet wired. Do this only if Priorities 1–5 leave residual session-close drag worth addressing.
+### Priority 6 — Intermediate TP (INTERMEDIATE_TP_RATIO)
+Add INTERMEDIATE_TP_RATIO ∈ [0.0, 0.3, 0.5, 0.7] — partial exit before TDO.
+Only implement if Priorities 1–5 leave residual session-close drag. Requires new constant + exit
+check in manage_position — not yet wired.
 
 ---
 

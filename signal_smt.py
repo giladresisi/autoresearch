@@ -20,7 +20,7 @@ from train_smt import screen_session, manage_position, compute_tdo
 # ── Connection constants ──────────────────────────────────────────────────────
 IB_HOST      = "127.0.0.1"
 IB_PORT      = 4002
-IB_CLIENT_ID = 10
+IB_CLIENT_ID = 15
 
 # ── Contract identifiers (quarterly; update after rollover) ───────────────────
 # MNQM6/MESM6 expire 2026-06-18; next: MNQU6=793356225, MESU6=793356217

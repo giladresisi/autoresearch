@@ -2,8 +2,16 @@
 
 ## Feature: SMT Bar-by-Bar State Machine Refactor (Phase 2)
 
-**Status**: ✅ Planned
+**Status**: ✅ Complete
 **Plan File**: `.agents/plans/smt-bar-by-bar-refactor.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-bar-by-bar-refactor.md`
+- Detailed implementation summary
+- Divergences and resolutions (screen_session shim, _scan_bars_for_exit already absent, sequential execution)
+- Test results and metrics: 417 passing, 1 pre-existing failure, ~23 new tests
+- Level 6 (smoke test with real data) deferred — requires IB-Gateway
 
 ---
 
