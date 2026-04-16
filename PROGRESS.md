@@ -1,5 +1,12 @@
 # PROGRESS
 
+## Feature: SMT Bar-by-Bar State Machine Refactor (Phase 2)
+
+**Status**: ✅ Planned
+**Plan File**: `.agents/plans/smt-bar-by-bar-refactor.md`
+
+---
+
 ## Feature: signal_smt.py — Tick-Based 1s Bar Ingestion
 
 **Status**: ✅ Complete
