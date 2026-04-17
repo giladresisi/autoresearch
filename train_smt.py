@@ -98,7 +98,7 @@ MIN_STOP_POINTS = 2.5
 # LONG_STOP_RATIO: frozen at 0.05 — longs disabled (TRADE_DIRECTION = "short"),
 # value is irrelevant but kept valid to avoid breaking the position-sizing path.
 LONG_STOP_RATIO  = 0.05
-SHORT_STOP_RATIO = 0.40
+SHORT_STOP_RATIO = 0.35
 
 # Print per-direction win rate, avg PnL, and exit breakdown after each fold.
 # Set False to suppress — does not affect frozen print_results output.
@@ -113,7 +113,7 @@ MNQ_PNL_PER_POINT = 2.0
 # "loaded" and a new confirmation bar qualifies for re-entry.
 # Set 0.0 to disable re-entry entirely.
 # Optimizer search space: [0.0, 5.0, 10.0, 20.0, 30.0].
-REENTRY_MAX_MOVE_PTS = 0.0
+REENTRY_MAX_MOVE_PTS = 999.0
 
 # Pre-TDO progress-based stop lock-in (replaces BREAKEVEN_TRIGGER_PTS).
 # Fraction of |entry − TDO| price must travel before stop is moved to entry (breakeven).
@@ -124,26 +124,26 @@ BREAKEVEN_TRIGGER_PCT = 0.0
 
 # Maximum bars a trade may remain open after entry (0 = disabled).
 # Applies per trade, including re-entries. Exits as "exit_time" at bar N+MAX_HOLD_BARS.
-MAX_HOLD_BARS = 0
+MAX_HOLD_BARS = 120
 
 # Minimum TDO distance filter: skip signals where |entry - TDO| < this value in MNQ pts.
 # Filters out setups where TDO is very close to entry.
 # Walk-forward evidence: close-TDO setups are net profitable; 15 is the empirically best floor.
 # Set 0.0 to disable.
 # Optimizer search space: [0.0, 10.0, 15.0, 20.0, 25.0].
-MIN_TDO_DISTANCE_PTS = 15.0
+MIN_TDO_DISTANCE_PTS = 0.0
 
 # Allowed weekdays for trading (Python weekday: Mon=0 … Sun=6).
 # Thursday (3) excluded: 25% win rate vs 40.8% for all other days (Finding 2).
 # Set frozenset({0,1,2,3,4}) to re-enable all weekdays.
-ALLOWED_WEEKDAYS = frozenset({0, 1, 2, 4})
+ALLOWED_WEEKDAYS = frozenset({0, 1, 2, 3, 4})
 
 # Signal blackout window: skip divergence signals whose entry bar falls in this time range.
 # Both values are "HH:MM" strings in the session's local timezone; "" disables the filter.
 # Blocks 11:00–13:30: 11:xx dead zone + 13:xx drag (only negative-PnL slot, Finding 3).
 # Optimizer search space: ["", "11:00"] for START; ["", "13:00", "13:30"] for END.
 SIGNAL_BLACKOUT_START = "11:00"
-SIGNAL_BLACKOUT_END   = "13:30"
+SIGNAL_BLACKOUT_END   = "12:00"
 
 # Trail-after-TP: instead of exiting at TDO, convert TP into a trailing stop.
 # When price first crosses TDO the position stays open; the stop is then trailed
