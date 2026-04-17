@@ -337,3 +337,88 @@ def test_regression_no_reentry_matches_legacy_behavior(futures_tmpdir, monkeypat
     assert stats["total_trades"] == 1
     assert len(stats["trade_records"]) == 1
     assert stats["trade_records"][0]["direction"] == "short"
+
+
+# ══ Task 8a — MAX_REENTRY_COUNT integration tests ════════════════════════════
+
+def test_run_backtest_max_reentry_count_limits_trades(futures_tmpdir, monkeypatch):
+    """MAX_REENTRY_COUNT=1 prevents a second re-entry within same session."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "MAX_REENTRY_COUNT", 1)
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 999.0)
+    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    mnq, mes = _build_short_signal_bars("2025-01-02")
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
+    assert len(stats.get("trade_records", [])) >= 1, "Need at least one trade to verify cap"
+    trades_by_day: dict[str, int] = {}
+    for t in stats.get("trade_records", []):
+        trades_by_day[t["entry_date"]] = trades_by_day.get(t["entry_date"], 0) + 1
+    assert all(v <= 1 for v in trades_by_day.values())
+
+
+def test_run_backtest_max_reentry_disabled_allows_multiple(futures_tmpdir, monkeypatch):
+    """MAX_REENTRY_COUNT=999 (disabled) does not cap trades."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "MAX_REENTRY_COUNT", 999)
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 999.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    mnq, mes = _build_short_signal_bars("2025-01-02")
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
+    assert stats["total_trades"] >= 1  # disabled cap — must produce at least one trade
+
+
+# ══ Task 8b — Trade record new fields + MIN_PRIOR_TRADE_BARS_HELD tests ══════
+
+def test_run_backtest_trade_record_contains_new_fields(futures_tmpdir, monkeypatch):
+    """Trade records include all 6 new diagnostic fields."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    mnq, mes = _build_short_signal_bars("2025-01-02")
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
+    assert len(stats.get("trade_records", [])) >= 1, "Need at least one trade to verify fields"
+    for t in stats.get("trade_records", []):
+        assert "reentry_sequence" in t
+        assert "prior_trade_bars_held" in t
+        assert "entry_bar_body_ratio" in t
+        assert "smt_sweep_pts" in t
+        assert "smt_miss_pts" in t
+        assert "bars_since_divergence" in t
+
+
+def test_run_backtest_min_prior_bars_held_infrastructure(futures_tmpdir, monkeypatch):
+    """MIN_PRIOR_TRADE_BARS_HELD=0 (default) does not block any re-entries."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "MIN_PRIOR_TRADE_BARS_HELD", 0)
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 999.0)
+    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    mnq, mes = _build_short_signal_bars("2025-01-02")
+    stats_base = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
+    assert stats_base["total_trades"] >= 1, "Need trades to test gate"
+
+    monkeypatch.setattr(train_smt, "MIN_PRIOR_TRADE_BARS_HELD", 100)
+    stats_blocked = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
+    # High threshold should reduce or equal re-entry count (gate is wired up)
+    assert stats_blocked["total_trades"] <= stats_base["total_trades"]

@@ -151,6 +151,39 @@ SIGNAL_BLACKOUT_END   = "12:00"
 # Optimizer search space: [0.0, 5.0, 10.0, 20.0].
 TRAIL_AFTER_TP_PTS = 1.0
 
+# Maximum TDO distance filter: skip signals where |entry - TDO| > this value in MNQ pts.
+# Cross-tab finding: TDO<20 has WR=37-43% and EP=$32-$59 across ALL re-entry sequences,
+# including 5th+. TDO>100 trades are structurally losing (EP=−$2.04). TDO>50 barely break
+# even. The quality degradation at high re-entry counts is driven by TDO distance, not depth.
+# Optimizer search space: [15, 20, 25, 30, 40, 999].
+# Set 999.0 to disable (pass-through for all distances).
+MAX_TDO_DISTANCE_PTS = 999.0
+
+# Maximum re-entries per session day.
+# At TDO<20 (with MAX_TDO_DISTANCE_PTS applied), even Seq#5+ has EP=$32, so this filter
+# is less important than expected. Most useful at TDO 20-50 where Seq#5+ declines to EP=$6.
+# Optimizer search space: [1, 2, 3, 4, 999]. Default 999 = disabled.
+MAX_REENTRY_COUNT = 999
+
+# Minimum bars the prior trade must have survived before re-entry is allowed.
+# DIAGNOSTIC ONLY — do not include in optimization runs. Extended diagnostics showed:
+# prior_bars<3 (n=1036, 42% of re-entries) has EP=$16.39 — removing these hurts volume
+# without improving EP. WR bumps at 10+ bars but EP stays flat. At TDO<20, prior duration
+# is irrelevant. Set 0 to disable (always allow re-entry).
+MIN_PRIOR_TRADE_BARS_HELD = 0
+
+# Minimum MES sweep magnitude for SMT divergence: how far MES must exceed the prior
+# session extreme to qualify. Marginal sweeps (< 1 pt) are noise.
+# Optimizer search space: [0, 1, 2, 5].
+# Set 0.0 to disable.
+MIN_SMT_SWEEP_PTS = 0.0
+
+# Minimum MNQ miss magnitude for SMT divergence: how far MNQ must fail to match MES.
+# A strong divergence (MNQ missed by 3 pts) is more reliable than a marginal one (0.5 pt).
+# Optimizer search space: [0, 1, 2, 5].
+# Set 0.0 to disable.
+MIN_SMT_MISS_PTS = 0.0
+
 
 # ══ STRATEGY FUNCTIONS ═══════════════════════════════════════════════════════
 
@@ -211,12 +244,15 @@ def detect_smt_divergence(
     bar_idx: int,
     session_start_idx: int,
     _min_bars: int = 0,
-) -> str | None:
+) -> tuple[str, float, float] | None:
     """Check for SMT divergence at bar_idx.
 
-    Returns "short" if MES makes new session high but MNQ does not.
-    Returns "long"  if MES makes new session low  but MNQ does not.
-    Returns None if no divergence or the bar-count guard fires.
+    Returns tuple (direction, sweep_pts, miss_pts) or None.
+    - direction: "short" if MES makes new session high but MNQ does not;
+                 "long"  if MES makes new session low  but MNQ does not.
+    - sweep_pts: how far MES exceeded the session extreme (always >= 0)
+    - miss_pts:  how far MNQ failed to match MES (always >= 0)
+    Returns None if no divergence, bar-count guard fires, or sweep/miss filters reject.
 
     Args:
         mes_bars: OHLCV DataFrame for MES, index = ET datetime (any bar interval)
@@ -243,10 +279,22 @@ def detect_smt_divergence(
 
     # Bearish SMT: MES sweeps session high (liquidity grab) but MNQ fails to confirm
     if cur_mes["High"] > mes_session_high and cur_mnq["High"] <= mnq_session_high:
-        return "short"
+        smt_sweep = cur_mes["High"] - mes_session_high
+        mnq_miss   = mnq_session_high - cur_mnq["High"]
+        if MIN_SMT_SWEEP_PTS > 0 and smt_sweep < MIN_SMT_SWEEP_PTS:
+            return None
+        if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
+            return None
+        return ("short", smt_sweep, mnq_miss)
     # Bullish SMT: MES sweeps session low but MNQ fails to confirm
     if cur_mes["Low"] < mes_session_low and cur_mnq["Low"] >= mnq_session_low:
-        return "long"
+        smt_sweep = mes_session_low - cur_mes["Low"]
+        mnq_miss   = cur_mnq["Low"] - mnq_session_low
+        if MIN_SMT_SWEEP_PTS > 0 and smt_sweep < MIN_SMT_SWEEP_PTS:
+            return None
+        if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
+            return None
+        return ("long", smt_sweep, mnq_miss)
     return None
 
 
@@ -421,9 +469,10 @@ def screen_session(
         if mnq_bars.index[bar_idx] < min_signal_ts:
             continue
 
-        direction = detect_smt_divergence(mes_reset, mnq_reset, bar_idx, 0)
-        if direction is None:
+        _smt = detect_smt_divergence(mes_reset, mnq_reset, bar_idx, 0)
+        if _smt is None:
             continue
+        direction, _smt_sweep, _smt_miss = _smt
         if TRADE_DIRECTION != "both" and direction != TRADE_DIRECTION:
             continue
 
@@ -441,7 +490,11 @@ def screen_session(
                 t = entry_time.strftime("%H:%M")
                 if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
                     break
-            signal = _build_signal_from_bar(conf_bar, entry_time, direction, tdo)
+            signal = _build_signal_from_bar(
+                conf_bar, entry_time, direction, tdo,
+                smt_sweep_pts=_smt_sweep,
+                smt_miss_pts=_smt_miss,
+            )
             if signal is None:
                 break
             signal["divergence_bar"] = bar_idx
@@ -456,11 +509,14 @@ def _build_signal_from_bar(
     ts: "pd.Timestamp",
     direction: str,
     tdo: float,
+    smt_sweep_pts: float = 0.0,
+    smt_miss_pts: float = 0.0,
+    divergence_bar_idx: int = -1,
 ) -> dict | None:
     """Build a signal dict from a confirmed entry bar, applying all validity guards.
 
-    Returns None if the signal fails TDO_VALIDITY_CHECK, MIN_STOP_POINTS, or
-    MIN_TDO_DISTANCE_PTS guards. This mirrors the guard logic in the old screen_session().
+    Returns None if the signal fails TDO_VALIDITY_CHECK, MIN_STOP_POINTS,
+    MIN_TDO_DISTANCE_PTS, or MAX_TDO_DISTANCE_PTS guards.
     """
     entry_price = float(bar["Close"])
 
@@ -473,6 +529,9 @@ def _build_signal_from_bar(
     distance_to_tdo = abs(entry_price - tdo)
     if MIN_TDO_DISTANCE_PTS > 0 and distance_to_tdo < MIN_TDO_DISTANCE_PTS:
         return None
+    # Ceiling filter — trades with extreme TDO distance have collapsing RR and negative EP
+    if MAX_TDO_DISTANCE_PTS < 999.0 and distance_to_tdo > MAX_TDO_DISTANCE_PTS:
+        return None
 
     stop_ratio = SHORT_STOP_RATIO if direction == "short" else LONG_STOP_RATIO
     if direction == "short":
@@ -483,15 +542,24 @@ def _build_signal_from_bar(
     if MIN_STOP_POINTS > 0 and abs(entry_price - stop_price) < MIN_STOP_POINTS:
         return None
 
+    bar_range = bar["High"] - bar["Low"]
+    entry_bar_body_ratio = (
+        abs(bar["Close"] - bar["Open"]) / bar_range if bar_range > 0 else 0.0
+    )
+
     return {
-        "direction":      direction,
-        "entry_price":    entry_price,
-        "entry_time":     ts,
-        "take_profit":    tdo,
-        "stop_price":     round(stop_price, 4),
-        "tdo":            tdo,
-        "divergence_bar": -1,   # not tracked in bar-loop mode
-        "entry_bar":      -1,
+        "direction":            direction,
+        "entry_price":          entry_price,
+        "entry_time":           ts,
+        "take_profit":          tdo,
+        "stop_price":           round(stop_price, 4),
+        "tdo":                  tdo,
+        "divergence_bar":       divergence_bar_idx,
+        "entry_bar":            -1,
+        # Diagnostic fields — captured for analysis, no filter logic applied
+        "smt_sweep_pts":        round(smt_sweep_pts, 4),
+        "smt_miss_pts":         round(smt_miss_pts, 4),
+        "entry_bar_body_ratio": round(entry_bar_body_ratio, 4),
     }
 
 
@@ -655,6 +723,17 @@ def _build_trade_record(
             ), 2)
             if exit_result == "exit_stop" else None
         ),
+        # Quality/diagnostic fields
+        "reentry_sequence":      position.get("reentry_sequence", 1),
+        "prior_trade_bars_held": position.get("prior_trade_bars_held", 0),
+        "entry_bar_body_ratio":  round(position.get("entry_bar_body_ratio", 0.0), 4),
+        "smt_sweep_pts":         round(position.get("smt_sweep_pts", 0.0), 4),
+        "smt_miss_pts":          round(position.get("smt_miss_pts", 0.0), 4),
+        "bars_since_divergence": (
+            position.get("entry_bar", -1) - position.get("divergence_bar", -1)
+            if position.get("entry_bar", -1) >= 0 and position.get("divergence_bar", -1) >= 0
+            else -1
+        ),
     }
     return trade, pnl
 
@@ -712,6 +791,13 @@ def run_backtest(
     trades: list[dict] = []
     equity_curve: list[float] = [0.0]
 
+    # Quality state — reset per day
+    reentry_count         = 0    # how many entries taken today
+    prior_trade_bars_held = 0    # how long the previous trade lasted
+    divergence_bar_idx    = -1   # bar index where divergence was detected this session
+    pending_smt_sweep     = 0.0
+    pending_smt_miss      = 0.0
+
     for day in trading_days:
         # Weekday filter: skip disallowed trading days (e.g. Thursday)
         if day.weekday() not in ALLOWED_WEEKDAYS:
@@ -748,6 +834,11 @@ def run_backtest(
             state = "IDLE"
             pending_direction = None
             anchor_close = None
+            reentry_count         = 0
+            prior_trade_bars_held = 0
+            divergence_bar_idx    = -1
+            pending_smt_sweep     = 0.0
+            pending_smt_miss      = 0.0
 
         min_signal_ts = mnq_session.index[0] + pd.Timedelta(minutes=MIN_BARS_BEFORE_SIGNAL)
 
@@ -780,6 +871,7 @@ def run_backtest(
                     )
                     trades.append(trade)
                     day_pnl += day_pnl_delta
+                    prior_trade_bars_held = entry_bar_count  # capture before reset
 
                     # Determine re-entry eligibility after a stop-out or time exit.
                     if REENTRY_MAX_MOVE_PTS > 0 and result in ("exit_stop", "exit_time"):
@@ -793,8 +885,12 @@ def run_backtest(
                             else:
                                 move = float(bar["Close"]) - position["entry_price"]
                             if move < REENTRY_MAX_MOVE_PTS:
-                                state = "REENTRY_ELIGIBLE"
-                                anchor_close = float(bar["Close"])
+                                # Require prior trade to have lasted long enough (diagnostic filter; default 0 = disabled)
+                                if MIN_PRIOR_TRADE_BARS_HELD > 0 and prior_trade_bars_held < MIN_PRIOR_TRADE_BARS_HELD:
+                                    state = "IDLE"
+                                else:
+                                    state = "REENTRY_ELIGIBLE"
+                                    anchor_close = float(bar["Close"])
                             else:
                                 state = "IDLE"
                     else:
@@ -811,7 +907,12 @@ def run_backtest(
                     if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
                         continue
                 if anchor_close is not None and is_confirmation_bar(bar, anchor_close, pending_direction):
-                    signal = _build_signal_from_bar(bar, ts, pending_direction, day_tdo)
+                    signal = _build_signal_from_bar(
+                        bar, ts, pending_direction, day_tdo,
+                        smt_sweep_pts=pending_smt_sweep,
+                        smt_miss_pts=pending_smt_miss,
+                        divergence_bar_idx=divergence_bar_idx,
+                    )
                     if signal is not None:
                         risk_per_contract = (
                             abs(signal["entry_price"] - signal["stop_price"]) * MNQ_PNL_PER_POINT
@@ -821,17 +922,32 @@ def run_backtest(
                             if risk_per_contract > 0 else 1
                         )
                         position = {**signal, "entry_date": day, "contracts": contracts}
+                        position["entry_bar"]             = bar_idx
+                        reentry_count += 1
+                        position["reentry_sequence"]      = reentry_count
+                        position["prior_trade_bars_held"] = prior_trade_bars_held
                         state = "IN_TRADE"
                         entry_bar_count = 0
 
             elif state == "REENTRY_ELIGIBLE":
+                # Gate: exceeded daily re-entry cap → abandon this signal
+                if MAX_REENTRY_COUNT < 999 and reentry_count >= MAX_REENTRY_COUNT:
+                    state = "IDLE"
+                    pending_direction = None
+                    anchor_close = None
+                    continue
                 # Apply blackout to re-entry bar, same as initial entry.
                 if SIGNAL_BLACKOUT_START and SIGNAL_BLACKOUT_END:
                     t = ts.strftime("%H:%M")
                     if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
                         continue
                 if anchor_close is not None and is_confirmation_bar(bar, anchor_close, pending_direction):
-                    signal = _build_signal_from_bar(bar, ts, pending_direction, day_tdo)
+                    signal = _build_signal_from_bar(
+                        bar, ts, pending_direction, day_tdo,
+                        smt_sweep_pts=pending_smt_sweep,
+                        smt_miss_pts=pending_smt_miss,
+                        divergence_bar_idx=divergence_bar_idx,
+                    )
                     if signal is not None:
                         risk_per_contract = (
                             abs(signal["entry_price"] - signal["stop_price"]) * MNQ_PNL_PER_POINT
@@ -841,6 +957,10 @@ def run_backtest(
                             if risk_per_contract > 0 else 1
                         )
                         position = {**signal, "entry_date": day, "contracts": contracts}
+                        position["entry_bar"]             = bar_idx
+                        reentry_count += 1
+                        position["reentry_sequence"]      = reentry_count
+                        position["prior_trade_bars_held"] = prior_trade_bars_held
                         state = "IN_TRADE"
                         entry_bar_count = 0
 
@@ -856,23 +976,27 @@ def run_backtest(
                     if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
                         continue
 
-                direction = detect_smt_divergence(
+                _smt = detect_smt_divergence(
                     mes_reset,
                     mnq_reset,
                     bar_idx,
                     0,
                 )
-                if direction is None:
+                if _smt is None:
                     continue
+                direction, _smt_sweep, _smt_miss = _smt
                 if TRADE_DIRECTION != "both" and direction != TRADE_DIRECTION:
                     continue
 
                 ac = find_anchor_close(mnq_reset, bar_idx, direction)
                 if ac is None:
                     continue
-                pending_direction = direction
-                anchor_close = ac
-                state = "WAITING_FOR_ENTRY"
+                pending_direction  = direction
+                anchor_close       = ac
+                pending_smt_sweep  = _smt_sweep
+                pending_smt_miss   = _smt_miss
+                divergence_bar_idx = bar_idx
+                state              = "WAITING_FOR_ENTRY"
 
         # End of session: force-close any position still open at session boundary.
         if state == "IN_TRADE" and position is not None:
@@ -889,6 +1013,8 @@ def run_backtest(
         state = "IDLE"
         pending_direction = None
         anchor_close = None
+        reentry_count         = 0
+        prior_trade_bars_held = 0
 
         equity_curve.append(equity_curve[-1] + day_pnl)
 

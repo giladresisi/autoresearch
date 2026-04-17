@@ -56,7 +56,7 @@ def test_detect_smt_bearish():
         closes=[200, 200, 200, 200, 200],
     )
     result = train_smt.detect_smt_divergence(mes, mnq, bar_idx=4, session_start_idx=0)
-    assert result == "short"
+    assert result is not None and result[0] == "short"
 
 
 def test_detect_smt_bullish():
@@ -75,7 +75,7 @@ def test_detect_smt_bullish():
         closes=[200, 200, 200, 200, 200],
     )
     result = train_smt.detect_smt_divergence(mes, mnq, bar_idx=4, session_start_idx=0)
-    assert result == "long"
+    assert result is not None and result[0] == "long"
 
 
 def test_detect_smt_both_confirm_none():
@@ -139,7 +139,7 @@ def test_detect_smt_resets_on_opposite():
         closes=[200, 200, 200, 200, 200],
     )
     result = train_smt.detect_smt_divergence(mes, mnq, bar_idx=4, session_start_idx=0)
-    assert result == "long"
+    assert result is not None and result[0] == "long"
 
 
 # ══ find_entry_bar tests ═════════════════════════════════════════════════════
@@ -1001,3 +1001,103 @@ def test_state_resets_at_day_boundary(monkeypatch):
     stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
     # Day 2 should not see a trade from the stale day-1 divergence
     assert stats["total_trades"] == 0
+
+
+# ══ Task 7b — MAX_TDO_DISTANCE_PTS ceiling filter tests ══════════════════════
+
+def test_build_signal_max_tdo_distance_ceiling(monkeypatch):
+    """Signal rejected when |entry - TDO| > MAX_TDO_DISTANCE_PTS."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 30.0)
+    bar = pd.Series({"Open": 100.0, "High": 105.0, "Low": 95.0, "Close": 99.0})
+    ts  = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
+    # TDO = 60 → distance = 39 > 30 → rejected
+    result = train_smt._build_signal_from_bar(bar, ts, "short", 60.0)
+    assert result is None
+
+
+def test_build_signal_max_tdo_distance_pass(monkeypatch):
+    """Signal passes when |entry - TDO| <= MAX_TDO_DISTANCE_PTS."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 50.0)
+    bar = pd.Series({"Open": 100.0, "High": 105.0, "Low": 95.0, "Close": 99.0})
+    ts  = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
+    # TDO = 60 → distance = 39 < 50 → passes
+    result = train_smt._build_signal_from_bar(bar, ts, "short", 60.0)
+    assert result is not None
+
+
+def test_build_signal_max_tdo_distance_disabled(monkeypatch):
+    """MAX_TDO_DISTANCE_PTS=999.0 disables the ceiling filter."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 999.0)
+    # Short entry: close=1100, tdo=100 → distance=1000 (which would be blocked by any finite ceiling)
+    # With 999.0 ceiling disabled, it must pass (assuming MIN_STOP_POINTS allows it)
+    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
+    bar = pd.Series({"Open": 1100.0, "High": 1105.0, "Low": 1095.0, "Close": 1100.0})
+    ts  = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
+    # Distance = 1000 — should pass with ceiling disabled
+    result = train_smt._build_signal_from_bar(bar, ts, "short", 100.0)
+    assert result is not None
+
+
+# ══ Task 7c — detect_smt_divergence new return type tests ════════════════════
+
+def test_detect_smt_divergence_returns_tuple_on_match():
+    import train_smt
+    mes = _make_1m_bars(
+        opens=[100]*5, highs=[101,102,101,101,103], lows=[99]*5, closes=[100]*5
+    )
+    mnq = _make_1m_bars(
+        opens=[200]*5, highs=[201,202,201,201,201], lows=[199]*5, closes=[200]*5
+    )
+    result = train_smt.detect_smt_divergence(mes, mnq, bar_idx=4, session_start_idx=0)
+    assert result is not None
+    direction, sweep, miss = result
+    assert direction == "short"
+    assert sweep > 0
+    assert miss >= 0
+
+
+def test_detect_smt_divergence_sweep_filter(monkeypatch):
+    """Returns None when sweep < MIN_SMT_SWEEP_PTS."""
+    import train_smt
+    monkeypatch.setattr(train_smt, "MIN_SMT_SWEEP_PTS", 5.0)
+    mes = _make_1m_bars(
+        opens=[100]*5, highs=[101,102,101,101,102.5], lows=[99]*5, closes=[100]*5
+    )
+    mnq = _make_1m_bars(
+        opens=[200]*5, highs=[201,202,201,201,201], lows=[199]*5, closes=[200]*5
+    )
+    # MES sweep = 102.5 - 102 = 0.5 < 5.0 → filtered
+    result = train_smt.detect_smt_divergence(mes, mnq, bar_idx=4, session_start_idx=0)
+    assert result is None
+
+
+# ══ Task 7d — new signal fields and body ratio tests ═════════════════════════
+
+def test_build_signal_contains_diagnostic_fields():
+    import train_smt
+    bar = pd.Series({"Open": 105.0, "High": 107.0, "Low": 97.0, "Close": 101.0})
+    ts  = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
+    result = train_smt._build_signal_from_bar(
+        bar, ts, "short", 60.0, smt_sweep_pts=2.5, smt_miss_pts=1.3
+    )
+    assert result is not None
+    assert "smt_sweep_pts" in result
+    assert "smt_miss_pts" in result
+    assert "entry_bar_body_ratio" in result
+    assert result["smt_sweep_pts"] == 2.5
+    assert result["smt_miss_pts"] == 1.3
+    assert 0.0 <= result["entry_bar_body_ratio"] <= 1.0
+
+
+def test_build_signal_body_ratio_not_filtered(monkeypatch):
+    """Near-doji bars (low body ratio) are NOT rejected — diagnostics show they are best."""
+    import train_smt
+    # Near-doji: body=0.1, range=20 → ratio=0.005 (extreme doji)
+    bar = pd.Series({"Open": 100.0, "High": 110.0, "Low": 90.0, "Close": 99.9})
+    ts  = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
+    result = train_smt._build_signal_from_bar(bar, ts, "short", 60.0)
+    assert result is not None, "Near-doji bars must not be filtered — they have highest EP"
+    assert result["entry_bar_body_ratio"] < 0.01

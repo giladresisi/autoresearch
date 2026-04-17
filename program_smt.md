@@ -1,6 +1,6 @@
 # SMT Divergence Strategy Optimizer
 
-Autonomous SMT divergence strategy optimizer: iterates on signal logic and tuning parameters in `train_smt.py` to maximize `mean_test_pnl` on the walk-forward evaluation of MNQ1! futures.
+Autonomous SMT divergence strategy optimizer: iterates on signal logic and tuning parameters in `train_smt.py` to maximize `avg_expectancy` on the walk-forward evaluation of MNQ1! futures.
 
 ---
 
@@ -46,6 +46,24 @@ You may modify ONLY these elements:
 - `LONG_STOP_RATIO` — frozen at 0.05 (longs disabled)
 - `MIN_STOP_POINTS` — minimum stop distance in MNQ points (current 2.5)
 - `MIN_TDO_DISTANCE_PTS` — minimum |entry − TDO| filter (current 15.0)
+- `MAX_TDO_DISTANCE_PTS` — ceiling on |entry − TDO| distance (default 999.0 = disabled).
+  Cross-tab: TDO<20 has EP=$32–$59 across ALL sequences including 5th+; TDO>100 EP=−$2.04.
+  Optimizer search space: [15, 20, 25, 30, 40, 999]
+- `MAX_REENTRY_COUNT` — max re-entries per session day (default 999 = disabled).
+  Less impactful when MAX_TDO_DISTANCE_PTS is tight; at TDO<20 even Seq#5+ has EP=$32.
+  Optimizer search space: [1, 2, 3, 4, 999]
+- `MIN_PRIOR_TRADE_BARS_HELD` — min bars prior trade must survive before re-entry allowed
+  (default 0 = disabled). DIAGNOSTIC ONLY — do not include in optimization runs.
+  Extended diagnostics: removing fast re-entries (prior_bars<10, n=1781) provides no EP gain.
+- `MIN_SMT_SWEEP_PTS` — min pts MES must exceed prior session extreme (default 0.0 = disabled);
+  optimizer search [0, 1, 2, 5]
+- `MIN_SMT_MISS_PTS` — min pts MNQ must fail to match MES (default 0.0 = disabled);
+  optimizer search [0, 1, 2, 5]
+
+**NOTE**: `MIN_CONFIRM_BODY_RATIO` is intentionally absent. Extended diagnostics showed
+near-doji confirmation bars (ratio 0.00–0.10) have WR=0.352 and EP=$20.70 — the best bucket.
+Filtering them would actively harm quality. This constant is not implemented.
+
 - `ALLOWED_WEEKDAYS` — weekdays eligible for trading; Thursday excluded (frozenset({0,1,2,4}))
 - `SIGNAL_BLACKOUT_START` / `SIGNAL_BLACKOUT_END` — entry suppression window (current "11:00"–"13:30")
 - `TRAIL_AFTER_TP_PTS` — trail stop past TDO (current 1.0)
@@ -107,82 +125,86 @@ A strategy iteration is considered an improvement if ALL of the following hold:
 
 | Criterion | Threshold | Priority |
 |-----------|-----------|----------|
-| `mean_test_pnl` | Higher than previous best | **PRIMARY** |
-| `min_test_pnl` | > 0.0 (all qualified folds profitable) | Secondary guard |
-| `total_trades` per fold | ≥ 3 (sparse folds excluded automatically) | |
-| `total_test_trades` (sum across folds) | ≥ 80 | Volume guard |
-| `avg_rr` | ≥ 1.5 (reward/risk ratio) | |
+| `avg_expectancy` | Higher than previous best | **PRIMARY** |
+| `win_rate` (per fold avg) | ≥ 0.38 (improvement from ~0.32 baseline) | Guard |
+| `avg_rr` | ≥ 1.5 | Guard |
+| `total_test_trades` (sum) | ≥ 80 | Volume guard |
+| `mean_test_pnl` | ≥ 1,500 (prevents trivially thin strategy) | Floor guard |
+| `min_test_pnl` | > 0 (all qualified folds profitable) | Secondary guard |
 
-Note: `win_rate` is informational only. The strategy is a low-win-rate / high-RR system (observed range 18–37%); a win_rate floor would reject valid configurations. Track it for directional context but do not gate on it.
-
-When two iterations both satisfy all guards, prefer the one with higher `mean_test_pnl`.
+`avg_expectancy` maps to `avg_pnl_per_trade` in the `print_results()` output.
+`wl_ratio` = `avg_win_rate / (1 - avg_win_rate)` — target > 0.70, stretch goal > 1.0.
+When two iterations both satisfy all guards, prefer the one with higher `avg_expectancy`.
 
 ---
 
-## Optimization Agenda
+## Optimization Agenda (Quality-Focused)
 
-Work through priorities in order.
+Work through in order. At each step, use the best accepted configuration as the base.
+Primary metric: `avg_expectancy`. Guards: `win_rate ≥ 0.38`, `total_test_trades ≥ 80`.
 
-**Baseline (1m bars):** SHORT_STOP_RATIO=0.40, MIN_TDO_DISTANCE_PTS=15,
-SIGNAL_BLACKOUT=11:00–13:30, Thursday excluded, TRAIL_AFTER_TP_PTS=1.0,
-REENTRY_MAX_MOVE_PTS=0.0, BREAKEVEN_TRIGGER_PCT=0.0.
-`mean_test_pnl=+1049.03`, `min_test_pnl=+53.20`, 361 test trades, all 6 folds profitable.
-Exit mix: ~94% stop (incl. 1pt trail post-TDO), ~6% session_close, 0% hard TP.
-avg_rr: 1.9–3.0 across folds. Win rates: 35%, 42%, 35%, 38%, 36%, 34% (tight band).
-Note: TRAIL_AFTER_TP_PTS=1.0 is genuinely 1pt at 1m (was functionally 5–10pt on 5m bars).
-Optimising this is Priority 1 — it caps all post-TDO capture.
+### Priority 1 — MAX_TDO_DISTANCE_PTS (highest expected impact)
 
-### Priority 1 — Trail width past TDO (HIGHEST PRIORITY)
-Grid search: TRAIL_AFTER_TP_PTS ∈ [0.0, 1.0, 5.0, 10.0, 20.0]
-**Why first:** Baseline shows 0% TP exits — current 1.0 pt trail is effectively a hard TP with 1-bar lag,
-capturing none of the post-TDO continuation (historical median: 54.5 pts past TDO). This lever touches
-every trade that reaches TDO and is clearly mistuned. Include 0.0 as a diagnostic (revert to hard TP).
-Optimise for: mean_test_pnl (primary), exit_tp avg_pnl (secondary).
+Grid search: [15, 20, 25, 30, 40, 999]
 
-### Priority 2 — Blackout and weekday re-evaluation
-**Why second:** The current SIGNAL_BLACKOUT_END=13:30 and Thursday exclusion were set before
-MIN_TDO was restored to 15. Isolation testing showed the blackout extension has mixed fold effects
-at MIN_TDO=50 — needs fresh measurement at MIN_TDO=15. Re-evaluate jointly.
-Search: SIGNAL_BLACKOUT_END ∈ ["12:00", "13:00", "13:30"]; ALLOWED_WEEKDAYS ∈ [all, no-Thu].
-Optimise for: mean_test_pnl (primary), min_test_pnl > 0 (secondary).
+This is the master lever. Cross-tab analysis: at TDO<20, every re-entry sequence
+(including 5th+) has WR > 0.34 and EP > $31. At TDO>100, even Seq#1 has EP=−$8.
+Setting to 20 keeps ~828/2908 trades (28%) but projects WR 32%→38–40%, EP $18→$45–50.
+Setting to 15 is more aggressive (~500 trades) but may reduce volume near the 80/fold guard.
 
-### Priority 3 — Stop ratio fine-tune
-Grid search: SHORT_STOP_RATIO ∈ [0.25, 0.30, 0.35, 0.40]
-**Why third:** At 5m bars, false wicks required a wide stop (0.40) for breathing room. At 1m, wick
-noise is substantially reduced (wick gaps are much smaller bar-by-bar), so a tighter ratio may be
-viable without increasing stop-outs. Tighter stop → higher R:R → better expected value if win rate
-holds. Search downward from the baseline 0.40.
-Optimise for: mean_test_pnl (primary), avg_rr and win_rate (secondary).
+At tight TDO, re-entry count becomes much less important — do not apply MAX_REENTRY_COUNT
+simultaneously in this step.
 
-### Priority 4 — Pre-TDO progress stop lock-in
-Grid search: BREAKEVEN_TRIGGER_PCT ∈ [0.0, 0.50, 0.60, 0.65, 0.70, 0.75]
-**Why fourth:** Stop-out rate is ~94% at 1m. Locking stop to entry once price is 50–75% toward TDO
-converts some losing stops into breakevens. Only viable after Priority 1 widens the effective stop gap.
-Optimise for: mean_test_pnl (primary), reduction in max_drawdown (secondary).
+Optimise for: avg_expectancy (primary), win_rate (secondary), total_test_trades ≥ 80 guard.
 
-### Priority 5 — Fine-tune MIN_TDO_DISTANCE_PTS
-Grid search: [0.0, 10.0, 15.0, 20.0, 25.0]
-**Note:** Isolation testing showed raising MIN_TDO from 15→50 was a -793 regression. 15 is the
-empirically best baseline; search around it for marginal gains only.
-Optimise for: avg_pnl_per_trade (primary), total_test_trades ≥ 8/fold (secondary).
+### Priority 2 — SIGNAL_BLACKOUT_END extension to 13:00
 
-### Priority 5b — Re-entry threshold (low confidence)
-Grid search: REENTRY_MAX_MOVE_PTS ∈ [0.0, 5.0, 10.0, 20.0]
-**Note:** Isolation testing showed re-entry at 20.0 was net negative (-110 mean, -142 min).
-Only revisit after Priority 1 changes the post-TDO exit profile — a wider trail may change
-whether post-stop divergences are worth re-entering.
-Optimise for: mean_test_pnl with total_trades guard ≥ 8/fold.
+Test: ["12:00", "13:00"]
 
-### Priority 6 — Time-based stop (MAX_HOLD_BARS)
-Grid search: MAX_HOLD_BARS ∈ [0, 60, 120, 180, 240] (bars at 1m resolution = 1–4 hours)
-**Note:** Session-close exits are ~6% of trades at 1m (was ~31% at 5m) — far less at risk.
-Only useful if analysis shows long-held losing trades dominating the stop-out population.
-Optimise for: mean_test_pnl net of session-close trade count.
+Cross-tab confirms: 12:xx × Seq#5+ = n=468 trades, EP=−$0.2 — dead weight. The 13:xx
+window (WR=0.416, EP=$13.14) remains accessible after blackout extension. This is a pure
+quality gain with negligible volume cost after MAX_TDO is applied.
 
-### Priority 7 — Intermediate TP (INTERMEDIATE_TP_RATIO)
-Add INTERMEDIATE_TP_RATIO ∈ [0.0, 0.3, 0.5, 0.7] — partial exit before TDO.
-Only implement if Priorities 1–6 leave residual session-close drag. Requires new constant + exit
-check in manage_position — not yet wired.
+Optimise for: avg_expectancy (primary).
+
+### Priority 3 — MAX_REENTRY_COUNT (test after Priority 1 is locked)
+
+Grid search: [1, 2, 3, 4, 999] using best MAX_TDO_DISTANCE from Priority 1.
+
+Expected lower impact than in the original agenda. At TDO<20, all re-entry sequences are
+high quality so the cap may not improve metrics. Most likely to help at the boundary
+TDO (20–30 range) where Seq#5+ drops to EP=$6. If Priority 1 converges to MAX_TDO=20,
+this step may produce no improvement — accept 999 (disabled) and move on.
+
+Optimise for: avg_expectancy (primary), total_test_trades ≥ 80 guard.
+
+### Priority 4 — SMT Strength Filters
+
+Grid search: MIN_SMT_SWEEP_PTS ∈ [0, 1, 2, 5]; MIN_SMT_MISS_PTS ∈ [0, 1, 2, 5]
+
+Filters marginal SMT divergences. A strong divergence (MES overshot by 5 pts, MNQ failed
+by 3 pts) is more reliable than a marginal one (both by 0.5 pts). Effect magnitude unknown
+from current diagnostics — these fields are now captured in trade records, enabling post-run
+analysis. Test 2D grid; if neither filter improves EP, disable both.
+
+### Priority 5 — 09:00 Window Isolation (if trade volume allows)
+
+The 09:00 window (WR=59%, WL=1.44) is the only known path to WL > 1.0 without extreme
+volume sacrifice. With ~183 trades total (~30/fold) it is borderline for reliable statistics.
+Evaluate whether the combined filters from Priorities 1–4 naturally concentrate trades in
+the 09:00 window, or whether an explicit time restriction is warranted. If testing, treat
+as a separate strategy evaluation rather than a parameter of the main strategy.
+
+### NOT IN AGENDA — MIN_CONFIRM_BODY_RATIO
+
+Diagnostics show near-doji bars are the best confirmation candles (EP=$20.70). Do not test
+this filter. The constant is not present in the codebase.
+
+### NOT IN AGENDA — MIN_PRIOR_TRADE_BARS_HELD
+
+Diagnostics show removing prior_bars<10 re-entries (73% of all re-entries) gains no EP
+improvement. The constant exists for diagnostic completeness (default 0 = disabled) but
+must not be included in optimizer search spaces.
 
 ---
 

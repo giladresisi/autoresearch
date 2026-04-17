@@ -901,6 +901,21 @@ To start an experiment session: open a Claude Code conversation in this repo and
 
 ---
 
+## Feature: SMT Quality-Focused Parameter Extensions
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-quality-params.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-quality-params.md`
+- Detailed implementation summary
+- Divergences and resolutions (test count discrepancy, test fixture adaptation, TDO geometry fix)
+- Test results and metrics: 79/79 passing (+11 new tests, 3 existing tests fixed)
+- All 9 tasks completed; all acceptance criteria met
+
+---
+
 ## Next: SMT Parameter Optimization Run
 
 **Status**: ✅ Planned
