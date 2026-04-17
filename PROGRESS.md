@@ -1,5 +1,20 @@
 # PROGRESS
 
+## Feature: IB-Gateway Connection Instability Fix
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/ib-connect-fix.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/ib-connect-fix.md`
+- Detailed implementation summary
+- No divergences from plan (10/10 alignment)
+- Test results: 27 passed, 1 pre-existing failure, 0 regressions
+- Manual-only gap: reconnect validation (requires live IB Gateway)
+
+---
+
 ## Feature: SMT Bar-by-Bar State Machine Refactor (Phase 2)
 
 **Status**: ✅ Complete

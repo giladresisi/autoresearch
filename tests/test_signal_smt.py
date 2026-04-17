@@ -438,7 +438,10 @@ def test_process_managing_exit_tp(monkeypatch, tmp_path):
     pos_file.write_text(json.dumps(pos))
     monkeypatch.setattr(signal_smt, "POSITION_FILE", pos_file)
 
-    monkeypatch.setattr("train_smt.manage_position", lambda p, b: "exit_tp")
+    # Patch where it is used (signal_smt namespace), not where it is defined.
+    # train_smt.manage_position is imported directly, so patching the source module
+    # does not reach signal_smt's local binding.
+    monkeypatch.setattr(signal_smt, "manage_position", lambda p, b: "exit_tp")
 
     bar = _make_mock_bar(ts="2025-01-02 09:30:00", high=20105.0, low=20095.0, close=20100.0)
     ts = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")

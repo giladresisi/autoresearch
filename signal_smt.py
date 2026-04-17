@@ -9,8 +9,8 @@ Requires IB Gateway (or TWS) running at IB_HOST:IB_PORT with API enabled.
 State machine: SCANNING → MANAGING, one trade per session.
 """
 from pathlib import Path
-import datetime
 import json
+import time
 
 import pandas as pd
 from ib_insync import IB, Future, util
@@ -35,7 +35,12 @@ SESSION_END   = "13:30"   # ET
 # 2-tick adverse fill; 1 tick = 0.25 MNQ points
 ENTRY_SLIPPAGE_TICKS = 2
 MAX_LOOKBACK_DAYS    = 30
+GAP_FILL_MAX_DAYS    = 3   # cap pacing load at startup; 30-day history already in parquet
 MNQ_PNL_PER_POINT    = 2.0
+
+# ── Reconnect settings ────────────────────────────────────────────────────────
+MAX_RETRIES   = 10
+RETRY_DELAY_S = 15
 
 # ── Realtime data paths ───────────────────────────────────────────────────────
 REALTIME_DATA_DIR = Path("data/realtime")
@@ -222,23 +227,23 @@ def _gap_fill_1m(
     from data.sources import IBGatewaySource
 
     now = pd.Timestamp.now(tz="America/New_York")
-    lookback_floor = now - pd.Timedelta(days=MAX_LOOKBACK_DAYS)
 
-    # Start from last cached bar or the 30-day floor, whichever is later
-    if not mnq_df.empty:
-        last_ts = mnq_df.index[-1]
-        start_ts = max(last_ts, lookback_floor)
-    else:
-        start_ts = lookback_floor
+    # Compute per-instrument start timestamps independently so that an empty MES
+    # parquet still gets the full 30-day fill even when MNQ is already populated.
+    def _start_ts_for(df: pd.DataFrame) -> pd.Timestamp:
+        gap_days = MAX_LOOKBACK_DAYS if df.empty else GAP_FILL_MAX_DAYS
+        floor = now - pd.Timedelta(days=gap_days)
+        return max(df.index[-1], floor) if not df.empty else floor
 
-    start_str = start_ts.isoformat()
-    end_str   = now.isoformat()
+    mnq_start_str = _start_ts_for(mnq_df).isoformat()
+    mes_start_str = _start_ts_for(mes_df).isoformat()
+    end_str = now.isoformat()
 
     # Use a different client ID for the gap-fill fetch (avoids clash with main IB connection)
     source = IBGatewaySource(host=IB_HOST, port=IB_PORT, client_id=IB_CLIENT_ID + 1)
 
-    mnq_new = source.fetch(MNQ_CONID, start_str, end_str, interval="1m", contract_type="future_by_conid")
-    mes_new = source.fetch(MES_CONID, start_str, end_str, interval="1m", contract_type="future_by_conid")
+    mnq_new = source.fetch(MNQ_CONID, mnq_start_str, end_str, interval="1m", contract_type="future_by_conid")
+    mes_new = source.fetch(MES_CONID, mes_start_str, end_str, interval="1m", contract_type="future_by_conid")
 
     if mnq_new is not None and not mnq_new.empty:
         mnq_df = pd.concat([mnq_df, mnq_new]).sort_index()
@@ -476,6 +481,32 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     _state = "SCANNING"
 
 
+# ── IB subscription setup ─────────────────────────────────────────────────────
+
+def _setup_ib_subscriptions(ib: IB, mnq_contract, mes_contract) -> None:
+    """Register all 4 IB data subscriptions and wire their event callbacks.
+
+    Called on every connection attempt so subscriptions are re-registered after
+    a disconnect; ib_insync does not automatically re-deliver them on reconnect.
+    """
+    mnq_1m = ib.reqHistoricalData(
+        mnq_contract, endDateTime="", durationStr="1 D",
+        barSizeSetting="1 min", whatToShow="TRADES",
+        useRTH=False, formatDate=2, keepUpToDate=True,
+    )
+    mes_1m = ib.reqHistoricalData(
+        mes_contract, endDateTime="", durationStr="1 D",
+        barSizeSetting="1 min", whatToShow="TRADES",
+        useRTH=False, formatDate=2, keepUpToDate=True,
+    )
+    mnq_tick = ib.reqTickByTickData(mnq_contract, "AllLast", 0, False)
+    mes_tick  = ib.reqTickByTickData(mes_contract, "AllLast", 0, False)
+    mnq_1m.updateEvent   += on_mnq_1m_bar
+    mes_1m.updateEvent   += on_mes_1m_bar
+    mnq_tick.updateEvent += on_mnq_tick
+    mes_tick.updateEvent += on_mes_tick
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -509,42 +540,43 @@ def main() -> None:
         # Startup guard timestamp: any signal entry_time <= this is considered stale
         _startup_ts = pd.Timestamp.now(tz="America/New_York")
 
-    # Connect to IB Gateway
-    _ib = IB()
-    _ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
-
+    # Contracts are stateless; create once outside the retry loop
     mnq_contract = Future(conId=int(MNQ_CONID), exchange="CME")
     mes_contract = Future(conId=int(MES_CONID), exchange="CME")
 
-    # Request 1m bar streams (keepUpToDate=True → callbacks fire on each new bar)
-    mnq_1m = _ib.reqHistoricalData(
-        mnq_contract, endDateTime="", durationStr="1 D",
-        barSizeSetting="1 min", whatToShow="TRADES",
-        useRTH=False, formatDate=2, keepUpToDate=True,
-    )
-    mes_1m = _ib.reqHistoricalData(
-        mes_contract, endDateTime="", durationStr="1 D",
-        barSizeSetting="1 min", whatToShow="TRADES",
-        useRTH=False, formatDate=2, keepUpToDate=True,
-    )
+    # Retry loop: handles startup clientId conflicts (RC3) and IB Gateway restarts (RC2).
+    # Module-level state (_mnq_1m_df, _state, _position, etc.) is preserved across retries.
+    for attempt in range(MAX_RETRIES):
+        try:
+            _ib = IB()
+            _ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
+            _setup_ib_subscriptions(_ib, mnq_contract, mes_contract)
+            util.run()
+            break  # clean exit — do not retry
+        except Exception as exc:
+            print(
+                f"[{attempt + 1}/{MAX_RETRIES}] IB connection error: {exc}. "
+                f"Retrying in {RETRY_DELAY_S}s ...",
+                flush=True,
+            )
+            try:
+                if _ib and _ib.isConnected():
+                    _ib.disconnect()
+            except Exception:
+                pass
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY_S)
 
-    # Subscribe to per-tick data; fire handler on each completed second (boundary crossing)
-    mnq_tick = _ib.reqTickByTickData(mnq_contract, "AllLast", 0, False)
-    mes_tick  = _ib.reqTickByTickData(mes_contract, "AllLast", 0, False)
+    else:
+        # for-loop completed without break → all retry attempts exhausted
+        print(f"[FATAL] Failed to connect after {MAX_RETRIES} attempts. Exiting.", flush=True)
 
-    mnq_1m.updateEvent   += on_mnq_1m_bar
-    mes_1m.updateEvent   += on_mes_1m_bar
-    mnq_tick.updateEvent += on_mnq_tick
-    mes_tick.updateEvent += on_mes_tick
-
+    # Graceful shutdown after loop exits (clean break or exhausted retries)
     try:
-        util.run()
-    finally:
-        # Graceful shutdown: disconnect from IB Gateway so clientIds are released.
-        # After loop.stop() the loop is stopped (not closed) and run_until_complete()
-        # works normally, so _ib.disconnect() (which calls it internally) is safe here.
         if _ib and _ib.isConnected():
             _ib.disconnect()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
