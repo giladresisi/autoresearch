@@ -128,6 +128,15 @@ def _format_exit_line(
     )
 
 
+def _format_stop_moved_line(ts: pd.Timestamp, reason: str, new_stop: float, old_stop: float) -> str:
+    """Human-readable stop-mutation log line."""
+    direction = "→" if new_stop != old_stop else "="
+    return (
+        f"[{ts.strftime('%H:%M:%S')}] STOP_MOVE {reason:<10} | "
+        f"stop {old_stop:.2f} {direction} {new_stop:.2f}"
+    )
+
+
 def _build_1s_buffer_df() -> pd.DataFrame:
     """Factory alias for _empty_bar_df; used in tests to verify buffer schema."""
     return _empty_bar_df()
@@ -451,6 +460,10 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         name=bar_ts,
     )
 
+    old_stop        = _position.get("stop_price")
+    old_tp_breached = _position.get("tp_breached", False)
+    old_breakeven   = _position.get("breakeven_active", False)
+
     result = manage_position(_position, bar_series)
 
     if result == "hold":
@@ -459,8 +472,14 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
             result = "exit_session_end"
             exit_price = float(bar.close)
         else:
-            # Persist any stop mutations (breakeven, trail-after-TP) so that a
-            # process restart restores the correct stop_price, tp_breached, etc.
+            # Log any stop mutations before persisting to disk.
+            new_stop = _position.get("stop_price")
+            if _position.get("breakeven_active") and not old_breakeven:
+                print(_format_stop_moved_line(bar_ts, "breakeven", new_stop, old_stop), flush=True)
+            elif _position.get("tp_breached") and not old_tp_breached:
+                print(_format_stop_moved_line(bar_ts, "trail_start", new_stop, old_stop), flush=True)
+            elif _position.get("tp_breached") and new_stop != old_stop:
+                print(_format_stop_moved_line(bar_ts, "trail", new_stop, old_stop), flush=True)
             POSITION_FILE.write_text(json.dumps(_position, indent=2))
             return
 

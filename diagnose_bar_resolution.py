@@ -23,7 +23,7 @@ Run:
 """
 import numpy as np
 import pandas as pd
-import train_smt
+import backtest_smt as train_smt
 
 
 def main() -> None:

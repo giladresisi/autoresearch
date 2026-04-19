@@ -73,9 +73,9 @@ SESSION_END   = "13:30"
 MIN_BARS_BEFORE_SIGNAL = 0
 
 # Direction filter: "both" = trade longs and shorts | "long" = longs only | "short" = shorts only
-# Frozen at "short": post-fix walk-forward shows long PnL negative in 5/6 folds (structural
-# asymmetry — SMT divergence at session highs is a stronger signal than at session lows).
-TRADE_DIRECTION = "short"
+# Re-testing "both" with quality filters active (MAX_TDO=15, STOP_RATIO=0.35).
+# Previous short-only verdict was pre-filter; longs+Thursdays now evaluated on equal footing.
+TRADE_DIRECTION = "both"
 
 # TDO validity gate: skip signals where the take-profit target is geometrically inverted.
 # For LONG: TDO must be above entry (price bounces up to the open).
@@ -97,7 +97,7 @@ MIN_STOP_POINTS = 2.5
 #
 # LONG_STOP_RATIO: frozen at 0.05 — longs disabled (TRADE_DIRECTION = "short"),
 # value is irrelevant but kept valid to avoid breaking the position-sizing path.
-LONG_STOP_RATIO  = 0.05
+LONG_STOP_RATIO  = 0.35
 SHORT_STOP_RATIO = 0.35
 
 # Print per-direction win rate, avg PnL, and exit breakdown after each fold.
@@ -143,7 +143,7 @@ ALLOWED_WEEKDAYS = frozenset({0, 1, 2, 3, 4})
 # Blocks 11:00–13:30: 11:xx dead zone + 13:xx drag (only negative-PnL slot, Finding 3).
 # Optimizer search space: ["", "11:00"] for START; ["", "13:00", "13:30"] for END.
 SIGNAL_BLACKOUT_START = "11:00"
-SIGNAL_BLACKOUT_END   = "12:00"
+SIGNAL_BLACKOUT_END   = "13:00"
 
 # Trail-after-TP: instead of exiting at TDO, convert TP into a trailing stop.
 # When price first crosses TDO the position stays open; the stop is then trailed
@@ -157,13 +157,13 @@ TRAIL_AFTER_TP_PTS = 1.0
 # even. The quality degradation at high re-entry counts is driven by TDO distance, not depth.
 # Optimizer search space: [15, 20, 25, 30, 40, 999].
 # Set 999.0 to disable (pass-through for all distances).
-MAX_TDO_DISTANCE_PTS = 999.0
+MAX_TDO_DISTANCE_PTS = 15.0
 
 # Maximum re-entries per session day.
 # At TDO<20 (with MAX_TDO_DISTANCE_PTS applied), even Seq#5+ has EP=$32, so this filter
 # is less important than expected. Most useful at TDO 20-50 where Seq#5+ declines to EP=$6.
 # Optimizer search space: [1, 2, 3, 4, 999]. Default 999 = disabled.
-MAX_REENTRY_COUNT = 999
+MAX_REENTRY_COUNT = 1
 
 # Minimum bars the prior trade must have survived before re-entry is allowed.
 # DIAGNOSTIC ONLY — do not include in optimization runs. Extended diagnostics showed:
