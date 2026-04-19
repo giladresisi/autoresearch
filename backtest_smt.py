@@ -13,12 +13,15 @@ from strategy_smt import (
     is_confirmation_bar, detect_smt_divergence, _build_signal_from_bar,
     manage_position, print_direction_breakdown, screen_session,
     compute_midnight_open, compute_overnight_range,
+    detect_fvg, detect_displacement, detect_smt_fill,
     SESSION_START, SESSION_END, TRADE_DIRECTION, ALLOWED_WEEKDAYS,
     SIGNAL_BLACKOUT_START, SIGNAL_BLACKOUT_END, MIN_BARS_BEFORE_SIGNAL,
     REENTRY_MAX_MOVE_PTS, MIN_PRIOR_TRADE_BARS_HELD, MAX_HOLD_BARS,
     MAX_REENTRY_COUNT,
     MIDNIGHT_OPEN_AS_TP, OVERNIGHT_SWEEP_REQUIRED, OVERNIGHT_RANGE_AS_TP,
     SILVER_BULLET_WINDOW_ONLY, SILVER_BULLET_START, SILVER_BULLET_END,
+    TWO_LAYER_POSITION, LAYER_A_FRACTION, FVG_LAYER_B_TRIGGER,
+    SMT_OPTIONAL, SMT_FILL_ENABLED, PARTIAL_EXIT_ENABLED, PARTIAL_EXIT_FRACTION,
 )
 
 # Cache directory for futures parquet files.
@@ -280,6 +283,7 @@ def run_backtest(
             _pending_div_bar_low  = 0.0
             _pending_smt_defended = 0.0
             _pending_smt_type     = "wick"
+            _pending_fvg_zone     = None
 
         min_signal_ts = mnq_session.index[0] + pd.Timedelta(minutes=MIN_BARS_BEFORE_SIGNAL)
 
@@ -305,6 +309,31 @@ def run_backtest(
                 )
                 if bar_end >= session_end_ts and result == "hold":
                     result = "session_close"
+
+                if result == "partial_exit":
+                    # Clamp so at least 1 contract always remains after the partial
+                    partial_contracts = min(
+                        max(1, int(position["contracts"] * PARTIAL_EXIT_FRACTION)),
+                        position["contracts"] - 1,
+                    )
+                    partial_exit_price = position.get("partial_price", float(bar["Close"]))
+                    pnl_per_contract = (
+                        (partial_exit_price - position["entry_price"]) if position["direction"] == "long"
+                        else (position["entry_price"] - partial_exit_price)
+                    )
+                    partial_pnl = pnl_per_contract * partial_contracts * MNQ_PNL_PER_POINT
+                    partial_trade, _ = _build_trade_record(
+                        {**position, "contracts": partial_contracts}, "partial_exit", bar, MNQ_PNL_PER_POINT
+                    )
+                    partial_trade["matches_hypothesis"] = position.get("matches_hypothesis")
+                    partial_trade["exit_type"] = "partial_exit"
+                    partial_trade["pnl"] = round(partial_pnl, 2)
+                    partial_trade["exit_price"] = round(partial_exit_price, 4)
+                    trades.append(partial_trade)
+                    day_pnl += partial_pnl
+                    position["contracts"] -= partial_contracts
+                    # Stay IN_TRADE with remaining contracts
+                    continue
 
                 if result != "hold":
                     trade, day_pnl_delta = _build_trade_record(
@@ -367,6 +396,7 @@ def run_backtest(
                         midnight_open=_day_midnight_open,
                         smt_defended_level=_pending_smt_defended,
                         smt_type=_pending_smt_type,
+                        fvg_zone=_pending_fvg_zone,
                     )
                     if signal is not None:
                         signal["matches_hypothesis"] = (
@@ -380,7 +410,17 @@ def run_backtest(
                             min(MAX_CONTRACTS, max(1, int(RISK_PER_TRADE / risk_per_contract)))
                             if risk_per_contract > 0 else 1
                         )
-                        position = {**signal, "entry_date": day, "contracts": contracts}
+                        total_contracts_target = contracts
+                        if TWO_LAYER_POSITION:
+                            layer_a_contracts = max(1, int(contracts * LAYER_A_FRACTION))
+                            total_contracts_target = contracts
+                            contracts = layer_a_contracts
+                        position = {
+                            **signal, "entry_date": day, "contracts": contracts,
+                            "total_contracts_target": total_contracts_target,
+                            "layer_b_entered": False, "layer_b_entry_price": None,
+                            "layer_b_contracts": 0, "partial_done": False, "partial_price": None,
+                        }
                         position["entry_bar"]             = bar_idx
                         reentry_count += 1
                         position["reentry_sequence"]      = reentry_count
@@ -419,6 +459,7 @@ def run_backtest(
                         midnight_open=_day_midnight_open,
                         smt_defended_level=_pending_smt_defended,
                         smt_type=_pending_smt_type,
+                        fvg_zone=_pending_fvg_zone,
                     )
                     if signal is not None:
                         signal["matches_hypothesis"] = (
@@ -432,7 +473,17 @@ def run_backtest(
                             min(MAX_CONTRACTS, max(1, int(RISK_PER_TRADE / risk_per_contract)))
                             if risk_per_contract > 0 else 1
                         )
-                        position = {**signal, "entry_date": day, "contracts": contracts}
+                        total_contracts_target = contracts
+                        if TWO_LAYER_POSITION:
+                            layer_a_contracts = max(1, int(contracts * LAYER_A_FRACTION))
+                            total_contracts_target = contracts
+                            contracts = layer_a_contracts
+                        position = {
+                            **signal, "entry_date": day, "contracts": contracts,
+                            "total_contracts_target": total_contracts_target,
+                            "layer_b_entered": False, "layer_b_entry_price": None,
+                            "layer_b_contracts": 0, "partial_done": False, "partial_price": None,
+                        }
                         position["entry_bar"]             = bar_idx
                         reentry_count += 1
                         position["reentry_sequence"]      = reentry_count
@@ -458,11 +509,35 @@ def run_backtest(
                     bar_idx,
                     0,
                 )
+
+                _smt_fill = None
+                _displacement_dir = None
                 if _smt is None:
+                    if SMT_FILL_ENABLED:
+                        _smt_fill = detect_smt_fill(mes_reset, mnq_reset, bar_idx)
+                    if _smt_fill is None and SMT_OPTIONAL:
+                        for _d in ("short", "long"):
+                            if TRADE_DIRECTION in ("both", _d) and detect_displacement(mnq_reset, bar_idx, _d):
+                                _displacement_dir = _d
+                                break
+                if _smt is None and _smt_fill is None and _displacement_dir is None:
                     continue
-                direction, _smt_sweep, _smt_miss, _smt_type, _smt_defended = _smt
+
+                # Resolve effective direction + aux fields
+                if _smt is not None:
+                    direction, _smt_sweep, _smt_miss, _smt_type, _smt_defended = _smt
+                elif _smt_fill is not None:
+                    direction, _, _ = _smt_fill
+                    _smt_sweep = _smt_miss = 0.0; _smt_type = "fill"; _smt_defended = None
+                else:
+                    direction = _displacement_dir
+                    _smt_sweep = _smt_miss = 0.0; _smt_type = "displacement"; _smt_defended = None
+
                 if TRADE_DIRECTION != "both" and direction != TRADE_DIRECTION:
                     continue
+
+                # Compute FVG zone after direction is resolved
+                _pending_fvg = detect_fvg(mnq_reset, bar_idx, direction)
 
                 # Overnight sweep gate: overnight H (shorts) or L (longs) must be exceeded.
                 if OVERNIGHT_SWEEP_REQUIRED:
@@ -496,6 +571,7 @@ def run_backtest(
                 _pending_div_bar_low  = float(_div_bar["Low"])
                 _pending_smt_defended = _smt_defended
                 _pending_smt_type     = _smt_type
+                _pending_fvg_zone     = _pending_fvg
                 state                 = "WAITING_FOR_ENTRY"
 
         # End of session: force-close any position still open at session boundary.
@@ -652,6 +728,7 @@ def _write_trades_tsv(trades: list[dict]) -> None:
         "stop_bar_wick_pts", "reentry_sequence", "prior_trade_bars_held",
         "entry_bar_body_ratio", "smt_sweep_pts", "smt_miss_pts", "bars_since_divergence",
         "matches_hypothesis", "smt_type",
+        "fvg_high", "fvg_low", "layer_b_entered", "layer_b_entry_price", "layer_b_contracts",
     ]
     with open("trades.tsv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")

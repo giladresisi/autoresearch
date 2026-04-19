@@ -174,6 +174,40 @@ SILVER_BULLET_END   = "10:10"
 # Approved in Round 1 experiments: +30.6% PnL, lower drawdown, same signal quality.
 HIDDEN_SMT_ENABLED: bool = True
 
+# Two-layer position model: enter Layer A at LAYER_A_FRACTION of max contracts,
+# add Layer B when price retraces into the FVG zone.
+# LAYER_A_FRACTION = 0.5 means Layer A gets floor(total * 0.5) contracts; Layer B gets the rest.
+# Requires FVG_ENABLED and FVG_LAYER_B_TRIGGER to also be True for Layer B to enter.
+# Optimizer search space: TWO_LAYER_POSITION [True, False]; LAYER_A_FRACTION [0.33, 0.5, 0.67]
+TWO_LAYER_POSITION: bool = False
+LAYER_A_FRACTION: float = 0.5
+
+# FVG (Fair Value Gap) detection: 3-bar imbalance where bar3 and bar1 do not overlap.
+# FVG_MIN_SIZE_PTS: minimum gap size in MNQ points to qualify as a valid FVG.
+# FVG_LAYER_B_TRIGGER: when True + TWO_LAYER_POSITION, Layer B enters on FVG retracement.
+# Optimizer search space: FVG_ENABLED [True, False]; FVG_MIN_SIZE_PTS [1.0, 2.0, 3.0, 5.0]
+FVG_ENABLED: bool = False
+FVG_MIN_SIZE_PTS: float = 2.0
+FVG_LAYER_B_TRIGGER: bool = False
+
+# SMT-optional: accept displacement candles (body ≥ MIN_DISPLACEMENT_PTS) as entries
+# even when no wick-based SMT exists. Fires only when detect_smt_divergence returns None.
+# Optimizer search space: SMT_OPTIONAL [True, False]; MIN_DISPLACEMENT_PTS [8.0, 10.0, 15.0]
+SMT_OPTIONAL: bool = False
+MIN_DISPLACEMENT_PTS: float = 10.0
+
+# Partial exit at first draw on liquidity.
+# PARTIAL_EXIT_FRACTION: fraction of open contracts to close at the partial level.
+# Partial level = midpoint between entry and take_profit.
+# Optimizer search space: PARTIAL_EXIT_ENABLED [True, False]; PARTIAL_EXIT_FRACTION [0.33, 0.5]
+PARTIAL_EXIT_ENABLED: bool = True   # Round 2 approved: -12% drawdown, minimal P&L cost
+PARTIAL_EXIT_FRACTION: float = 0.33  # Round 2 approved: 0.33 outperformed 0.5 (B-1 vs B-2)
+
+# SMT fill divergence: MES fills a FVG that MNQ has not (bearish) or vice versa (bullish).
+# Fires as an alternative to wick SMT in the IDLE detection loop.
+# Optimizer search space: [True, False]
+SMT_FILL_ENABLED: bool = False
+
 
 # ── Module-level bar data ─────────────────────────────────────────────────────
 _mnq_bars: "pd.DataFrame | None" = None
@@ -434,6 +468,94 @@ def compute_overnight_range(mnq_bars: pd.DataFrame, date: datetime.date) -> dict
     }
 
 
+def detect_fvg(
+    bars: pd.DataFrame,
+    bar_idx: int,
+    direction: str,
+    lookback: int = 20,
+) -> dict | None:
+    """Find the most recent Fair Value Gap in the given direction before bar_idx.
+
+    Bullish FVG (long): bar3.Low > bar1.High — gap on the way up.
+      Zone = [bar1.High, bar3.Low]; price retraces down into this zone for Layer B.
+    Bearish FVG (short): bar3.High < bar1.Low — gap on the way down.
+      Zone = [bar3.High, bar1.Low]; price retraces up into this zone for Layer B.
+
+    Returns {"fvg_high": float, "fvg_low": float, "fvg_bar": int} or None.
+    Always None when FVG_ENABLED is False.
+    """
+    if not FVG_ENABLED:
+        return None
+    start = max(0, bar_idx - lookback)
+    # Search backward from bar_idx-2 so bar3 = i+2 < bar_idx
+    for i in range(bar_idx - 2, start - 1, -1):
+        if i + 2 >= bar_idx:
+            continue
+        bar1_h = float(bars["High"].iloc[i])
+        bar1_l = float(bars["Low"].iloc[i])
+        bar3_h = float(bars["High"].iloc[i + 2])
+        bar3_l = float(bars["Low"].iloc[i + 2])
+        if direction == "long":
+            if bar3_l > bar1_h and (bar3_l - bar1_h) >= FVG_MIN_SIZE_PTS:
+                return {"fvg_high": bar3_l, "fvg_low": bar1_h, "fvg_bar": i}
+        else:  # short
+            if bar3_h < bar1_l and (bar1_l - bar3_h) >= FVG_MIN_SIZE_PTS:
+                return {"fvg_high": bar1_l, "fvg_low": bar3_h, "fvg_bar": i}
+    return None
+
+
+def detect_displacement(
+    bars: pd.DataFrame,
+    bar_idx: int,
+    direction: str,
+) -> bool:
+    """True if bar_idx is a displacement candle in the given direction.
+
+    Displacement: body (|Close - Open|) >= MIN_DISPLACEMENT_PTS and candle direction
+    matches. Always False when SMT_OPTIONAL is False or MIN_DISPLACEMENT_PTS <= 0.
+    """
+    if not SMT_OPTIONAL or MIN_DISPLACEMENT_PTS <= 0:
+        return False
+    bar = bars.iloc[bar_idx]
+    body = abs(float(bar["Close"]) - float(bar["Open"]))
+    if body < MIN_DISPLACEMENT_PTS:
+        return False
+    if direction == "long"  and bar["Close"] > bar["Open"]: return True
+    if direction == "short" and bar["Close"] < bar["Open"]: return True
+    return False
+
+
+def detect_smt_fill(
+    mes_bars: pd.DataFrame,
+    mnq_bars: pd.DataFrame,
+    bar_idx: int,
+    lookback: int = 20,
+) -> tuple | None:
+    """Detect inter-instrument FVG fill divergence.
+
+    Bearish: current MES bar reaches into a recent bearish FVG that MNQ has not reached.
+    Bullish: current MNQ bar reaches into a recent bullish FVG that MES has not reached.
+
+    Returns (direction, fvg_high, fvg_low) or None.
+    Always None when SMT_FILL_ENABLED is False.
+    """
+    if not SMT_FILL_ENABLED:
+        return None
+    mes_bar = mes_bars.iloc[bar_idx]
+    mnq_bar = mnq_bars.iloc[bar_idx]
+    # Bearish fill: MES rallies into a bearish FVG; MNQ has not reached the zone
+    mes_fvg = detect_fvg(mes_bars, bar_idx, "short", lookback)
+    if mes_fvg is not None:
+        if float(mes_bar["High"]) >= mes_fvg["fvg_low"] and float(mnq_bar["High"]) < mes_fvg["fvg_low"]:
+            return ("short", mes_fvg["fvg_high"], mes_fvg["fvg_low"])
+    # Bullish fill: MNQ retraces into a bullish FVG; MES has not reached the zone
+    mnq_fvg = detect_fvg(mnq_bars, bar_idx, "long", lookback)
+    if mnq_fvg is not None:
+        if float(mnq_bar["Low"]) <= mnq_fvg["fvg_high"] and float(mes_bar["Low"]) > mnq_fvg["fvg_high"]:
+            return ("long", mnq_fvg["fvg_high"], mnq_fvg["fvg_low"])
+    return None
+
+
 def print_direction_breakdown(stats: dict, prefix: str = "") -> None:
     """Print per-direction trade count, win rate, avg PnL, and exit breakdown.
 
@@ -540,9 +662,31 @@ def screen_session(
             continue
 
         _smt = detect_smt_divergence(mes_reset, mnq_reset, bar_idx, 0)
+
+        # SMT-optional: accept displacement if no wick/hidden SMT found
+        _smt_fill = None
+        _displacement_direction = None
         if _smt is None:
+            if SMT_FILL_ENABLED:
+                _smt_fill = detect_smt_fill(mes_reset, mnq_reset, bar_idx)
+            if _smt_fill is None and SMT_OPTIONAL:
+                for _d in ("short", "long"):
+                    if detect_displacement(mnq_reset, bar_idx, _d):
+                        _displacement_direction = _d
+                        break
+        if _smt is None and _smt_fill is None and _displacement_direction is None:
             continue
-        direction, _smt_sweep, _smt_miss, _smt_type, _smt_defended = _smt
+
+        # Resolve effective direction
+        if _smt is not None:
+            direction, _smt_sweep, _smt_miss, _smt_type, _smt_defended = _smt
+        elif _smt_fill is not None:
+            direction, _fill_fvg_high, _fill_fvg_low = _smt_fill
+            _smt_sweep = _smt_miss = 0.0; _smt_type = "fill"; _smt_defended = None
+        else:
+            direction = _displacement_direction
+            _smt_sweep = _smt_miss = 0.0; _smt_type = "displacement"; _smt_defended = None
+
         if TRADE_DIRECTION != "both" and direction != TRADE_DIRECTION:
             continue
 
@@ -568,6 +712,9 @@ def screen_session(
         _div_bar = mnq_reset.iloc[bar_idx]
         _div_bar_high = float(_div_bar["High"])
         _div_bar_low  = float(_div_bar["Low"])
+
+        # Compute FVG zone after direction is resolved
+        _fvg_zone = detect_fvg(mnq_reset, bar_idx, direction)
 
         # TP target selection: overnight range → midnight open → TDO (fallback).
         if OVERNIGHT_RANGE_AS_TP and overnight_range is not None:
@@ -601,6 +748,7 @@ def screen_session(
                 midnight_open=midnight_open,
                 smt_defended_level=_smt_defended,
                 smt_type=_smt_type,
+                fvg_zone=_fvg_zone,
             )
             if signal is None:
                 break
@@ -625,6 +773,8 @@ def _build_signal_from_bar(
     midnight_open=None,
     smt_defended_level=None,
     smt_type: str = "wick",
+    # New Plan 2 fields:
+    fvg_zone=None,
 ) -> dict | None:
     """Build a signal dict from a confirmed entry bar, applying all validity guards.
 
@@ -687,6 +837,10 @@ def _build_signal_from_bar(
         "midnight_open":        midnight_open,
         "smt_defended_level":   smt_defended_level,
         "smt_type":             smt_type,
+        # Plan 2 fields
+        "fvg_high":             float(fvg_zone["fvg_high"]) if fvg_zone else None,
+        "fvg_low":              float(fvg_zone["fvg_low"])  if fvg_zone else None,
+        "partial_exit_level":   round((entry_price + tdo) / 2, 4) if PARTIAL_EXIT_ENABLED else None,
     }
 
 
@@ -745,6 +899,37 @@ def manage_position(
                     position["stop_price"]    = position["best_after_tp"] - TRAIL_AFTER_TP_PTS
                 return "hold"
 
+    # ── Layer B entry (FVG retracement) ─────────────────────────────────────
+    if TWO_LAYER_POSITION and FVG_LAYER_B_TRIGGER:
+        if not position.get("layer_b_entered") and not position.get("partial_done"):
+            fvg_high = position.get("fvg_high")
+            fvg_low  = position.get("fvg_low")
+            if fvg_high is not None and fvg_low is not None:
+                in_fvg = (
+                    (direction == "long"  and current_bar["Low"]  <= fvg_high and current_bar["Low"]  >= fvg_low) or
+                    (direction == "short" and current_bar["High"] >= fvg_low  and current_bar["High"] <= fvg_high)
+                )
+                if in_fvg:
+                    total_target = position.get("total_contracts_target", position["contracts"])
+                    layer_b_contracts = total_target - position["contracts"]
+                    if layer_b_contracts > 0:
+                        lb_entry = float(current_bar["Close"])
+                        n_a = position["contracts"]
+                        position["entry_price"] = (
+                            position["entry_price"] * n_a + lb_entry * layer_b_contracts
+                        ) / (n_a + layer_b_contracts)
+                        position["contracts"]           += layer_b_contracts
+                        position["layer_b_entered"]      = True
+                        position["layer_b_entry_price"]  = lb_entry
+                        position["layer_b_contracts"]    = layer_b_contracts
+                        # Tighten stop to FVG boundary on Layer B entry
+                        if direction == "long":
+                            new_stop = fvg_low - STRUCTURAL_STOP_BUFFER_PTS
+                            position["stop_price"] = max(position["stop_price"], new_stop)
+                        else:
+                            new_stop = fvg_high + STRUCTURAL_STOP_BUFFER_PTS
+                            position["stop_price"] = min(position["stop_price"], new_stop)
+
     # ── Breakeven / trailing stop update ─────────────────────────────────────
     # Skip breakeven management once we are trailing past TDO (stop is already ahead of entry)
     if BREAKEVEN_TRIGGER_PCT > 0 and not position.get("tp_breached"):
@@ -791,6 +976,19 @@ def manage_position(
                 return "exit_invalidation_smt"
 
     stop = position["stop_price"]
+
+    # ── Partial exit at first draw on liquidity ─────────────────────────────
+    if PARTIAL_EXIT_ENABLED and not position.get("partial_done"):
+        lvl = position.get("partial_exit_level")
+        if lvl is not None:
+            if direction == "long"  and current_bar["High"] >= lvl:
+                position["partial_done"]  = True
+                position["partial_price"] = lvl
+                return "partial_exit"
+            if direction == "short" and current_bar["Low"]  <= lvl:
+                position["partial_done"]  = True
+                position["partial_price"] = lvl
+                return "partial_exit"
 
     # ── Exit checks ───────────────────────────────────────────────────────────
     # exit_tp is only used when trail-after-TP is disabled; otherwise the stop
