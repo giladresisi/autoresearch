@@ -105,8 +105,10 @@ def _format_signal_line(ts: pd.Timestamp, signal: dict, assumed_entry: float) ->
     stop_dist = abs(signal["entry_price"] - signal["stop_price"])
     rr = dist / stop_dist if stop_dist > 0 else 0.0
     slip_label = f"+{ENTRY_SLIPPAGE_TICKS}t slip" if signal["direction"] == "long" else f"-{ENTRY_SLIPPAGE_TICKS}t slip"
+    entry_time = pd.Timestamp(signal["entry_time"])
     return (
         f"[{ts.strftime('%H:%M:%S')}] SIGNAL    {signal['direction']:<5} | "
+        f"entry_time {entry_time.strftime('%H:%M:%S')} | "
         f"entry ~{assumed_entry:.2f} ({slip_label}) | "
         f"stop {signal['stop_price']:.2f} | "
         f"TP {signal['take_profit']:.2f} | "
@@ -115,15 +117,22 @@ def _format_signal_line(ts: pd.Timestamp, signal: dict, assumed_entry: float) ->
 
 
 def _format_exit_line(
-    ts: pd.Timestamp, exit_type: str, exit_price: float, pnl: float, contracts: int
+    ts: pd.Timestamp, exit_type: str, exit_price: float, pnl: float, contracts: int,
+    entry_time_str: str,
 ) -> str:
     """Human-readable exit log line."""
     label = exit_type.replace("exit_", "").replace("_session_end", " (session)")
     pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+    entry_ts = pd.Timestamp(entry_time_str)
+    if entry_ts.tz is None:
+        entry_ts = entry_ts.tz_localize("America/New_York")
+    dur_secs = int((ts - entry_ts).total_seconds())
+    dur_str = f"{dur_secs // 60}m {dur_secs % 60}s"
     return (
         f"[{ts.strftime('%H:%M:%S')}] EXIT      {label:<6} | "
         f"filled {exit_price:.2f} | "
         f"P&L {pnl_str} | "
+        f"duration {dur_str} | "
         f"{contracts} MNQ1! contract{'s' if contracts != 1 else ''}"
     )
 
@@ -496,7 +505,7 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         return
 
     pnl = _compute_pnl(_position, exit_price)
-    print(_format_exit_line(bar_ts, result, exit_price, pnl, _position["contracts"]), flush=True)
+    print(_format_exit_line(bar_ts, result, exit_price, pnl, _position["contracts"], _position["entry_time"]), flush=True)
 
     _last_exit_ts = bar_ts
     POSITION_FILE.unlink(missing_ok=True)

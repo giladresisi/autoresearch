@@ -154,6 +154,7 @@ def test_format_signal_line_long():
         "entry_price": 19850.0,
         "take_profit": 19950.0,
         "stop_price":  19805.0,
+        "entry_time":  pd.Timestamp("2025-01-02 09:04:00", tz="America/New_York"),
     }
     line = signal_smt._format_signal_line(ts, signal, 19850.5)
     assert "SIGNAL" in line
@@ -165,10 +166,11 @@ def test_format_exit_line_tp():
     """_format_exit_line output contains 'EXIT', 'tp', and the P&L."""
     import signal_smt
     ts = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
-    line = signal_smt._format_exit_line(ts, "exit_tp", 19890.0, 78.5, 1)
+    line = signal_smt._format_exit_line(ts, "exit_tp", 19890.0, 78.5, 1, "2025-01-02 09:10:00-05:00")
     assert "EXIT" in line
     assert "tp" in line
     assert "78.5" in line
+    assert "20m" in line
 
 
 # ══ SCANNING state tests ══════════════════════════════════════════════════════
