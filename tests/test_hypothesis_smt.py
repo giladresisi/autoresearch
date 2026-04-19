@@ -498,11 +498,14 @@ def _run_backtest_with_hypothesis(monkeypatch, hyp_direction, signal_direction):
     monkeypatch.setattr(backtest_smt, "RISK_PER_TRADE",   50.0)
     monkeypatch.setattr(backtest_smt, "MAX_CONTRACTS",    1)
 
-    # Mock compute_hypothesis_direction to return the desired direction
-    monkeypatch.setattr(
-        backtest_smt, "compute_hypothesis_direction",
-        lambda *args, **kwargs: hyp_direction,
-    )
+    # Mock compute_hypothesis_context (replaces compute_hypothesis_direction in run_backtest)
+    def _mock_hyp_ctx(*args, **kwargs):
+        if hyp_direction is None:
+            return None
+        return {"direction": hyp_direction, "pd_range_case": None, "pd_range_bias": "neutral",
+                "week_zone": None, "day_zone": None, "trend_direction": "neutral",
+                "hypothesis_score": 0}
+    monkeypatch.setattr(backtest_smt, "compute_hypothesis_context", _mock_hyp_ctx)
 
     stats = backtest_smt.run_backtest(mnq, mes, start=date_str, end="2026-04-15")
     return stats.get("trade_records", [])

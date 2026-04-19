@@ -208,6 +208,43 @@ PARTIAL_EXIT_FRACTION: float = 0.33  # Round 2 approved: 0.33 outperformed 0.5 (
 # Optimizer search space: [True, False]
 SMT_FILL_ENABLED: bool = False
 
+# ── Displacement entry quality controls (Plan 3) ──────────────────────────────
+# Re-enables SMT_OPTIONAL experiments after adding the two fixes that Round 2
+# identified as prerequisites: correct stop placement and hypothesis score gate.
+#
+# DISPLACEMENT_STOP_MODE: when True and smt_type=="displacement", sets initial
+#   stop to the displacement bar's extreme (bar Low for long, bar High for short)
+#   instead of the SMT structural stop. Mechanistically correct: the displacement
+#   thesis fails when price closes back through the impulse bar.
+#   Optimizer search space: [True, False]
+DISPLACEMENT_STOP_MODE: bool = False
+
+# MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT: minimum count of hypothesis rules that
+#   must agree with signal direction for a displacement entry to be accepted.
+#   0 = gate disabled (all displacement entries pass). Only effective when
+#   SMT_OPTIONAL=True; has no effect on wick/body SMT entries.
+#   Score range: 0–4 (pd_range_bias, week_zone, day_zone, trend_direction votes).
+#   Optimizer search space: [0, 2, 3]
+MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT: int = 0
+
+# ── Partial exit level (Plan 3) ───────────────────────────────────────────────
+# PARTIAL_EXIT_LEVEL_RATIO: linear interpolation between entry (0.0) and TP (1.0)
+#   for the partial exit target. 0.5 = current hardcoded midpoint (no behaviour
+#   change when PARTIAL_EXIT_ENABLED=True). Enables Round 3 experiments at
+#   0.33 (earlier lock-in, higher probability) and 0.67 (later, more favorable RR).
+#   Only read by manage_position() when PARTIAL_EXIT_ENABLED=True.
+#   Optimizer search space: [0.33, 0.5, 0.67]
+PARTIAL_EXIT_LEVEL_RATIO: float = 0.5
+
+# ── Layer B hypothesis gate (Plan 3) ─────────────────────────────────────────
+# FVG_LAYER_B_REQUIRES_HYPOTHESIS: when True, the FVG retracement add-on (Layer B)
+#   is only accepted in sessions where hypothesis_score >= MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT.
+#   ICT's two-leg accumulation model is a reversal/pullback structure — gating it to
+#   hypothesis-confirmed sessions prevents Layer B entries in pure momentum days.
+#   Requires TWO_LAYER_POSITION=True; has no effect when FVG is disabled.
+#   Optimizer search space: [True, False]
+FVG_LAYER_B_REQUIRES_HYPOTHESIS: bool = False
+
 
 # ── Module-level bar data ─────────────────────────────────────────────────────
 _mnq_bars: "pd.DataFrame | None" = None
@@ -840,7 +877,7 @@ def _build_signal_from_bar(
         # Plan 2 fields
         "fvg_high":             float(fvg_zone["fvg_high"]) if fvg_zone else None,
         "fvg_low":              float(fvg_zone["fvg_low"])  if fvg_zone else None,
-        "partial_exit_level":   round((entry_price + tdo) / 2, 4) if PARTIAL_EXIT_ENABLED else None,
+        "partial_exit_level":   round(entry_price + (tdo - entry_price) * PARTIAL_EXIT_LEVEL_RATIO, 4) if PARTIAL_EXIT_ENABLED else None,
     }
 
 

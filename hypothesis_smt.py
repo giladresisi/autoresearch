@@ -490,6 +490,57 @@ def compute_hypothesis_direction(mnq_1m_df: pd.DataFrame, hist_mnq_df: pd.DataFr
         return None  # insufficient data → caller treats as no hypothesis
 
 
+def _count_aligned_rules(r1_bias, w_zone, d_zone, trend, direction):
+    """Count rule votes aligned with direction (0-4). 0 when direction is None/neutral."""
+    if not direction or direction == "neutral":
+        return 0
+    score = 0
+    if r1_bias == direction:
+        score += 1
+    if (w_zone == "discount" and direction == "long") or (w_zone == "premium" and direction == "short"):
+        score += 1
+    if (d_zone == "discount" and direction == "long") or (d_zone == "premium" and direction == "short"):
+        score += 1
+    if (trend == "bullish" and direction == "long") or (trend == "bearish" and direction == "short"):
+        score += 1
+    return score
+
+
+def compute_hypothesis_context(
+    mnq_1m_df: pd.DataFrame,
+    hist_mnq_df: pd.DataFrame,
+    date: datetime.date,
+) -> Optional[dict]:
+    """Return per-rule breakdown + final direction + score. No side effects. Safe for backtest."""
+    try:
+        r5 = _compute_rule5(mnq_1m_df, date)
+        if r5 is None:
+            return None
+        r1 = _compute_rule1(mnq_1m_df, date)
+        r2 = _compute_rule2(hist_mnq_df, date)
+        direction = _weighted_vote(
+            r1["pd_range_bias"],
+            r5["week_zone"],
+            r5["day_zone"],
+            r2["trend_direction"],
+        )
+        r1_bias       = r1.get("pd_range_bias", "neutral")
+        w_zone        = r5.get("week_zone")
+        d_zone        = r5.get("day_zone")
+        trend         = r2.get("trend_direction", "neutral")
+        return {
+            "direction":        direction,
+            "pd_range_case":    r1.get("pd_range_case"),
+            "pd_range_bias":    r1_bias,
+            "week_zone":        w_zone,
+            "day_zone":         d_zone,
+            "trend_direction":  trend,
+            "hypothesis_score": _count_aligned_rules(r1_bias, w_zone, d_zone, trend, direction),
+        }
+    except Exception:
+        return None
+
+
 def _build_session_context(mnq_1m_df: pd.DataFrame, hist_mnq_df: pd.DataFrame,
                             date: datetime.date) -> Optional[dict]:
     """Assemble ALL rule outputs into the session_context dict for Claude."""

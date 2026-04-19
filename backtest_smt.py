@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from hypothesis_smt import compute_hypothesis_direction
+from hypothesis_smt import compute_hypothesis_context
 from strategy_smt import (
     set_bar_data, load_futures_data, compute_tdo, find_anchor_close,
     is_confirmation_bar, detect_smt_divergence, _build_signal_from_bar,
@@ -22,6 +22,8 @@ from strategy_smt import (
     SILVER_BULLET_WINDOW_ONLY, SILVER_BULLET_START, SILVER_BULLET_END,
     TWO_LAYER_POSITION, LAYER_A_FRACTION, FVG_LAYER_B_TRIGGER,
     SMT_OPTIONAL, SMT_FILL_ENABLED, PARTIAL_EXIT_ENABLED, PARTIAL_EXIT_FRACTION,
+    DISPLACEMENT_STOP_MODE, MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT,
+    FVG_LAYER_B_REQUIRES_HYPOTHESIS, STRUCTURAL_STOP_BUFFER_PTS,
 )
 
 # Cache directory for futures parquet files.
@@ -54,6 +56,11 @@ WRITE_FINAL_OUTPUTS = False
 # Print per-direction win rate, avg PnL, and exit breakdown after each fold.
 # Set False to suppress — does not affect frozen print_results output.
 PRINT_DIRECTION_BREAKDOWN = True
+
+# When True, only signals where matches_hypothesis == True are taken.
+# Default False = current behaviour. Set True to test Outcome B walk-forward validation.
+# Optimization search space: [True, False]
+HYPOTHESIS_FILTER: bool = False
 
 # MNQ futures P&L per point per contract.
 MNQ_PNL_PER_POINT = 2.0
@@ -265,8 +272,9 @@ def run_backtest(
             else {"overnight_high": None, "overnight_low": None}
         )
 
-        # Hypothesis direction for this session (deterministic, no LLM)
-        _session_hyp_dir = compute_hypothesis_direction(mnq_df, _hist_mnq_df, day)
+        # Hypothesis direction + per-rule context for this session (deterministic, no LLM)
+        _session_hyp_ctx = compute_hypothesis_context(mnq_df, _hist_mnq_df, day)
+        _session_hyp_dir = _session_hyp_ctx["direction"] if _session_hyp_ctx else None
 
         # Reset pending state at day boundary — divergence signals are session-scoped.
         # An open position (IN_TRADE) is allowed to carry across days.
@@ -282,8 +290,10 @@ def run_backtest(
             _pending_div_bar_high = 0.0
             _pending_div_bar_low  = 0.0
             _pending_smt_defended = 0.0
-            _pending_smt_type     = "wick"
-            _pending_fvg_zone     = None
+            _pending_smt_type               = "wick"
+            _pending_fvg_zone               = None
+            _pending_fvg_detected           = False
+            _pending_displacement_bar_extreme = None
 
         min_signal_ts = mnq_session.index[0] + pd.Timedelta(minutes=MIN_BARS_BEFORE_SIGNAL)
 
@@ -326,6 +336,10 @@ def run_backtest(
                         {**position, "contracts": partial_contracts}, "partial_exit", bar, MNQ_PNL_PER_POINT
                     )
                     partial_trade["matches_hypothesis"] = position.get("matches_hypothesis")
+                    for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
+                               "week_zone", "day_zone", "trend_direction", "hypothesis_score",
+                               "fvg_detected"):
+                        partial_trade[_f] = position.get(_f)
                     partial_trade["exit_type"] = "partial_exit"
                     partial_trade["pnl"] = round(partial_pnl, 2)
                     partial_trade["exit_price"] = round(partial_exit_price, 4)
@@ -340,6 +354,10 @@ def run_backtest(
                         position, result, bar, MNQ_PNL_PER_POINT
                     )
                     trade["matches_hypothesis"] = position.get("matches_hypothesis")
+                    for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
+                               "week_zone", "day_zone", "trend_direction", "hypothesis_score",
+                               "fvg_detected"):
+                        trade[_f] = position.get(_f)
                     trades.append(trade)
                     day_pnl += day_pnl_delta
                     prior_trade_bars_held = entry_bar_count  # capture before reset
@@ -403,6 +421,28 @@ def run_backtest(
                             (signal.get("direction") == _session_hyp_dir)
                             if _session_hyp_dir is not None else None
                         )
+                        signal["fvg_detected"] = _pending_fvg_detected
+                        if _session_hyp_ctx is not None:
+                            signal["hypothesis_direction"] = _session_hyp_ctx.get("direction")
+                            signal["pd_range_case"]        = _session_hyp_ctx.get("pd_range_case")
+                            signal["pd_range_bias"]        = _session_hyp_ctx.get("pd_range_bias")
+                            signal["week_zone"]            = _session_hyp_ctx.get("week_zone")
+                            signal["day_zone"]             = _session_hyp_ctx.get("day_zone")
+                            signal["trend_direction"]      = _session_hyp_ctx.get("trend_direction")
+                            signal["hypothesis_score"]     = _session_hyp_ctx.get("hypothesis_score", 0)
+                        else:
+                            signal["hypothesis_direction"] = None
+                            signal["pd_range_case"]        = None
+                            signal["pd_range_bias"]        = None
+                            signal["week_zone"]            = None
+                            signal["day_zone"]             = None
+                            signal["trend_direction"]      = None
+                            signal["hypothesis_score"]     = 0
+                        if HYPOTHESIS_FILTER and signal.get("matches_hypothesis") is not True:
+                            state = "IDLE"
+                            pending_direction = None
+                            anchor_close = None
+                            continue
                         risk_per_contract = (
                             abs(signal["entry_price"] - signal["stop_price"]) * MNQ_PNL_PER_POINT
                         )
@@ -421,6 +461,13 @@ def run_backtest(
                             "layer_b_entered": False, "layer_b_entry_price": None,
                             "layer_b_contracts": 0, "partial_done": False, "partial_price": None,
                         }
+                        if DISPLACEMENT_STOP_MODE and position.get("smt_type") == "displacement":
+                            _extreme = _pending_displacement_bar_extreme
+                            if _extreme is not None:
+                                if position["direction"] == "long":
+                                    position["stop_price"] = _extreme - STRUCTURAL_STOP_BUFFER_PTS
+                                else:
+                                    position["stop_price"] = _extreme + STRUCTURAL_STOP_BUFFER_PTS
                         position["entry_bar"]             = bar_idx
                         reentry_count += 1
                         position["reentry_sequence"]      = reentry_count
@@ -466,6 +513,28 @@ def run_backtest(
                             (signal.get("direction") == _session_hyp_dir)
                             if _session_hyp_dir is not None else None
                         )
+                        signal["fvg_detected"] = _pending_fvg_detected
+                        if _session_hyp_ctx is not None:
+                            signal["hypothesis_direction"] = _session_hyp_ctx.get("direction")
+                            signal["pd_range_case"]        = _session_hyp_ctx.get("pd_range_case")
+                            signal["pd_range_bias"]        = _session_hyp_ctx.get("pd_range_bias")
+                            signal["week_zone"]            = _session_hyp_ctx.get("week_zone")
+                            signal["day_zone"]             = _session_hyp_ctx.get("day_zone")
+                            signal["trend_direction"]      = _session_hyp_ctx.get("trend_direction")
+                            signal["hypothesis_score"]     = _session_hyp_ctx.get("hypothesis_score", 0)
+                        else:
+                            signal["hypothesis_direction"] = None
+                            signal["pd_range_case"]        = None
+                            signal["pd_range_bias"]        = None
+                            signal["week_zone"]            = None
+                            signal["day_zone"]             = None
+                            signal["trend_direction"]      = None
+                            signal["hypothesis_score"]     = 0
+                        if HYPOTHESIS_FILTER and signal.get("matches_hypothesis") is not True:
+                            state = "IDLE"
+                            pending_direction = None
+                            anchor_close = None
+                            continue
                         risk_per_contract = (
                             abs(signal["entry_price"] - signal["stop_price"]) * MNQ_PNL_PER_POINT
                         )
@@ -484,6 +553,13 @@ def run_backtest(
                             "layer_b_entered": False, "layer_b_entry_price": None,
                             "layer_b_contracts": 0, "partial_done": False, "partial_price": None,
                         }
+                        if DISPLACEMENT_STOP_MODE and position.get("smt_type") == "displacement":
+                            _extreme = _pending_displacement_bar_extreme
+                            if _extreme is not None:
+                                if position["direction"] == "long":
+                                    position["stop_price"] = _extreme - STRUCTURAL_STOP_BUFFER_PTS
+                                else:
+                                    position["stop_price"] = _extreme + STRUCTURAL_STOP_BUFFER_PTS
                         position["entry_bar"]             = bar_idx
                         reentry_count += 1
                         position["reentry_sequence"]      = reentry_count
@@ -536,8 +612,29 @@ def run_backtest(
                 if TRADE_DIRECTION != "both" and direction != TRADE_DIRECTION:
                     continue
 
+                # Stash displacement bar extreme for stop override (DISPLACEMENT_STOP_MODE)
+                _displacement_bar_extreme = None
+                if _smt_type == "displacement":
+                    if direction == "long":
+                        _displacement_bar_extreme = float(mnq_reset.iloc[bar_idx]["Low"])
+                    else:
+                        _displacement_bar_extreme = float(mnq_reset.iloc[bar_idx]["High"])
+
+                # Score gate: reject displacement entries below hypothesis alignment threshold
+                if _smt_type == "displacement" and MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT > 0:
+                    _score = _session_hyp_ctx.get("hypothesis_score", 0) if _session_hyp_ctx else 0
+                    if _score < MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT:
+                        continue
+
                 # Compute FVG zone after direction is resolved
                 _pending_fvg = detect_fvg(mnq_reset, bar_idx, direction)
+                _raw_fvg_present = _pending_fvg is not None  # capture before gate may clear it
+
+                # Clear FVG zone when Layer B hypothesis gate is enabled and score is insufficient
+                if FVG_LAYER_B_REQUIRES_HYPOTHESIS:
+                    _score = _session_hyp_ctx.get("hypothesis_score", 0) if _session_hyp_ctx else 0
+                    if _score < MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT:
+                        _pending_fvg = None  # Layer B disabled this session; Layer A proceeds
 
                 # Overnight sweep gate: overnight H (shorts) or L (longs) must be exceeded.
                 if OVERNIGHT_SWEEP_REQUIRED:
@@ -570,9 +667,11 @@ def run_backtest(
                 _pending_div_bar_high = float(_div_bar["High"])
                 _pending_div_bar_low  = float(_div_bar["Low"])
                 _pending_smt_defended = _smt_defended
-                _pending_smt_type     = _smt_type
-                _pending_fvg_zone     = _pending_fvg
-                state                 = "WAITING_FOR_ENTRY"
+                _pending_smt_type               = _smt_type
+                _pending_fvg_zone               = _pending_fvg
+                _pending_fvg_detected           = _raw_fvg_present
+                _pending_displacement_bar_extreme = _displacement_bar_extreme
+                state                           = "WAITING_FOR_ENTRY"
 
         # End of session: force-close any position still open at session boundary.
         if state == "IN_TRADE" and position is not None:
@@ -581,6 +680,10 @@ def run_backtest(
                 position, "session_close", last_bar, MNQ_PNL_PER_POINT
             )
             trade["matches_hypothesis"] = position.get("matches_hypothesis")
+            for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
+                       "week_zone", "day_zone", "trend_direction", "hypothesis_score",
+                       "fvg_detected"):
+                trade[_f] = position.get(_f)
             trades.append(trade)
             day_pnl += day_pnl_delta
             position = None
@@ -605,6 +708,10 @@ def run_backtest(
             )
             trade["exit_time"] = ""   # no meaningful bar time at backtest end
             trade["matches_hypothesis"] = position.get("matches_hypothesis")
+            for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
+                       "week_zone", "day_zone", "trend_direction", "hypothesis_score",
+                       "fvg_detected"):
+                trade[_f] = position.get(_f)
             trades.append(trade)
             equity_curve.append(equity_curve[-1] + pnl)
 
@@ -729,9 +836,12 @@ def _write_trades_tsv(trades: list[dict]) -> None:
         "entry_bar_body_ratio", "smt_sweep_pts", "smt_miss_pts", "bars_since_divergence",
         "matches_hypothesis", "smt_type",
         "fvg_high", "fvg_low", "layer_b_entered", "layer_b_entry_price", "layer_b_contracts",
+        "hypothesis_direction", "pd_range_case", "pd_range_bias",
+        "week_zone", "day_zone", "trend_direction", "hypothesis_score", "fvg_detected",
     ]
     with open("trades.tsv", "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t",
+                           extrasaction="ignore", restval="")
         w.writeheader()
         w.writerows(trades)
     print(f"Trades written -> trades.tsv ({len(trades)} records)")

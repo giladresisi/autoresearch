@@ -218,6 +218,154 @@ trades=45, pnl=$4,798, wr=62.2%, avg_rr=6.56, max_dd=$95
 - **Run C (TWO_LAYER+FVG)**: `layer_b_triggers=0` across all configs in this 60-day momentum window. Not a parameter problem — FVG retracements are a regime-dependent pattern. Plan 3 adds `fvg_detected` TSV field to diagnose whether zones are forming but not retracing, or not forming at all. Re-test in a different regime window or after `FVG_LAYER_B_REQUIRES_HYPOTHESIS` gates it to hypothesis-confirmed sessions.
 - **Run D (SMT_FILL_ENABLED)**: `fill_entries=0`, final_pnl=$5,075 (baseline, NEUTRAL). No fill divergences formed in this 60-day momentum regime. Re-test in Round 3 when `fvg_detected` field provides broader regime diagnostics.
 
-## Round 3 — Plan 3 Hypothesis Alignment (pending)
+## Round 3 — Plan 3 Hypothesis Alignment
 
-_To be filled after Plan 3 experiments._
+**Status:** Infrastructure complete (2026-04-20). Experiments pending.
+
+**Runner:** `uv run python plan3_experiment_runner.py [FLAG=VALUE ...]`
+_(Create from `plan2_experiment_runner.py` — add Plan 3 bool flags: `HYPOTHESIS_FILTER`, `DISPLACEMENT_STOP_MODE`, `FVG_LAYER_B_REQUIRES_HYPOTHESIS`; int flag: `MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT`; float flags: `PARTIAL_EXIT_LEVEL_RATIO`. Mirror `HYPOTHESIS_FILTER` into `backtest_smt` not `strategy_smt`.)_
+
+**Test window:** Same 1-fold fast mode (60 business days ending at `TRAIN_END`).
+
+**Effective baseline entering Round 3:**
+trades=45, pnl=$4,798, wr=62.2%, avg_rr=6.56, max_dd=$95
+(HIDDEN_SMT_ENABLED=True, PARTIAL_EXIT_ENABLED=True, PARTIAL_EXIT_FRACTION=0.33)
+
+---
+
+### Pre-Run Analysis (required before first experiment)
+
+Run a fresh backtest to generate trades.tsv with the new Rule 5 hypothesis columns, then run the alignment analysis to inform which experiments are worth prioritising:
+
+```bash
+uv run python backtest_smt.py
+uv run python analyze_hypothesis.py
+```
+
+Read the `VERDICT` line:
+- **POTENTIAL EDGE** (aligned WR − misaligned WR ≥ 10pp, ≥4/6 folds consistent) → Run A is high-priority; the hypothesis filter has real signal.
+- **NO CLEAR EDGE** → Run A is low-priority; displacement fixes (Run B) and partial level tuning (Run C) are higher-value.
+
+Also check `fvg_detected` distribution in the new trades.tsv:
+```bash
+python -c "import pandas as pd; df=pd.read_csv('trades.tsv',sep='\t'); print(df['fvg_detected'].value_counts())"
+```
+If `fvg_detected=True` is common but `layer_b_triggers=0` (from Round 2), it means FVG zones are forming but price never retraces — regime-dependent. If `fvg_detected=False` dominates, the FVG detection threshold may need tuning before Run D is meaningful.
+
+---
+
+### How to Run Each Group
+
+#### Run A — Hypothesis filter (`HYPOTHESIS_FILTER`)
+
+Takes only signals where the session hypothesis agrees with signal direction. Tests whether the hypothesis system produces tradeable alpha or is decorative.
+
+**Only run if `analyze_hypothesis.py` shows POTENTIAL EDGE.** If NO CLEAR EDGE, record A-1 as NEUTRAL and skip to Run B.
+
+```bash
+uv run python plan3_experiment_runner.py HYPOTHESIS_FILTER=True
+```
+
+Key metrics: `final_trades` (expect significant drop if many signals are misaligned), `final_pnl`, `win_rate`, `avg_rr`.
+
+**Verdict logic:** APPROVE only if `final_pnl` > Round 3 baseline ($4,798) AND `final_trades` ≥ 20 (enough to be statistically meaningful). If trades drop below 20, record as NEUTRAL — insufficient sample. If P&L improves but WR/RR degrade, it may be a volatility artifact — record as NEUTRAL with a note.
+
+---
+
+#### Run B — Displacement re-test with Plan 3 fixes (`SMT_OPTIONAL` + `DISPLACEMENT_STOP_MODE`)
+
+Round 2 rejected all `SMT_OPTIONAL` configs due to two structural flaws: (1) wrong stop placement (structural stop instead of displacement bar extreme), (2) no quality gate. Plan 3 fixes both. Re-test with fixes enabled.
+
+**Always set `DISPLACEMENT_STOP_MODE=True` when `SMT_OPTIONAL=True`** — testing without it repeats a rejected Round 2 config.
+
+```bash
+# B-1: displacement entries with correct stop only
+uv run python plan3_experiment_runner.py SMT_OPTIONAL=True MIN_DISPLACEMENT_PTS=10.0 DISPLACEMENT_STOP_MODE=True
+
+# B-2: add hypothesis score gate (score >= 2 required)
+uv run python plan3_experiment_runner.py SMT_OPTIONAL=True MIN_DISPLACEMENT_PTS=10.0 DISPLACEMENT_STOP_MODE=True MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT=2
+
+# B-3: stricter score gate (score >= 3 required)
+uv run python plan3_experiment_runner.py SMT_OPTIONAL=True MIN_DISPLACEMENT_PTS=10.0 DISPLACEMENT_STOP_MODE=True MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT=3
+```
+
+Key metrics: `displacement_entries` (must be > 0 to be meaningful), `final_pnl`, `win_rate`, `avg_rr`, `max_dd`.
+
+**Verdict logic:** Compare `displacement_entries` across B-1/B-2/B-3 to understand how many entries the score gate eliminates. APPROVE if `final_pnl` > baseline and WR/RR don't degrade. NEUTRAL if `displacement_entries=0` (threshold too tight for current window). REJECT if P&L is below Round 2 A-2 result ($3,520) — the fixes made it worse, not better.
+
+If B-1 still rejects, the slot-stealing structural flaw is not fixed by stop placement alone — document and defer to Round 4.
+
+---
+
+#### Run C — Partial exit level tuning (`PARTIAL_EXIT_LEVEL_RATIO`)
+
+Round 2 approved `PARTIAL_EXIT_FRACTION=0.33` at midpoint (ratio=0.5). Tests whether adjusting the partial level earlier (0.33) or later (0.67) improves the risk-adjusted result further.
+
+```bash
+# C-1: earlier partial exit (33% of the way to TP — tighter lock-in)
+uv run python plan3_experiment_runner.py PARTIAL_EXIT_LEVEL_RATIO=0.33
+
+# C-2: later partial exit (67% of the way to TP — more favorable RR on partial leg)
+uv run python plan3_experiment_runner.py PARTIAL_EXIT_LEVEL_RATIO=0.67
+```
+
+**Note:** `PARTIAL_EXIT_ENABLED=True` and `PARTIAL_EXIT_FRACTION=0.33` are already the defaults — the runner runs with them on. Only `PARTIAL_EXIT_LEVEL_RATIO` changes.
+
+Key metrics: `partial_trades` (should equal `final_trades` — if lower, partial level was never reached), `final_pnl`, `max_dd`.
+
+**Verdict logic:** Same as Run B in Round 2 — use `final_pnl` vs baseline and `max_drawdown` as primary signal. The baseline ratio=0.5 gives $4,798 / $95dd. APPROVE the new ratio if P&L ≥ baseline AND max_dd ≤ $95. If `partial_trades` < `final_trades` at ratio=0.33, early level is too tight (midpoint wasn't reached) — NEUTRAL.
+
+---
+
+#### Run D — Layer B hypothesis gate (`FVG_LAYER_B_REQUIRES_HYPOTHESIS`)
+
+Gates the FVG retracement add-on (Layer B) to hypothesis-confirmed sessions. Only meaningful once `fvg_detected=True` is common in trades.tsv and/or after a regime shift where Layer B actually fires.
+
+**Skip or defer Run D if:**
+- `fvg_detected=True` is rare (< 20% of trades) — FVG zones aren't forming, gating them is moot.
+- `layer_b_triggers=0` — Layer B still doesn't fire (regression on Round 2 finding); document and defer to Round 4.
+
+```bash
+# D-1: gate Layer B to hypothesis-confirmed sessions (score >= 1, MIN_HYPOTHESIS_SCORE default=0)
+uv run python plan3_experiment_runner.py TWO_LAYER_POSITION=True FVG_ENABLED=True FVG_LAYER_B_TRIGGER=True FVG_LAYER_B_REQUIRES_HYPOTHESIS=True MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT=2
+```
+
+Key metrics: `layer_b_triggers` (if still 0 → NEUTRAL, regime unchanged), `fvg_detected` count from trades.tsv (from pre-run analysis step).
+
+---
+
+### Verdict Framework
+
+Same as Rounds 1–2 with one addition for the hypothesis filter:
+
+| Result | Criterion | Action |
+|--------|-----------|--------|
+| APPROVE | `final_pnl` > Round 3 baseline ($4,798) AND WR/RR stable; OR `max_dd` meaningfully lower at ≤5% P&L cost | Set flag as new default in `strategy_smt.py` (or `backtest_smt.py` for `HYPOTHESIS_FILTER`) |
+| NEUTRAL | Within ±5% of baseline, no meaningful improvement; OR insufficient sample (`final_trades` < 20) | Leave False/default; document re-test conditions |
+| REJECT | `final_pnl` < baseline − 10% OR WR/RR collapses vs prior approved baseline | Leave False; document root cause |
+
+For hypothesis filter (Run A): APPROVE only if both P&L improves AND sample ≥ 20 final trades.
+For displacement (Run B): compare against the Round 2 **rejected** baseline ($3,520), not just $4,798 — even if below $4,798, it may still be an improvement over the unfixed displacement config.
+For partial level (Run C): `max_drawdown` is the primary signal, P&L is secondary.
+
+---
+
+### Results
+
+_Fill in after running experiments. Run pre-run analysis first and record verdict in the Pre-Run Analysis row._
+
+| Run | Config | final_pnl | final_trades | win_rate | avg_rr | max_dd | displacement | layer_b | Verdict |
+|-----|--------|-----------|--------------|----------|--------|--------|--------------|---------|---------|
+| Baseline | (Round 3 defaults) | $4,798 | 45 | 62.2% | 6.56 | $95 | 0 | 0 | — |
+| Pre-run | analyze_hypothesis.py | — | — | — | — | — | — | — | EDGE / NO EDGE |
+| A-1 | HYPOTHESIS_FILTER=True | | | | | | | | |
+| B-1 | SMT_OPTIONAL=True, DISP_STOP=True, MIN_DISP=10 | | | | | | | | |
+| B-2 | B-1 + MIN_SCORE=2 | | | | | | | | |
+| B-3 | B-1 + MIN_SCORE=3 | | | | | | | | |
+| C-1 | PARTIAL_RATIO=0.33 | | | | | | | | |
+| C-2 | PARTIAL_RATIO=0.67 | | | | | | | | |
+| D-1 | TWO_LAYER+FVG+LB+REQUIRES_HYP, MIN_SCORE=2 | | | | | | | | |
+
+### Re-test Conditions
+
+_To be filled after Round 3 experiments._
