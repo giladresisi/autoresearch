@@ -26,12 +26,43 @@ _ET = "America/New_York"
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
+# Per-DataFrame caches keyed by id(df). Safe because DataFrames live for the full backtest.
+_df_dates_cache: dict = {}
+_df_times_cache: dict = {}
+_df_two_cache: dict = {}   # id(df) -> {(iso_year, iso_week): tuesday_open}
+
+
 def _index_dates(df: pd.DataFrame):
-    """Return a numpy array of date objects from a DataFrame's index (tz-safe)."""
-    idx = df.index
-    if hasattr(idx, "tz") and idx.tz is not None:
-        return idx.date
-    return idx.normalize().date
+    """Return date array for df's index. Cached per DataFrame object."""
+    k = id(df)
+    if k not in _df_dates_cache:
+        idx = df.index
+        _df_dates_cache[k] = idx.date if (hasattr(idx, "tz") and idx.tz is not None) else idx.normalize().date
+    return _df_dates_cache[k]
+
+
+def _index_times(df: pd.DataFrame):
+    """Return time array for df's index. Cached per DataFrame object."""
+    k = id(df)
+    if k not in _df_times_cache:
+        _df_times_cache[k] = df.index.time
+    return _df_times_cache[k]
+
+
+def _get_two_map(df: pd.DataFrame) -> dict:
+    """Return {(iso_year, iso_week): first_tuesday_open} dict. Cached per DataFrame object."""
+    k = id(df)
+    if k not in _df_two_cache:
+        dates = _index_dates(df)
+        opens = df["Open"].values
+        two_map: dict = {}
+        for i, d in enumerate(dates):
+            if d.weekday() == 1:   # Tuesday only — cheap filter before isocalendar
+                yw = d.isocalendar()[:2]
+                if yw not in two_map:
+                    two_map[yw] = float(opens[i])
+        _df_two_cache[k] = two_map
+    return _df_two_cache[k]
 
 
 def _price_at_900(mnq_1m_df: pd.DataFrame, date: datetime.date) -> Optional[float]:
@@ -40,8 +71,7 @@ def _price_at_900(mnq_1m_df: pd.DataFrame, date: datetime.date) -> Optional[floa
     if target in mnq_1m_df.index:
         return float(mnq_1m_df.loc[target, "Open"])
     # Fallback: first bar on that date at or after 09:00
-    day_bars = mnq_1m_df[_index_dates(mnq_1m_df) == date]
-    session_bars = day_bars[day_bars.index.time >= time(9, 0)]
+    session_bars = mnq_1m_df[(_index_dates(mnq_1m_df) == date) & (_index_times(mnq_1m_df) >= time(9, 0))]
     return float(session_bars.iloc[0]["Open"]) if not session_bars.empty else None
 
 
@@ -67,13 +97,7 @@ def _compute_rule5(mnq_1m_df: pd.DataFrame, date: datetime.date) -> Optional[dic
 
     # TWO: open of the first 1m bar on Tuesday of the current ISO week
     iso_year, iso_week, _ = date.isocalendar()
-    two = None
-    dates = _index_dates(mnq_1m_df)
-    for i, d in enumerate(dates):
-        d_iso = d.isocalendar()
-        if d_iso[0] == iso_year and d_iso[1] == iso_week and d.weekday() == 1:
-            two = float(mnq_1m_df.iloc[i]["Open"])
-            break
+    two = _get_two_map(mnq_1m_df).get((iso_year, iso_week))
 
     day_zone  = ("premium" if p900 > tdo  else "discount") if tdo  is not None else None
     week_zone = ("premium" if p900 > two   else "discount") if two  is not None else None
@@ -110,9 +134,8 @@ def _compute_rule1(mnq_1m_df: pd.DataFrame, date: datetime.date) -> dict:
 
     # Case 1.5: price_at_900 outside [pdl, pdh] — re-analyse on today's overnight range
     if not price_in_pd_range:
-        overnight = mnq_1m_df[
-            (dates == date) & (mnq_1m_df.index.time < time(9, 0))
-        ]
+        _times = _index_times(mnq_1m_df)
+        overnight = mnq_1m_df[(dates == date) & (_times < time(9, 0))]
         if not overnight.empty:
             pdh = float(overnight["High"].max())
             pdl = float(overnight["Low"].min())
@@ -128,9 +151,7 @@ def _compute_rule1(mnq_1m_df: pd.DataFrame, date: datetime.date) -> dict:
         return {"pdh": pdh, "pdl": pdl, "pd_midpoint": pd_midpoint,
                 "pd_range_case": "1.5", "pd_range_bias": "neutral", "price_in_pd_range": False}
 
-    overnight = mnq_1m_df[
-        (dates == date) & (mnq_1m_df.index.time < time(9, 0))
-    ]
+    overnight = mnq_1m_df[(dates == date) & (_index_times(mnq_1m_df) < time(9, 0))]
     case, bias = _assign_case(overnight, pdh, pdl, pd_midpoint, p900)
     return {
         "pdh": pdh, "pdl": pdl, "pd_midpoint": pd_midpoint,

@@ -254,15 +254,21 @@ def run_backtest(
         columns=["Open", "High", "Low", "Close", "Volume"]
     )
 
+    # Precompute once — avoids 807K-row .date/.time extraction on every session day
+    _mnq_dates   = mnq_df.index.date
+    _mnq_times   = mnq_df.index.time
+    _ses_start_t = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
+    _ses_end_t   = pd.Timestamp(f"2000-01-01 {SESSION_END}").time()
+
     for day in trading_days:
         # Weekday filter: skip disallowed trading days (e.g. Thursday)
         if day.weekday() not in ALLOWED_WEEKDAYS:
             continue
 
         session_mask = (
-            (mnq_df.index.date == day)
-            & (mnq_df.index.time >= pd.Timestamp(f"2000-01-01 {SESSION_START}").time())
-            & (mnq_df.index.time <= pd.Timestamp(f"2000-01-01 {SESSION_END}").time())
+            (_mnq_dates == day)
+            & (_mnq_times >= _ses_start_t)
+            & (_mnq_times <= _ses_end_t)
         )
         mnq_session = mnq_df[session_mask]
         mes_session = mes_df[session_mask]
@@ -278,7 +284,7 @@ def run_backtest(
 
         # Compute TDO for new signal generation; skip the day only if TDO is
         # missing AND we are not currently managing a carried position.
-        mnq_day = mnq_df[mnq_df.index.date == day]
+        mnq_day = mnq_df[_mnq_dates == day]
         day_tdo = compute_tdo(mnq_day, day)
         if day_tdo is None and state != "IN_TRADE":
             equity_curve.append(equity_curve[-1])
