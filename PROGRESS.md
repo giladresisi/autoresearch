@@ -1,5 +1,22 @@
 # PROGRESS
 
+
+## Feature: Session Hypothesis System
+
+**Status**: Planned
+**Plan File**: `.agents/plans/session-hypothesis.md`
+
+### Summary
+Session-planning layer for the realtime SMT workflow. At ~9:00am ET a `HypothesisManager`
+runs 5 deterministic ICT/SMT rules (PDH/PDL case analysis, multi-day trend, deception sweeps,
+session extremes, TDO/TWO premium-discount zones) and calls the Claude API for a narrative
+hypothesis. Evidence is evaluated per 1m bar; 3 contradictions trigger a revision call.
+Session end calls a Claude summary. A `matches_hypothesis` boolean is added to every signal
+dict in both realtime (`signal_smt.py`) and backtest (`backtest_smt.py`), enabling downstream
+alignment analysis without affecting signal generation.
+
+---
+
 ## Feature: Session Orchestrator Daemon
 
 **Status**: ✅ Complete
