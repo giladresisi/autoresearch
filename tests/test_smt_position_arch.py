@@ -89,6 +89,17 @@ def test_fvg_returns_none_when_bars_overlap(monkeypatch):
     assert result is None
 
 
+def test_detect_fvg_returns_none_when_bar_idx_lt_3(monkeypatch):
+    """bar_idx < 3 → no room for a 3-bar FVG pattern → always None."""
+    monkeypatch.setattr(_strat, "FVG_ENABLED", True)
+    monkeypatch.setattr(_strat, "FVG_MIN_SIZE_PTS", 0.0)
+    # Build a DataFrame large enough to not cause other issues
+    bars = _flat_bars(n=10)
+    for bar_idx in (0, 1, 2):
+        assert _strat.detect_fvg(bars, bar_idx=bar_idx, direction="long") is None
+        assert _strat.detect_fvg(bars, bar_idx=bar_idx, direction="short") is None
+
+
 # ── detect_displacement ───────────────────────────────────────────────────────
 
 def test_displacement_long_detected(monkeypatch):
