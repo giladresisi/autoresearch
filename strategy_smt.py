@@ -717,12 +717,49 @@ def screen_session(
     min_signal_ts = mnq_bars.index[0] + pd.Timedelta(minutes=MIN_BARS_BEFORE_SIGNAL)
     mes_reset = mes_bars.reset_index(drop=True)
     mnq_reset = mnq_bars.reset_index(drop=True)
+    import math as _math
+    _mes_h_arr  = mes_reset["High"].values
+    _mes_l_arr  = mes_reset["Low"].values
+    _mnq_h_arr  = mnq_reset["High"].values
+    _mnq_l_arr  = mnq_reset["Low"].values
+    _mes_c_arr  = mes_reset["Close"].values
+    _mnq_c_arr  = mnq_reset["Close"].values
+    _ses_mes_h  = _ses_mes_l  = float("nan")
+    _ses_mnq_h  = _ses_mnq_l  = float("nan")
+    _ses_mes_ch = _ses_mes_cl = float("nan")
+    _ses_mnq_ch = _ses_mnq_cl = float("nan")
 
     for bar_idx in range(n_bars):
+        # Update running extremes with previous bar — done at TOP so continue-statements
+        # elsewhere in the loop body cannot skip the update.
+        if bar_idx > 0:
+            _p = bar_idx - 1
+            _v = float(_mes_h_arr[_p])
+            _ses_mes_h  = _v if _math.isnan(_ses_mes_h)  else max(_ses_mes_h,  _v)
+            _v = float(_mes_l_arr[_p])
+            _ses_mes_l  = _v if _math.isnan(_ses_mes_l)  else min(_ses_mes_l,  _v)
+            _v = float(_mnq_h_arr[_p])
+            _ses_mnq_h  = _v if _math.isnan(_ses_mnq_h)  else max(_ses_mnq_h,  _v)
+            _v = float(_mnq_l_arr[_p])
+            _ses_mnq_l  = _v if _math.isnan(_ses_mnq_l)  else min(_ses_mnq_l,  _v)
+            _v = float(_mes_c_arr[_p])
+            _ses_mes_ch = _v if _math.isnan(_ses_mes_ch) else max(_ses_mes_ch, _v)
+            _ses_mes_cl = _v if _math.isnan(_ses_mes_cl) else min(_ses_mes_cl, _v)
+            _v = float(_mnq_c_arr[_p])
+            _ses_mnq_ch = _v if _math.isnan(_ses_mnq_ch) else max(_ses_mnq_ch, _v)
+            _ses_mnq_cl = _v if _math.isnan(_ses_mnq_cl) else min(_ses_mnq_cl, _v)
+
+        _smt_cache = {
+            "mes_h":  _ses_mes_h,  "mes_l":  _ses_mes_l,
+            "mnq_h":  _ses_mnq_h,  "mnq_l":  _ses_mnq_l,
+            "mes_ch": _ses_mes_ch, "mes_cl": _ses_mes_cl,
+            "mnq_ch": _ses_mnq_ch, "mnq_cl": _ses_mnq_cl,
+        }
+
         if mnq_bars.index[bar_idx] < min_signal_ts:
             continue
 
-        _smt = detect_smt_divergence(mes_reset, mnq_reset, bar_idx, 0)
+        _smt = detect_smt_divergence(mes_reset, mnq_reset, bar_idx, 0, _cached=_smt_cache)
 
         # SMT-optional: accept displacement if no wick/hidden SMT found
         _smt_fill = None
