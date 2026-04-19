@@ -16,6 +16,7 @@ import pandas as pd
 from ib_insync import IB, Future, util
 
 from strategy_smt import screen_session, manage_position, compute_tdo, set_bar_data
+from hypothesis_smt import HypothesisManager
 
 # ── Connection constants ──────────────────────────────────────────────────────
 IB_HOST      = "127.0.0.1"
@@ -66,6 +67,9 @@ _startup_ts: pd.Timestamp | None = None
 
 # Guard against re-detecting a signal that fired before this session's first exit
 _last_exit_ts: pd.Timestamp = pd.Timestamp("1970-01-01", tz="America/New_York")
+
+_hypothesis_manager: "HypothesisManager | None" = None
+_hypothesis_generated: bool = False
 
 # Derived time objects (set from SESSION_START/END strings in main())
 _session_start_time = None
@@ -225,6 +229,14 @@ def _bar_timestamp(bar) -> pd.Timestamp:
     return ts.tz_convert("America/New_York")
 
 
+def _load_hist_mnq() -> pd.DataFrame:
+    """Load the Databento 5m historical parquet for hypothesis rule engine."""
+    hist_path = Path("data/historical/MNQ.parquet")
+    if hist_path.exists():
+        return pd.read_parquet(hist_path)
+    return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+
+
 def _load_parquets() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load cached 1m parquet files. Returns empty DataFrames if files don't exist."""
     mnq_path = REALTIME_DATA_DIR / "MNQ_1m.parquet"
@@ -305,6 +317,16 @@ def on_mnq_1m_bar(bars, hasNewBar):
     # re-appended to the fresh buffer on the first tick of the next minute.
     _mnq_tick_bar = None
     set_bar_data(_mnq_1m_df, _mes_1m_df)
+
+    # Hypothesis: generate on first 1m bar at/after 09:00 ET; evaluate every bar
+    global _hypothesis_manager, _hypothesis_generated
+    if _hypothesis_manager is not None:
+        bar_time = _bar_timestamp(bars[-1]).time()
+        _session_start_time_local = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
+        if not _hypothesis_generated and bar_time >= _session_start_time_local:
+            _hypothesis_manager.generate()
+            _hypothesis_generated = True
+        _hypothesis_manager.evaluate_bar(bars[-1])
 
 
 def on_mes_1m_bar(bars, hasNewBar):
@@ -399,6 +421,10 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     if bar_time < _session_start_time or bar_time > _session_end_time:
         return
 
+    # 1a. Hypothesis gate: do not scan until generate() has run for today's session
+    if _hypothesis_manager is not None and not _hypothesis_generated:
+        return
+
     # 2. Alignment gate: MES 1s buffer must be current (same latest ts as MNQ)
     if _mes_1s_buf.empty or _mes_1s_buf.index[-1] != _mnq_1s_buf.index[-1]:
         return
@@ -430,6 +456,14 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     signal = screen_session(mnq_session, mes_session, tdo)
     if signal is None:
         return
+
+    # Annotate signal with hypothesis alignment
+    if _hypothesis_manager is not None and _hypothesis_manager.direction_bias is not None:
+        signal["matches_hypothesis"] = (
+            signal.get("direction") == _hypothesis_manager.direction_bias
+        )
+    else:
+        signal["matches_hypothesis"] = None
 
     # 7. Stale startup guard: skip signals that fired before this process started
     if _startup_ts is not None and signal["entry_time"] <= _startup_ts:
@@ -507,6 +541,11 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     pnl = _compute_pnl(_position, exit_price)
     print(_format_exit_line(bar_ts, result, exit_price, pnl, _position["contracts"], _position["entry_time"]), flush=True)
 
+    # Finalize hypothesis at session end (called before _position is cleared)
+    if _hypothesis_manager is not None and result != "hold":
+        exit_result_dict = {"exit_type": result, "pnl": pnl}
+        _hypothesis_manager.finalize(_position, exit_result_dict)
+
     _last_exit_ts = bar_ts
     POSITION_FILE.unlink(missing_ok=True)
     _position = None
@@ -546,6 +585,7 @@ def main() -> None:
     global _mnq_1s_buf, _mes_1s_buf, _state, _position, _startup_ts
     global _session_start_time, _session_end_time
     global _mnq_tick_bar, _mes_tick_bar
+    global _hypothesis_manager, _hypothesis_generated
 
     REALTIME_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -561,6 +601,12 @@ def main() -> None:
     # Load and gap-fill the persistent 1m parquet caches
     _mnq_1m_df, _mes_1m_df = _load_parquets()
     _mnq_1m_df, _mes_1m_df = _gap_fill_1m(_mnq_1m_df, _mes_1m_df)
+
+    # Load historical 5m data for hypothesis rule engine
+    _hist_mnq_df = _load_hist_mnq()
+    today = pd.Timestamp.now(tz="America/New_York").date()
+    _hypothesis_manager = HypothesisManager(_mnq_1m_df, _hist_mnq_df, today)
+    _hypothesis_generated = False
 
     # Restore open position from disk if the process was restarted mid-trade
     if POSITION_FILE.exists():

@@ -3,7 +3,7 @@
 
 ## Feature: Session Hypothesis System
 
-**Status**: Planned
+**Status**: ✅ Complete
 **Plan File**: `.agents/plans/session-hypothesis.md`
 
 ### Summary
@@ -14,6 +14,15 @@ hypothesis. Evidence is evaluated per 1m bar; 3 contradictions trigger a revisio
 Session end calls a Claude summary. A `matches_hypothesis` boolean is added to every signal
 dict in both realtime (`signal_smt.py`) and backtest (`backtest_smt.py`), enabling downstream
 alignment analysis without affecting signal generation.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/session-hypothesis.md`
+- Detailed implementation summary
+- Two minor divergences: `_assign_case` helper extracted for testability; 3 trade-record exit sites annotated vs 1 documented in plan
+- Test results: 22 passed (tests/test_hypothesis_smt.py); full suite 510 passed, 9 skipped, 0 failed
+- Baseline was 488 passed; +22 new tests, zero regressions
+- Live smoke test (real MNQ parquets) deferred — requires IB session data on disk
 
 ---
 

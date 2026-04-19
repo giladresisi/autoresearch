@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from hypothesis_smt import compute_hypothesis_direction
 from strategy_smt import (
     set_bar_data, load_futures_data, compute_tdo, find_anchor_close,
     is_confirmation_bar, detect_smt_divergence, _build_signal_from_bar,
@@ -214,6 +215,12 @@ def run_backtest(
     pending_smt_sweep     = 0.0
     pending_smt_miss      = 0.0
 
+    # Load 5m historical for hypothesis direction (deterministic, no API calls)
+    _hist_mnq_path = Path("data/historical/MNQ.parquet")
+    _hist_mnq_df = pd.read_parquet(_hist_mnq_path) if _hist_mnq_path.exists() else pd.DataFrame(
+        columns=["Open", "High", "Low", "Close", "Volume"]
+    )
+
     for day in trading_days:
         # Weekday filter: skip disallowed trading days (e.g. Thursday)
         if day.weekday() not in ALLOWED_WEEKDAYS:
@@ -243,6 +250,9 @@ def run_backtest(
         if day_tdo is None and state != "IN_TRADE":
             equity_curve.append(equity_curve[-1])
             continue
+
+        # Hypothesis direction for this session (deterministic, no LLM)
+        _session_hyp_dir = compute_hypothesis_direction(mnq_df, _hist_mnq_df, day)
 
         # Reset pending state at day boundary — divergence signals are session-scoped.
         # An open position (IN_TRADE) is allowed to carry across days.
@@ -285,6 +295,7 @@ def run_backtest(
                     trade, day_pnl_delta = _build_trade_record(
                         position, result, bar, MNQ_PNL_PER_POINT
                     )
+                    trade["matches_hypothesis"] = position.get("matches_hypothesis")
                     trades.append(trade)
                     day_pnl += day_pnl_delta
                     prior_trade_bars_held = entry_bar_count  # capture before reset
@@ -330,6 +341,10 @@ def run_backtest(
                         divergence_bar_idx=divergence_bar_idx,
                     )
                     if signal is not None:
+                        signal["matches_hypothesis"] = (
+                            (signal.get("direction") == _session_hyp_dir)
+                            if _session_hyp_dir is not None else None
+                        )
                         risk_per_contract = (
                             abs(signal["entry_price"] - signal["stop_price"]) * MNQ_PNL_PER_POINT
                         )
@@ -365,6 +380,10 @@ def run_backtest(
                         divergence_bar_idx=divergence_bar_idx,
                     )
                     if signal is not None:
+                        signal["matches_hypothesis"] = (
+                            (signal.get("direction") == _session_hyp_dir)
+                            if _session_hyp_dir is not None else None
+                        )
                         risk_per_contract = (
                             abs(signal["entry_price"] - signal["stop_price"]) * MNQ_PNL_PER_POINT
                         )
@@ -420,6 +439,7 @@ def run_backtest(
             trade, day_pnl_delta = _build_trade_record(
                 position, "session_close", last_bar, MNQ_PNL_PER_POINT
             )
+            trade["matches_hypothesis"] = position.get("matches_hypothesis")
             trades.append(trade)
             day_pnl += day_pnl_delta
             position = None
@@ -443,6 +463,7 @@ def run_backtest(
                 position, "end_of_backtest", last_bar, MNQ_PNL_PER_POINT
             )
             trade["exit_time"] = ""   # no meaningful bar time at backtest end
+            trade["matches_hypothesis"] = position.get("matches_hypothesis")
             trades.append(trade)
             equity_curve.append(equity_curve[-1] + pnl)
 
@@ -565,6 +586,7 @@ def _write_trades_tsv(trades: list[dict]) -> None:
         "pnl", "exit_type", "divergence_bar", "entry_bar",
         "stop_bar_wick_pts", "reentry_sequence", "prior_trade_bars_held",
         "entry_bar_body_ratio", "smt_sweep_pts", "smt_miss_pts", "bars_since_divergence",
+        "matches_hypothesis",
     ]
     with open("trades.tsv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")
