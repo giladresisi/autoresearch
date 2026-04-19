@@ -1,5 +1,26 @@
 # PROGRESS
 
+## Feature: Session Orchestrator Daemon
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/session-orchestrator.md`
+
+### Summary
+Python daemon (`orchestrator/main.py`) that manages `signal_smt.py` lifecycle:
+starts at 09:00 ET on trading days, relays SIGNAL/EXIT lines to stdout + session log,
+restarts once on unexpected crash, terminates at 13:35 ET, and calls Claude API for
+post-session summary with metrics, narrative, and parameter recommendations.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/session-orchestrator.md`
+- Detailed implementation summary
+- One divergence: psutil import moved to module level (testability improvement)
+- Test results: 53 passed (51 unit + 2 integration); full suite 495 passed, 0 failures
+- Manual-only gap: `python orchestrator/main.py --check` with real key; live IB Gateway session
+
+---
+
 ## Feature: IB-Gateway Connection Instability Fix
 
 **Status**: ✅ Complete

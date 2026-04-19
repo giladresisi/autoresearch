@@ -5,11 +5,14 @@ description = "Autonomous pretraining research swarm"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "anthropic>=0.50",
     "databento>=0.74.0",
+    "exchange-calendars>=4.5",
     "ib-insync>=0.9",
     "matplotlib>=3.10.8",
     "numpy>=2.2.6",
     "pandas>=2.3.3",
+    "psutil>=5.9",
     "pyarrow>=21.0.0",
     "yfinance",
 ]

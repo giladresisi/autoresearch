@@ -31,6 +31,9 @@ harness_upgrade.md
 # Environment variables
 .env
 
+# Live session logs (real trading data, not committed)
+sessions/
+
 # Databento permanent parquet store (large, not committed)
 data/historical/*.parquet
 
