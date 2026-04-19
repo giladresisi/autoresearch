@@ -321,6 +321,7 @@ def detect_smt_divergence(
     bar_idx: int,
     session_start_idx: int,
     _min_bars: int = 0,
+    _cached: "dict | None" = None,
 ) -> tuple[str, float, float, str, float] | None:
     """Check for SMT divergence at bar_idx.
 
@@ -342,16 +343,27 @@ def detect_smt_divergence(
             Default 0 disables the guard — callers should apply their own
             time-based threshold (e.g. screen_session uses MIN_BARS_BEFORE_SIGNAL
             as a wall-clock timedelta, which is interval-agnostic).
+        _cached: optional dict with pre-computed session extremes for this bar:
+            keys "mes_h", "mes_l", "mnq_h", "mnq_l" (wick-based),
+            and "mes_ch", "mes_cl", "mnq_ch", "mnq_cl" (close-based for HIDDEN_SMT).
+            When provided, skips the O(n) slice.max/min computation.
+            Values should be nan (not -inf/+inf) when the session is empty (bar 0).
     """
     if bar_idx - session_start_idx < _min_bars:
         return None
 
-    # Compare current bar's extreme against session high/low (excluding current bar)
-    session_slice = slice(session_start_idx, bar_idx)
-    mes_session_high = mes_bars["High"].iloc[session_slice].max()
-    mes_session_low  = mes_bars["Low"].iloc[session_slice].min()
-    mnq_session_high = mnq_bars["High"].iloc[session_slice].max()
-    mnq_session_low  = mnq_bars["Low"].iloc[session_slice].min()
+    # Session extremes: use pre-computed values if available, else compute from slice
+    if _cached is not None:
+        mes_session_high = _cached["mes_h"]
+        mes_session_low  = _cached["mes_l"]
+        mnq_session_high = _cached["mnq_h"]
+        mnq_session_low  = _cached["mnq_l"]
+    else:
+        session_slice = slice(session_start_idx, bar_idx)
+        mes_session_high = mes_bars["High"].iloc[session_slice].max()
+        mes_session_low  = mes_bars["Low"].iloc[session_slice].min()
+        mnq_session_high = mnq_bars["High"].iloc[session_slice].max()
+        mnq_session_low  = mnq_bars["Low"].iloc[session_slice].min()
 
     cur_mes = mes_bars.iloc[bar_idx]
     cur_mnq = mnq_bars.iloc[bar_idx]
@@ -378,10 +390,17 @@ def detect_smt_divergence(
     # Hidden SMT: body/close-based divergence (fires only when wick SMT did not).
     # MES close makes new session extreme but MNQ close does not confirm.
     if HIDDEN_SMT_ENABLED:
-        mes_close_session_high = mes_bars["Close"].iloc[session_slice].max()
-        mnq_close_session_high = mnq_bars["Close"].iloc[session_slice].max()
-        mes_close_session_low  = mes_bars["Close"].iloc[session_slice].min()
-        mnq_close_session_low  = mnq_bars["Close"].iloc[session_slice].min()
+        if _cached is not None:
+            mes_close_session_high = _cached["mes_ch"]
+            mnq_close_session_high = _cached["mnq_ch"]
+            mes_close_session_low  = _cached["mes_cl"]
+            mnq_close_session_low  = _cached["mnq_cl"]
+        else:
+            session_slice = slice(session_start_idx, bar_idx)
+            mes_close_session_high = mes_bars["Close"].iloc[session_slice].max()
+            mnq_close_session_high = mnq_bars["Close"].iloc[session_slice].max()
+            mes_close_session_low  = mes_bars["Close"].iloc[session_slice].min()
+            mnq_close_session_low  = mnq_bars["Close"].iloc[session_slice].min()
         if cur_mes["Close"] > mes_close_session_high and cur_mnq["Close"] <= mnq_close_session_high:
             smt_sweep = cur_mes["Close"] - mes_close_session_high
             mnq_miss   = mnq_close_session_high - cur_mnq["Close"]
