@@ -132,6 +132,48 @@ MIN_SMT_SWEEP_PTS = 0.0
 # Set 0.0 to disable.
 MIN_SMT_MISS_PTS = 0.0
 
+# Midnight open as TP target (replaces 9:30 RTH open / TDO).
+# ICT canonical intraday reversion target = first 1m bar at/after 00:00 ET.
+# Optimizer search space: [True, False]
+MIDNIGHT_OPEN_AS_TP: bool = False
+
+# Structural stop placement: stop beyond the divergence bar's wick extreme.
+# When False: ratio × |entry - TP| (current behavior).
+# STRUCTURAL_STOP_BUFFER_PTS: points beyond the wick to place the stop.
+# Optimizer search space: STRUCTURAL_STOP_MODE [True, False];
+#   STRUCTURAL_STOP_BUFFER_PTS [1.0, 2.0, 3.0, 5.0]
+STRUCTURAL_STOP_MODE: bool = False
+STRUCTURAL_STOP_BUFFER_PTS: float = 2.0
+
+# Thesis-invalidation exits (close-based; fires before stop check).
+# MSS: close beyond the divergence bar's wick extreme on the entry instrument.
+# CISD: close beyond the midnight open (requires MIDNIGHT_OPEN_AS_TP = True).
+# SMT: close beyond the MNQ level that defined the divergence (defended level).
+# All optimizer search space: [True, False]
+INVALIDATION_MSS_EXIT: bool = False
+INVALIDATION_CISD_EXIT: bool = False
+INVALIDATION_SMT_EXIT: bool = False
+
+# Overnight sweep gate: require overnight H (for shorts) or L (for longs)
+# to have been swept before the signal bar fires.
+# OVERNIGHT_RANGE_AS_TP: use opposite overnight extreme as TP instead of TDO/midnight.
+# Optimizer search space: [True, False]
+OVERNIGHT_SWEEP_REQUIRED: bool = False
+OVERNIGHT_RANGE_AS_TP: bool = False
+
+# Silver Bullet window: restrict new divergence detection to 09:50–10:10 ET.
+# Re-entries allowed outside window if original divergence was inside it.
+# Optimizer search space: [True, False]
+SILVER_BULLET_WINDOW_ONLY: bool = False
+SILVER_BULLET_START = "09:50"
+SILVER_BULLET_END   = "10:10"
+
+# Hidden SMT: body/close-based divergence (MES close new session extreme,
+# MNQ close does not). Only fires if wick SMT did not fire on the same bar.
+# Optimizer search space: [True, False]
+# Approved in Round 1 experiments: +30.6% PnL, lower drawdown, same signal quality.
+HIDDEN_SMT_ENABLED: bool = True
+
 
 # ── Module-level bar data ─────────────────────────────────────────────────────
 _mnq_bars: "pd.DataFrame | None" = None
@@ -208,14 +250,16 @@ def detect_smt_divergence(
     bar_idx: int,
     session_start_idx: int,
     _min_bars: int = 0,
-) -> tuple[str, float, float] | None:
+) -> tuple[str, float, float, str, float] | None:
     """Check for SMT divergence at bar_idx.
 
-    Returns tuple (direction, sweep_pts, miss_pts) or None.
+    Returns tuple (direction, sweep_pts, miss_pts, smt_type, smt_defended_level) or None.
     - direction: "short" if MES makes new session high but MNQ does not;
                  "long"  if MES makes new session low  but MNQ does not.
     - sweep_pts: how far MES exceeded the session extreme (always >= 0)
     - miss_pts:  how far MNQ failed to match MES (always >= 0)
+    - smt_type: "wick" for high/low-based divergence; "body" for close-based (hidden SMT)
+    - smt_defended_level: MNQ session extreme MNQ failed to match
     Returns None if no divergence, bar-count guard fires, or sweep/miss filters reject.
 
     Args:
@@ -249,7 +293,7 @@ def detect_smt_divergence(
             return None
         if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
             return None
-        return ("short", smt_sweep, mnq_miss)
+        return ("short", smt_sweep, mnq_miss, "wick", mnq_session_high)
     # Bullish SMT: MES sweeps session low but MNQ fails to confirm
     if cur_mes["Low"] < mes_session_low and cur_mnq["Low"] >= mnq_session_low:
         smt_sweep = mes_session_low - cur_mes["Low"]
@@ -258,7 +302,31 @@ def detect_smt_divergence(
             return None
         if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
             return None
-        return ("long", smt_sweep, mnq_miss)
+        return ("long", smt_sweep, mnq_miss, "wick", mnq_session_low)
+
+    # Hidden SMT: body/close-based divergence (fires only when wick SMT did not).
+    # MES close makes new session extreme but MNQ close does not confirm.
+    if HIDDEN_SMT_ENABLED:
+        mes_close_session_high = mes_bars["Close"].iloc[session_slice].max()
+        mnq_close_session_high = mnq_bars["Close"].iloc[session_slice].max()
+        mes_close_session_low  = mes_bars["Close"].iloc[session_slice].min()
+        mnq_close_session_low  = mnq_bars["Close"].iloc[session_slice].min()
+        if cur_mes["Close"] > mes_close_session_high and cur_mnq["Close"] <= mnq_close_session_high:
+            smt_sweep = cur_mes["Close"] - mes_close_session_high
+            mnq_miss   = mnq_close_session_high - cur_mnq["Close"]
+            if MIN_SMT_SWEEP_PTS > 0 and smt_sweep < MIN_SMT_SWEEP_PTS:
+                return None
+            if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
+                return None
+            return ("short", smt_sweep, mnq_miss, "body", mnq_close_session_high)
+        if cur_mes["Close"] < mes_close_session_low and cur_mnq["Close"] >= mnq_close_session_low:
+            smt_sweep = mes_close_session_low - cur_mes["Close"]
+            mnq_miss   = cur_mnq["Close"] - mnq_close_session_low
+            if MIN_SMT_SWEEP_PTS > 0 and smt_sweep < MIN_SMT_SWEEP_PTS:
+                return None
+            if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
+                return None
+            return ("long", smt_sweep, mnq_miss, "body", mnq_close_session_low)
     return None
 
 
@@ -328,6 +396,42 @@ def compute_tdo(mnq_bars: pd.DataFrame, date: datetime.date) -> float | None:
     if day_bars.empty:
         return None
     return float(day_bars.iloc[0]["Open"])
+
+
+def compute_midnight_open(mnq_bars: pd.DataFrame, date: datetime.date) -> float | None:
+    """Return the Open of the first 1m/5m bar at or after 00:00 ET on date.
+
+    ICT canonical intraday reversion target. Falls back to the first bar on
+    that date if no bar exists exactly at midnight (e.g. on 5m resampled data).
+    Returns None if no bars exist for the date.
+    """
+    day_bars = mnq_bars[mnq_bars.index.date == date]
+    if day_bars.empty:
+        return None
+    midnight = pd.Timestamp(f"{date} 00:00:00", tz="America/New_York")
+    after_midnight = day_bars[day_bars.index >= midnight]
+    if not after_midnight.empty:
+        return float(after_midnight.iloc[0]["Open"])
+    return float(day_bars.iloc[0]["Open"])
+
+
+def compute_overnight_range(mnq_bars: pd.DataFrame, date: datetime.date) -> dict:
+    """Return overnight high/low: bars on date with time < 09:00 ET.
+
+    Returns {"overnight_high": float, "overnight_low": float} or
+    {"overnight_high": None, "overnight_low": None} if no pre-9am bars exist.
+    """
+    mask = (
+        (mnq_bars.index.date == date) &
+        (mnq_bars.index.time < pd.Timestamp("2000-01-01 09:00:00").time())
+    )
+    bars = mnq_bars[mask]
+    if bars.empty:
+        return {"overnight_high": None, "overnight_low": None}
+    return {
+        "overnight_high": float(bars["High"].max()),
+        "overnight_low":  float(bars["Low"].min()),
+    }
 
 
 def print_direction_breakdown(stats: dict, prefix: str = "") -> None:
@@ -410,6 +514,8 @@ def screen_session(
     mnq_bars: pd.DataFrame,
     mes_bars: pd.DataFrame,
     tdo: float,
+    midnight_open=None,
+    overnight_range=None,
 ) -> dict | None:
     """Session signal scanner — compatibility shim for signal_smt.py live trading.
 
@@ -436,9 +542,41 @@ def screen_session(
         _smt = detect_smt_divergence(mes_reset, mnq_reset, bar_idx, 0)
         if _smt is None:
             continue
-        direction, _smt_sweep, _smt_miss = _smt
+        direction, _smt_sweep, _smt_miss, _smt_type, _smt_defended = _smt
         if TRADE_DIRECTION != "both" and direction != TRADE_DIRECTION:
             continue
+
+        # Overnight sweep gate: require overnight H (shorts) or L (longs) to have been swept.
+        if OVERNIGHT_SWEEP_REQUIRED and overnight_range is not None:
+            oh = overnight_range.get("overnight_high")
+            ol = overnight_range.get("overnight_low")
+            if direction == "short" and oh is not None:
+                pre_session_high = mnq_reset["High"].iloc[:bar_idx].max() if bar_idx > 0 else 0
+                if pre_session_high <= oh:
+                    continue
+            if direction == "long" and ol is not None:
+                pre_session_low = mnq_reset["Low"].iloc[:bar_idx].min() if bar_idx > 0 else float("inf")
+                if pre_session_low >= ol:
+                    continue
+
+        # Silver bullet window: only accept divergences during 09:50–10:10 ET.
+        if SILVER_BULLET_WINDOW_ONLY:
+            bar_t = mnq_bars.index[bar_idx].strftime("%H:%M")
+            if not (SILVER_BULLET_START <= bar_t < SILVER_BULLET_END):
+                continue
+
+        _div_bar = mnq_reset.iloc[bar_idx]
+        _div_bar_high = float(_div_bar["High"])
+        _div_bar_low  = float(_div_bar["Low"])
+
+        # TP target selection: overnight range → midnight open → TDO (fallback).
+        if OVERNIGHT_RANGE_AS_TP and overnight_range is not None:
+            _raw = overnight_range.get("overnight_low" if direction == "short" else "overnight_high")
+            _tp = _raw if _raw is not None else tdo
+        elif MIDNIGHT_OPEN_AS_TP and midnight_open is not None:
+            _tp = midnight_open
+        else:
+            _tp = tdo
 
         ac = find_anchor_close(mnq_reset, bar_idx, direction)
         if ac is None:
@@ -455,9 +593,14 @@ def screen_session(
                 if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
                     break
             signal = _build_signal_from_bar(
-                conf_bar, entry_time, direction, tdo,
+                conf_bar, entry_time, direction, _tp,
                 smt_sweep_pts=_smt_sweep,
                 smt_miss_pts=_smt_miss,
+                divergence_bar_high=_div_bar_high,
+                divergence_bar_low=_div_bar_low,
+                midnight_open=midnight_open,
+                smt_defended_level=_smt_defended,
+                smt_type=_smt_type,
             )
             if signal is None:
                 break
@@ -476,6 +619,12 @@ def _build_signal_from_bar(
     smt_sweep_pts: float = 0.0,
     smt_miss_pts: float = 0.0,
     divergence_bar_idx: int = -1,
+    # New Plan 1 fields:
+    divergence_bar_high=None,
+    divergence_bar_low=None,
+    midnight_open=None,
+    smt_defended_level=None,
+    smt_type: str = "wick",
 ) -> dict | None:
     """Build a signal dict from a confirmed entry bar, applying all validity guards.
 
@@ -497,11 +646,19 @@ def _build_signal_from_bar(
     if MAX_TDO_DISTANCE_PTS < 999.0 and distance_to_tdo > MAX_TDO_DISTANCE_PTS:
         return None
 
-    stop_ratio = SHORT_STOP_RATIO if direction == "short" else LONG_STOP_RATIO
-    if direction == "short":
-        stop_price = entry_price + stop_ratio * distance_to_tdo
+    # Structural stop: beyond the divergence bar's wick extreme + buffer.
+    # Falls back to ratio-based stop if divergence bar extremes are unavailable.
+    if STRUCTURAL_STOP_MODE and divergence_bar_high is not None and divergence_bar_low is not None:
+        if direction == "short":
+            stop_price = divergence_bar_high + STRUCTURAL_STOP_BUFFER_PTS
+        else:
+            stop_price = divergence_bar_low - STRUCTURAL_STOP_BUFFER_PTS
     else:
-        stop_price = entry_price - stop_ratio * distance_to_tdo
+        stop_ratio = SHORT_STOP_RATIO if direction == "short" else LONG_STOP_RATIO
+        if direction == "short":
+            stop_price = entry_price + stop_ratio * distance_to_tdo
+        else:
+            stop_price = entry_price - stop_ratio * distance_to_tdo
 
     if MIN_STOP_POINTS > 0 and abs(entry_price - stop_price) < MIN_STOP_POINTS:
         return None
@@ -524,6 +681,12 @@ def _build_signal_from_bar(
         "smt_sweep_pts":        round(smt_sweep_pts, 4),
         "smt_miss_pts":         round(smt_miss_pts, 4),
         "entry_bar_body_ratio": round(entry_bar_body_ratio, 4),
+        # Plan 1 structural fields
+        "divergence_bar_high":  divergence_bar_high,
+        "divergence_bar_low":   divergence_bar_low,
+        "midnight_open":        midnight_open,
+        "smt_defended_level":   smt_defended_level,
+        "smt_type":             smt_type,
     }
 
 
@@ -598,6 +761,34 @@ def manage_position(
                 else:
                     position["stop_price"] = max(position["stop_price"], entry_price)
                 position["breakeven_active"] = True
+
+    # ── Thesis-invalidation exits (close-based; fire before stop check) ─────────
+    # MSS: divergence extreme breached on a closing basis.
+    if INVALIDATION_MSS_EXIT:
+        div_low  = position.get("divergence_bar_low")
+        div_high = position.get("divergence_bar_high")
+        if direction == "long" and div_low is not None and current_bar["Close"] < div_low:
+            return "exit_invalidation_mss"
+        if direction == "short" and div_high is not None and current_bar["Close"] > div_high:
+            return "exit_invalidation_mss"
+
+    # CISD: midnight open breached on a closing basis.
+    if INVALIDATION_CISD_EXIT:
+        mo = position.get("midnight_open")
+        if mo is not None:
+            if direction == "long"  and current_bar["Close"] < mo:
+                return "exit_invalidation_cisd"
+            if direction == "short" and current_bar["Close"] > mo:
+                return "exit_invalidation_cisd"
+
+    # SMT: MNQ defended level breached on a closing basis.
+    if INVALIDATION_SMT_EXIT:
+        defended = position.get("smt_defended_level")
+        if defended is not None:
+            if direction == "long"  and current_bar["Close"] < defended:
+                return "exit_invalidation_smt"
+            if direction == "short" and current_bar["Close"] > defended:
+                return "exit_invalidation_smt"
 
     stop = position["stop_price"]
 

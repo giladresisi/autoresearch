@@ -1034,7 +1034,7 @@ def test_detect_smt_divergence_returns_tuple_on_match():
     )
     result = train_smt.detect_smt_divergence(mes, mnq, bar_idx=4, session_start_idx=0)
     assert result is not None
-    direction, sweep, miss = result
+    direction, sweep, miss, smt_type, defended = result
     assert direction == "short"
     assert sweep > 0
     assert miss >= 0

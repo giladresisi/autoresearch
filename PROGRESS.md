@@ -1,6 +1,44 @@
 # PROGRESS
 
 
+## Feature: SMT Strategy — Position Architecture Expansion (Plan 2 of 2)
+
+**Status**: ✅ Planned
+**Plan File**: `.agents/plans/smt-position-architecture-plan2.md`
+
+---
+
+## Feature: SMT Strategy — Reference Level Fix + Signal Quality (Plan 1 of 2)
+
+**Status**: ✅ Complete + Experiments Done
+**Plan File**: `.agents/plans/smt-signal-quality-plan1.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-signal-quality-plan1.md`
+- Detailed implementation summary
+- Two divergences: fewer existing tests needed updating than planned (index-based unpack was already dominant); Level 4 manual backtest deferred (requires Databento parquets)
+- Test results: 22 new tests passing (test_smt_signal_quality.py); full suite 531 passed, 2 pre-existing failures
+- All functional acceptance criteria met; all features opt-in and default-off
+
+### Flag Experiment Results (2026-04-20)
+
+1-fold fast backtest (2026-01-19 → 2026-04-12). Full data in `plan1-results.tsv`, full analysis in `.agents/experiment-log.md`.
+
+- **APPROVED (1):** `HIDDEN_SMT_ENABLED=True` — +30.6% PnL (+$1,189), lower drawdown, +9 extra trades. Now set as default.
+- **REJECTED (2):** `STRUCTURAL_STOP_MODE` — kills RR (7.47→2.08), structurally incompatible with trailing-stop exits.
+- **REJECTED (2):** `INVALIDATION_MSS_EXIT` / `INVALIDATION_SMT_EXIT` — fires too close to entry; need `MIN_FAVORABLE_MOVE_PTS` guard before retesting.
+- **NEUTRAL (5):** `MIDNIGHT_OPEN_AS_TP`, `SILVER_BULLET_WINDOW_ONLY`, `OVERNIGHT_SWEEP_REQUIRED`, `OVERNIGHT_RANGE_AS_TP`, `INVALIDATION_CISD_EXIT` — no effect in this 60-day window; retained for future regime testing.
+
+---
+
+## Feature: SMT Hypothesis Alignment Analysis (Plan 3 of 3)
+
+**Status**: ✅ Planned
+**Plan File**: `.agents/plans/smt-hypothesis-alignment-plan3.md`
+
+---
+
 ## Feature: Session Hypothesis System
 
 **Status**: ✅ Complete

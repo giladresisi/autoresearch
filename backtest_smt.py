@@ -12,10 +12,13 @@ from strategy_smt import (
     set_bar_data, load_futures_data, compute_tdo, find_anchor_close,
     is_confirmation_bar, detect_smt_divergence, _build_signal_from_bar,
     manage_position, print_direction_breakdown, screen_session,
+    compute_midnight_open, compute_overnight_range,
     SESSION_START, SESSION_END, TRADE_DIRECTION, ALLOWED_WEEKDAYS,
     SIGNAL_BLACKOUT_START, SIGNAL_BLACKOUT_END, MIN_BARS_BEFORE_SIGNAL,
     REENTRY_MAX_MOVE_PTS, MIN_PRIOR_TRADE_BARS_HELD, MAX_HOLD_BARS,
     MAX_REENTRY_COUNT,
+    MIDNIGHT_OPEN_AS_TP, OVERNIGHT_SWEEP_REQUIRED, OVERNIGHT_RANGE_AS_TP,
+    SILVER_BULLET_WINDOW_ONLY, SILVER_BULLET_START, SILVER_BULLET_END,
 )
 
 # Cache directory for futures parquet files.
@@ -97,7 +100,7 @@ def _build_trade_record(
     elif exit_result == "exit_stop":
         exit_price = position["stop_price"]
     else:
-        # covers exit_time, session_close, exit_market, end_of_backtest
+        # covers exit_time, session_close, exit_market, end_of_backtest, exit_invalidation_*
         exit_price = float(exit_bar["Close"])
 
     pnl = (
@@ -150,6 +153,7 @@ def _build_trade_record(
             if position.get("entry_bar", -1) >= 0 and position.get("divergence_bar", -1) >= 0
             else -1
         ),
+        "smt_type": position.get("smt_type", "wick"),
     }
     return trade, pnl
 
@@ -251,6 +255,13 @@ def run_backtest(
             equity_curve.append(equity_curve[-1])
             continue
 
+        _day_midnight_open = compute_midnight_open(mnq_df, day) if MIDNIGHT_OPEN_AS_TP else None
+        _day_overnight = (
+            compute_overnight_range(mnq_df, day)
+            if (OVERNIGHT_SWEEP_REQUIRED or OVERNIGHT_RANGE_AS_TP)
+            else {"overnight_high": None, "overnight_low": None}
+        )
+
         # Hypothesis direction for this session (deterministic, no LLM)
         _session_hyp_dir = compute_hypothesis_direction(mnq_df, _hist_mnq_df, day)
 
@@ -265,6 +276,10 @@ def run_backtest(
             divergence_bar_idx    = -1
             pending_smt_sweep     = 0.0
             pending_smt_miss      = 0.0
+            _pending_div_bar_high = 0.0
+            _pending_div_bar_low  = 0.0
+            _pending_smt_defended = 0.0
+            _pending_smt_type     = "wick"
 
         min_signal_ts = mnq_session.index[0] + pd.Timedelta(minutes=MIN_BARS_BEFORE_SIGNAL)
 
@@ -334,11 +349,24 @@ def run_backtest(
                     if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
                         continue
                 if anchor_close is not None and is_confirmation_bar(bar, anchor_close, pending_direction):
+                    # TP selection: overnight range → midnight open → TDO.
+                    if OVERNIGHT_RANGE_AS_TP:
+                        _raw = _day_overnight.get("overnight_low" if pending_direction == "short" else "overnight_high")
+                        _day_tp = _raw if _raw is not None else day_tdo
+                    elif MIDNIGHT_OPEN_AS_TP and _day_midnight_open is not None:
+                        _day_tp = _day_midnight_open
+                    else:
+                        _day_tp = day_tdo
                     signal = _build_signal_from_bar(
-                        bar, ts, pending_direction, day_tdo,
+                        bar, ts, pending_direction, _day_tp,
                         smt_sweep_pts=pending_smt_sweep,
                         smt_miss_pts=pending_smt_miss,
                         divergence_bar_idx=divergence_bar_idx,
+                        divergence_bar_high=_pending_div_bar_high,
+                        divergence_bar_low=_pending_div_bar_low,
+                        midnight_open=_day_midnight_open,
+                        smt_defended_level=_pending_smt_defended,
+                        smt_type=_pending_smt_type,
                     )
                     if signal is not None:
                         signal["matches_hypothesis"] = (
@@ -373,11 +401,24 @@ def run_backtest(
                     if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
                         continue
                 if anchor_close is not None and is_confirmation_bar(bar, anchor_close, pending_direction):
+                    # TP selection: overnight range → midnight open → TDO.
+                    if OVERNIGHT_RANGE_AS_TP:
+                        _raw = _day_overnight.get("overnight_low" if pending_direction == "short" else "overnight_high")
+                        _day_tp = _raw if _raw is not None else day_tdo
+                    elif MIDNIGHT_OPEN_AS_TP and _day_midnight_open is not None:
+                        _day_tp = _day_midnight_open
+                    else:
+                        _day_tp = day_tdo
                     signal = _build_signal_from_bar(
-                        bar, ts, pending_direction, day_tdo,
+                        bar, ts, pending_direction, _day_tp,
                         smt_sweep_pts=pending_smt_sweep,
                         smt_miss_pts=pending_smt_miss,
                         divergence_bar_idx=divergence_bar_idx,
+                        divergence_bar_high=_pending_div_bar_high,
+                        divergence_bar_low=_pending_div_bar_low,
+                        midnight_open=_day_midnight_open,
+                        smt_defended_level=_pending_smt_defended,
+                        smt_type=_pending_smt_type,
                     )
                     if signal is not None:
                         signal["matches_hypothesis"] = (
@@ -419,19 +460,43 @@ def run_backtest(
                 )
                 if _smt is None:
                     continue
-                direction, _smt_sweep, _smt_miss = _smt
+                direction, _smt_sweep, _smt_miss, _smt_type, _smt_defended = _smt
                 if TRADE_DIRECTION != "both" and direction != TRADE_DIRECTION:
                     continue
+
+                # Overnight sweep gate: overnight H (shorts) or L (longs) must be exceeded.
+                if OVERNIGHT_SWEEP_REQUIRED:
+                    oh = _day_overnight.get("overnight_high")
+                    ol = _day_overnight.get("overnight_low")
+                    if direction == "short" and oh is not None:
+                        pre_bar_high = mnq_reset["High"].iloc[:bar_idx].max() if bar_idx > 0 else 0
+                        if pre_bar_high <= oh:
+                            continue
+                    if direction == "long" and ol is not None:
+                        pre_bar_low = mnq_reset["Low"].iloc[:bar_idx].min() if bar_idx > 0 else float("inf")
+                        if pre_bar_low >= ol:
+                            continue
+
+                # Silver bullet window: only accept divergences during 09:50–10:10 ET.
+                if SILVER_BULLET_WINDOW_ONLY:
+                    bar_t = ts.strftime("%H:%M")
+                    if not (SILVER_BULLET_START <= bar_t < SILVER_BULLET_END):
+                        continue
 
                 ac = find_anchor_close(mnq_reset, bar_idx, direction)
                 if ac is None:
                     continue
-                pending_direction  = direction
-                anchor_close       = ac
-                pending_smt_sweep  = _smt_sweep
-                pending_smt_miss   = _smt_miss
-                divergence_bar_idx = bar_idx
-                state              = "WAITING_FOR_ENTRY"
+                _div_bar = mnq_reset.iloc[bar_idx]
+                pending_direction     = direction
+                anchor_close          = ac
+                pending_smt_sweep     = _smt_sweep
+                pending_smt_miss      = _smt_miss
+                divergence_bar_idx    = bar_idx
+                _pending_div_bar_high = float(_div_bar["High"])
+                _pending_div_bar_low  = float(_div_bar["Low"])
+                _pending_smt_defended = _smt_defended
+                _pending_smt_type     = _smt_type
+                state                 = "WAITING_FOR_ENTRY"
 
         # End of session: force-close any position still open at session boundary.
         if state == "IN_TRADE" and position is not None:
@@ -586,7 +651,7 @@ def _write_trades_tsv(trades: list[dict]) -> None:
         "pnl", "exit_type", "divergence_bar", "entry_bar",
         "stop_bar_wick_pts", "reentry_sequence", "prior_trade_bars_held",
         "entry_bar_body_ratio", "smt_sweep_pts", "smt_miss_pts", "bars_since_divergence",
-        "matches_hypothesis",
+        "matches_hypothesis", "smt_type",
     ]
     with open("trades.tsv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")

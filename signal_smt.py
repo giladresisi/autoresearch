@@ -15,7 +15,12 @@ import time
 import pandas as pd
 from ib_insync import IB, Future, util
 
-from strategy_smt import screen_session, manage_position, compute_tdo, set_bar_data
+from strategy_smt import (
+    screen_session, manage_position, compute_tdo, set_bar_data,
+    compute_midnight_open, compute_overnight_range,
+    MIDNIGHT_OPEN_AS_TP, OVERNIGHT_SWEEP_REQUIRED, OVERNIGHT_RANGE_AS_TP,
+)
+import strategy_smt
 from hypothesis_smt import HypothesisManager
 
 # ── Connection constants ──────────────────────────────────────────────────────
@@ -452,8 +457,17 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     if tdo is None:
         return
 
+    midnight_open_price = compute_midnight_open(_mnq_1m_df, today) if MIDNIGHT_OPEN_AS_TP else None
+    overnight_range = (
+        compute_overnight_range(_mnq_1m_df, today)
+        if (OVERNIGHT_SWEEP_REQUIRED or OVERNIGHT_RANGE_AS_TP)
+        else None
+    )
+
     # 6. Detect signal
-    signal = screen_session(mnq_session, mes_session, tdo)
+    signal = screen_session(mnq_session, mes_session, tdo,
+                            midnight_open=midnight_open_price,
+                            overnight_range=overnight_range)
     if signal is None:
         return
 
@@ -532,7 +546,7 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         exit_price = _position["take_profit"]
     elif result == "exit_stop":
         exit_price = _position["stop_price"]
-    elif result == "exit_market":
+    elif result in ("exit_market", "exit_invalidation_mss", "exit_invalidation_cisd", "exit_invalidation_smt"):
         exit_price = float(bar.close)
     elif result != "exit_session_end":
         # Unknown exit type — log and bail rather than corrupt state with unbound exit_price
