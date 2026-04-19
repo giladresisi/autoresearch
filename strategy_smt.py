@@ -523,15 +523,20 @@ def detect_fvg(
     """
     if not FVG_ENABLED:
         return None
+    # bar3 = i+2 must be strictly < bar_idx → i <= bar_idx-3
+    if bar_idx < 3:
+        return None
     start = max(0, bar_idx - lookback)
-    # Search backward from bar_idx-2 so bar3 = i+2 < bar_idx
-    for i in range(bar_idx - 2, start - 1, -1):
-        if i + 2 >= bar_idx:
-            continue
-        bar1_h = float(bars["High"].iloc[i])
-        bar1_l = float(bars["Low"].iloc[i])
-        bar3_h = float(bars["High"].iloc[i + 2])
-        bar3_l = float(bars["Low"].iloc[i + 2])
+    if start > bar_idx - 3:
+        return None
+    # Pre-extract arrays once — avoids 4× .iloc overhead per iteration
+    highs = bars["High"].values
+    lows  = bars["Low"].values
+    for i in range(bar_idx - 3, start - 1, -1):
+        bar1_h = highs[i]
+        bar1_l = lows[i]
+        bar3_h = highs[i + 2]
+        bar3_l = lows[i + 2]
         if direction == "long":
             if bar3_l > bar1_h and (bar3_l - bar1_h) >= FVG_MIN_SIZE_PTS:
                 return {"fvg_high": bar3_l, "fvg_low": bar1_h, "fvg_bar": i}
