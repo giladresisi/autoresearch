@@ -901,6 +901,21 @@ To start an experiment session: open a Claude Code conversation in this repo and
 
 ---
 
+## Feature: SMT Strategy Refactor (Bar Globals + exit_market + File Split)
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-strategy-refactor.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-strategy-refactor.md`
+- Detailed implementation summary
+- Divergences and resolutions (MAX_TDO_DISTANCE_PTS patches, MAX_REENTRY_COUNT patches, dual-module patching, test_signal_smt.py patch-target fix)
+- Test results: 434 passed, 10 skipped, 0 failures
+- Manual validation (backtest_smt.py output vs pre-refactor baseline) deferred — requires Databento parquets
+
+---
+
 ## Feature: SMT Quality-Focused Parameter Extensions
 
 **Status**: ✅ Complete

@@ -1,6 +1,19 @@
-"""tests/test_smt_backtest.py -- Integration tests for run_backtest() in train_smt.py.
+"""tests/test_smt_backtest.py -- Integration tests for run_backtest() in backtest_smt.py.
 
 Uses synthetic 5m DataFrames written to a tmpdir. No IB connection required.
+
+Import conventions:
+  import backtest_smt as train_smt   — harness module (run_backtest, _compute_fold_params)
+  import strategy_smt as _strat      — strategy module (manage_position, _build_signal_from_bar)
+
+Patch targets:
+  Harness constants (BACKTEST_START, FUTURES_CACHE_DIR, SESSION_START/END,
+    SIGNAL_BLACKOUT_*, ALLOWED_WEEKDAYS, REENTRY_MAX_MOVE_PTS, etc.):
+      monkeypatch.setattr(train_smt, ...)
+  Strategy constants read inside strategy functions
+    (TDO_VALIDITY_CHECK, MIN_STOP_POINTS, MIN_TDO_DISTANCE_PTS,
+     TRAIL_AFTER_TP_PTS, BREAKEVEN_TRIGGER_PCT, LONG/SHORT_STOP_RATIO):
+      monkeypatch.setattr(_strat, ...)  — AND also train_smt for consistency
 """
 import datetime
 import json
@@ -86,7 +99,7 @@ def _build_long_signal_bars(date, base=20000.0, n=90):
 @pytest.fixture
 def futures_tmpdir(tmp_path, monkeypatch):
     """Fixture: sets FUTURES_CACHE_DIR to a fresh tmpdir and bootstraps manifest."""
-    import train_smt
+    import backtest_smt as train_smt
     cache_dir = tmp_path / "futures_data"
     interval_dir = cache_dir / "5m"
     interval_dir.mkdir(parents=True)
@@ -112,7 +125,7 @@ def futures_tmpdir(tmp_path, monkeypatch):
 
 def test_run_backtest_empty_data_returns_zero_trades(futures_tmpdir):
     """No bars -> 0 trades, no crash, returns valid metrics dict."""
-    import train_smt
+    import backtest_smt as train_smt
     empty = pd.DataFrame(
         columns=["Open", "High", "Low", "Close", "Volume"],
         dtype=float,
@@ -127,7 +140,7 @@ def test_run_backtest_empty_data_returns_zero_trades(futures_tmpdir):
 
 def test_run_backtest_long_trade_tp_hit(futures_tmpdir):
     """Bullish SMT + TP bar -> positive PnL."""
-    import train_smt
+    import backtest_smt as train_smt
     mnq, mes = _build_long_signal_bars("2025-01-02")
     stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     if stats["total_trades"] > 0:
@@ -138,7 +151,7 @@ def test_run_backtest_long_trade_tp_hit(futures_tmpdir):
 
 def test_run_backtest_short_trade_stop_hit(futures_tmpdir):
     """Bearish SMT -> trade recorded with a valid exit type."""
-    import train_smt
+    import backtest_smt as train_smt
     mnq, mes = _build_short_signal_bars("2025-01-02")
     stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     if stats["total_trades"] > 0:
@@ -152,12 +165,14 @@ def test_run_backtest_short_trade_stop_hit(futures_tmpdir):
 
 def test_run_backtest_session_force_exit(futures_tmpdir, monkeypatch):
     """Position open but TP/stop unreachable -> force-closed at session end."""
-    import train_smt
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
     # Disable all guards so the signal fires; set stop/TP far from price
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
     monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
@@ -175,11 +190,13 @@ def test_run_backtest_session_force_exit(futures_tmpdir, monkeypatch):
 
 def test_run_backtest_end_of_backtest_exit(futures_tmpdir, monkeypatch):
     """run_backtest returns valid stats dict regardless of trade count."""
-    import train_smt
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
     monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
@@ -196,7 +213,7 @@ def test_run_backtest_end_of_backtest_exit(futures_tmpdir, monkeypatch):
 
 def test_pnl_long_correct(futures_tmpdir):
     """Long PnL = (exit - entry) x contracts x MNQ_PNL_PER_POINT (2.0)."""
-    import train_smt
+    import backtest_smt as train_smt
     entry  = 20000.0
     exit_p = 20010.0
     contracts = 1
@@ -208,7 +225,7 @@ def test_pnl_long_correct(futures_tmpdir):
 
 def test_pnl_short_correct(futures_tmpdir):
     """Short PnL = (entry - exit) x contracts x MNQ_PNL_PER_POINT (2.0)."""
-    import train_smt
+    import backtest_smt as train_smt
     entry  = 20010.0
     exit_p = 20000.0
     contracts = 1
@@ -220,11 +237,12 @@ def test_pnl_short_correct(futures_tmpdir):
 
 def test_one_trade_per_day_max(futures_tmpdir, monkeypatch):
     """At most one trade per day from a single signal setup."""
-    import train_smt
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
     monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
@@ -250,7 +268,7 @@ def test_one_trade_per_day_max(futures_tmpdir, monkeypatch):
 
 def test_fold_loop_smoke(futures_tmpdir):
     """With several months of synthetic data, _compute_fold_params runs without error."""
-    import train_smt
+    import backtest_smt as train_smt
 
     dates = pd.bdate_range("2025-01-02", "2025-04-30")
     all_bars = []
@@ -278,7 +296,7 @@ def test_fold_loop_smoke(futures_tmpdir):
 
 def test_metrics_shape(futures_tmpdir):
     """Returned dict has all required keys."""
-    import train_smt
+    import backtest_smt as train_smt
 
     empty = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"], dtype=float)
     empty.index = pd.DatetimeIndex([], tz="America/New_York")
@@ -296,12 +314,13 @@ def test_metrics_shape(futures_tmpdir):
 
 def test_new_defaults_produce_valid_results(futures_tmpdir, monkeypatch):
     """New default constants (validity gate + min stop) don't crash run_backtest."""
-    import train_smt
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", True)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 5.0)
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", True)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 5.0)
     monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
-    monkeypatch.setattr(train_smt, "LONG_STOP_RATIO", 0.45)
-    monkeypatch.setattr(train_smt, "SHORT_STOP_RATIO", 0.45)
+    monkeypatch.setattr(_strat, "LONG_STOP_RATIO", 0.45)
+    monkeypatch.setattr(_strat, "SHORT_STOP_RATIO", 0.45)
 
     mnq, mes = _build_short_signal_bars("2025-01-02")
     stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
@@ -319,14 +338,15 @@ def test_regression_no_reentry_matches_legacy_behavior(futures_tmpdir, monkeypat
     This ensures the refactor is semantically equivalent to the old screen_session
     + _scan_bars_for_exit architecture when re-entry and breakeven are both disabled.
     """
-    import train_smt
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
     monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "short")
-    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
     monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
@@ -343,16 +363,17 @@ def test_regression_no_reentry_matches_legacy_behavior(futures_tmpdir, monkeypat
 
 def test_run_backtest_max_reentry_count_limits_trades(futures_tmpdir, monkeypatch):
     """MAX_REENTRY_COUNT=1 prevents a second re-entry within same session."""
-    import train_smt
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
     monkeypatch.setattr(train_smt, "MAX_REENTRY_COUNT", 1)
     monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 999.0)
     monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
     monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
     mnq, mes = _build_short_signal_bars("2025-01-02")
     stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
     assert len(stats.get("trade_records", [])) >= 1, "Need at least one trade to verify cap"
@@ -364,15 +385,16 @@ def test_run_backtest_max_reentry_count_limits_trades(futures_tmpdir, monkeypatc
 
 def test_run_backtest_max_reentry_disabled_allows_multiple(futures_tmpdir, monkeypatch):
     """MAX_REENTRY_COUNT=999 (disabled) does not cap trades."""
-    import train_smt
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
     monkeypatch.setattr(train_smt, "MAX_REENTRY_COUNT", 999)
     monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 999.0)
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
     monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
     mnq, mes = _build_short_signal_bars("2025-01-02")
     stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
     assert stats["total_trades"] >= 1  # disabled cap — must produce at least one trade
@@ -382,14 +404,15 @@ def test_run_backtest_max_reentry_disabled_allows_multiple(futures_tmpdir, monke
 
 def test_run_backtest_trade_record_contains_new_fields(futures_tmpdir, monkeypatch):
     """Trade records include all 6 new diagnostic fields."""
-    import train_smt
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
     monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
     monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
     mnq, mes = _build_short_signal_bars("2025-01-02")
     stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
     assert len(stats.get("trade_records", [])) >= 1, "Need at least one trade to verify fields"
@@ -404,16 +427,17 @@ def test_run_backtest_trade_record_contains_new_fields(futures_tmpdir, monkeypat
 
 def test_run_backtest_min_prior_bars_held_infrastructure(futures_tmpdir, monkeypatch):
     """MIN_PRIOR_TRADE_BARS_HELD=0 (default) does not block any re-entries."""
-    import train_smt
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
     monkeypatch.setattr(train_smt, "MIN_PRIOR_TRADE_BARS_HELD", 0)
     monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 999.0)
     monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "both")
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
     monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
     mnq, mes = _build_short_signal_bars("2025-01-02")
     stats_base = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
     assert stats_base["total_trades"] >= 1, "Need trades to test gate"
@@ -422,3 +446,27 @@ def test_run_backtest_min_prior_bars_held_infrastructure(futures_tmpdir, monkeyp
     stats_blocked = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
     # High threshold should reduce or equal re-entry count (gate is wired up)
     assert stats_blocked["total_trades"] <= stats_base["total_trades"]
+
+
+# ══ Phase 2: exit_market infrastructure ══════════════════════════════════════
+
+def test_run_backtest_exit_market_uses_bar_close(monkeypatch):
+    """When manage_position returns exit_market, trade exit_price equals bar close."""
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
+    call_count = [0]
+    orig = train_smt.manage_position
+    def patched(position, bar):
+        call_count[0] += 1
+        return "exit_market" if call_count[0] == 1 else orig(position, bar)
+    monkeypatch.setattr(train_smt, "manage_position", patched)
+    mnq, mes = _build_short_signal_bars("2025-01-02")
+    monkeypatch.setattr(train_smt, "BACKTEST_START", "2025-01-02")
+    monkeypatch.setattr(train_smt, "BACKTEST_END",   "2025-01-03")
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    stats = train_smt.run_backtest(mnq, mes)
+    market = [t for t in stats["trade_records"] if t["exit_type"] == "exit_market"]
+    if market:
+        assert market[0]["exit_price"] != market[0]["stop_price"]
+        assert market[0]["exit_price"] != market[0]["tdo"]

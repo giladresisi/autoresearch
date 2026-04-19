@@ -600,4 +600,4 @@ class TestDatabentSourceIntegration:
         assert str(df.index.tzinfo) == "America/New_York"
         assert len(df) > 0
         assert df["Open"].dtype == float
-        assert df["Volume"].dtype in (float, int, "int64", "float64")
+        assert df["Volume"].dtype in (float, int, "int64", "float64", "uint64")

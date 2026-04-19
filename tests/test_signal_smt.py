@@ -176,11 +176,11 @@ def test_format_exit_line_tp():
 def _setup_scanning_state(monkeypatch, tmp_path):
     """Helper: reset signal_smt module state to a clean SCANNING configuration."""
     import signal_smt
-    import train_smt
+    import strategy_smt
 
-    monkeypatch.setattr(train_smt, "MIN_BARS_BEFORE_SIGNAL", 2)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(strategy_smt, "MIN_BARS_BEFORE_SIGNAL", 2)
+    monkeypatch.setattr(strategy_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(strategy_smt, "TDO_VALIDITY_CHECK", False)
 
     monkeypatch.setattr(signal_smt, "POSITION_FILE", tmp_path / "position.json")
     monkeypatch.setattr(signal_smt, "_state", "SCANNING")
@@ -212,7 +212,7 @@ def test_process_scanning_session_gate_before_start(monkeypatch, tmp_path):
     _setup_scanning_state(monkeypatch, tmp_path)
 
     called = []
-    monkeypatch.setattr("train_smt.screen_session", lambda *a, **kw: called.append(1) or None)
+    monkeypatch.setattr("signal_smt.screen_session", lambda *a, **kw: called.append(1) or None)
 
     bar = _make_mock_bar(ts="2025-01-02 08:59:00")
     signal_smt._process_scanning(bar, pd.Timestamp("2025-01-02 08:59:00", tz="America/New_York"), pd.Timestamp("2025-01-02 08:59:00", tz="America/New_York").time())
@@ -227,7 +227,7 @@ def test_process_scanning_session_gate_after_end(monkeypatch, tmp_path):
     _setup_scanning_state(monkeypatch, tmp_path)
 
     called = []
-    monkeypatch.setattr("train_smt.screen_session", lambda *a, **kw: called.append(1) or None)
+    monkeypatch.setattr("signal_smt.screen_session", lambda *a, **kw: called.append(1) or None)
 
     bar = _make_mock_bar(ts="2025-01-02 13:31:00")
     ts = pd.Timestamp("2025-01-02 13:31:00", tz="America/New_York")
@@ -251,7 +251,7 @@ def test_process_scanning_alignment_gate(monkeypatch, tmp_path):
     monkeypatch.setattr(signal_smt, "_mes_1s_buf", mes_buf)
 
     called = []
-    monkeypatch.setattr("train_smt.screen_session", lambda *a, **kw: called.append(1) or None)
+    monkeypatch.setattr("signal_smt.screen_session", lambda *a, **kw: called.append(1) or None)
 
     bar = _make_mock_bar(ts="2025-01-02 09:10:00")
     ts = pd.Timestamp("2025-01-02 09:10:00", tz="America/New_York")
@@ -271,8 +271,8 @@ def test_process_scanning_no_signal(monkeypatch, tmp_path):
     monkeypatch.setattr(signal_smt, "_mnq_1s_buf", buf.copy())
     monkeypatch.setattr(signal_smt, "_mes_1s_buf", buf.copy())
 
-    monkeypatch.setattr("train_smt.screen_session", lambda *a, **kw: None)
-    monkeypatch.setattr("train_smt.compute_tdo", lambda df, date: 20000.0)
+    monkeypatch.setattr("signal_smt.screen_session", lambda *a, **kw: None)
+    monkeypatch.setattr("signal_smt.compute_tdo", lambda df, date: 20000.0)
 
     bar = _make_mock_bar(ts="2025-01-02 09:10:00")
     signal_smt._process_scanning(bar, aligned_ts, aligned_ts.time())
@@ -302,8 +302,8 @@ def test_process_scanning_stale_startup_guard(monkeypatch, tmp_path):
         "take_profit": 19900.0, "stop_price": 19999.0, "tdo": 19900.0,
         "divergence_bar": 4, "entry_bar": 5,
     }
-    monkeypatch.setattr("train_smt.screen_session", lambda *a, **kw: fake_signal)
-    monkeypatch.setattr("train_smt.compute_tdo", lambda df, date: 19900.0)
+    monkeypatch.setattr("signal_smt.screen_session", lambda *a, **kw: fake_signal)
+    monkeypatch.setattr("signal_smt.compute_tdo", lambda df, date: 19900.0)
 
     bar = _make_mock_bar(ts="2025-01-02 09:10:00")
     signal_smt._process_scanning(bar, aligned_ts, aligned_ts.time())
@@ -332,8 +332,8 @@ def test_process_scanning_redetection_guard(monkeypatch, tmp_path):
         "take_profit": 19900.0, "stop_price": 19999.0, "tdo": 19900.0,
         "divergence_bar": 4, "entry_bar": 5,
     }
-    monkeypatch.setattr("train_smt.screen_session", lambda *a, **kw: fake_signal)
-    monkeypatch.setattr("train_smt.compute_tdo", lambda df, date: 19900.0)
+    monkeypatch.setattr("signal_smt.screen_session", lambda *a, **kw: fake_signal)
+    monkeypatch.setattr("signal_smt.compute_tdo", lambda df, date: 19900.0)
 
     bar = _make_mock_bar(ts="2025-01-02 09:25:00")
     signal_smt._process_scanning(bar, aligned_ts, aligned_ts.time())
@@ -419,7 +419,7 @@ def test_process_managing_hold(monkeypatch, tmp_path):
     import signal_smt
     _setup_managing_state(monkeypatch, tmp_path)
 
-    monkeypatch.setattr("train_smt.manage_position", lambda pos, bar: "hold")
+    monkeypatch.setattr("signal_smt.manage_position", lambda pos, bar: "hold")
 
     bar = _make_mock_bar(ts="2025-01-02 09:15:00", high=20010.0, low=19990.0, close=20000.0)
     ts = pd.Timestamp("2025-01-02 09:15:00", tz="America/New_York")
@@ -463,7 +463,7 @@ def test_process_managing_exit_stop(monkeypatch, tmp_path):
 
     captured_lines = []
     monkeypatch.setattr("builtins.print", lambda *a, **kw: captured_lines.append(a[0]))
-    monkeypatch.setattr("train_smt.manage_position", lambda p, b: "exit_stop")
+    monkeypatch.setattr("signal_smt.manage_position", lambda p, b: "exit_stop")
 
     bar = _make_mock_bar(ts="2025-01-02 09:30:00", high=19960.0, low=19948.0, close=19950.0)
     ts = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
@@ -483,7 +483,7 @@ def test_process_managing_session_end_force_close(monkeypatch, tmp_path):
     pos_file.write_text(json.dumps(pos))
     monkeypatch.setattr(signal_smt, "POSITION_FILE", pos_file)
 
-    monkeypatch.setattr("train_smt.manage_position", lambda p, b: "hold")
+    monkeypatch.setattr("signal_smt.manage_position", lambda p, b: "hold")
 
     # Bar at exactly SESSION_END time triggers force close
     bar = _make_mock_bar(ts="2025-01-02 13:30:00", close=19980.0)

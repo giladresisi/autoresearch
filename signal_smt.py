@@ -15,7 +15,7 @@ import time
 import pandas as pd
 from ib_insync import IB, Future, util
 
-from train_smt import screen_session, manage_position, compute_tdo
+from strategy_smt import screen_session, manage_position, compute_tdo, set_bar_data
 
 # ── Connection constants ──────────────────────────────────────────────────────
 IB_HOST      = "127.0.0.1"
@@ -295,6 +295,7 @@ def on_mnq_1m_bar(bars, hasNewBar):
     # Reset tick accumulator so the last second of the expiring minute is not
     # re-appended to the fresh buffer on the first tick of the next minute.
     _mnq_tick_bar = None
+    set_bar_data(_mnq_1m_df, _mes_1m_df)
 
 
 def on_mes_1m_bar(bars, hasNewBar):
@@ -319,6 +320,7 @@ def on_mes_1m_bar(bars, hasNewBar):
     # Reset tick accumulator alongside 1s buffer to avoid stale second bleeding
     # into the next minute's buffer on the first tick.
     _mes_tick_bar = None
+    set_bar_data(_mnq_1m_df, _mes_1m_df)
 
 
 def _tick_second_ts(t) -> pd.Timestamp:
@@ -487,6 +489,8 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         exit_price = _position["take_profit"]
     elif result == "exit_stop":
         exit_price = _position["stop_price"]
+    elif result == "exit_market":
+        exit_price = float(bar.close)
     elif result != "exit_session_end":
         # Unknown exit type — log and bail rather than corrupt state with unbound exit_price
         return

@@ -1,6 +1,6 @@
 # SMT Divergence Strategy Optimizer
 
-Autonomous SMT divergence strategy optimizer: iterates on signal logic and tuning parameters in `train_smt.py` to maximize `avg_expectancy` on the walk-forward evaluation of MNQ1! futures.
+Autonomous SMT divergence strategy optimizer: iterates on signal logic and tuning parameters in `strategy_smt.py` to maximize `avg_expectancy` on the walk-forward evaluation of MNQ1! futures.
 
 ---
 
@@ -8,7 +8,7 @@ Autonomous SMT divergence strategy optimizer: iterates on signal logic and tunin
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| **Timeframe** | `BACKTEST_START`=2024-09-01 to `BACKTEST_END`=2026-03-20 | Fixed futures backtest window; edit in `train_smt.py` constants block only. |
+| **Timeframe** | `BACKTEST_START`=2024-09-01 to `BACKTEST_END`=2026-03-20 | Fixed futures backtest window; defined in `backtest_smt.py` (do not edit). |
 | **Instruments** | MNQ1!, MES1! | Continuous futures contracts. Data fetched by `prepare_futures.py`. |
 | **Iterations** | 30 | Number of experiment iterations to run before stopping. |
 
@@ -18,23 +18,25 @@ Autonomous SMT divergence strategy optimizer: iterates on signal logic and tunin
 
 0. **Verify you are in an optimization worktree**: Run `git branch --show-current`. The branch must match `autoresearch/*`. If it shows `master`, stop and use `prepare-optimization` skill first.
 
-1. **Verify futures data is cached**: Run `uv run python -c "import train_smt; train_smt.load_futures_data(); print('data ok')"`. If this raises `FileNotFoundError`, run `uv run prepare_futures.py` (requires IB-Gateway on port 4002).
+1. **Verify futures data is cached**: Run `uv run python -c "import strategy_smt; strategy_smt.load_futures_data(); print('data ok')"`. If this raises `FileNotFoundError`, run `uv run prepare_futures.py` (requires IB-Gateway on port 4002).
 
 2. **Compute train/test split**:
    - `TRAIN_END = BACKTEST_END − 14 calendar days` (e.g. 2026-03-20 → 2026-03-06)
    - `TEST_START = TRAIN_END`
    - `SILENT_END = TRAIN_END − 14 calendar days` (e.g. 2026-03-06 → 2026-02-20)
 
-3. **Set walk-forward constants** in `train_smt.py` editable section (above the boundary):
+3. **Set walk-forward constants** in `backtest_smt.py` (frozen harness; only WALK_FORWARD_WINDOWS / FOLD_TEST_DAYS / FOLD_TRAIN_DAYS may be adjusted per run):
    - `WALK_FORWARD_WINDOWS = 6`
    - `FOLD_TEST_DAYS = 60` (business days per test fold)
    - `FOLD_TRAIN_DAYS = 0` (expanding window)
 
-4. **Run baseline**: `uv run python train_smt.py` — record the initial `mean_test_pnl` and `min_test_pnl`.
+4. **Run baseline**: `uv run python backtest_smt.py` — record the initial `mean_test_pnl` and `min_test_pnl`.
 
 ---
 
-## Editable Section (above `# DO NOT EDIT BELOW THIS LINE`)
+## Editable Section (`strategy_smt.py` only)
+
+Edit **only `strategy_smt.py`**. Do not modify `backtest_smt.py` (frozen harness).
 
 You may modify ONLY these elements:
 
@@ -85,20 +87,20 @@ Filtering them would actively harm quality. This constant is not implemented.
 - `run_backtest()` — per-bar state machine; four states: IDLE / WAITING_FOR_ENTRY / IN_TRADE / REENTRY_ELIGIBLE
 
 ### Forbidden Changes
-- Do NOT modify anything below `# DO NOT EDIT BELOW THIS LINE`
+- Do NOT modify `backtest_smt.py` — it is the frozen evaluation harness
 - Do NOT change `MNQ_PNL_PER_POINT = 2.0` (fixed contract spec)
 - Do NOT change `RISK_PER_TRADE = 50.0` (frozen position-sizing baseline)
 - Do NOT change `TRADE_DIRECTION` away from `"short"` (longs show structural losses across 5/6 folds)
-- Do NOT change `FUTURES_CACHE_DIR`, `BACKTEST_START`, `BACKTEST_END` (loaded from manifest)
+- Do NOT change `FUTURES_CACHE_DIR`, `BACKTEST_START`, `BACKTEST_END` (loaded from manifest; defined in `backtest_smt.py`)
 - Do NOT add external imports outside the standard library and pandas/numpy
-- Do NOT modify `BREAKEVEN_TRIGGER_PTS` or `TRAIL_AFTER_BREAKEVEN_PTS` — frozen below boundary
+- Do NOT modify `BREAKEVEN_TRIGGER_PTS` or `TRAIL_AFTER_BREAKEVEN_PTS` — deprecated compat shims in `backtest_smt.py`
 
 ---
 
 ## Running an Experiment
 
 ```bash
-uv run python train_smt.py
+uv run python backtest_smt.py
 ```
 
 Output format (one key=value per line):

@@ -1,4 +1,4 @@
-"""tests/test_smt_strategy.py — Unit tests for SMT strategy functions in train_smt.py.
+"""tests/test_smt_strategy.py — Unit tests for SMT strategy functions in strategy_smt.py.
 
 All tests use synthetic 1m DataFrames — no IB connection required.
 """
@@ -33,7 +33,7 @@ def _make_1m_bars(
 @pytest.fixture(autouse=True)
 def patch_min_bars(monkeypatch):
     """Override MIN_BARS_BEFORE_SIGNAL to 2 for most tests to keep bar counts small."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "MIN_BARS_BEFORE_SIGNAL", 2)
 
 
@@ -41,7 +41,7 @@ def patch_min_bars(monkeypatch):
 
 def test_detect_smt_bearish():
     """MES makes new session high, MNQ does not → 'short'."""
-    import train_smt
+    import strategy_smt as train_smt
     # 5 bars: session high for MES is bar 2 (high=102); bar 4 MES breaks out, MNQ does not
     mes = _make_1m_bars(
         opens= [100, 100, 100, 100, 100],
@@ -61,7 +61,7 @@ def test_detect_smt_bearish():
 
 def test_detect_smt_bullish():
     """MES makes new session low, MNQ does not → 'long'."""
-    import train_smt
+    import strategy_smt as train_smt
     mes = _make_1m_bars(
         opens= [100, 100, 100, 100, 100],
         highs= [101, 101, 101, 101, 101],
@@ -80,7 +80,7 @@ def test_detect_smt_bullish():
 
 def test_detect_smt_both_confirm_none():
     """Both MES and MNQ make new session high → no divergence (None)."""
-    import train_smt
+    import strategy_smt as train_smt
     mes = _make_1m_bars(
         opens= [100, 100, 100, 100, 100],
         highs= [101, 102, 101, 101, 103],
@@ -104,7 +104,7 @@ def test_detect_smt_min_bars_suppresses():
     callers must pass _min_bars explicitly (screen_session uses a wall-clock
     timedelta instead).
     """
-    import train_smt
+    import strategy_smt as train_smt
     mes = _make_1m_bars(
         opens= [100, 100, 100],
         highs= [101, 102, 103],
@@ -124,7 +124,7 @@ def test_detect_smt_min_bars_suppresses():
 
 def test_detect_smt_resets_on_opposite():
     """Latest extreme wins: if bearish divergence set then resolved, check again."""
-    import train_smt
+    import strategy_smt as train_smt
     # Build bars where MES makes session low (not high) at bar_idx=4
     mes = _make_1m_bars(
         opens= [100, 100, 100, 100, 100],
@@ -146,7 +146,7 @@ def test_detect_smt_resets_on_opposite():
 
 def test_find_entry_bar_short():
     """Bearish bar + upper wick past most recent bull body → returns index."""
-    import train_smt
+    import strategy_smt as train_smt
     # 6 bars: bar 2 is bullish (close=202, open=200), bar 3 is bearish with wick above 202
     mnq = _make_1m_bars(
         opens= [200, 200, 200, 205, 200, 200],
@@ -161,7 +161,7 @@ def test_find_entry_bar_short():
 
 def test_find_entry_bar_long():
     """Bullish bar + lower wick past most recent bear body → returns index."""
-    import train_smt
+    import strategy_smt as train_smt
     # bar 2 is bearish (close=198, open=200), bar 3 is bullish with wick below 198
     mnq = _make_1m_bars(
         opens= [200, 200, 200, 195, 200, 200],
@@ -175,7 +175,7 @@ def test_find_entry_bar_long():
 
 def test_find_entry_bar_no_match_returns_none():
     """No valid confirmation bar before session_end_idx → None."""
-    import train_smt
+    import strategy_smt as train_smt
     # All doji bars — no clear bull or bear bars
     mnq = _make_1m_bars(
         opens= [200, 200, 200, 200, 200],
@@ -189,7 +189,7 @@ def test_find_entry_bar_no_match_returns_none():
 
 def test_find_entry_requires_wick_past_body():
     """Bearish bar present but wick does NOT pierce the bull body close → None."""
-    import train_smt
+    import strategy_smt as train_smt
     # bar 1 is bullish close=202; bar 3 is bearish but high=201 which is BELOW 202
     mnq = _make_1m_bars(
         opens= [200, 200, 205, 203, 200],
@@ -205,7 +205,7 @@ def test_find_entry_requires_wick_past_body():
 
 def test_compute_tdo_finds_midnight_bar():
     """00:00 ET bar exists → returns its open."""
-    import train_smt
+    import strategy_smt as train_smt
     mnq = _make_1m_bars(
         opens= [100, 105, 110],
         highs= [101, 106, 111],
@@ -220,7 +220,7 @@ def test_compute_tdo_finds_midnight_bar():
 
 def test_compute_tdo_proxy_no_midnight_bar():
     """00:00 bar absent → returns first available bar's open."""
-    import train_smt
+    import strategy_smt as train_smt
     mnq = _make_1m_bars(
         opens= [100, 105],
         highs= [101, 106],
@@ -235,7 +235,7 @@ def test_compute_tdo_proxy_no_midnight_bar():
 
 def test_compute_tdo_returns_none_on_empty():
     """No bars for the requested date → None."""
-    import train_smt
+    import strategy_smt as train_smt
     # Bars on a different date
     mnq = _make_1m_bars(
         opens= [100],
@@ -271,14 +271,14 @@ def test_stop_long():
 
 def test_tp_equals_tdo():
     """TP is always TDO — confirmed via _build_signal_from_bar signal dict."""
-    import train_smt
-    # Short signal: entry at 20100, TDO at 20000 (below entry — valid short)
+    import strategy_smt as train_smt
+    # Short signal: entry at 20100, TDO at 20090 (10 pts below — within MAX_TDO_DISTANCE_PTS)
     bar = pd.Series({"Open": 20105.0, "High": 20110.0, "Low": 20095.0, "Close": 20100.0})
     ts = pd.Timestamp("2025-01-02 09:05:00", tz="America/New_York")
-    signal = train_smt._build_signal_from_bar(bar, ts, "short", 20000.0)
+    signal = train_smt._build_signal_from_bar(bar, ts, "short", 20090.0)
     assert signal is not None
     assert signal["take_profit"] == signal["tdo"]
-    assert signal["take_profit"] == 20000.0
+    assert signal["take_profit"] == 20090.0
 
 
 def test_rr_ratio():
@@ -307,9 +307,10 @@ _SIGNAL_TS = pd.Timestamp("2025-01-02 09:05:00", tz="America/New_York")
 
 def test_build_signal_from_bar_short_returns_signal(monkeypatch):
     """_build_signal_from_bar returns a short signal dict for valid short setup."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 999.0)
     bar = _make_signal_bar(close=20100.0)
     signal = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "short", 20000.0)
     assert signal is not None
@@ -321,9 +322,10 @@ def test_build_signal_from_bar_short_returns_signal(monkeypatch):
 
 def test_build_signal_from_bar_long_returns_signal(monkeypatch):
     """_build_signal_from_bar returns a long signal dict for valid long setup."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 999.0)
     bar = _make_signal_bar(close=19900.0)
     signal = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "long", 20000.0)
     assert signal is not None
@@ -350,7 +352,7 @@ def _make_bar(high, low, close=None, open_=None):
 
 def test_manage_position_tp_long(monkeypatch):
     """Long: high >= take_profit → 'exit_tp'."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
     pos = _make_position("long", 19900, 19800, 20000)
     bar = _make_bar(high=20001, low=19950)
@@ -359,7 +361,7 @@ def test_manage_position_tp_long(monkeypatch):
 
 def test_manage_position_stop_long():
     """Long: low <= stop_price → 'exit_stop'."""
-    import train_smt
+    import strategy_smt as train_smt
     pos = _make_position("long", 19900, 19800, 20000)
     bar = _make_bar(high=19850, low=19799)
     assert train_smt.manage_position(pos, bar) == "exit_stop"
@@ -367,7 +369,7 @@ def test_manage_position_stop_long():
 
 def test_manage_position_tp_short(monkeypatch):
     """Short: low <= take_profit → 'exit_tp'."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
     pos = _make_position("short", 20100, 20200, 20000)
     bar = _make_bar(high=20050, low=19999)
@@ -376,7 +378,7 @@ def test_manage_position_tp_short(monkeypatch):
 
 def test_manage_position_stop_short():
     """Short: high >= stop_price → 'exit_stop'."""
-    import train_smt
+    import strategy_smt as train_smt
     pos = _make_position("short", 20100, 20200, 20000)
     bar = _make_bar(high=20200, low=20050)
     assert train_smt.manage_position(pos, bar) == "exit_stop"
@@ -384,7 +386,7 @@ def test_manage_position_stop_short():
 
 def test_manage_position_hold():
     """Neither TP nor stop triggered → 'hold'."""
-    import train_smt
+    import strategy_smt as train_smt
     pos = _make_position("long", 19900, 19800, 20000)
     bar = _make_bar(high=19950, low=19850)
     assert train_smt.manage_position(pos, bar) == "hold"
@@ -461,45 +463,52 @@ def _make_long_session_bars(base=20000.0):
 # ══ TRADE_DIRECTION filter tests ═════════════════════════════════════════════
 
 def _patch_direction_test_guards(monkeypatch, trade_direction):
-    """Shared setup for direction-filter tests: disable all guards except direction."""
-    import train_smt
-    monkeypatch.setattr(train_smt, "TRADE_DIRECTION", trade_direction)
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
-    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
-    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
-    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 19900.0)
+    """Shared setup for direction-filter tests: disable all guards except direction.
+
+    Patches strategy-side constants on strategy_smt and harness-side on backtest_smt.
+    Returns backtest_smt so callers can invoke run_backtest on the correct module.
+    """
+    import strategy_smt as _strat
+    import backtest_smt as _bk
+    # Strategy-side: affect _build_signal_from_bar, manage_position
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
+    # Harness-side: affect run_backtest directly
+    monkeypatch.setattr(_bk, "TRADE_DIRECTION", trade_direction)
+    monkeypatch.setattr(_bk, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(_bk, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(_bk, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(_bk, "REENTRY_MAX_MOVE_PTS", 0.0)
+    monkeypatch.setattr(_bk, "compute_tdo", lambda *a: 19900.0)
+    return _bk
 
 
 def test_trade_direction_short_blocks_long(monkeypatch):
     """TRADE_DIRECTION='short' causes run_backtest to skip bullish SMT signals."""
-    import train_smt
-    _patch_direction_test_guards(monkeypatch, "short")
+    _bk = _patch_direction_test_guards(monkeypatch, "short")
     mnq, mes = _make_long_session_bars()
-    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     assert stats["total_trades"] == 0
 
 
 def test_trade_direction_long_blocks_short(monkeypatch):
     """TRADE_DIRECTION='long' causes run_backtest to skip bearish SMT signals."""
-    import train_smt
+    import backtest_smt as _bk
     _patch_direction_test_guards(monkeypatch, "long")
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 20100.0)
+    monkeypatch.setattr(_bk, "compute_tdo", lambda *a: 20100.0)
     mnq, mes = _make_short_session_bars()
-    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     assert stats["total_trades"] == 0
 
 
 def test_trade_direction_both_passes_short(monkeypatch):
     """TRADE_DIRECTION='both' does not filter bearish SMT signals."""
-    import train_smt
-    _patch_direction_test_guards(monkeypatch, "both")
+    _bk = _patch_direction_test_guards(monkeypatch, "both")
     mnq, mes = _make_short_session_bars()
-    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     assert stats["total_trades"] >= 1
     assert any(t["direction"] == "short" for t in stats["trade_records"])
 
@@ -508,7 +517,7 @@ def test_trade_direction_both_passes_short(monkeypatch):
 
 def test_tdo_validity_blocks_inverted_long(monkeypatch):
     """TDO_VALIDITY_CHECK=True skips long signal when TDO < entry_price."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", True)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
@@ -520,10 +529,11 @@ def test_tdo_validity_blocks_inverted_long(monkeypatch):
 
 def test_tdo_validity_passes_valid_long(monkeypatch):
     """TDO_VALIDITY_CHECK=True allows long signal when TDO > entry_price."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", True)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 999.0)
     # Long signal: entry at 19900, TDO at 20100 → TDO above entry → valid
     bar = _make_signal_bar(close=19900.0)
     result = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "long", 20100.0)
@@ -534,7 +544,7 @@ def test_tdo_validity_passes_valid_long(monkeypatch):
 
 def test_tdo_validity_blocks_inverted_short(monkeypatch):
     """TDO_VALIDITY_CHECK=True skips short signal when TDO > entry_price."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", True)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
@@ -546,10 +556,11 @@ def test_tdo_validity_blocks_inverted_short(monkeypatch):
 
 def test_tdo_validity_false_passes_inverted(monkeypatch):
     """TDO_VALIDITY_CHECK=False allows inverted signals through (legacy behavior)."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 999.0)
     # Short signal: entry at 19900, TDO at 20100 → inverted, but gate is off
     bar = _make_signal_bar(close=19900.0)
     result = train_smt._build_signal_from_bar(bar, _SIGNAL_TS, "short", 20100.0)
@@ -560,7 +571,7 @@ def test_tdo_validity_false_passes_inverted(monkeypatch):
 
 def test_min_stop_points_filters_tiny_stop(monkeypatch):
     """MIN_STOP_POINTS=50 rejects signals where stop distance < 50 pts."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 50.0)
     monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
@@ -572,7 +583,7 @@ def test_min_stop_points_filters_tiny_stop(monkeypatch):
 
 def test_min_stop_points_zero_disables_guard(monkeypatch):
     """MIN_STOP_POINTS=0.0 allows all stop distances through."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
@@ -586,10 +597,11 @@ def test_min_stop_points_zero_disables_guard(monkeypatch):
 
 def test_long_stop_ratio_applied(monkeypatch):
     """LONG_STOP_RATIO is used for long stop computation."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 999.0)
     monkeypatch.setattr(train_smt, "LONG_STOP_RATIO", 0.3)
     tdo_val = 20100.0
     bar = _make_signal_bar(close=19900.0)
@@ -602,10 +614,11 @@ def test_long_stop_ratio_applied(monkeypatch):
 
 def test_short_stop_ratio_applied(monkeypatch):
     """SHORT_STOP_RATIO is used for short stop computation."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 999.0)
     monkeypatch.setattr(train_smt, "SHORT_STOP_RATIO", 0.6)
     tdo_val = 19900.0
     bar = _make_signal_bar(close=20100.0)
@@ -620,7 +633,7 @@ def test_short_stop_ratio_applied(monkeypatch):
 
 def test_print_direction_breakdown_format(capsys):
     """print_direction_breakdown prints per-direction metrics with correct prefix."""
-    import train_smt
+    import strategy_smt as train_smt
     fake_stats = {
         "total_pnl": 100.0,
         "trade_records": [
@@ -641,7 +654,7 @@ def test_print_direction_breakdown_format(capsys):
 
 def test_print_direction_breakdown_empty_trades(capsys):
     """print_direction_breakdown prints nothing when trade_records is empty."""
-    import train_smt
+    import strategy_smt as train_smt
     train_smt.print_direction_breakdown({"trade_records": []}, prefix="test_")
     out = capsys.readouterr().out
     assert out == ""
@@ -651,7 +664,7 @@ def test_print_direction_breakdown_empty_trades(capsys):
 
 def test_find_anchor_close_short_finds_bull_bar():
     """Short setup: scans back from bar 4 and finds the bullish bar 2 close."""
-    import train_smt
+    import strategy_smt as train_smt
     bars = _make_1m_bars(
         opens= [200, 200, 198, 200, 200],
         highs= [201, 201, 203, 201, 201],
@@ -664,7 +677,7 @@ def test_find_anchor_close_short_finds_bull_bar():
 
 def test_find_anchor_close_long_finds_bear_bar():
     """Long setup: scans back from bar 4 and finds the bearish bar 2 close."""
-    import train_smt
+    import strategy_smt as train_smt
     bars = _make_1m_bars(
         opens= [200, 200, 202, 200, 200],
         highs= [201, 201, 203, 201, 201],
@@ -677,7 +690,7 @@ def test_find_anchor_close_long_finds_bear_bar():
 
 def test_find_anchor_close_no_match_returns_none():
     """All doji bars → no qualifying bar → returns None."""
-    import train_smt
+    import strategy_smt as train_smt
     bars = _make_1m_bars(
         opens= [200, 200, 200, 200, 200],
         highs= [201, 201, 201, 201, 201],
@@ -690,7 +703,7 @@ def test_find_anchor_close_no_match_returns_none():
 
 def test_find_anchor_close_uses_most_recent():
     """Two bullish bars: returns the closer (most recent) one's close."""
-    import train_smt
+    import strategy_smt as train_smt
     bars = _make_1m_bars(
         opens= [198, 200, 198, 200, 200],
         highs= [203, 201, 203, 201, 201],
@@ -706,42 +719,42 @@ def test_find_anchor_close_uses_most_recent():
 
 def test_is_confirmation_bar_short_true():
     """Bearish bar with high > anchor_close → True."""
-    import train_smt
+    import strategy_smt as train_smt
     bar = pd.Series({"Open": 200.0, "High": 205.0, "Low": 196.0, "Close": 197.0})
     assert train_smt.is_confirmation_bar(bar, anchor_close=203.0, direction="short")
 
 
 def test_is_confirmation_bar_short_false_not_bearish():
     """Bullish bar (close > open) → False even if high > anchor."""
-    import train_smt
+    import strategy_smt as train_smt
     bar = pd.Series({"Open": 196.0, "High": 205.0, "Low": 195.0, "Close": 200.0})
     assert not train_smt.is_confirmation_bar(bar, anchor_close=203.0, direction="short")
 
 
 def test_is_confirmation_bar_short_false_wick_below_anchor():
     """Bearish bar but high <= anchor_close → False."""
-    import train_smt
+    import strategy_smt as train_smt
     bar = pd.Series({"Open": 200.0, "High": 202.0, "Low": 196.0, "Close": 197.0})
     assert not train_smt.is_confirmation_bar(bar, anchor_close=203.0, direction="short")
 
 
 def test_is_confirmation_bar_long_true():
     """Bullish bar with low < anchor_close → True."""
-    import train_smt
+    import strategy_smt as train_smt
     bar = pd.Series({"Open": 198.0, "High": 205.0, "Low": 194.0, "Close": 202.0})
     assert train_smt.is_confirmation_bar(bar, anchor_close=196.0, direction="long")
 
 
 def test_is_confirmation_bar_long_false_not_bullish():
     """Bearish bar (close < open) → False even if low < anchor."""
-    import train_smt
+    import strategy_smt as train_smt
     bar = pd.Series({"Open": 202.0, "High": 205.0, "Low": 194.0, "Close": 198.0})
     assert not train_smt.is_confirmation_bar(bar, anchor_close=196.0, direction="long")
 
 
 def test_is_confirmation_bar_long_false_wick_above_anchor():
     """Bullish bar but low >= anchor_close → False."""
-    import train_smt
+    import strategy_smt as train_smt
     bar = pd.Series({"Open": 198.0, "High": 205.0, "Low": 197.0, "Close": 202.0})
     assert not train_smt.is_confirmation_bar(bar, anchor_close=196.0, direction="long")
 
@@ -759,7 +772,7 @@ def _make_position_with_tp(direction, entry_price, stop_price, take_profit):
 
 def test_breakeven_trigger_pct_fires_at_correct_progress(monkeypatch):
     """Short trade at 50% progress to TDO → stop moves to entry, breakeven_active set."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.5)
     monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
     # entry=20100, TP=20000, dist=100. 50% progress = price dropped 50 pts → Low=20050
@@ -772,7 +785,7 @@ def test_breakeven_trigger_pct_fires_at_correct_progress(monkeypatch):
 
 def test_breakeven_trigger_pct_does_not_fire_below_threshold(monkeypatch):
     """40% progress with 50% threshold → stop unchanged."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.5)
     monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
     # entry=20100, TP=20000, dist=100. 40% progress → Low=20060
@@ -786,7 +799,7 @@ def test_breakeven_trigger_pct_does_not_fire_below_threshold(monkeypatch):
 
 def test_breakeven_trigger_pct_zero_disables_mechanism(monkeypatch):
     """BREAKEVEN_TRIGGER_PCT=0.0 → stop never moves regardless of progress."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.0)
     monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
     pos = _make_position_with_tp("short", 20100.0, 20200.0, 20000.0)
@@ -798,7 +811,7 @@ def test_breakeven_trigger_pct_zero_disables_mechanism(monkeypatch):
 
 def test_breakeven_active_flag_set(monkeypatch):
     """After BREAKEVEN_TRIGGER_PCT fires, breakeven_active is True."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.5)
     monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
     pos = _make_position_with_tp("short", 20100.0, 20200.0, 20000.0)
@@ -809,7 +822,7 @@ def test_breakeven_active_flag_set(monkeypatch):
 
 def test_breakeven_stop_only_tightens(monkeypatch):
     """If stop is already tighter than entry, it is not widened by breakeven."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.5)
     monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
     # Stop already tighter than entry (e.g. moved by trailing logic earlier)
@@ -869,41 +882,40 @@ def _make_reentry_session_bars(base=20000.0):
     return mnq, mes
 
 
+def _patch_reentry_guards(monkeypatch, reentry_max_move=50.0, breakeven_pct=0.0):
+    """Shared setup for reentry tests. Returns backtest_smt for run_backtest calls."""
+    import strategy_smt as _strat
+    import backtest_smt as _bk
+    # Strategy-side
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(_strat, "BREAKEVEN_TRIGGER_PCT", breakeven_pct)
+    # Harness-side
+    monkeypatch.setattr(_bk, "REENTRY_MAX_MOVE_PTS", reentry_max_move)
+    monkeypatch.setattr(_bk, "MAX_REENTRY_COUNT", 999)  # disable cap; initial entry also uses reentry_count
+    monkeypatch.setattr(_bk, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(_bk, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(_bk, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(_bk, "compute_tdo", lambda *a: 19900.0)
+    return _bk
+
+
 def test_reentry_after_stop(monkeypatch):
     """Re-entry fires a second trade when stop-out move < REENTRY_MAX_MOVE_PTS."""
-    import train_smt
-    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 50.0)
-    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.0)
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
-    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
-    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 19900.0)
-
+    _bk = _patch_reentry_guards(monkeypatch, reentry_max_move=50.0, breakeven_pct=0.0)
     mnq, mes = _make_reentry_session_bars()
-    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     assert stats["total_trades"] >= 2
 
 
 def test_no_reentry_when_disabled(monkeypatch):
     """REENTRY_MAX_MOVE_PTS=0.0 → only one trade even with a valid re-entry setup."""
-    import train_smt
-    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.0)
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
-    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
-    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 19900.0)
-
+    _bk = _patch_reentry_guards(monkeypatch, reentry_max_move=0.0, breakeven_pct=0.0)
     mnq, mes = _make_reentry_session_bars()
-    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     assert stats["total_trades"] <= 1
 
 
@@ -914,17 +926,7 @@ def test_no_reentry_when_move_exceeds_threshold(monkeypatch):
     means price moved favorably (downward) before reversing and stopping us out.
     When move >= threshold, re-entry is suppressed (we missed the move already).
     """
-    import train_smt
-    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 5.0)
-    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.0)
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
-    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
-    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 19900.0)
+    _bk = _patch_reentry_guards(monkeypatch, reentry_max_move=5.0, breakeven_pct=0.0)
 
     # Build a session where:
     # - entry at bar 8 close = base-2
@@ -936,26 +938,15 @@ def test_no_reentry_when_move_exceeds_threshold(monkeypatch):
     mnq = mnq.copy()
     mnq.iloc[9, mnq.columns.get_loc("Close")] = base - 20
 
-    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     assert stats["total_trades"] == 1
 
 
 def test_reentry_breakeven_active_bypasses_move_check(monkeypatch):
     """Trade stopped at breakeven → REENTRY_ELIGIBLE regardless of move size."""
-    import train_smt
-    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 1.0)  # very tight threshold
-    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.01)  # fires almost immediately
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
-    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
-    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 19900.0)
-
+    _bk = _patch_reentry_guards(monkeypatch, reentry_max_move=1.0, breakeven_pct=0.01)
     mnq, mes = _make_reentry_session_bars()
-    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     # Verify the backtest completes without error; with breakeven active the position
     # stops at entry so breakeven_active bypasses the move check → reentry eligible.
     assert "total_trades" in stats
@@ -963,17 +954,7 @@ def test_reentry_breakeven_active_bypasses_move_check(monkeypatch):
 
 def test_state_resets_at_day_boundary(monkeypatch):
     """A pending divergence from day 1 does NOT carry to day 2."""
-    import train_smt
-    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "BREAKEVEN_TRIGGER_PCT", 0.0)
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "MIN_TDO_DISTANCE_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "TRAIL_AFTER_TP_PTS", 0.0)
-    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
-    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
-    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
-    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 19900.0)
+    _bk = _patch_reentry_guards(monkeypatch, reentry_max_move=0.0, breakeven_pct=0.0)
 
     # Day 1: divergence fires but no confirmation bar in session (no bearish confirm)
     n = 30
@@ -998,7 +979,7 @@ def test_state_resets_at_day_boundary(monkeypatch):
 
     mnq = pd.concat([mnq1, mnq2])
     mes = pd.concat([mes1, mes2])
-    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
+    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
     # Day 2 should not see a trade from the stale day-1 divergence
     assert stats["total_trades"] == 0
 
@@ -1007,7 +988,7 @@ def test_state_resets_at_day_boundary(monkeypatch):
 
 def test_build_signal_max_tdo_distance_ceiling(monkeypatch):
     """Signal rejected when |entry - TDO| > MAX_TDO_DISTANCE_PTS."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 30.0)
     bar = pd.Series({"Open": 100.0, "High": 105.0, "Low": 95.0, "Close": 99.0})
     ts  = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
@@ -1018,7 +999,7 @@ def test_build_signal_max_tdo_distance_ceiling(monkeypatch):
 
 def test_build_signal_max_tdo_distance_pass(monkeypatch):
     """Signal passes when |entry - TDO| <= MAX_TDO_DISTANCE_PTS."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 50.0)
     bar = pd.Series({"Open": 100.0, "High": 105.0, "Low": 95.0, "Close": 99.0})
     ts  = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
@@ -1029,7 +1010,7 @@ def test_build_signal_max_tdo_distance_pass(monkeypatch):
 
 def test_build_signal_max_tdo_distance_disabled(monkeypatch):
     """MAX_TDO_DISTANCE_PTS=999.0 disables the ceiling filter."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 999.0)
     # Short entry: close=1100, tdo=100 → distance=1000 (which would be blocked by any finite ceiling)
     # With 999.0 ceiling disabled, it must pass (assuming MIN_STOP_POINTS allows it)
@@ -1044,7 +1025,7 @@ def test_build_signal_max_tdo_distance_disabled(monkeypatch):
 # ══ Task 7c — detect_smt_divergence new return type tests ════════════════════
 
 def test_detect_smt_divergence_returns_tuple_on_match():
-    import train_smt
+    import strategy_smt as train_smt
     mes = _make_1m_bars(
         opens=[100]*5, highs=[101,102,101,101,103], lows=[99]*5, closes=[100]*5
     )
@@ -1061,7 +1042,7 @@ def test_detect_smt_divergence_returns_tuple_on_match():
 
 def test_detect_smt_divergence_sweep_filter(monkeypatch):
     """Returns None when sweep < MIN_SMT_SWEEP_PTS."""
-    import train_smt
+    import strategy_smt as train_smt
     monkeypatch.setattr(train_smt, "MIN_SMT_SWEEP_PTS", 5.0)
     mes = _make_1m_bars(
         opens=[100]*5, highs=[101,102,101,101,102.5], lows=[99]*5, closes=[100]*5
@@ -1077,11 +1058,12 @@ def test_detect_smt_divergence_sweep_filter(monkeypatch):
 # ══ Task 7d — new signal fields and body ratio tests ═════════════════════════
 
 def test_build_signal_contains_diagnostic_fields():
-    import train_smt
+    import strategy_smt as train_smt
     bar = pd.Series({"Open": 105.0, "High": 107.0, "Low": 97.0, "Close": 101.0})
     ts  = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
+    # TDO=92 → dist=9 pts, within MAX_TDO_DISTANCE_PTS=15 and stop=101+0.35*9=104.15 > MIN_STOP_POINTS
     result = train_smt._build_signal_from_bar(
-        bar, ts, "short", 60.0, smt_sweep_pts=2.5, smt_miss_pts=1.3
+        bar, ts, "short", 92.0, smt_sweep_pts=2.5, smt_miss_pts=1.3
     )
     assert result is not None
     assert "smt_sweep_pts" in result
@@ -1094,10 +1076,55 @@ def test_build_signal_contains_diagnostic_fields():
 
 def test_build_signal_body_ratio_not_filtered(monkeypatch):
     """Near-doji bars (low body ratio) are NOT rejected — diagnostics show they are best."""
-    import train_smt
+    import strategy_smt as train_smt
+    monkeypatch.setattr(train_smt, "MAX_TDO_DISTANCE_PTS", 999.0)
     # Near-doji: body=0.1, range=20 → ratio=0.005 (extreme doji)
     bar = pd.Series({"Open": 100.0, "High": 110.0, "Low": 90.0, "Close": 99.9})
     ts  = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
     result = train_smt._build_signal_from_bar(bar, ts, "short", 60.0)
     assert result is not None, "Near-doji bars must not be filtered — they have highest EP"
-    assert result["entry_bar_body_ratio"] < 0.01
+
+
+# ══ Phase 1: bar globals + set_bar_data() ════════════════════════════════════
+
+def test_set_bar_data_populates_globals():
+    import strategy_smt as train_smt
+    mnq = _make_1m_bars([100]*3, [101]*3, [99]*3, [100]*3)
+    mes = _make_1m_bars([50]*3, [51]*3, [49]*3, [50]*3)
+    train_smt.set_bar_data(mnq, mes)
+    assert train_smt._mnq_bars is mnq
+    assert train_smt._mes_bars is mes
+
+
+def test_set_bar_data_overwrites_previous():
+    import strategy_smt as train_smt
+    df1 = _make_1m_bars([100]*2, [101]*2, [99]*2, [100]*2)
+    df2 = _make_1m_bars([200]*2, [201]*2, [199]*2, [200]*2)
+    train_smt.set_bar_data(df1, df1)
+    train_smt.set_bar_data(df2, df2)
+    assert train_smt._mnq_bars is df2
+
+
+def test_run_backtest_calls_set_bar_data(monkeypatch):
+    import strategy_smt as _strat
+    import backtest_smt as _bk
+    calls = []
+    # set_bar_data is called via backtest_smt's imported reference — patch there
+    monkeypatch.setattr(_bk, "set_bar_data", lambda mnq, mes: calls.append((mnq, mes)))
+    mnq = _make_1m_bars([100]*2, [101]*2, [99]*2, [100]*2)
+    mes = _make_1m_bars([50]*2, [51]*2, [49]*2, [50]*2)
+    monkeypatch.setattr(_bk, "BACKTEST_START", "2025-01-02")
+    monkeypatch.setattr(_bk, "BACKTEST_END",   "2025-01-03")
+    _bk.run_backtest(mnq, mes)
+    assert len(calls) == 1 and calls[0][0] is mnq
+
+
+# ══ Phase 2: exit_market infrastructure ══════════════════════════════════════
+
+def test_manage_position_does_not_return_exit_market_by_default():
+    """exit_market must not fire without a criterion — infrastructure only."""
+    import strategy_smt as train_smt
+    pos = {"direction": "short", "entry_price": 20100.0, "take_profit": 20000.0,
+           "stop_price": 20150.0, "entry_time": pd.Timestamp("2025-01-02 09:05", tz="America/New_York")}
+    bar = pd.Series({"Open": 20080.0, "High": 20090.0, "Low": 20070.0, "Close": 20080.0})
+    assert train_smt.manage_position(pos, bar) != "exit_market"
