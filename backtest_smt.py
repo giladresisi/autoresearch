@@ -5,7 +5,27 @@ import os
 import sys
 from pathlib import Path
 
+import math as _math
+
 import pandas as pd
+
+
+class _BarRow:
+    """Lightweight bar data holder — replaces pd.Series from iterrows() in the session loop.
+
+    Supports bar["Open"], bar["High"], bar["Low"], bar["Close"] and bar.name (timestamp).
+    """
+    __slots__ = ("Open", "High", "Low", "Close", "name")
+
+    def __init__(self, o: float, h: float, l: float, c: float, ts) -> None:
+        self.Open  = o
+        self.High  = h
+        self.Low   = l
+        self.Close = c
+        self.name  = ts
+
+    def __getitem__(self, key: str) -> float:
+        return getattr(self, key)
 
 from hypothesis_smt import compute_hypothesis_context
 from strategy_smt import (
@@ -245,8 +265,8 @@ def run_backtest(
             & (mnq_df.index.time >= pd.Timestamp(f"2000-01-01 {SESSION_START}").time())
             & (mnq_df.index.time <= pd.Timestamp(f"2000-01-01 {SESSION_END}").time())
         )
-        mnq_session = mnq_df[session_mask].copy()
-        mes_session = mes_df[session_mask].copy()
+        mnq_session = mnq_df[session_mask]
+        mes_session = mes_df[session_mask]
 
         if mnq_session.empty:
             equity_curve.append(equity_curve[-1])
@@ -301,7 +321,64 @@ def run_backtest(
         mes_reset = mes_session.reset_index(drop=True)
         mnq_reset = mnq_session.reset_index(drop=True)
 
-        for bar_idx, (ts, bar) in enumerate(mnq_session.iterrows()):
+        # Pre-extract numpy arrays for fast per-bar access (avoids iterrows() Series overhead)
+        _mnq_opens  = mnq_session["Open"].values
+        _mnq_highs  = mnq_session["High"].values
+        _mnq_lows   = mnq_session["Low"].values
+        _mnq_closes = mnq_session["Close"].values
+        _mes_highs  = mes_session["High"].values
+        _mes_lows   = mes_session["Low"].values
+        _mes_closes = mes_session["Close"].values
+        _mnq_idx    = mnq_session.index
+
+        # Running session extremes — updated at start of each bar for bars [0..bar_idx-1]
+        # Initialized to nan so bar 0 comparisons behave identically to empty-slice .max()/.min()
+        _ses_mes_h  = _ses_mes_l  = float("nan")
+        _ses_mnq_h  = _ses_mnq_l  = float("nan")
+        _ses_mes_ch = _ses_mes_cl = float("nan")
+        _ses_mnq_ch = _ses_mnq_cl = float("nan")
+        # Running high/low for overnight sweep gate (replaces slice-based recomputation)
+        _run_ses_high = 0.0           # matches: mnq_reset["High"].iloc[:0].max() fallback==0
+        _run_ses_low  = float("inf")  # matches: mnq_reset["Low"].iloc[:0].min() fallback==inf
+
+        for bar_idx in range(len(mnq_session)):
+            ts = _mnq_idx[bar_idx]
+
+            # Bring running extremes up-to-date with the previous bar.
+            # Done at the TOP so continue-statements elsewhere cannot skip the update.
+            if bar_idx > 0:
+                _p = bar_idx - 1
+                _v = float(_mes_highs[_p])
+                _ses_mes_h   = _v if _math.isnan(_ses_mes_h)  else max(_ses_mes_h,  _v)
+                _v = float(_mes_lows[_p])
+                _ses_mes_l   = _v if _math.isnan(_ses_mes_l)  else min(_ses_mes_l,  _v)
+                _v = float(_mnq_highs[_p])
+                _ses_mnq_h   = _v if _math.isnan(_ses_mnq_h)  else max(_ses_mnq_h,  _v)
+                _run_ses_high = max(_run_ses_high, _v)
+                _v = float(_mnq_lows[_p])
+                _ses_mnq_l   = _v if _math.isnan(_ses_mnq_l)  else min(_ses_mnq_l,  _v)
+                _run_ses_low  = min(_run_ses_low,  _v)
+                _v = float(_mes_closes[_p])
+                _ses_mes_ch  = _v if _math.isnan(_ses_mes_ch) else max(_ses_mes_ch, _v)
+                _ses_mes_cl  = _v if _math.isnan(_ses_mes_cl) else min(_ses_mes_cl, _v)
+                _v = float(_mnq_closes[_p])
+                _ses_mnq_ch  = _v if _math.isnan(_ses_mnq_ch) else max(_ses_mnq_ch, _v)
+                _ses_mnq_cl  = _v if _math.isnan(_ses_mnq_cl) else min(_ses_mnq_cl, _v)
+
+            _smt_cache = {
+                "mes_h":  _ses_mes_h,  "mes_l":  _ses_mes_l,
+                "mnq_h":  _ses_mnq_h,  "mnq_l":  _ses_mnq_l,
+                "mes_ch": _ses_mes_ch, "mes_cl": _ses_mes_cl,
+                "mnq_ch": _ses_mnq_ch, "mnq_cl": _ses_mnq_cl,
+            }
+
+            bar = _BarRow(
+                float(_mnq_opens[bar_idx]),
+                float(_mnq_highs[bar_idx]),
+                float(_mnq_lows[bar_idx]),
+                float(_mnq_closes[bar_idx]),
+                ts,
+            )
 
             if state == "IN_TRADE":
                 entry_bar_count += 1
@@ -584,6 +661,7 @@ def run_backtest(
                     mnq_reset,
                     bar_idx,
                     0,
+                    _cached=_smt_cache,
                 )
 
                 _smt_fill = None
@@ -616,9 +694,9 @@ def run_backtest(
                 _displacement_bar_extreme = None
                 if _smt_type == "displacement":
                     if direction == "long":
-                        _displacement_bar_extreme = float(mnq_reset.iloc[bar_idx]["Low"])
+                        _displacement_bar_extreme = float(_mnq_lows[bar_idx])
                     else:
-                        _displacement_bar_extreme = float(mnq_reset.iloc[bar_idx]["High"])
+                        _displacement_bar_extreme = float(_mnq_highs[bar_idx])
 
                 # Score gate: reject displacement entries below hypothesis alignment threshold
                 if _smt_type == "displacement" and MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT > 0:
@@ -641,12 +719,10 @@ def run_backtest(
                     oh = _day_overnight.get("overnight_high")
                     ol = _day_overnight.get("overnight_low")
                     if direction == "short" and oh is not None:
-                        pre_bar_high = mnq_reset["High"].iloc[:bar_idx].max() if bar_idx > 0 else 0
-                        if pre_bar_high <= oh:
+                        if _run_ses_high <= oh:
                             continue
                     if direction == "long" and ol is not None:
-                        pre_bar_low = mnq_reset["Low"].iloc[:bar_idx].min() if bar_idx > 0 else float("inf")
-                        if pre_bar_low >= ol:
+                        if _run_ses_low >= ol:
                             continue
 
                 # Silver bullet window: only accept divergences during 09:50–10:10 ET.
@@ -658,14 +734,13 @@ def run_backtest(
                 ac = find_anchor_close(mnq_reset, bar_idx, direction)
                 if ac is None:
                     continue
-                _div_bar = mnq_reset.iloc[bar_idx]
                 pending_direction     = direction
                 anchor_close          = ac
                 pending_smt_sweep     = _smt_sweep
                 pending_smt_miss      = _smt_miss
                 divergence_bar_idx    = bar_idx
-                _pending_div_bar_high = float(_div_bar["High"])
-                _pending_div_bar_low  = float(_div_bar["Low"])
+                _pending_div_bar_high = float(_mnq_highs[bar_idx])
+                _pending_div_bar_low  = float(_mnq_lows[bar_idx])
                 _pending_smt_defended = _smt_defended
                 _pending_smt_type               = _smt_type
                 _pending_fvg_zone               = _pending_fvg
