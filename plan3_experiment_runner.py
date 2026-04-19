@@ -182,3 +182,6 @@ print(f"fvg_detected_count:   {fvg_detected_count}")
 exits = test_stats.get("exit_type_breakdown", {})
 for k, v in sorted(exits.items()):
     print(f"exit_{k}: {v}")
+
+from backtest_smt import _write_trades_tsv
+_write_trades_tsv(all_trades)

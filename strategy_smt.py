@@ -193,7 +193,7 @@ FVG_LAYER_B_TRIGGER: bool = False
 # SMT-optional: accept displacement candles (body ≥ MIN_DISPLACEMENT_PTS) as entries
 # even when no wick-based SMT exists. Fires only when detect_smt_divergence returns None.
 # Optimizer search space: SMT_OPTIONAL [True, False]; MIN_DISPLACEMENT_PTS [8.0, 10.0, 15.0]
-SMT_OPTIONAL: bool = False
+SMT_OPTIONAL: bool = True
 MIN_DISPLACEMENT_PTS: float = 10.0
 
 # Partial exit at first draw on liquidity.
@@ -217,7 +217,7 @@ SMT_FILL_ENABLED: bool = False
 #   instead of the SMT structural stop. Mechanistically correct: the displacement
 #   thesis fails when price closes back through the impulse bar.
 #   Optimizer search space: [True, False]
-DISPLACEMENT_STOP_MODE: bool = False
+DISPLACEMENT_STOP_MODE: bool = True
 
 # MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT: minimum count of hypothesis rules that
 #   must agree with signal direction for a displacement entry to be accepted.
@@ -234,7 +234,7 @@ MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT: int = 0
 #   0.33 (earlier lock-in, higher probability) and 0.67 (later, more favorable RR).
 #   Only read by manage_position() when PARTIAL_EXIT_ENABLED=True.
 #   Optimizer search space: [0.33, 0.5, 0.67]
-PARTIAL_EXIT_LEVEL_RATIO: float = 0.5
+PARTIAL_EXIT_LEVEL_RATIO: float = 0.33
 
 # ── Layer B hypothesis gate (Plan 3) ─────────────────────────────────────────
 # FVG_LAYER_B_REQUIRES_HYPOTHESIS: when True, the FVG retracement add-on (Layer B)

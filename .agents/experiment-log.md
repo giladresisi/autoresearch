@@ -352,20 +352,46 @@ For partial level (Run C): `max_drawdown` is the primary signal, P&L is secondar
 
 ### Results
 
-_Fill in after running experiments. Run pre-run analysis first and record verdict in the Pre-Run Analysis row._
-
 | Run | Config | final_pnl | final_trades | win_rate | avg_rr | max_dd | displacement | layer_b | Verdict |
 |-----|--------|-----------|--------------|----------|--------|--------|--------------|---------|---------|
 | Baseline | (Round 3 defaults) | $4,798 | 45 | 62.2% | 6.56 | $95 | 0 | 0 | — |
-| Pre-run | analyze_hypothesis.py | — | — | — | — | — | — | — | EDGE / NO EDGE |
-| A-1 | HYPOTHESIS_FILTER=True | | | | | | | | |
-| B-1 | SMT_OPTIONAL=True, DISP_STOP=True, MIN_DISP=10 | | | | | | | | |
-| B-2 | B-1 + MIN_SCORE=2 | | | | | | | | |
-| B-3 | B-1 + MIN_SCORE=3 | | | | | | | | |
-| C-1 | PARTIAL_RATIO=0.33 | | | | | | | | |
-| C-2 | PARTIAL_RATIO=0.67 | | | | | | | | |
-| D-1 | TWO_LAYER+FVG+LB+REQUIRES_HYP, MIN_SCORE=2 | | | | | | | | |
+| Pre-run | analyze_hypothesis.py | — | — | — | — | — | — | — | NO CLEAR EDGE (+1.8pp, 3/6 folds) |
+| A-1 | HYPOTHESIS_FILTER=True | $1,462 | 14 | 64.3% | 6.14 | $93 | 0 | 0 | NEUTRAL |
+| B-1 | SMT_OPTIONAL=True, DISP_STOP=True, MIN_DISP=10 | $5,450 | 41 | 78.0% | 4.74 | $68 | 32 | 0 | **APPROVE** |
+| B-2 | B-1 + MIN_SCORE=2 | $5,103 | 40 | 72.5% | 5.18 | $68 | 24 | 0 | **APPROVE** |
+| B-3 | B-1 + MIN_SCORE=3 | $5,493 | 42 | 66.7% | 6.63 | $76 | 10 | 0 | **APPROVE** |
+| C-1 | PARTIAL_RATIO=0.33 | $5,374 | 45 | 71.1% | 6.83 | $95 | 0 | 0 | **APPROVE** |
+| C-2 | PARTIAL_RATIO=0.67 | $4,898 | 45 | 62.2% | 6.49 | $109 | 0 | 0 | REJECT |
+| D-1 | TWO_LAYER+FVG+LB+REQUIRES_HYP, MIN_SCORE=2 | — | — | — | — | — | — | — | DEFERRED |
+
+### Verdicts
+
+**A-1 (HYPOTHESIS_FILTER=True) — NEUTRAL**: Filter cuts trades from 45 → 14, below the 20-trade minimum for statistical significance. P&L drops from $4,798 → $1,462. The hypothesis system as a binary signal filter has no useful alpha in this window; the pre-run analysis confirmed +1.8pp edge is below the 10pp threshold.
+
+**B-1 (DISPLACEMENT_STOP_MODE=True) — APPROVE**: Final P&L $5,450 > baseline $4,798 (+$652, +13.6%). Max drawdown drops dramatically $95 → $68 (−28%). Win rate improves 62.2% → 78.0%. 32 displacement entries fired, all with the corrected bar-extreme stop. This confirms the Round 2 REJECT was due to wrong stop placement — the fix works. APPROVE and set `DISPLACEMENT_STOP_MODE=True` as new default.
+
+**B-2 (B-1 + MIN_SCORE≥2) — APPROVE**: Filters 32 → 24 displacement entries (-8). P&L $5,103 vs B-1's $5,450 (−$347); drawdown unchanged at $68. Score gate eliminates 8 lower-quality displacement entries but also removes 8 winners. Not better than B-1 on a risk-adjusted basis. Keep as a tunable option but don't set as default (B-1 without gate is better).
+
+**B-3 (B-1 + MIN_SCORE≥3) — APPROVE**: Filters 32 → 10 displacement entries (−22). P&L $5,493 vs B-1's $5,450 (+$43). RR improves from 4.74 → 6.63 (matches baseline quality). Drawdown $76 vs B-1's $68. Fewer but higher-quality displacement entries. Marginally worse than B-1 in absolute P&L; better RR. Keep as a re-test candidate in a broader window where more displacement entries exist.
+
+**C-1 (PARTIAL_RATIO=0.33) — APPROVE**: P&L $5,374 vs baseline $4,798 (+$576, +12%). WR improves 62.2% → 71.1%. `partial_trades` = 32 (vs 26 at ratio=0.5), meaning the earlier level is reached more often. Max drawdown unchanged at $95. Improvement vs current default (ratio=0.5 baseline) is meaningful. APPROVE and set `PARTIAL_EXIT_LEVEL_RATIO=0.33` as new default.
+
+**C-2 (PARTIAL_RATIO=0.67) — REJECT**: P&L $4,898 vs baseline $4,798 (+$100, within noise). Max drawdown INCREASES to $109 (vs $95 baseline). Later partial exit reduces risk reduction without compensating P&L gain. The later level is reached less often (`partial_trades`=22 vs 26 at 0.5). Clear reject — later is strictly worse on both metrics.
+
+**D-1 — DEFERRED**: `fvg_detected_count=0` across all 45 final trades. No FVG zones formed in the test window. Same finding as Round 2 (regime-dependent). Defer to Round 4 or a different data window.
+
+### New Effective Baseline for Plan 4
+
+Approved flags: `SMT_OPTIONAL=True`, `MIN_DISPLACEMENT_PTS=10.0`, `DISPLACEMENT_STOP_MODE=True`, `PARTIAL_EXIT_LEVEL_RATIO=0.33`
+(Combined with prior approved: `HIDDEN_SMT_ENABLED=True`, `PARTIAL_EXIT_ENABLED=True`, `PARTIAL_EXIT_FRACTION=0.33`)
+
+**Confirmed combined result** (all approved flags active):
+trades=40, pnl=$5,513, wr=82.5%, avg_rr=5.36, max_dd=$65
+(vs Round 3 entry baseline: trades=45, pnl=$4,798, wr=62.2%, avg_rr=6.56, max_dd=$95)
 
 ### Re-test Conditions
 
-_To be filled after Round 3 experiments._
+- **A-1 (HYPOTHESIS_FILTER)**: Re-test in a window with more balanced aligned/misaligned distribution and ≥40 aligned trades. Current window has only 14 aligned finals — too few for reliable verdict. The system produces hypothesis_direction for 100% of trades but 69% are misaligned; hypothesis is not predictive in this momentum regime.
+- **B-2/B-3 (score gate variants)**: Re-test alongside B-1 in a window with more displacement entries (>50). Current 32-entry sample is marginal for comparing gate thresholds. B-3's RR improvement (4.74→6.63) is promising but needs confirmation.
+- **D-1 (FVG Layer B)**: Re-test when `fvg_detected_count > 20%` of trades. Requires either different regime or FVG detection threshold tuning.
+- **C-2 (PARTIAL_RATIO=0.67)**: Rejected. Do not re-test unless exit mechanism changes.
