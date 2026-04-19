@@ -1,31 +1,12 @@
 """backtest_smt.py — SMT Divergence backtest harness. Frozen — do not modify. Run: uv run python backtest_smt.py"""
 import datetime
 import json
+import math as _math
 import os
 import sys
 from pathlib import Path
 
-import math as _math
-
 import pandas as pd
-
-
-class _BarRow:
-    """Lightweight bar data holder — replaces pd.Series from iterrows() in the session loop.
-
-    Supports bar["Open"], bar["High"], bar["Low"], bar["Close"] and bar.name (timestamp).
-    """
-    __slots__ = ("Open", "High", "Low", "Close", "name")
-
-    def __init__(self, o: float, h: float, l: float, c: float, ts) -> None:
-        self.Open  = o
-        self.High  = h
-        self.Low   = l
-        self.Close = c
-        self.name  = ts
-
-    def __getitem__(self, key: str) -> float:
-        return getattr(self, key)
 
 from hypothesis_smt import compute_hypothesis_context
 from strategy_smt import (
@@ -45,6 +26,24 @@ from strategy_smt import (
     DISPLACEMENT_STOP_MODE, MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT,
     FVG_LAYER_B_REQUIRES_HYPOTHESIS, STRUCTURAL_STOP_BUFFER_PTS,
 )
+
+
+class _BarRow:
+    """Lightweight bar data holder — replaces pd.Series from iterrows() in the session loop.
+
+    Supports bar["Open"], bar["High"], bar["Low"], bar["Close"] and bar.name (timestamp).
+    """
+    __slots__ = ("Open", "High", "Low", "Close", "name")
+
+    def __init__(self, o: float, h: float, l: float, c: float, ts) -> None:
+        self.Open  = o
+        self.High  = h
+        self.Low   = l
+        self.Close = c
+        self.name  = ts
+
+    def __getitem__(self, key: str) -> float:
+        return getattr(self, key)
 
 # Cache directory for futures parquet files.
 FUTURES_CACHE_DIR = os.environ.get(
@@ -120,7 +119,7 @@ MAX_CONTRACTS = 4
 def _build_trade_record(
     position: dict,
     exit_result: str,
-    exit_bar: pd.Series,
+    exit_bar: "pd.Series | _BarRow",
     pnl_per_point: float,
 ) -> "tuple[dict, float]":
     """Build the trade dict and compute PnL from a closed position."""
