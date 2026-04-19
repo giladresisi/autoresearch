@@ -153,11 +153,14 @@ def _assign_case(overnight: pd.DataFrame, pdh: float, pdl: float,
 
     near_far_extreme = False
     if rng > 0:
-        for _, row in overnight.iterrows():
-            if row["High"] > pd_midpoint and (pdh - row["High"]) <= 0.15 * rng:
+        _oh = overnight["High"].values
+        _ol = overnight["Low"].values
+        _thresh = 0.15 * rng
+        for _h, _l in zip(_oh, _ol):
+            if _h > pd_midpoint and (pdh - _h) <= _thresh:
                 near_far_extreme = True
                 break
-            if row["Low"] < pd_midpoint and (row["Low"] - pdl) <= 0.15 * rng:
+            if _l < pd_midpoint and (_l - pdl) <= _thresh:
                 near_far_extreme = True
                 break
 
@@ -256,20 +259,16 @@ def _compute_rule3(mnq_1m_df: pd.DataFrame, hist_mnq_df: pd.DataFrame,
         else:
             asia_high = asia_low = None
 
-        bars_list = list(day_bars.iterrows())
-        for i in range(1, len(bars_list)):
-            _, prev_bar = bars_list[i - 1]
-            _, curr_bar = bars_list[i]
-
+        _d_highs = day_bars["High"].values
+        _d_lows  = day_bars["Low"].values
+        for i in range(1, len(_d_highs)):
             if trend_direction == "bullish":
-                # Bearish wick against bullish trend
-                wick_level = float(curr_bar["Low"])
-                is_wick = wick_level < float(prev_bar["Low"])
+                wick_level = float(_d_lows[i])
+                is_wick = wick_level < float(_d_lows[i - 1])
                 direction_label = "bearish"
             else:
-                # Bullish wick against bearish trend
-                wick_level = float(curr_bar["High"])
-                is_wick = wick_level > float(prev_bar["High"])
+                wick_level = float(_d_highs[i])
+                is_wick = wick_level > float(_d_highs[i - 1])
                 direction_label = "bullish"
 
             if not is_wick:
@@ -353,8 +352,9 @@ def _compute_rule4(mnq_1m_df: pd.DataFrame, hist_mnq_df: pd.DataFrame,
     p900 = _price_at_900(mnq_1m_df, date)
 
     if not overnight_bars.empty:
-        for ts, row in overnight_bars.iterrows():
-            close = float(row["Close"])
+        for row in overnight_bars.itertuples():
+            close = float(row.Close)
+            ts = row.Index
             for level_name, level_val in extremes.items():
                 if level_val is None:
                     continue
