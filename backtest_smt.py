@@ -553,6 +553,26 @@ def _write_results_tsv(row: dict) -> None:
         w.writerow(row)
 
 
+def _write_trades_tsv(trades: list[dict]) -> None:
+    """Write all test-fold trade records to trades.tsv (tab-separated). Overwrites each run."""
+    import csv
+
+    if not trades:
+        return
+    fieldnames = [
+        "entry_date", "entry_time", "exit_time", "direction",
+        "entry_price", "exit_price", "tdo", "stop_price", "contracts",
+        "pnl", "exit_type", "divergence_bar", "entry_bar",
+        "stop_bar_wick_pts", "reentry_sequence", "prior_trade_bars_held",
+        "entry_bar_body_ratio", "smt_sweep_pts", "smt_miss_pts", "bars_since_divergence",
+    ]
+    with open("trades.tsv", "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")
+        w.writeheader()
+        w.writerows(trades)
+    print(f"Trades written -> trades.tsv ({len(trades)} records)")
+
+
 if __name__ == "__main__":
     dfs = load_futures_data()
     mnq_df = dfs["MNQ"]
@@ -573,6 +593,7 @@ if __name__ == "__main__":
 
     fold_test_pnls: list = []
     _fold_test_stats_list: list = []  # collect per-fold stats for TSV aggregates
+    _all_test_trades: list = []       # collect per-trade records for trades.tsv
 
     for _i in range(_effective_n_folds):
         _steps_back         = _effective_n_folds - 1 - _i
@@ -601,6 +622,7 @@ if __name__ == "__main__":
 
         fold_test_pnls.append((_fold_test_stats["total_pnl"], _fold_test_stats["total_trades"]))
         _fold_test_stats_list.append(_fold_test_stats)
+        _all_test_trades.extend(_fold_test_stats.get("trade_records", []))
 
     # R2: Exclude folds with < 3 test trades — sparse folds are noise-dominated
     _qualified = [(p, t) for p, t in fold_test_pnls if t >= 3]
@@ -649,3 +671,4 @@ if __name__ == "__main__":
         "avg_expectancy":   f"{_avg_exp:.2f}",
         "wl_ratio":         f"{_wl:.4f}",
     })
+    _write_trades_tsv(_all_test_trades)

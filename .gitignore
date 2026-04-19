@@ -19,8 +19,9 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 
-# Results file
+# Results and trade log files
 results.tsv
+trades.tsv
 
 # Harness upgrade reflections (per-worktree, untracked like results.tsv)
 harness_upgrade.md
