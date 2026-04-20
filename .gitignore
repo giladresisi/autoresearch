@@ -43,3 +43,4 @@ data/realtime/*.parquet
 
 # Agent format-patch archives (stored in .agents/ but not committed)
 .agents/*.patch
+trades.tsv
