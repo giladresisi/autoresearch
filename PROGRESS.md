@@ -111,6 +111,26 @@ trades=45, pnl=$4,798, wr=62.2%, avg_rr=6.56, max_dd=$95
 - `analyze_hypothesis.py` — new script (mirrors `analyze_gaps.py` pattern)
 - `tests/test_hypothesis_analysis.py` — new test file (30 tests)
 
+### Round 3 Experiment Results
+
+1-fold fast backtest (2026-01-19 → 2026-04-12). Full analysis in `.agents/experiment-log.md`.
+
+| Run | Config | Trades | PnL | WR | avg_rr | max_dd | Verdict |
+|-----|--------|--------|-----|----|--------|--------|---------|
+| A-1 | HYPOTHESIS_FILTER=True | 19 | $4,124 | 84.2% | 4.40 | $65 | NEUTRAL — fewer trades, similar WR, loses $1.5K; hypothesis doesn't add signal value |
+| B-1 | SMT_OPTIONAL=True + MIN_DISPLACEMENT_PTS=10 + DISPLACEMENT_STOP_MODE=True | 47 | $7,148 | 76.6% | 5.52 | $120 | APPROVE — +$2K, +7 displacement trades, structurally correct stop |
+| C-1 | PARTIAL_EXIT_LEVEL_RATIO=0.33 | 53 | $5,939 | 81.1% | 5.34 | $65 | APPROVE — tighter partial exit, same WR, lower drawdown |
+| C-2 | PARTIAL_EXIT_LEVEL_RATIO=0.25 | 53 | $5,462 | 81.1% | 4.65 | $65 | REJECT — further tightening degrades RR with no WR benefit |
+| D-1 | FVG_LAYER_B_REQUIRES_HYPOTHESIS=True + score≥2 | 35 | $3,843 | 80.0% | 5.05 | $125 | DEFERRED — layer_b_triggers=0; gating has no effect this regime |
+| Combined | SMT_OPTIONAL + DISPLACEMENT_STOP_MODE + PARTIAL_EXIT_LEVEL_RATIO=0.33 | 40 | $5,513 | 82.5% | 5.36 | $65 | CONFIRMED baseline |
+
+**New approved defaults (set in `strategy_smt.py`):**
+- `SMT_OPTIONAL = True`
+- `DISPLACEMENT_STOP_MODE = True`
+- `PARTIAL_EXIT_LEVEL_RATIO = 0.33`
+
+**New effective baseline entering optimization run:** trades=40, pnl=$5,513, wr=82.5%, avg_rr=5.36, max_dd=$65
+
 ---
 
 ## Feature: Session Hypothesis System
@@ -1096,40 +1116,28 @@ To start an experiment session: open a Claude Code conversation in this repo and
 **Date scoped**: 2026-04-02
 **Plan File**: .agents/plans/smt-optimization-run-setup.md
 
-### Baseline (2-year Databento run, default params)
+### Baseline (post-Plans-1-2-3 defaults, 1-fold fast test)
 
 - **Data**: `data/historical/MNQ.parquet` + `data/historical/MES.parquet`
   - Source: Databento GLBX.MDP3, MNQ.v.0 / MES.v.0 (volume-roll continuous), `stype_in="continuous"`
   - Range: 2024-01-01 → 2026-04-01 (~158,847 1m bars resampled to 5m)
 - **Walk-forward**: 6 folds × 60 business-day test windows (≈ 3 months each)
-- **Total test trades**: 105
+- **1-fold fast test result** (2026-01-19 → 2026-04-12): trades=40, pnl=$5,513, wr=82.5%, avg_rr=5.36, max_dd=$65
 
-| Fold | Test Trades | Win Rate | Test PnL | Sharpe | avg_rr |
-|------|------------|----------|----------|--------|--------|
-| 1    | 17         | 52.9%    | $806     | 2.75   | 2.24   |
-| 2    | 17         | 52.9%    | $1,225   | 3.41   | 3.50   |
-| 3    | 18         | 55.6%    | $938     | 3.62   | 2.72   |
-| 4    | 18         | 50.0%    | $677     | 2.76   | 2.50   |
-| 5    | 16         | 50.0%    | $640     | 2.22   | 2.05   |
-| 6    | 19         | 52.6%    | $697     | 2.26   | 1.80   |
-
-- **Mean test PnL/fold**: $830
-- **Worst-fold test PnL** (`min_test_pnl`): $640 (fold 5)
-- **W/L ratio**: 55W / 50L = 1.10 across all test folds
-- **Expectation per trade**: ~$41–48 (formula: `W% × avg_rr × R − L% × R`, R=$50)
-- **Stop-hit rate**: ~50% (stops slightly outnumber TPs across all folds)
+> **Pre-Plans-1-3 baseline** (historical reference): 105 trades, 52% WR, $830/fold — replaced by the post-plan defaults above.
 
 ### Parameters at baseline
 
 ```python
 SESSION_START          = "09:00"
 SESSION_END            = "10:30"
-MIN_BARS_BEFORE_SIGNAL = 5          # 25 min warm-up at 5m
-TRADE_DIRECTION        = "both"
-TDO_VALIDITY_CHECK     = True
+HIDDEN_SMT_ENABLED     = True       # Plan 1 approved
+PARTIAL_EXIT_ENABLED   = True       # Plan 2 approved
+PARTIAL_EXIT_FRACTION  = 0.33
+SMT_OPTIONAL           = True       # Plan 3 approved
+DISPLACEMENT_STOP_MODE = True       # Plan 3 approved
+PARTIAL_EXIT_LEVEL_RATIO = 0.33     # Plan 3 approved
 MIN_STOP_POINTS        = 5.0
-LONG_STOP_RATIO        = 0.45       # → theoretical RR ~2.22
-SHORT_STOP_RATIO       = 0.45
 ```
 
 ### Proposed tweaks for next run (priority order)
