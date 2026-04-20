@@ -12,6 +12,9 @@ from pathlib import Path
 import json
 import time
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import pandas as pd
 from ib_insync import IB, Future, util
 
@@ -149,7 +152,7 @@ def _format_exit_line(
 
 def _format_stop_moved_line(ts: pd.Timestamp, reason: str, new_stop: float, old_stop: float) -> str:
     """Human-readable stop-mutation log line."""
-    direction = "→" if new_stop != old_stop else "="
+    direction = "->" if new_stop != old_stop else "="
     return (
         f"[{ts.strftime('%H:%M:%S')}] STOP_MOVE {reason:<10} | "
         f"stop {old_stop:.2f} {direction} {new_stop:.2f}"

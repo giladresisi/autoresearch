@@ -918,7 +918,7 @@ Respond with valid JSON matching this schema exactly:
         if expected:
             print(f"           Expected: {expected}", flush=True)
         if levels:
-            print(f"           Levels: {' → '.join(str(l) for l in levels)}", flush=True)
+            print(f"           Levels: {' -> '.join(str(l) for l in levels)}", flush=True)
 
     def _print_evidence(self, ts: pd.Timestamp, finding: dict) -> None:
         cls = finding["classification"]
@@ -932,6 +932,6 @@ Respond with valid JSON matching this schema exactly:
         bias   = revision.get("direction_bias", "?")
         conf   = revision.get("confidence", "?")
         reason = revision.get("revision_reason", "")
-        print(f"[{ts.strftime('%H:%M:%S')}] HYPOTHESIS REVISED → {bias} ({conf} confidence)", flush=True)
+        print(f"[{ts.strftime('%H:%M:%S')}] HYPOTHESIS REVISED -> {bias} ({conf} confidence)", flush=True)
         if reason:
             print(f"           {reason}", flush=True)
