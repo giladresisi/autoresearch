@@ -1116,28 +1116,44 @@ To start an experiment session: open a Claude Code conversation in this repo and
 **Date scoped**: 2026-04-02
 **Plan File**: .agents/plans/smt-optimization-run-setup.md
 
-### Baseline (post-Plans-1-2-3 defaults, 1-fold fast test)
+### Baseline (post-Plans-1-2-3 defaults, full 6-fold run 2024-09-01 → 2026-03-20)
 
 - **Data**: `data/historical/MNQ.parquet` + `data/historical/MES.parquet`
   - Source: Databento GLBX.MDP3, MNQ.v.0 / MES.v.0 (volume-roll continuous), `stype_in="continuous"`
-  - Range: 2024-01-01 → 2026-04-01 (~158,847 1m bars resampled to 5m)
-- **Walk-forward**: 6 folds × 60 business-day test windows (≈ 3 months each)
-- **1-fold fast test result** (2026-01-19 → 2026-04-12): trades=40, pnl=$5,513, wr=82.5%, avg_rr=5.36, max_dd=$65
+- **Walk-forward**: 6 folds × 60 business-day test windows
 
-> **Pre-Plans-1-3 baseline** (historical reference): 105 trades, 52% WR, $830/fold — replaced by the post-plan defaults above.
+| Fold | Test Trades | Win Rate | Test PnL | avg_rr |
+|------|------------|----------|----------|--------|
+| 1    | 92         | 65.2%    | $2,677   | 2.05   |
+| 2    | 111        | 84.7%    | $7,679   | 2.03   |
+| 3    | 100        | 75.0%    | $4,832   | 2.45   |
+| 4    | 119        | 69.8%    | $4,263   | 2.14   |
+| 5    | 77         | 76.6%    | $3,398   | 1.37   |
+| 6    | 70         | 90.0%    | $5,731   | 2.92   |
+
+- **mean_test_pnl**: $4,763 | **min_test_pnl**: $2,677 | **Total test trades**: 569
+- **Avg WR**: 76.9% | **Avg avg_rr**: 2.17
+
+> **Pre-Plans-1-3 historical reference**: 105 trades, 52% WR, $830/fold.
 
 ### Parameters at baseline
 
 ```python
 SESSION_START          = "09:00"
-SESSION_END            = "10:30"
+SESSION_END            = "13:30"
+MAX_TDO_DISTANCE_PTS   = 15.0
+MAX_REENTRY_COUNT      = 1
+SIGNAL_BLACKOUT_START  = "11:00"
+SIGNAL_BLACKOUT_END    = "13:00"
+SHORT_STOP_RATIO       = 0.35
+LONG_STOP_RATIO        = 0.35
+TRAIL_AFTER_TP_PTS     = 1.0
 HIDDEN_SMT_ENABLED     = True       # Plan 1 approved
 PARTIAL_EXIT_ENABLED   = True       # Plan 2 approved
 PARTIAL_EXIT_FRACTION  = 0.33
 SMT_OPTIONAL           = True       # Plan 3 approved
 DISPLACEMENT_STOP_MODE = True       # Plan 3 approved
 PARTIAL_EXIT_LEVEL_RATIO = 0.33     # Plan 3 approved
-MIN_STOP_POINTS        = 5.0
 ```
 
 ### Proposed tweaks for next run (priority order)
