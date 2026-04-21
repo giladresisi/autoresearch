@@ -14,6 +14,7 @@ dependencies = [
     "pandas>=2.3.3",
     "psutil>=5.9",
     "pyarrow>=21.0.0",
+    "python-dotenv>=1.2.2",
     "yfinance",
 ]
 
