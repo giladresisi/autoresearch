@@ -1,6 +1,24 @@
 # PROGRESS
 
 
+## Feature: SMT Solutions A–E — Signal Quality & State Machine Hardening
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-solutions-a-e.md`
+**Prerequisite**: `smt-structural-and-fixes.md` complete. Executes BEFORE `smt-solution-f-draw-on-liquidity.md`.
+
+Implements five signal quality improvements: divergence scoring (A), hypothesis replacement with score decay (B), inverted stop guard (C), hypothesis invalidation threshold (D), early bar skip (E). All new constants default to off/permissive so baseline output is unchanged at defaults.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-solutions-a-e.md`
+- All 4 waves completed; 20 new tests passing (+20 from 603 baseline to 623); 0 regressions
+- One plan divergence: Wave 3 signal_smt.py state machine not verbatim-mirrored (inapplicable — `_process_scanning` is stateless; Solution C inherited via `_build_signal_from_bar`)
+- Test results: 77 passed (unit), 27 passed (integration), 623 full suite; 8 pre-existing failures unchanged
+- Alignment score: 9/10
+
+---
+
 ## Feature: SMT Structural Fixes & Signal Quality
 
 **Status**: ✅ Complete

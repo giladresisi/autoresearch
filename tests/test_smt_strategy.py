@@ -1132,3 +1132,177 @@ def test_manage_position_does_not_return_exit_market_by_default():
            "stop_price": 20150.0, "entry_time": pd.Timestamp("2025-01-02 09:05", tz="America/New_York")}
     bar = pd.Series({"Open": 20080.0, "High": 20090.0, "Low": 20070.0, "Close": 20080.0})
     assert train_smt.manage_position(pos, bar) != "exit_market"
+
+
+# ── Tests for divergence_score() ─────────────────────────────────────────────
+
+def test_divergence_score_displacement_uses_body():
+    from strategy_smt import divergence_score
+    score = divergence_score(sweep_pts=0, miss_pts=0, body_pts=20.0,
+                              smt_type="displacement",
+                              hypothesis_direction=None, div_direction="long")
+    assert score == 1.0  # 20/20 = 1.0
+
+
+def test_divergence_score_wick_weights():
+    from strategy_smt import divergence_score
+    # miss_pts carries 50% weight; with only miss_pts set: score = 0 * 0.25 + 1.0 * 0.50 + 0 * 0.25
+    score = divergence_score(sweep_pts=0, miss_pts=25.0, body_pts=0,
+                              smt_type="wick",
+                              hypothesis_direction=None, div_direction="long")
+    assert abs(score - 0.50) < 1e-9
+
+
+def test_divergence_score_hypothesis_bonus_aligned():
+    from strategy_smt import divergence_score
+    # Base with all components maxed = 1.0; bonus would push to 1.2 but capped at 1.0
+    score = divergence_score(sweep_pts=5.0, miss_pts=25.0, body_pts=15.0,
+                              smt_type="wick",
+                              hypothesis_direction="long", div_direction="long")
+    assert score == 1.0
+
+
+def test_divergence_score_hypothesis_no_penalty_counter():
+    from strategy_smt import divergence_score
+    # Counter-hypothesis does NOT reduce base score
+    score_no_hyp = divergence_score(0, 0, 0, "wick", None, "long")
+    score_counter = divergence_score(0, 0, 0, "wick", "short", "long")
+    assert score_no_hyp == score_counter
+
+
+def test_effective_div_score_time_decay():
+    from strategy_smt import _effective_div_score, DIV_SCORE_DECAY_FACTOR, DIV_SCORE_DECAY_INTERVAL
+    # After exactly DIV_SCORE_DECAY_INTERVAL bars: time_decay = FACTOR^1
+    # No adverse move (price unchanged: discovery_price == current bar mid)
+    score = _effective_div_score(
+        score=1.0,
+        discovery_bar_idx=0,
+        current_bar_idx=DIV_SCORE_DECAY_INTERVAL,
+        discovery_price=100.0,
+        direction="long",
+        current_bar_high=100.0,
+        current_bar_low=100.0,   # no adverse move for long
+    )
+    expected_time_decay = DIV_SCORE_DECAY_FACTOR ** 1
+    expected_adverse_decay = 1.0  # no adverse move
+    assert abs(score - expected_time_decay * expected_adverse_decay) < 1e-9
+
+
+def test_effective_div_score_adverse_move_decay():
+    from strategy_smt import _effective_div_score, ADVERSE_MOVE_FULL_DECAY_PTS, ADVERSE_MOVE_MIN_DECAY
+    # Full adverse move (150 pts for long: price went down 150 pts against long)
+    score = _effective_div_score(
+        score=1.0,
+        discovery_bar_idx=0,
+        current_bar_idx=0,
+        discovery_price=200.0,
+        direction="long",
+        current_bar_high=350.0,
+        current_bar_low=50.0,  # adverse = 200 - 50 = 150 = ADVERSE_MOVE_FULL_DECAY_PTS
+    )
+    # move_decay = max(ADVERSE_MOVE_MIN_DECAY, 1 - 150/150) = max(0.1, 0) = 0.1
+    assert abs(score - ADVERSE_MOVE_MIN_DECAY) < 1e-9
+
+
+def test_effective_div_score_combined_decay():
+    from strategy_smt import _effective_div_score, DIV_SCORE_DECAY_FACTOR, DIV_SCORE_DECAY_INTERVAL, ADVERSE_MOVE_MIN_DECAY
+    bars = DIV_SCORE_DECAY_INTERVAL
+    score = _effective_div_score(
+        score=1.0,
+        discovery_bar_idx=0,
+        current_bar_idx=bars,
+        discovery_price=200.0,
+        direction="long",
+        current_bar_high=350.0,
+        current_bar_low=50.0,  # adverse = 150 = full decay
+    )
+    time_decay = DIV_SCORE_DECAY_FACTOR ** 1
+    move_decay = ADVERSE_MOVE_MIN_DECAY
+    assert abs(score - time_decay * move_decay) < 1e-9
+
+
+def test_inverted_stop_guard_long_rejected():
+    """Long signal where stop >= entry must return None."""
+    from strategy_smt import _build_signal_from_bar
+    import strategy_smt as sm
+    bar = pd.Series({"Open": 99.0, "High": 103.0, "Low": 99.0, "Close": 100.0}, name=pd.Timestamp("2024-01-02 10:00", tz="America/New_York"))
+    ts = bar.name
+    orig_sm = sm.STRUCTURAL_STOP_MODE
+    orig_buff = sm.STRUCTURAL_STOP_BUFFER_PTS
+    orig_tdo_check = sm.TDO_VALIDITY_CHECK
+    orig_min_stop = sm.MIN_STOP_POINTS
+    try:
+        sm.STRUCTURAL_STOP_MODE = True
+        sm.STRUCTURAL_STOP_BUFFER_PTS = 0.0
+        sm.TDO_VALIDITY_CHECK = False
+        sm.MIN_STOP_POINTS = 0
+        # divergence_bar_low = 101.0 > entry = 100.0 → stop = 101.0 - 0 = 101.0 >= 100 → rejected
+        result = _build_signal_from_bar(
+            bar, ts, "long", 110.0,
+            divergence_bar_high=105.0,
+            divergence_bar_low=101.0,
+        )
+        assert result is None, f"Expected None for inverted stop, got {result}"
+    finally:
+        sm.STRUCTURAL_STOP_MODE = orig_sm
+        sm.STRUCTURAL_STOP_BUFFER_PTS = orig_buff
+        sm.TDO_VALIDITY_CHECK = orig_tdo_check
+        sm.MIN_STOP_POINTS = orig_min_stop
+
+
+def test_inverted_stop_guard_short_rejected():
+    """Short signal where stop <= entry must return None."""
+    from strategy_smt import _build_signal_from_bar
+    import strategy_smt as sm
+    bar = pd.Series({"Open": 101.0, "High": 103.0, "Low": 99.0, "Close": 100.0}, name=pd.Timestamp("2024-01-02 10:00", tz="America/New_York"))
+    ts = bar.name
+    orig_sm = sm.STRUCTURAL_STOP_MODE
+    orig_buff = sm.STRUCTURAL_STOP_BUFFER_PTS
+    orig_tdo = sm.TDO_VALIDITY_CHECK
+    orig_min_stop = sm.MIN_STOP_POINTS
+    try:
+        sm.STRUCTURAL_STOP_MODE = True
+        sm.STRUCTURAL_STOP_BUFFER_PTS = 0.0
+        sm.TDO_VALIDITY_CHECK = False
+        sm.MIN_STOP_POINTS = 0
+        # Short: stop = divergence_bar_high + buffer = 99.0 + 0 = 99.0 <= entry=100.0 → rejected
+        result = _build_signal_from_bar(
+            bar, ts, "short", 90.0,
+            divergence_bar_high=99.0,
+            divergence_bar_low=97.0,
+        )
+        assert result is None, f"Expected None for inverted short stop, got {result}"
+    finally:
+        sm.STRUCTURAL_STOP_MODE = orig_sm
+        sm.STRUCTURAL_STOP_BUFFER_PTS = orig_buff
+        sm.TDO_VALIDITY_CHECK = orig_tdo
+        sm.MIN_STOP_POINTS = orig_min_stop
+
+
+def test_inverted_stop_guard_valid_passes():
+    """Valid stop on correct side does not trigger guard."""
+    from strategy_smt import _build_signal_from_bar
+    import strategy_smt as sm
+    bar = pd.Series({"Open": 101.0, "High": 103.0, "Low": 99.0, "Close": 100.0}, name=pd.Timestamp("2024-01-02 10:00", tz="America/New_York"))
+    ts = bar.name
+    orig_sm = sm.STRUCTURAL_STOP_MODE
+    orig_buff = sm.STRUCTURAL_STOP_BUFFER_PTS
+    orig_tdo = sm.TDO_VALIDITY_CHECK
+    orig_min_stop = sm.MIN_STOP_POINTS
+    try:
+        sm.STRUCTURAL_STOP_MODE = True
+        sm.STRUCTURAL_STOP_BUFFER_PTS = 0.0
+        sm.TDO_VALIDITY_CHECK = False
+        sm.MIN_STOP_POINTS = 0
+        # Long: divergence_bar_low = 97.0 < entry=100.0 → stop = 97.0 - 0 = 97.0 < entry → valid
+        result = _build_signal_from_bar(
+            bar, ts, "long", 110.0,
+            divergence_bar_high=103.0,
+            divergence_bar_low=97.0,
+        )
+        assert result is not None, "Expected a valid signal dict"
+    finally:
+        sm.STRUCTURAL_STOP_MODE = orig_sm
+        sm.STRUCTURAL_STOP_BUFFER_PTS = orig_buff
+        sm.TDO_VALIDITY_CHECK = orig_tdo
+        sm.MIN_STOP_POINTS = orig_min_stop

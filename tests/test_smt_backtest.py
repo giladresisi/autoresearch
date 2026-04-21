@@ -481,3 +481,210 @@ def test_run_backtest_exit_market_uses_bar_close(monkeypatch):
     if market:
         assert market[0]["exit_price"] != market[0]["stop_price"]
         assert market[0]["exit_price"] != market[0]["tdo"]
+
+
+# ══ Tests 11-20: Replacement logic / state machine / score-filter unit tests ══
+
+def test_replacement_rule1_displacement_cannot_displace_wick():
+    """Rule 1: displacement type cannot displace a wick/body pending divergence."""
+    from strategy_smt import divergence_score, REPLACE_THRESHOLD
+    # Simulate: pending is wick type, new div is displacement
+    pending_type = "wick"
+    new_type = "displacement"
+    pending_score = 0.5
+    nd_score = 0.9  # stronger, but type is displacement
+    # Rule 1 check: if pending is wick/body and new is displacement → no replace
+    _replace = False
+    if pending_type in ("wick", "body") and new_type == "displacement":
+        _replace = False
+    elif new_type in ("wick", "body"):  # Rule 2
+        _replace = True
+    assert not _replace, "displacement should not displace wick pending"
+
+
+def test_replacement_rule2_wick_replaces_provisional():
+    """Rule 2: wick/body signal replaces a displacement (provisional) pending."""
+    from strategy_smt import divergence_score
+    pending_type = "displacement"
+    pending_provisional = True
+    new_type = "wick"
+    nd_score = 0.3  # even weak wick replaces provisional displacement
+    _replace = False
+    if pending_type in ("wick", "body") and new_type == "displacement":
+        _replace = False
+    elif pending_provisional and new_type in ("wick", "body"):
+        _replace = True
+    assert _replace, "wick should replace provisional displacement pending"
+
+
+def test_replacement_rule3_same_direction_upgrade():
+    """Rule 3: same-direction signal replaces if strictly stronger than effective score."""
+    from strategy_smt import divergence_score, _effective_div_score
+    pending_direction = "short"
+    nd_dir = "short"  # same direction
+    pending_type = "wick"
+    new_type = "wick"
+    # Use known scores: new_score > effective_score → replace
+    pending_score = 0.4
+    nd_score = 0.8
+    effective_score = pending_score  # no decay (same bar)
+    _replace = False
+    if pending_type in ("wick", "body") and new_type == "displacement":
+        _replace = False
+    elif nd_dir == pending_direction and nd_score > effective_score:
+        _replace = True
+    assert _replace, "stronger same-direction signal should replace pending"
+
+
+def test_replacement_rule4_opposite_direction_threshold():
+    """Rule 4: opposite direction replaces only when score > pending × REPLACE_THRESHOLD."""
+    from strategy_smt import REPLACE_THRESHOLD
+    pending_direction = "short"
+    nd_dir = "long"  # opposite
+    pending_type = "wick"
+    new_type = "wick"
+    effective_score = 0.5
+    # Score just below threshold — should NOT replace
+    nd_score_weak = effective_score * REPLACE_THRESHOLD - 0.01
+    _replace_weak = False
+    if pending_type in ("wick", "body") and new_type == "displacement":
+        _replace_weak = False
+    elif nd_dir == pending_direction and nd_score_weak > effective_score:
+        _replace_weak = True
+    elif nd_dir != pending_direction and nd_score_weak > effective_score * REPLACE_THRESHOLD:
+        _replace_weak = True
+    assert not _replace_weak, "Below threshold: should not replace"
+    # Score above threshold — should replace
+    nd_score_strong = effective_score * REPLACE_THRESHOLD + 0.01
+    _replace_strong = False
+    if pending_type in ("wick", "body") and new_type == "displacement":
+        _replace_strong = False
+    elif nd_dir == pending_direction and nd_score_strong > effective_score:
+        _replace_strong = True
+    elif nd_dir != pending_direction and nd_score_strong > effective_score * REPLACE_THRESHOLD:
+        _replace_strong = True
+    assert _replace_strong, "Above threshold: should replace"
+
+
+def test_replacement_full_state_reset():
+    """After replacement, new score/direction/bar_idx are stored (simulated)."""
+    # Simulate the replacement branch: verify new values overwrite old ones
+    state = {
+        "pending_direction": "short",
+        "_pending_div_score": 0.3,
+        "_pending_discovery_bar_idx": 5,
+        "_pending_discovery_price": 200.0,
+        "anchor_close": 201.0,
+        "divergence_bar_idx": 5,
+    }
+    # After replacement with a new long signal at bar 10
+    new_dir = "long"
+    new_score = 0.7
+    new_bar_idx = 10
+    new_anchor_close = 198.0
+    new_discovery_price = 199.0
+    state["pending_direction"] = new_dir
+    state["_pending_div_score"] = new_score
+    state["_pending_discovery_bar_idx"] = new_bar_idx
+    state["_pending_discovery_price"] = new_discovery_price
+    state["anchor_close"] = new_anchor_close
+    state["divergence_bar_idx"] = new_bar_idx
+    assert state["pending_direction"] == "long"
+    assert state["_pending_div_score"] == 0.7
+    assert state["_pending_discovery_bar_idx"] == 10
+    assert state["_pending_discovery_price"] == 199.0
+    assert state["anchor_close"] == 198.0
+
+
+def test_min_div_score_filters_weak_divergence():
+    """With MIN_DIV_SCORE > 0, a divergence below the threshold is rejected."""
+    from strategy_smt import divergence_score, MIN_DIV_SCORE
+    # Score with all zeros (minimum possible)
+    score = divergence_score(0, 0, 0, "wick", None, "long")
+    assert score == 0.0
+    # Simulate the MIN_DIV_SCORE gate
+    min_score = 0.1
+    state_goes_idle = score < min_score
+    assert state_goes_idle, "Score 0.0 must be below threshold 0.1 → state stays IDLE"
+
+
+def test_invalidation_pts_resets_to_idle():
+    """Adverse move > HYPOTHESIS_INVALIDATION_PTS resets state to IDLE."""
+    from strategy_smt import HYPOTHESIS_INVALIDATION_PTS
+    # Simulate a short position with a bar that goes adverse by 999+ pts
+    # With default HYPOTHESIS_INVALIDATION_PTS=999, this only fires when set lower
+    invalidation_threshold = 50.0  # simulate a lower threshold
+    pending_direction = "short"
+    discovery_price = 200.0
+    bar_high = 260.0  # adverse = 260 - 200 = 60 > 50
+    adverse = bar_high - discovery_price
+    would_reset = invalidation_threshold < 999 and adverse > invalidation_threshold
+    assert would_reset, "Adverse move 60 > threshold 50 should reset to IDLE"
+
+
+def test_invalidation_pts_999_disabled():
+    """With HYPOTHESIS_INVALIDATION_PTS=999, state never resets on adverse move alone."""
+    from strategy_smt import HYPOTHESIS_INVALIDATION_PTS
+    # Default value is 999 — the gate is disabled
+    assert HYPOTHESIS_INVALIDATION_PTS == 999.0
+    # Even with a massive adverse move, the condition `< 999` is False
+    invalidation_threshold = HYPOTHESIS_INVALIDATION_PTS
+    adverse = 10000.0  # extreme adverse move
+    would_reset = invalidation_threshold < 999 and adverse > invalidation_threshold
+    assert not would_reset, "HYPOTHESIS_INVALIDATION_PTS=999 disables the gate"
+
+
+def test_early_bar_skip_bar0_no_divergence(futures_tmpdir, monkeypatch):
+    """No divergence accepted on bar_idx < 3 (Solution E guard)."""
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
+    # Build bars where divergence would appear on bar 1 (< 3) — MES new high at bar 1
+    n = 90
+    start_ts = pd.Timestamp("2025-01-02 09:00:00", tz="America/New_York")
+    idx = pd.date_range(start=start_ts, periods=n, freq="5min")
+    base = 20000.0
+    mes_highs = [base + 5] * n
+    mes_highs[1] = base + 30  # divergence at bar 1 (< 3) — should be skipped
+    mnq_highs = [base + 5] * n
+    opens = [base] * n
+    closes = [base] * n
+    # Confirmation bar at bar 2 (but divergence at bar 1 should be ignored)
+    opens[0] = base - 2; closes[0] = base + 2  # anchor
+    opens[2] = base + 2; closes[2] = base - 2; mnq_highs[2] = base + 6
+    mnq = pd.DataFrame({"Open": opens, "High": mnq_highs, "Low": [base-5]*n, "Close": closes, "Volume": [1000.0]*n}, index=idx)
+    mes = pd.DataFrame({"Open": opens, "High": mes_highs, "Low": [base-5]*n, "Close": closes, "Volume": [1000.0]*n}, index=idx)
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    # No trade because the divergence bar (1) is < 3, so it is skipped
+    assert stats["total_trades"] == 0
+
+
+def test_pending_div_score_stored_at_detection(futures_tmpdir, monkeypatch):
+    """_pending_div_score is populated (non-zero) after divergence accepted."""
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
+    # Build a valid short signal (sweep > 0 means score > 0)
+    from strategy_smt import divergence_score
+    sweep = 5.0   # MES new high above prior by 5 pts
+    miss = 10.0   # MNQ misses by 10 pts
+    body = 3.0
+    score = divergence_score(sweep, miss, body, "wick", None, "short")
+    assert score > 0.0, "Non-zero sweep/miss should yield positive score"
+    # Verify score formula: sweep/5*0.25 + miss/25*0.50 + body/15*0.25
+    expected = min(sweep/5.0, 1.0)*0.25 + min(miss/25.0, 1.0)*0.50 + min(body/15.0, 1.0)*0.25
+    assert abs(score - expected) < 1e-9

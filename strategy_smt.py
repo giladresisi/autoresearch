@@ -292,6 +292,21 @@ EXPANDED_REFERENCE_LEVELS: bool = False
 HTF_VISIBILITY_REQUIRED: bool = False
 HTF_PERIODS_MINUTES: list = [15, 30, 60, 240]
 
+# ── Solution A+B: Divergence quality scoring and hypothesis replacement ────────
+MIN_DIV_SCORE:             float = 0.0    # minimum score to accept divergence; 0 = off
+REPLACE_THRESHOLD:         float = 1.5    # new_score must be > pending_effective * this to replace
+
+# Score decay — pending hypothesis grows easier to replace the longer it is held
+DIV_SCORE_DECAY_FACTOR:    float = 0.90   # per-interval multiplier; 1.0 = disabled
+DIV_SCORE_DECAY_INTERVAL:  int   = 10     # bars between each decay step
+
+# Adverse-move decay — additional decay based on how far price moved against hypothesis
+ADVERSE_MOVE_FULL_DECAY_PTS:  float = 150.0  # pts of adverse move that drives score to floor; 999 = disabled
+ADVERSE_MOVE_MIN_DECAY:       float = 0.10   # floor for the adverse-move decay multiplier
+
+# ── Solution D: Hard invalidation threshold ───────────────────────────────────
+HYPOTHESIS_INVALIDATION_PTS:  float = 999.0  # abandon hypothesis after this many pts adverse; 999 = disabled
+
 
 # ── Module-level bar data ─────────────────────────────────────────────────────
 _mnq_bars: "pd.DataFrame | None" = None
@@ -360,6 +375,53 @@ def load_futures_data() -> dict[str, pd.DataFrame]:
         result["MES"] = result["MES"].loc[common_idx]
     return result
 
+
+
+def divergence_score(
+    sweep_pts: float,
+    miss_pts: float,
+    body_pts: float,
+    smt_type: str,
+    hypothesis_direction: "str | None",
+    div_direction: str,
+) -> float:
+    """Score a divergence [0, 1]. Higher = stronger, harder to displace."""
+    if smt_type == "displacement":
+        base = min(body_pts / 20.0, 1.0)
+    else:
+        base = (
+            min(sweep_pts / 5.0,  1.0) * 0.25
+            + min(miss_pts  / 25.0, 1.0) * 0.50
+            + min(body_pts  / 15.0, 1.0) * 0.25
+        )
+    if hypothesis_direction not in (None, "neutral"):
+        if div_direction == hypothesis_direction:
+            base = min(base + 0.20, 1.0)
+    return base
+
+
+def _effective_div_score(
+    score: float,
+    discovery_bar_idx: int,
+    current_bar_idx: int,
+    discovery_price: float,
+    direction: str,
+    current_bar_high: float,
+    current_bar_low: float,
+) -> float:
+    """Apply time and adverse-move decay to a pending divergence score."""
+    bars_held  = current_bar_idx - discovery_bar_idx
+    time_decay = DIV_SCORE_DECAY_FACTOR ** (bars_held // max(DIV_SCORE_DECAY_INTERVAL, 1))
+
+    if direction == "short":
+        adverse = max(0.0, current_bar_high - discovery_price)
+    else:
+        adverse = max(0.0, discovery_price - current_bar_low)
+    move_decay = max(
+        ADVERSE_MOVE_MIN_DECAY,
+        1.0 - adverse / max(ADVERSE_MOVE_FULL_DECAY_PTS, 1.0),
+    )
+    return score * time_decay * move_decay
 
 
 def detect_smt_divergence(
@@ -1212,6 +1274,12 @@ def _build_signal_from_bar(
             stop_price = entry_price + stop_ratio * distance_to_tdo
         else:
             stop_price = entry_price - stop_ratio * distance_to_tdo
+
+    # Solution C: reject inverted stops — stop on wrong side of entry guarantees bar-1 exit
+    if direction == "long"  and stop_price >= entry_price:
+        return None
+    if direction == "short" and stop_price <= entry_price:
+        return None
 
     if MIN_STOP_POINTS > 0 and abs(entry_price - stop_price) < MIN_STOP_POINTS:
         return None

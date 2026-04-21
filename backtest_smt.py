@@ -29,6 +29,11 @@ from strategy_smt import (
     EXPANDED_REFERENCE_LEVELS, HTF_VISIBILITY_REQUIRED, HTF_PERIODS_MINUTES,
     HIDDEN_SMT_ENABLED, _compute_ref_levels, _check_smt_against_ref,
     ALWAYS_REQUIRE_CONFIRMATION,
+    divergence_score, _effective_div_score,
+    MIN_DIV_SCORE, REPLACE_THRESHOLD,
+    DIV_SCORE_DECAY_FACTOR, DIV_SCORE_DECAY_INTERVAL,
+    ADVERSE_MOVE_FULL_DECAY_PTS, ADVERSE_MOVE_MIN_DECAY,
+    HYPOTHESIS_INVALIDATION_PTS,
 )
 
 
@@ -339,6 +344,10 @@ def run_backtest(
             _pending_fvg_zone               = None
             _pending_fvg_detected           = False
             _pending_displacement_bar_extreme = None
+            _pending_div_score           = 0.0
+            _pending_div_provisional     = False
+            _pending_discovery_bar_idx   = -1
+            _pending_discovery_price     = 0.0
 
         min_signal_ts = mnq_session.index[0] + pd.Timedelta(minutes=MIN_BARS_BEFORE_SIGNAL)
 
@@ -593,6 +602,74 @@ def run_backtest(
                     t = ts.strftime("%H:%M")
                     if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
                         continue
+                # Replacement check: scan for a new divergence that could displace the pending hypothesis
+                _new_div = detect_smt_divergence(
+                    mes_reset,
+                    mnq_reset,
+                    bar_idx,
+                    0,
+                    _cached=_smt_cache,
+                )
+                if _new_div is not None:
+                    _nd_dir, _nd_sweep, _nd_miss, _nd_type, _nd_defended = _new_div
+                    _nd_body = abs(float(bar["Close"]) - float(bar["Open"]))
+                    _nd_score = divergence_score(
+                        _nd_sweep, _nd_miss, _nd_body,
+                        _nd_type, _session_hyp_dir, _nd_dir,
+                    )
+                    if _nd_score >= MIN_DIV_SCORE:
+                        _eff = _effective_div_score(
+                            _pending_div_score, _pending_discovery_bar_idx, bar_idx,
+                            _pending_discovery_price, pending_direction,
+                            float(bar["High"]), float(bar["Low"]),
+                        )
+                        _replace = False
+                        # Rule 1: displacement can never displace wick/body
+                        if _pending_smt_type in ("wick", "body") and _nd_type == "displacement":
+                            _replace = False
+                        # Rule 2: any wick/body replaces a provisional (displacement) pending
+                        elif _pending_div_provisional and _nd_type in ("wick", "body"):
+                            _replace = True
+                        # Rule 3: same direction — upgrade if strictly stronger
+                        elif _nd_dir == pending_direction and _nd_score > _eff:
+                            _replace = True
+                        # Rule 4: opposite direction — replace if significantly stronger
+                        elif _nd_dir != pending_direction and _nd_score > _eff * REPLACE_THRESHOLD:
+                            _replace = True
+
+                        if _replace:
+                            _new_ac = find_anchor_close(mnq_reset, bar_idx, _nd_dir)
+                            if _new_ac is not None:
+                                pending_direction           = _nd_dir
+                                anchor_close                = _new_ac
+                                pending_smt_sweep           = _nd_sweep
+                                pending_smt_miss            = _nd_miss
+                                _pending_div_bar_high       = float(bar["High"])
+                                _pending_div_bar_low        = float(bar["Low"])
+                                _pending_smt_defended       = _nd_defended
+                                _pending_smt_type           = _nd_type
+                                _pending_div_score          = _nd_score
+                                _pending_div_provisional    = (_nd_type == "displacement")
+                                _pending_discovery_bar_idx  = bar_idx
+                                _pending_discovery_price    = float(bar["Close"])
+                                divergence_bar_idx          = bar_idx
+                                _pending_displacement_bar_extreme = (
+                                    float(bar["Low"]) if _nd_dir == "long" else float(bar["High"])
+                                ) if _nd_type == "displacement" else None
+                                _new_fvg = detect_fvg(mnq_reset, bar_idx, _nd_dir)
+                                _pending_fvg_zone     = _new_fvg
+                                _pending_fvg_detected = _new_fvg is not None
+                # Solution D: abandon hypothesis if adverse move exceeds threshold
+                if HYPOTHESIS_INVALIDATION_PTS < 999:
+                    if pending_direction == "short":
+                        _adverse = float(bar["High"]) - _pending_discovery_price
+                    else:
+                        _adverse = _pending_discovery_price - float(bar["Low"])
+                    if _adverse > HYPOTHESIS_INVALIDATION_PTS:
+                        state = "IDLE"
+                        pending_direction = None
+                        anchor_close = None
+                        continue
                 if anchor_close is not None and is_confirmation_bar(bar, anchor_close, pending_direction):
                     # ALWAYS_REQUIRE_CONFIRMATION: bar must break the divergence bar's body boundary.
                     if ALWAYS_REQUIRE_CONFIRMATION and divergence_bar_idx >= 0:
@@ -795,6 +872,10 @@ def run_backtest(
                     if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
                         continue
 
+                # Solution E: skip first 3 bars — session extremes undefined with <4 data points
+                if bar_idx < 3:
+                    continue
+
                 _smt = detect_smt_divergence(
                     mes_reset,
                     mnq_reset,
@@ -932,6 +1013,21 @@ def run_backtest(
                 _pending_fvg_detected           = _raw_fvg_present
                 _pending_displacement_bar_extreme = _displacement_bar_extreme
                 state                           = "WAITING_FOR_ENTRY"
+                _pending_div_score = divergence_score(
+                    _smt_sweep, _smt_miss,
+                    body_pts=abs(float(_mnq_closes[bar_idx]) - float(_mnq_opens[bar_idx])),
+                    smt_type=_smt_type,
+                    hypothesis_direction=_session_hyp_dir,
+                    div_direction=direction,
+                )
+                if MIN_DIV_SCORE > 0 and _pending_div_score < MIN_DIV_SCORE:
+                    state = "IDLE"
+                    pending_direction = None
+                    anchor_close = None
+                    continue
+                _pending_div_provisional     = (_smt_type == "displacement")
+                _pending_discovery_bar_idx   = bar_idx
+                _pending_discovery_price     = float(_mnq_closes[bar_idx])
 
         # End of session: force-close any position still open at session boundary.
         if state == "IN_TRADE" and position is not None:
