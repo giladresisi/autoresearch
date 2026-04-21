@@ -119,6 +119,10 @@ RISK_PER_TRADE = 50.0
 # 0.001-point stop that implies 50 000 contracts). Do NOT change during optimization.
 MAX_CONTRACTS = 4
 
+# Slippage applied to market orders (session_close, exit_time, exit_market) when
+# PESSIMISTIC_FILLS is True. 5 pts is intentionally pessimistic for MNQ in RTH.
+MARKET_ORDER_SLIPPAGE_PTS: float = 5.0
+
 
 def _build_trade_record(
     position: dict,
@@ -129,12 +133,21 @@ def _build_trade_record(
     """Build the trade dict and compute PnL from a closed position."""
     direction_sign = 1 if position["direction"] == "long" else -1
     if exit_result == "exit_tp":
+        # Limit order — fills at the defined take-profit price; no slippage on liquid NQ
         exit_price = position["take_profit"]
     elif exit_result == "exit_stop":
+        # Stop-limit order — fills at the defined stop price; no slippage on liquid NQ
         exit_price = position["stop_price"]
     else:
-        # covers exit_time, session_close, exit_market, end_of_backtest, exit_invalidation_*
-        exit_price = float(exit_bar["Close"])
+        # Market orders (exit_time, session_close, exit_market, end_of_backtest,
+        # exit_invalidation_*) — simulate with bar mid +/- slippage
+        mid = (float(exit_bar["High"]) + float(exit_bar["Low"])) / 2.0
+        if PESSIMISTIC_FILLS:
+            slip = MARKET_ORDER_SLIPPAGE_PTS
+            direction_sign = 1 if position["direction"] == "long" else -1
+            exit_price = mid - direction_sign * slip
+        else:
+            exit_price = mid
 
     pnl = (
         direction_sign
