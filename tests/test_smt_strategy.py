@@ -893,6 +893,10 @@ def _patch_reentry_guards(monkeypatch, reentry_max_move=50.0, breakeven_pct=0.0)
     monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
     monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
     monkeypatch.setattr(_strat, "BREAKEVEN_TRIGGER_PCT", breakeven_pct)
+    # Disable midnight-open TP override so compute_tdo=19900 is used as TDO.
+    # Must patch both modules since backtest_smt holds its own bound name.
+    monkeypatch.setattr(_strat, "MIDNIGHT_OPEN_AS_TP", False)
+    monkeypatch.setattr(_bk, "MIDNIGHT_OPEN_AS_TP", False)
     # Harness-side
     monkeypatch.setattr(_bk, "REENTRY_MAX_MOVE_PTS", reentry_max_move)
     monkeypatch.setattr(_bk, "MAX_REENTRY_COUNT", 999)  # disable cap; initial entry also uses reentry_count

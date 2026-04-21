@@ -17,7 +17,7 @@ from strategy_smt import (
     detect_fvg, detect_displacement, detect_smt_fill,
     SESSION_START, SESSION_END, TRADE_DIRECTION, ALLOWED_WEEKDAYS,
     SIGNAL_BLACKOUT_START, SIGNAL_BLACKOUT_END, MIN_BARS_BEFORE_SIGNAL,
-    REENTRY_MAX_MOVE_PTS, MIN_PRIOR_TRADE_BARS_HELD, MAX_HOLD_BARS,
+    REENTRY_MAX_MOVE_PTS, REENTRY_MAX_MOVE_RATIO, MIN_PRIOR_TRADE_BARS_HELD, MAX_HOLD_BARS,
     MAX_REENTRY_COUNT,
     MIDNIGHT_OPEN_AS_TP, OVERNIGHT_SWEEP_REQUIRED, OVERNIGHT_RANGE_AS_TP,
     SILVER_BULLET_WINDOW_ONLY, SILVER_BULLET_START, SILVER_BULLET_END,
@@ -25,6 +25,10 @@ from strategy_smt import (
     SMT_OPTIONAL, SMT_FILL_ENABLED, PARTIAL_EXIT_ENABLED, PARTIAL_EXIT_FRACTION,
     DISPLACEMENT_STOP_MODE, MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT,
     FVG_LAYER_B_REQUIRES_HYPOTHESIS, STRUCTURAL_STOP_BUFFER_PTS,
+    PESSIMISTIC_FILLS,
+    EXPANDED_REFERENCE_LEVELS, HTF_VISIBILITY_REQUIRED, HTF_PERIODS_MINUTES,
+    HIDDEN_SMT_ENABLED, _compute_ref_levels, _check_smt_against_ref,
+    ALWAYS_REQUIRE_CONFIRMATION,
 )
 
 
@@ -183,6 +187,9 @@ def _build_trade_record(
             else -1
         ),
         "smt_type": position.get("smt_type", "wick"),
+        # Plan 4 fields
+        "displacement_body_pts": position.get("displacement_body_pts"),
+        "pessimistic_fills": PESSIMISTIC_FILLS,
     }
     return trade, pnl
 
@@ -336,6 +343,61 @@ def run_backtest(
         _mes_closes = mes_session["Close"].values
         _mnq_idx    = mnq_session.index
 
+        # Prev-day slices for EXPANDED_REFERENCE_LEVELS
+        _prev_day = day - pd.Timedelta(days=1) if hasattr(day, "days") else \
+            day.__class__.fromordinal(day.toordinal() - 1)
+        _prev_day_date = _prev_day if hasattr(_prev_day, "weekday") else _prev_day
+        _prev_day_mnq = mnq_df[_mnq_dates == _prev_day_date] if EXPANDED_REFERENCE_LEVELS else None
+        _prev_day_mes = mes_df[mes_df.index.date == _prev_day_date] if EXPANDED_REFERENCE_LEVELS else None
+        # Prev session: same day's session bars (already computed each day) - use prev trading day
+        _prev_ses_mnq: "pd.DataFrame | None" = None
+        _prev_ses_mes: "pd.DataFrame | None" = None
+        if EXPANDED_REFERENCE_LEVELS and _prev_day_mnq is not None and not _prev_day_mnq.empty:
+            _ses_start_prev = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
+            _ses_end_prev   = pd.Timestamp(f"2000-01-01 {SESSION_END}").time()
+            _prev_ses_mask  = (
+                (_prev_day_mnq.index.time >= _ses_start_prev)
+                & (_prev_day_mnq.index.time <= _ses_end_prev)
+            )
+            _prev_ses_mnq = _prev_day_mnq[_prev_ses_mask]
+            _prev_ses_mes = _prev_day_mes[
+                (_prev_day_mes.index.time >= _ses_start_prev)
+                & (_prev_day_mes.index.time <= _ses_end_prev)
+            ] if _prev_day_mes is not None and not _prev_day_mes.empty else None
+
+        # Reference level cache for EXPANDED_REFERENCE_LEVELS
+        _bt_ref_lvls: dict = {}
+        if EXPANDED_REFERENCE_LEVELS:
+            # Current calendar week bars (Mon–current day) for week H/L reference level.
+            import datetime as _dt
+            _week_start = day - _dt.timedelta(days=day.weekday())
+            _week_mnq = mnq_df[(_mnq_dates >= _week_start) & (_mnq_dates < day)] \
+                if _week_start < day else None
+            _week_mes = mes_df[
+                (mes_df.index.date >= _week_start) & (mes_df.index.date < day)
+            ] if _week_start < day else None
+            _bt_ref_lvls = _compute_ref_levels(
+                _prev_day_mnq, _prev_day_mes, _prev_ses_mnq, _prev_ses_mes,
+                _week_mnq, _week_mes,
+            )
+
+        # HTF state for HTF_VISIBILITY_REQUIRED (same pattern as screen_session)
+        _bt_htf_state: dict = {}
+        if HTF_VISIBILITY_REQUIRED:
+            import math as _math_htf
+            for _T in HTF_PERIODS_MINUTES:
+                _bt_htf_state[_T] = {
+                    "pstart": None,
+                    "c_mes_h": float("nan"), "c_mes_l": float("nan"),
+                    "c_mnq_h": float("nan"), "c_mnq_l": float("nan"),
+                    "c_mes_ch": float("nan"), "c_mes_cl": float("nan"),
+                    "c_mnq_ch": float("nan"), "c_mnq_cl": float("nan"),
+                    "p_mes_h": None, "p_mes_l": None,
+                    "p_mnq_h": None, "p_mnq_l": None,
+                    "p_mes_ch": None, "p_mes_cl": None,
+                    "p_mnq_ch": None, "p_mnq_cl": None,
+                }
+
         # Running session extremes — updated at start of each bar for bars [0..bar_idx-1]
         # Initialized to nan so bar 0 comparisons behave identically to empty-slice .max()/.min()
         _ses_mes_h  = _ses_mes_l  = float("nan")
@@ -377,6 +439,37 @@ def run_backtest(
                 "mnq_ch": _ses_mnq_ch, "mnq_cl": _ses_mnq_cl,
             }
 
+            # HTF period extreme update for HTF_VISIBILITY_REQUIRED
+            if HTF_VISIBILITY_REQUIRED and _bt_htf_state:
+                _ts_ns = _mnq_idx[bar_idx].value
+                for _T, _hs in _bt_htf_state.items():
+                    _period_ns = _T * 60 * 10**9
+                    _pstart = (_ts_ns // _period_ns) * _period_ns
+                    if _hs["pstart"] != _pstart:
+                        if _hs["pstart"] is not None and not _math.isnan(_hs["c_mes_h"]):
+                            _hs["p_mes_h"]  = _hs["c_mes_h"];  _hs["p_mes_l"]  = _hs["c_mes_l"]
+                            _hs["p_mnq_h"]  = _hs["c_mnq_h"];  _hs["p_mnq_l"]  = _hs["c_mnq_l"]
+                            _hs["p_mes_ch"] = _hs["c_mes_ch"]; _hs["p_mes_cl"] = _hs["c_mes_cl"]
+                            _hs["p_mnq_ch"] = _hs["c_mnq_ch"]; _hs["p_mnq_cl"] = _hs["c_mnq_cl"]
+                        _hs["pstart"] = _pstart
+                        _hs["c_mes_h"] = float(_mes_highs[bar_idx])
+                        _hs["c_mes_l"] = float(_mes_lows[bar_idx])
+                        _hs["c_mnq_h"] = float(_mnq_highs[bar_idx])
+                        _hs["c_mnq_l"] = float(_mnq_lows[bar_idx])
+                        _hs["c_mes_ch"] = float(_mes_closes[bar_idx])
+                        _hs["c_mes_cl"] = float(_mes_closes[bar_idx])
+                        _hs["c_mnq_ch"] = float(_mnq_closes[bar_idx])
+                        _hs["c_mnq_cl"] = float(_mnq_closes[bar_idx])
+                    else:
+                        _hs["c_mes_h"]  = max(_hs["c_mes_h"],  float(_mes_highs[bar_idx]))
+                        _hs["c_mes_l"]  = min(_hs["c_mes_l"],  float(_mes_lows[bar_idx]))
+                        _hs["c_mnq_h"]  = max(_hs["c_mnq_h"],  float(_mnq_highs[bar_idx]))
+                        _hs["c_mnq_l"]  = min(_hs["c_mnq_l"],  float(_mnq_lows[bar_idx]))
+                        _hs["c_mes_ch"] = max(_hs["c_mes_ch"], float(_mes_closes[bar_idx]))
+                        _hs["c_mes_cl"] = min(_hs["c_mes_cl"], float(_mes_closes[bar_idx]))
+                        _hs["c_mnq_ch"] = max(_hs["c_mnq_ch"], float(_mnq_closes[bar_idx]))
+                        _hs["c_mnq_cl"] = min(_hs["c_mnq_cl"], float(_mnq_closes[bar_idx]))
+
             bar = _BarRow(
                 float(_mnq_opens[bar_idx]),
                 float(_mnq_highs[bar_idx]),
@@ -408,6 +501,10 @@ def run_backtest(
                         max(1, int(position["contracts"] * PARTIAL_EXIT_FRACTION)),
                         position["contracts"] - 1,
                     )
+                    if partial_contracts < 1:
+                        # Single-contract position: partial is impossible; skip silently.
+                        # partial_done is already True so this branch won't re-trigger.
+                        continue
                     partial_exit_price = position.get("partial_price", float(bar["Close"]))
                     pnl_per_contract = (
                         (partial_exit_price - position["entry_price"]) if position["direction"] == "long"
@@ -445,7 +542,7 @@ def run_backtest(
                     prior_trade_bars_held = entry_bar_count  # capture before reset
 
                     # Determine re-entry eligibility after a stop-out or time exit.
-                    if REENTRY_MAX_MOVE_PTS > 0 and result in ("exit_stop", "exit_time"):
+                    if result in ("exit_stop", "exit_time"):
                         if position.get("breakeven_active"):
                             # Stop was at breakeven — price never really moved; always eligible.
                             state = "REENTRY_ELIGIBLE"
@@ -455,7 +552,13 @@ def run_backtest(
                                 move = position["entry_price"] - float(bar["Close"])
                             else:
                                 move = float(bar["Close"]) - position["entry_price"]
-                            if move < REENTRY_MAX_MOVE_PTS:
+                            # REENTRY_MAX_MOVE_PTS=0 is the disable sentinel — skip entirely.
+                            # When enabled, combined threshold = min(absolute pts, ratio-based).
+                            # REENTRY_MAX_MOVE_PTS=999 defers to ratio only.
+                            entry_to_tp = abs(position["entry_price"] - position["tdo"])
+                            ratio_threshold = REENTRY_MAX_MOVE_RATIO * entry_to_tp if REENTRY_MAX_MOVE_RATIO < 99 else 9999
+                            move_threshold = min(REENTRY_MAX_MOVE_PTS, ratio_threshold) if REENTRY_MAX_MOVE_PTS > 0 else -1
+                            if REENTRY_MAX_MOVE_PTS > 0 and move < move_threshold:
                                 # Require prior trade to have lasted long enough (diagnostic filter; default 0 = disabled)
                                 if MIN_PRIOR_TRADE_BARS_HELD > 0 and prior_trade_bars_held < MIN_PRIOR_TRADE_BARS_HELD:
                                     state = "IDLE"
@@ -478,6 +581,15 @@ def run_backtest(
                     if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
                         continue
                 if anchor_close is not None and is_confirmation_bar(bar, anchor_close, pending_direction):
+                    # ALWAYS_REQUIRE_CONFIRMATION: bar must break the divergence bar's body boundary.
+                    if ALWAYS_REQUIRE_CONFIRMATION and divergence_bar_idx >= 0:
+                        _div = mnq_reset.iloc[divergence_bar_idx]
+                        _dbh = max(float(_div["Open"]), float(_div["Close"]))
+                        _dbl = min(float(_div["Open"]), float(_div["Close"]))
+                        if pending_direction == "short" and float(bar["Close"]) >= _dbl:
+                            continue
+                        if pending_direction == "long" and float(bar["Close"]) <= _dbh:
+                            continue
                     # TP selection: overnight range → midnight open → TDO.
                     if OVERNIGHT_RANGE_AS_TP:
                         _raw = _day_overnight.get("overnight_low" if pending_direction == "short" else "overnight_high")
@@ -570,6 +682,15 @@ def run_backtest(
                     if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
                         continue
                 if anchor_close is not None and is_confirmation_bar(bar, anchor_close, pending_direction):
+                    # ALWAYS_REQUIRE_CONFIRMATION: bar must break the divergence bar's body boundary.
+                    if ALWAYS_REQUIRE_CONFIRMATION and divergence_bar_idx >= 0:
+                        _div = mnq_reset.iloc[divergence_bar_idx]
+                        _dbh = max(float(_div["Open"]), float(_div["Close"]))
+                        _dbl = min(float(_div["Open"]), float(_div["Close"]))
+                        if pending_direction == "short" and float(bar["Close"]) >= _dbl:
+                            continue
+                        if pending_direction == "long" and float(bar["Close"]) <= _dbh:
+                            continue
                     # TP selection: overnight range → midnight open → TDO.
                     if OVERNIGHT_RANGE_AS_TP:
                         _raw = _day_overnight.get("overnight_low" if pending_direction == "short" else "overnight_high")
@@ -669,6 +790,33 @@ def run_backtest(
                     _cached=_smt_cache,
                 )
 
+                # Expanded reference levels: check prev-day/prev-session extremes
+                if _smt is None and EXPANDED_REFERENCE_LEVELS and _bt_ref_lvls:
+                    _cur_mes_b = mes_reset.iloc[bar_idx]
+                    _cur_mnq_b = mnq_reset.iloc[bar_idx]
+                    _best_ref_bt = None
+                    for _rk in (
+                        ("prev_day_mes_high", "prev_day_mes_low", "prev_day_mnq_high", "prev_day_mnq_low", False),
+                        ("prev_session_mes_high", "prev_session_mes_low", "prev_session_mnq_high", "prev_session_mnq_low", False),
+                        ("week_mes_high", "week_mes_low", "week_mnq_high", "week_mnq_low", False),
+                        ("prev_day_mes_close_high", "prev_day_mes_close_low", "prev_day_mnq_close_high", "prev_day_mnq_close_low", True),
+                        ("prev_session_mes_close_high", "prev_session_mes_close_low", "prev_session_mnq_close_high", "prev_session_mnq_close_low", True),
+                        ("week_mes_close_high", "week_mes_close_low", "week_mnq_close_high", "week_mnq_close_low", True),
+                    ):
+                        _mh, _ml, _nh, _nl, _uc = _rk
+                        if _uc and not HIDDEN_SMT_ENABLED:
+                            continue
+                        _cand = _check_smt_against_ref(
+                            _cur_mes_b, _cur_mnq_b,
+                            _bt_ref_lvls.get(_mh), _bt_ref_lvls.get(_ml),
+                            _bt_ref_lvls.get(_nh), _bt_ref_lvls.get(_nl),
+                            use_close=_uc,
+                        )
+                        if _cand is not None and (_best_ref_bt is None or _cand[1] > _best_ref_bt[1]):
+                            _best_ref_bt = _cand
+                    if _best_ref_bt is not None:
+                        _smt = _best_ref_bt
+
                 _smt_fill = None
                 _displacement_dir = None
                 if _smt is None:
@@ -694,6 +842,25 @@ def run_backtest(
 
                 if TRADE_DIRECTION != "both" and direction != TRADE_DIRECTION:
                     continue
+
+                # HTF visibility filter: skip if signal not visible on any configured HTF period
+                if HTF_VISIBILITY_REQUIRED and _bt_htf_state:
+                    _htf_ok = False
+                    for _T, _hs in _bt_htf_state.items():
+                        if _hs["p_mes_h"] is None:
+                            continue
+                        if direction == "short":
+                            if _hs["c_mes_h"] > _hs["p_mes_h"] and _hs["c_mnq_h"] <= _hs["p_mnq_h"]:
+                                _htf_ok = True; break
+                            if HIDDEN_SMT_ENABLED and _hs["c_mes_ch"] > _hs["p_mes_ch"] and _hs["c_mnq_ch"] <= _hs["p_mnq_ch"]:
+                                _htf_ok = True; break
+                        else:
+                            if _hs["c_mes_l"] < _hs["p_mes_l"] and _hs["c_mnq_l"] >= _hs["p_mnq_l"]:
+                                _htf_ok = True; break
+                            if HIDDEN_SMT_ENABLED and _hs["c_mes_cl"] < _hs["p_mes_cl"] and _hs["c_mnq_cl"] >= _hs["p_mnq_cl"]:
+                                _htf_ok = True; break
+                    if not _htf_ok:
+                        continue
 
                 # Stash displacement bar extreme for stop override (DISPLACEMENT_STOP_MODE)
                 _displacement_bar_extreme = None
@@ -918,6 +1085,8 @@ def _write_trades_tsv(trades: list[dict]) -> None:
         "fvg_high", "fvg_low", "layer_b_entered", "layer_b_entry_price", "layer_b_contracts",
         "hypothesis_direction", "pd_range_case", "pd_range_bias",
         "week_zone", "day_zone", "trend_direction", "hypothesis_score", "fvg_detected",
+        # Plan 4 columns
+        "displacement_body_pts", "pessimistic_fills",
     ]
     with open("trades.tsv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t",

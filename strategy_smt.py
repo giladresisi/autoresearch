@@ -63,12 +63,19 @@ MNQ_PNL_PER_POINT = 2.0
 # Optimizer search space: [0.0, 5.0, 10.0, 20.0, 30.0].
 REENTRY_MAX_MOVE_PTS = 999.0
 
+# Ratio-based reentry invalidation: replaces the hard REENTRY_MAX_MOVE_PTS sentinel.
+# move_threshold = REENTRY_MAX_MOVE_RATIO * |entry - TDO|. Scale-invariant alternative.
+# 0.5 = "price moved more than 50% toward TP before stopping out" → disqualify re-entry.
+# Set >= 99 to effectively disable (9999-pt threshold).
+# Optimizer search space: [0.25, 0.5, 0.75, 99].
+REENTRY_MAX_MOVE_RATIO: float = 0.5
+
 # Pre-TDO progress-based stop lock-in (replaces BREAKEVEN_TRIGGER_PTS).
 # Fraction of |entry − TDO| price must travel before stop is moved to entry (breakeven).
 # Scale-invariant: 0.65 means "65% of the way to TDO regardless of trade size."
 # 0.0 = disable (stop frozen pre-TDO, matching current behaviour).
 # Optimizer search space: [0.0, 0.50, 0.60, 0.65, 0.70, 0.75].
-BREAKEVEN_TRIGGER_PCT = 0.60
+BREAKEVEN_TRIGGER_PCT = 0.0
 
 # Maximum bars a trade may remain open after entry (0 = disabled).
 # Applies per trade, including re-entries. Exits as "exit_time" at bar N+MAX_HOLD_BARS.
@@ -90,8 +97,8 @@ ALLOWED_WEEKDAYS = frozenset({0, 1, 2, 3, 4})
 # Both values are "HH:MM" strings in the session's local timezone; "" disables the filter.
 # Blocks 11:00–13:30: 11:xx dead zone + 13:xx drag (only negative-PnL slot, Finding 3).
 # Optimizer search space: ["", "11:00"] for START; ["", "13:00", "13:30"] for END.
-SIGNAL_BLACKOUT_START = ""
-SIGNAL_BLACKOUT_END   = ""
+SIGNAL_BLACKOUT_START = "11:00"
+SIGNAL_BLACKOUT_END   = "13:00"
 
 # Trail-after-TP: instead of exiting at TDO, convert TP into a trailing stop.
 # When price first crosses TDO the position stays open; the stop is then trailed
@@ -105,13 +112,16 @@ TRAIL_AFTER_TP_PTS = 1.0
 # even. The quality degradation at high re-entry counts is driven by TDO distance, not depth.
 # Optimizer search space: [15, 20, 25, 30, 40, 999].
 # Set 999.0 to disable (pass-through for all distances).
-MAX_TDO_DISTANCE_PTS = 999.0
+MAX_TDO_DISTANCE_PTS = 15.0
 
 # Maximum re-entries per session day.
 # At TDO<20 (with MAX_TDO_DISTANCE_PTS applied), even Seq#5+ has EP=$32, so this filter
 # is less important than expected. Most useful at TDO 20-50 where Seq#5+ declines to EP=$6.
 # Optimizer search space: [1, 2, 3, 4, 999]. Default 999 = disabled.
-MAX_REENTRY_COUNT = 999
+# Semantic note: in signal_smt this counts repeated divergence SIGNALS on the same level;
+# in backtest_smt it counts ENTRY attempts. The two counts can differ when a signal fires
+# but fails a filter (TDO_VALIDITY_CHECK, MIN_STOP_POINTS, etc.) before entry.
+MAX_REENTRY_COUNT = 1
 
 # Minimum bars the prior trade must have survived before re-entry is allowed.
 # DIAGNOSTIC ONLY — do not include in optimization runs. Extended diagnostics showed:
@@ -134,8 +144,17 @@ MIN_SMT_MISS_PTS = 0.0
 
 # Midnight open as TP target (replaces 9:30 RTH open / TDO).
 # ICT canonical intraday reversion target = first 1m bar at/after 00:00 ET.
+# Default True: pre-9:30 signals no longer reference a future (post-signal) price.
 # Optimizer search space: [True, False]
-MIDNIGHT_OPEN_AS_TP: bool = False
+MIDNIGHT_OPEN_AS_TP: bool = True
+
+# Pessimistic fill simulation: use bar extreme as exit price instead of exact level.
+# Stop-outs fill at bar Low (long) / bar High (short); TPs fill at bar High (long) / bar Low (short).
+# Note: TP fill at bar High (long) / bar Low (short) is technically optimistic — it assumes
+# price reaches the bar extreme in our favor. Kept for consistency with stop fill behavior.
+# Default True so optimizer always sees consistent, realistic fills.
+# Optimizer search space: [True, False]
+PESSIMISTIC_FILLS: bool = True
 
 # Structural stop placement: stop beyond the divergence bar's wick extreme.
 # When False: ratio × |entry - TP| (current behavior).
@@ -172,7 +191,7 @@ SILVER_BULLET_END   = "10:10"
 # MNQ close does not). Only fires if wick SMT did not fire on the same bar.
 # Optimizer search space: [True, False]
 # Approved in Round 1 experiments: +30.6% PnL, lower drawdown, same signal quality.
-HIDDEN_SMT_ENABLED: bool = False
+HIDDEN_SMT_ENABLED: bool = True
 
 # Two-layer position model: enter Layer A at LAYER_A_FRACTION of max contracts,
 # add Layer B when price retraces into the FVG zone.
@@ -194,7 +213,7 @@ FVG_LAYER_B_TRIGGER: bool = False
 # even when no wick-based SMT exists. Fires only when detect_smt_divergence returns None.
 # Optimizer search space: SMT_OPTIONAL [True, False]; MIN_DISPLACEMENT_PTS [8.0, 10.0, 15.0]
 SMT_OPTIONAL: bool = True
-MIN_DISPLACEMENT_PTS: float = 8.0
+MIN_DISPLACEMENT_PTS: float = 10.0
 
 # Partial exit at first draw on liquidity.
 # PARTIAL_EXIT_FRACTION: fraction of open contracts to close at the partial level.
@@ -244,6 +263,34 @@ PARTIAL_EXIT_LEVEL_RATIO: float = 0.33
 #   Requires TWO_LAYER_POSITION=True; has no effect when FVG is disabled.
 #   Optimizer search space: [True, False]
 FVG_LAYER_B_REQUIRES_HYPOTHESIS: bool = False
+
+# ── Structural signal quality (Plan 4) ───────────────────────────────────────
+
+# Symmetric SMT: also detect divergences where MNQ leads and MES fails (not only MES-leads).
+# smt_type = "wick_sym" for MNQ-leads signals.
+# Optimizer search space: [True, False]
+SYMMETRIC_SMT_ENABLED: bool = False
+
+# Displacement body size filter: minimum |Close - Open| of the displacement bar.
+# 0.0 = disabled. displacement_body_pts is always recorded as a diagnostic field.
+# Optimizer search space: [0.0, 8.0, 12.0, 15.0]
+MIN_DISPLACEMENT_BODY_PTS: float = 0.0
+
+# Always-on confirmation candle: require the confirmation bar to break the displacement
+# bar's body boundary even for non-delayed entries.
+# Optimizer search space: [True, False]
+ALWAYS_REQUIRE_CONFIRMATION: bool = False
+
+# Expanded reference levels: check sweeps against quarterly sessions, calendar day,
+# and current calendar week H/L in addition to the current session extreme.
+# Optimizer search space: [True, False]
+EXPANDED_REFERENCE_LEVELS: bool = False
+
+# HTF visibility filter: suppress signals not visible on any of the configured HTF periods.
+# HTF_PERIODS_MINUTES: list of timeframe widths (minutes) to check.
+# Optimizer search space: HTF_VISIBILITY_REQUIRED [True, False]
+HTF_VISIBILITY_REQUIRED: bool = False
+HTF_PERIODS_MINUTES: list = [15, 30, 60, 240]
 
 
 # ── Module-level bar data ─────────────────────────────────────────────────────
@@ -386,6 +433,25 @@ def detect_smt_divergence(
         if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
             return None
         return ("long", smt_sweep, mnq_miss, "wick", mnq_session_low)
+
+    # Symmetric SMT: MNQ leads, MES fails (mirror of MES-leads logic above).
+    if SYMMETRIC_SMT_ENABLED:
+        if cur_mnq["High"] > mnq_session_high and cur_mes["High"] <= mes_session_high:
+            smt_sweep = cur_mnq["High"] - mnq_session_high
+            mnq_miss   = mnq_session_high - cur_mes["High"]
+            if MIN_SMT_SWEEP_PTS > 0 and smt_sweep < MIN_SMT_SWEEP_PTS:
+                return None
+            if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
+                return None
+            return ("short", smt_sweep, mnq_miss, "wick_sym", mes_session_high)
+        if cur_mnq["Low"] < mnq_session_low and cur_mes["Low"] >= mes_session_low:
+            smt_sweep = mnq_session_low - cur_mnq["Low"]
+            mnq_miss   = cur_mes["Low"] - mes_session_low
+            if MIN_SMT_SWEEP_PTS > 0 and smt_sweep < MIN_SMT_SWEEP_PTS:
+                return None
+            if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
+                return None
+            return ("long", smt_sweep, mnq_miss, "wick_sym", mes_session_low)
 
     # Hidden SMT: body/close-based divergence (fires only when wick SMT did not).
     # MES close makes new session extreme but MNQ close does not confirm.
@@ -581,6 +647,10 @@ def detect_displacement(
     body = abs(float(bar["Close"]) - float(bar["Open"]))
     if body < MIN_DISPLACEMENT_PTS:
         return False
+    # This check is only reachable when MIN_DISPLACEMENT_BODY_PTS > MIN_DISPLACEMENT_PTS;
+    # if body_pts ≤ displacement_pts the earlier check already returned False.
+    if MIN_DISPLACEMENT_BODY_PTS > 0 and body < MIN_DISPLACEMENT_BODY_PTS:
+        return False
     if direction == "long"  and bar["Close"] > bar["Open"]: return True
     if direction == "short" and bar["Close"] < bar["Open"]: return True
     return False
@@ -693,12 +763,124 @@ def is_confirmation_bar(
         return bar["Close"] > bar["Open"] and bar["Low"] < anchor_close
 
 
+def _quarterly_session_windows(date: "datetime.date") -> list:
+    """Return 4×6h quarterly session boundary tuples (start, end) as ET Timestamps for date.
+
+    Windows: Asia 18:00–00:00, London 00:00–06:00, NY Morning 06:00–12:00, NY Evening 12:00–18:00.
+    Asia window straddles midnight: start is prev calendar day 18:00, end is date 00:00.
+    """
+    tz = "America/New_York"
+    prev = date - datetime.timedelta(days=1)
+    return [
+        (pd.Timestamp(f"{prev} 18:00", tz=tz), pd.Timestamp(f"{date} 00:00", tz=tz)),
+        (pd.Timestamp(f"{date} 00:00",  tz=tz), pd.Timestamp(f"{date} 06:00", tz=tz)),
+        (pd.Timestamp(f"{date} 06:00",  tz=tz), pd.Timestamp(f"{date} 12:00", tz=tz)),
+        (pd.Timestamp(f"{date} 12:00",  tz=tz), pd.Timestamp(f"{date} 18:00", tz=tz)),
+    ]
+
+
+def _compute_ref_levels(
+    prev_day_mnq: "pd.DataFrame | None",
+    prev_day_mes: "pd.DataFrame | None",
+    prev_session_mnq: "pd.DataFrame | None",
+    prev_session_mes: "pd.DataFrame | None",
+    week_mnq: "pd.DataFrame | None",
+    week_mes: "pd.DataFrame | None",
+) -> dict:
+    """Pre-compute reference level cache from prior-day, prior-session, and week slices.
+
+    Returns a dict with high/low keys for each reference window (wick-based and close-based).
+    None values indicate unavailable data; callers skip the corresponding check.
+    """
+    def _hl(df, col_h="High", col_l="Low"):
+        if df is None or df.empty:
+            return None, None
+        return float(df[col_h].max()), float(df[col_l].min())
+
+    mnq_pd_h, mnq_pd_l = _hl(prev_day_mnq)
+    mes_pd_h, mes_pd_l = _hl(prev_day_mes)
+    mnq_ps_h, mnq_ps_l = _hl(prev_session_mnq)
+    mes_ps_h, mes_ps_l = _hl(prev_session_mes)
+    mnq_wk_h, mnq_wk_l = _hl(week_mnq)
+    mes_wk_h, mes_wk_l = _hl(week_mes)
+    # Close-based equivalents for hidden SMT
+    mnq_pd_ch, mnq_pd_cl = _hl(prev_day_mnq, "Close", "Close")
+    mes_pd_ch, mes_pd_cl = _hl(prev_day_mes, "Close", "Close")
+    mnq_ps_ch, mnq_ps_cl = _hl(prev_session_mnq, "Close", "Close")
+    mes_ps_ch, mes_ps_cl = _hl(prev_session_mes, "Close", "Close")
+    mnq_wk_ch, mnq_wk_cl = _hl(week_mnq, "Close", "Close")
+    mes_wk_ch, mes_wk_cl = _hl(week_mes, "Close", "Close")
+    return {
+        "prev_day_mnq_high": mnq_pd_h,   "prev_day_mnq_low": mnq_pd_l,
+        "prev_day_mes_high": mes_pd_h,   "prev_day_mes_low": mes_pd_l,
+        "prev_session_mnq_high": mnq_ps_h, "prev_session_mnq_low": mnq_ps_l,
+        "prev_session_mes_high": mes_ps_h, "prev_session_mes_low": mes_ps_l,
+        "week_mnq_high": mnq_wk_h,       "week_mnq_low": mnq_wk_l,
+        "week_mes_high": mes_wk_h,       "week_mes_low": mes_wk_l,
+        # Close-based for hidden SMT
+        "prev_day_mnq_close_high": mnq_pd_ch,   "prev_day_mnq_close_low": mnq_pd_cl,
+        "prev_day_mes_close_high": mes_pd_ch,   "prev_day_mes_close_low": mes_pd_cl,
+        "prev_session_mnq_close_high": mnq_ps_ch, "prev_session_mnq_close_low": mnq_ps_cl,
+        "prev_session_mes_close_high": mes_ps_ch, "prev_session_mes_close_low": mes_ps_cl,
+        "week_mnq_close_high": mnq_wk_ch, "week_mnq_close_low": mnq_wk_cl,
+        "week_mes_close_high": mes_wk_ch, "week_mes_close_low": mes_wk_cl,
+    }
+
+
+def _check_smt_against_ref(
+    cur_mes, cur_mnq,
+    ref_mes_high, ref_mes_low,
+    ref_mnq_high, ref_mnq_low,
+    use_close: bool = False,
+) -> "tuple[str, float, float, str, float] | None":
+    """Check MES-leads SMT divergence against a single reference level pair.
+
+    Returns (direction, sweep_pts, miss_pts, smt_type, smt_defended_level) or None.
+    use_close=True uses Close values (hidden SMT body/close check).
+    """
+    if ref_mes_high is None:
+        return None
+    if use_close:
+        cur_mes_h = float(cur_mes["Close"])
+        cur_mes_l = float(cur_mes["Close"])
+        cur_mnq_h = float(cur_mnq["Close"])
+        cur_mnq_l = float(cur_mnq["Close"])
+        smt_tag = "body"
+    else:
+        cur_mes_h = float(cur_mes["High"])
+        cur_mes_l = float(cur_mes["Low"])
+        cur_mnq_h = float(cur_mnq["High"])
+        cur_mnq_l = float(cur_mnq["Low"])
+        smt_tag = "wick"
+    if ref_mnq_high is not None and cur_mes_h > ref_mes_high and cur_mnq_h <= ref_mnq_high:
+        sweep = cur_mes_h - ref_mes_high
+        miss  = ref_mnq_high - cur_mnq_h
+        if MIN_SMT_SWEEP_PTS > 0 and sweep < MIN_SMT_SWEEP_PTS:
+            return None
+        if MIN_SMT_MISS_PTS > 0 and miss < MIN_SMT_MISS_PTS:
+            return None
+        return ("short", sweep, miss, smt_tag, ref_mnq_high)
+    if ref_mnq_low is not None and cur_mes_l < ref_mes_low and cur_mnq_l >= ref_mnq_low:
+        sweep = ref_mes_low - cur_mes_l
+        miss  = cur_mnq_l - ref_mnq_low
+        if MIN_SMT_SWEEP_PTS > 0 and sweep < MIN_SMT_SWEEP_PTS:
+            return None
+        if MIN_SMT_MISS_PTS > 0 and miss < MIN_SMT_MISS_PTS:
+            return None
+        return ("long", sweep, miss, smt_tag, ref_mnq_low)
+    return None
+
+
 def screen_session(
     mnq_bars: pd.DataFrame,
     mes_bars: pd.DataFrame,
     tdo: float,
     midnight_open=None,
     overnight_range=None,
+    prev_day_mes: "pd.DataFrame | None" = None,
+    prev_day_mnq: "pd.DataFrame | None" = None,
+    prev_session_mes: "pd.DataFrame | None" = None,
+    prev_session_mnq: "pd.DataFrame | None" = None,
 ) -> dict | None:
     """Session signal scanner — compatibility shim for signal_smt.py live trading.
 
@@ -729,6 +911,33 @@ def screen_session(
     _ses_mes_ch = _ses_mes_cl = float("nan")
     _ses_mnq_ch = _ses_mnq_cl = float("nan")
 
+    # Pre-compute reference levels for EXPANDED_REFERENCE_LEVELS check
+    _ref_lvls = {}
+    if EXPANDED_REFERENCE_LEVELS:
+        _ref_lvls = _compute_ref_levels(
+            prev_day_mnq, prev_day_mes, prev_session_mnq, prev_session_mes, None, None
+        )
+
+    # HTF state: per-period running extremes for HTF_VISIBILITY_REQUIRED
+    # Each entry: (period_start_ns, cur_mes_h, cur_mes_l, cur_mnq_h, cur_mnq_l,
+    #              cur_mes_ch, cur_mes_cl, cur_mnq_ch, cur_mnq_cl,
+    #              prev_mes_h, prev_mes_l, prev_mnq_h, prev_mnq_l,
+    #              prev_mes_ch, prev_mes_cl, prev_mnq_ch, prev_mnq_cl)
+    _htf_state: dict = {}
+    if HTF_VISIBILITY_REQUIRED:
+        for _T in HTF_PERIODS_MINUTES:
+            _htf_state[_T] = {
+                "pstart": None,
+                "c_mes_h": float("nan"), "c_mes_l": float("nan"),
+                "c_mnq_h": float("nan"), "c_mnq_l": float("nan"),
+                "c_mes_ch": float("nan"), "c_mes_cl": float("nan"),
+                "c_mnq_ch": float("nan"), "c_mnq_cl": float("nan"),
+                "p_mes_h": None, "p_mes_l": None,
+                "p_mnq_h": None, "p_mnq_l": None,
+                "p_mes_ch": None, "p_mes_cl": None,
+                "p_mnq_ch": None, "p_mnq_cl": None,
+            }
+
     for bar_idx in range(n_bars):
         # Update running extremes with previous bar — done at TOP so continue-statements
         # elsewhere in the loop body cannot skip the update.
@@ -749,6 +958,39 @@ def screen_session(
             _ses_mnq_ch = _v if _math.isnan(_ses_mnq_ch) else max(_ses_mnq_ch, _v)
             _ses_mnq_cl = _v if _math.isnan(_ses_mnq_cl) else min(_ses_mnq_cl, _v)
 
+        # HTF period extreme update — include current bar in running extreme
+        if HTF_VISIBILITY_REQUIRED:
+            ts_bar = mnq_bars.index[bar_idx]
+            ts_ns  = ts_bar.value  # nanoseconds since epoch
+            for _T, _hs in _htf_state.items():
+                _period_ns = _T * 60 * 10**9
+                _pstart = (ts_ns // _period_ns) * _period_ns
+                if _hs["pstart"] != _pstart:
+                    # Period boundary crossed — snapshot prior period
+                    if _hs["pstart"] is not None and not _math.isnan(_hs["c_mes_h"]):
+                        _hs["p_mes_h"]  = _hs["c_mes_h"];  _hs["p_mes_l"]  = _hs["c_mes_l"]
+                        _hs["p_mnq_h"]  = _hs["c_mnq_h"];  _hs["p_mnq_l"]  = _hs["c_mnq_l"]
+                        _hs["p_mes_ch"] = _hs["c_mes_ch"]; _hs["p_mes_cl"] = _hs["c_mes_cl"]
+                        _hs["p_mnq_ch"] = _hs["c_mnq_ch"]; _hs["p_mnq_cl"] = _hs["c_mnq_cl"]
+                    _hs["pstart"] = _pstart
+                    _hs["c_mes_h"] = float(_mes_h_arr[bar_idx])
+                    _hs["c_mes_l"] = float(_mes_l_arr[bar_idx])
+                    _hs["c_mnq_h"] = float(_mnq_h_arr[bar_idx])
+                    _hs["c_mnq_l"] = float(_mnq_l_arr[bar_idx])
+                    _hs["c_mes_ch"] = float(_mes_c_arr[bar_idx])
+                    _hs["c_mes_cl"] = float(_mes_c_arr[bar_idx])
+                    _hs["c_mnq_ch"] = float(_mnq_c_arr[bar_idx])
+                    _hs["c_mnq_cl"] = float(_mnq_c_arr[bar_idx])
+                else:
+                    _hs["c_mes_h"]  = max(_hs["c_mes_h"],  float(_mes_h_arr[bar_idx]))
+                    _hs["c_mes_l"]  = min(_hs["c_mes_l"],  float(_mes_l_arr[bar_idx]))
+                    _hs["c_mnq_h"]  = max(_hs["c_mnq_h"],  float(_mnq_h_arr[bar_idx]))
+                    _hs["c_mnq_l"]  = min(_hs["c_mnq_l"],  float(_mnq_l_arr[bar_idx]))
+                    _hs["c_mes_ch"] = max(_hs["c_mes_ch"], float(_mes_c_arr[bar_idx]))
+                    _hs["c_mes_cl"] = min(_hs["c_mes_cl"], float(_mes_c_arr[bar_idx]))
+                    _hs["c_mnq_ch"] = max(_hs["c_mnq_ch"], float(_mnq_c_arr[bar_idx]))
+                    _hs["c_mnq_cl"] = min(_hs["c_mnq_cl"], float(_mnq_c_arr[bar_idx]))
+
         _smt_cache = {
             "mes_h":  _ses_mes_h,  "mes_l":  _ses_mes_l,
             "mnq_h":  _ses_mnq_h,  "mnq_l":  _ses_mnq_l,
@@ -760,6 +1002,36 @@ def screen_session(
             continue
 
         _smt = detect_smt_divergence(mes_reset, mnq_reset, bar_idx, 0, _cached=_smt_cache)
+
+        # Expanded reference levels: try prev-day, prev-session, week extremes when flag enabled
+        if _smt is None and EXPANDED_REFERENCE_LEVELS and _ref_lvls:
+            _cur_mes = mes_reset.iloc[bar_idx]
+            _cur_mnq = mnq_reset.iloc[bar_idx]
+            _best_ref: "tuple | None" = None
+            for _ref_key in (
+                ("prev_day_mes_high", "prev_day_mes_low", "prev_day_mnq_high", "prev_day_mnq_low", False),
+                ("prev_session_mes_high", "prev_session_mes_low", "prev_session_mnq_high", "prev_session_mnq_low", False),
+                ("week_mes_high", "week_mes_low", "week_mnq_high", "week_mnq_low", False),
+                ("prev_day_mes_close_high", "prev_day_mes_close_low", "prev_day_mnq_close_high", "prev_day_mnq_close_low", True),
+                ("prev_session_mes_close_high", "prev_session_mes_close_low", "prev_session_mnq_close_high", "prev_session_mnq_close_low", True),
+                ("week_mes_close_high", "week_mes_close_low", "week_mnq_close_high", "week_mnq_close_low", True),
+            ):
+                _mh, _ml, _nh, _nl, _use_close = _ref_key
+                # Skip close-based ref levels unless HIDDEN_SMT_ENABLED
+                if _use_close and not HIDDEN_SMT_ENABLED:
+                    continue
+                _candidate = _check_smt_against_ref(
+                    _cur_mes, _cur_mnq,
+                    _ref_lvls.get(_mh), _ref_lvls.get(_ml),
+                    _ref_lvls.get(_nh), _ref_lvls.get(_nl),
+                    use_close=_use_close,
+                )
+                if _candidate is not None:
+                    # Pick the result with the largest sweep_pts
+                    if _best_ref is None or _candidate[1] > _best_ref[1]:
+                        _best_ref = _candidate
+            if _best_ref is not None:
+                _smt = _best_ref
 
         # SMT-optional: accept displacement if no wick/hidden SMT found
         _smt_fill = None
@@ -787,6 +1059,29 @@ def screen_session(
 
         if TRADE_DIRECTION != "both" and direction != TRADE_DIRECTION:
             continue
+
+        # HTF visibility filter: skip if signal not visible on any configured HTF period
+        if HTF_VISIBILITY_REQUIRED and _htf_state:
+            _htf_confirmed: list = []
+            for _T, _hs in _htf_state.items():
+                if _hs["p_mes_h"] is None:
+                    continue
+                if direction == "short":
+                    if _hs["c_mes_h"] > _hs["p_mes_h"] and _hs["c_mnq_h"] <= _hs["p_mnq_h"]:
+                        _htf_confirmed.append(_T)
+                    elif HIDDEN_SMT_ENABLED and _hs["c_mes_ch"] > _hs["p_mes_ch"] and _hs["c_mnq_ch"] <= _hs["p_mnq_ch"]:
+                        _htf_confirmed.append(_T)
+                else:
+                    if _hs["c_mes_l"] < _hs["p_mes_l"] and _hs["c_mnq_l"] >= _hs["p_mnq_l"]:
+                        _htf_confirmed.append(_T)
+                    elif HIDDEN_SMT_ENABLED and _hs["c_mes_cl"] < _hs["p_mes_cl"] and _hs["c_mnq_cl"] >= _hs["p_mnq_cl"]:
+                        _htf_confirmed.append(_T)
+            if not _htf_confirmed:
+                continue
+            # Store confirmed timeframes for later insertion into signal dict
+            _htf_confirmed_tfs = _htf_confirmed
+        else:
+            _htf_confirmed_tfs = None
 
         # Overnight sweep gate: require overnight H (shorts) or L (longs) to have been swept.
         if OVERNIGHT_SWEEP_REQUIRED and overnight_range is not None:
@@ -827,11 +1122,19 @@ def screen_session(
         if ac is None:
             continue
 
-        # Scan forward for first confirmation bar after divergence
+        # Scan forward for first confirmation bar after divergence.
+        # ALWAYS_REQUIRE_CONFIRMATION: bar must also break the displacement bar's body boundary.
+        _div_body_high = max(float(_div_bar["Open"]), float(_div_bar["Close"]))
+        _div_body_low  = min(float(_div_bar["Open"]), float(_div_bar["Close"]))
         for conf_idx in range(bar_idx + 1, n_bars):
             conf_bar = mnq_reset.iloc[conf_idx]
             if not is_confirmation_bar(conf_bar, ac, direction):
                 continue
+            if ALWAYS_REQUIRE_CONFIRMATION:
+                if direction == "short" and float(conf_bar["Close"]) >= _div_body_low:
+                    continue
+                if direction == "long" and float(conf_bar["Close"]) <= _div_body_high:
+                    continue
             entry_time = mnq_bars.index[conf_idx]
             if SIGNAL_BLACKOUT_START and SIGNAL_BLACKOUT_END:
                 t = entry_time.strftime("%H:%M")
@@ -852,6 +1155,8 @@ def screen_session(
                 break
             signal["divergence_bar"] = bar_idx
             signal["entry_bar"] = conf_idx
+            if HTF_VISIBILITY_REQUIRED:
+                signal["htf_confirmed_timeframes"] = _htf_confirmed_tfs
             return signal
 
     return None
@@ -911,6 +1216,10 @@ def _build_signal_from_bar(
     if MIN_STOP_POINTS > 0 and abs(entry_price - stop_price) < MIN_STOP_POINTS:
         return None
 
+    body = abs(float(bar["Close"]) - float(bar["Open"]))
+    if MIN_DISPLACEMENT_BODY_PTS > 0 and body < MIN_DISPLACEMENT_BODY_PTS:
+        return None
+
     bar_range = bar["High"] - bar["Low"]
     entry_bar_body_ratio = (
         abs(bar["Close"] - bar["Open"]) / bar_range if bar_range > 0 else 0.0
@@ -939,6 +1248,8 @@ def _build_signal_from_bar(
         "fvg_high":             float(fvg_zone["fvg_high"]) if fvg_zone else None,
         "fvg_low":              float(fvg_zone["fvg_low"])  if fvg_zone else None,
         "partial_exit_level":   round(entry_price + (tdo - entry_price) * PARTIAL_EXIT_LEVEL_RATIO, 4) if PARTIAL_EXIT_ENABLED else None,
+        # Plan 4 diagnostic — always recorded
+        "displacement_body_pts": round(body, 2),
     }
 
 

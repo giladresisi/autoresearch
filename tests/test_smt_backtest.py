@@ -177,7 +177,12 @@ def test_run_backtest_session_force_exit(futures_tmpdir, monkeypatch):
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
     monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
     monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
-    # TDO 10000 pts below entry so both TP and stop are unreachable within the session
+    # TDO 10000 pts below entry so both TP and stop are unreachable within the session.
+    # Disable MIDNIGHT_OPEN_AS_TP so compute_tdo=10000 is actually used as TDO (not
+    # overridden by midnight open which defaults to the first bar's open ~20000).
+    # Must patch both modules: backtest_smt holds its own bound name.
+    monkeypatch.setattr(_strat, "MIDNIGHT_OPEN_AS_TP", False)
+    monkeypatch.setattr(train_smt, "MIDNIGHT_OPEN_AS_TP", False)
     monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 10000.0)
 
     mnq, mes = _build_short_signal_bars("2025-01-02")
@@ -347,6 +352,9 @@ def test_regression_no_reentry_matches_legacy_behavior(futures_tmpdir, monkeypat
     monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "short")
     monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(_strat, "HIDDEN_SMT_ENABLED", False)
+    monkeypatch.setattr(train_smt, "HIDDEN_SMT_ENABLED", False)
+    monkeypatch.setattr(_strat, "PARTIAL_EXIT_ENABLED", False)
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
     monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
     monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
@@ -374,6 +382,9 @@ def test_run_backtest_max_reentry_count_limits_trades(futures_tmpdir, monkeypatc
     monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "HIDDEN_SMT_ENABLED", False)
+    monkeypatch.setattr(train_smt, "HIDDEN_SMT_ENABLED", False)
+    monkeypatch.setattr(_strat, "PARTIAL_EXIT_ENABLED", False)
     mnq, mes = _build_short_signal_bars("2025-01-02")
     stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
     assert len(stats.get("trade_records", [])) >= 1, "Need at least one trade to verify cap"

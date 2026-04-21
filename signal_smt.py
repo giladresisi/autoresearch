@@ -23,6 +23,7 @@ from strategy_smt import (
     compute_midnight_open, compute_overnight_range,
     detect_fvg, detect_displacement, detect_smt_fill,
     MIDNIGHT_OPEN_AS_TP, OVERNIGHT_SWEEP_REQUIRED, OVERNIGHT_RANGE_AS_TP,
+    MAX_REENTRY_COUNT,
 )
 import strategy_smt
 from hypothesis_smt import HypothesisManager
@@ -76,6 +77,11 @@ _startup_ts: pd.Timestamp | None = None
 
 # Guard against re-detecting a signal that fired before this session's first exit
 _last_exit_ts: pd.Timestamp = pd.Timestamp("1970-01-01", tz="America/New_York")
+
+# Per-session reentry tracking: reset when day changes or a new divergence level is detected
+_current_session_date = None
+_current_divergence_level: "float | None" = None
+_divergence_reentry_count: int = 0
 
 _hypothesis_manager: "HypothesisManager | None" = None
 _hypothesis_generated: bool = False
@@ -425,6 +431,7 @@ def _process(bar) -> None:
 def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     """SCANNING state: check all gates then attempt signal detection on each 1s bar."""
     global _state, _position, _last_exit_ts
+    global _current_session_date, _current_divergence_level, _divergence_reentry_count
 
     # 1. Session gate: only scan during kill zone
     if bar_time < _session_start_time or bar_time > _session_end_time:
@@ -490,6 +497,22 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     # 8. Re-detection guard: skip signals at or before the last exit timestamp
     if signal["entry_time"] <= _last_exit_ts:
         return
+
+    # 8a. Session date reset: clear divergence tracking when a new trading day starts
+    if today != _current_session_date:
+        _current_session_date = today
+        _current_divergence_level = None
+        _divergence_reentry_count = 0
+
+    # 8b. Per-divergence reentry guard: enforce MAX_REENTRY_COUNT on the live path
+    defended = signal.get("smt_defended_level")
+    if defended != _current_divergence_level:
+        _current_divergence_level = defended
+        _divergence_reentry_count = 0
+    else:
+        _divergence_reentry_count += 1
+        if MAX_REENTRY_COUNT < 999 and _divergence_reentry_count >= MAX_REENTRY_COUNT:
+            return
 
     # 9. Open position with slippage-adjusted assumed fill
     assumed_entry = _apply_slippage(signal)

@@ -1,6 +1,33 @@
 # PROGRESS
 
 
+## Feature: SMT Structural Fixes & Signal Quality
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-structural-and-fixes.md`
+
+Combines findings.md fixes (F1 live reentry guard, F2a/b midnight open TP default, F2c ratio-based invalidation threshold, F3 pessimistic fill prices) with structural_moves.md signal quality improvements (symmetric SMT, expanded reference levels, HTF visibility filter, displacement body size, always-on confirmation candle). All changes behind opt-in flags. Metric baseline captured after this plan AND smt-humanize are both merged.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-structural-and-fixes.md`
+- All 9 tasks completed (F3, F1, F2a/b, F2c, S1, S4, S5, S2, S3); 3 plan divergences, all improvements
+- Three divergences: MIN_DISPLACEMENT_BODY_PTS applied in two locations (plan gap); ALWAYS_REQUIRE_CONFIRMATION checked in backtest WAITING_FOR_ENTRY blocks (plan gap); ratio threshold combined with existing PTS sentinel for backward compatibility
+- Test results: 28 new tests passing (tests/test_smt_structural_fixes.py) + 2 pre-existing tests fixed; full suite 605 passed, 5 pre-existing failures unchanged
+- Alignment score: 9/10
+
+---
+
+## Feature: SMT Humanize — Human-Executable Signal Model
+
+**Status**: ✅ Planned
+**Plan File**: `.agents/plans/smt-humanize.md`
+**Prerequisite**: `smt-structural-and-fixes.md` merged and baseline captured first.
+
+Redesigns signal output (typed ENTRY/MOVE_STOP/CLOSE_MARKET), adds execution delay simulation to 1m backtest, PENDING states, daily limits (8 entries, $100/$150 DD), confidence scoring, and deception detection. All gated by HUMAN_EXECUTION_MODE=False default.
+
+---
+
 ## Feature: SMT Strategy — Position Architecture Expansion (Plan 2 of 2)
 
 **Status**: ✅ Complete
