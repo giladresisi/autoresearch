@@ -19,6 +19,34 @@ Implements five signal quality improvements: divergence scoring (A), hypothesis 
 
 ---
 
+## Feature: SMT Solution F — ICT-Aligned Draw on Liquidity Target Selection
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-solution-f-draw-on-liquidity.md`
+**Prerequisite**: `smt-solutions-a-e.md` complete. Isolated cycle — validate independently before merging with A–E optimisation results.
+
+Replaces TDO-only TP with a 6-level draw-on-liquidity hierarchy (FVG → TDO → Midnight Open → Session High/Low → Overnight H/L → PDH/PDL). Signals with no draw satisfying `MIN_RR_FOR_TARGET` (1.5×) and `MIN_TARGET_PTS` (15 pts) are skipped. Adds secondary target and `exit_secondary` exit type. Supersedes `OVERNIGHT_RANGE_AS_TP` and `MIDNIGHT_OPEN_AS_TP` flags.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-solution-f-draw-on-liquidity.md`
+- All 5 waves completed; 21 new tests passing (9 unit + 12 integration); 125 target-suite passed, 0 regressions
+- Two plan gaps: TP cascade replaced in two locations (plan cited one); `test_smt_structural_fixes.py` monkeypatching required for new filter constants
+- Alignment score: 9/10
+
+**Smoke Backtest (full 6-fold walk-forward):**
+- 516 total trades; mean_test_pnl=$2,458.76; min_test_pnl=$916.84 (no losing folds)
+- fold6 avg_rr=4.12, win_rate=54.9%, Sharpe=4.50, Calmar=14.77
+- `exit_secondary` fired on 7 test trades — two-level exit path confirmed end-to-end
+
+**Post-review fixes (committed with plan):**
+- `backtest_smt.py:439` — `_run_ses_high` init changed from `0.0` to `-float("inf")` (symmetric with `_run_ses_low`)
+- `strategy_smt.py:1432` — added clarifying comment on standalone `tp_breached` setter
+- `tests/test_smt_backtest.py` — fixed `test_signal_with_pdh_draw_placed` assertion (now checks `tp_name`); added `test_exit_secondary_same_bar_primary_and_secondary_crossed`
+- `backtest_smt.py` + `signal_smt.py` — added directional guards to `overnight_high/low`, `pdh`, `pdl` draws (consistent with other draw entries)
+
+---
+
 ## Feature: SMT Structural Fixes & Signal Quality
 
 **Status**: ✅ Complete

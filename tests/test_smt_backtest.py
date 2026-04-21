@@ -350,6 +350,8 @@ def test_regression_no_reentry_matches_legacy_behavior(futures_tmpdir, monkeypat
     monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
     monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TARGET_PTS", 0.0)
     monkeypatch.setattr(train_smt, "TRADE_DIRECTION", "short")
     monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
     monkeypatch.setattr(_strat, "HIDDEN_SMT_ENABLED", False)
@@ -385,6 +387,8 @@ def test_run_backtest_max_reentry_count_limits_trades(futures_tmpdir, monkeypatc
     monkeypatch.setattr(_strat, "HIDDEN_SMT_ENABLED", False)
     monkeypatch.setattr(train_smt, "HIDDEN_SMT_ENABLED", False)
     monkeypatch.setattr(_strat, "PARTIAL_EXIT_ENABLED", False)
+    monkeypatch.setattr(_strat, "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TARGET_PTS", 0.0)
     mnq, mes = _build_short_signal_bars("2025-01-02")
     stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
     assert len(stats.get("trade_records", [])) >= 1, "Need at least one trade to verify cap"
@@ -406,6 +410,8 @@ def test_run_backtest_max_reentry_disabled_allows_multiple(futures_tmpdir, monke
     monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TARGET_PTS", 0.0)
     mnq, mes = _build_short_signal_bars("2025-01-02")
     stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
     assert stats["total_trades"] >= 1  # disabled cap — must produce at least one trade
@@ -424,6 +430,8 @@ def test_run_backtest_trade_record_contains_new_fields(futures_tmpdir, monkeypat
     monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TARGET_PTS", 0.0)
     mnq, mes = _build_short_signal_bars("2025-01-02")
     stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
     assert len(stats.get("trade_records", [])) >= 1, "Need at least one trade to verify fields"
@@ -449,6 +457,8 @@ def test_run_backtest_min_prior_bars_held_infrastructure(futures_tmpdir, monkeyp
     monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "MIN_TARGET_PTS", 0.0)
     mnq, mes = _build_short_signal_bars("2025-01-02")
     stats_base = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
     assert stats_base["total_trades"] >= 1, "Need trades to test gate"
@@ -688,3 +698,288 @@ def test_pending_div_score_stored_at_detection(futures_tmpdir, monkeypatch):
     # Verify score formula: sweep/5*0.25 + miss/25*0.50 + body/15*0.25
     expected = min(sweep/5.0, 1.0)*0.25 + min(miss/25.0, 1.0)*0.50 + min(body/15.0, 1.0)*0.25
     assert abs(score - expected) < 1e-9
+
+
+# ══ Solution F: Draw-on-Liquidity integration tests ═══════════════════════════
+
+def _sol_f_monkeypatch(monkeypatch, bk, strat):
+    """Shared setup for Solution F integration tests — disables all filters."""
+    monkeypatch.setattr(strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(strat, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(strat, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    monkeypatch.setattr(strat, "MIDNIGHT_OPEN_AS_TP", False)
+    monkeypatch.setattr(strat, "PARTIAL_EXIT_ENABLED", False)
+    monkeypatch.setattr(bk,   "MIDNIGHT_OPEN_AS_TP", False)
+    monkeypatch.setattr(bk,   "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(bk,   "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(bk,   "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(bk,   "REENTRY_MAX_MOVE_PTS", 0.0)
+    monkeypatch.setattr(strat, "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(bk,   "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(strat, "MIN_RR_FOR_TARGET", 0.0)
+    monkeypatch.setattr(bk,   "MIN_RR_FOR_TARGET", 0.0)
+    monkeypatch.setattr(bk,   "compute_tdo", lambda *a: 10000.0)
+
+
+def test_signal_near_tdo_skipped(futures_tmpdir, monkeypatch):
+    """Entry within min_pts of TDO with no other draws → no trade placed."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    _sol_f_monkeypatch(monkeypatch, bk, strat)
+    # Re-enable MIN_TARGET_PTS to filter out close draws
+    monkeypatch.setattr(strat, "MIN_TARGET_PTS", 15.0)
+    monkeypatch.setattr(bk,   "MIN_TARGET_PTS", 15.0)
+    # TDO set to 19998 (same as entry close), so distance < 15 → no valid draw
+    monkeypatch.setattr(bk, "compute_tdo", lambda *a: 19998.0)
+    mnq, mes = _build_short_signal_bars("2025-01-02")
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    assert stats["total_trades"] == 0, "Near-TDO entry with no valid draw should be skipped"
+
+
+def test_signal_with_pdh_draw_placed(futures_tmpdir, monkeypatch):
+    """Entry far from TDO with PDH qualifying → trade placed with take_profit=PDH."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    _sol_f_monkeypatch(monkeypatch, bk, strat)
+    # Re-enable distance filter
+    monkeypatch.setattr(strat, "MIN_TARGET_PTS", 15.0)
+    monkeypatch.setattr(bk,   "MIN_TARGET_PTS", 15.0)
+    # For short signal: PDL far below entry qualifies
+    base = 20000.0
+    mnq, mes = _build_short_signal_bars("2025-01-02", base=base)
+    # Inject a pdl value via compute_pdh_pdl patch (entry ~19998; PDL at 19960 → dist=38 > 15)
+    import strategy_smt as _strat
+    original_pdh_pdl = _strat.compute_pdh_pdl
+    monkeypatch.setattr(bk, "compute_pdh_pdl", lambda *a: (base + 100.0, base - 40.0))
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    assert stats["total_trades"] >= 1, "With PDL qualifying, trade should be placed"
+    tr = stats["trade_records"][0]
+    assert tr["stop_price"] is not None
+    assert tr["tp_name"] == "pdl", f"tp_name should be 'pdl', got {tr['tp_name']}"
+
+
+def test_secondary_target_stored_in_position(futures_tmpdir, monkeypatch):
+    """position dict has secondary_target field after entry."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    _sol_f_monkeypatch(monkeypatch, bk, strat)
+    mnq, mes = _build_short_signal_bars("2025-01-02")
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    # At minimum, the trade record must include tp_name and secondary_target_name keys
+    if stats["total_trades"] >= 1:
+        tr = stats["trade_records"][0]
+        assert "tp_name" in tr
+        assert "secondary_target_name" in tr
+
+
+def test_tp_breached_false_at_entry(futures_tmpdir, monkeypatch):
+    """tp_breached is False immediately after position is opened."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    _sol_f_monkeypatch(monkeypatch, bk, strat)
+    # Capture position dict at first manage_position call
+    captured = []
+    orig_mp = strat.manage_position
+    def patched_mp(pos, bar):
+        if not captured:
+            captured.append(dict(pos))
+        return orig_mp(pos, bar)
+    monkeypatch.setattr(bk, "manage_position", patched_mp)
+    mnq, mes = _build_short_signal_bars("2025-01-02")
+    bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    if captured:
+        assert captured[0].get("tp_breached") is False
+
+
+def test_tp_breached_set_on_primary_cross(monkeypatch):
+    """tp_breached becomes True when price crosses take_profit (no trail, no secondary)."""
+    import strategy_smt as strat
+    monkeypatch.setattr(strat, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(strat, "PARTIAL_EXIT_ENABLED", False)
+    monkeypatch.setattr(strat, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    pos = {
+        "direction": "long", "entry_price": 100.0, "stop_price": 97.0,
+        "take_profit": 110.0, "tdo": 110.0, "tp_breached": False,
+        "secondary_target": 120.0, "secondary_target_name": "test",
+        "entry_time": None, "divergence_bar": 0, "entry_bar": 1,
+        "entry_bar_body_ratio": 0.5, "smt_sweep_pts": 0.0, "smt_miss_pts": 0.0,
+        "smt_type": "wick", "midnight_open": None, "smt_defended_level": None,
+        "divergence_bar_high": 100.0, "divergence_bar_low": 97.0,
+        "partial_exit_level": None, "partial_done": False,
+        "layer_b_entered": False, "total_contracts_target": 1, "contracts": 1,
+    }
+    bar = pd.Series({"High": 112.0, "Low": 98.0, "Close": 111.0, "Open": 102.0})
+    strat.manage_position(pos, bar)
+    assert pos["tp_breached"] is True
+
+
+def test_exit_secondary_fires_after_primary(monkeypatch):
+    """Bar crossing secondary level after tp_breached=True returns exit_secondary."""
+    import strategy_smt as strat
+    monkeypatch.setattr(strat, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(strat, "PARTIAL_EXIT_ENABLED", False)
+    monkeypatch.setattr(strat, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    pos = {
+        "direction": "long", "entry_price": 100.0, "stop_price": 97.0,
+        "take_profit": 110.0, "tdo": 110.0, "tp_breached": True,
+        "secondary_target": 120.0, "secondary_target_name": "test",
+        "entry_time": None, "divergence_bar": 0, "entry_bar": 1,
+        "entry_bar_body_ratio": 0.5, "smt_sweep_pts": 0.0, "smt_miss_pts": 0.0,
+        "smt_type": "wick", "midnight_open": None, "smt_defended_level": None,
+        "divergence_bar_high": 100.0, "divergence_bar_low": 97.0,
+        "partial_exit_level": None, "partial_done": False,
+        "layer_b_entered": False, "total_contracts_target": 1, "contracts": 1,
+    }
+    bar = pd.Series({"High": 122.0, "Low": 105.0, "Close": 118.0, "Open": 108.0})
+    result = strat.manage_position(pos, bar)
+    assert result == "exit_secondary"
+
+
+def test_exit_secondary_not_before_primary(monkeypatch):
+    """Bar crossing secondary level before tp_breached → no exit_secondary."""
+    import strategy_smt as strat
+    monkeypatch.setattr(strat, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(strat, "PARTIAL_EXIT_ENABLED", False)
+    monkeypatch.setattr(strat, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    pos = {
+        "direction": "long", "entry_price": 100.0, "stop_price": 97.0,
+        "take_profit": 110.0, "tdo": 110.0, "tp_breached": False,
+        "secondary_target": 120.0, "secondary_target_name": "test",
+        "entry_time": None, "divergence_bar": 0, "entry_bar": 1,
+        "entry_bar_body_ratio": 0.5, "smt_sweep_pts": 0.0, "smt_miss_pts": 0.0,
+        "smt_type": "wick", "midnight_open": None, "smt_defended_level": None,
+        "divergence_bar_high": 100.0, "divergence_bar_low": 97.0,
+        "partial_exit_level": None, "partial_done": False,
+        "layer_b_entered": False, "total_contracts_target": 1, "contracts": 1,
+    }
+    # secondary (120) is hit but tp_breached is False; primary (110) is NOT hit (bar high < 110)
+    bar = pd.Series({"High": 108.0, "Low": 98.0, "Close": 107.0, "Open": 102.0})
+    result = strat.manage_position(pos, bar)
+    assert result != "exit_secondary"
+
+
+def test_exit_secondary_same_bar_primary_and_secondary_crossed(monkeypatch):
+    """Bar crosses both primary TP and secondary on same bar (tp_breached starts False) → exit_secondary."""
+    import strategy_smt as strat
+    monkeypatch.setattr(strat, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(strat, "PARTIAL_EXIT_ENABLED", False)
+    monkeypatch.setattr(strat, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    pos = {
+        "direction": "long", "entry_price": 100.0, "stop_price": 97.0,
+        "take_profit": 110.0, "tdo": 110.0, "tp_breached": False,
+        "secondary_target": 120.0, "secondary_target_name": "test",
+        "entry_time": None, "divergence_bar": 0, "entry_bar": 1,
+        "entry_bar_body_ratio": 0.5, "smt_sweep_pts": 0.0, "smt_miss_pts": 0.0,
+        "smt_type": "wick", "midnight_open": None, "smt_defended_level": None,
+        "divergence_bar_high": 100.0, "divergence_bar_low": 97.0,
+        "partial_exit_level": None, "partial_done": False,
+        "layer_b_entered": False, "total_contracts_target": 1, "contracts": 1,
+    }
+    # Single bar crosses both primary (110) and secondary (120)
+    bar = pd.Series({"High": 125.0, "Low": 105.0, "Close": 118.0, "Open": 108.0})
+    result = strat.manage_position(pos, bar)
+    assert result == "exit_secondary"
+    assert pos["tp_breached"] is True
+
+
+def test_exit_secondary_fill_at_secondary_price(monkeypatch):
+    """exit_secondary fills at position['secondary_target'], not bar extreme."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    pos = {
+        "direction": "long", "entry_price": 100.0, "stop_price": 97.0,
+        "take_profit": 110.0, "tdo": 110.0, "secondary_target": 120.0,
+        "secondary_target_name": "test", "tp_breached": True,
+        "entry_time": None, "divergence_bar": 0, "entry_bar": 1,
+        "entry_bar_body_ratio": 0.5, "smt_sweep_pts": 0.0, "smt_miss_pts": 0.0,
+        "smt_type": "wick", "midnight_open": None, "smt_defended_level": None,
+        "divergence_bar_high": 100.0, "divergence_bar_low": 97.0,
+        "partial_exit_level": None, "partial_done": False,
+        "layer_b_entered": False, "total_contracts_target": 1, "contracts": 1,
+        "entry_date": "2025-01-02", "reentry_sequence": 1, "prior_trade_bars_held": 0,
+        "displacement_body_pts": None,
+    }
+    bar = pd.Series({"High": 125.0, "Low": 110.0, "Close": 120.0, "Open": 112.0},
+                    name=pd.Timestamp("2025-01-02 10:00", tz="America/New_York"))
+    trade, pnl = bk._build_trade_record(pos, "exit_secondary", bar, 2.0)
+    assert trade["exit_price"] == 120.0
+    assert trade["exit_type"] == "exit_secondary"
+
+
+def test_trail_disabled_when_secondary_exists(monkeypatch):
+    """TRAIL_AFTER_TP_PTS has no effect when secondary_target is set."""
+    import strategy_smt as strat
+    monkeypatch.setattr(strat, "TRAIL_AFTER_TP_PTS", 5.0)
+    monkeypatch.setattr(strat, "PARTIAL_EXIT_ENABLED", False)
+    monkeypatch.setattr(strat, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    pos = {
+        "direction": "long", "entry_price": 100.0, "stop_price": 97.0,
+        "take_profit": 110.0, "tdo": 110.0, "tp_breached": False,
+        "secondary_target": 125.0, "secondary_target_name": "test",
+        "entry_time": None, "divergence_bar": 0, "entry_bar": 1,
+        "entry_bar_body_ratio": 0.5, "smt_sweep_pts": 0.0, "smt_miss_pts": 0.0,
+        "smt_type": "wick", "midnight_open": None, "smt_defended_level": None,
+        "divergence_bar_high": 100.0, "divergence_bar_low": 97.0,
+        "partial_exit_level": None, "partial_done": False,
+        "layer_b_entered": False, "total_contracts_target": 1, "contracts": 1,
+    }
+    # Bar crosses primary TP (110) but NOT secondary (125) — trail would return "hold"
+    # but secondary logic should set tp_breached without activating trail
+    old_stop = pos["stop_price"]
+    bar = pd.Series({"High": 115.0, "Low": 98.0, "Close": 112.0, "Open": 102.0})
+    result = strat.manage_position(pos, bar)
+    # Trail NOT activated (stop should not have changed to trail value)
+    # With secondary present, trail block is skipped → stop stays at 97.0
+    assert pos["stop_price"] == old_stop, "Trail should not move stop when secondary_target exists"
+    assert pos.get("tp_breached") is True
+
+
+def test_trail_active_when_no_secondary(monkeypatch):
+    """TRAIL_AFTER_TP_PTS still fires when secondary_target is None."""
+    import strategy_smt as strat
+    monkeypatch.setattr(strat, "TRAIL_AFTER_TP_PTS", 5.0)
+    monkeypatch.setattr(strat, "PARTIAL_EXIT_ENABLED", False)
+    monkeypatch.setattr(strat, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    pos = {
+        "direction": "long", "entry_price": 100.0, "stop_price": 97.0,
+        "take_profit": 110.0, "tdo": 110.0, "tp_breached": False,
+        "secondary_target": None, "secondary_target_name": None,
+        "entry_time": None, "divergence_bar": 0, "entry_bar": 1,
+        "entry_bar_body_ratio": 0.5, "smt_sweep_pts": 0.0, "smt_miss_pts": 0.0,
+        "smt_type": "wick", "midnight_open": None, "smt_defended_level": None,
+        "divergence_bar_high": 100.0, "divergence_bar_low": 97.0,
+        "partial_exit_level": None, "partial_done": False,
+        "layer_b_entered": False, "total_contracts_target": 1, "contracts": 1,
+    }
+    bar = pd.Series({"High": 115.0, "Low": 98.0, "Close": 112.0, "Open": 102.0})
+    strat.manage_position(pos, bar)
+    # Trail activated — stop should have moved above 97.0
+    assert pos["stop_price"] > 97.0, "Trail should move stop when no secondary_target"
+    assert pos.get("tp_breached") is True
+
+
+def test_tp_name_in_trade_record(monkeypatch):
+    """Trade record contains tp_name field."""
+    import backtest_smt as bk
+    pos = {
+        "direction": "short", "entry_price": 100.0, "stop_price": 103.0,
+        "take_profit": 85.0, "tdo": 85.0, "secondary_target": None,
+        "secondary_target_name": None, "tp_breached": False,
+        "tp_name": "midnight_open",
+        "entry_time": None, "divergence_bar": 0, "entry_bar": 1,
+        "entry_bar_body_ratio": 0.5, "smt_sweep_pts": 0.0, "smt_miss_pts": 0.0,
+        "smt_type": "wick", "midnight_open": None, "smt_defended_level": None,
+        "divergence_bar_high": 100.0, "divergence_bar_low": 97.0,
+        "partial_exit_level": None, "partial_done": False,
+        "layer_b_entered": False, "total_contracts_target": 1, "contracts": 1,
+        "entry_date": "2025-01-02", "reentry_sequence": 1, "prior_trade_bars_held": 0,
+        "displacement_body_pts": None,
+    }
+    bar = pd.Series({"High": 98.0, "Low": 84.0, "Close": 86.0, "Open": 96.0},
+                    name=pd.Timestamp("2025-01-02 10:30", tz="America/New_York"))
+    trade, _ = bk._build_trade_record(pos, "exit_tp", bar, 2.0)
+    assert "tp_name" in trade
+    assert trade["tp_name"] == "midnight_open"

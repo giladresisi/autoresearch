@@ -180,6 +180,10 @@ INVALIDATION_SMT_EXIT: bool = False
 OVERNIGHT_SWEEP_REQUIRED: bool = False
 OVERNIGHT_RANGE_AS_TP: bool = False
 
+# ── Solution F: Draw-on-Liquidity target selection ────────────────────────────
+MIN_RR_FOR_TARGET: float = 1.5   # reward >= min_rr * |entry - stop|; optimizer: [1.0, 1.5, 2.0]
+MIN_TARGET_PTS:    float = 15.0  # absolute min target distance in MNQ pts; optimizer: [10, 15, 20, 25]
+
 # Silver Bullet window: restrict new divergence detection to 09:50–10:10 ET.
 # Re-entries allowed outside window if original divergence was inside it.
 # Optimizer search space: [True, False]
@@ -650,6 +654,24 @@ def compute_overnight_range(mnq_bars: pd.DataFrame, date: datetime.date) -> dict
         "overnight_high": float(bars["High"].max()),
         "overnight_low":  float(bars["Low"].min()),
     }
+
+
+def compute_pdh_pdl(
+    hist_df: "pd.DataFrame",
+    session_date: "datetime.date",
+) -> "tuple[float | None, float | None]":
+    """Return (previous_day_high, previous_day_low) from daily OHLCV.
+
+    Uses the last row before session_date — safe with both 1m and daily data
+    when hist_df has one row per prior calendar day (or resampled to daily).
+    """
+    if hist_df.empty or not hasattr(hist_df.index, "date"):
+        return None, None
+    prior = hist_df[hist_df.index.date < session_date]
+    if prior.empty:
+        return None, None
+    prev = prior.iloc[-1]
+    return float(prev["High"]), float(prev["Low"])
 
 
 def detect_fvg(
@@ -1224,6 +1246,37 @@ def screen_session(
     return None
 
 
+def select_draw_on_liquidity(
+    direction: str,
+    entry_price: float,
+    stop_price: float,
+    draws: dict,
+    min_rr: float = 1.5,
+    min_pts: float = 15.0,
+) -> "tuple[str | None, float | None, str | None, float | None]":
+    """Return (primary_name, primary_price, secondary_name, secondary_price).
+
+    Primary = nearest draw satisfying both RR and pts constraints.
+    Secondary = next farther draw at least 1.5x primary distance away.
+    Returns (None, None, None, None) if no valid draw exists.
+    """
+    stop_dist = abs(entry_price - stop_price)
+    min_dist  = max(min_pts, min_rr * stop_dist)
+    valid: "list[tuple[str, float, float]]" = []
+    for name, price in draws.items():
+        if price is None:
+            continue
+        dist = (price - entry_price) if direction == "long" else (entry_price - price)
+        if dist >= min_dist:
+            valid.append((name, price, dist))
+    if not valid:
+        return None, None, None, None
+    valid.sort(key=lambda x: x[2])
+    pri = valid[0]
+    sec = next((v for v in valid[1:] if v[2] >= pri[2] * 1.5), None)
+    return pri[0], pri[1], (sec[0] if sec else None), (sec[1] if sec else None)
+
+
 def _build_signal_from_bar(
     bar: pd.Series,
     ts: "pd.Timestamp",
@@ -1350,8 +1403,8 @@ def manage_position(
     entry_price = position["entry_price"]
     tp          = position["take_profit"]
 
-    # ── Trail-after-TP: stay in trade past TDO, trail stop behind best price ──
-    if TRAIL_AFTER_TP_PTS > 0:
+    # ── Trail-after-TP: disabled when a secondary target exists (secondary takes over) ──
+    if TRAIL_AFTER_TP_PTS > 0 and position.get("secondary_target") is None:
         if position.get("tp_breached"):
             # Already past TDO — update trailing stop each bar
             if direction == "short":
@@ -1375,6 +1428,22 @@ def manage_position(
                     position["best_after_tp"] = max(tp, current_bar["High"])
                     position["stop_price"]    = position["best_after_tp"] - TRAIL_AFTER_TP_PTS
                 return "hold"
+
+    # ── Set tp_breached on first primary TP crossing (for secondary target tracking) ──
+    # Runs when trail is disabled or secondary_target is set (trail block above is skipped in both cases).
+    if not position.get("tp_breached"):
+        if direction == "long"  and float(current_bar["High"]) >= tp:
+            position["tp_breached"] = True
+        elif direction == "short" and float(current_bar["Low"])  <= tp:
+            position["tp_breached"] = True
+
+    # ── Secondary target check: exit after primary breach ────────────────────
+    sec = position.get("secondary_target")
+    if sec is not None and position.get("tp_breached"):
+        if direction == "long"  and float(current_bar["High"]) >= sec:
+            return "exit_secondary"
+        if direction == "short" and float(current_bar["Low"])  <= sec:
+            return "exit_secondary"
 
     # ── Layer B entry (FVG retracement) ─────────────────────────────────────
     if TWO_LAYER_POSITION and FVG_LAYER_B_TRIGGER:
@@ -1471,9 +1540,9 @@ def manage_position(
     # exit_tp is only used when trail-after-TP is disabled; otherwise the stop
     # takes over once TDO is breached (handled in the block above).
     if direction == "long":
-        if current_bar["Low"]  <= stop:                            return "exit_stop"
-        if TRAIL_AFTER_TP_PTS == 0 and current_bar["High"] >= tp: return "exit_tp"
+        if current_bar["Low"]  <= stop:                                                         return "exit_stop"
+        if TRAIL_AFTER_TP_PTS == 0 and position.get("secondary_target") is None and current_bar["High"] >= tp: return "exit_tp"
     else:  # short
-        if current_bar["High"] >= stop:                            return "exit_stop"
-        if TRAIL_AFTER_TP_PTS == 0 and current_bar["Low"]  <= tp: return "exit_tp"
+        if current_bar["High"] >= stop:                                                         return "exit_stop"
+        if TRAIL_AFTER_TP_PTS == 0 and position.get("secondary_target") is None and current_bar["Low"]  <= tp: return "exit_tp"
     return "hold"

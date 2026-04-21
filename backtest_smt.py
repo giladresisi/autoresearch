@@ -14,12 +14,14 @@ from strategy_smt import (
     is_confirmation_bar, detect_smt_divergence, _build_signal_from_bar,
     manage_position, print_direction_breakdown, screen_session,
     compute_midnight_open, compute_overnight_range,
+    compute_pdh_pdl, select_draw_on_liquidity,
     detect_fvg, detect_displacement, detect_smt_fill,
     SESSION_START, SESSION_END, TRADE_DIRECTION, ALLOWED_WEEKDAYS,
     SIGNAL_BLACKOUT_START, SIGNAL_BLACKOUT_END, MIN_BARS_BEFORE_SIGNAL,
     REENTRY_MAX_MOVE_PTS, REENTRY_MAX_MOVE_RATIO, MIN_PRIOR_TRADE_BARS_HELD, MAX_HOLD_BARS,
     MAX_REENTRY_COUNT,
     MIDNIGHT_OPEN_AS_TP, OVERNIGHT_SWEEP_REQUIRED, OVERNIGHT_RANGE_AS_TP,
+    MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
     SILVER_BULLET_WINDOW_ONLY, SILVER_BULLET_START, SILVER_BULLET_END,
     TWO_LAYER_POSITION, LAYER_A_FRACTION, FVG_LAYER_B_TRIGGER,
     SMT_OPTIONAL, SMT_FILL_ENABLED, PARTIAL_EXIT_ENABLED, PARTIAL_EXIT_FRACTION,
@@ -140,6 +142,9 @@ def _build_trade_record(
     if exit_result == "exit_tp":
         # Limit order — fills at the defined take-profit price; no slippage on liquid NQ
         exit_price = position["take_profit"]
+    elif exit_result == "exit_secondary":
+        # Limit order hit at secondary target — fills at defined price, identical semantics to exit_tp
+        exit_price = position["secondary_target"]
     elif exit_result == "exit_stop":
         # Stop-limit order — fills at the defined stop price; no slippage on liquid NQ
         exit_price = position["stop_price"]
@@ -208,6 +213,9 @@ def _build_trade_record(
         # Plan 4 fields
         "displacement_body_pts": position.get("displacement_body_pts"),
         "pessimistic_fills": PESSIMISTIC_FILLS,
+        # Solution F diagnostic fields
+        "tp_name":               position.get("tp_name"),
+        "secondary_target_name": position.get("secondary_target_name"),
     }
     return trade, pnl
 
@@ -321,6 +329,7 @@ def run_backtest(
             if (OVERNIGHT_SWEEP_REQUIRED or OVERNIGHT_RANGE_AS_TP)
             else {"overnight_high": None, "overnight_low": None}
         )
+        _day_pdh, _day_pdl = compute_pdh_pdl(_hist_mnq_df, day)
 
         # Hypothesis direction + per-rule context for this session (deterministic, no LLM)
         _session_hyp_ctx = compute_hypothesis_context(mnq_df, _hist_mnq_df, day)
@@ -427,8 +436,8 @@ def run_backtest(
         _ses_mes_ch = _ses_mes_cl = float("nan")
         _ses_mnq_ch = _ses_mnq_cl = float("nan")
         # Running high/low for overnight sweep gate (replaces slice-based recomputation)
-        _run_ses_high = 0.0           # matches: mnq_reset["High"].iloc[:0].max() fallback==0
-        _run_ses_low  = float("inf")  # matches: mnq_reset["Low"].iloc[:0].min() fallback==inf
+        _run_ses_high = -float("inf")  # symmetric with _run_ses_low; guard (_run_ses_high > _ep+1) filters it safely
+        _run_ses_low  = float("inf")
 
         for bar_idx in range(len(mnq_session)):
             ts = _mnq_idx[bar_idx]
@@ -680,16 +689,9 @@ def run_backtest(
                             continue
                         if pending_direction == "long" and float(bar["Close"]) <= _dbh:
                             continue
-                    # TP selection: overnight range → midnight open → TDO.
-                    if OVERNIGHT_RANGE_AS_TP:
-                        _raw = _day_overnight.get("overnight_low" if pending_direction == "short" else "overnight_high")
-                        _day_tp = _raw if _raw is not None else day_tdo
-                    elif MIDNIGHT_OPEN_AS_TP and _day_midnight_open is not None:
-                        _day_tp = _day_midnight_open
-                    else:
-                        _day_tp = day_tdo
+                    # Build signal first with TDO as placeholder TP, then select draw.
                     signal = _build_signal_from_bar(
-                        bar, ts, pending_direction, _day_tp,
+                        bar, ts, pending_direction, day_tdo,
                         smt_sweep_pts=pending_smt_sweep,
                         smt_miss_pts=pending_smt_miss,
                         divergence_bar_idx=divergence_bar_idx,
@@ -701,6 +703,34 @@ def run_backtest(
                         fvg_zone=_pending_fvg_zone,
                     )
                     if signal is not None:
+                        # Draw-on-liquidity target selection replaces TP cascade.
+                        _ep = signal["entry_price"]
+                        _sp = signal["stop_price"]
+                        if pending_direction == "long":
+                            _draws = {
+                                "fvg_top":        _pending_fvg_zone["fvg_high"] if _pending_fvg_zone else None,
+                                "tdo":            day_tdo if day_tdo and day_tdo > _ep else None,
+                                "midnight_open":  _day_midnight_open if _day_midnight_open and _day_midnight_open > _ep else None,
+                                "session_high":   _run_ses_high if _run_ses_high > _ep + 1 else None,
+                                "overnight_high": _day_overnight.get("overnight_high") if _day_overnight.get("overnight_high") and _day_overnight.get("overnight_high") > _ep else None,
+                                "pdh":            _day_pdh if _day_pdh and _day_pdh > _ep else None,
+                            }
+                        else:
+                            _draws = {
+                                "fvg_bottom":    _pending_fvg_zone["fvg_low"] if _pending_fvg_zone else None,
+                                "tdo":           day_tdo if day_tdo and day_tdo < _ep else None,
+                                "midnight_open": _day_midnight_open if _day_midnight_open and _day_midnight_open < _ep else None,
+                                "session_low":   _run_ses_low if _run_ses_low < _ep - 1 else None,
+                                "overnight_low": _day_overnight.get("overnight_low") if _day_overnight.get("overnight_low") and _day_overnight.get("overnight_low") < _ep else None,
+                                "pdl":           _day_pdl if _day_pdl and _day_pdl < _ep else None,
+                            }
+                        _tp_name, _day_tp, _sec_tp_name, _sec_tp = select_draw_on_liquidity(
+                            pending_direction, _ep, _sp, _draws, MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
+                        )
+                        if _day_tp is None:
+                            continue  # no viable draw — skip this confirmation bar
+                        signal["take_profit"]  = _day_tp
+                        signal["tp_name"]      = _tp_name
                         signal["matches_hypothesis"] = (
                             (signal.get("direction") == _session_hyp_dir)
                             if _session_hyp_dir is not None else None
@@ -752,6 +782,9 @@ def run_backtest(
                                     position["stop_price"] = _extreme - STRUCTURAL_STOP_BUFFER_PTS
                                 else:
                                     position["stop_price"] = _extreme + STRUCTURAL_STOP_BUFFER_PTS
+                        position["secondary_target"]      = _sec_tp
+                        position["secondary_target_name"] = _sec_tp_name
+                        position["tp_breached"]           = False
                         position["entry_bar"]             = bar_idx
                         reentry_count += 1
                         position["reentry_sequence"]      = reentry_count
@@ -781,16 +814,9 @@ def run_backtest(
                             continue
                         if pending_direction == "long" and float(bar["Close"]) <= _dbh:
                             continue
-                    # TP selection: overnight range → midnight open → TDO.
-                    if OVERNIGHT_RANGE_AS_TP:
-                        _raw = _day_overnight.get("overnight_low" if pending_direction == "short" else "overnight_high")
-                        _day_tp = _raw if _raw is not None else day_tdo
-                    elif MIDNIGHT_OPEN_AS_TP and _day_midnight_open is not None:
-                        _day_tp = _day_midnight_open
-                    else:
-                        _day_tp = day_tdo
+                    # Build signal first with TDO as placeholder TP, then select draw.
                     signal = _build_signal_from_bar(
-                        bar, ts, pending_direction, _day_tp,
+                        bar, ts, pending_direction, day_tdo,
                         smt_sweep_pts=pending_smt_sweep,
                         smt_miss_pts=pending_smt_miss,
                         divergence_bar_idx=divergence_bar_idx,
@@ -802,6 +828,34 @@ def run_backtest(
                         fvg_zone=_pending_fvg_zone,
                     )
                     if signal is not None:
+                        # Draw-on-liquidity target selection replaces TP cascade.
+                        _ep = signal["entry_price"]
+                        _sp = signal["stop_price"]
+                        if pending_direction == "long":
+                            _draws = {
+                                "fvg_top":        _pending_fvg_zone["fvg_high"] if _pending_fvg_zone else None,
+                                "tdo":            day_tdo if day_tdo and day_tdo > _ep else None,
+                                "midnight_open":  _day_midnight_open if _day_midnight_open and _day_midnight_open > _ep else None,
+                                "session_high":   _run_ses_high if _run_ses_high > _ep + 1 else None,
+                                "overnight_high": _day_overnight.get("overnight_high") if _day_overnight.get("overnight_high") and _day_overnight.get("overnight_high") > _ep else None,
+                                "pdh":            _day_pdh if _day_pdh and _day_pdh > _ep else None,
+                            }
+                        else:
+                            _draws = {
+                                "fvg_bottom":    _pending_fvg_zone["fvg_low"] if _pending_fvg_zone else None,
+                                "tdo":           day_tdo if day_tdo and day_tdo < _ep else None,
+                                "midnight_open": _day_midnight_open if _day_midnight_open and _day_midnight_open < _ep else None,
+                                "session_low":   _run_ses_low if _run_ses_low < _ep - 1 else None,
+                                "overnight_low": _day_overnight.get("overnight_low") if _day_overnight.get("overnight_low") and _day_overnight.get("overnight_low") < _ep else None,
+                                "pdl":           _day_pdl if _day_pdl and _day_pdl < _ep else None,
+                            }
+                        _tp_name, _day_tp, _sec_tp_name, _sec_tp = select_draw_on_liquidity(
+                            pending_direction, _ep, _sp, _draws, MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
+                        )
+                        if _day_tp is None:
+                            continue  # no viable draw — skip this re-entry bar
+                        signal["take_profit"]  = _day_tp
+                        signal["tp_name"]      = _tp_name
                         signal["matches_hypothesis"] = (
                             (signal.get("direction") == _session_hyp_dir)
                             if _session_hyp_dir is not None else None
@@ -853,6 +907,9 @@ def run_backtest(
                                     position["stop_price"] = _extreme - STRUCTURAL_STOP_BUFFER_PTS
                                 else:
                                     position["stop_price"] = _extreme + STRUCTURAL_STOP_BUFFER_PTS
+                        position["secondary_target"]      = _sec_tp
+                        position["secondary_target_name"] = _sec_tp_name
+                        position["tp_breached"]           = False
                         position["entry_bar"]             = bar_idx
                         reentry_count += 1
                         position["reentry_sequence"]      = reentry_count

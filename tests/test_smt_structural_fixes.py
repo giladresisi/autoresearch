@@ -56,6 +56,11 @@ def _base_monkeypatch(monkeypatch, bk, strat):
     monkeypatch.setattr(bk,   "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
     monkeypatch.setattr(bk,   "REENTRY_MAX_MOVE_PTS", 0.0)
     monkeypatch.setattr(bk,   "compute_tdo", lambda *a: 10000.0)
+    # Disable draw distance filter so synthetic tests always produce trades
+    monkeypatch.setattr(strat, "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(bk,   "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(strat, "MIN_RR_FOR_TARGET", 0.0)
+    monkeypatch.setattr(bk,   "MIN_RR_FOR_TARGET", 0.0)
 
 
 # ══ F3: Pessimistic fills ══════════════════════════════════════════════════════

@@ -21,8 +21,10 @@ from ib_insync import IB, Future, util
 from strategy_smt import (
     screen_session, manage_position, compute_tdo, set_bar_data,
     compute_midnight_open, compute_overnight_range,
+    compute_pdh_pdl, select_draw_on_liquidity,
     detect_fvg, detect_displacement, detect_smt_fill,
     MIDNIGHT_OPEN_AS_TP, OVERNIGHT_SWEEP_REQUIRED, OVERNIGHT_RANGE_AS_TP,
+    MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
     MAX_REENTRY_COUNT,
     divergence_score, _effective_div_score,
     MIN_DIV_SCORE, REPLACE_THRESHOLD,
@@ -90,6 +92,14 @@ _divergence_reentry_count: int = 0
 
 _hypothesis_manager: "HypothesisManager | None" = None
 _hypothesis_generated: bool = False
+
+# Historical daily OHLCV for PDH/PDL computation (loaded from parquet in main())
+_hist_daily_df: pd.DataFrame = None
+
+# Per-session PDH/PDL (updated once per trading day in _process_scanning)
+_day_pdh: "float | None" = None
+_day_pdl: "float | None" = None
+_pdh_pdl_date = None  # tracks which date PDH/PDL was last computed
 
 # Derived time objects (set from SESSION_START/END strings in main())
 _session_start_time = None
@@ -437,6 +447,7 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     """SCANNING state: check all gates then attempt signal detection on each 1s bar."""
     global _state, _position, _last_exit_ts
     global _current_session_date, _current_divergence_level, _divergence_reentry_count
+    global _day_pdh, _day_pdl, _pdh_pdl_date
 
     # 1. Session gate: only scan during kill zone
     if bar_time < _session_start_time or bar_time > _session_end_time:
@@ -480,12 +491,53 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         else None
     )
 
+    # Compute PDH/PDL once per session day (Solution F)
+    if today != _pdh_pdl_date and _hist_daily_df is not None:
+        _day_pdh, _day_pdl = compute_pdh_pdl(_hist_daily_df, today)
+        _pdh_pdl_date = today
+
     # 6. Detect signal
     signal = screen_session(mnq_session, mes_session, tdo,
                             midnight_open=midnight_open_price,
                             overnight_range=overnight_range)
     if signal is None:
         return
+
+    # Apply draw-on-liquidity target selection (Solution F)
+    _ep = signal["entry_price"]
+    _sp = signal["stop_price"]
+    _direction = signal["direction"]
+    _ses_high = float(mnq_session["High"].max()) if not mnq_session.empty else 0.0
+    _ses_low  = float(mnq_session["Low"].min())  if not mnq_session.empty else float("inf")
+    _fvg_high = signal.get("fvg_high")
+    _fvg_low  = signal.get("fvg_low")
+    _ovn_high = overnight_range.get("overnight_high") if overnight_range else None
+    _ovn_low  = overnight_range.get("overnight_low")  if overnight_range else None
+    if _direction == "long":
+        _draws = {
+            "fvg_top":        _fvg_high if _fvg_high and _fvg_high > _ep else None,
+            "tdo":            tdo if tdo and tdo > _ep else None,
+            "midnight_open":  midnight_open_price if midnight_open_price and midnight_open_price > _ep else None,
+            "session_high":   _ses_high if _ses_high > _ep + 1 else None,
+            "overnight_high": _ovn_high if _ovn_high and _ovn_high > _ep else None,
+            "pdh":            _day_pdh if _day_pdh and _day_pdh > _ep else None,
+        }
+    else:
+        _draws = {
+            "fvg_bottom":    _fvg_low if _fvg_low and _fvg_low < _ep else None,
+            "tdo":           tdo if tdo and tdo < _ep else None,
+            "midnight_open": midnight_open_price if midnight_open_price and midnight_open_price < _ep else None,
+            "session_low":   _ses_low if _ses_low < _ep - 1 else None,
+            "overnight_low": _ovn_low if _ovn_low and _ovn_low < _ep else None,
+            "pdl":           _day_pdl if _day_pdl and _day_pdl < _ep else None,
+        }
+    _tp_name, _selected_tp, _sec_tp_name, _sec_tp = select_draw_on_liquidity(
+        _direction, _ep, _sp, _draws, MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
+    )
+    if _selected_tp is None:
+        return  # no viable draw — skip this signal
+    signal["take_profit"]  = _selected_tp
+    signal["tp_name"]      = _tp_name
 
     # Annotate signal with hypothesis alignment
     if _hypothesis_manager is not None and _hypothesis_manager.direction_bias is not None:
@@ -527,6 +579,9 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         "contracts": 1,
         "instrument": "MNQ1!",
         "entry_time": str(signal["entry_time"]),
+        "secondary_target":      _sec_tp,
+        "secondary_target_name": _sec_tp_name,
+        "tp_breached":           False,
     }
     POSITION_FILE.write_text(json.dumps(_position, indent=2))
     print(_format_signal_line(bar_ts, signal, assumed_entry), flush=True)
@@ -576,6 +631,9 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
 
     if result == "exit_tp":
         exit_price = _position["take_profit"]
+    elif result == "exit_secondary":
+        # Limit order hit at secondary target — fills at defined price
+        exit_price = _position["secondary_target"]
     elif result == "exit_stop":
         exit_price = _position["stop_price"]
     elif result in ("exit_market", "exit_invalidation_mss", "exit_invalidation_cisd", "exit_invalidation_smt"):
@@ -632,6 +690,7 @@ def main() -> None:
     global _session_start_time, _session_end_time
     global _mnq_tick_bar, _mes_tick_bar
     global _hypothesis_manager, _hypothesis_generated
+    global _hist_daily_df
 
     REALTIME_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -652,6 +711,9 @@ def main() -> None:
     _hist_mnq_df = _load_hist_mnq()
     today = pd.Timestamp.now(tz="America/New_York").date()
     _hypothesis_manager = HypothesisManager(_mnq_1m_df, _hist_mnq_df, today)
+
+    # Load historical daily data for PDH/PDL computation (Solution F)
+    _hist_daily_df = _hist_mnq_df  # reuse 5m hist; compute_pdh_pdl uses index.date
     _hypothesis_generated = False
 
     # Restore open position from disk if the process was restarted mid-trade

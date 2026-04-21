@@ -1306,3 +1306,108 @@ def test_inverted_stop_guard_valid_passes():
         sm.STRUCTURAL_STOP_BUFFER_PTS = orig_buff
         sm.TDO_VALIDITY_CHECK = orig_tdo
         sm.MIN_STOP_POINTS = orig_min_stop
+
+
+# ══ Solution F: select_draw_on_liquidity unit tests ═══════════════════════════
+
+def test_select_draw_no_valid():
+    """Returns (None, None, None, None) when all draws are below min_dist."""
+    from strategy_smt import select_draw_on_liquidity
+    result = select_draw_on_liquidity("long", 100.0, 98.0, {"level_a": 103.0, "level_b": 104.0}, min_rr=1.5, min_pts=15.0)
+    assert result == (None, None, None, None)
+
+
+def test_select_draw_single_valid_no_secondary():
+    """Primary returned, secondary None when only one draw qualifies."""
+    from strategy_smt import select_draw_on_liquidity
+    name, price, sname, sprice = select_draw_on_liquidity(
+        "long", 100.0, 97.0, {"only": 120.0}, min_rr=1.5, min_pts=15.0
+    )
+    assert name == "only"
+    assert price == 120.0
+    assert sname is None
+    assert sprice is None
+
+
+def test_select_draw_secondary_requires_1pt5x():
+    """Second draw at 1.6x primary distance is selected as secondary."""
+    from strategy_smt import select_draw_on_liquidity
+    # primary dist=20 (at 120), secondary dist=32 (at 132); 32 >= 1.5*20=30
+    name, price, sname, sprice = select_draw_on_liquidity(
+        "long", 100.0, 97.0, {"pri": 120.0, "sec": 132.0}, min_rr=0.0, min_pts=15.0
+    )
+    assert name == "pri" and price == 120.0
+    assert sname == "sec" and sprice == 132.0
+
+
+def test_select_draw_secondary_below_threshold():
+    """Second draw at 1.4x primary distance gives secondary=None."""
+    from strategy_smt import select_draw_on_liquidity
+    # primary dist=20 (at 120), second dist=28 (at 128); 28 < 1.5*20=30
+    name, price, sname, sprice = select_draw_on_liquidity(
+        "long", 100.0, 97.0, {"pri": 120.0, "sec": 128.0}, min_rr=0.0, min_pts=15.0
+    )
+    assert name == "pri"
+    assert sname is None
+
+
+def test_select_draw_short_direction():
+    """Distance computed as entry - price for short signals."""
+    from strategy_smt import select_draw_on_liquidity
+    # For short: entry=100, draw at 80 → dist = 100-80 = 20 >= min_pts=15
+    name, price, sname, sprice = select_draw_on_liquidity(
+        "short", 100.0, 103.0, {"target": 80.0}, min_rr=0.0, min_pts=15.0
+    )
+    assert name == "target" and price == 80.0
+
+
+def test_select_draw_min_pts_overrides_rr():
+    """min_pts floor applies when rr × stop_dist < min_pts."""
+    from strategy_smt import select_draw_on_liquidity
+    # stop_dist=1.0, rr=1.5 → rr*stop=1.5; min_pts=15 → min_dist=15
+    # draw at dist=10 < 15 → filtered out
+    result = select_draw_on_liquidity("long", 100.0, 99.0, {"close": 110.0}, min_rr=1.5, min_pts=15.0)
+    assert result == (None, None, None, None)
+
+
+# ══ Solution F: compute_pdh_pdl unit tests ════════════════════════════════════
+
+def test_compute_pdh_pdl_empty_hist():
+    """Returns (None, None) on empty dataframe."""
+    from strategy_smt import compute_pdh_pdl
+    empty = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    pdh, pdl = compute_pdh_pdl(empty, datetime.date(2025, 1, 6))
+    assert pdh is None and pdl is None
+
+
+def test_compute_pdh_pdl_returns_prior_day():
+    """Returns correct High/Low from the day before session_date."""
+    from strategy_smt import compute_pdh_pdl
+    idx = pd.date_range("2025-01-02", periods=5, freq="D", tz="America/New_York")
+    df = pd.DataFrame({
+        "Open":  [100.0] * 5,
+        "High":  [110.0, 120.0, 130.0, 140.0, 150.0],
+        "Low":   [ 90.0,  95.0,  98.0, 102.0, 105.0],
+        "Close": [105.0] * 5,
+    }, index=idx)
+    # session_date = 2025-01-06 → prior = rows before 2025-01-06 → last is 2025-01-05 (index=3)
+    pdh, pdl = compute_pdh_pdl(df, datetime.date(2025, 1, 6))
+    assert pdh == 140.0 and pdl == 102.0
+
+
+def test_compute_pdh_pdl_monday_uses_friday():
+    """Correctly handles weekend gap: Monday session_date → Friday data."""
+    from strategy_smt import compute_pdh_pdl
+    idx = pd.DatetimeIndex([
+        pd.Timestamp("2025-01-02", tz="America/New_York"),
+        pd.Timestamp("2025-01-03", tz="America/New_York"),
+    ])
+    df = pd.DataFrame({
+        "Open":  [100.0, 100.0],
+        "High":  [110.0, 125.0],
+        "Low":   [ 90.0,  88.0],
+        "Close": [105.0, 108.0],
+    }, index=idx)
+    # Monday 2025-01-06; last row before it = Friday 2025-01-03
+    pdh, pdl = compute_pdh_pdl(df, datetime.date(2025, 1, 6))
+    assert pdh == 125.0 and pdl == 88.0
