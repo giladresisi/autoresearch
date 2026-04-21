@@ -68,7 +68,7 @@ REENTRY_MAX_MOVE_PTS = 999.0
 # Scale-invariant: 0.65 means "65% of the way to TDO regardless of trade size."
 # 0.0 = disable (stop frozen pre-TDO, matching current behaviour).
 # Optimizer search space: [0.0, 0.50, 0.60, 0.65, 0.70, 0.75].
-BREAKEVEN_TRIGGER_PCT = 0.0
+BREAKEVEN_TRIGGER_PCT = 0.60
 
 # Maximum bars a trade may remain open after entry (0 = disabled).
 # Applies per trade, including re-entries. Exits as "exit_time" at bar N+MAX_HOLD_BARS.
@@ -90,8 +90,8 @@ ALLOWED_WEEKDAYS = frozenset({0, 1, 2, 3, 4})
 # Both values are "HH:MM" strings in the session's local timezone; "" disables the filter.
 # Blocks 11:00–13:30: 11:xx dead zone + 13:xx drag (only negative-PnL slot, Finding 3).
 # Optimizer search space: ["", "11:00"] for START; ["", "13:00", "13:30"] for END.
-SIGNAL_BLACKOUT_START = "11:00"
-SIGNAL_BLACKOUT_END   = "13:00"
+SIGNAL_BLACKOUT_START = ""
+SIGNAL_BLACKOUT_END   = ""
 
 # Trail-after-TP: instead of exiting at TDO, convert TP into a trailing stop.
 # When price first crosses TDO the position stays open; the stop is then trailed
@@ -105,13 +105,13 @@ TRAIL_AFTER_TP_PTS = 1.0
 # even. The quality degradation at high re-entry counts is driven by TDO distance, not depth.
 # Optimizer search space: [15, 20, 25, 30, 40, 999].
 # Set 999.0 to disable (pass-through for all distances).
-MAX_TDO_DISTANCE_PTS = 15.0
+MAX_TDO_DISTANCE_PTS = 999.0
 
 # Maximum re-entries per session day.
 # At TDO<20 (with MAX_TDO_DISTANCE_PTS applied), even Seq#5+ has EP=$32, so this filter
 # is less important than expected. Most useful at TDO 20-50 where Seq#5+ declines to EP=$6.
 # Optimizer search space: [1, 2, 3, 4, 999]. Default 999 = disabled.
-MAX_REENTRY_COUNT = 1
+MAX_REENTRY_COUNT = 999
 
 # Minimum bars the prior trade must have survived before re-entry is allowed.
 # DIAGNOSTIC ONLY — do not include in optimization runs. Extended diagnostics showed:
@@ -172,7 +172,7 @@ SILVER_BULLET_END   = "10:10"
 # MNQ close does not). Only fires if wick SMT did not fire on the same bar.
 # Optimizer search space: [True, False]
 # Approved in Round 1 experiments: +30.6% PnL, lower drawdown, same signal quality.
-HIDDEN_SMT_ENABLED: bool = True
+HIDDEN_SMT_ENABLED: bool = False
 
 # Two-layer position model: enter Layer A at LAYER_A_FRACTION of max contracts,
 # add Layer B when price retraces into the FVG zone.
@@ -194,7 +194,7 @@ FVG_LAYER_B_TRIGGER: bool = False
 # even when no wick-based SMT exists. Fires only when detect_smt_divergence returns None.
 # Optimizer search space: SMT_OPTIONAL [True, False]; MIN_DISPLACEMENT_PTS [8.0, 10.0, 15.0]
 SMT_OPTIONAL: bool = True
-MIN_DISPLACEMENT_PTS: float = 10.0
+MIN_DISPLACEMENT_PTS: float = 8.0
 
 # Partial exit at first draw on liquidity.
 # PARTIAL_EXIT_FRACTION: fraction of open contracts to close at the partial level.
