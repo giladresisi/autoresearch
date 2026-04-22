@@ -24,10 +24,12 @@ from strategy_smt import (
     MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
     SILVER_BULLET_WINDOW_ONLY, SILVER_BULLET_START, SILVER_BULLET_END,
     TWO_LAYER_POSITION, LAYER_A_FRACTION, FVG_LAYER_B_TRIGGER,
-    SMT_OPTIONAL, SMT_FILL_ENABLED, PARTIAL_EXIT_ENABLED, PARTIAL_EXIT_FRACTION,
+    SMT_OPTIONAL, SMT_FILL_ENABLED, PARTIAL_EXIT_ENABLED, PARTIAL_EXIT_FRACTION, PARTIAL_STOP_BUFFER_PTS,
     DISPLACEMENT_STOP_MODE, MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT,
     FVG_LAYER_B_REQUIRES_HYPOTHESIS, STRUCTURAL_STOP_BUFFER_PTS,
     PESSIMISTIC_FILLS,
+    LIMIT_ENTRY_BUFFER_PTS, LIMIT_EXPIRY_SECONDS, LIMIT_RATIO_THRESHOLD,
+    CONFIRMATION_BAR_MINUTES,
     EXPANDED_REFERENCE_LEVELS, HTF_VISIBILITY_REQUIRED, HTF_PERIODS_MINUTES,
     HIDDEN_SMT_ENABLED, _compute_ref_levels, _check_smt_against_ref,
     ALWAYS_REQUIRE_CONFIRMATION,
@@ -168,6 +170,7 @@ def _build_trade_record(
 
     entry_time = position["entry_time"]
     trade = {
+        "position_id":    position.get("position_id", -1),
         "entry_date":     str(position["entry_date"]),
         "entry_time":     (
             str(entry_time.time())[:5]
@@ -216,8 +219,78 @@ def _build_trade_record(
         # Solution F diagnostic fields
         "tp_name":               position.get("tp_name"),
         "secondary_target_name": position.get("secondary_target_name"),
+        # Limit entry diagnostic fields
+        "anchor_close_price": (
+            round(position["anchor_close_price"], 4)
+            if position.get("anchor_close_price") is not None else ""
+        ),
+        "limit_fill_bars":    position.get("limit_fill_bars", ""),
+        "missed_move_pts":    "",
     }
     return trade, pnl
+
+
+def _build_limit_expired_record(
+    signal: dict,
+    missed_move_pts: float,
+    entry_date,
+    expiry_ts,
+    exit_type: str = "limit_expired",
+) -> dict:
+    """Build a trade-like record for a limit order that expired without filling."""
+    return {
+        "entry_date":        entry_date,
+        "entry_time":        (
+            signal["entry_time"].strftime("%H:%M")
+            if hasattr(signal["entry_time"], "strftime")
+            else str(signal["entry_time"])
+        ),
+        "exit_time":         (
+            expiry_ts.strftime("%H:%M")
+            if hasattr(expiry_ts, "strftime") else str(expiry_ts)
+        ),
+        "direction":         signal["direction"],
+        "entry_price":       round(signal["entry_price"], 4),
+        "exit_price":        "",
+        "tdo":               round(signal.get("tdo", 0), 4),
+        "stop_price":        round(signal["stop_price"], 4),
+        "contracts":         0,
+        "pnl":               0.0,
+        "exit_type":         exit_type,
+        "divergence_bar":    signal.get("divergence_bar", -1),
+        "entry_bar":         signal.get("entry_bar", -1),
+        "stop_bar_wick_pts": "",
+        "reentry_sequence":  "",
+        "prior_trade_bars_held": "",
+        "entry_bar_body_ratio": round(signal.get("entry_bar_body_ratio", 0.0), 4),
+        "smt_sweep_pts":     round(signal.get("smt_sweep_pts", 0.0), 4),
+        "smt_miss_pts":      round(signal.get("smt_miss_pts", 0.0), 4),
+        "bars_since_divergence": "",
+        "matches_hypothesis": signal.get("matches_hypothesis"),
+        "smt_type":          signal.get("smt_type", ""),
+        "fvg_high":          signal.get("fvg_high", ""),
+        "fvg_low":           signal.get("fvg_low", ""),
+        "layer_b_entered":   False,
+        "layer_b_entry_price": "",
+        "layer_b_contracts": 0,
+        "hypothesis_direction": signal.get("hypothesis_direction", ""),
+        "pd_range_case":     signal.get("pd_range_case", ""),
+        "pd_range_bias":     signal.get("pd_range_bias", ""),
+        "week_zone":         signal.get("week_zone", ""),
+        "day_zone":          signal.get("day_zone", ""),
+        "trend_direction":   signal.get("trend_direction", ""),
+        "hypothesis_score":  signal.get("hypothesis_score", ""),
+        "fvg_detected":      signal.get("fvg_detected", ""),
+        "displacement_body_pts": signal.get("displacement_body_pts", ""),
+        "pessimistic_fills": PESSIMISTIC_FILLS,
+        # Limit entry diagnostic fields
+        "anchor_close_price": (
+            round(signal["anchor_close_price"], 4)
+            if signal.get("anchor_close_price") is not None else ""
+        ),
+        "limit_fill_bars":   "",
+        "missed_move_pts":   round(missed_move_pts, 4),
+    }
 
 
 def _compute_fold_params(
@@ -277,6 +350,7 @@ def run_backtest(
     # Quality state — reset per day
     reentry_count         = 0    # how many entries taken today
     prior_trade_bars_held = 0    # how long the previous trade lasted
+    _position_id          = 0    # monotonic counter; shared by partial + final records of same position
     divergence_bar_idx    = -1   # bar index where divergence was detected this session
     pending_smt_sweep     = 0.0
     pending_smt_miss      = 0.0
@@ -343,9 +417,15 @@ def run_backtest(
             anchor_close = None
             reentry_count         = 0
             prior_trade_bars_held = 0
+            _position_id          = 0
             divergence_bar_idx    = -1
             pending_smt_sweep     = 0.0
             pending_smt_miss      = 0.0
+            pending_limit_signal  = None
+            _limit_bars_elapsed   = 0
+            _limit_max_bars       = 0
+            _limit_missed_move    = 0.0
+            _conf_window_start    = -1
             _pending_div_bar_high = 0.0
             _pending_div_bar_low  = 0.0
             _pending_smt_defended = 0.0
@@ -364,11 +444,19 @@ def run_backtest(
         mes_reset = mes_session.reset_index(drop=True)
         mnq_reset = mnq_session.reset_index(drop=True)
 
+        # Detect bar resolution for limit expiry window conversion.
+        # Uses only the first inter-bar gap — assumes a regular series with no late/missing open bar.
+        if len(mnq_reset) >= 2:
+            bar_seconds = (mnq_session.index[1] - mnq_session.index[0]).total_seconds()
+        else:
+            bar_seconds = 60.0
+
         # Pre-extract numpy arrays for fast per-bar access (avoids iterrows() Series overhead)
         _mnq_opens  = mnq_session["Open"].values
         _mnq_highs  = mnq_session["High"].values
         _mnq_lows   = mnq_session["Low"].values
         _mnq_closes = mnq_session["Close"].values
+        _mnq_vols   = mnq_session["Volume"].values
         _mes_highs  = mes_session["High"].values
         _mes_lows   = mes_session["Low"].values
         _mes_closes = mes_session["Close"].values
@@ -553,9 +641,33 @@ def run_backtest(
                     partial_trade["exit_type"] = "partial_exit"
                     partial_trade["pnl"] = round(partial_pnl, 2)
                     partial_trade["exit_price"] = round(partial_exit_price, 4)
+
+                    # Slide stop to lock a floor on the remaining contracts, unless the
+                    # current stop is already tighter (e.g. already at breakeven or better).
+                    _old_stop = position["stop_price"]
+                    _old_tp   = position["take_profit"]
+                    if position["direction"] == "long":
+                        _lock_stop = partial_exit_price - PARTIAL_STOP_BUFFER_PTS
+                        _new_stop  = max(_lock_stop, _old_stop)  # never move stop against position
+                    else:
+                        _lock_stop = partial_exit_price + PARTIAL_STOP_BUFFER_PTS
+                        _new_stop  = min(_lock_stop, _old_stop)
+
+                    # Promote secondary target to TP now that the partial has been taken.
+                    _sec = position.get("secondary_target")
+                    _new_tp = _sec if _sec is not None else _old_tp
+
+                    partial_trade["partial_adjustments"] = (
+                        f"stop:{_old_stop:.2f}->{_new_stop:.2f};"
+                        f"tp:{_old_tp:.2f}->{_new_tp:.2f}"
+                    )
                     trades.append(partial_trade)
                     day_pnl += partial_pnl
                     position["contracts"] -= partial_contracts
+                    position["stop_price"]    = _new_stop
+                    position["take_profit"]   = _new_tp
+                    if _sec is not None:
+                        position["secondary_target"] = None  # consumed; don't double-exit
                     # Stay IN_TRADE with remaining contracts
                     continue
 
@@ -578,6 +690,7 @@ def run_backtest(
                             # Stop was at breakeven — price never really moved; always eligible.
                             state = "REENTRY_ELIGIBLE"
                             anchor_close = float(bar["Close"])
+                            _conf_window_start = bar_idx + 1
                         else:
                             if position["direction"] == "short":
                                 move = position["entry_price"] - float(bar["Close"])
@@ -596,6 +709,7 @@ def run_backtest(
                                 else:
                                     state = "REENTRY_ELIGIBLE"
                                     anchor_close = float(bar["Close"])
+                                    _conf_window_start = bar_idx + 1
                             else:
                                 state = "IDLE"
                     else:
@@ -668,6 +782,7 @@ def run_backtest(
                                 _new_fvg = detect_fvg(mnq_reset, bar_idx, _nd_dir)
                                 _pending_fvg_zone     = _new_fvg
                                 _pending_fvg_detected = _new_fvg is not None
+                                _conf_window_start    = bar_idx + 1
                 # Solution D: abandon hypothesis if adverse move exceeds threshold
                 if HYPOTHESIS_INVALIDATION_PTS < 999:
                     if pending_direction == "short":
@@ -679,118 +794,177 @@ def run_backtest(
                         pending_direction = None
                         anchor_close = None
                         continue
-                if anchor_close is not None and is_confirmation_bar(bar, anchor_close, pending_direction):
-                    # ALWAYS_REQUIRE_CONFIRMATION: bar must break the divergence bar's body boundary.
-                    if ALWAYS_REQUIRE_CONFIRMATION and divergence_bar_idx >= 0:
-                        _div = mnq_reset.iloc[divergence_bar_idx]
-                        _dbh = max(float(_div["Open"]), float(_div["Close"]))
-                        _dbl = min(float(_div["Open"]), float(_div["Close"]))
-                        if pending_direction == "short" and float(bar["Close"]) >= _dbl:
-                            continue
-                        if pending_direction == "long" and float(bar["Close"]) <= _dbh:
-                            continue
-                    # Build signal first with TDO as placeholder TP, then select draw.
-                    signal = _build_signal_from_bar(
-                        bar, ts, pending_direction, day_tdo,
-                        smt_sweep_pts=pending_smt_sweep,
-                        smt_miss_pts=pending_smt_miss,
-                        divergence_bar_idx=divergence_bar_idx,
-                        divergence_bar_high=_pending_div_bar_high,
-                        divergence_bar_low=_pending_div_bar_low,
-                        midnight_open=_day_midnight_open,
-                        smt_defended_level=_pending_smt_defended,
-                        smt_type=_pending_smt_type,
-                        fvg_zone=_pending_fvg_zone,
-                    )
-                    if signal is not None:
-                        # Draw-on-liquidity target selection replaces TP cascade.
-                        _ep = signal["entry_price"]
-                        _sp = signal["stop_price"]
-                        if pending_direction == "long":
-                            _draws = {
-                                "fvg_top":        _pending_fvg_zone["fvg_high"] if _pending_fvg_zone else None,
-                                "tdo":            day_tdo if day_tdo and day_tdo > _ep else None,
-                                "midnight_open":  _day_midnight_open if _day_midnight_open and _day_midnight_open > _ep else None,
-                                "session_high":   _run_ses_high if _run_ses_high > _ep + 1 else None,
-                                "overnight_high": _day_overnight.get("overnight_high") if _day_overnight.get("overnight_high") and _day_overnight.get("overnight_high") > _ep else None,
-                                "pdh":            _day_pdh if _day_pdh and _day_pdh > _ep else None,
-                            }
-                        else:
-                            _draws = {
-                                "fvg_bottom":    _pending_fvg_zone["fvg_low"] if _pending_fvg_zone else None,
-                                "tdo":           day_tdo if day_tdo and day_tdo < _ep else None,
-                                "midnight_open": _day_midnight_open if _day_midnight_open and _day_midnight_open < _ep else None,
-                                "session_low":   _run_ses_low if _run_ses_low < _ep - 1 else None,
-                                "overnight_low": _day_overnight.get("overnight_low") if _day_overnight.get("overnight_low") and _day_overnight.get("overnight_low") < _ep else None,
-                                "pdl":           _day_pdl if _day_pdl and _day_pdl < _ep else None,
-                            }
-                        _tp_name, _day_tp, _sec_tp_name, _sec_tp = select_draw_on_liquidity(
-                            pending_direction, _ep, _sp, _draws, MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
+                # Build confirmation bar: synthetic N-bar candle or raw bar.
+                _conf_bar = bar
+                if CONFIRMATION_BAR_MINUTES > 1:
+                    if (bar_idx < _conf_window_start
+                            or (bar_idx - _conf_window_start + 1) % CONFIRMATION_BAR_MINUTES != 0):
+                        _conf_bar = None
+                    else:
+                        _syn_start = bar_idx - CONFIRMATION_BAR_MINUTES + 1
+                        _conf_bar = pd.Series({
+                            "Open":   float(_mnq_opens[_syn_start]),
+                            "High":   float(_mnq_highs[_syn_start:bar_idx + 1].max()),
+                            "Low":    float(_mnq_lows[_syn_start:bar_idx + 1].min()),
+                            "Close":  float(_mnq_closes[bar_idx]),
+                            "Volume": float(_mnq_vols[_syn_start:bar_idx + 1].sum()),
+                        }, name=ts)
+                if _conf_bar is not None and anchor_close is not None:
+                    if not is_confirmation_bar(_conf_bar, anchor_close, pending_direction):
+                        # Adverse boundary bar: close moved against direction at this window edge.
+                        # Update anchor so the next window must retrace through this new level.
+                        _is_adverse = (
+                            (pending_direction == "short" and float(_conf_bar["Close"]) > float(_conf_bar["Open"]))
+                            or (pending_direction == "long" and float(_conf_bar["Close"]) < float(_conf_bar["Open"]))
                         )
-                        if _day_tp is None:
-                            continue  # no viable draw — skip this confirmation bar
-                        signal["take_profit"]  = _day_tp
-                        signal["tp_name"]      = _tp_name
-                        signal["matches_hypothesis"] = (
-                            (signal.get("direction") == _session_hyp_dir)
-                            if _session_hyp_dir is not None else None
+                        if _is_adverse:
+                            anchor_close = float(_conf_bar["Close"])
+                    else:
+                        # ALWAYS_REQUIRE_CONFIRMATION: bar must break the divergence bar's body boundary.
+                        if ALWAYS_REQUIRE_CONFIRMATION and divergence_bar_idx >= 0:
+                            _div = mnq_reset.iloc[divergence_bar_idx]
+                            _dbh = max(float(_div["Open"]), float(_div["Close"]))
+                            _dbl = min(float(_div["Open"]), float(_div["Close"]))
+                            if pending_direction == "short" and float(_conf_bar["Close"]) >= _dbl:
+                                continue
+                            if pending_direction == "long" and float(_conf_bar["Close"]) <= _dbh:
+                                continue
+                        # Build signal first with TDO as placeholder TP, then select draw.
+                        signal = _build_signal_from_bar(
+                            _conf_bar, ts, pending_direction, day_tdo,
+                            smt_sweep_pts=pending_smt_sweep,
+                            smt_miss_pts=pending_smt_miss,
+                            divergence_bar_idx=divergence_bar_idx,
+                            divergence_bar_high=_pending_div_bar_high,
+                            divergence_bar_low=_pending_div_bar_low,
+                            midnight_open=_day_midnight_open,
+                            smt_defended_level=_pending_smt_defended,
+                            smt_type=_pending_smt_type,
+                            fvg_zone=_pending_fvg_zone,
+                            anchor_close=anchor_close,
                         )
-                        signal["fvg_detected"] = _pending_fvg_detected
-                        if _session_hyp_ctx is not None:
-                            signal["hypothesis_direction"] = _session_hyp_ctx.get("direction")
-                            signal["pd_range_case"]        = _session_hyp_ctx.get("pd_range_case")
-                            signal["pd_range_bias"]        = _session_hyp_ctx.get("pd_range_bias")
-                            signal["week_zone"]            = _session_hyp_ctx.get("week_zone")
-                            signal["day_zone"]             = _session_hyp_ctx.get("day_zone")
-                            signal["trend_direction"]      = _session_hyp_ctx.get("trend_direction")
-                            signal["hypothesis_score"]     = _session_hyp_ctx.get("hypothesis_score", 0)
-                        else:
-                            signal["hypothesis_direction"] = None
-                            signal["pd_range_case"]        = None
-                            signal["pd_range_bias"]        = None
-                            signal["week_zone"]            = None
-                            signal["day_zone"]             = None
-                            signal["trend_direction"]      = None
-                            signal["hypothesis_score"]     = 0
-                        if HYPOTHESIS_FILTER and signal.get("matches_hypothesis") is not True:
-                            state = "IDLE"
-                            pending_direction = None
-                            anchor_close = None
-                            continue
-                        risk_per_contract = (
-                            abs(signal["entry_price"] - signal["stop_price"]) * MNQ_PNL_PER_POINT
-                        )
-                        contracts = (
-                            min(MAX_CONTRACTS, max(1, int(RISK_PER_TRADE / risk_per_contract)))
-                            if risk_per_contract > 0 else 1
-                        )
-                        total_contracts_target = contracts
-                        if TWO_LAYER_POSITION:
-                            layer_a_contracts = max(1, int(contracts * LAYER_A_FRACTION))
-                            total_contracts_target = contracts
-                            contracts = layer_a_contracts
-                        position = {
-                            **signal, "entry_date": day, "contracts": contracts,
-                            "total_contracts_target": total_contracts_target,
-                            "layer_b_entered": False, "layer_b_entry_price": None,
-                            "layer_b_contracts": 0, "partial_done": False, "partial_price": None,
-                        }
-                        if DISPLACEMENT_STOP_MODE and position.get("smt_type") == "displacement":
-                            _extreme = _pending_displacement_bar_extreme
-                            if _extreme is not None:
-                                if position["direction"] == "long":
-                                    position["stop_price"] = _extreme - STRUCTURAL_STOP_BUFFER_PTS
-                                else:
-                                    position["stop_price"] = _extreme + STRUCTURAL_STOP_BUFFER_PTS
-                        position["secondary_target"]      = _sec_tp
-                        position["secondary_target_name"] = _sec_tp_name
-                        position["tp_breached"]           = False
-                        position["entry_bar"]             = bar_idx
-                        reentry_count += 1
-                        position["reentry_sequence"]      = reentry_count
-                        position["prior_trade_bars_held"] = prior_trade_bars_held
-                        state = "IN_TRADE"
-                        entry_bar_count = 0
+                        if signal is not None:
+                            # Draw-on-liquidity target selection replaces TP cascade.
+                            _ep = signal["entry_price"]
+                            _sp = signal["stop_price"]
+                            if pending_direction == "long":
+                                _draws = {
+                                    "fvg_top":        _pending_fvg_zone["fvg_high"] if _pending_fvg_zone else None,
+                                    "tdo":            day_tdo if day_tdo and day_tdo > _ep else None,
+                                    "midnight_open":  _day_midnight_open if _day_midnight_open and _day_midnight_open > _ep else None,
+                                    "session_high":   _run_ses_high if _run_ses_high > _ep + 1 else None,
+                                    "overnight_high": _day_overnight.get("overnight_high") if _day_overnight.get("overnight_high") and _day_overnight.get("overnight_high") > _ep else None,
+                                    "pdh":            _day_pdh if _day_pdh and _day_pdh > _ep else None,
+                                }
+                            else:
+                                _draws = {
+                                    "fvg_bottom":    _pending_fvg_zone["fvg_low"] if _pending_fvg_zone else None,
+                                    "tdo":           day_tdo if day_tdo and day_tdo < _ep else None,
+                                    "midnight_open": _day_midnight_open if _day_midnight_open and _day_midnight_open < _ep else None,
+                                    "session_low":   _run_ses_low if _run_ses_low < _ep - 1 else None,
+                                    "overnight_low": _day_overnight.get("overnight_low") if _day_overnight.get("overnight_low") and _day_overnight.get("overnight_low") < _ep else None,
+                                    "pdl":           _day_pdl if _day_pdl and _day_pdl < _ep else None,
+                                }
+                            _tp_name, _day_tp, _sec_tp_name, _sec_tp = select_draw_on_liquidity(
+                                pending_direction, _ep, _sp, _draws, MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
+                            )
+                            if _day_tp is None:
+                                continue  # no viable draw — skip this confirmation bar
+                            signal["take_profit"]  = _day_tp
+                            signal["tp_name"]      = _tp_name
+                            if signal.get("partial_exit_level") is not None:
+                                signal["partial_exit_level"] = round(
+                                    _ep + (_day_tp - _ep) * PARTIAL_EXIT_LEVEL_RATIO, 4
+                                )
+                            signal["matches_hypothesis"] = (
+                                (signal.get("direction") == _session_hyp_dir)
+                                if _session_hyp_dir is not None else None
+                            )
+                            signal["fvg_detected"] = _pending_fvg_detected
+                            if _session_hyp_ctx is not None:
+                                signal["hypothesis_direction"] = _session_hyp_ctx.get("direction")
+                                signal["pd_range_case"]        = _session_hyp_ctx.get("pd_range_case")
+                                signal["pd_range_bias"]        = _session_hyp_ctx.get("pd_range_bias")
+                                signal["week_zone"]            = _session_hyp_ctx.get("week_zone")
+                                signal["day_zone"]             = _session_hyp_ctx.get("day_zone")
+                                signal["trend_direction"]      = _session_hyp_ctx.get("trend_direction")
+                                signal["hypothesis_score"]     = _session_hyp_ctx.get("hypothesis_score", 0)
+                            else:
+                                signal["hypothesis_direction"] = None
+                                signal["pd_range_case"]        = None
+                                signal["pd_range_bias"]        = None
+                                signal["week_zone"]            = None
+                                signal["day_zone"]             = None
+                                signal["trend_direction"]      = None
+                                signal["hypothesis_score"]     = 0
+                            if HYPOTHESIS_FILTER and signal.get("matches_hypothesis") is not True:
+                                state = "IDLE"
+                                pending_direction = None
+                                anchor_close = None
+                                continue
+                            # Determine operating mode: forward limit vs same-bar fill
+                            _body_ratio = signal.get("entry_bar_body_ratio", 0.0)
+                            _use_forward_limit = (
+                                LIMIT_ENTRY_BUFFER_PTS is not None
+                                and LIMIT_EXPIRY_SECONDS is not None
+                                and (LIMIT_RATIO_THRESHOLD is None
+                                     or _body_ratio < LIMIT_RATIO_THRESHOLD)
+                            )
+                            if _use_forward_limit:
+                                # Capture all position-shaping fields into the signal now, while
+                                # context locals (_sec_tp, _pending_displacement_bar_extreme) are live.
+                                signal["secondary_target"]      = _sec_tp
+                                signal["secondary_target_name"] = _sec_tp_name
+                                if DISPLACEMENT_STOP_MODE and signal.get("smt_type") == "displacement":
+                                    _extreme = _pending_displacement_bar_extreme
+                                    if _extreme is not None:
+                                        if signal["direction"] == "long":
+                                            signal["stop_price"] = _extreme - STRUCTURAL_STOP_BUFFER_PTS
+                                        else:
+                                            signal["stop_price"] = _extreme + STRUCTURAL_STOP_BUFFER_PTS
+                                state = "WAITING_FOR_LIMIT_FILL"
+                                pending_limit_signal = signal
+                                _limit_bars_elapsed = 0
+                                _limit_max_bars = max(1, round(LIMIT_EXPIRY_SECONDS / bar_seconds))
+                                _limit_missed_move = 0.0
+                            else:
+                                signal["limit_fill_bars"] = 0 if LIMIT_ENTRY_BUFFER_PTS is not None else None
+                                risk_per_contract = (
+                                    abs(signal["entry_price"] - signal["stop_price"]) * MNQ_PNL_PER_POINT
+                                )
+                                contracts = (
+                                    min(MAX_CONTRACTS, max(1, int(RISK_PER_TRADE / risk_per_contract)))
+                                    if risk_per_contract > 0 else 1
+                                )
+                                total_contracts_target = contracts
+                                if TWO_LAYER_POSITION:
+                                    layer_a_contracts = max(1, int(contracts * LAYER_A_FRACTION))
+                                    total_contracts_target = contracts
+                                    contracts = layer_a_contracts
+                                position = {
+                                    **signal, "entry_date": day, "contracts": contracts,
+                                    "total_contracts_target": total_contracts_target,
+                                    "layer_b_entered": False, "layer_b_entry_price": None,
+                                    "layer_b_contracts": 0, "partial_done": False, "partial_price": None,
+                                }
+                                if DISPLACEMENT_STOP_MODE and position.get("smt_type") == "displacement":
+                                    _extreme = _pending_displacement_bar_extreme
+                                    if _extreme is not None:
+                                        if position["direction"] == "long":
+                                            position["stop_price"] = _extreme - STRUCTURAL_STOP_BUFFER_PTS
+                                        else:
+                                            position["stop_price"] = _extreme + STRUCTURAL_STOP_BUFFER_PTS
+                                position["secondary_target"]      = _sec_tp
+                                position["secondary_target_name"] = _sec_tp_name
+                                position["tp_breached"]           = False
+                                position["entry_bar"]             = bar_idx
+                                _position_id += 1
+                                position["position_id"]           = _position_id
+                                reentry_count += 1
+                                position["reentry_sequence"]      = reentry_count
+                                position["prior_trade_bars_held"] = prior_trade_bars_held
+                                state = "IN_TRADE"
+                                entry_bar_count = 0
 
             elif state == "REENTRY_ELIGIBLE":
                 # Gate: exceeded daily re-entry cap → abandon this signal
@@ -798,124 +972,252 @@ def run_backtest(
                     state = "IDLE"
                     pending_direction = None
                     anchor_close = None
+                    _conf_window_start = -1
                     continue
                 # Apply blackout to re-entry bar, same as initial entry.
                 if SIGNAL_BLACKOUT_START and SIGNAL_BLACKOUT_END:
                     t = ts.strftime("%H:%M")
                     if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
                         continue
-                if anchor_close is not None and is_confirmation_bar(bar, anchor_close, pending_direction):
-                    # ALWAYS_REQUIRE_CONFIRMATION: bar must break the divergence bar's body boundary.
-                    if ALWAYS_REQUIRE_CONFIRMATION and divergence_bar_idx >= 0:
-                        _div = mnq_reset.iloc[divergence_bar_idx]
-                        _dbh = max(float(_div["Open"]), float(_div["Close"]))
-                        _dbl = min(float(_div["Open"]), float(_div["Close"]))
-                        if pending_direction == "short" and float(bar["Close"]) >= _dbl:
-                            continue
-                        if pending_direction == "long" and float(bar["Close"]) <= _dbh:
-                            continue
-                    # Build signal first with TDO as placeholder TP, then select draw.
-                    signal = _build_signal_from_bar(
-                        bar, ts, pending_direction, day_tdo,
-                        smt_sweep_pts=pending_smt_sweep,
-                        smt_miss_pts=pending_smt_miss,
-                        divergence_bar_idx=divergence_bar_idx,
-                        divergence_bar_high=_pending_div_bar_high,
-                        divergence_bar_low=_pending_div_bar_low,
-                        midnight_open=_day_midnight_open,
-                        smt_defended_level=_pending_smt_defended,
-                        smt_type=_pending_smt_type,
-                        fvg_zone=_pending_fvg_zone,
+                # Build confirmation bar: synthetic N-bar candle or raw bar.
+                _conf_bar = bar
+                if CONFIRMATION_BAR_MINUTES > 1:
+                    if (bar_idx < _conf_window_start
+                            or (bar_idx - _conf_window_start + 1) % CONFIRMATION_BAR_MINUTES != 0):
+                        _conf_bar = None
+                    else:
+                        _syn_start = bar_idx - CONFIRMATION_BAR_MINUTES + 1
+                        _conf_bar = pd.Series({
+                            "Open":   float(_mnq_opens[_syn_start]),
+                            "High":   float(_mnq_highs[_syn_start:bar_idx + 1].max()),
+                            "Low":    float(_mnq_lows[_syn_start:bar_idx + 1].min()),
+                            "Close":  float(_mnq_closes[bar_idx]),
+                            "Volume": float(_mnq_vols[_syn_start:bar_idx + 1].sum()),
+                        }, name=ts)
+                if _conf_bar is not None and anchor_close is not None:
+                    if not is_confirmation_bar(_conf_bar, anchor_close, pending_direction):
+                        # Adverse boundary bar: close moved against direction at this window edge.
+                        # Update anchor so the next window must retrace through this new level.
+                        _is_adverse = (
+                            (pending_direction == "short" and float(_conf_bar["Close"]) > float(_conf_bar["Open"]))
+                            or (pending_direction == "long" and float(_conf_bar["Close"]) < float(_conf_bar["Open"]))
+                        )
+                        if _is_adverse:
+                            anchor_close = float(_conf_bar["Close"])
+                    else:
+                        # ALWAYS_REQUIRE_CONFIRMATION: bar must break the divergence bar's body boundary.
+                        if ALWAYS_REQUIRE_CONFIRMATION and divergence_bar_idx >= 0:
+                            _div = mnq_reset.iloc[divergence_bar_idx]
+                            _dbh = max(float(_div["Open"]), float(_div["Close"]))
+                            _dbl = min(float(_div["Open"]), float(_div["Close"]))
+                            if pending_direction == "short" and float(_conf_bar["Close"]) >= _dbl:
+                                continue
+                            if pending_direction == "long" and float(_conf_bar["Close"]) <= _dbh:
+                                continue
+                        # Build signal first with TDO as placeholder TP, then select draw.
+                        signal = _build_signal_from_bar(
+                            _conf_bar, ts, pending_direction, day_tdo,
+                            smt_sweep_pts=pending_smt_sweep,
+                            smt_miss_pts=pending_smt_miss,
+                            divergence_bar_idx=divergence_bar_idx,
+                            divergence_bar_high=_pending_div_bar_high,
+                            divergence_bar_low=_pending_div_bar_low,
+                            midnight_open=_day_midnight_open,
+                            smt_defended_level=_pending_smt_defended,
+                            smt_type=_pending_smt_type,
+                            fvg_zone=_pending_fvg_zone,
+                            anchor_close=anchor_close,
+                        )
+                        if signal is not None:
+                            # Draw-on-liquidity target selection replaces TP cascade.
+                            _ep = signal["entry_price"]
+                            _sp = signal["stop_price"]
+                            if pending_direction == "long":
+                                _draws = {
+                                    "fvg_top":        _pending_fvg_zone["fvg_high"] if _pending_fvg_zone else None,
+                                    "tdo":            day_tdo if day_tdo and day_tdo > _ep else None,
+                                    "midnight_open":  _day_midnight_open if _day_midnight_open and _day_midnight_open > _ep else None,
+                                    "session_high":   _run_ses_high if _run_ses_high > _ep + 1 else None,
+                                    "overnight_high": _day_overnight.get("overnight_high") if _day_overnight.get("overnight_high") and _day_overnight.get("overnight_high") > _ep else None,
+                                    "pdh":            _day_pdh if _day_pdh and _day_pdh > _ep else None,
+                                }
+                            else:
+                                _draws = {
+                                    "fvg_bottom":    _pending_fvg_zone["fvg_low"] if _pending_fvg_zone else None,
+                                    "tdo":           day_tdo if day_tdo and day_tdo < _ep else None,
+                                    "midnight_open": _day_midnight_open if _day_midnight_open and _day_midnight_open < _ep else None,
+                                    "session_low":   _run_ses_low if _run_ses_low < _ep - 1 else None,
+                                    "overnight_low": _day_overnight.get("overnight_low") if _day_overnight.get("overnight_low") and _day_overnight.get("overnight_low") < _ep else None,
+                                    "pdl":           _day_pdl if _day_pdl and _day_pdl < _ep else None,
+                                }
+                            _tp_name, _day_tp, _sec_tp_name, _sec_tp = select_draw_on_liquidity(
+                                pending_direction, _ep, _sp, _draws, MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
+                            )
+                            if _day_tp is None:
+                                continue  # no viable draw — skip this re-entry bar
+                            signal["take_profit"]  = _day_tp
+                            signal["tp_name"]      = _tp_name
+                            if signal.get("partial_exit_level") is not None:
+                                signal["partial_exit_level"] = round(
+                                    _ep + (_day_tp - _ep) * PARTIAL_EXIT_LEVEL_RATIO, 4
+                                )
+                            signal["matches_hypothesis"] = (
+                                (signal.get("direction") == _session_hyp_dir)
+                                if _session_hyp_dir is not None else None
+                            )
+                            signal["fvg_detected"] = _pending_fvg_detected
+                            if _session_hyp_ctx is not None:
+                                signal["hypothesis_direction"] = _session_hyp_ctx.get("direction")
+                                signal["pd_range_case"]        = _session_hyp_ctx.get("pd_range_case")
+                                signal["pd_range_bias"]        = _session_hyp_ctx.get("pd_range_bias")
+                                signal["week_zone"]            = _session_hyp_ctx.get("week_zone")
+                                signal["day_zone"]             = _session_hyp_ctx.get("day_zone")
+                                signal["trend_direction"]      = _session_hyp_ctx.get("trend_direction")
+                                signal["hypothesis_score"]     = _session_hyp_ctx.get("hypothesis_score", 0)
+                            else:
+                                signal["hypothesis_direction"] = None
+                                signal["pd_range_case"]        = None
+                                signal["pd_range_bias"]        = None
+                                signal["week_zone"]            = None
+                                signal["day_zone"]             = None
+                                signal["trend_direction"]      = None
+                                signal["hypothesis_score"]     = 0
+                            if HYPOTHESIS_FILTER and signal.get("matches_hypothesis") is not True:
+                                state = "IDLE"
+                                pending_direction = None
+                                anchor_close = None
+                                continue
+                            # Determine operating mode: forward limit vs same-bar fill
+                            _body_ratio = signal.get("entry_bar_body_ratio", 0.0)
+                            _use_forward_limit = (
+                                LIMIT_ENTRY_BUFFER_PTS is not None
+                                and LIMIT_EXPIRY_SECONDS is not None
+                                and (LIMIT_RATIO_THRESHOLD is None
+                                     or _body_ratio < LIMIT_RATIO_THRESHOLD)
+                            )
+                            if _use_forward_limit:
+                                # Capture position-shaping fields into the signal while locals are live.
+                                signal["secondary_target"]      = _sec_tp
+                                signal["secondary_target_name"] = _sec_tp_name
+                                if DISPLACEMENT_STOP_MODE and signal.get("smt_type") == "displacement":
+                                    _extreme = _pending_displacement_bar_extreme
+                                    if _extreme is not None:
+                                        if signal["direction"] == "long":
+                                            signal["stop_price"] = _extreme - STRUCTURAL_STOP_BUFFER_PTS
+                                        else:
+                                            signal["stop_price"] = _extreme + STRUCTURAL_STOP_BUFFER_PTS
+                                state = "WAITING_FOR_LIMIT_FILL"
+                                pending_limit_signal = signal
+                                _limit_bars_elapsed = 0
+                                _limit_max_bars = max(1, round(LIMIT_EXPIRY_SECONDS / bar_seconds))
+                                _limit_missed_move = 0.0
+                            else:
+                                signal["limit_fill_bars"] = 0 if LIMIT_ENTRY_BUFFER_PTS is not None else None
+                                risk_per_contract = (
+                                    abs(signal["entry_price"] - signal["stop_price"]) * MNQ_PNL_PER_POINT
+                                )
+                                contracts = (
+                                    min(MAX_CONTRACTS, max(1, int(RISK_PER_TRADE / risk_per_contract)))
+                                    if risk_per_contract > 0 else 1
+                                )
+                                total_contracts_target = contracts
+                                if TWO_LAYER_POSITION:
+                                    layer_a_contracts = max(1, int(contracts * LAYER_A_FRACTION))
+                                    total_contracts_target = contracts
+                                    contracts = layer_a_contracts
+                                position = {
+                                    **signal, "entry_date": day, "contracts": contracts,
+                                    "total_contracts_target": total_contracts_target,
+                                    "layer_b_entered": False, "layer_b_entry_price": None,
+                                    "layer_b_contracts": 0, "partial_done": False, "partial_price": None,
+                                }
+                                if DISPLACEMENT_STOP_MODE and position.get("smt_type") == "displacement":
+                                    _extreme = _pending_displacement_bar_extreme
+                                    if _extreme is not None:
+                                        if position["direction"] == "long":
+                                            position["stop_price"] = _extreme - STRUCTURAL_STOP_BUFFER_PTS
+                                        else:
+                                            position["stop_price"] = _extreme + STRUCTURAL_STOP_BUFFER_PTS
+                                position["secondary_target"]      = _sec_tp
+                                position["secondary_target_name"] = _sec_tp_name
+                                position["tp_breached"]           = False
+                                position["entry_bar"]             = bar_idx
+                                _position_id += 1
+                                position["position_id"]           = _position_id
+                                reentry_count += 1
+                                position["reentry_sequence"]      = reentry_count
+                                position["prior_trade_bars_held"] = prior_trade_bars_held
+                                state = "IN_TRADE"
+                                entry_bar_count = 0
+
+            elif state == "WAITING_FOR_LIMIT_FILL":
+                _limit_bars_elapsed += 1
+
+                # Track max favourable move during wait window
+                if pending_limit_signal["direction"] == "short":
+                    _limit_missed_move = max(
+                        _limit_missed_move,
+                        pending_limit_signal["entry_price"] - float(bar["Low"])
                     )
-                    if signal is not None:
-                        # Draw-on-liquidity target selection replaces TP cascade.
-                        _ep = signal["entry_price"]
-                        _sp = signal["stop_price"]
-                        if pending_direction == "long":
-                            _draws = {
-                                "fvg_top":        _pending_fvg_zone["fvg_high"] if _pending_fvg_zone else None,
-                                "tdo":            day_tdo if day_tdo and day_tdo > _ep else None,
-                                "midnight_open":  _day_midnight_open if _day_midnight_open and _day_midnight_open > _ep else None,
-                                "session_high":   _run_ses_high if _run_ses_high > _ep + 1 else None,
-                                "overnight_high": _day_overnight.get("overnight_high") if _day_overnight.get("overnight_high") and _day_overnight.get("overnight_high") > _ep else None,
-                                "pdh":            _day_pdh if _day_pdh and _day_pdh > _ep else None,
-                            }
-                        else:
-                            _draws = {
-                                "fvg_bottom":    _pending_fvg_zone["fvg_low"] if _pending_fvg_zone else None,
-                                "tdo":           day_tdo if day_tdo and day_tdo < _ep else None,
-                                "midnight_open": _day_midnight_open if _day_midnight_open and _day_midnight_open < _ep else None,
-                                "session_low":   _run_ses_low if _run_ses_low < _ep - 1 else None,
-                                "overnight_low": _day_overnight.get("overnight_low") if _day_overnight.get("overnight_low") and _day_overnight.get("overnight_low") < _ep else None,
-                                "pdl":           _day_pdl if _day_pdl and _day_pdl < _ep else None,
-                            }
-                        _tp_name, _day_tp, _sec_tp_name, _sec_tp = select_draw_on_liquidity(
-                            pending_direction, _ep, _sp, _draws, MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
-                        )
-                        if _day_tp is None:
-                            continue  # no viable draw — skip this re-entry bar
-                        signal["take_profit"]  = _day_tp
-                        signal["tp_name"]      = _tp_name
-                        signal["matches_hypothesis"] = (
-                            (signal.get("direction") == _session_hyp_dir)
-                            if _session_hyp_dir is not None else None
-                        )
-                        signal["fvg_detected"] = _pending_fvg_detected
-                        if _session_hyp_ctx is not None:
-                            signal["hypothesis_direction"] = _session_hyp_ctx.get("direction")
-                            signal["pd_range_case"]        = _session_hyp_ctx.get("pd_range_case")
-                            signal["pd_range_bias"]        = _session_hyp_ctx.get("pd_range_bias")
-                            signal["week_zone"]            = _session_hyp_ctx.get("week_zone")
-                            signal["day_zone"]             = _session_hyp_ctx.get("day_zone")
-                            signal["trend_direction"]      = _session_hyp_ctx.get("trend_direction")
-                            signal["hypothesis_score"]     = _session_hyp_ctx.get("hypothesis_score", 0)
-                        else:
-                            signal["hypothesis_direction"] = None
-                            signal["pd_range_case"]        = None
-                            signal["pd_range_bias"]        = None
-                            signal["week_zone"]            = None
-                            signal["day_zone"]             = None
-                            signal["trend_direction"]      = None
-                            signal["hypothesis_score"]     = 0
-                        if HYPOTHESIS_FILTER and signal.get("matches_hypothesis") is not True:
-                            state = "IDLE"
-                            pending_direction = None
-                            anchor_close = None
-                            continue
-                        risk_per_contract = (
-                            abs(signal["entry_price"] - signal["stop_price"]) * MNQ_PNL_PER_POINT
-                        )
-                        contracts = (
-                            min(MAX_CONTRACTS, max(1, int(RISK_PER_TRADE / risk_per_contract)))
-                            if risk_per_contract > 0 else 1
-                        )
+                else:
+                    _limit_missed_move = max(
+                        _limit_missed_move,
+                        float(bar["High"]) - pending_limit_signal["entry_price"]
+                    )
+
+                filled = (
+                    (pending_limit_signal["direction"] == "short"
+                     and float(bar["High"]) >= pending_limit_signal["entry_price"])
+                    or
+                    (pending_limit_signal["direction"] == "long"
+                     and float(bar["Low"])  <= pending_limit_signal["entry_price"])
+                )
+
+                if filled:
+                    pending_limit_signal["limit_fill_bars"] = _limit_bars_elapsed
+                    risk_per_contract = (
+                        abs(pending_limit_signal["entry_price"] - pending_limit_signal["stop_price"])
+                        * MNQ_PNL_PER_POINT
+                    )
+                    contracts = (
+                        min(MAX_CONTRACTS, max(1, int(RISK_PER_TRADE / risk_per_contract)))
+                        if risk_per_contract > 0 else 1
+                    )
+                    total_contracts_target = contracts
+                    if TWO_LAYER_POSITION:
+                        layer_a_contracts = max(1, int(contracts * LAYER_A_FRACTION))
                         total_contracts_target = contracts
-                        if TWO_LAYER_POSITION:
-                            layer_a_contracts = max(1, int(contracts * LAYER_A_FRACTION))
-                            total_contracts_target = contracts
-                            contracts = layer_a_contracts
-                        position = {
-                            **signal, "entry_date": day, "contracts": contracts,
-                            "total_contracts_target": total_contracts_target,
-                            "layer_b_entered": False, "layer_b_entry_price": None,
-                            "layer_b_contracts": 0, "partial_done": False, "partial_price": None,
-                        }
-                        if DISPLACEMENT_STOP_MODE and position.get("smt_type") == "displacement":
-                            _extreme = _pending_displacement_bar_extreme
-                            if _extreme is not None:
-                                if position["direction"] == "long":
-                                    position["stop_price"] = _extreme - STRUCTURAL_STOP_BUFFER_PTS
-                                else:
-                                    position["stop_price"] = _extreme + STRUCTURAL_STOP_BUFFER_PTS
-                        position["secondary_target"]      = _sec_tp
-                        position["secondary_target_name"] = _sec_tp_name
-                        position["tp_breached"]           = False
-                        position["entry_bar"]             = bar_idx
-                        reentry_count += 1
-                        position["reentry_sequence"]      = reentry_count
-                        position["prior_trade_bars_held"] = prior_trade_bars_held
-                        state = "IN_TRADE"
-                        entry_bar_count = 0
+                        contracts = layer_a_contracts
+                    # stop_price, secondary_target, and displacement override were
+                    # locked into pending_limit_signal at WAITING state entry — intentionally
+                    # not updated during the wait window.
+                    position = {
+                        **pending_limit_signal,
+                        "entry_date": day, "contracts": contracts,
+                        "total_contracts_target": total_contracts_target,
+                        "layer_b_entered": False, "layer_b_entry_price": None,
+                        "layer_b_contracts": 0, "partial_done": False, "partial_price": None,
+                    }
+                    position["tp_breached"]           = False
+                    position["entry_bar"]             = bar_idx
+                    _position_id += 1
+                    position["position_id"]           = _position_id
+                    reentry_count += 1
+                    position["reentry_sequence"]      = reentry_count
+                    position["prior_trade_bars_held"] = prior_trade_bars_held
+                    state = "IN_TRADE"
+                    entry_bar_count = 0
+                    pending_limit_signal = None
+
+                elif _limit_bars_elapsed >= _limit_max_bars:
+                    expired_record = _build_limit_expired_record(
+                        pending_limit_signal, _limit_missed_move, day, ts,
+                        exit_type="limit_expired",
+                    )
+                    trades.append(expired_record)
+                    state = "IDLE"
+                    pending_limit_signal = None
+                    anchor_close = None
 
             else:  # IDLE
                 if day_tdo is None:
@@ -1070,6 +1372,7 @@ def run_backtest(
                 _pending_fvg_detected           = _raw_fvg_present
                 _pending_displacement_bar_extreme = _displacement_bar_extreme
                 state                           = "WAITING_FOR_ENTRY"
+                _conf_window_start              = bar_idx + 1
                 _pending_div_score = divergence_score(
                     _smt_sweep, _smt_miss,
                     body_pts=abs(float(_mnq_closes[bar_idx]) - float(_mnq_opens[bar_idx])),
@@ -1085,6 +1388,17 @@ def run_backtest(
                 _pending_div_provisional     = (_smt_type == "displacement")
                 _pending_discovery_bar_idx   = bar_idx
                 _pending_discovery_price     = float(_mnq_closes[bar_idx])
+
+        # End of session: expire any pending limit order still waiting for fill.
+        if state == "WAITING_FOR_LIMIT_FILL" and pending_limit_signal is not None:
+            last_ts = mnq_session.index[-1]
+            expired_record = _build_limit_expired_record(
+                pending_limit_signal, _limit_missed_move, day, last_ts,
+                exit_type="limit_expired_session_close",
+            )
+            trades.append(expired_record)
+            pending_limit_signal = None
+            state = "IDLE"
 
         # End of session: force-close any position still open at session boundary.
         if state == "IN_TRADE" and position is not None:
@@ -1253,6 +1567,12 @@ def _write_trades_tsv(trades: list[dict]) -> None:
         "week_zone", "day_zone", "trend_direction", "hypothesis_score", "fvg_detected",
         # Plan 4 columns
         "displacement_body_pts", "pessimistic_fills",
+        # Limit entry columns
+        "anchor_close_price", "limit_fill_bars", "missed_move_pts",
+        # Partial exit stop/tp adjustment notes
+        "partial_adjustments",
+        # Position linkage
+        "position_id",
     ]
     with open("trades.tsv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t",

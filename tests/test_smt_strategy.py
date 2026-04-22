@@ -1411,3 +1411,129 @@ def test_compute_pdh_pdl_monday_uses_friday():
     # Monday 2025-01-06; last row before it = Friday 2025-01-03
     pdh, pdl = compute_pdh_pdl(df, datetime.date(2025, 1, 6))
     assert pdh == 125.0 and pdl == 88.0
+
+
+# ══ Limit entry tests T1-T10 (_build_signal_from_bar) ════════════════════════
+
+def _bar_limit(close=105.0, open_=107.0, high=112.0, low=100.0):
+    return pd.Series({"Open": float(open_), "High": float(high), "Low": float(low), "Close": float(close)})
+
+_LIM_TS = pd.Timestamp("2025-01-02 09:05:00", tz="America/New_York")
+
+
+def _disable_filters(monkeypatch, smt):
+    monkeypatch.setattr(smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(smt, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(smt, "MAX_TDO_DISTANCE_PTS", 999.0)
+
+
+def test_limit_entry_disabled_both_none(monkeypatch):
+    """T1: Both LIMIT_ENTRY_BUFFER_PTS=None and anchor_close=None → entry=bar["Close"], anchor_close_price=None."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "LIMIT_ENTRY_BUFFER_PTS", None)
+    _disable_filters(monkeypatch, smt)
+    sig = smt._build_signal_from_bar(_bar_limit(close=105.0), _LIM_TS, "short", 70.0)
+    assert sig is not None
+    assert sig["entry_price"] == 105.0
+    assert sig["anchor_close_price"] is None
+
+
+def test_limit_entry_disabled_buffer_none(monkeypatch):
+    """T2: LIMIT_ENTRY_BUFFER_PTS=None, anchor_close=100.0 → entry=bar["Close"]."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "LIMIT_ENTRY_BUFFER_PTS", None)
+    _disable_filters(monkeypatch, smt)
+    sig = smt._build_signal_from_bar(_bar_limit(close=105.0), _LIM_TS, "short", 70.0, anchor_close=100.0)
+    assert sig is not None
+    assert sig["entry_price"] == 105.0
+    assert sig["anchor_close_price"] is None
+
+
+def test_limit_entry_disabled_anchor_none(monkeypatch):
+    """T3: LIMIT_ENTRY_BUFFER_PTS=0.0, anchor_close=None → entry=bar["Close"]."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "LIMIT_ENTRY_BUFFER_PTS", 0.0)
+    _disable_filters(monkeypatch, smt)
+    sig = smt._build_signal_from_bar(_bar_limit(close=105.0), _LIM_TS, "short", 70.0, anchor_close=None)
+    assert sig is not None
+    assert sig["entry_price"] == 105.0
+
+
+def test_limit_entry_short_zero_buffer(monkeypatch):
+    """T4: Short, LIMIT_ENTRY_BUFFER_PTS=0.0, anchor_close=100.0 → entry=100.0, anchor_close_price=100.0."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "LIMIT_ENTRY_BUFFER_PTS", 0.0)
+    _disable_filters(monkeypatch, smt)
+    sig = smt._build_signal_from_bar(_bar_limit(close=105.0), _LIM_TS, "short", 70.0, anchor_close=100.0)
+    assert sig is not None
+    assert sig["entry_price"] == pytest.approx(100.0)
+    assert sig["anchor_close_price"] == pytest.approx(100.0)
+
+
+def test_limit_entry_long_zero_buffer(monkeypatch):
+    """T5: Long, LIMIT_ENTRY_BUFFER_PTS=0.0, anchor_close=100.0 → entry=100.0."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "LIMIT_ENTRY_BUFFER_PTS", 0.0)
+    _disable_filters(monkeypatch, smt)
+    bar = _bar_limit(close=95.0, open_=93.0, high=101.0, low=90.0)
+    sig = smt._build_signal_from_bar(bar, _LIM_TS, "long", 130.0, anchor_close=100.0)
+    assert sig is not None
+    assert sig["entry_price"] == pytest.approx(100.0)
+
+
+def test_limit_entry_short_with_buffer(monkeypatch):
+    """T6: Short, LIMIT_ENTRY_BUFFER_PTS=0.5, anchor_close=100.0 → entry=99.5."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "LIMIT_ENTRY_BUFFER_PTS", 0.5)
+    _disable_filters(monkeypatch, smt)
+    sig = smt._build_signal_from_bar(_bar_limit(close=105.0), _LIM_TS, "short", 70.0, anchor_close=100.0)
+    assert sig is not None
+    assert sig["entry_price"] == pytest.approx(99.5)
+
+
+def test_limit_entry_long_with_buffer(monkeypatch):
+    """T7: Long, LIMIT_ENTRY_BUFFER_PTS=0.5, anchor_close=100.0 → entry=100.5."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "LIMIT_ENTRY_BUFFER_PTS", 0.5)
+    _disable_filters(monkeypatch, smt)
+    bar = _bar_limit(close=95.0, open_=93.0, high=101.0, low=90.0)
+    sig = smt._build_signal_from_bar(bar, _LIM_TS, "long", 130.0, anchor_close=100.0)
+    assert sig is not None
+    assert sig["entry_price"] == pytest.approx(100.5)
+
+
+def test_limit_entry_stop_recalculates(monkeypatch):
+    """T8: Stop is calculated from limit entry_price (100.0), not bar["Close"] (105.0)."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "LIMIT_ENTRY_BUFFER_PTS", 0.0)
+    monkeypatch.setattr(smt, "SHORT_STOP_RATIO", 0.35)
+    monkeypatch.setattr(smt, "STRUCTURAL_STOP_MODE", False)
+    _disable_filters(monkeypatch, smt)
+    # entry=100.0, tdo=70.0 → distance=30, stop = 100.0 + 0.35*30 = 110.5
+    sig = smt._build_signal_from_bar(_bar_limit(close=105.0), _LIM_TS, "short", 70.0, anchor_close=100.0)
+    assert sig is not None
+    assert sig["stop_price"] == pytest.approx(110.5)
+
+
+def test_limit_entry_tdo_check_rejects(monkeypatch):
+    """T9: Short limit entry=98.0 with tdo=99.0 above entry → TDO validity rejects → None."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "LIMIT_ENTRY_BUFFER_PTS", 2.0)
+    monkeypatch.setattr(smt, "TDO_VALIDITY_CHECK", True)
+    _disable_filters(monkeypatch, smt)
+    # entry = 100.0 - 2.0 = 98.0; tdo=99.0 ≥ entry (invalid for short)
+    sig = smt._build_signal_from_bar(_bar_limit(close=105.0), _LIM_TS, "short", 99.0, anchor_close=100.0)
+    assert sig is None
+
+
+def test_limit_entry_partial_exit_uses_new_entry(monkeypatch):
+    """T10: Partial exit level computed from limit entry_price (100.0), not bar["Close"] (105.0)."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "LIMIT_ENTRY_BUFFER_PTS", 0.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", True)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_LEVEL_RATIO", 0.33)
+    _disable_filters(monkeypatch, smt)
+    # entry=100.0, tdo=70.0 → partial = 100.0 + (70.0 - 100.0) * 0.33 = 90.1
+    sig = smt._build_signal_from_bar(_bar_limit(close=105.0), _LIM_TS, "short", 70.0, anchor_close=100.0)
+    assert sig is not None
+    assert sig["partial_exit_level"] == pytest.approx(90.1, rel=1e-3)

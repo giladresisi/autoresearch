@@ -258,6 +258,11 @@ MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT: int = 0
 #   Only read by manage_position() when PARTIAL_EXIT_ENABLED=True.
 #   Optimizer search space: [0.33, 0.5, 0.67]
 PARTIAL_EXIT_LEVEL_RATIO: float = 0.33
+# After partial exit, slide the stop to partial_exit_price ± this buffer so the remaining
+# contracts cannot lose significantly if price reverses before reaching TP.
+# Set to 0.0 to lock the stop exactly at the partial price (no buffer).
+# Optimizer search space: [0.5, 1.0, 2.0, 3.0]
+PARTIAL_STOP_BUFFER_PTS: float = 2.0
 
 # ── Layer B hypothesis gate (Plan 3) ─────────────────────────────────────────
 # FVG_LAYER_B_REQUIRES_HYPOTHESIS: when True, the FVG retracement add-on (Layer B)
@@ -310,6 +315,39 @@ ADVERSE_MOVE_MIN_DECAY:       float = 0.10   # floor for the adverse-move decay 
 
 # ── Solution D: Hard invalidation threshold ───────────────────────────────────
 HYPOTHESIS_INVALIDATION_PTS:  float = 999.0  # abandon hypothesis after this many pts adverse; 999 = disabled
+
+# ── Limit entry at anchor_close ───────────────────────────────────────────────
+# Entry fills at anchor_close ± buffer instead of the confirmation bar's close.
+# None = disabled (entry = bar["Close"], existing behaviour).
+# 0.0  = exactly at anchor_close.
+# >0   = anchor_close offset by buffer (SHORT: −buffer; LONG: +buffer).
+# Optimizer search space: [1.0, 2.0, 3.0]
+LIMIT_ENTRY_BUFFER_PTS: "float | None" = 3.0
+
+# Forward-looking limit expiry window in wall-clock seconds.
+# None = same-bar fill (LIMIT_ENTRY_BUFFER_PTS still controls entry_price;
+#        no new state machine state).
+# >0   = limit must fill on a subsequent bar within this window;
+#        expired signals produce a limit_expired TSV record.
+# Bar count derived automatically: max(1, round(LIMIT_EXPIRY_SECONDS / bar_seconds)).
+# Typical values: 60 (1 min), 120 (2 min), 300 (5 min).
+# Optimizer search space: [None, 60.0, 120.0, 300.0]
+LIMIT_EXPIRY_SECONDS: "float | None" = 120.0
+
+# Hybrid mode: bypass forward-looking limit for high-conviction bars.
+# When entry_bar_body_ratio >= threshold, use same-bar fill regardless of
+# LIMIT_EXPIRY_SECONDS. Only evaluated when LIMIT_EXPIRY_SECONDS is not None.
+# None = all bars use forward-looking limit (no bypass).
+# 0.60 = bars where the confirmation bar used >= 60% of its range as body use same-bar fill.
+# Optimizer search space: [None, 0.40, 0.50, 0.60, 0.70]
+LIMIT_RATIO_THRESHOLD: "float | None" = None
+
+# Confirmation bar resolution in bar-count multiples.
+# 1 = check every bar (default, current behaviour).
+# N > 1 = build a synthetic N-bar candle (open of first bar, max high, min low, close of last)
+# using a fixed window anchored to the divergence bar. Only check confirmation at window closes.
+# Window 1: bars [div+1 .. div+N], window 2: [div+N+1 .. div+2N], etc.
+CONFIRMATION_BAR_MINUTES: int = 1
 
 
 # ── Module-level bar data ─────────────────────────────────────────────────────
@@ -1234,6 +1272,7 @@ def screen_session(
                 smt_defended_level=_smt_defended,
                 smt_type=_smt_type,
                 fvg_zone=_fvg_zone,
+                anchor_close=ac,
             )
             if signal is None:
                 break
@@ -1293,13 +1332,21 @@ def _build_signal_from_bar(
     smt_type: str = "wick",
     # New Plan 2 fields:
     fvg_zone=None,
+    # Limit entry fields:
+    anchor_close: "float | None" = None,
 ) -> dict | None:
     """Build a signal dict from a confirmed entry bar, applying all validity guards.
 
     Returns None if the signal fails TDO_VALIDITY_CHECK, MIN_STOP_POINTS,
     MIN_TDO_DISTANCE_PTS, or MAX_TDO_DISTANCE_PTS guards.
     """
-    entry_price = float(bar["Close"])
+    if anchor_close is not None and LIMIT_ENTRY_BUFFER_PTS is not None:
+        entry_price = (
+            anchor_close - LIMIT_ENTRY_BUFFER_PTS if direction == "short"
+            else anchor_close + LIMIT_ENTRY_BUFFER_PTS
+        )
+    else:
+        entry_price = float(bar["Close"])
 
     if TDO_VALIDITY_CHECK:
         if direction == "long" and tdo <= entry_price:
@@ -1371,6 +1418,10 @@ def _build_signal_from_bar(
         "partial_exit_level":   round(entry_price + (tdo - entry_price) * PARTIAL_EXIT_LEVEL_RATIO, 4) if PARTIAL_EXIT_ENABLED else None,
         # Plan 4 diagnostic — always recorded
         "displacement_body_pts": round(body, 2),
+        # Limit entry diagnostics
+        "anchor_close_price": anchor_close if LIMIT_ENTRY_BUFFER_PTS is not None else None,
+        "limit_fill_bars":    None,   # populated by state machine on fill
+        "missed_move_pts":    None,   # populated by state machine on expiry
     }
 
 

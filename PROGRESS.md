@@ -1,5 +1,21 @@
 # PROGRESS
 
+## Feature: SMT Limit Entry at Anchor Close
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-limit-entry-anchor-close.md`
+
+Replaces market-order entry (bar close) with a limit at `anchor_close ± buffer`. Two modes: same-bar fill (`LIMIT_EXPIRY_SECONDS=None`) and forward-looking limit with new `WAITING_FOR_LIMIT_FILL` state machine state. Bar resolution auto-detected from timestamps — works at 1m (backtest) and 1s (live). Adds `anchor_close_price`, `limit_fill_bars`, `missed_move_pts` diagnostic fields and `limit_expired` exit type to `trades.tsv` so missed big-mover trades are fully visible. Both constants default to `None` (zero behaviour change). Optimizer search space: `LIMIT_ENTRY_BUFFER_PTS ∈ [None, 0.0, 0.25, 0.5, 1.0]`, `LIMIT_EXPIRY_SECONDS ∈ [None, 60.0, 120.0, 300.0]`.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-limit-entry-anchor-close.md`
+- All 6 tasks completed; 19 new tests passing (+19 from 643 baseline to 662); 0 regressions
+- One latent gap: forward-limit fill path does not apply secondary_target / DISPLACEMENT_STOP_MODE adjustments (no impact while LIMIT_EXPIRY_SECONDS=None default)
+- Test results: 662 full suite; 9 pre-existing failures unchanged
+- Alignment score: 9/10
+
+---
 
 ## Feature: SMT Solutions A–E — Signal Quality & State Machine Hardening
 

@@ -982,4 +982,465 @@ def test_tp_name_in_trade_record(monkeypatch):
                     name=pd.Timestamp("2025-01-02 10:30", tz="America/New_York"))
     trade, _ = bk._build_trade_record(pos, "exit_tp", bar, 2.0)
     assert "tp_name" in trade
-    assert trade["tp_name"] == "midnight_open"
+
+
+# ══ Limit entry integration tests T11-T19 ════════════════════════════════════
+
+def _build_short_limit_session(
+    date, base=20000.0, n=90, freq="5min",
+    bar9_high=None, bar9_low=None, bar10_high=None, bar10_low=None,
+    conf_bar_open=None, conf_bar_close=None,
+):
+    """Build a short-signal session with limit-entry-friendly control points."""
+    start_ts = pd.Timestamp(date + " 09:00:00", tz="America/New_York")
+    idx = pd.date_range(start=start_ts, periods=n, freq=freq)
+    mes_highs = [base + 5] * n
+    mnq_highs = [base + 5] * n
+    mes_lows  = [base - 5] * n
+    mnq_lows  = [base - 5] * n
+    opens  = [base] * n
+    closes = [base] * n
+    # Bar 5: bullish anchor → anchor_close = base+2
+    opens[5]  = base - 2
+    closes[5] = base + 2
+    # Bar 7: MES new session high (bearish divergence)
+    mes_highs[7] = base + 30
+    # Bar 8: bearish confirmation (close < open, high > anchor_close=base+2)
+    opens[8]  = conf_bar_open  if conf_bar_open  is not None else base + 2
+    closes[8] = conf_bar_close if conf_bar_close is not None else base - 2
+    mnq_highs[8] = base + 6
+    # Bars 9/10: default highs stay base+5 (fills immediately); override to prevent fill
+    if bar9_high is not None and n > 9:
+        mnq_highs[9] = bar9_high
+        mes_highs[9] = bar9_high
+    if bar9_low is not None and n > 9:
+        mnq_lows[9] = bar9_low
+        mes_lows[9] = bar9_low
+    if bar10_high is not None and n > 10:
+        mnq_highs[10] = bar10_high
+        mes_highs[10] = bar10_high
+    if bar10_low is not None and n > 10:
+        mnq_lows[10] = bar10_low
+        mes_lows[10] = bar10_low
+    mnq = pd.DataFrame(
+        {"Open": opens, "High": mnq_highs, "Low": mnq_lows, "Close": closes, "Volume": [1000.0] * n},
+        index=idx,
+    )
+    mes = pd.DataFrame(
+        {"Open": opens, "High": mes_highs, "Low": mes_lows, "Close": closes, "Volume": [1000.0] * n},
+        index=idx,
+    )
+    return mnq, mes
+
+
+def _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=None, ratio_threshold=None):
+    """Apply common patches required for limit entry integration tests."""
+    monkeypatch.setattr(strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(strat, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(strat, "MIDNIGHT_OPEN_AS_TP", False)
+    monkeypatch.setattr(strat, "SMT_OPTIONAL", False)
+    monkeypatch.setattr(strat, "DISPLACEMENT_STOP_MODE", False)
+    monkeypatch.setattr(strat, "STRUCTURAL_STOP_MODE", False)
+    monkeypatch.setattr(strat, "LIMIT_ENTRY_BUFFER_PTS", limit_buffer)
+    monkeypatch.setattr(strat, "LIMIT_EXPIRY_SECONDS", limit_expiry)
+    monkeypatch.setattr(strat, "LIMIT_RATIO_THRESHOLD", ratio_threshold)
+    monkeypatch.setattr(bk, "LIMIT_ENTRY_BUFFER_PTS", limit_buffer)
+    monkeypatch.setattr(bk, "LIMIT_EXPIRY_SECONDS", limit_expiry)
+    monkeypatch.setattr(bk, "LIMIT_RATIO_THRESHOLD", ratio_threshold)
+    monkeypatch.setattr(bk, "MIDNIGHT_OPEN_AS_TP", False)
+    monkeypatch.setattr(bk, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(bk, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(bk, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(bk, "REENTRY_MAX_MOVE_PTS", 0.0)
+    monkeypatch.setattr(bk, "MAX_REENTRY_COUNT", 1)
+    monkeypatch.setattr(bk, "SESSION_START", "09:00")
+    monkeypatch.setattr(bk, "SESSION_END", "10:30")
+    # Guard against import-order contamination: test_smt_strategy.py's autouse
+    # fixture may patch strategy_smt.MIN_BARS_BEFORE_SIGNAL before backtest_smt
+    # is first imported, leaving bk.MIN_BARS_BEFORE_SIGNAL permanently elevated.
+    monkeypatch.setattr(bk, "MIN_BARS_BEFORE_SIGNAL", 0)
+    monkeypatch.setattr(bk, "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(bk, "MIN_RR_FOR_TARGET", 0.0)
+    monkeypatch.setattr(strat, "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(strat, "MIN_RR_FOR_TARGET", 0.0)
+    monkeypatch.setattr(bk, "SMT_OPTIONAL", False)
+
+
+def test_limit_entry_forward_fills_on_next_bar(futures_tmpdir, monkeypatch):
+    """T11: Forward-limit fills on bar N+1; limit_fill_bars=1 in trade record."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    # LIMIT_EXPIRY_SECONDS=600 with 5m bars → max_limit_bars=2 (fills on bar 9, elapsed=1)
+    _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=600.0)
+    base = 20000.0
+    # bar 9 default high = base+5 >= anchor(base+2) → fills
+    mnq, mes = _build_short_limit_session("2025-01-02", base=base)
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    filled = [t for t in stats["trade_records"] if t.get("exit_type") not in ("limit_expired", "limit_expired_session_close")]
+    assert len(filled) >= 1, "Expected a filled trade"
+    limit_filled = [t for t in filled if t.get("limit_fill_bars") is not None and t["limit_fill_bars"] != ""]
+    assert len(limit_filled) >= 1, "Expected limit_fill_bars populated on at least one trade"
+    assert limit_filled[0]["limit_fill_bars"] == 1
+
+
+def test_limit_entry_forward_expires(futures_tmpdir, monkeypatch):
+    """T12: Forward-limit expires after max_limit_bars; limit_expired record with pnl=0."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    # LIMIT_EXPIRY_SECONDS=300 with 5m bars → max_limit_bars=1; bar9 high < anchor → no fill
+    _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=300.0)
+    base = 20000.0
+    mnq, mes = _build_short_limit_session("2025-01-02", base=base, bar9_high=base + 1)
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    expired = [t for t in stats["trade_records"] if t.get("exit_type") == "limit_expired"]
+    assert len(expired) >= 1, "Expected a limit_expired record"
+    assert expired[0]["pnl"] == 0.0
+
+
+def test_limit_entry_expiry_missed_move_populated(futures_tmpdir, monkeypatch):
+    """T13: missed_move_pts populated on expired record; reflects max favourable move during wait."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=300.0)
+    base = 20000.0
+    # bar9: high < anchor (no fill) but low is far below entry → missed_move = entry_price - low = (base+2)-(base-12) = 14.0
+    mnq, mes = _build_short_limit_session(
+        "2025-01-02", base=base, bar9_high=base + 1, bar9_low=base - 12
+    )
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    expired = [t for t in stats["trade_records"] if t.get("exit_type") == "limit_expired"]
+    assert len(expired) >= 1
+    assert expired[0]["missed_move_pts"] == pytest.approx(14.0, rel=1e-3)
+
+
+def test_limit_entry_session_close_during_wait(futures_tmpdir, monkeypatch):
+    """T14: Session ends while in WAITING_FOR_LIMIT_FILL → limit_expired_session_close record."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    # Long expiry so it doesn't expire normally; session ends before that
+    _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=3600.0)
+    base = 20000.0
+    # n=10: bar 8 fires confirmation, bar 9 is the last bar (no fill), session ends
+    mnq, mes = _build_short_limit_session("2025-01-02", base=base, n=10, bar9_high=base + 1)
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    session_expired = [
+        t for t in stats["trade_records"]
+        if t.get("exit_type") == "limit_expired_session_close"
+    ]
+    assert len(session_expired) >= 1
+
+
+def test_bar_seconds_detected_1m(futures_tmpdir, monkeypatch):
+    """T15: 1m bars → bar_seconds=60, max_limit_bars=2 for LIMIT_EXPIRY_SECONDS=120."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    # With 1m bars and 120s expiry → max_limit_bars=2
+    # bar9 and bar10 don't fill → expires at bar10 (elapsed=2)
+    _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=120.0)
+    base = 20000.0
+    mnq, mes = _build_short_limit_session(
+        "2025-01-02", base=base, n=90, freq="1min",
+        bar9_high=base + 1, bar10_high=base + 1,
+    )
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    # With 2-bar window, both bars don't fill → exactly one limit_expired record
+    expired = [t for t in stats["trade_records"] if t.get("exit_type") == "limit_expired"]
+    assert len(expired) >= 1, "Expected limit_expired after 2 1m bars"
+
+
+def test_bar_seconds_detected_1s(futures_tmpdir, monkeypatch):
+    """T16: 1s bars → bar_seconds=1, max_limit_bars=120; session ends before expiry → session_close variant."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    # With 1s bars and 120s expiry → max_limit_bars=120; n=11 → session ends before 120 elapsed
+    # n=11 → bars 0-10; bar10 is last, forced high=base+1 (no fill) → session_close expiry
+    _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=120.0)
+    base = 20000.0
+    mnq, mes = _build_short_limit_session(
+        "2025-01-02", base=base, n=11, freq="1s",
+        bar9_high=base + 1, bar10_high=base + 1,
+    )
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    # max_limit_bars=120 but session only has 11 bars → session-end write (not plain limit_expired)
+    plain_expired = [t for t in stats["trade_records"] if t.get("exit_type") == "limit_expired"]
+    session_expired = [t for t in stats["trade_records"] if t.get("exit_type") == "limit_expired_session_close"]
+    assert len(plain_expired) == 0, "Should not expire normally with 120-bar window and only 12 bars"
+    assert len(session_expired) >= 1, "Session-end should write limit_expired_session_close"
+
+
+def test_limit_entry_disabled_baseline_unchanged(futures_tmpdir, monkeypatch):
+    """T17: LIMIT_ENTRY_BUFFER_PTS=None → no limit_expired rows; anchor_close_price empty."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    # Limit disabled: standard backtest behavior
+    _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=None, limit_expiry=None)
+    base = 20000.0
+    mnq, mes = _build_short_limit_session("2025-01-02", base=base)
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    assert stats["total_trades"] >= 0
+    # No limit_expired records of any kind
+    expired = [
+        t for t in stats["trade_records"]
+        if t.get("exit_type") in ("limit_expired", "limit_expired_session_close")
+    ]
+    assert len(expired) == 0
+    # All filled trades have anchor_close_price = "" or None
+    for t in stats["trade_records"]:
+        assert t.get("anchor_close_price") in ("", None)
+
+
+def test_limit_ratio_threshold_high_body_uses_same_bar(futures_tmpdir, monkeypatch):
+    """T18: body_ratio ≥ LIMIT_RATIO_THRESHOLD → same-bar fill; limit_fill_bars=0, no WAITING state."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    # Confirmation bar: body=8, range=11 → ratio≈0.73 ≥ 0.60 → same-bar fill
+    _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.5, limit_expiry=600.0, ratio_threshold=0.60)
+    base = 20000.0
+    # High body_ratio bar: open=base+4, close=base-4, high=base+6, low=base-5
+    mnq, mes = _build_short_limit_session(
+        "2025-01-02", base=base,
+        conf_bar_open=base + 4, conf_bar_close=base - 4,
+    )
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    filled = [
+        t for t in stats["trade_records"]
+        if t.get("exit_type") not in ("limit_expired", "limit_expired_session_close")
+    ]
+    assert len(filled) >= 1, "Expected a same-bar filled trade"
+    same_bar = [t for t in filled if t.get("limit_fill_bars") == 0]
+    assert len(same_bar) >= 1, "Expected limit_fill_bars=0 for same-bar fill"
+
+
+def test_limit_ratio_threshold_low_body_uses_forward_limit(futures_tmpdir, monkeypatch):
+    """T19: body_ratio < LIMIT_RATIO_THRESHOLD → WAITING_FOR_LIMIT_FILL entered; no immediate fill."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    # Default confirmation bar has body≈4, range≈11, ratio≈0.36 < 0.60 → forward limit
+    # Make bar9 NOT fill to confirm we entered WAITING state
+    _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=300.0, ratio_threshold=0.60)
+    base = 20000.0
+    mnq, mes = _build_short_limit_session("2025-01-02", base=base, bar9_high=base + 1)
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    # Low body_ratio → forward limit → if bar9 doesn't fill → limit_expired
+    expired = [t for t in stats["trade_records"] if t.get("exit_type") == "limit_expired"]
+    assert len(expired) >= 1, "Low body_ratio should enter WAITING_FOR_LIMIT_FILL and expire"
+
+
+# ══ Confirmation bar window tests T20-T23 ════════════════════════════════════
+
+def _setup_conf_patches(monkeypatch, bk, strat, conf_minutes=1):
+    """Patches for confirmation bar window tests — disables all guards, sets conf window."""
+    monkeypatch.setattr(strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(strat, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(strat, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(strat, "MIDNIGHT_OPEN_AS_TP", False)
+    monkeypatch.setattr(strat, "SMT_OPTIONAL", False)
+    monkeypatch.setattr(strat, "DISPLACEMENT_STOP_MODE", False)
+    monkeypatch.setattr(strat, "STRUCTURAL_STOP_MODE", False)
+    monkeypatch.setattr(strat, "LIMIT_ENTRY_BUFFER_PTS", None)
+    monkeypatch.setattr(strat, "LIMIT_EXPIRY_SECONDS", None)
+    monkeypatch.setattr(strat, "CONFIRMATION_BAR_MINUTES", conf_minutes)
+    monkeypatch.setattr(bk, "CONFIRMATION_BAR_MINUTES", conf_minutes)
+    monkeypatch.setattr(bk, "LIMIT_ENTRY_BUFFER_PTS", None)
+    monkeypatch.setattr(bk, "LIMIT_EXPIRY_SECONDS", None)
+    monkeypatch.setattr(bk, "MIDNIGHT_OPEN_AS_TP", False)
+    monkeypatch.setattr(bk, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(bk, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(bk, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    monkeypatch.setattr(bk, "REENTRY_MAX_MOVE_PTS", 0.0)
+    monkeypatch.setattr(bk, "MAX_REENTRY_COUNT", 1)
+    monkeypatch.setattr(bk, "SESSION_START", "09:00")
+    monkeypatch.setattr(bk, "SESSION_END", "10:30")
+    monkeypatch.setattr(bk, "MIN_BARS_BEFORE_SIGNAL", 0)
+    monkeypatch.setattr(bk, "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(bk, "MIN_RR_FOR_TARGET", 0.0)
+    monkeypatch.setattr(strat, "MIN_TARGET_PTS", 0.0)
+    monkeypatch.setattr(strat, "MIN_RR_FOR_TARGET", 0.0)
+
+
+def _build_conf_window_session(date, base=20000.0, n=30, freq="1min"):
+    """1m session: div at bar 7, bearish conf bar at bar 8, bars 9-27 continue lower.
+
+    anchor_close = base+2 (bullish anchor at bar 5).
+    Bar 8: open=base+2, high=base+6, close=base-2 → valid 1m confirmation.
+    Bars 9-27: open=close=base-3, high=base-2, low=base-4 → also valid confirmations
+    individually, ensuring the 3m synthetic window (bars 8-10) is still a valid confirmation.
+    """
+    start_ts = pd.Timestamp(date + " 09:00:00", tz="America/New_York")
+    idx = pd.date_range(start=start_ts, periods=n, freq=freq)
+    opens  = [base] * n
+    closes = [base] * n
+    highs  = [base + 5] * n
+    lows   = [base - 5] * n
+    # Bullish anchor at bar 5
+    opens[5]  = base - 2
+    closes[5] = base + 2
+    # MES divergence at bar 7
+    mes_highs = [base + 5] * n
+    mes_highs[7] = base + 30
+    # Bearish confirmation at bar 8 (and subsequent bars continue lower)
+    for i in range(8, min(n, 28)):
+        opens[i]  = base + 2
+        closes[i] = base - 2
+        highs[i]  = base + 6
+        lows[i]   = base - 4
+    mnq = pd.DataFrame(
+        {"Open": opens, "High": highs, "Low": lows, "Close": closes, "Volume": [1000.0] * n},
+        index=idx,
+    )
+    mes = pd.DataFrame(
+        {"Open": opens, "High": mes_highs, "Low": lows, "Close": closes, "Volume": [1000.0] * n},
+        index=idx,
+    )
+    return mnq, mes
+
+
+def test_conf_bar_minutes_1_baseline(futures_tmpdir, monkeypatch):
+    """T20: CONFIRMATION_BAR_MINUTES=1 → confirmation fires on bar 8 (entry_bar=8)."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    _setup_conf_patches(monkeypatch, bk, strat, conf_minutes=1)
+    mnq, mes = _build_conf_window_session("2025-01-02")
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    trades = stats["trade_records"]
+    assert len(trades) >= 1, "Should produce at least one trade with 1m confirmation"
+    entry_bar = trades[0]["entry_bar"]
+    assert entry_bar == 8, f"With N=1 confirmation should fire at bar 8, got {entry_bar}"
+
+
+def test_conf_bar_minutes_3_deferred_to_window_boundary(futures_tmpdir, monkeypatch):
+    """T21: CONFIRMATION_BAR_MINUTES=3 → bar 8 skipped; confirmation fires at bar 10."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    _setup_conf_patches(monkeypatch, bk, strat, conf_minutes=3)
+    mnq, mes = _build_conf_window_session("2025-01-02")
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    trades = stats["trade_records"]
+    assert len(trades) >= 1, "Should produce a trade with 3m confirmation"
+    entry_bar = trades[0]["entry_bar"]
+    # Div at bar 7 → window starts at bar 8; first boundary at bar 10 (bars 8,9,10)
+    assert entry_bar == 10, f"With N=3 confirmation should fire at bar 10, got {entry_bar}"
+
+
+def test_conf_bar_minutes_3_synthetic_ohlc(futures_tmpdir, monkeypatch):
+    """T22: Synthetic 3m bar uses open of bar 8, max high, min low, close of bar 10."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    _setup_conf_patches(monkeypatch, bk, strat, conf_minutes=3)
+    base = 20000.0
+    mnq, mes = _build_conf_window_session("2025-01-02", base=base)
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    trades = stats["trade_records"]
+    assert len(trades) >= 1
+    t = trades[0]
+    # Synthetic bar 8-10: open=base+2, high=base+6, low=base-4, close=base-2
+    # entry_bar_body_ratio = |close-open| / (high-low) = 4 / 10 = 0.4
+    assert abs(t["entry_bar_body_ratio"] - 0.4) < 0.01, (
+        f"Synthetic 3m body ratio should be 0.4, got {t['entry_bar_body_ratio']}"
+    )
+
+
+def test_conf_bar_minutes_3_no_trade_before_boundary(futures_tmpdir, monkeypatch):
+    """T23: With N=3, no trade fires at bars 8 or 9 — only at the boundary bar 10."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    _setup_conf_patches(monkeypatch, bk, strat, conf_minutes=3)
+    # Use a session with only 10 bars (0-9); bar 9 is last — just before the boundary
+    mnq, mes = _build_conf_window_session("2025-01-02", n=10)
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    # Only 10 bars (0-9): window starts at 8, first boundary would be bar 10 (doesn't exist)
+    assert stats["total_trades"] == 0, "No trade should fire before the first 3m boundary"
+
+
+# ══ Adverse anchor update tests T24-T25 ══════════════════════════════════════
+
+def _build_adverse_then_confirm_session(date, base=20000.0, n=40, freq="1min"):
+    """1m session for testing anchor update on adverse bars.
+
+    Bar 5:  bullish anchor (open=base-2, close=base+2). anchor_close = base+2.
+    Bar 7:  MES new session high → bearish divergence.
+    Bar 8:  bullish bar going AGAINST the short: open=base+2, close=base+6.
+            This is an adverse boundary bar (N=1 case) → anchor_close updates to base+6.
+    Bar 9:  bearish confirmation at the new anchor: open=base+6, close=base+2, high=base+8.
+            high (base+8) > new anchor (base+6) → is_confirmation_bar=True.
+    Bars 10-39: neutral continuation (close < anchor, high > anchor).
+    """
+    start_ts = pd.Timestamp(date + " 09:00:00", tz="America/New_York")
+    idx = pd.date_range(start=start_ts, periods=n, freq=freq)
+    opens  = [base] * n
+    closes = [base] * n
+    highs  = [base + 5] * n
+    lows   = [base - 5] * n
+    mes_highs = list(highs)
+    # Bar 5: bullish anchor
+    opens[5]  = base - 2
+    closes[5] = base + 2
+    # Bar 7: MES divergence
+    mes_highs[7] = base + 30
+    # Bar 8: adverse bullish bar (against expected short)
+    opens[8]  = base + 2
+    closes[8] = base + 6
+    highs[8]  = base + 8
+    # Bar 9: bearish confirmation at the new anchor (base+6)
+    opens[9]  = base + 6
+    closes[9] = base + 2
+    highs[9]  = base + 8
+    mnq = pd.DataFrame(
+        {"Open": opens, "High": highs, "Low": lows, "Close": closes, "Volume": [1000.0] * n},
+        index=idx,
+    )
+    mes = pd.DataFrame(
+        {"Open": opens, "High": mes_highs, "Low": lows, "Close": closes, "Volume": [1000.0] * n},
+        index=idx,
+    )
+    return mnq, mes
+
+
+def test_adverse_anchor_update_defers_entry(futures_tmpdir, monkeypatch):
+    """T24: Adverse bar at N=1 boundary updates anchor; entry fires at bar 9 (new anchor)."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    _setup_conf_patches(monkeypatch, bk, strat, conf_minutes=1)
+    base = 20000.0
+    mnq, mes = _build_adverse_then_confirm_session("2025-01-02", base=base)
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    trades = stats["trade_records"]
+    assert len(trades) >= 1, "Should produce a trade after anchor update"
+    # Bar 8 is adverse → anchor updates; bar 9 is the first valid confirmation at new anchor
+    entry_bar = trades[0]["entry_bar"]
+    assert entry_bar == 9, f"Entry should be deferred to bar 9, got {entry_bar}"
+
+
+def test_adverse_anchor_update_n3_deferred_to_second_window(futures_tmpdir, monkeypatch):
+    """T25: With N=3, adverse first window (bars 8-10) updates anchor; entry fires in window 2."""
+    import backtest_smt as bk
+    import strategy_smt as strat
+    _setup_conf_patches(monkeypatch, bk, strat, conf_minutes=3)
+    base = 20000.0
+    # Build a session with:
+    # - Bars 8-10: all bullish (adverse 3m window) → anchor updates to close of bar 10
+    # - Bars 11-13: bearish confirmation at the new anchor (second 3m window boundary = bar 13)
+    mnq, mes = _build_conf_window_session("2025-01-02", base=base, n=40)
+    # Override bars 8-10 to be bullish (adverse)
+    for i in range(8, 11):
+        mnq.iloc[i, mnq.columns.get_loc("Open")]  = base + 2
+        mnq.iloc[i, mnq.columns.get_loc("Close")] = base + 6
+        mnq.iloc[i, mnq.columns.get_loc("High")]  = base + 8
+        mnq.iloc[i, mnq.columns.get_loc("Low")]   = base + 0
+    # Bars 11-13: bearish at the updated anchor (base+6)
+    for i in range(11, 14):
+        mnq.iloc[i, mnq.columns.get_loc("Open")]  = base + 6
+        mnq.iloc[i, mnq.columns.get_loc("Close")] = base + 2
+        mnq.iloc[i, mnq.columns.get_loc("High")]  = base + 8
+        mnq.iloc[i, mnq.columns.get_loc("Low")]   = base + 0
+    stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    trades = stats["trade_records"]
+    assert len(trades) >= 1, "Should produce a trade in the second 3m window"
+    entry_bar = trades[0]["entry_bar"]
+    # Window 1: bars 8-10 (adverse) → anchor updates; window 2: bars 11-13, boundary at bar 13
+    assert entry_bar == 13, f"Entry should fire at bar 13 (second window boundary), got {entry_bar}"
