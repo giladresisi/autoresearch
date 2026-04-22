@@ -938,9 +938,13 @@ def test_trail_disabled_when_secondary_exists(monkeypatch):
 
 
 def test_trail_active_when_no_secondary(monkeypatch):
-    """TRAIL_AFTER_TP_PTS still fires when secondary_target is None."""
+    """TRAIL_AFTER_TP_PTS still fires when secondary_target is None.
+
+    Two-call sequence: crossing bar defers stop (Edit 1); next bar activates trail (Edit 2).
+    """
     import strategy_smt as strat
     monkeypatch.setattr(strat, "TRAIL_AFTER_TP_PTS", 5.0)
+    monkeypatch.setattr(strat, "TRAIL_ACTIVATION_R", 0.0)  # activate immediately
     monkeypatch.setattr(strat, "PARTIAL_EXIT_ENABLED", False)
     monkeypatch.setattr(strat, "BREAKEVEN_TRIGGER_PCT", 0.0)
     pos = {
@@ -953,12 +957,16 @@ def test_trail_active_when_no_secondary(monkeypatch):
         "divergence_bar_high": 100.0, "divergence_bar_low": 97.0,
         "partial_exit_level": None, "partial_done": False,
         "layer_b_entered": False, "total_contracts_target": 1, "contracts": 1,
+        "initial_stop_pts": 3.0,
     }
     bar = pd.Series({"High": 115.0, "Low": 98.0, "Close": 112.0, "Open": 102.0})
+    # Crossing bar: defers stop, sets tp_breached
     strat.manage_position(pos, bar)
-    # Trail activated — stop should have moved above 97.0
-    assert pos["stop_price"] > 97.0, "Trail should move stop when no secondary_target"
     assert pos.get("tp_breached") is True
+    assert pos["stop_price"] == 97.0, "Stop must not move on the crossing bar"
+    # Continuation bar: trail activates (TRAIL_ACTIVATION_R=0.0 → immediate)
+    strat.manage_position(pos, bar)
+    assert pos["stop_price"] > 97.0, "Trail should move stop on subsequent bar when no secondary_target"
 
 
 def test_tp_name_in_trade_record(monkeypatch):
@@ -1444,3 +1452,144 @@ def test_adverse_anchor_update_n3_deferred_to_second_window(futures_tmpdir, monk
     entry_bar = trades[0]["entry_bar"]
     # Window 1: bars 8-10 (adverse) → anchor updates; window 2: bars 11-13, boundary at bar 13
     assert entry_bar == 13, f"Entry should fire at bar 13 (second window boundary), got {entry_bar}"
+
+
+# ══ Trail-mode integration tests T26-T27 ══════════════════════════════════════
+
+def test_trail_mode_holds_past_tdo_and_exits_via_stop(futures_tmpdir, monkeypatch):
+    """T26: Trail mode — long position crosses TDO, reverses, exits via exit_stop (not exit_tp).
+
+    Verifies that with TRAIL_AFTER_TP_PTS=50.0 and TRAIL_ACTIVATION_R=0.0, after the position
+    crosses TDO the stop trails price upward and the eventual reversal through the trail stop
+    produces an exit_stop trade record rather than exit_tp.
+    """
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
+
+    for mod in [_strat, train_smt]:
+        monkeypatch.setattr(mod, "TRAIL_AFTER_TP_PTS", 50.0)
+        monkeypatch.setattr(mod, "LIMIT_ENTRY_BUFFER_PTS", None)
+    monkeypatch.setattr(_strat, "TRAIL_ACTIVATION_R", 0.0)
+    monkeypatch.setattr(_strat, "PARTIAL_EXIT_ENABLED", False)
+    monkeypatch.setattr(_strat, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(_strat, "INVALIDATION_MSS_EXIT", False)
+    monkeypatch.setattr(_strat, "INVALIDATION_CISD_EXIT", False)
+    monkeypatch.setattr(_strat, "INVALIDATION_SMT_EXIT", False)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    # TDO at 20050 — 48 pts above entry (~20002), well within MAX_TDO_DISTANCE_PTS=999
+    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 20050.0)
+    # No secondary target — trail block requires secondary_target is None
+    monkeypatch.setattr(train_smt, "select_draw_on_liquidity",
+                        lambda *a, **kw: ("tdo", 20050.0, None, None))
+    monkeypatch.setattr(_strat, "MIDNIGHT_OPEN_AS_TP", False)
+    monkeypatch.setattr(train_smt, "MIDNIGHT_OPEN_AS_TP", False)
+
+    mnq, mes = _build_long_signal_bars("2025-01-02", base=20000.0, n=90)
+
+    # Bars 9-12: price rises well past TDO (20050) up to 20120; trail will track best high
+    for i in range(9, 13):
+        mnq.iloc[i, mnq.columns.get_loc("High")]  = 20120.0
+        mnq.iloc[i, mnq.columns.get_loc("Low")]   = 20060.0
+        mnq.iloc[i, mnq.columns.get_loc("Open")]  = 20065.0
+        mnq.iloc[i, mnq.columns.get_loc("Close")] = 20110.0
+
+    # Bars 13-20: price reverses below trail stop (best=20120, trail=50 → stop at 20070)
+    for i in range(13, 21):
+        mnq.iloc[i, mnq.columns.get_loc("High")]  = 20060.0
+        mnq.iloc[i, mnq.columns.get_loc("Low")]   = 20040.0
+        mnq.iloc[i, mnq.columns.get_loc("Open")]  = 20055.0
+        mnq.iloc[i, mnq.columns.get_loc("Close")] = 20045.0
+
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    trades = stats["trade_records"]
+
+    assert len(trades) >= 1, f"Expected at least one trade; got stats={stats}"
+
+    exit_types = [t["exit_type"] for t in trades]
+    assert "exit_stop" in exit_types, (
+        f"Expected exit_stop (trail hit) in exit_types; got {exit_types}"
+    )
+    # With PARTIAL_EXIT_ENABLED=False, no partial_exit record should appear
+    assert "partial_exit" not in exit_types, (
+        f"Unexpected partial_exit record with PARTIAL_EXIT_ENABLED=False; got {exit_types}"
+    )
+
+
+def test_trail_mode_partial_slides_stop_no_contract_reduction(futures_tmpdir, monkeypatch):
+    """T27: Trail mode + PARTIAL_EXIT_ENABLED=True — partial level hit slides stop but does NOT
+    append a partial_exit trade record and does NOT reduce contracts.
+
+    The partial stop-slide in trail mode adjusts the stop upward but the contract count is
+    preserved and no separate partial_exit entry is written to trade_records.
+    """
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
+
+    for mod in [_strat, train_smt]:
+        monkeypatch.setattr(mod, "TRAIL_AFTER_TP_PTS", 50.0)
+        monkeypatch.setattr(mod, "LIMIT_ENTRY_BUFFER_PTS", None)
+    monkeypatch.setattr(_strat, "TRAIL_ACTIVATION_R", 0.0)
+    monkeypatch.setattr(_strat, "PARTIAL_EXIT_ENABLED", True)
+    monkeypatch.setattr(_strat, "PARTIAL_EXIT_LEVEL_RATIO", 0.33)
+    monkeypatch.setattr(_strat, "BREAKEVEN_TRIGGER_PCT", 0.0)
+    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
+    monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(_strat, "INVALIDATION_MSS_EXIT", False)
+    monkeypatch.setattr(_strat, "INVALIDATION_CISD_EXIT", False)
+    monkeypatch.setattr(_strat, "INVALIDATION_SMT_EXIT", False)
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(train_smt, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(train_smt, "REENTRY_MAX_MOVE_PTS", 0.0)
+    monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
+    # TDO at 20050: partial_exit_level ≈ entry + (tdo - entry) * 0.33 ≈ 20002 + 16 = 20018
+    monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 20050.0)
+    # No secondary target — trail block requires secondary_target is None
+    monkeypatch.setattr(train_smt, "select_draw_on_liquidity",
+                        lambda *a, **kw: ("tdo", 20050.0, None, None))
+    monkeypatch.setattr(_strat, "MIDNIGHT_OPEN_AS_TP", False)
+    monkeypatch.setattr(train_smt, "MIDNIGHT_OPEN_AS_TP", False)
+
+    mnq, mes = _build_long_signal_bars("2025-01-02", base=20000.0, n=90)
+
+    # Bars 9-11: price rises past partial level (~20018) but stays below TDO (20050)
+    for i in range(9, 12):
+        mnq.iloc[i, mnq.columns.get_loc("High")]  = 20025.0
+        mnq.iloc[i, mnq.columns.get_loc("Low")]   = 20010.0
+        mnq.iloc[i, mnq.columns.get_loc("Open")]  = 20012.0
+        mnq.iloc[i, mnq.columns.get_loc("Close")] = 20020.0
+
+    # Bars 12-14: price crosses TDO and continues up to 20120
+    for i in range(12, 15):
+        mnq.iloc[i, mnq.columns.get_loc("High")]  = 20120.0
+        mnq.iloc[i, mnq.columns.get_loc("Low")]   = 20050.0
+        mnq.iloc[i, mnq.columns.get_loc("Open")]  = 20055.0
+        mnq.iloc[i, mnq.columns.get_loc("Close")] = 20110.0
+
+    # Bars 15-20: price reverses below trail stop (best=20120, trail=50 → stop at 20070)
+    for i in range(15, 21):
+        mnq.iloc[i, mnq.columns.get_loc("High")]  = 20060.0
+        mnq.iloc[i, mnq.columns.get_loc("Low")]   = 20040.0
+        mnq.iloc[i, mnq.columns.get_loc("Open")]  = 20055.0
+        mnq.iloc[i, mnq.columns.get_loc("Close")] = 20045.0
+
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    trades = stats["trade_records"]
+
+    assert len(trades) >= 1, f"Expected at least one trade; got stats={stats}"
+
+    exit_types = [t["exit_type"] for t in trades]
+    # Trail mode must NOT append a partial_exit trade record even when partial level is hit
+    assert "partial_exit" not in exit_types, (
+        f"Trail mode should not append partial_exit trade record; got {exit_types}"
+    )
+    # The position must eventually exit via stop (trail) or session close, not initial stop alone
+    assert any(et in ("exit_stop", "session_close") for et in exit_types), (
+        f"Expected exit_stop or session_close after trail reversal; got {exit_types}"
+    )

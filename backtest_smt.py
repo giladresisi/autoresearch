@@ -38,6 +38,8 @@ from strategy_smt import (
     DIV_SCORE_DECAY_FACTOR, DIV_SCORE_DECAY_INTERVAL,
     ADVERSE_MOVE_FULL_DECAY_PTS, ADVERSE_MOVE_MIN_DECAY,
     HYPOTHESIS_INVALIDATION_PTS,
+    PARTIAL_EXIT_LEVEL_RATIO,
+    TRAIL_AFTER_TP_PTS,
 )
 
 
@@ -78,7 +80,7 @@ TEST_START  = "2026-03-28"
 SILENT_END  = "2026-03-28"
 
 # Walk-forward evaluation parameters.
-WALK_FORWARD_WINDOWS = 6
+WALK_FORWARD_WINDOWS = int(os.environ.get("WALK_FORWARD_WINDOWS", "6"))
 FOLD_TEST_DAYS       = 60    # business days per test fold; auto-reduced for short windows
 FOLD_TRAIN_DAYS      = 0     # 0 = expanding window (train from BACKTEST_START)
 
@@ -615,60 +617,56 @@ def run_backtest(
                     result = "session_close"
 
                 if result == "partial_exit":
-                    # Clamp so at least 1 contract always remains after the partial
-                    partial_contracts = min(
-                        max(1, int(position["contracts"] * PARTIAL_EXIT_FRACTION)),
-                        position["contracts"] - 1,
-                    )
-                    if partial_contracts < 1:
-                        # Single-contract position: partial is impossible; skip silently.
-                        # partial_done is already True so this branch won't re-trigger.
-                        continue
                     partial_exit_price = position.get("partial_price", float(bar["Close"]))
-                    pnl_per_contract = (
-                        (partial_exit_price - position["entry_price"]) if position["direction"] == "long"
-                        else (position["entry_price"] - partial_exit_price)
-                    )
-                    partial_pnl = pnl_per_contract * partial_contracts * MNQ_PNL_PER_POINT
-                    partial_trade, _ = _build_trade_record(
-                        {**position, "contracts": partial_contracts}, "partial_exit", bar, MNQ_PNL_PER_POINT
-                    )
-                    partial_trade["matches_hypothesis"] = position.get("matches_hypothesis")
-                    for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
-                               "week_zone", "day_zone", "trend_direction", "hypothesis_score",
-                               "fvg_detected"):
-                        partial_trade[_f] = position.get(_f)
-                    partial_trade["exit_type"] = "partial_exit"
-                    partial_trade["pnl"] = round(partial_pnl, 2)
-                    partial_trade["exit_price"] = round(partial_exit_price, 4)
 
-                    # Slide stop to lock a floor on the remaining contracts, unless the
-                    # current stop is already tighter (e.g. already at breakeven or better).
+                    # Stop-slide always runs regardless of trail mode — preserves near-breakeven
+                    # floor on TDO-touch reversals.
                     _old_stop = position["stop_price"]
-                    _old_tp   = position["take_profit"]
                     if position["direction"] == "long":
                         _lock_stop = partial_exit_price - PARTIAL_STOP_BUFFER_PTS
-                        _new_stop  = max(_lock_stop, _old_stop)  # never move stop against position
+                        _new_stop  = max(_lock_stop, _old_stop)
                     else:
                         _lock_stop = partial_exit_price + PARTIAL_STOP_BUFFER_PTS
                         _new_stop  = min(_lock_stop, _old_stop)
+                    position["stop_price"] = _new_stop
 
-                    # Promote secondary target to TP now that the partial has been taken.
-                    _sec = position.get("secondary_target")
-                    _new_tp = _sec if _sec is not None else _old_tp
-
-                    partial_trade["partial_adjustments"] = (
-                        f"stop:{_old_stop:.2f}->{_new_stop:.2f};"
-                        f"tp:{_old_tp:.2f}->{_new_tp:.2f}"
-                    )
-                    trades.append(partial_trade)
-                    day_pnl += partial_pnl
-                    position["contracts"] -= partial_contracts
-                    position["stop_price"]    = _new_stop
-                    position["take_profit"]   = _new_tp
-                    if _sec is not None:
-                        position["secondary_target"] = None  # consumed; don't double-exit
-                    # Stay IN_TRADE with remaining contracts
+                    if TRAIL_AFTER_TP_PTS <= 0:
+                        # Contract reduction only when not trailing
+                        partial_contracts = min(
+                            max(1, int(position["contracts"] * PARTIAL_EXIT_FRACTION)),
+                            position["contracts"] - 1,
+                        )
+                        if partial_contracts < 1:
+                            continue
+                        pnl_per_contract = (
+                            (partial_exit_price - position["entry_price"]) if position["direction"] == "long"
+                            else (position["entry_price"] - partial_exit_price)
+                        )
+                        partial_pnl = pnl_per_contract * partial_contracts * MNQ_PNL_PER_POINT
+                        partial_trade, _ = _build_trade_record(
+                            {**position, "contracts": partial_contracts}, "partial_exit", bar, MNQ_PNL_PER_POINT
+                        )
+                        partial_trade["matches_hypothesis"] = position.get("matches_hypothesis")
+                        for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
+                                   "week_zone", "day_zone", "trend_direction", "hypothesis_score",
+                                   "fvg_detected"):
+                            partial_trade[_f] = position.get(_f)
+                        partial_trade["exit_type"] = "partial_exit"
+                        partial_trade["pnl"] = round(partial_pnl, 2)
+                        partial_trade["exit_price"] = round(partial_exit_price, 4)
+                        _old_tp = position["take_profit"]
+                        _sec = position.get("secondary_target")
+                        _new_tp = _sec if _sec is not None else _old_tp
+                        partial_trade["partial_adjustments"] = (
+                            f"stop:{_old_stop:.2f}->{_new_stop:.2f};"
+                            f"tp:{_old_tp:.2f}->{_new_tp:.2f}"
+                        )
+                        trades.append(partial_trade)
+                        day_pnl += partial_pnl
+                        position["contracts"] -= partial_contracts
+                        position["take_profit"] = _new_tp
+                        if _sec is not None:
+                            position["secondary_target"] = None
                     continue
 
                 if result != "hold":
@@ -1167,10 +1165,10 @@ def run_backtest(
 
                 filled = (
                     (pending_limit_signal["direction"] == "short"
-                     and float(bar["High"]) >= pending_limit_signal["entry_price"])
+                     and float(bar["Low"]) <= pending_limit_signal["entry_price"])
                     or
                     (pending_limit_signal["direction"] == "long"
-                     and float(bar["Low"])  <= pending_limit_signal["entry_price"])
+                     and float(bar["High"]) >= pending_limit_signal["entry_price"])
                 )
 
                 if filled:

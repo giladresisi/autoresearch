@@ -893,6 +893,11 @@ def _patch_reentry_guards(monkeypatch, reentry_max_move=50.0, breakeven_pct=0.0)
     monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
     monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
     monkeypatch.setattr(_strat, "BREAKEVEN_TRIGGER_PCT", breakeven_pct)
+    # Disable limit entry so signal fills at bar-8 close (not delayed to bar 9).
+    # Bar 9's high is designed to trigger the stop, which requires entry at bar 8.
+    # Must patch both modules: backtest_smt holds its own bound name.
+    monkeypatch.setattr(_strat, "LIMIT_ENTRY_BUFFER_PTS", None)
+    monkeypatch.setattr(_bk,    "LIMIT_ENTRY_BUFFER_PTS", None)
     # Disable midnight-open TP override so compute_tdo=19900 is used as TDO.
     # Must patch both modules since backtest_smt holds its own bound name.
     monkeypatch.setattr(_strat, "MIDNIGHT_OPEN_AS_TP", False)
@@ -1537,3 +1542,250 @@ def test_limit_entry_partial_exit_uses_new_entry(monkeypatch):
     sig = smt._build_signal_from_bar(_bar_limit(close=105.0), _LIM_TS, "short", 70.0, anchor_close=100.0)
     assert sig is not None
     assert sig["partial_exit_level"] == pytest.approx(90.1, rel=1e-3)
+
+
+# ══ manage_position TRAIL_ACTIVATION_R + never-widen tests ═══════════════════
+
+def _make_full_position(direction, entry_price, stop_price, take_profit,
+                        initial_stop_pts, tp_breached=False, best_after_tp=None,
+                        partial_exit_level=None, partial_done=False,
+                        secondary_target=None):
+    """Build a complete position dict suitable for manage_position calls.
+
+    Prefer this over _make_position for any test touching trail, partial-exit, or
+    layer-B paths — those paths read fields (_make_position omits) and will KeyError
+    otherwise. _make_position is retained only for legacy stop/TP tests that need
+    nothing beyond the four core fields.
+    """
+    return {
+        "direction":            direction,
+        "entry_price":          entry_price,
+        "stop_price":           stop_price,
+        "take_profit":          take_profit,
+        "tdo":                  take_profit,
+        "tp_breached":          tp_breached,
+        "best_after_tp":        best_after_tp,
+        "initial_stop_pts":     initial_stop_pts,
+        "secondary_target":     secondary_target,
+        "secondary_target_name": None,
+        "partial_exit_level":   partial_exit_level,
+        "partial_done":         partial_done,
+        "entry_time":           None,
+        "divergence_bar":       0,
+        "entry_bar":            1,
+        "entry_bar_body_ratio": 0.5,
+        "smt_sweep_pts":        0.0,
+        "smt_miss_pts":         0.0,
+        "smt_type":             "wick",
+        "midnight_open":        None,
+        "smt_defended_level":   None,
+        "divergence_bar_high":  entry_price,
+        "divergence_bar_low":   stop_price,
+        "layer_b_entered":      False,
+        "total_contracts_target": 1,
+        "contracts":            1,
+    }
+
+
+def test_trail_tdo_crossing_defers_stop_long(monkeypatch):
+    """T1: First TDO crossing sets tp_breached=True and returns "hold" without moving the stop."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "TRAIL_AFTER_TP_PTS", 50.0)
+    monkeypatch.setattr(smt, "TRAIL_ACTIVATION_R", 1.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", False)
+    pos = _make_full_position("long", entry_price=100.0, stop_price=97.0,
+                              take_profit=110.0, initial_stop_pts=3.0,
+                              tp_breached=False)
+    bar = _make_bar(high=111.0, low=99.0)
+    result = smt.manage_position(pos, bar)
+    assert result == "hold"
+    assert pos["tp_breached"] is True
+    assert pos["stop_price"] == 97.0
+
+
+def test_trail_tdo_crossing_defers_stop_short(monkeypatch):
+    """T2: Short — first TDO crossing sets tp_breached=True and returns "hold" without moving the stop."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "TRAIL_AFTER_TP_PTS", 50.0)
+    monkeypatch.setattr(smt, "TRAIL_ACTIVATION_R", 1.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", False)
+    pos = _make_full_position("short", entry_price=100.0, stop_price=103.0,
+                              take_profit=90.0, initial_stop_pts=3.0,
+                              tp_breached=False)
+    bar = _make_bar(high=101.0, low=89.0)
+    result = smt.manage_position(pos, bar)
+    assert result == "hold"
+    assert pos["tp_breached"] is True
+    assert pos["stop_price"] == 103.0
+
+
+def test_trail_does_not_activate_below_threshold_long(monkeypatch):
+    """T3: Long — best_after_tp only 2 pts past TDO; threshold=3.0 → stop stays unchanged."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "TRAIL_AFTER_TP_PTS", 50.0)
+    monkeypatch.setattr(smt, "TRAIL_ACTIVATION_R", 1.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", False)
+    pos = _make_full_position("long", entry_price=100.0, stop_price=97.0,
+                              take_profit=110.0, initial_stop_pts=3.0,
+                              tp_breached=True, best_after_tp=112.0)
+    bar = _make_bar(high=112.0, low=100.0)
+    result = smt.manage_position(pos, bar)
+    assert result == "hold"
+    # best-tp = 112-110 = 2 < activation_dist 3*1.0=3 → no trail update
+    assert pos["stop_price"] == 97.0
+
+
+def test_trail_activates_at_threshold_long(monkeypatch):
+    """T4: Long — best exactly at activation threshold; never-widen keeps original stop when trail would widen."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "TRAIL_AFTER_TP_PTS", 50.0)
+    monkeypatch.setattr(smt, "TRAIL_ACTIVATION_R", 1.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", False)
+    pos = _make_full_position("long", entry_price=100.0, stop_price=97.0,
+                              take_profit=110.0, initial_stop_pts=3.0,
+                              tp_breached=True, best_after_tp=113.0)
+    bar = _make_bar(high=113.0, low=100.0)
+    smt.manage_position(pos, bar)
+    # activation_dist=3.0; best-tp=3.0 >= 3.0 → activates
+    # new_stop = 113-50 = 63; never-widen: max(97, 63) = 97
+    assert pos["stop_price"] == 97.0
+
+
+def test_trail_activates_far_past_tdo_long(monkeypatch):
+    """T5: Long — price far past TDO; trail tightens stop above original."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "TRAIL_AFTER_TP_PTS", 50.0)
+    monkeypatch.setattr(smt, "TRAIL_ACTIVATION_R", 1.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", False)
+    pos = _make_full_position("long", entry_price=100.0, stop_price=97.0,
+                              take_profit=110.0, initial_stop_pts=3.0,
+                              tp_breached=True, best_after_tp=170.0)
+    bar = _make_bar(high=170.0, low=100.0)
+    smt.manage_position(pos, bar)
+    # activation_dist=3.0; best-tp=60 >= 3 → activates
+    # new_stop = 170-50 = 120; never-widen: max(97, 120) = 120
+    assert pos["stop_price"] == 120.0
+
+
+def test_trail_activates_at_threshold_short(monkeypatch):
+    """T6: Short — best exactly at activation threshold; never-widen keeps original stop when trail would widen."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "TRAIL_AFTER_TP_PTS", 50.0)
+    monkeypatch.setattr(smt, "TRAIL_ACTIVATION_R", 1.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", False)
+    pos = _make_full_position("short", entry_price=100.0, stop_price=103.0,
+                              take_profit=90.0, initial_stop_pts=3.0,
+                              tp_breached=True, best_after_tp=87.0)
+    bar = _make_bar(high=101.0, low=87.0)
+    smt.manage_position(pos, bar)
+    # activation_dist=3.0; tp-best=3.0 >= 3.0 → activates
+    # new_stop = 87+50 = 137; never-widen: min(103, 137) = 103
+    assert pos["stop_price"] == 103.0
+
+
+def test_trail_far_past_tdo_short(monkeypatch):
+    """T7: Short — price far past TDO; trail tightens stop below original."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "TRAIL_AFTER_TP_PTS", 50.0)
+    monkeypatch.setattr(smt, "TRAIL_ACTIVATION_R", 1.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", False)
+    pos = _make_full_position("short", entry_price=100.0, stop_price=103.0,
+                              take_profit=90.0, initial_stop_pts=3.0,
+                              tp_breached=True, best_after_tp=30.0)
+    bar = _make_bar(high=101.0, low=30.0)
+    smt.manage_position(pos, bar)
+    # activation_dist=3.0; tp-best=60 >= 3 → activates
+    # new_stop = 30+50 = 80; never-widen: min(103, 80) = 80
+    assert pos["stop_price"] == 80.0
+
+
+def test_never_widen_prevents_stop_regression_long(monkeypatch):
+    """T8: Trail would place stop well below current stop — never-widen keeps original."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "TRAIL_AFTER_TP_PTS", 50.0)
+    monkeypatch.setattr(smt, "TRAIL_ACTIVATION_R", 0.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", False)
+    pos = _make_full_position("long", entry_price=100.0, stop_price=96.0,
+                              take_profit=110.0, initial_stop_pts=4.0,
+                              tp_breached=True, best_after_tp=110.5)
+    bar = _make_bar(high=110.5, low=100.0)
+    smt.manage_position(pos, bar)
+    # activation_dist=0.0; 110.5-110=0.5 >= 0 → activates
+    # new_stop = 110.5-50 = 60.5; never-widen: max(96, 60.5) = 96
+    assert pos["stop_price"] == 96.0
+
+
+def test_trail_activation_r_zero_activates_immediately(monkeypatch):
+    """T9: TRAIL_ACTIVATION_R=0.0 activates trail at exact TDO level; never-widen still applies."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "TRAIL_AFTER_TP_PTS", 50.0)
+    monkeypatch.setattr(smt, "TRAIL_ACTIVATION_R", 0.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", False)
+    pos = _make_full_position("long", entry_price=100.0, stop_price=97.0,
+                              take_profit=110.0, initial_stop_pts=3.0,
+                              tp_breached=True, best_after_tp=110.0)
+    bar = _make_bar(high=110.0, low=100.0)
+    smt.manage_position(pos, bar)
+    # activation_dist=0.0; 110.0-110.0=0.0 >= 0.0 → activates
+    # new_stop = 110-50 = 60; never-widen: max(97, 60) = 97
+    assert pos["stop_price"] == 97.0
+
+
+def test_trail_exit_stop_fires_after_activation_long(monkeypatch):
+    """T10: Trail activates (best=130, trail=10 → stop=120), bar low=119 crosses stop → exit_stop."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "TRAIL_AFTER_TP_PTS", 10.0)
+    monkeypatch.setattr(smt, "TRAIL_ACTIVATION_R", 0.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", False)
+    pos = _make_full_position("long", entry_price=100.0, stop_price=97.0,
+                              take_profit=110.0, initial_stop_pts=3.0,
+                              tp_breached=True, best_after_tp=130.0)
+    # Trail block: best=max(130,119)=130, new_stop=130-10=120, stop=max(97,120)=120
+    # Then stop check: low=119 <= 120 → exit_stop
+    bar = _make_bar(high=130.0, low=119.0)
+    result = smt.manage_position(pos, bar)
+    assert result == "exit_stop"
+
+
+def test_partial_exit_still_returned_when_trail_active(monkeypatch):
+    """T11: Partial exit fires before TDO is checked — trail mode does not suppress it."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "TRAIL_AFTER_TP_PTS", 50.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", True)
+    pos = _make_full_position("long", entry_price=100.0, stop_price=97.0,
+                              take_profit=110.0, initial_stop_pts=3.0,
+                              tp_breached=False,
+                              partial_exit_level=105.0, partial_done=False)
+    # high=106 crosses partial_exit_level=105, but stays below TDO=110
+    bar = _make_bar(high=106.0, low=100.0)
+    result = smt.manage_position(pos, bar)
+    assert result == "partial_exit"
+
+
+def test_partial_exit_fires_when_trail_disabled(monkeypatch):
+    """T12: With trail disabled (TRAIL_AFTER_TP_PTS=0.0), partial exit still fires normally."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "TRAIL_AFTER_TP_PTS", 0.0)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", True)
+    pos = _make_full_position("long", entry_price=100.0, stop_price=97.0,
+                              take_profit=110.0, initial_stop_pts=3.0,
+                              partial_exit_level=105.0, partial_done=False)
+    bar = _make_bar(high=106.0, low=100.0)
+    result = smt.manage_position(pos, bar)
+    assert result == "partial_exit"
+
+
+def test_initial_stop_pts_in_signal_dict(monkeypatch):
+    """T13: _build_signal_from_bar records correct initial_stop_pts with LONG_STOP_RATIO=0.35."""
+    import strategy_smt as smt
+    monkeypatch.setattr(smt, "LIMIT_ENTRY_BUFFER_PTS", None)
+    monkeypatch.setattr(smt, "PARTIAL_EXIT_ENABLED", False)
+    monkeypatch.setattr(smt, "LONG_STOP_RATIO", 0.35)
+    monkeypatch.setattr(smt, "STRUCTURAL_STOP_MODE", False)
+    _disable_filters(monkeypatch, smt)
+    bar = _make_signal_bar(close=100.0)
+    ts = pd.Timestamp("2025-01-02 09:05:00", tz="America/New_York")
+    # entry=100, tdo=115, distance=15; stop = 100 - 0.35*15 = 94.75; initial_stop_pts = 5.25
+    sig = smt._build_signal_from_bar(bar, ts, "long", 115.0, anchor_close=None)
+    assert sig is not None
+    assert sig["initial_stop_pts"] == pytest.approx(5.25, rel=1e-3)

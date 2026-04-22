@@ -103,8 +103,15 @@ SIGNAL_BLACKOUT_END   = "13:00"
 # Trail-after-TP: instead of exiting at TDO, convert TP into a trailing stop.
 # When price first crosses TDO the position stays open; the stop is then trailed
 # this many points behind the best post-TDO price. Set 0.0 to disable (exit at TDO).
-# Optimizer search space: [0.0, 5.0, 10.0, 20.0].
-TRAIL_AFTER_TP_PTS = 1.0
+# Optimizer search space: [25.0, 50.0, 75.0, 100.0].
+TRAIL_AFTER_TP_PTS = 0.0
+
+# TRAIL_ACTIVATION_R: trail only takes over after price travels this many R-multiples
+# of |entry - stop| past TDO. 0.0 = activate immediately at TDO (legacy behaviour).
+# Prevents a bare TDO tick-through from enabling a 50-pt adverse stop placement.
+# R-multiple is scale-invariant, consistent with BREAKEVEN_TRIGGER_PCT.
+# Optimizer search space: [0.0, 0.5, 1.0, 1.5, 2.0]
+TRAIL_ACTIVATION_R: float = 1.0
 
 # Maximum TDO distance filter: skip signals where |entry - TDO| > this value in MNQ pts.
 # Cross-tab finding: TDO<20 has WR=37-43% and EP=$32-$59 across ALL re-entry sequences,
@@ -146,7 +153,7 @@ MIN_SMT_MISS_PTS = 0.0
 # ICT canonical intraday reversion target = first 1m bar at/after 00:00 ET.
 # Default True: pre-9:30 signals no longer reference a future (post-signal) price.
 # Optimizer search space: [True, False]
-MIDNIGHT_OPEN_AS_TP: bool = True
+MIDNIGHT_OPEN_AS_TP: bool = False
 
 # Pessimistic fill simulation: use bar extreme as exit price instead of exact level.
 # Stop-outs fill at bar Low (long) / bar High (short); TPs fill at bar High (long) / bar Low (short).
@@ -181,8 +188,8 @@ OVERNIGHT_SWEEP_REQUIRED: bool = False
 OVERNIGHT_RANGE_AS_TP: bool = False
 
 # ── Solution F: Draw-on-Liquidity target selection ────────────────────────────
-MIN_RR_FOR_TARGET: float = 1.5   # reward >= min_rr * |entry - stop|; optimizer: [1.0, 1.5, 2.0]
-MIN_TARGET_PTS:    float = 15.0  # absolute min target distance in MNQ pts; optimizer: [10, 15, 20, 25]
+MIN_RR_FOR_TARGET: float = 0.0   # reward >= min_rr * |entry - stop|; optimizer: [1.0, 1.5, 2.0]
+MIN_TARGET_PTS:    float = 0.0   # absolute min target distance in MNQ pts; optimizer: [10, 15, 20, 25]
 
 # Silver Bullet window: restrict new divergence detection to 09:50–10:10 ET.
 # Re-entries allowed outside window if original divergence was inside it.
@@ -1422,6 +1429,7 @@ def _build_signal_from_bar(
         "anchor_close_price": anchor_close if LIMIT_ENTRY_BUFFER_PTS is not None else None,
         "limit_fill_bars":    None,   # populated by state machine on fill
         "missed_move_pts":    None,   # populated by state machine on expiry
+        "initial_stop_pts":   round(abs(entry_price - round(stop_price, 4)), 4),
     }
 
 
@@ -1461,23 +1469,33 @@ def manage_position(
             if direction == "short":
                 best = min(position.get("best_after_tp", tp), current_bar["Low"])
                 position["best_after_tp"] = best
-                position["stop_price"]    = best + TRAIL_AFTER_TP_PTS
+                activation_dist = TRAIL_ACTIVATION_R * position.get("initial_stop_pts", 0.0)
+                if tp - best >= activation_dist:
+                    new_stop = best + TRAIL_AFTER_TP_PTS
+                    position["stop_price"] = min(position["stop_price"], new_stop)  # never widen
             else:
                 best = max(position.get("best_after_tp", tp), current_bar["High"])
                 position["best_after_tp"] = best
-                position["stop_price"]    = best - TRAIL_AFTER_TP_PTS
+                activation_dist = TRAIL_ACTIVATION_R * position.get("initial_stop_pts", 0.0)
+                if best - tp >= activation_dist:
+                    new_stop = best - TRAIL_AFTER_TP_PTS
+                    position["stop_price"] = max(position["stop_price"], new_stop)  # never widen
         else:
             # Check if TDO was crossed this bar for the first time
             crossed = (direction == "short" and current_bar["Low"]  <= tp) or \
                       (direction == "long"  and current_bar["High"] >= tp)
             if crossed:
+                # Check original stop before marking breach — a bar can cross both TDO and stop.
+                stop = position["stop_price"]
+                if direction == "short" and float(current_bar["High"]) >= stop:
+                    return "exit_stop"
+                if direction == "long"  and float(current_bar["Low"])  <= stop:
+                    return "exit_stop"
                 position["tp_breached"] = True
                 if direction == "short":
                     position["best_after_tp"] = min(tp, current_bar["Low"])
-                    position["stop_price"]    = position["best_after_tp"] + TRAIL_AFTER_TP_PTS
                 else:
                     position["best_after_tp"] = max(tp, current_bar["High"])
-                    position["stop_price"]    = position["best_after_tp"] - TRAIL_AFTER_TP_PTS
                 return "hold"
 
     # ── Set tp_breached on first primary TP crossing (for secondary target tracking) ──

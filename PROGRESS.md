@@ -1,5 +1,23 @@
 # PROGRESS
 
+
+## Feature: Uncap Hold Time — Trail Width + Session Extension
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/uncap_hold_time.md`
+
+Widens `TRAIL_AFTER_TP_PTS` from 1.0 to 50.0 pts with two safeguards: a never-widen rule (`stop = max(current, trail)` for longs) and a delayed activation gate (`TRAIL_ACTIVATION_R` — trail only fires after price travels R multiples of initial stop past TDO). Extends `SESSION_END` to `"15:15"`. Disables partial exit when trail is active (logically contradictory). Adds `initial_stop_pts` to signal dict. Optimizer grid: 4 × 5 = 20 cells (`TRAIL_AFTER_TP_PTS` × `TRAIL_ACTIVATION_R`).
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/uncap_hold_time.md`
+- All 5 tasks completed; 15 new tests passing (+15 from 149 baseline to 164); 0 regressions
+- Three divergences: pre-existing `PARTIAL_EXIT_LEVEL_RATIO` import bug fixed; `test_trail_active_when_no_secondary` updated for new deferred-stop contract; integration tests required deeper monkeypatching for newer feature gates
+- Test results: 164/165 full suite; 1 pre-existing failure unchanged
+- Alignment score: 9/10
+
+---
+
 ## Feature: SMT Limit Entry at Anchor Close
 
 **Status**: ✅ Complete

@@ -10,7 +10,7 @@ Autonomous SMT divergence strategy optimizer: iterates on signal logic and tunin
 |-----------|---------|-------------|
 | **Timeframe** | `BACKTEST_START`=2024-09-01 to `BACKTEST_END`=2026-03-20 | Fixed futures backtest window; defined in `backtest_smt.py` (do not edit). |
 | **Instruments** | MNQ1!, MES1! | Continuous futures contracts. Data fetched by `prepare_futures.py`. |
-| **Iterations** | 30 | Number of experiment iterations to run before stopping. |
+| **Iterations** | open-ended | Work through groups in order; stop when further gains are marginal. |
 
 ---
 
@@ -40,24 +40,29 @@ You may modify ONLY these constants:
 | Constant | Current Default | Optimizer Search Space |
 |----------|----------------|------------------------|
 | `SESSION_START` | "09:00" | ["09:00", "09:30"] |
-| `SESSION_END` | "13:30" | ["10:30", "11:00", "12:00", "13:30"] |
+| `SESSION_END` | "13:30" | ["11:00", "12:00", "13:30", "14:00", "15:15"] |
 | `MIN_BARS_BEFORE_SIGNAL` | 0 | [0, 10, 20, 30] (minutes) |
 | `TRADE_DIRECTION` | "both" | ["both", "short"] |
 | `SHORT_STOP_RATIO` | 0.35 | [0.25, 0.30, 0.35, 0.40, 0.45] |
 | `LONG_STOP_RATIO` | 0.35 | [0.25, 0.30, 0.35, 0.40, 0.45] |
 | `MIN_STOP_POINTS` | 2.5 | do not change |
-| `MIN_TDO_DISTANCE_PTS` | 0.0 | [0.0, 5.0, 10.0, 15.0] |
-| `MAX_TDO_DISTANCE_PTS` | 15.0 | [10.0, 15.0, 20.0, 25.0, 40.0, 999.0] |
+| `MIN_TDO_DISTANCE_PTS` | 0.0 | [0.0, 10.0, 15.0, 20.0, 25.0] |
+| `MAX_TDO_DISTANCE_PTS` | 15.0 | [15.0, 20.0, 25.0, 30.0, 40.0, 999.0] |
 | `MAX_REENTRY_COUNT` | 1 | [1, 2, 3, 4, 999] |
 | `REENTRY_MAX_MOVE_PTS` | 999.0 | [0.0, 5.0, 10.0, 20.0, 999.0] |
-| `BREAKEVEN_TRIGGER_PCT` | 0.0 | [0.0, 0.50, 0.60, 0.65, 0.70] |
+| `BREAKEVEN_TRIGGER_PCT` | 0.0 | [0.0, 0.50, 0.60, 0.65, 0.70, 0.75] |
 | `MAX_HOLD_BARS` | 120 | [60, 120, 240, 0] |
 | `ALLOWED_WEEKDAYS` | {0,1,2,3,4} | [{0,1,2,3,4}, frozenset({0,1,2,4})] |
 | `SIGNAL_BLACKOUT_START` | "11:00" | ["", "11:00"] |
 | `SIGNAL_BLACKOUT_END` | "13:00" | ["", "12:00", "13:00", "13:30"] |
-| `TRAIL_AFTER_TP_PTS` | 1.0 | [0.0, 1.0, 5.0, 10.0, 20.0] |
+| `TRAIL_AFTER_TP_PTS` | 0.0 | [0.0, 25.0, 50.0, 75.0, 100.0] |
+| `TRAIL_ACTIVATION_R` | 1.0 | [0.0, 0.5, 1.0, 1.5, 2.0] |
 | `MIN_SMT_SWEEP_PTS` | 0.0 | [0.0, 1.0, 2.0, 5.0] |
 | `MIN_SMT_MISS_PTS` | 0.0 | [0.0, 1.0, 2.0, 5.0] |
+| `LIMIT_ENTRY_BUFFER_PTS` | 3.0 | [1.0, 2.0, 3.0] |
+| `LIMIT_EXPIRY_SECONDS` | 120.0 | [60.0, 120.0, 300.0] |
+| `LIMIT_RATIO_THRESHOLD` | None | [None, 0.40, 0.50, 0.60, 0.70] |
+| `PARTIAL_STOP_BUFFER_PTS` | 2.0 | [0.5, 1.0, 2.0, 3.0] |
 
 ### Plan 1–3 Feature Flags (approved defaults — re-validate in full walk-forward)
 
@@ -70,7 +75,7 @@ You may modify ONLY these constants:
 | `MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT` | 0 | [0, 2, 3] |
 | `PARTIAL_EXIT_ENABLED` | True | do not change (keep True) |
 | `PARTIAL_EXIT_FRACTION` | 0.33 | [0.25, 0.33, 0.50] |
-| `PARTIAL_EXIT_LEVEL_RATIO` | 0.33 | [0.25, 0.33, 0.50, 0.67] |
+| `PARTIAL_EXIT_LEVEL_RATIO` | 0.33 | [0.33, 0.50, 0.67] |
 
 ### ICT Structure Features (untested at current quality level)
 
@@ -80,18 +85,24 @@ You may modify ONLY these constants:
 | `SILVER_BULLET_WINDOW_ONLY` | False | [True, False] |
 | `OVERNIGHT_SWEEP_REQUIRED` | False | [True, False] |
 | `OVERNIGHT_RANGE_AS_TP` | False | [True, False] — only with OVERNIGHT_SWEEP_REQUIRED=True |
-| `STRUCTURAL_STOP_MODE` | False | [True, False] — re-test with new baseline |
-| `STRUCTURAL_STOP_BUFFER_PTS` | 2.0 | [1.0, 2.0, 3.0, 5.0] — only when STRUCTURAL_STOP_MODE=True |
 | `TWO_LAYER_POSITION` | False | [True, False] — requires FVG_ENABLED=True |
 | `FVG_ENABLED` | False | [True, False] |
 | `FVG_LAYER_B_TRIGGER` | False | [True, False] |
 | `FVG_MIN_SIZE_PTS` | 2.0 | [1.0, 2.0, 3.0, 5.0] |
 | `SMT_FILL_ENABLED` | False | [True, False] |
 | `INVALIDATION_MSS_EXIT` | False | [True, False] |
+| `INVALIDATION_CISD_EXIT` | False | [True, False] |
+| `INVALIDATION_SMT_EXIT` | False | [True, False] |
+| `SYMMETRIC_SMT_ENABLED` | False | [True, False] |
+| `ALWAYS_REQUIRE_CONFIRMATION` | False | [True, False] |
+| `HTF_VISIBILITY_REQUIRED` | False | [True, False] |
+| `EXPANDED_REFERENCE_LEVELS` | False | [True, False] |
 
 ### Do NOT Change
 
-- `INVALIDATION_CISD_EXIT`, `INVALIDATION_SMT_EXIT` — prior experiments showed exits too close to entry; no guard mechanism implemented
+- `STRUCTURAL_STOP_MODE = False` — tested and rejected: stop beyond wick extreme kills RR vs ratio stop
+- `MIN_DISPLACEMENT_BODY_PTS = 0.0` — tested and rejected: displacement body size filter adds no value
+- `CONFIRMATION_BAR_MINUTES = 1` — tested, confirmed optimal; do not change
 - `MNQ_PNL_PER_POINT = 2.0` — fixed contract spec
 - `RISK_PER_TRADE = 50.0` — frozen position-sizing baseline
 - `MIN_PRIOR_TRADE_BARS_HELD` — diagnostic only; extended diagnostics showed no EP improvement at any threshold
@@ -134,238 +145,259 @@ An iteration is accepted if ALL of the following hold:
 | Criterion | Threshold | Priority |
 |-----------|-----------|----------|
 | `mean_test_pnl` | Higher than current best | **PRIMARY** |
-| Win rate (avg across folds) | ≥ 0.60 | Guard |
+| Win rate (avg across folds) | ≥ 0.75 | Guard |
 | `avg_rr` (avg across folds) | ≥ 1.5 | Guard |
-| Total test trades (sum) | ≥ 400 | Volume guard |
-| `min_test_pnl` | > 0 (all qualified folds profitable) | Secondary guard |
+| Total test trades (sum) | ≥ 450 | Volume guard |
+| `min_test_pnl` | ≥ $2,000 (no weak folds) | Secondary guard |
+| `avg_pnl_per_trade` (avg across folds) | ≥ $25 | Quality guard |
 
 When two iterations both satisfy all guards, prefer the one with higher `mean_test_pnl`.
 
-**Baseline (post-Plans-1-3 defaults, full 6-fold run 2024-09-01 → 2026-03-20):**
+_Thresholds last updated after corrected limit-entry fill direction (SHORT fills on bar Low ≤ entry_price). Current baseline WR=85.5%, avg_rr=2.14, min_test_pnl=$3,354 — guards set ~10pp below WR baseline to catch genuine regressions without blocking mild parameter-tuning noise._
 
-| Fold | Trades | Win Rate | Test PnL | avg_rr |
-|------|--------|----------|----------|--------|
-| 1 | 92 | 65.2% | $2,677 | 2.05 |
-| 2 | 111 | 84.7% | $7,679 | 2.03 |
-| 3 | 100 | 75.0% | $4,832 | 2.45 |
-| 4 | 119 | 69.8% | $4,263 | 2.14 |
-| 5 | 77 | 76.6% | $3,398 | 1.37 |
-| 6 | 70 | 90.0% | $5,731 | 2.92 |
+**Baseline (Plans 1–3 + LIMIT_ENTRY_BUFFER_PTS=3 + LIMIT_EXPIRY_SECONDS=120 + corrected fill direction, full 6-fold walk-forward 2024-09-01 → 2026-03-20):**
 
-- **mean_test_pnl**: $4,763 | **min_test_pnl**: $2,677 | **Total trades**: 569 | **Avg WR**: 76.9% | **Avg avg_rr**: 2.17
+| Fold | Test Trades | Win Rate | Test PnL | avg_rr |
+|------|------------|----------|----------|--------|
+| 1    | 110        | 87.3%    | $3,851   | 1.75   |
+| 2    | 120        | 88.3%    | $5,287   | 2.06   |
+| 3    | 104        | 83.7%    | $4,983   | 2.48   |
+| 4    | 126        | 88.1%    | $4,704   | 1.74   |
+| 5    | 91         | 81.3%    | $4,648   | 2.96   |
+| 6    | 76         | 84.2%    | $3,354   | 1.84   |
+
+- **mean_test_pnl**: $4,471 | **min_test_pnl**: $3,354 | **Total test trades**: 627 | **Avg WR**: 85.5% | **Avg avg_rr**: 2.14
 
 ---
 
-## Optimization Agenda (30 Iterations)
+## Optimization Agenda
 
 Work through in priority order. At each step, start from the **current best accepted configuration**.
-Primary metric: `mean_test_pnl`. Guards: WR ≥ 0.60, total_test_trades ≥ 100.
+Primary metric: `mean_test_pnl`. Guards: WR ≥ 0.65, avg_rr ≥ 1.8, total_test_trades ≥ 400, min_test_pnl ≥ $0, avg_pnl_per_trade ≥ $20.
 
 ---
 
-### Group 1 — Validate Plan 1–3 Defaults in Full Walk-Forward (Iterations 1–4)
+### Group 1 — Limit Entry Mechanics (Iterations 1–2)
 
-These features were approved in 1-fold fast tests. Confirm they hold across all 6 folds before using them as the fixed base for subsequent iterations.
+The new pullback limit entry (`anchor_close ± LIMIT_ENTRY_BUFFER_PTS`, expires after `LIMIT_EXPIRY_SECONDS`) is the core change from the prior baseline. Optimizing these is the first priority because they directly control fill rate, fill quality, and effective RR.
 
-#### Iteration 1 — DISPLACEMENT_STOP_MODE
+#### Iteration 1 — LIMIT_ENTRY_BUFFER_PTS × LIMIT_EXPIRY_SECONDS grid
 
-Test: `[True, False]`
+Test all combinations in `[1.0, 2.0, 3.0] × [60.0, 120.0, 300.0]` (9 combos).
 
-With the correct bar-extreme stop for displacement entries, 1-fold showed +$2K vs SMT_OPTIONAL alone. Validate this holds across all regimes. If False wins, revert `DISPLACEMENT_STOP_MODE` and continue.
+Smaller buffer fills faster, recovering volume lost to the pullback requirement; larger buffer gets a better entry price but misses more setups. Longer expiry tolerates slower retracements but may fill into deteriorating setups. Grid the full 3×3 space from the current default (3.0, 120.0).
 
-#### Iteration 2 — MIN_DISPLACEMENT_PTS threshold
+#### Iteration 2 — LIMIT_RATIO_THRESHOLD
 
-Test: `[8.0, 10.0, 15.0]` (with `SMT_OPTIONAL=True`, `DISPLACEMENT_STOP_MODE` at its accepted value)
+Test: `[None, 0.40, 0.50, 0.60, 0.70]`
 
-The current 10.0 was the Plan 3 default. Tighter (15.0) reduces noisy entries; looser (8.0) increases volume. Find the best trade-off.
-
-#### Iteration 3 — PARTIAL_EXIT_LEVEL_RATIO
-
-Test: `[0.25, 0.33, 0.50, 0.67]`
-
-Current default 0.33 was the 1-fold winner. Test whether 0.25 (earlier lock-in) or 0.50 (midpoint) performs better across 6 folds.
-
-#### Iteration 4 — HIDDEN_SMT_ENABLED
-
-Test: `[True, False]`
-
-Approved in Round 1 for +30.6% PnL. Re-confirm the gain holds after all subsequent changes. If False wins, revert.
+Suppresses limit entries where `LIMIT_ENTRY_BUFFER_PTS / (TDO distance)` exceeds the threshold — i.e., where the buffer consumes a large fraction of the trade's available travel. Without this guard, a 3-pt buffer on a 4-pt TDO setup would still place a limit entry with almost no room to TP. None = disabled (current default).
 
 ---
 
-### Group 2 — Stop and Exit Mechanics (Iterations 5–10)
+### Group 2 — Stop and Exit Mechanics (Iterations 3–7)
 
-#### Iteration 5 — MAX_TDO_DISTANCE_PTS
-
-Test: `[10.0, 15.0, 20.0, 25.0, 40.0, 999.0]`
-
-Current default is 15.0 from prior optimization. Re-test with the new baseline — displacement entries and Plan 3 features may shift the optimal ceiling. Cross-tab: TDO>100 loses money; TDO<20 is the best quality tier. Expected optimum still near 15–20.
-
-#### Iteration 6 — SHORT_STOP_RATIO
+#### Iteration 3 — SHORT_STOP_RATIO
 
 Test: `[0.25, 0.30, 0.35, 0.40, 0.45]`
 
-Stop ratio is the main RR lever for shorts. With WR at 82.5%, we can afford to widen the stop to improve RR and reduce stop-outs. Wider stop → higher avg_rr at expense of more capital at risk per trade.
+Primary RR lever for shorts. At the new baseline WR of ~54%, the optimal ratio may shift: tighter stops (0.25–0.30) improve RR at cost of more stop-outs; looser stops (0.40–0.45) reduce frequency but risk more capital per trade.
 
-#### Iteration 7 — LONG_STOP_RATIO
+#### Iteration 4 — LONG_STOP_RATIO
 
 Test: `[0.25, 0.30, 0.35, 0.40, 0.45]`
 
-Longs are now active (`TRADE_DIRECTION = "both"`). Long and short setups have different structural characteristics — test whether asymmetric ratios improve overall performance. Test LONG_STOP_RATIO independently after SHORT is locked.
+Test after SHORT_STOP_RATIO is locked. Long and short setups have different structural characteristics (longs tend to have smaller PnL contribution at the current baseline) — asymmetric ratios may be optimal.
 
-#### Iteration 8 — BREAKEVEN_TRIGGER_PCT
+#### Iteration 5 — PARTIAL_EXIT_LEVEL_RATIO
 
-Test: `[0.0, 0.50, 0.60, 0.65, 0.70]`
+Test: `[0.33, 0.50, 0.67]`
 
-Moves stop to entry after price travels X% toward TDO. Currently disabled (0.0). At WR=82.5%, most trades reach TDO — a breakeven trigger could protect gains on the 17.5% of losers that would otherwise stop out fully. Expected effect: lower max_drawdown, mild reduction in avg_rr.
+With the partial-exit level bug fixed (level now correctly tracks the actual selected TP, not the placeholder TDO), re-calibrate where in the trade's travel to take partial profits. 0.33 = early lock-in; 0.67 = hold most of the trade to near-TP.
 
-#### Iteration 9 — TRAIL_AFTER_TP_PTS
+#### Iteration 6 — PARTIAL_STOP_BUFFER_PTS
 
-Test: `[0.0, 1.0, 5.0, 10.0, 20.0]`
+Test: `[0.5, 1.0, 2.0, 3.0]`
 
-Currently 1.0 — a trailing stop 1 MNQ point behind the best post-TDO price. A wider trail (5–10 pts) allows winners to run further; 0.0 exits exactly at TDO. Expected effect: higher avg_rr at cost of some converted TPs becoming stop-outs.
+After partial exit, stop slides to `partial_exit_price ± PARTIAL_STOP_BUFFER_PTS`. Current default 2.0. Tighter buffer (0.5–1.0) locks in more P&L from the first leg but risks noise stop-out; looser (3.0) gives more room at the cost of giving back gain.
 
-#### Iteration 10 — PARTIAL_EXIT_FRACTION
+#### Iteration 7 — BREAKEVEN_TRIGGER_PCT
 
-Test: `[0.25, 0.33, 0.50]`
+Test: `[0.0, 0.50, 0.60, 0.65, 0.70, 0.75]`
 
-Fraction of contracts closed at the partial exit level. Current 0.33 was approved in Round 2. Test whether closing half (0.50) earlier improves drawdown more than it costs in final-leg PnL.
-
----
-
-### Group 3 — Session and Timing (Iterations 11–14)
-
-#### Iteration 11 — TRADE_DIRECTION
-
-Test: `["both", "short"]`
-
-Current default is "both". The prior finding that longs lose was based on a 52% WR baseline — at the current quality level, longs may behave differently. Confirm whether "both" outperforms "short" in the full 6-fold run.
-
-#### Iteration 12 — ALLOWED_WEEKDAYS (Thursday)
-
-Test: `[frozenset({0,1,2,3,4}), frozenset({0,1,2,4})]`
-
-Thursday previously showed 25% WR on the old baseline. Re-test with current quality filters in place. If Thursday still underperforms, exclude it.
-
-#### Iteration 13 — SESSION_END
-
-Test: `["10:30", "11:00", "12:00", "13:30"]`
-
-The current blackout ("11:00"–"13:00") already suppresses the dead zone. Test whether a hard session cutoff at 10:30 or 11:00 concentrates entries into the strongest morning window.
-
-#### Iteration 14 — SIGNAL_BLACKOUT relaxation
-
-Test combinations: `SIGNAL_BLACKOUT_START/END` in `["", "11:00"] × ["", "12:00", "13:00", "13:30"]`
-
-The current "11:00"–"13:00" window was set empirically. Test whether relaxing the end (to 13:30) captures useful afternoon setups, or whether extending the start (to 11:30) further improves quality.
+Slides stop to entry after price travels X% toward TP. Currently disabled (0.0). At WR=54% with avg_rr=1.43, converting partial losers to breakeven could meaningfully reduce drawdown. Expected: lower max_drawdown, mild reduction in avg_rr.
 
 ---
 
-### Group 4 — Re-entry Mechanics (Iterations 15–17)
+### Group 3 — Target Selection (Iterations 8–9)
 
-#### Iteration 15 — MAX_REENTRY_COUNT
+#### Iteration 8 — MAX_TDO_DISTANCE_PTS
 
-Test: `[1, 2, 3, 4, 999]`
+Test: `[15.0, 20.0, 25.0, 30.0, 40.0, 999.0]`
 
-Currently 1 (one re-entry per session). With high-quality TDO distances now filtered, re-entries at the same setup may be structurally sound. Test whether allowing 2–3 re-entries per day adds volume without degrading quality.
+Upper-bound filter on |entry − TDO|. Current default 15.0. With the limit buffer shifting fill prices, the effective TDO distance at entry has changed slightly; the optimal ceiling may have moved. Lower ceilings filter wide, lower-probability setups; 999 = disabled.
 
-#### Iteration 16 — REENTRY_MAX_MOVE_PTS
+#### Iteration 9 — MIN_TDO_DISTANCE_PTS
 
-Test: `[0.0, 5.0, 10.0, 20.0, 999.0]`
+Test: `[0.0, 10.0, 15.0, 20.0, 25.0]`
 
-0.0 = disallow re-entry if price moved at all toward target before stop. 999.0 = always allow. An intermediate threshold (10–20 pts) allows re-entry only when the setup is still "fresh." Expected effect: filters late-session revenge re-entries.
-
-#### Iteration 17 — MIN_TDO_DISTANCE_PTS
-
-Test: `[0.0, 5.0, 10.0, 15.0]`
-
-Lower-bound filter on |entry − TDO|. Currently disabled (0.0). Very tight TDO setups (< 5 pts) have degenerate stops — a floor here may improve average RR without significant volume loss.
+Floor on TDO distance. Very tight TDO setups produce degenerate stops and poor RR. Currently 0.0 (disabled). A floor of 10–15 pts may improve average quality without significant volume loss.
 
 ---
 
-### Group 5 — Signal Quality Filters (Iterations 18–21)
+### Group 4 — Signal Quality Filters (Iterations 10–13)
 
-#### Iteration 18 — MIN_SMT_SWEEP_PTS
+#### Iteration 10 — MIN_SMT_SWEEP_PTS
 
 Test: `[0.0, 1.0, 2.0, 5.0]`
 
-How far MES must exceed the prior session extreme. Marginal sweeps (< 1 pt) may be noise. Expected effect: fewer signals but higher conviction per trade.
+Minimum distance MES must exceed the prior session extreme. Marginal sweeps (< 1 pt) may be noise. Expected: fewer signals but higher conviction per trade.
 
-#### Iteration 19 — MIN_SMT_MISS_PTS
+#### Iteration 11 — MIN_SMT_MISS_PTS
 
 Test: `[0.0, 1.0, 2.0, 5.0]`
 
-How far MNQ must fail to match MES. A 3-pt miss is a stronger divergence than a 0.5-pt one. Test independently after MIN_SMT_SWEEP_PTS is locked; they may be correlated.
+Minimum distance MNQ must fail to match MES. A 3-pt miss is a stronger divergence signal than a 0.5-pt one. Test after MIN_SMT_SWEEP_PTS is locked — they are correlated and interact.
 
-#### Iteration 20 — MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT
+#### Iteration 12 — MAX_REENTRY_COUNT + REENTRY_MAX_MOVE_PTS
+
+Test `MAX_REENTRY_COUNT` ∈ `[1, 2, 3, 4, 999]` with `REENTRY_MAX_MOVE_PTS` ∈ `[0.0, 5.0, 10.0, 20.0, 999.0]`.
+
+Currently 1 re-entry allowed regardless of how far price has moved. Test whether allowing 2–3 re-entries recovers useful volume, and whether capping `REENTRY_MAX_MOVE_PTS` filters late re-entries after significant adverse movement.
+
+#### Iteration 13 — MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT
 
 Test: `[0, 2, 3]`
 
-Gates displacement entries to sessions where at least N ICT/hypothesis rules confirm direction. Score 0 = disabled (current). Score 2 requires pd_range + one other rule to agree. Expected effect: fewer displacement entries, higher WR on that subset.
-
-#### Iteration 21 — MIN_BARS_BEFORE_SIGNAL
-
-Test: `[0, 10, 20, 30]` (minutes after session open)
-
-Currently 0 — the first real signal opportunity is already bar 1 due to empty prior-session slice. A forced warm-up (20–30 min) ensures the session's structure is established before entries are taken.
+Gates displacement entries to sessions where at least N ICT/hypothesis rules confirm direction. Score 0 = disabled (current). Score 2 requires pd_range + one additional confirmation. Expected: fewer displacement entries, higher per-trade WR on that subset.
 
 ---
 
-### Group 6 — ICT Structure Features (Iterations 22–27)
+### Group 5 — Re-validate Plan 1–3 Defaults (Iterations 14–17)
 
-Test each feature independently, starting from the best configuration to date. Most of these were previously neutral or deferred — re-test at the new quality level.
+These features were approved at an earlier quality level and baseline. Re-confirm with the new entry mechanics and partial-exit fix in place.
 
-#### Iteration 22 — MIDNIGHT_OPEN_AS_TP
+#### Iteration 14 — HIDDEN_SMT_ENABLED
 
-Test: `[False, True]`
+Test: `[True, False]`
 
-Uses 00:00 ET globex open as TP target instead of 9:30 RTH open (TDO). ICT canonical reversion target. Previously neutral. May unlock overnight setups that TDO misses.
+Approved for +30.6% PnL at earlier baseline. Confirm the gain holds with the limit buffer entry and corrected partial-exit level calculation.
 
-#### Iteration 23 — SILVER_BULLET_WINDOW_ONLY
+#### Iteration 15 — DISPLACEMENT_STOP_MODE
 
-Test: `[False, True]`
+Test: `[True, False]`
 
-Restricts divergence detection to 09:50–10:10 ET. This is the ICT "Silver Bullet" kill zone — highest-conviction window for reversal patterns. Expected effect: significant volume reduction but possible WR improvement. Only proceed if total_test_trades ≥ 100.
+Bar-extreme stop for displacement entries (stop placed beyond the displacement bar's wick). Approved in 1-fold test. Re-confirm across all 6 folds.
 
-#### Iteration 24 — OVERNIGHT_SWEEP_REQUIRED
+#### Iteration 16 — SMT_OPTIONAL + MIN_DISPLACEMENT_PTS
 
-Test: `[False, True]`
+Test `SMT_OPTIONAL` ∈ `[True, False]`; if True accepted, test `MIN_DISPLACEMENT_PTS` ∈ `[8.0, 10.0, 15.0]`.
 
-Requires the overnight high (for shorts) or low (for longs) to have been swept before the session signal fires. ICT confirmation that liquidity above/below has already been cleared. Previously neutral — re-test.
+Pure displacement entries add volume. Re-test whether this volume is profitable at the current quality level. If SMT_OPTIONAL=False wins, skip MIN_DISPLACEMENT_PTS.
 
-#### Iteration 25 — TWO_LAYER_POSITION + FVG_ENABLED
+#### Iteration 17 — TRAIL_AFTER_TP_PTS × TRAIL_ACTIVATION_R
 
-Test: `TWO_LAYER_POSITION=True, FVG_ENABLED=True, FVG_LAYER_B_TRIGGER=True` vs baseline
+**Step A** — Lock `TRAIL_AFTER_TP_PTS` ∈ `[0.0, 25.0, 50.0, 75.0, 100.0]` with `TRAIL_ACTIVATION_R` held at 1.0.
 
-The two-layer (Layer A at divergence, Layer B on FVG retracement) was neutral in Round 2 because layer_b_triggers=0 in the test window. Test across all 6 folds — FVG retracements may appear in different regimes.
+`TRAIL_AFTER_TP_PTS = 0.0` is the current default (exit exactly at TDO, no trailing). Test wider values `[25.0, 50.0, 75.0, 100.0]` to see whether trailing past TDO captures trend extension; note that wider trails convert some TPs into stop-outs on reversals.
 
-#### Iteration 26 — STRUCTURAL_STOP_MODE
+**Step B** — After Step A, lock the best `TRAIL_AFTER_TP_PTS` and test `TRAIL_ACTIVATION_R` ∈ `[0.0, 0.5, 1.0, 1.5, 2.0]`.
 
-Test: `[False, True]` with `STRUCTURAL_STOP_BUFFER_PTS` ∈ `[1.0, 2.0, 5.0]`
-
-Stop beyond the divergence bar's wick extreme. Rejected in Round 1 (killed RR at old stop ratios). Re-test with current quality baseline: at WR=82.5% and better setups, the structural stop may work correctly without the ratio stop's mechanical dependency on TDO distance.
-
-#### Iteration 27 — SMT_FILL_ENABLED
-
-Test: `[False, True]`
-
-MES fills a FVG that MNQ has not — alternative divergence type. Previously neutral (fill_entries=0 in test window). Confirm whether fills generate entries in other 6-fold regimes.
+`0.0` = trail activates immediately at TDO crossing (legacy); `1.0` = trail waits until price has moved 1× the initial stop distance past TDO; higher values reduce false activations on shallow TDO breaches. Note: when `TRAIL_AFTER_TP_PTS > 0`, the partial-exit stop-slide still runs (protecting against TDO-touch reversals) but contract reduction is skipped — the full position stays open for trend capture.
 
 ---
 
-### Group 7 — Combinatorial and Final Tuning (Iterations 28–30)
+### Group 6 — ICT Structure Features (Iterations 18–27)
 
-#### Iteration 28 — Asymmetric Stop Combo
+Test each feature independently from the best configuration to date. Most are untested at the current quality level.
 
-Using best `SHORT_STOP_RATIO` from Iter 6 and best `LONG_STOP_RATIO` from Iter 7, test them together. When tested independently, the other is at its default — the combined effect may differ.
+#### Iteration 18 — FVG_ENABLED + FVG_MIN_SIZE_PTS
 
-#### Iteration 29 — Best ICT Feature Combo
+Test `FVG_ENABLED` ∈ `[True, False]`; if True accepted, test `FVG_MIN_SIZE_PTS` ∈ `[1.0, 2.0, 3.0, 5.0]`.
 
-Take the best-performing ICT feature(s) from Group 6 (Iterations 22–27) and test them simultaneously. Features that were marginal individually may compound when combined.
+Fair Value Gap confirmation gate. FVG data is computed but currently bypassed. Test whether requiring a nearby FVG improves signal quality. FVG_ENABLED=True is also prerequisite for TWO_LAYER_POSITION (Iteration 24).
 
-#### Iteration 30 — Final Best-of-All
+#### Iteration 19 — SILVER_BULLET_WINDOW_ONLY
 
-Apply all accepted changes simultaneously and run the full walk-forward as a final sanity check. Compare `mean_test_pnl`, `min_test_pnl`, win rate, and total_test_trades against the original baseline. This is the submission candidate.
+Test: `[False, True]`
+
+Restricts divergence detection to the 09:50–10:10 ET ICT kill zone. Significant volume reduction expected. Only accept if total_test_trades ≥ 350 after filtering.
+
+#### Iteration 20 — OVERNIGHT_SWEEP_REQUIRED
+
+Test: `[False, True]`
+
+Requires the overnight high (shorts) or low (longs) to be swept before the session signal fires. Provides liquidity-clearance confirmation. Previously neutral — re-test at current quality level.
+
+#### Iteration 21 — INVALIDATION_CISD_EXIT
+
+Test: `[False, True]`
+
+Exit on Change in State of Delivery. Previously excluded because exits fired too close to entry. Re-test: the limit buffer entry increases the initial travel distance before any CISD signal can fire, which may make this viable.
+
+#### Iteration 22 — INVALIDATION_SMT_EXIT
+
+Test: `[False, True]`
+
+Exit if the MES/MNQ relationship inverts. Same caveat as CISD — the limit buffer should provide more separation between entry and any invalidation signal.
+
+#### Iteration 23 — INVALIDATION_MSS_EXIT
+
+Test: `[False, True]`
+
+Exit on Market Structure Shift against the trade direction. Less aggressive than CISD or SMT. Test whether early structural exits reduce drawdown without sacrificing wins.
+
+#### Iteration 24 — TWO_LAYER_POSITION + FVG_LAYER_B_TRIGGER
+
+Test: `TWO_LAYER_POSITION=True, FVG_ENABLED=True, FVG_LAYER_B_TRIGGER=True` vs baseline.
+
+Layer A at divergence signal, Layer B on FVG retracement. Requires FVG_ENABLED=True (set from Iteration 18 result, or enable here if FVG was rejected). Previously neutral due to zero layer_b_triggers in the test window — re-test across all 6 folds.
+
+#### Iteration 25 — SYMMETRIC_SMT_ENABLED
+
+Test: `[False, True]`
+
+Allows same-direction SMT patterns in addition to divergence. Expands signal universe. Previously untested at current quality level.
+
+#### Iteration 26 — ALWAYS_REQUIRE_CONFIRMATION
+
+Test: `[False, True]`
+
+Forces a confirmation bar for all entry types including displacement entries. Reduces volume; expected effect is higher WR at cost of fewer trades.
+
+#### Iteration 27 — HTF_VISIBILITY_REQUIRED + EXPANDED_REFERENCE_LEVELS
+
+Test each independently: `[False, True]`.
+
+HTF visibility gates entries on higher-timeframe alignment. Expanded reference levels adds more liquidity targets to the TP candidate pool. Test independently; if both accepted, test combined.
+
+---
+
+### Group 7 — Session and Timing (Iterations 28–29)
+
+#### Iteration 28 — TRADE_DIRECTION + ALLOWED_WEEKDAYS
+
+Test `TRADE_DIRECTION` ∈ `["both", "short"]`. If "short" accepted, repurpose this iteration to also test `ALLOWED_WEEKDAYS` ∈ `[{0,1,2,3,4}, frozenset({0,1,2,4})]`.
+
+At the current baseline, longs contribute negatively in several folds. Thursday has historically underperformed — confirm with the new baseline.
+
+#### Iteration 29 — SESSION_END + SIGNAL_BLACKOUT
+
+Test `SESSION_END` ∈ `["11:00", "12:00", "13:30", "14:00", "15:15"]`. Test blackout combinations if SESSION_END change is marginal.
+
+`SESSION_END` is currently `"13:30"`. Test whether extending to 14:00 or 15:15 adds value — the post-blackout (13:00–) window would add afternoon signals. Also test earlier cutoffs (11:00, 12:00) to see if limiting to the morning kill zone improves quality. `"10:30"` dropped from the grid — below the blackout start, it would block all morning signals.
+
+---
+
+### Group 8 — Combinatorial and Final (Iterations 30–31)
+
+#### Iteration 30 — Best Stop + Entry Combo
+
+Using the best SHORT_STOP_RATIO and LONG_STOP_RATIO from Group 2, test them simultaneously with the best LIMIT_ENTRY_BUFFER_PTS × LIMIT_EXPIRY_SECONDS pair from Group 1. These interact: better fill quality (limit buffer) may justify a tighter stop; the stop was optimized against the 3-pt-buffer baseline and the combined optimum may differ.
+
+#### Iteration 31 — Final Best-of-All
+
+Apply all accepted changes simultaneously and run the full walk-forward as a final sanity check. Compare `mean_test_pnl`, `min_test_pnl`, win rate, and total_test_trades against both the original baseline and the current best. This is the submission candidate.
 
 ---
 
@@ -393,9 +425,10 @@ Explicitly state:
 Before moving to the next agenda item, think deeply about whether remaining proposals are still the right next steps. Write a one-paragraph **"Agenda Reassessment"** stating either "proceeding as planned: [reason]" or "diverging from agenda: [alternative and rationale]."
 
 Examples of when to diverge:
-- If win rate is already ≥ 0.85 after Group 1, tighter quality filters (Group 5) may be counterproductive — prioritise volume recovery instead.
-- If `TRADE_DIRECTION="short"` wins in Iter 11, skip `LONG_STOP_RATIO` (Iter 7) and repurpose that iteration for an unlisted parameter.
-- If `STRUCTURAL_STOP_MODE=True` wins in Iter 26, revisit `SHORT_STOP_RATIO` / `LONG_STOP_RATIO` since the stop mechanism has changed.
+- If Group 1 grid shows that None (no limit buffer) is optimal, drop LIMIT_RATIO_THRESHOLD (Iter 2) and revert to market entry baseline.
+- If TRADE_DIRECTION="short" wins in Iter 28, skip LONG_STOP_RATIO (Iter 4) and repurpose for an unlisted parameter.
+- If win rate climbs above 0.65 after Groups 1–2, tighter quality filters (Group 4) may be counterproductive — prioritise volume recovery instead.
+- If STRUCTURAL_STOP_MODE becomes re-relevant after a stop-ratio change, revisit it despite the locked status (with explicit note).
 
 ---
 
@@ -403,13 +436,14 @@ Examples of when to diverge:
 
 - **One trade per day maximum** — harness only enters if no open position
 - **Direction**: both longs and shorts active (`TRADE_DIRECTION = "both"`)
-- **Kill zone**: 09:00–13:30 ET; signal blackout 11:00–13:00 suppresses dead zone
+- **Kill zone**: 09:00–15:15 ET; signal blackout 11:00–13:00 suppresses dead zone
 - **TDO anchor**: 9:30 AM ET bar open is TP target and stop-placement basis; first-bar proxy if 9:30 bar absent
-- **Stop formula (short)**: `entry + SHORT_STOP_RATIO × |entry − TDO|`; current ratio 0.35 → ~2.86:1 R:R
-- **Stop formula (long)**: `entry − LONG_STOP_RATIO × |entry − TDO|`; current ratio 0.35 → ~2.86:1 R:R
+- **Stop formula (short)**: `entry + SHORT_STOP_RATIO × |entry − TDO|`; at ratio 0.35 → ~2.86:1 R:R
+- **Stop formula (long)**: `entry − LONG_STOP_RATIO × |entry − TDO|`; at ratio 0.35 → ~2.86:1 R:R
+- **Limit entry**: for SHORT, place SELL limit at `anchor_close − LIMIT_ENTRY_BUFFER_PTS`; fill check is `bar["Low"] <= entry_price` (price must drop down to the level); for LONG, BUY limit at `anchor_close + LIMIT_ENTRY_BUFFER_PTS`, fill check is `bar["High"] >= entry_price`; expires after `LIMIT_EXPIRY_SECONDS`
 - **SMT divergence**: bearish = MES new session high + MNQ failure; bullish = MES new session low + MNQ failure
 - **Displacement entries**: large-body candle (body ≥ MIN_DISPLACEMENT_PTS) when no wick SMT fires; stop = bar extreme when DISPLACEMENT_STOP_MODE=True
-- **Partial exit**: closes PARTIAL_EXIT_FRACTION of contracts at PARTIAL_EXIT_LEVEL_RATIO × distance to TP
+- **Partial exit**: closes `PARTIAL_EXIT_FRACTION` of contracts at `PARTIAL_EXIT_LEVEL_RATIO × |entry − TP|` distance from entry; stop then slides to `partial_exit_price ± PARTIAL_STOP_BUFFER_PTS` and secondary TP is promoted
 - **Ticker naming**: IB uses `MNQ` / `MES` (not `MNQ1!` / `MES1!`)
 
 ---
