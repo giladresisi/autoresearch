@@ -577,6 +577,23 @@ def _build_session_context(mnq_1m_df: pd.DataFrame, hist_mnq_df: pd.DataFrame,
     return {**r5, **r1, **r2, "deceptions": r3, **r4, **overnight, "fvgs_toward_tdo": fvgs}
 
 
+def _extract_response_text(msg) -> str:
+    """Return the first non-empty text block from a Claude Messages response.
+
+    Raises RuntimeError with diagnostic info if no text block is present —
+    e.g. when extended thinking consumes all tokens and no TextBlock is emitted.
+    """
+    for block in msg.content:
+        text = getattr(block, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    block_types = [getattr(b, "type", type(b).__name__) for b in msg.content]
+    stop_reason = getattr(msg, "stop_reason", "unknown")
+    raise RuntimeError(
+        f"Claude response had no text block; stop_reason={stop_reason} blocks={block_types}"
+    )
+
+
 # ── HypothesisManager ─────────────────────────────────────────────────────────
 
 class HypothesisManager:
@@ -681,13 +698,13 @@ Respond with valid JSON matching this schema exactly:
             try:
                 client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
                 msg = client.messages.create(
-                    model="claude-opus-4-5",
-                    max_tokens=1024,
+                    model="claude-opus-4-7",
+                    max_tokens=4096,
                     system=self.GENERATION_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": json.dumps(context, default=str)}],
                 )
                 self._call_count += 1
-                raw = msg.content[0].text.strip()
+                raw = _extract_response_text(msg)
                 hypothesis_json = json.loads(raw)
                 self._direction_bias = hypothesis_json.get("direction_bias", direction)
                 self._key_levels = hypothesis_json.get("key_levels_to_watch", [])
@@ -838,13 +855,13 @@ Respond with valid JSON matching this schema exactly:
                 "session_context":     self._session_data["session_context"],
             }
             msg = client.messages.create(
-                model="claude-opus-4-5",
-                max_tokens=1024,
+                model="claude-opus-4-7",
+                max_tokens=4096,
                 system=self.REVISION_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": json.dumps(payload, default=str)}],
             )
             self._call_count += 1
-            raw = msg.content[0].text.strip()
+            raw = _extract_response_text(msg)
             revision = json.loads(raw)
             self._direction_bias = revision.get("direction_bias", self._direction_bias)
             self._key_levels = revision.get("key_levels_to_watch", self._key_levels)
@@ -880,13 +897,13 @@ Respond with valid JSON matching this schema exactly:
         try:
             client = anthropic.Anthropic()
             msg = client.messages.create(
-                model="claude-opus-4-5",
-                max_tokens=1024,
+                model="claude-opus-4-7",
+                max_tokens=4096,
                 system=self.SUMMARY_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": json.dumps(self._session_data, default=str)}],
             )
             self._call_count += 1
-            raw = msg.content[0].text.strip()
+            raw = _extract_response_text(msg)
             summary_json = json.loads(raw)
             self._session_data["summary"] = summary_json
             self._write_file()

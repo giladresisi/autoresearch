@@ -902,6 +902,11 @@ def main() -> None:
 
     REALTIME_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    # This module is only used for signalling to a human trader, so human-mode
+    # classification/emission is always on when signal_smt is the entry point.
+    # Backtest imports strategy_smt directly and keeps the module default (False).
+    strategy_smt.HUMAN_EXECUTION_MODE = True
+
     # Parse session window into time objects used by callbacks
     _session_start_time = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
     _session_end_time   = pd.Timestamp(f"2000-01-01 {SIGNAL_SESSION_END}").time()
