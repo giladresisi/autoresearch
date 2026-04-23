@@ -363,6 +363,25 @@ LIMIT_RATIO_THRESHOLD: "float | None" = None
 # Named WINDOW_BARS (not MINUTES) because the value is a bar count — at 1s bars N=3 is 3 seconds.
 CONFIRMATION_WINDOW_BARS: int = 1
 
+# ── Human execution mode ─────────────────────────────────────────────────────
+# When True, emits typed human-trader-friendly signals (ENTRY_MARKET / ENTRY_LIMIT /
+# MOVE_STOP / CLOSE_MARKET), applies a confidence filter, and surfaces stop moves as
+# MOVE_STOP events instead of silent mutations. Defaults False — zero behaviour change.
+HUMAN_EXECUTION_MODE: bool = False
+# Additive pts on top of existing slippage for market fills in human mode (default 0.0).
+# Models human reaction delay; timeframe-agnostic (applies identically on 1m/5m/1s bars).
+HUMAN_ENTRY_SLIPPAGE_PTS: float = 0.0
+# Signals with confidence below this threshold are suppressed (logged) in human mode.
+MIN_CONFIDENCE_THRESHOLD: float = 0.50
+# Classify signal as ENTRY_LIMIT when |current_price - signal_entry| >= this value.
+# Independent of LIMIT_ENTRY_BUFFER_PTS (which governs algo-side limit fill simulation).
+ENTRY_LIMIT_CLASSIFICATION_PTS: float = 5.0
+# Minimum bar gap between consecutive MOVE_STOP signals; 0 = no rate limiting.
+MOVE_STOP_MIN_GAP_BARS: int = 0
+# Opt-in deception-exit flag — active regardless of HUMAN_EXECUTION_MODE.
+# When True, an opposing-direction displacement candle after entry triggers a market exit.
+DECEPTION_OPPOSING_DISP_EXIT: bool = False
+
 
 # ── Module-level bar data ─────────────────────────────────────────────────────
 _mnq_bars: "pd.DataFrame | None" = None
@@ -1219,6 +1238,51 @@ def select_draw_on_liquidity(
     return pri[0], pri[1], (sec[0] if sec else None), (sec[1] if sec else None)
 
 
+def compute_confidence(
+    signal: dict,
+    prior_session_profitable: bool,
+    session_start_ts: "pd.Timestamp",
+) -> float:
+    """Confidence score in [0, 1] for a built signal, used by human-execution mode.
+
+    Weights:
+      0.4 — time-of-day (ramps 0→1 between session start and +210 min)
+      0.3 — prior-session profitability (binary)
+      0.2 — displacement body size (normalised to 20 pts)
+      0.1 — TDO distance sweet spot (peak at 30–100 pts, zero beyond 200)
+
+    Weights are v0 hand-tuned; expected to be tuned by the optimizer.
+    """
+    entry_ts = signal["entry_time"]
+    # Align tz between entry and session-start: either both aware or both naive.
+    if session_start_ts.tz is not None and entry_ts.tz is None:
+        entry_ts = entry_ts.tz_localize(session_start_ts.tz)
+    elif session_start_ts.tz is None and entry_ts.tz is not None:
+        entry_ts = entry_ts.tz_localize(None)
+    mins_since_start = max(0.0, (entry_ts - session_start_ts).total_seconds() / 60.0)
+    time_score = min(1.0, mins_since_start / 210.0)   # 210 min = session start to +3.5h
+
+    trend_score = 1.0 if prior_session_profitable else 0.0
+
+    body_pts = signal.get("displacement_body_pts") or 0.0
+    body_score = min(1.0, body_pts / 20.0) if body_pts > 0 else 0.0
+
+    tdo_dist = abs(signal["entry_price"] - signal["tdo"])
+    if tdo_dist < 30.0:
+        dist_score = tdo_dist / 30.0
+    elif tdo_dist <= 100.0:
+        dist_score = 1.0
+    elif tdo_dist <= 200.0:
+        dist_score = 1.0 - (tdo_dist - 100.0) / 100.0
+    else:
+        dist_score = 0.0
+
+    return round(
+        0.4 * time_score + 0.3 * trend_score + 0.2 * body_score + 0.1 * dist_score,
+        4,
+    )
+
+
 def _build_signal_from_bar(
     bar: pd.Series,
     ts: "pd.Timestamp",
@@ -1296,7 +1360,7 @@ def _build_signal_from_bar(
         abs(bar["Close"] - bar["Open"]) / bar_range if bar_range > 0 else 0.0
     )
 
-    return {
+    signal = {
         "direction":            direction,
         "entry_price":          entry_price,
         "entry_time":           ts,
@@ -1326,7 +1390,24 @@ def _build_signal_from_bar(
         "limit_fill_bars":    None,   # populated by state machine on fill
         "missed_move_pts":    None,   # populated by state machine on expiry
         "initial_stop_pts":   round(abs(entry_price - round(stop_price, 4)), 4),
+        # Human-mode fields (Wave 3) — signal_type is re-classified in signal_smt.py
+        # against live price at emit time; default here is ENTRY_MARKET.
+        "signal_type":        "ENTRY_MARKET",
+        "confidence":         None,
     }
+
+    # Confidence: session start is the bar's day at SESSION_START in the bar's tz.
+    ses_start_t = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
+    if hasattr(ts, "normalize"):
+        session_start_ts = ts.normalize().replace(
+            hour=ses_start_t.hour, minute=ses_start_t.minute, second=0
+        )
+    else:
+        session_start_ts = ts  # fallback; tests pass Timestamp objects
+    # prior_session_profitable wired as False here; backtest/signal wrappers can override
+    # via a later field-set once session-level PnL bookkeeping is threaded in.
+    signal["confidence"] = compute_confidence(signal, False, session_start_ts)
+    return signal
 
 
 def _annotate_hypothesis(signal: dict, hyp_ctx: "dict | None", hyp_dir: "str | None") -> None:
@@ -1887,6 +1968,10 @@ def manage_position(
     entry_price = position["entry_price"]
     tp          = position["take_profit"]
 
+    # Track the stop at bar start so human-mode can surface a MOVE_STOP event
+    # when any path below (breakeven, trail-after-TP, layer-B) tightens the stop.
+    _orig_stop = position["stop_price"]
+
     # ── Trail-after-TP: disabled when a secondary target exists (secondary takes over) ──
     if TRAIL_AFTER_TP_PTS > 0 and position.get("secondary_target") is None:
         if position.get("tp_breached"):
@@ -1987,6 +2072,21 @@ def manage_position(
                     position["stop_price"] = max(position["stop_price"], entry_price)
                 position["breakeven_active"] = True
 
+    # ── Deception exit: opposing displacement candle ─────────────────────────
+    # A strong candle in the opposite direction of the trade (body >= MIN_DISPLACEMENT_PTS)
+    # signals the thesis is likely wrong. Exits at bar close as a market order.
+    # Inlined (not via detect_displacement()) so the check runs regardless of SMT_OPTIONAL,
+    # which detect_displacement gates on and which governs an unrelated entry path.
+    if DECEPTION_OPPOSING_DISP_EXIT and MIN_DISPLACEMENT_PTS > 0:
+        opposing = "long" if direction == "short" else "short"
+        body_pts = abs(float(current_bar["Close"]) - float(current_bar["Open"]))
+        opposing_candle = (
+            (opposing == "long"  and current_bar["Close"] > current_bar["Open"]) or
+            (opposing == "short" and current_bar["Close"] < current_bar["Open"])
+        )
+        if body_pts >= MIN_DISPLACEMENT_PTS and opposing_candle:
+            return "exit_invalidation_opposing_disp"
+
     # ── Thesis-invalidation exits (close-based; fire before stop check) ─────────
     # MSS: divergence extreme breached on a closing basis.
     if INVALIDATION_MSS_EXIT:
@@ -2039,4 +2139,10 @@ def manage_position(
     else:  # short
         if current_bar["High"] >= stop:                                                         return "exit_stop"
         if TRAIL_AFTER_TP_PTS == 0 and position.get("secondary_target") is None and current_bar["Low"]  <= tp: return "exit_tp"
+    # Human mode: surface stop mutations as an explicit MOVE_STOP event so downstream
+    # consumers (live signal emitter, backtest record) can act on the change rather
+    # than silently inheriting the mutated position["stop_price"].
+    if HUMAN_EXECUTION_MODE and position["stop_price"] != _orig_stop:
+        position["_pending_move_stop"] = position["stop_price"]
+        return "move_stop"
     return "hold"

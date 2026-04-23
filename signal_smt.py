@@ -28,6 +28,8 @@ from strategy_smt import (
     MAX_REENTRY_COUNT,
     MIN_BARS_BEFORE_SIGNAL,
 )
+# Human-mode flags read lazily via strategy_smt.<NAME> so monkeypatching
+# strategy_smt attributes in tests affects signal_smt without a re-import.
 import strategy_smt
 from hypothesis_smt import HypothesisManager
 
@@ -116,6 +118,11 @@ _session_smt_cache: dict = {
 }
 _session_run_ses_high: float = -float("inf")
 _session_run_ses_low: float  =  float("inf")
+
+# Human-mode MOVE_STOP rate limiter — tracks the bar index of the last emission
+# so we can suppress MOVE_STOP events that arrive within MOVE_STOP_MIN_GAP_BARS.
+_last_move_stop_bar_idx: int = -10**9
+_move_stop_bar_counter: int  = 0
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -696,8 +703,33 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     if MAX_REENTRY_COUNT < 999 and _divergence_reentry_count >= MAX_REENTRY_COUNT:
         return
 
+    # 10a. Human-mode confidence filter + ENTRY_LIMIT/ENTRY_MARKET classification.
+    # Gated on HUMAN_EXECUTION_MODE so algo behaviour is unchanged at default.
+    if strategy_smt.HUMAN_EXECUTION_MODE:
+        conf = signal.get("confidence")
+        if conf is not None and conf < strategy_smt.MIN_CONFIDENCE_THRESHOLD:
+            # Sub-threshold: suppressed (internal log only); no emission, no position.
+            print(
+                f"[{bar_ts.strftime('%H:%M:%S')}] SUPPRESSED {signal['direction']:<5} | "
+                f"confidence {conf:.2f} < {strategy_smt.MIN_CONFIDENCE_THRESHOLD:.2f}",
+                flush=True,
+            )
+            return
+        # Classify: distance from current bar close to the signal's committed entry_price.
+        current_price = float(bar.Close)
+        if abs(current_price - signal["entry_price"]) >= strategy_smt.ENTRY_LIMIT_CLASSIFICATION_PTS:
+            signal["signal_type"] = "ENTRY_LIMIT"
+        else:
+            signal["signal_type"] = "ENTRY_MARKET"
+
     # 11. Open position with slippage-adjusted assumed fill
     assumed_entry = _apply_slippage(signal)
+    if strategy_smt.HUMAN_EXECUTION_MODE and strategy_smt.HUMAN_ENTRY_SLIPPAGE_PTS > 0:
+        # Additive human-reaction slippage for market fills (direction-correct).
+        if signal["direction"] == "long":
+            assumed_entry += strategy_smt.HUMAN_ENTRY_SLIPPAGE_PTS
+        else:
+            assumed_entry -= strategy_smt.HUMAN_ENTRY_SLIPPAGE_PTS
     _position = {
         **signal,
         "assumed_entry": assumed_entry,
@@ -708,6 +740,21 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     }
     POSITION_FILE.write_text(json.dumps(_position, indent=2))
     print(_format_signal_line(bar_ts, signal, assumed_entry), flush=True)
+    if strategy_smt.HUMAN_EXECUTION_MODE:
+        # Emit the typed human-trader payload alongside the legacy log line.
+        print(
+            json.dumps({
+                "signal_type":    signal["signal_type"],
+                "direction":      signal["direction"],
+                "entry_price":    round(float(signal["entry_price"]), 4),
+                "initial_stop":   round(float(signal["stop_price"]), 4),
+                "tp":             round(float(signal["take_profit"]), 4),
+                "confidence":     signal.get("confidence"),
+                "valid_for_bars": None,
+                "reason":         signal.get("smt_type", "wick"),
+            }),
+            flush=True,
+        )
     _divergence_reentry_count += 1
     _state = "MANAGING"
 
@@ -718,6 +765,7 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     Exits on TP, stop, or session end; prints exit line and resets to SCANNING.
     """
     global _state, _position, _last_exit_ts
+    global _last_move_stop_bar_idx, _move_stop_bar_counter
 
     bar_row = strategy_smt._BarRow(
         float(bar.Open), float(bar.High), float(bar.Low), float(bar.Close),
@@ -729,6 +777,30 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     old_breakeven   = _position.get("breakeven_active", False)
 
     result = manage_position(_position, bar_row)
+
+    # Human-mode: manage_position may surface a MOVE_STOP event instead of silently
+    # mutating the stop. Emit the structured payload (subject to rate limit) and
+    # carry on as if the bar returned "hold".
+    if result == "move_stop":
+        _move_stop_bar_counter += 1
+        new_stop = _position.get("_pending_move_stop", _position.get("stop_price"))
+        gap = _move_stop_bar_counter - _last_move_stop_bar_idx
+        if gap >= strategy_smt.MOVE_STOP_MIN_GAP_BARS:
+            reason = "breakeven" if _position.get("breakeven_active") else "trail_update"
+            urgency = "high" if reason == "breakeven" else "low"
+            print(
+                json.dumps({
+                    "signal_type": "MOVE_STOP",
+                    "new_stop":    round(float(new_stop), 4),
+                    "reason":      reason,
+                    "urgency":     urgency,
+                }),
+                flush=True,
+            )
+            _last_move_stop_bar_idx = _move_stop_bar_counter
+        # Clear the pending marker so a subsequent hold doesn't re-trigger emission.
+        _position.pop("_pending_move_stop", None)
+        result = "hold"
 
     if result == "hold":
         if bar_time >= _session_end_time:
@@ -754,7 +826,13 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         exit_price = _position["secondary_target"]
     elif result == "exit_stop":
         exit_price = _position["stop_price"]
-    elif result in ("exit_market", "exit_invalidation_mss", "exit_invalidation_cisd", "exit_invalidation_smt"):
+    elif result in (
+        "exit_market",
+        "exit_invalidation_mss",
+        "exit_invalidation_cisd",
+        "exit_invalidation_smt",
+        "exit_invalidation_opposing_disp",
+    ):
         exit_price = float(bar.Close)
     elif result != "exit_session_end":
         # Unknown exit type — log and bail rather than corrupt state with unbound exit_price

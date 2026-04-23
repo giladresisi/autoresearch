@@ -93,6 +93,7 @@ You may modify ONLY these constants:
 | `INVALIDATION_MSS_EXIT` | False | [True, False] |
 | `INVALIDATION_CISD_EXIT` | False | [True, False] |
 | `INVALIDATION_SMT_EXIT` | False | [True, False] |
+| `DECEPTION_OPPOSING_DISP_EXIT` | False | [True, False] — active regardless of HUMAN_EXECUTION_MODE |
 | `SYMMETRIC_SMT_ENABLED` | False | [True, False] |
 | `ALWAYS_REQUIRE_CONFIRMATION` | False | [True, False] |
 | `HTF_VISIBILITY_REQUIRED` | False | [True, False] |
@@ -108,6 +109,13 @@ You may modify ONLY these constants:
 - `MIN_PRIOR_TRADE_BARS_HELD` — diagnostic only; extended diagnostics showed no EP improvement at any threshold
 - `FUTURES_CACHE_DIR`, `BACKTEST_START`, `BACKTEST_END` — loaded from manifest; defined in `backtest_smt.py`
 - Anything in `backtest_smt.py`
+- **Humanize plan constants (live-trading configuration, not algo levers)** — these only modify behaviour when `HUMAN_EXECUTION_MODE=True`, which configures the strategy for a human trader acting on TradingView/Tradovate alerts. Leaving them at defaults preserves the algo baseline:
+  - `HUMAN_EXECUTION_MODE = False` — flipping on suppresses sub-confidence signals, adds reaction-delay slippage, and changes signal emission semantics
+  - `HUMAN_ENTRY_SLIPPAGE_PTS = 0.0` — only applied when `HUMAN_EXECUTION_MODE=True`
+  - `MIN_CONFIDENCE_THRESHOLD = 0.50` — only enforced when `HUMAN_EXECUTION_MODE=True`
+  - `ENTRY_LIMIT_CLASSIFICATION_PTS = 5.0` — only affects emitted payload labels in human mode
+  - `MOVE_STOP_MIN_GAP_BARS = 0` — only affects live MOVE_STOP rate limiting in human mode
+  - Exception: `DECEPTION_OPPOSING_DISP_EXIT` IS tunable (active regardless of human mode) — see Iteration 23b
 
 ---
 
@@ -347,6 +355,12 @@ Test: `[False, True]`
 
 Exit on Market Structure Shift against the trade direction. Less aggressive than CISD or SMT. Test whether early structural exits reduce drawdown without sacrificing wins.
 
+#### Iteration 23b — DECEPTION_OPPOSING_DISP_EXIT
+
+Test: `[False, True]`
+
+Exits on an opposing-direction displacement candle — body ≥ `MIN_DISPLACEMENT_PTS` AND candle direction opposite the trade. Returns `exit_invalidation_opposing_disp` from `manage_position()`, filled at bar close with market-order slippage. Introduced by the humanize plan and active regardless of `HUMAN_EXECUTION_MODE`, so it is a legitimate algo lever. Stronger signal than MSS (requires a full-body impulse, not just a structural break) but weaker than CISD (no midnight-open reference). Same "too-close-to-entry" caveat as the other invalidation exits applies — the limit buffer now gives more separation before any opposing candle can fire, which may make this viable.
+
 #### Iteration 24 — TWO_LAYER_POSITION + FVG_LAYER_B_TRIGGER
 
 Test: `TWO_LAYER_POSITION=True, FVG_ENABLED=True, FVG_LAYER_B_TRIGGER=True` vs baseline.
@@ -444,6 +458,7 @@ Examples of when to diverge:
 - **SMT divergence**: bearish = MES new session high + MNQ failure; bullish = MES new session low + MNQ failure
 - **Displacement entries**: large-body candle (body ≥ MIN_DISPLACEMENT_PTS) when no wick SMT fires; stop = bar extreme when DISPLACEMENT_STOP_MODE=True
 - **Partial exit**: closes `PARTIAL_EXIT_FRACTION` of contracts at `PARTIAL_EXIT_LEVEL_RATIO × |entry − TP|` distance from entry; stop then slides to `partial_exit_price ± PARTIAL_STOP_BUFFER_PTS` and secondary TP is promoted
+- **Diagnostic fields (humanize plan)**: every trade record now carries `confidence` (float in [0, 1] from `compute_confidence()`), `signal_type` (`ENTRY_MARKET` or `ENTRY_LIMIT`, classified at emit time), `human_mode` (bool, always False in optimization runs), and `deception_exit` (bool, True when `exit_type` contains "invalidation"). These are recorded on every trade regardless of `HUMAN_EXECUTION_MODE` — useful for post-hoc analysis (e.g., whether low-confidence trades correlate with losses, whether deception-exit trades outperform legacy exits). `compute_confidence()` weights (0.4 time-of-day, 0.3 prior-session outcome, 0.2 displacement body, 0.1 TDO-distance sweet spot) are v0 hand-tuned and inline — promote to named constants before any optimization iteration that wants to tune them
 - **Ticker naming**: IB uses `MNQ` / `MES` (not `MNQ1!` / `MES1!`)
 
 ---

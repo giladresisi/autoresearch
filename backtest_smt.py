@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from hypothesis_smt import compute_hypothesis_context
+import strategy_smt
 from strategy_smt import (
     _BarRow,
     set_bar_data, load_futures_data, compute_tdo, find_anchor_close,
@@ -167,6 +168,14 @@ def _open_position(
     }
     position["tp_breached"] = False
     position["entry_bar"]   = bar_idx
+    # Human-mode additive fill slippage (direction-correct): long pays more, short receives less.
+    # Read via module attribute so monkeypatching strategy_smt in tests takes effect.
+    if strategy_smt.HUMAN_EXECUTION_MODE and strategy_smt.HUMAN_ENTRY_SLIPPAGE_PTS > 0:
+        slip = strategy_smt.HUMAN_ENTRY_SLIPPAGE_PTS
+        if position["direction"] == "long":
+            position["entry_price"] = round(position["entry_price"] + slip, 4)
+        else:
+            position["entry_price"] = round(position["entry_price"] - slip, 4)
     return position
 
 
@@ -253,6 +262,11 @@ def _build_trade_record(
         # Plan 4 fields
         "displacement_body_pts": position.get("displacement_body_pts"),
         "pessimistic_fills": PESSIMISTIC_FILLS,
+        # Human-execution-mode diagnostic fields (Wave 5)
+        "confidence":      position.get("confidence"),
+        "signal_type":     position.get("signal_type"),
+        "human_mode":      bool(strategy_smt.HUMAN_EXECUTION_MODE),
+        "deception_exit":  "invalidation" in exit_result,
         # Solution F diagnostic fields
         "tp_name":               position.get("tp_name"),
         "secondary_target_name": position.get("secondary_target_name"),
@@ -580,6 +594,13 @@ def run_backtest(
             if state == "IN_TRADE":
                 entry_bar_count += 1
                 result = manage_position(position, bar)
+
+                # Human-mode: "move_stop" is a non-exit event that surfaces a stop
+                # mutation. Stop has already been applied to the position dict by
+                # manage_position; treat the bar as a hold for state-machine purposes.
+                if result == "move_stop":
+                    position.pop("_pending_move_stop", None)
+                    result = "hold"
 
                 # Time-based exit: close after MAX_HOLD_BARS bars regardless of TP/stop.
                 if MAX_HOLD_BARS > 0 and entry_bar_count >= MAX_HOLD_BARS and result == "hold":

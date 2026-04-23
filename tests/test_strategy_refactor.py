@@ -489,7 +489,9 @@ def test_process_scan_bar_limit_expired_returns_expired(monkeypatch):
     _p2_patch(monkeypatch, strat)
     mnq_r, mes_r, ts, opens, highs, lows, closes, vols, mh, ml, mc, c4, c5 = _p2_make_short_session()
 
-    ep = _P2B + 10.0   # limit entry far above current bars — won't fill
+    # SHORT limit fills when bar["Low"] <= entry_price (price must drop to ep).
+    # Set ep below the bar's Low so no fill triggers, letting elapsed-count expire it.
+    ep = _P2B - 10.0
     pending_sig = {
         "direction": "short", "entry_price": ep, "stop_price": ep + 5.0,
         "take_profit": ep - 40.0, "tp_name": "tdo",
@@ -504,7 +506,7 @@ def test_process_scan_bar_limit_expired_returns_expired(monkeypatch):
     state.limit_missed_move = 2.0
 
     ctx = _p2_ctx()
-    # Bar where High < ep so no fill, and after increment elapsed=5 >= max_bars=5
+    # Bar Low=_P2B-2 = 19998 > ep=19990 → no fill; after increment elapsed=5 >= max_bars=5 → expired.
     bar = strat._BarRow(_P2B, _P2B + 2.0, _P2B - 2.0, _P2B, 1000.0, ts=ts[6])
     result = strat.process_scan_bar(
         state, ctx, 6, bar, mnq_r, mes_r, c5,
@@ -518,8 +520,8 @@ def test_process_scan_bar_limit_expired_returns_expired(monkeypatch):
     assert result is not None
     assert result["type"] == "expired"
     assert result["signal"]["direction"] == "short"
-    # ep=_P2B+10, Low=_P2B-2 → ep-Low=12 > pre-existing 2.0, so max updates to 12.0
-    assert result["limit_missed_move"] == pytest.approx(12.0)
+    # ep - Low = 19990 - 19998 = -8; max(-8, pre-existing 2.0) = 2.0.
+    assert result["limit_missed_move"] == pytest.approx(2.0)
     assert state.scan_state == "IDLE"
     assert state.pending_limit_signal is None
 

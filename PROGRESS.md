@@ -100,11 +100,19 @@ Combines findings.md fixes (F1 live reentry guard, F2a/b midnight open TP defaul
 
 ## Feature: SMT Humanize — Human-Executable Signal Model
 
-**Status**: ✅ Planned
+**Status**: ✅ Complete
 **Plan File**: `.agents/plans/smt-humanize.md`
 **Prerequisite**: `smt-structural-and-fixes.md` merged and baseline captured first.
 
 Redesigns signal output (typed ENTRY/MOVE_STOP/CLOSE_MARKET), adds execution delay simulation to 1m backtest, PENDING states, daily limits (8 entries, $100/$150 DD), confidence scoring, and deception detection. All gated by HUMAN_EXECUTION_MODE=False default.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-humanize.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics
+- Team performance analysis (if applicable)
 
 ---
 
