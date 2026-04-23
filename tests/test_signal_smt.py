@@ -207,14 +207,34 @@ def _setup_scanning_state(monkeypatch, tmp_path):
     monkeypatch.setattr(signal_smt, "_mnq_1m_df", empty.copy())
     monkeypatch.setattr(signal_smt, "_mes_1m_df", empty.copy())
 
+    # Phase 5 stateful scanner state — pre-initialised so session-init block is skipped.
+    _test_date = datetime.date(2025, 1, 2)
+    monkeypatch.setattr(signal_smt, "_session_init_date", _test_date)
+    monkeypatch.setattr(signal_smt, "_scan_state", strategy_smt.ScanState())
+    monkeypatch.setattr(signal_smt, "_session_ctx", strategy_smt.SessionContext(
+        day=_test_date, tdo=19900.0, midnight_open=None, overnight={},
+        pdh=None, pdl=None, hyp_ctx=None, hyp_dir=None, bar_seconds=1.0,
+    ))
+    monkeypatch.setattr(signal_smt, "_session_mnq_rows", [])
+    monkeypatch.setattr(signal_smt, "_session_mes_rows", [])
+    monkeypatch.setattr(signal_smt, "_session_smt_cache", {
+        "mes_h": float("nan"), "mes_l": float("nan"),
+        "mnq_h": float("nan"), "mnq_l": float("nan"),
+        "mes_ch": float("nan"), "mes_cl": float("nan"),
+        "mnq_ch": float("nan"), "mnq_cl": float("nan"),
+    })
+    monkeypatch.setattr(signal_smt, "_session_run_ses_high", -float("inf"))
+    monkeypatch.setattr(signal_smt, "_session_run_ses_low", float("inf"))
+
 
 def test_process_scanning_session_gate_before_start(monkeypatch, tmp_path):
-    """Bar arriving before SESSION_START is silently skipped; screen_session never called."""
+    """Bar arriving before SESSION_START is silently skipped; process_scan_bar never called."""
     import signal_smt
+    import strategy_smt
     _setup_scanning_state(monkeypatch, tmp_path)
 
     called = []
-    monkeypatch.setattr("signal_smt.screen_session", lambda *a, **kw: called.append(1) or None)
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: called.append(1) or None)
 
     bar = _make_mock_bar(ts="2025-01-02 08:59:00")
     signal_smt._process_scanning(bar, pd.Timestamp("2025-01-02 08:59:00", tz="America/New_York"), pd.Timestamp("2025-01-02 08:59:00", tz="America/New_York").time())
@@ -226,10 +246,11 @@ def test_process_scanning_session_gate_before_start(monkeypatch, tmp_path):
 def test_process_scanning_session_gate_after_end(monkeypatch, tmp_path):
     """Bar arriving after SESSION_END is silently skipped."""
     import signal_smt
+    import strategy_smt
     _setup_scanning_state(monkeypatch, tmp_path)
 
     called = []
-    monkeypatch.setattr("signal_smt.screen_session", lambda *a, **kw: called.append(1) or None)
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: called.append(1) or None)
 
     bar = _make_mock_bar(ts="2025-01-02 13:31:00")
     ts = pd.Timestamp("2025-01-02 13:31:00", tz="America/New_York")
@@ -240,8 +261,9 @@ def test_process_scanning_session_gate_after_end(monkeypatch, tmp_path):
 
 
 def test_process_scanning_alignment_gate(monkeypatch, tmp_path):
-    """MES 1s buffer has a different latest timestamp → screen_session not called."""
+    """MES 1s buffer has a different latest timestamp → process_scan_bar not called."""
     import signal_smt
+    import strategy_smt
     _setup_scanning_state(monkeypatch, tmp_path)
 
     # MNQ 1s buf has bar at 09:10, MES 1s buf has bar at 09:09 → misaligned
@@ -253,18 +275,22 @@ def test_process_scanning_alignment_gate(monkeypatch, tmp_path):
     monkeypatch.setattr(signal_smt, "_mes_1s_buf", mes_buf)
 
     called = []
-    monkeypatch.setattr("signal_smt.screen_session", lambda *a, **kw: called.append(1) or None)
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: called.append(1) or None)
 
     bar = _make_mock_bar(ts="2025-01-02 09:10:00")
     ts = pd.Timestamp("2025-01-02 09:10:00", tz="America/New_York")
     signal_smt._process_scanning(bar, ts, ts.time())
 
     assert len(called) == 0
+    # Alignment gate fires before steps 5–6, so session rows must remain unpolluted.
+    assert len(signal_smt._session_mnq_rows) == 0
+    assert len(signal_smt._session_mes_rows) == 0
 
 
 def test_process_scanning_no_signal(monkeypatch, tmp_path):
-    """Valid session bar but screen_session returns None → state stays SCANNING."""
+    """Valid session bar but process_scan_bar returns None → state stays SCANNING."""
     import signal_smt
+    import strategy_smt
     _setup_scanning_state(monkeypatch, tmp_path)
 
     aligned_ts = pd.Timestamp("2025-01-02 09:10:00", tz="America/New_York")
@@ -273,7 +299,7 @@ def test_process_scanning_no_signal(monkeypatch, tmp_path):
     monkeypatch.setattr(signal_smt, "_mnq_1s_buf", buf.copy())
     monkeypatch.setattr(signal_smt, "_mes_1s_buf", buf.copy())
 
-    monkeypatch.setattr("signal_smt.screen_session", lambda *a, **kw: None)
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: None)
     monkeypatch.setattr("signal_smt.compute_tdo", lambda df, date: 20000.0)
 
     bar = _make_mock_bar(ts="2025-01-02 09:10:00")
@@ -299,12 +325,14 @@ def test_process_scanning_stale_startup_guard(monkeypatch, tmp_path):
 
     # Signal entry_time is before startup_ts → should be skipped
     fake_signal = {
+        "type": "signal",
         "direction": "short", "entry_price": 19998.0,
         "entry_time": pd.Timestamp("2025-01-02 09:05:00", tz="America/New_York"),
         "take_profit": 19900.0, "stop_price": 19999.0, "tdo": 19900.0,
         "divergence_bar": 4, "entry_bar": 5,
     }
-    monkeypatch.setattr("signal_smt.screen_session", lambda *a, **kw: fake_signal)
+    import strategy_smt
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: fake_signal)
     monkeypatch.setattr("signal_smt.compute_tdo", lambda df, date: 19900.0)
 
     bar = _make_mock_bar(ts="2025-01-02 09:10:00")
@@ -329,12 +357,14 @@ def test_process_scanning_redetection_guard(monkeypatch, tmp_path):
 
     # Signal entry_time is before last_exit_ts → should be skipped
     fake_signal = {
+        "type": "signal",
         "direction": "short", "entry_price": 19998.0,
         "entry_time": pd.Timestamp("2025-01-02 09:10:00", tz="America/New_York"),
         "take_profit": 19900.0, "stop_price": 19999.0, "tdo": 19900.0,
         "divergence_bar": 4, "entry_bar": 5,
     }
-    monkeypatch.setattr("signal_smt.screen_session", lambda *a, **kw: fake_signal)
+    import strategy_smt
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: fake_signal)
     monkeypatch.setattr("signal_smt.compute_tdo", lambda df, date: 19900.0)
 
     bar = _make_mock_bar(ts="2025-01-02 09:25:00")
@@ -359,13 +389,14 @@ def test_process_scanning_valid_signal_transitions_to_managing(monkeypatch, tmp_
 
     entry_time = pd.Timestamp("2025-01-02 09:25:00", tz="America/New_York")
     fake_signal = {
+        "type": "signal",
         "direction": "short", "entry_price": 19998.0,
         "entry_time": entry_time,
         "take_profit": 19900.0, "stop_price": 19999.0, "tdo": 19900.0,
         "divergence_bar": 4, "entry_bar": 5,
     }
-    # Patch on signal_smt because signal_smt imported them directly via "from train_smt import ..."
-    monkeypatch.setattr(signal_smt, "screen_session", lambda *a, **kw: fake_signal)
+    import strategy_smt
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: fake_signal)
     monkeypatch.setattr(signal_smt, "compute_tdo", lambda df, date: 19900.0)
 
     bar = _make_mock_bar(ts="2025-01-02 09:30:00")

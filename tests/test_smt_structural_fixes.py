@@ -72,6 +72,7 @@ def test_f3_1_long_stop_fills_at_bar_low(monkeypatch):
     _base_monkeypatch(monkeypatch, bk, strat)
     monkeypatch.setattr(strat, "PESSIMISTIC_FILLS", True)
     monkeypatch.setattr(bk,   "PESSIMISTIC_FILLS", True)
+    monkeypatch.setattr(strat, "PARTIAL_EXIT_ENABLED", False)
     # Force-close via session end by setting TDO far from all bars and making stop
     # trigger on bar 9 (mnq_l[9] = base-40 pierces stop for a long).
     base = 20000.0
@@ -527,6 +528,8 @@ def test_s2_1_expanded_ref_levels_detects_prev_day_sweep(monkeypatch):
     monkeypatch.setattr(strat, "MIN_DISPLACEMENT_BODY_PTS", 0.0)
     monkeypatch.setattr(strat, "ALWAYS_REQUIRE_CONFIRMATION", False)
     monkeypatch.setattr(strat, "HTF_VISIBILITY_REQUIRED", False)
+    monkeypatch.setattr(strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(strat, "TDO_VALIDITY_CHECK", False)
     base = 20000.0
     mnq, mes, prev_mnq, prev_mes = _make_prev_day_divergence_bars(base=base)
     signal = strat.screen_session(mnq, mes, tdo=base - 200,
@@ -603,6 +606,8 @@ def test_s3_1_htf_visible_signal_passes_filter(monkeypatch):
     monkeypatch.setattr(strat, "MIN_DISPLACEMENT_BODY_PTS", 0.0)
     monkeypatch.setattr(strat, "ALWAYS_REQUIRE_CONFIRMATION", False)
     monkeypatch.setattr(strat, "EXPANDED_REFERENCE_LEVELS", False)
+    monkeypatch.setattr(strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(strat, "TDO_VALIDITY_CHECK", False)
     mnq, mes = _make_htf_visible_bars()
     # Bar 7 divergence falls in the 09:30 15m period; prior period (09:15-09:30) has
     # c_mes_h=base+5, so base+30 beats it. c_mnq_h stays at base+5 ≤ p_mnq_h=base+5.
@@ -637,6 +642,8 @@ def test_s3_3_htf_confirmed_timeframes_in_signal(monkeypatch):
     monkeypatch.setattr(strat, "MIN_DISPLACEMENT_BODY_PTS", 0.0)
     monkeypatch.setattr(strat, "ALWAYS_REQUIRE_CONFIRMATION", False)
     monkeypatch.setattr(strat, "EXPANDED_REFERENCE_LEVELS", False)
+    monkeypatch.setattr(strat, "MAX_TDO_DISTANCE_PTS", 999.0)
+    monkeypatch.setattr(strat, "TDO_VALIDITY_CHECK", False)
     # Build longer bars so 15m period boundary is crossed (3+ bars = 15m)
     mnq, mes = _make_short_bars(n=90)
     signal = strat.screen_session(mnq, mes, tdo=19900.0)

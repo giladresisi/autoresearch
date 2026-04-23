@@ -1187,6 +1187,21 @@ To start an experiment session: open a Claude Code conversation in this repo and
 
 ---
 
+## Feature: Strategy Refactor — Stateful Scanner, Perf, and Cleanup
+
+**Status**: ✅ Complete (Phases 1–5; Phase 0 and RC1–RC6 deferred)
+**Plan File**: `.agents/plans/strategy_refactor.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/strategy_refactor.md`
+- Phases 1–5 complete; `process_scan_bar` is the single source of truth for all scanning logic
+- 709 passed, 9 skipped, 0 regressions; backtest parity verified
+- Phase 0 dead-code cleanup and RC1/RC3 live bar-resolution fixes deferred
+- Alignment score: 7/10
+
+---
+
 ## Feature: SMT Strategy Refactor (Bar Globals + exit_market + File Split)
 
 **Status**: ✅ Complete

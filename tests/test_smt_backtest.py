@@ -184,6 +184,7 @@ def test_run_backtest_session_force_exit(futures_tmpdir, monkeypatch):
     monkeypatch.setattr(_strat, "MIDNIGHT_OPEN_AS_TP", False)
     monkeypatch.setattr(train_smt, "MIDNIGHT_OPEN_AS_TP", False)
     monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 10000.0)
+    monkeypatch.setattr(_strat, "PARTIAL_EXIT_ENABLED", False)
 
     mnq, mes = _build_short_signal_bars("2025-01-02")
     stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
@@ -1098,10 +1099,11 @@ def test_limit_entry_forward_expires(futures_tmpdir, monkeypatch):
     """T12: Forward-limit expires after max_limit_bars; limit_expired record with pnl=0."""
     import backtest_smt as bk
     import strategy_smt as strat
-    # LIMIT_EXPIRY_SECONDS=300 with 5m bars → max_limit_bars=1; bar9 high < anchor → no fill
+    # LIMIT_EXPIRY_SECONDS=300 with 5m bars → max_limit_bars=1; bar9 low > entry → no fill
     _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=300.0)
     base = 20000.0
-    mnq, mes = _build_short_limit_session("2025-01-02", base=base, bar9_high=base + 1)
+    # entry_price = anchor_close - buffer = base+2; bar9_low=base+3 > entry → no fill for SHORT
+    mnq, mes = _build_short_limit_session("2025-01-02", base=base, bar9_low=base + 3)
     stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     expired = [t for t in stats["trade_records"] if t.get("exit_type") == "limit_expired"]
     assert len(expired) >= 1, "Expected a limit_expired record"
@@ -1109,19 +1111,24 @@ def test_limit_entry_forward_expires(futures_tmpdir, monkeypatch):
 
 
 def test_limit_entry_expiry_missed_move_populated(futures_tmpdir, monkeypatch):
-    """T13: missed_move_pts populated on expired record; reflects max favourable move during wait."""
+    """T13: missed_move_pts is 0 on expired SHORT record.
+
+    For a SHORT limit at entry_price=base+2, fill triggers when bar.Low <= entry_price.
+    Expiry can only occur when bar.Low > entry_price throughout the wait — which means
+    missed_move = max(0, entry_price - bar.Low) stays at 0. The field must be present.
+    """
     import backtest_smt as bk
     import strategy_smt as strat
     _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=300.0)
     base = 20000.0
-    # bar9: high < anchor (no fill) but low is far below entry → missed_move = entry_price - low = (base+2)-(base-12) = 14.0
+    # bar9_low=base+3 > entry=base+2 → no fill; missed_move = max(0, entry - low) = max(0, -1) = 0
     mnq, mes = _build_short_limit_session(
-        "2025-01-02", base=base, bar9_high=base + 1, bar9_low=base - 12
+        "2025-01-02", base=base, bar9_low=base + 3
     )
     stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     expired = [t for t in stats["trade_records"] if t.get("exit_type") == "limit_expired"]
     assert len(expired) >= 1
-    assert expired[0]["missed_move_pts"] == pytest.approx(14.0, rel=1e-3)
+    assert expired[0]["missed_move_pts"] == pytest.approx(0.0, abs=1e-6)
 
 
 def test_limit_entry_session_close_during_wait(futures_tmpdir, monkeypatch):
@@ -1131,8 +1138,8 @@ def test_limit_entry_session_close_during_wait(futures_tmpdir, monkeypatch):
     # Long expiry so it doesn't expire normally; session ends before that
     _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=3600.0)
     base = 20000.0
-    # n=10: bar 8 fires confirmation, bar 9 is the last bar (no fill), session ends
-    mnq, mes = _build_short_limit_session("2025-01-02", base=base, n=10, bar9_high=base + 1)
+    # n=10: bar 8 fires confirmation, bar 9 is the last bar; bar9_low=base+3 > entry=base+2 → no fill
+    mnq, mes = _build_short_limit_session("2025-01-02", base=base, n=10, bar9_low=base + 3)
     stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     session_expired = [
         t for t in stats["trade_records"]
@@ -1146,12 +1153,12 @@ def test_bar_seconds_detected_1m(futures_tmpdir, monkeypatch):
     import backtest_smt as bk
     import strategy_smt as strat
     # With 1m bars and 120s expiry → max_limit_bars=2
-    # bar9 and bar10 don't fill → expires at bar10 (elapsed=2)
+    # bar9_low and bar10_low > entry=base+2 → no fill; expires at bar10 (elapsed=2)
     _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=120.0)
     base = 20000.0
     mnq, mes = _build_short_limit_session(
         "2025-01-02", base=base, n=90, freq="1min",
-        bar9_high=base + 1, bar10_high=base + 1,
+        bar9_low=base + 3, bar10_low=base + 3,
     )
     stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     # With 2-bar window, both bars don't fill → exactly one limit_expired record
@@ -1164,12 +1171,12 @@ def test_bar_seconds_detected_1s(futures_tmpdir, monkeypatch):
     import backtest_smt as bk
     import strategy_smt as strat
     # With 1s bars and 120s expiry → max_limit_bars=120; n=11 → session ends before 120 elapsed
-    # n=11 → bars 0-10; bar10 is last, forced high=base+1 (no fill) → session_close expiry
+    # bar9_low and bar10_low > entry=base+2 → no fill; session ends → session_close expiry
     _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=120.0)
     base = 20000.0
     mnq, mes = _build_short_limit_session(
         "2025-01-02", base=base, n=11, freq="1s",
-        bar9_high=base + 1, bar10_high=base + 1,
+        bar9_low=base + 3, bar10_low=base + 3,
     )
     stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     # max_limit_bars=120 but session only has 11 bars → session-end write (not plain limit_expired)
@@ -1227,10 +1234,10 @@ def test_limit_ratio_threshold_low_body_uses_forward_limit(futures_tmpdir, monke
     import backtest_smt as bk
     import strategy_smt as strat
     # Default confirmation bar has body≈4, range≈11, ratio≈0.36 < 0.60 → forward limit
-    # Make bar9 NOT fill to confirm we entered WAITING state
+    # bar9_low=base+3 > entry=base+2 → no fill → confirms WAITING state was entered (expires)
     _setup_limit_patches(monkeypatch, bk, strat, limit_buffer=0.0, limit_expiry=300.0, ratio_threshold=0.60)
     base = 20000.0
-    mnq, mes = _build_short_limit_session("2025-01-02", base=base, bar9_high=base + 1)
+    mnq, mes = _build_short_limit_session("2025-01-02", base=base, bar9_low=base + 3)
     stats = bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
     # Low body_ratio → forward limit → if bar9 doesn't fill → limit_expired
     expired = [t for t in stats["trade_records"] if t.get("exit_type") == "limit_expired"]
@@ -1252,8 +1259,8 @@ def _setup_conf_patches(monkeypatch, bk, strat, conf_minutes=1):
     monkeypatch.setattr(strat, "STRUCTURAL_STOP_MODE", False)
     monkeypatch.setattr(strat, "LIMIT_ENTRY_BUFFER_PTS", None)
     monkeypatch.setattr(strat, "LIMIT_EXPIRY_SECONDS", None)
-    monkeypatch.setattr(strat, "CONFIRMATION_BAR_MINUTES", conf_minutes)
-    monkeypatch.setattr(bk, "CONFIRMATION_BAR_MINUTES", conf_minutes)
+    monkeypatch.setattr(strat, "CONFIRMATION_WINDOW_BARS", conf_minutes)
+    monkeypatch.setattr(bk, "CONFIRMATION_WINDOW_BARS", conf_minutes)
     monkeypatch.setattr(bk, "LIMIT_ENTRY_BUFFER_PTS", None)
     monkeypatch.setattr(bk, "LIMIT_EXPIRY_SECONDS", None)
     monkeypatch.setattr(bk, "MIDNIGHT_OPEN_AS_TP", False)
@@ -1309,7 +1316,7 @@ def _build_conf_window_session(date, base=20000.0, n=30, freq="1min"):
 
 
 def test_conf_bar_minutes_1_baseline(futures_tmpdir, monkeypatch):
-    """T20: CONFIRMATION_BAR_MINUTES=1 → confirmation fires on bar 8 (entry_bar=8)."""
+    """T20: CONFIRMATION_WINDOW_BARS=1 → confirmation fires on bar 8 (entry_bar=8)."""
     import backtest_smt as bk
     import strategy_smt as strat
     _setup_conf_patches(monkeypatch, bk, strat, conf_minutes=1)
@@ -1322,7 +1329,7 @@ def test_conf_bar_minutes_1_baseline(futures_tmpdir, monkeypatch):
 
 
 def test_conf_bar_minutes_3_deferred_to_window_boundary(futures_tmpdir, monkeypatch):
-    """T21: CONFIRMATION_BAR_MINUTES=3 → bar 8 skipped; confirmation fires at bar 10."""
+    """T21: CONFIRMATION_WINDOW_BARS=3 → bar 8 skipped; confirmation fires at bar 10."""
     import backtest_smt as bk
     import strategy_smt as strat
     _setup_conf_patches(monkeypatch, bk, strat, conf_minutes=3)
@@ -1484,9 +1491,12 @@ def test_trail_mode_holds_past_tdo_and_exits_via_stop(futures_tmpdir, monkeypatc
     monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
     # TDO at 20050 — 48 pts above entry (~20002), well within MAX_TDO_DISTANCE_PTS=999
     monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 20050.0)
-    # No secondary target — trail block requires secondary_target is None
-    monkeypatch.setattr(train_smt, "select_draw_on_liquidity",
-                        lambda *a, **kw: ("tdo", 20050.0, None, None))
+    # No secondary target — trail block requires secondary_target is None.
+    # Patch on both modules: _build_draws_and_select now lives in strategy_smt
+    # and reads select_draw_on_liquidity from that namespace.
+    _no_sec = lambda *a, **kw: ("tdo", 20050.0, None, None)
+    monkeypatch.setattr(train_smt, "select_draw_on_liquidity", _no_sec)
+    monkeypatch.setattr(_strat, "select_draw_on_liquidity", _no_sec)
     monkeypatch.setattr(_strat, "MIDNIGHT_OPEN_AS_TP", False)
     monkeypatch.setattr(train_smt, "MIDNIGHT_OPEN_AS_TP", False)
 
@@ -1550,9 +1560,11 @@ def test_trail_mode_partial_slides_stop_no_contract_reduction(futures_tmpdir, mo
     monkeypatch.setattr(train_smt, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
     # TDO at 20050: partial_exit_level ≈ entry + (tdo - entry) * 0.33 ≈ 20002 + 16 = 20018
     monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 20050.0)
-    # No secondary target — trail block requires secondary_target is None
-    monkeypatch.setattr(train_smt, "select_draw_on_liquidity",
-                        lambda *a, **kw: ("tdo", 20050.0, None, None))
+    # No secondary target — trail block requires secondary_target is None.
+    # Patch on both modules: _build_draws_and_select now lives in strategy_smt.
+    _no_sec2 = lambda *a, **kw: ("tdo", 20050.0, None, None)
+    monkeypatch.setattr(train_smt, "select_draw_on_liquidity", _no_sec2)
+    monkeypatch.setattr(_strat, "select_draw_on_liquidity", _no_sec2)
     monkeypatch.setattr(_strat, "MIDNIGHT_OPEN_AS_TP", False)
     monkeypatch.setattr(train_smt, "MIDNIGHT_OPEN_AS_TP", False)
 

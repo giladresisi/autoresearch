@@ -1,6 +1,7 @@
 """strategy_smt.py — SMT Divergence strategy constants and functions. Fully mutable — owned by the optimizing agent."""
 import datetime
 import json
+import math as _math
 import os
 import sys
 from pathlib import Path
@@ -314,7 +315,11 @@ REPLACE_THRESHOLD:         float = 1.5    # new_score must be > pending_effectiv
 
 # Score decay — pending hypothesis grows easier to replace the longer it is held
 DIV_SCORE_DECAY_FACTOR:    float = 0.90   # per-interval multiplier; 1.0 = disabled
-DIV_SCORE_DECAY_INTERVAL:  int   = 10     # bars between each decay step
+DIV_SCORE_DECAY_INTERVAL:  int   = 10     # bars between each decay step (legacy)
+# Wall-clock decay period — resolution-invariant replacement for DIV_SCORE_DECAY_INTERVAL.
+# process_scan_bar converts this to bars via context.bar_seconds so decay rate is the same
+# on 1m bars (backtest) and 1s bars (live). Default 600s = 10 minutes = 10 bars at 1m.
+DIV_SCORE_DECAY_SECONDS: float = 600.0
 
 # Adverse-move decay — additional decay based on how far price moved against hypothesis
 ADVERSE_MOVE_FULL_DECAY_PTS:  float = 150.0  # pts of adverse move that drives score to floor; 999 = disabled
@@ -322,6 +327,7 @@ ADVERSE_MOVE_MIN_DECAY:       float = 0.10   # floor for the adverse-move decay 
 
 # ── Solution D: Hard invalidation threshold ───────────────────────────────────
 HYPOTHESIS_INVALIDATION_PTS:  float = 999.0  # abandon hypothesis after this many pts adverse; 999 = disabled
+HYPOTHESIS_FILTER:             bool  = False  # when True, only fire signals matching the HTF hypothesis direction
 
 # ── Limit entry at anchor_close ───────────────────────────────────────────────
 # Entry fills at anchor_close ± buffer instead of the confirmation bar's close.
@@ -349,12 +355,13 @@ LIMIT_EXPIRY_SECONDS: "float | None" = 120.0
 # Optimizer search space: [None, 0.40, 0.50, 0.60, 0.70]
 LIMIT_RATIO_THRESHOLD: "float | None" = None
 
-# Confirmation bar resolution in bar-count multiples.
+# Confirmation window size in bars.
 # 1 = check every bar (default, current behaviour).
 # N > 1 = build a synthetic N-bar candle (open of first bar, max high, min low, close of last)
 # using a fixed window anchored to the divergence bar. Only check confirmation at window closes.
 # Window 1: bars [div+1 .. div+N], window 2: [div+N+1 .. div+2N], etc.
-CONFIRMATION_BAR_MINUTES: int = 1
+# Named WINDOW_BARS (not MINUTES) because the value is a bar count — at 1s bars N=3 is 3 seconds.
+CONFIRMATION_WINDOW_BARS: int = 1
 
 
 # ── Module-level bar data ─────────────────────────────────────────────────────
@@ -371,6 +378,167 @@ def set_bar_data(mnq_df: pd.DataFrame, mes_df: pd.DataFrame) -> None:
     global _mnq_bars, _mes_bars
     _mnq_bars = mnq_df
     _mes_bars = mes_df
+
+
+# ══ DATA STRUCTURES ══════════════════════════════════════════════════════════
+
+class _BarRow:
+    """Lightweight bar data holder — avoids pd.Series allocation in tight loops.
+
+    Supports bar["Open"], bar["High"], bar["Low"], bar["Close"], bar["Volume"] and bar.name.
+    """
+    __slots__ = ("Open", "High", "Low", "Close", "Volume", "name")
+
+    def __init__(self, Open: float, High: float, Low: float, Close: float,
+                 Volume: float = 0.0, ts=None) -> None:
+        self.Open   = Open
+        self.High   = High
+        self.Low    = Low
+        self.Close  = Close
+        self.Volume = Volume
+        self.name   = ts
+
+    def __getitem__(self, key: str) -> float:
+        return getattr(self, key)
+
+
+def _in_blackout(t: "datetime.time") -> bool:
+    """Return True if wall-clock time t falls inside the signal blackout window.
+
+    Reads SIGNAL_BLACKOUT_START/END dynamically so monkeypatching works in tests.
+    """
+    if not SIGNAL_BLACKOUT_START or not SIGNAL_BLACKOUT_END:
+        return False
+    t_str = t.strftime("%H:%M")
+    return SIGNAL_BLACKOUT_START <= t_str < SIGNAL_BLACKOUT_END
+
+
+def _in_silver_bullet(t: "datetime.time") -> bool:
+    """Return True if wall-clock time t falls inside the silver-bullet window."""
+    t_str = t.strftime("%H:%M")
+    return SILVER_BULLET_START <= t_str < SILVER_BULLET_END
+
+
+# ══ STATEFUL SCANNER DATA STRUCTURES ═════════════════════════════════════════
+
+class ScanState:
+    """Mutable per-session scanning state — passed to process_scan_bar each bar.
+
+    Encapsulates all local variables that the backtest IDLE / WAITING_FOR_ENTRY /
+    REENTRY_ELIGIBLE / WAITING_FOR_LIMIT_FILL blocks currently keep as locals.
+    Allows both backtest_smt.py and signal_smt.py to share a single strategy path.
+    """
+    __slots__ = (
+        "scan_state",
+        "pending_direction", "anchor_close",
+        "divergence_bar_idx", "conf_window_start",
+        "pending_smt_sweep", "pending_smt_miss",
+        "pending_div_bar_high", "pending_div_bar_low",
+        "pending_smt_defended", "pending_smt_type",
+        "pending_fvg_zone", "pending_fvg_detected",
+        "pending_displacement_bar_extreme",
+        "pending_div_score", "pending_div_provisional",
+        "pending_discovery_bar_idx", "pending_discovery_price",
+        "pending_limit_signal",
+        "limit_bars_elapsed", "limit_max_bars", "limit_missed_move",
+        "reentry_count", "prior_trade_bars_held",
+        "htf_state", "pending_htf_confirmed_tfs",
+    )
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset all scanning state to session-start values."""
+        self.scan_state                     = "IDLE"
+        self.pending_direction              = None
+        self.anchor_close                   = None
+        self.divergence_bar_idx             = -1
+        self.conf_window_start              = -1
+        self.pending_smt_sweep              = 0.0
+        self.pending_smt_miss               = 0.0
+        self.pending_div_bar_high           = 0.0
+        self.pending_div_bar_low            = 0.0
+        self.pending_smt_defended           = None
+        self.pending_smt_type               = "wick"
+        self.pending_fvg_zone               = None
+        self.pending_fvg_detected           = False
+        self.pending_displacement_bar_extreme = None
+        self.pending_div_score              = 0.0
+        self.pending_div_provisional        = False
+        self.pending_discovery_bar_idx      = -1
+        self.pending_discovery_price        = 0.0
+        self.pending_limit_signal           = None
+        self.limit_bars_elapsed             = 0
+        self.limit_max_bars                 = 0
+        self.limit_missed_move              = 0.0
+        self.reentry_count                  = 0
+        self.prior_trade_bars_held          = 0
+        # HTF state initialised to empty; caller populates when HTF_VISIBILITY_REQUIRED.
+        self.htf_state: dict                = {}
+        self.pending_htf_confirmed_tfs: "list | None" = None
+
+
+class SessionContext:
+    """Immutable per-session data — computed once at session start, read-only during scan.
+
+    Separates stable session metadata from the mutable ScanState so process_scan_bar
+    can be called with both without conflating what changes and what doesn't.
+    """
+    __slots__ = (
+        "day", "tdo", "midnight_open", "overnight",
+        "pdh", "pdl", "hyp_ctx", "hyp_dir",
+        "bar_seconds", "ref_lvls",
+    )
+
+    def __init__(
+        self,
+        day: "datetime.date",
+        tdo: float,
+        midnight_open: "float | None" = None,
+        overnight: "dict | None" = None,
+        pdh: "float | None" = None,
+        pdl: "float | None" = None,
+        hyp_ctx: "dict | None" = None,
+        hyp_dir: "str | None" = None,
+        bar_seconds: float = 60.0,
+        ref_lvls: "dict | None" = None,
+    ) -> None:
+        self.day          = day
+        self.tdo          = tdo
+        self.midnight_open = midnight_open
+        self.overnight    = overnight or {}
+        self.pdh          = pdh
+        self.pdl          = pdl
+        self.hyp_ctx      = hyp_ctx
+        self.hyp_dir      = hyp_dir
+        self.bar_seconds  = bar_seconds
+        self.ref_lvls     = ref_lvls or {}
+
+
+def build_synthetic_confirmation_bar(
+    opens: "object",    # numpy array slice
+    highs: "object",
+    lows: "object",
+    closes: "object",
+    vols: "object",
+    syn_start: int,
+    bar_idx: int,
+    ts,
+) -> "_BarRow":
+    """Build an N-bar synthetic candle from pre-extracted numpy arrays.
+
+    Used when CONFIRMATION_WINDOW_BARS > 1: the Open is the first bar of the window,
+    High/Low are the extremes, Close is the current bar, Volume is the sum.
+    """
+    return _BarRow(
+        Open=float(opens[syn_start]),
+        High=float(highs[syn_start:bar_idx + 1].max()),
+        Low=float(lows[syn_start:bar_idx + 1].min()),
+        Close=float(closes[bar_idx]),
+        Volume=float(vols[syn_start:bar_idx + 1].sum()),
+        ts=ts,
+    )
 
 
 # ══ STRATEGY FUNCTIONS ═══════════════════════════════════════════════════════
@@ -457,10 +625,17 @@ def _effective_div_score(
     direction: str,
     current_bar_high: float,
     current_bar_low: float,
+    decay_interval_bars: "int | None" = None,
 ) -> float:
-    """Apply time and adverse-move decay to a pending divergence score."""
+    """Apply time and adverse-move decay to a pending divergence score.
+
+    decay_interval_bars: override for DIV_SCORE_DECAY_INTERVAL. Pass
+    max(1, round(DIV_SCORE_DECAY_SECONDS / context.bar_seconds)) from
+    process_scan_bar so decay rate is resolution-invariant.
+    """
+    _interval = decay_interval_bars if decay_interval_bars is not None else DIV_SCORE_DECAY_INTERVAL
     bars_held  = current_bar_idx - discovery_bar_idx
-    time_decay = DIV_SCORE_DECAY_FACTOR ** (bars_held // max(DIV_SCORE_DECAY_INTERVAL, 1))
+    time_decay = DIV_SCORE_DECAY_FACTOR ** (bars_held // max(_interval, 1))
 
     if direction == "short":
         adverse = max(0.0, current_bar_high - discovery_price)
@@ -596,56 +771,6 @@ def detect_smt_divergence(
             return ("long", smt_sweep, mnq_miss, "body", mnq_close_session_low)
     return None
 
-
-def find_entry_bar(
-    mnq_bars: pd.DataFrame,
-    direction: str,
-    divergence_idx: int,
-    session_end_idx: int,
-) -> int | None:
-    """Find the confirmation candle after a divergence signal.
-
-    For "short": first bar after divergence_idx where:
-        - close < open  (bearish bar)
-        - high > close of most recent prior bullish bar (wick pierces bull body)
-
-    For "long": first bar after divergence_idx where:
-        - close > open  (bullish bar)
-        - low < close of most recent prior bearish bar (wick pierces bear body)
-
-    Returns bar index or None if no confirmation before session_end_idx.
-    """
-    if direction == "short":
-        # Find the most recent bullish bar at or before divergence_idx
-        last_bull_close = None
-        for i in range(divergence_idx, -1, -1):
-            bar = mnq_bars.iloc[i]
-            if bar["Close"] > bar["Open"]:
-                last_bull_close = bar["Close"]
-                break
-        if last_bull_close is None:
-            return None
-        # Confirmation: bearish bar whose wick pierces the bull body close
-        for i in range(divergence_idx + 1, session_end_idx):
-            bar = mnq_bars.iloc[i]
-            if bar["Close"] < bar["Open"] and bar["High"] > last_bull_close:
-                return i
-    else:  # "long"
-        # Find the most recent bearish bar at or before divergence_idx
-        last_bear_close = None
-        for i in range(divergence_idx, -1, -1):
-            bar = mnq_bars.iloc[i]
-            if bar["Close"] < bar["Open"]:
-                last_bear_close = bar["Close"]
-                break
-        if last_bear_close is None:
-            return None
-        # Confirmation: bullish bar whose wick pierces the bear body close
-        for i in range(divergence_idx + 1, session_end_idx):
-            bar = mnq_bars.iloc[i]
-            if bar["Close"] > bar["Open"] and bar["Low"] < last_bear_close:
-                return i
-    return None
 
 
 def compute_tdo(mnq_bars: pd.DataFrame, date: datetime.date) -> float | None:
@@ -816,39 +941,6 @@ def detect_smt_fill(
     return None
 
 
-def print_direction_breakdown(stats: dict, prefix: str = "") -> None:
-    """Print per-direction trade count, win rate, avg PnL, and exit breakdown.
-
-    Uses the same {prefix}{key}: {value} format as print_results so autoresearch
-    agents can parse direction metrics alongside the standard fold output.
-
-    Reads from stats["trade_records"]. Prints nothing if trade_records is absent
-    or empty. Controlled by PRINT_DIRECTION_BREAKDOWN constant (caller's responsibility
-    to check before calling).
-
-    Args:
-        stats:  Dict returned by run_backtest or _compute_metrics.
-        prefix: String prepended to every printed key (e.g. "fold1_train_").
-    """
-    trades = stats.get("trade_records", [])
-    if not trades:
-        return
-    for direction in ("long", "short"):
-        subset = [t for t in trades if t["direction"] == direction]
-        n = len(subset)
-        wins = sum(1 for t in subset if t["pnl"] > 0)
-        total_pnl = sum(t["pnl"] for t in subset)
-        win_rate  = round(wins / n, 4) if n > 0 else 0.0
-        avg_pnl   = round(total_pnl / n, 2) if n > 0 else 0.0
-        print(f"{prefix}{direction}_trades: {n}")
-        print(f"{prefix}{direction}_win_rate: {win_rate}")
-        print(f"{prefix}{direction}_avg_pnl: {avg_pnl}")
-        exits: dict[str, int] = {}
-        for t in subset:
-            exits[t["exit_type"]] = exits.get(t["exit_type"], 0) + 1
-        for exit_type, count in exits.items():
-            print(f"{prefix}{direction}_exit_{exit_type}: {count}")
-
 
 def find_anchor_close(
     bars: pd.DataFrame,
@@ -891,21 +983,6 @@ def is_confirmation_bar(
     else:  # "long"
         return bar["Close"] > bar["Open"] and bar["Low"] < anchor_close
 
-
-def _quarterly_session_windows(date: "datetime.date") -> list:
-    """Return 4×6h quarterly session boundary tuples (start, end) as ET Timestamps for date.
-
-    Windows: Asia 18:00–00:00, London 00:00–06:00, NY Morning 06:00–12:00, NY Evening 12:00–18:00.
-    Asia window straddles midnight: start is prev calendar day 18:00, end is date 00:00.
-    """
-    tz = "America/New_York"
-    prev = date - datetime.timedelta(days=1)
-    return [
-        (pd.Timestamp(f"{prev} 18:00", tz=tz), pd.Timestamp(f"{date} 00:00", tz=tz)),
-        (pd.Timestamp(f"{date} 00:00",  tz=tz), pd.Timestamp(f"{date} 06:00", tz=tz)),
-        (pd.Timestamp(f"{date} 06:00",  tz=tz), pd.Timestamp(f"{date} 12:00", tz=tz)),
-        (pd.Timestamp(f"{date} 12:00",  tz=tz), pd.Timestamp(f"{date} 18:00", tz=tz)),
-    ]
 
 
 def _compute_ref_levels(
@@ -1010,15 +1087,12 @@ def screen_session(
     prev_day_mnq: "pd.DataFrame | None" = None,
     prev_session_mes: "pd.DataFrame | None" = None,
     prev_session_mnq: "pd.DataFrame | None" = None,
+    pdh: "float | None" = None,
+    pdl: "float | None" = None,
+    hyp_ctx: "dict | None" = None,
+    hyp_dir: "str | None" = None,
 ) -> dict | None:
-    """Session signal scanner — compatibility shim for signal_smt.py live trading.
-
-    Implements the same scan as the old screen_session using the new helpers
-    (find_anchor_close, is_confirmation_bar, _build_signal_from_bar) so that the
-    live trading module (signal_smt.py) continues to work unchanged.
-
-    For backtesting use run_backtest() which runs the full bar-by-bar state machine.
-    """
+    """Thin wrapper over process_scan_bar — correct by construction; cannot diverge from backtest."""
     if mnq_bars.empty or mes_bars.empty:
         return None
     if tdo is None or tdo == 0.0:
@@ -1026,268 +1100,90 @@ def screen_session(
 
     n_bars = min(len(mnq_bars), len(mes_bars))
     min_signal_ts = mnq_bars.index[0] + pd.Timedelta(minutes=MIN_BARS_BEFORE_SIGNAL)
-    mes_reset = mes_bars.reset_index(drop=True)
-    mnq_reset = mnq_bars.reset_index(drop=True)
-    import math as _math
-    _mes_h_arr  = mes_reset["High"].values
-    _mes_l_arr  = mes_reset["Low"].values
-    _mnq_h_arr  = mnq_reset["High"].values
-    _mnq_l_arr  = mnq_reset["Low"].values
-    _mes_c_arr  = mes_reset["Close"].values
-    _mnq_c_arr  = mnq_reset["Close"].values
-    _ses_mes_h  = _ses_mes_l  = float("nan")
-    _ses_mnq_h  = _ses_mnq_l  = float("nan")
-    _ses_mes_ch = _ses_mes_cl = float("nan")
-    _ses_mnq_ch = _ses_mnq_cl = float("nan")
+    mes_reset  = mes_bars.reset_index(drop=True)
+    mnq_reset  = mnq_bars.reset_index(drop=True)
+    _mnq_idx   = mnq_bars.index
+    _mes_h     = mes_reset["High"].values
+    _mes_l     = mes_reset["Low"].values
+    _mes_c     = mes_reset["Close"].values
+    _mnq_o     = mnq_reset["Open"].values
+    _mnq_h     = mnq_reset["High"].values
+    _mnq_l     = mnq_reset["Low"].values
+    _mnq_c     = mnq_reset["Close"].values
+    _mnq_v     = mnq_reset["Volume"].values if "Volume" in mnq_reset.columns else None
 
-    # Pre-compute reference levels for EXPANDED_REFERENCE_LEVELS check
-    _ref_lvls = {}
+    _ref_lvls: dict = {}
     if EXPANDED_REFERENCE_LEVELS:
         _ref_lvls = _compute_ref_levels(
             prev_day_mnq, prev_day_mes, prev_session_mnq, prev_session_mes, None, None
         )
 
-    # HTF state: per-period running extremes for HTF_VISIBILITY_REQUIRED
-    # Each entry: (period_start_ns, cur_mes_h, cur_mes_l, cur_mnq_h, cur_mnq_l,
-    #              cur_mes_ch, cur_mes_cl, cur_mnq_ch, cur_mnq_cl,
-    #              prev_mes_h, prev_mes_l, prev_mnq_h, prev_mnq_l,
-    #              prev_mes_ch, prev_mes_cl, prev_mnq_ch, prev_mnq_cl)
-    _htf_state: dict = {}
-    if HTF_VISIBILITY_REQUIRED:
-        for _T in HTF_PERIODS_MINUTES:
-            _htf_state[_T] = {
-                "pstart": None,
-                "c_mes_h": float("nan"), "c_mes_l": float("nan"),
-                "c_mnq_h": float("nan"), "c_mnq_l": float("nan"),
-                "c_mes_ch": float("nan"), "c_mes_cl": float("nan"),
-                "c_mnq_ch": float("nan"), "c_mnq_cl": float("nan"),
-                "p_mes_h": None, "p_mes_l": None,
-                "p_mnq_h": None, "p_mnq_l": None,
-                "p_mes_ch": None, "p_mes_cl": None,
-                "p_mnq_ch": None, "p_mnq_cl": None,
-            }
+    _session_ctx = SessionContext(
+        day=mnq_bars.index[0].date(),
+        tdo=tdo,
+        midnight_open=midnight_open,
+        overnight=overnight_range or {},
+        pdh=pdh,
+        pdl=pdl,
+        hyp_ctx=hyp_ctx,
+        hyp_dir=hyp_dir,
+        bar_seconds=60.0,
+        ref_lvls=_ref_lvls,
+    )
+    _scan_state  = ScanState()
+    _smt_cache: dict = {
+        "mes_h": float("nan"), "mes_l": float("nan"),
+        "mnq_h": float("nan"), "mnq_l": float("nan"),
+        "mes_ch": float("nan"), "mes_cl": float("nan"),
+        "mnq_ch": float("nan"), "mnq_cl": float("nan"),
+    }
+    _ses_mes_h = _ses_mes_l = float("nan")
+    _ses_mnq_h = _ses_mnq_l = float("nan")
+    _ses_mes_ch = _ses_mes_cl = float("nan")
+    _ses_mnq_ch = _ses_mnq_cl = float("nan")
+    _run_ses_high = -float("inf")
+    _run_ses_low  =  float("inf")
 
     for bar_idx in range(n_bars):
-        # Update running extremes with previous bar — done at TOP so continue-statements
-        # elsewhere in the loop body cannot skip the update.
         if bar_idx > 0:
             _p = bar_idx - 1
-            _v = float(_mes_h_arr[_p])
+            _v = float(_mes_h[_p])
             _ses_mes_h  = _v if _math.isnan(_ses_mes_h)  else max(_ses_mes_h,  _v)
-            _v = float(_mes_l_arr[_p])
+            _v = float(_mes_l[_p])
             _ses_mes_l  = _v if _math.isnan(_ses_mes_l)  else min(_ses_mes_l,  _v)
-            _v = float(_mnq_h_arr[_p])
+            _v = float(_mnq_h[_p])
             _ses_mnq_h  = _v if _math.isnan(_ses_mnq_h)  else max(_ses_mnq_h,  _v)
-            _v = float(_mnq_l_arr[_p])
+            _run_ses_high = max(_run_ses_high, _v)
+            _v = float(_mnq_l[_p])
             _ses_mnq_l  = _v if _math.isnan(_ses_mnq_l)  else min(_ses_mnq_l,  _v)
-            _v = float(_mes_c_arr[_p])
+            _run_ses_low  = min(_run_ses_low,  _v)
+            _v = float(_mes_c[_p])
             _ses_mes_ch = _v if _math.isnan(_ses_mes_ch) else max(_ses_mes_ch, _v)
             _ses_mes_cl = _v if _math.isnan(_ses_mes_cl) else min(_ses_mes_cl, _v)
-            _v = float(_mnq_c_arr[_p])
+            _v = float(_mnq_c[_p])
             _ses_mnq_ch = _v if _math.isnan(_ses_mnq_ch) else max(_ses_mnq_ch, _v)
             _ses_mnq_cl = _v if _math.isnan(_ses_mnq_cl) else min(_ses_mnq_cl, _v)
 
-        # HTF period extreme update — include current bar in running extreme
-        if HTF_VISIBILITY_REQUIRED:
-            ts_bar = mnq_bars.index[bar_idx]
-            ts_ns  = ts_bar.value  # nanoseconds since epoch
-            for _T, _hs in _htf_state.items():
-                _period_ns = _T * 60 * 10**9
-                _pstart = (ts_ns // _period_ns) * _period_ns
-                if _hs["pstart"] != _pstart:
-                    # Period boundary crossed — snapshot prior period
-                    if _hs["pstart"] is not None and not _math.isnan(_hs["c_mes_h"]):
-                        _hs["p_mes_h"]  = _hs["c_mes_h"];  _hs["p_mes_l"]  = _hs["c_mes_l"]
-                        _hs["p_mnq_h"]  = _hs["c_mnq_h"];  _hs["p_mnq_l"]  = _hs["c_mnq_l"]
-                        _hs["p_mes_ch"] = _hs["c_mes_ch"]; _hs["p_mes_cl"] = _hs["c_mes_cl"]
-                        _hs["p_mnq_ch"] = _hs["c_mnq_ch"]; _hs["p_mnq_cl"] = _hs["c_mnq_cl"]
-                    _hs["pstart"] = _pstart
-                    _hs["c_mes_h"] = float(_mes_h_arr[bar_idx])
-                    _hs["c_mes_l"] = float(_mes_l_arr[bar_idx])
-                    _hs["c_mnq_h"] = float(_mnq_h_arr[bar_idx])
-                    _hs["c_mnq_l"] = float(_mnq_l_arr[bar_idx])
-                    _hs["c_mes_ch"] = float(_mes_c_arr[bar_idx])
-                    _hs["c_mes_cl"] = float(_mes_c_arr[bar_idx])
-                    _hs["c_mnq_ch"] = float(_mnq_c_arr[bar_idx])
-                    _hs["c_mnq_cl"] = float(_mnq_c_arr[bar_idx])
-                else:
-                    _hs["c_mes_h"]  = max(_hs["c_mes_h"],  float(_mes_h_arr[bar_idx]))
-                    _hs["c_mes_l"]  = min(_hs["c_mes_l"],  float(_mes_l_arr[bar_idx]))
-                    _hs["c_mnq_h"]  = max(_hs["c_mnq_h"],  float(_mnq_h_arr[bar_idx]))
-                    _hs["c_mnq_l"]  = min(_hs["c_mnq_l"],  float(_mnq_l_arr[bar_idx]))
-                    _hs["c_mes_ch"] = max(_hs["c_mes_ch"], float(_mes_c_arr[bar_idx]))
-                    _hs["c_mes_cl"] = min(_hs["c_mes_cl"], float(_mes_c_arr[bar_idx]))
-                    _hs["c_mnq_ch"] = max(_hs["c_mnq_ch"], float(_mnq_c_arr[bar_idx]))
-                    _hs["c_mnq_cl"] = min(_hs["c_mnq_cl"], float(_mnq_c_arr[bar_idx]))
+        _smt_cache["mes_h"]  = _ses_mes_h;  _smt_cache["mes_l"]  = _ses_mes_l
+        _smt_cache["mnq_h"]  = _ses_mnq_h;  _smt_cache["mnq_l"]  = _ses_mnq_l
+        _smt_cache["mes_ch"] = _ses_mes_ch; _smt_cache["mes_cl"] = _ses_mes_cl
+        _smt_cache["mnq_ch"] = _ses_mnq_ch; _smt_cache["mnq_cl"] = _ses_mnq_cl
 
-        _smt_cache = {
-            "mes_h":  _ses_mes_h,  "mes_l":  _ses_mes_l,
-            "mnq_h":  _ses_mnq_h,  "mnq_l":  _ses_mnq_l,
-            "mes_ch": _ses_mes_ch, "mes_cl": _ses_mes_cl,
-            "mnq_ch": _ses_mnq_ch, "mnq_cl": _ses_mnq_cl,
-        }
+        ts  = _mnq_idx[bar_idx]
+        bar = _BarRow(float(_mnq_o[bar_idx]), float(_mnq_h[bar_idx]),
+                      float(_mnq_l[bar_idx]), float(_mnq_c[bar_idx]),
+                      float(_mnq_v[bar_idx]) if _mnq_v is not None else 0.0, ts)
 
-        if mnq_bars.index[bar_idx] < min_signal_ts:
-            continue
-
-        _smt = detect_smt_divergence(mes_reset, mnq_reset, bar_idx, 0, _cached=_smt_cache)
-
-        # Expanded reference levels: try prev-day, prev-session, week extremes when flag enabled
-        if _smt is None and EXPANDED_REFERENCE_LEVELS and _ref_lvls:
-            _cur_mes = mes_reset.iloc[bar_idx]
-            _cur_mnq = mnq_reset.iloc[bar_idx]
-            _best_ref: "tuple | None" = None
-            for _ref_key in (
-                ("prev_day_mes_high", "prev_day_mes_low", "prev_day_mnq_high", "prev_day_mnq_low", False),
-                ("prev_session_mes_high", "prev_session_mes_low", "prev_session_mnq_high", "prev_session_mnq_low", False),
-                ("week_mes_high", "week_mes_low", "week_mnq_high", "week_mnq_low", False),
-                ("prev_day_mes_close_high", "prev_day_mes_close_low", "prev_day_mnq_close_high", "prev_day_mnq_close_low", True),
-                ("prev_session_mes_close_high", "prev_session_mes_close_low", "prev_session_mnq_close_high", "prev_session_mnq_close_low", True),
-                ("week_mes_close_high", "week_mes_close_low", "week_mnq_close_high", "week_mnq_close_low", True),
-            ):
-                _mh, _ml, _nh, _nl, _use_close = _ref_key
-                # Skip close-based ref levels unless HIDDEN_SMT_ENABLED
-                if _use_close and not HIDDEN_SMT_ENABLED:
-                    continue
-                _candidate = _check_smt_against_ref(
-                    _cur_mes, _cur_mnq,
-                    _ref_lvls.get(_mh), _ref_lvls.get(_ml),
-                    _ref_lvls.get(_nh), _ref_lvls.get(_nl),
-                    use_close=_use_close,
-                )
-                if _candidate is not None:
-                    # Pick the result with the largest sweep_pts
-                    if _best_ref is None or _candidate[1] > _best_ref[1]:
-                        _best_ref = _candidate
-            if _best_ref is not None:
-                _smt = _best_ref
-
-        # SMT-optional: accept displacement if no wick/hidden SMT found
-        _smt_fill = None
-        _displacement_direction = None
-        if _smt is None:
-            if SMT_FILL_ENABLED:
-                _smt_fill = detect_smt_fill(mes_reset, mnq_reset, bar_idx)
-            if _smt_fill is None and SMT_OPTIONAL:
-                for _d in ("short", "long"):
-                    if detect_displacement(mnq_reset, bar_idx, _d):
-                        _displacement_direction = _d
-                        break
-        if _smt is None and _smt_fill is None and _displacement_direction is None:
-            continue
-
-        # Resolve effective direction
-        if _smt is not None:
-            direction, _smt_sweep, _smt_miss, _smt_type, _smt_defended = _smt
-        elif _smt_fill is not None:
-            direction, _fill_fvg_high, _fill_fvg_low = _smt_fill
-            _smt_sweep = _smt_miss = 0.0; _smt_type = "fill"; _smt_defended = None
-        else:
-            direction = _displacement_direction
-            _smt_sweep = _smt_miss = 0.0; _smt_type = "displacement"; _smt_defended = None
-
-        if TRADE_DIRECTION != "both" and direction != TRADE_DIRECTION:
-            continue
-
-        # HTF visibility filter: skip if signal not visible on any configured HTF period
-        if HTF_VISIBILITY_REQUIRED and _htf_state:
-            _htf_confirmed: list = []
-            for _T, _hs in _htf_state.items():
-                if _hs["p_mes_h"] is None:
-                    continue
-                if direction == "short":
-                    if _hs["c_mes_h"] > _hs["p_mes_h"] and _hs["c_mnq_h"] <= _hs["p_mnq_h"]:
-                        _htf_confirmed.append(_T)
-                    elif HIDDEN_SMT_ENABLED and _hs["c_mes_ch"] > _hs["p_mes_ch"] and _hs["c_mnq_ch"] <= _hs["p_mnq_ch"]:
-                        _htf_confirmed.append(_T)
-                else:
-                    if _hs["c_mes_l"] < _hs["p_mes_l"] and _hs["c_mnq_l"] >= _hs["p_mnq_l"]:
-                        _htf_confirmed.append(_T)
-                    elif HIDDEN_SMT_ENABLED and _hs["c_mes_cl"] < _hs["p_mes_cl"] and _hs["c_mnq_cl"] >= _hs["p_mnq_cl"]:
-                        _htf_confirmed.append(_T)
-            if not _htf_confirmed:
-                continue
-            # Store confirmed timeframes for later insertion into signal dict
-            _htf_confirmed_tfs = _htf_confirmed
-        else:
-            _htf_confirmed_tfs = None
-
-        # Overnight sweep gate: require overnight H (shorts) or L (longs) to have been swept.
-        if OVERNIGHT_SWEEP_REQUIRED and overnight_range is not None:
-            oh = overnight_range.get("overnight_high")
-            ol = overnight_range.get("overnight_low")
-            if direction == "short" and oh is not None:
-                pre_session_high = mnq_reset["High"].iloc[:bar_idx].max() if bar_idx > 0 else 0
-                if pre_session_high <= oh:
-                    continue
-            if direction == "long" and ol is not None:
-                pre_session_low = mnq_reset["Low"].iloc[:bar_idx].min() if bar_idx > 0 else float("inf")
-                if pre_session_low >= ol:
-                    continue
-
-        # Silver bullet window: only accept divergences during 09:50–10:10 ET.
-        if SILVER_BULLET_WINDOW_ONLY:
-            bar_t = mnq_bars.index[bar_idx].strftime("%H:%M")
-            if not (SILVER_BULLET_START <= bar_t < SILVER_BULLET_END):
-                continue
-
-        _div_bar = mnq_reset.iloc[bar_idx]
-        _div_bar_high = float(_div_bar["High"])
-        _div_bar_low  = float(_div_bar["Low"])
-
-        # Compute FVG zone after direction is resolved
-        _fvg_zone = detect_fvg(mnq_reset, bar_idx, direction)
-
-        # TP target selection: overnight range → midnight open → TDO (fallback).
-        if OVERNIGHT_RANGE_AS_TP and overnight_range is not None:
-            _raw = overnight_range.get("overnight_low" if direction == "short" else "overnight_high")
-            _tp = _raw if _raw is not None else tdo
-        elif MIDNIGHT_OPEN_AS_TP and midnight_open is not None:
-            _tp = midnight_open
-        else:
-            _tp = tdo
-
-        ac = find_anchor_close(mnq_reset, bar_idx, direction)
-        if ac is None:
-            continue
-
-        # Scan forward for first confirmation bar after divergence.
-        # ALWAYS_REQUIRE_CONFIRMATION: bar must also break the displacement bar's body boundary.
-        _div_body_high = max(float(_div_bar["Open"]), float(_div_bar["Close"]))
-        _div_body_low  = min(float(_div_bar["Open"]), float(_div_bar["Close"]))
-        for conf_idx in range(bar_idx + 1, n_bars):
-            conf_bar = mnq_reset.iloc[conf_idx]
-            if not is_confirmation_bar(conf_bar, ac, direction):
-                continue
-            if ALWAYS_REQUIRE_CONFIRMATION:
-                if direction == "short" and float(conf_bar["Close"]) >= _div_body_low:
-                    continue
-                if direction == "long" and float(conf_bar["Close"]) <= _div_body_high:
-                    continue
-            entry_time = mnq_bars.index[conf_idx]
-            if SIGNAL_BLACKOUT_START and SIGNAL_BLACKOUT_END:
-                t = entry_time.strftime("%H:%M")
-                if SIGNAL_BLACKOUT_START <= t < SIGNAL_BLACKOUT_END:
-                    break
-            signal = _build_signal_from_bar(
-                conf_bar, entry_time, direction, _tp,
-                smt_sweep_pts=_smt_sweep,
-                smt_miss_pts=_smt_miss,
-                divergence_bar_high=_div_bar_high,
-                divergence_bar_low=_div_bar_low,
-                midnight_open=midnight_open,
-                smt_defended_level=_smt_defended,
-                smt_type=_smt_type,
-                fvg_zone=_fvg_zone,
-                anchor_close=ac,
-            )
-            if signal is None:
-                break
-            signal["divergence_bar"] = bar_idx
-            signal["entry_bar"] = conf_idx
-            if HTF_VISIBILITY_REQUIRED:
-                signal["htf_confirmed_timeframes"] = _htf_confirmed_tfs
-            return signal
+        result = process_scan_bar(
+            _scan_state, _session_ctx, bar_idx, bar,
+            mnq_reset, mes_reset, _smt_cache,
+            _run_ses_high, _run_ses_low, ts, min_signal_ts,
+            _mnq_o, _mnq_h, _mnq_l, _mnq_c,
+            _mnq_v if _mnq_v is not None else _mnq_c,  # vols fallback
+            _mes_h, _mes_l, _mes_c,
+        )
+        if result is not None and result["type"] == "signal":
+            return result
 
     return None
 
@@ -1432,6 +1328,535 @@ def _build_signal_from_bar(
         "initial_stop_pts":   round(abs(entry_price - round(stop_price, 4)), 4),
     }
 
+
+def _annotate_hypothesis(signal: dict, hyp_ctx: "dict | None", hyp_dir: "str | None") -> None:
+    """Stamp hypothesis-match and per-rule breakdown fields onto a signal dict in-place."""
+    signal["matches_hypothesis"] = (
+        (signal.get("direction") == hyp_dir) if hyp_dir is not None else None
+    )
+    if hyp_ctx is not None:
+        signal["hypothesis_direction"] = hyp_ctx.get("direction")
+        signal["pd_range_case"]        = hyp_ctx.get("pd_range_case")
+        signal["pd_range_bias"]        = hyp_ctx.get("pd_range_bias")
+        signal["week_zone"]            = hyp_ctx.get("week_zone")
+        signal["day_zone"]             = hyp_ctx.get("day_zone")
+        signal["trend_direction"]      = hyp_ctx.get("trend_direction")
+        signal["hypothesis_score"]     = hyp_ctx.get("hypothesis_score", 0)
+    else:
+        signal["hypothesis_direction"] = None
+        signal["pd_range_case"]        = None
+        signal["pd_range_bias"]        = None
+        signal["week_zone"]            = None
+        signal["day_zone"]             = None
+        signal["trend_direction"]      = None
+        signal["hypothesis_score"]     = 0
+
+
+def _build_draws_and_select(
+    direction: str, ep: float, sp: float, fvg_zone: "dict | None",
+    day_tdo: "float | None", midnight_open: "float | None",
+    run_ses_high: float, run_ses_low: float,
+    overnight: dict, pdh: "float | None", pdl: "float | None",
+) -> "tuple[str | None, float | None, str | None, float | None]":
+    """Assemble draw-on-liquidity targets and delegate to select_draw_on_liquidity."""
+    if direction == "long":
+        draws = {
+            "fvg_top":        fvg_zone["fvg_high"] if fvg_zone else None,
+            "tdo":            day_tdo if day_tdo and day_tdo > ep else None,
+            "midnight_open":  midnight_open if midnight_open and midnight_open > ep else None,
+            "session_high":   run_ses_high if run_ses_high > ep + 1 else None,
+            "overnight_high": overnight.get("overnight_high") if overnight.get("overnight_high") and overnight.get("overnight_high") > ep else None,
+            "pdh":            pdh if pdh and pdh > ep else None,
+        }
+    else:
+        draws = {
+            "fvg_bottom":    fvg_zone["fvg_low"] if fvg_zone else None,
+            "tdo":           day_tdo if day_tdo and day_tdo < ep else None,
+            "midnight_open": midnight_open if midnight_open and midnight_open < ep else None,
+            "session_low":   run_ses_low if run_ses_low < ep - 1 else None,
+            "overnight_low": overnight.get("overnight_low") if overnight.get("overnight_low") and overnight.get("overnight_low") < ep else None,
+            "pdl":           pdl if pdl and pdl < ep else None,
+        }
+    return select_draw_on_liquidity(direction, ep, sp, draws, MIN_RR_FOR_TARGET, MIN_TARGET_PTS)
+
+
+def process_scan_bar(
+    state: "ScanState",
+    context: "SessionContext",
+    bar_idx: int,
+    bar: "_BarRow",
+    mnq_reset: pd.DataFrame,
+    mes_reset: pd.DataFrame,
+    smt_cache: dict,
+    run_ses_high: float,
+    run_ses_low: float,
+    ts: "pd.Timestamp",
+    min_signal_ts: "pd.Timestamp",
+    mnq_opens,
+    mnq_highs,
+    mnq_lows,
+    mnq_closes,
+    mnq_vols,
+    mes_highs=None,
+    mes_lows=None,
+    mes_closes=None,
+) -> "dict | None":
+    """Stateful scanner: process one bar of the non-IN_TRADE state machine.
+
+    Returns:
+        None                     — nothing actionable this bar
+        {"type": "signal", ...}  — entry signal; caller handles position sizing
+        {"type": "expired", "signal": ..., "limit_missed_move": float}
+                                 — limit order expired without fill
+
+    Mutates state in place. Never builds trade records or sizes contracts.
+    """
+    # ── HTF state initialization (first call or empty state) ─────────────────
+    if HTF_VISIBILITY_REQUIRED and not state.htf_state:
+        for _T in HTF_PERIODS_MINUTES:
+            state.htf_state[_T] = {
+                "pstart": None,
+                "c_mes_h": float("nan"), "c_mes_l": float("nan"),
+                "c_mnq_h": float("nan"), "c_mnq_l": float("nan"),
+                "c_mes_ch": float("nan"), "c_mes_cl": float("nan"),
+                "c_mnq_ch": float("nan"), "c_mnq_cl": float("nan"),
+                "p_mes_h": None, "p_mes_l": None,
+                "p_mnq_h": None, "p_mnq_l": None,
+                "p_mes_ch": None, "p_mes_cl": None,
+                "p_mnq_ch": None, "p_mnq_cl": None,
+            }
+
+    # ── HTF period extreme update ─────────────────────────────────────────────
+    if HTF_VISIBILITY_REQUIRED and state.htf_state and mes_highs is not None:
+        _ts_ns = ts.value
+        for _T, _hs in state.htf_state.items():
+            _period_ns = _T * 60 * 10**9
+            _pstart = (_ts_ns // _period_ns) * _period_ns
+            if _hs["pstart"] != _pstart:
+                if _hs["pstart"] is not None and not _math.isnan(_hs["c_mes_h"]):
+                    _hs["p_mes_h"]  = _hs["c_mes_h"];  _hs["p_mes_l"]  = _hs["c_mes_l"]
+                    _hs["p_mnq_h"]  = _hs["c_mnq_h"];  _hs["p_mnq_l"]  = _hs["c_mnq_l"]
+                    _hs["p_mes_ch"] = _hs["c_mes_ch"]; _hs["p_mes_cl"] = _hs["c_mes_cl"]
+                    _hs["p_mnq_ch"] = _hs["c_mnq_ch"]; _hs["p_mnq_cl"] = _hs["c_mnq_cl"]
+                _hs["pstart"]   = _pstart
+                _hs["c_mes_h"]  = float(mes_highs[bar_idx])
+                _hs["c_mes_l"]  = float(mes_lows[bar_idx])
+                _hs["c_mnq_h"]  = float(mnq_highs[bar_idx])
+                _hs["c_mnq_l"]  = float(mnq_lows[bar_idx])
+                _hs["c_mes_ch"] = float(mes_closes[bar_idx])
+                _hs["c_mes_cl"] = float(mes_closes[bar_idx])
+                _hs["c_mnq_ch"] = float(mnq_closes[bar_idx])
+                _hs["c_mnq_cl"] = float(mnq_closes[bar_idx])
+            else:
+                _hs["c_mes_h"]  = max(_hs["c_mes_h"],  float(mes_highs[bar_idx]))
+                _hs["c_mes_l"]  = min(_hs["c_mes_l"],  float(mes_lows[bar_idx]))
+                _hs["c_mnq_h"]  = max(_hs["c_mnq_h"],  float(mnq_highs[bar_idx]))
+                _hs["c_mnq_l"]  = min(_hs["c_mnq_l"],  float(mnq_lows[bar_idx]))
+                _hs["c_mes_ch"] = max(_hs["c_mes_ch"], float(mes_closes[bar_idx]))
+                _hs["c_mes_cl"] = min(_hs["c_mes_cl"], float(mes_closes[bar_idx]))
+                _hs["c_mnq_ch"] = max(_hs["c_mnq_ch"], float(mnq_closes[bar_idx]))
+                _hs["c_mnq_cl"] = min(_hs["c_mnq_cl"], float(mnq_closes[bar_idx]))
+
+    # ── WAITING_FOR_LIMIT_FILL ────────────────────────────────────────────────
+    if state.scan_state == "WAITING_FOR_LIMIT_FILL":
+        state.limit_bars_elapsed += 1
+        pls = state.pending_limit_signal
+
+        if pls["direction"] == "short":
+            state.limit_missed_move = max(
+                state.limit_missed_move,
+                pls["entry_price"] - float(bar["Low"])
+            )
+        else:
+            state.limit_missed_move = max(
+                state.limit_missed_move,
+                float(bar["High"]) - pls["entry_price"]
+            )
+
+        filled = (
+            (pls["direction"] == "short" and float(bar["Low"]) <= pls["entry_price"])
+            or (pls["direction"] == "long" and float(bar["High"]) >= pls["entry_price"])
+        )
+
+        if filled:
+            pls["limit_fill_bars"] = state.limit_bars_elapsed
+            signal_out = dict(pls)
+            state.reentry_count += 1
+            signal_out["reentry_sequence"]      = state.reentry_count
+            signal_out["prior_trade_bars_held"] = state.prior_trade_bars_held
+            state.pending_limit_signal = None
+            state.scan_state = "IDLE"
+            return {"type": "signal", **signal_out}
+
+        if state.limit_bars_elapsed >= state.limit_max_bars:
+            expired_out = {
+                "type": "expired",
+                "signal": dict(pls),
+                "limit_missed_move": state.limit_missed_move,
+            }
+            state.pending_limit_signal = None
+            state.anchor_close = None
+            state.scan_state = "IDLE"
+            return expired_out
+
+        return None
+
+    # ── WAITING_FOR_ENTRY / REENTRY_ELIGIBLE ─────────────────────────────────
+    if state.scan_state in ("WAITING_FOR_ENTRY", "REENTRY_ELIGIBLE"):
+        if state.scan_state == "REENTRY_ELIGIBLE":
+            if MAX_REENTRY_COUNT < 999 and state.reentry_count >= MAX_REENTRY_COUNT:
+                state.scan_state = "IDLE"
+                state.pending_direction = None
+                state.anchor_close = None
+                state.conf_window_start = -1
+                return None
+
+        if _in_blackout(ts.time()):
+            return None
+
+        # Replacement check — WAITING_FOR_ENTRY only
+        if state.scan_state == "WAITING_FOR_ENTRY":
+            _new_div = detect_smt_divergence(
+                mes_reset, mnq_reset, bar_idx, 0, _cached=smt_cache
+            )
+            if _new_div is not None:
+                _nd_dir, _nd_sweep, _nd_miss, _nd_type, _nd_defended = _new_div
+                _nd_body = abs(float(bar["Close"]) - float(bar["Open"]))
+                _nd_score = divergence_score(
+                    _nd_sweep, _nd_miss, _nd_body, _nd_type, context.hyp_dir, _nd_dir
+                )
+                if _nd_score >= MIN_DIV_SCORE:
+                    _decay_ivl = max(1, round(DIV_SCORE_DECAY_SECONDS / context.bar_seconds))
+                    _eff = _effective_div_score(
+                        state.pending_div_score,
+                        state.pending_discovery_bar_idx, bar_idx,
+                        state.pending_discovery_price, state.pending_direction,
+                        float(bar["High"]), float(bar["Low"]),
+                        _decay_ivl,
+                    )
+                    _replace = False
+                    if state.pending_smt_type in ("wick", "body") and _nd_type == "displacement":
+                        _replace = False
+                    elif state.pending_div_provisional and _nd_type in ("wick", "body"):
+                        _replace = True
+                    elif _nd_dir == state.pending_direction and _nd_score > _eff:
+                        _replace = True
+                    elif _nd_dir != state.pending_direction and _nd_score > _eff * REPLACE_THRESHOLD:
+                        _replace = True
+
+                    if _replace:
+                        _new_ac = find_anchor_close(mnq_reset, bar_idx, _nd_dir)
+                        if _new_ac is not None:
+                            fvg_lookback = max(3, round(1200 / context.bar_seconds))
+                            _new_fvg = detect_fvg(mnq_reset, bar_idx, _nd_dir, lookback=fvg_lookback)
+                            state.pending_direction           = _nd_dir
+                            state.anchor_close                = _new_ac
+                            state.pending_smt_sweep           = _nd_sweep
+                            state.pending_smt_miss            = _nd_miss
+                            state.pending_div_bar_high        = float(bar["High"])
+                            state.pending_div_bar_low         = float(bar["Low"])
+                            state.pending_smt_defended        = _nd_defended
+                            state.pending_smt_type            = _nd_type
+                            state.pending_div_score           = _nd_score
+                            state.pending_div_provisional     = (_nd_type == "displacement")
+                            state.pending_discovery_bar_idx   = bar_idx
+                            state.pending_discovery_price     = float(bar["Close"])
+                            state.divergence_bar_idx          = bar_idx
+                            state.pending_displacement_bar_extreme = (
+                                float(bar["Low"]) if _nd_dir == "long" else float(bar["High"])
+                            ) if _nd_type == "displacement" else None
+                            state.pending_fvg_zone            = _new_fvg
+                            state.pending_fvg_detected        = _new_fvg is not None
+                            state.conf_window_start           = bar_idx + 1
+
+            # Solution D: abandon hypothesis if adverse move exceeds threshold
+            if HYPOTHESIS_INVALIDATION_PTS < 999:
+                if state.pending_direction == "short":
+                    _adverse = float(bar["High"]) - state.pending_discovery_price
+                else:
+                    _adverse = state.pending_discovery_price - float(bar["Low"])
+                if _adverse > HYPOTHESIS_INVALIDATION_PTS:
+                    state.scan_state = "IDLE"
+                    state.pending_direction = None
+                    state.anchor_close = None
+                    return None
+
+        # Build confirmation bar: raw bar or synthetic N-bar candle
+        _conf_bar = bar
+        if CONFIRMATION_WINDOW_BARS > 1:
+            if (bar_idx < state.conf_window_start
+                    or (bar_idx - state.conf_window_start + 1) % CONFIRMATION_WINDOW_BARS != 0):
+                _conf_bar = None
+            else:
+                _syn_start = bar_idx - CONFIRMATION_WINDOW_BARS + 1
+                _conf_bar = build_synthetic_confirmation_bar(
+                    mnq_opens, mnq_highs, mnq_lows, mnq_closes, mnq_vols,
+                    _syn_start, bar_idx, ts
+                )
+
+        if _conf_bar is None or state.anchor_close is None:
+            return None
+
+        if not is_confirmation_bar(_conf_bar, state.anchor_close, state.pending_direction):
+            _is_adverse = (
+                (state.pending_direction == "short"
+                 and float(_conf_bar["Close"]) > float(_conf_bar["Open"]))
+                or (state.pending_direction == "long"
+                    and float(_conf_bar["Close"]) < float(_conf_bar["Open"]))
+            )
+            if _is_adverse:
+                state.anchor_close = float(_conf_bar["Close"])
+            return None
+
+        # ALWAYS_REQUIRE_CONFIRMATION: bar must break divergence bar's body boundary
+        if ALWAYS_REQUIRE_CONFIRMATION and state.divergence_bar_idx >= 0:
+            _div = mnq_reset.iloc[state.divergence_bar_idx]
+            _dbh = max(float(_div["Open"]), float(_div["Close"]))
+            _dbl = min(float(_div["Open"]), float(_div["Close"]))
+            if state.pending_direction == "short" and float(_conf_bar["Close"]) >= _dbl:
+                return None
+            if state.pending_direction == "long" and float(_conf_bar["Close"]) <= _dbh:
+                return None
+
+        signal = _build_signal_from_bar(
+            _conf_bar, ts, state.pending_direction, context.tdo,
+            smt_sweep_pts=state.pending_smt_sweep,
+            smt_miss_pts=state.pending_smt_miss,
+            divergence_bar_idx=state.divergence_bar_idx,
+            divergence_bar_high=state.pending_div_bar_high,
+            divergence_bar_low=state.pending_div_bar_low,
+            midnight_open=context.midnight_open,
+            smt_defended_level=state.pending_smt_defended,
+            smt_type=state.pending_smt_type,
+            fvg_zone=state.pending_fvg_zone,
+            anchor_close=state.anchor_close,
+        )
+        if signal is None:
+            return None
+
+        signal["entry_bar"] = bar_idx
+
+        _ep = signal["entry_price"]
+        _sp = signal["stop_price"]
+        _tp_name, _day_tp, _sec_tp_name, _sec_tp = _build_draws_and_select(
+            state.pending_direction, _ep, _sp, state.pending_fvg_zone,
+            context.tdo, context.midnight_open, run_ses_high, run_ses_low,
+            context.overnight, context.pdh, context.pdl,
+        )
+        if _day_tp is None:
+            return None
+
+        signal["take_profit"] = _day_tp
+        signal["tp_name"]     = _tp_name
+        if signal.get("partial_exit_level") is not None:
+            signal["partial_exit_level"] = round(
+                _ep + (_day_tp - _ep) * PARTIAL_EXIT_LEVEL_RATIO, 4
+            )
+        _annotate_hypothesis(signal, context.hyp_ctx, context.hyp_dir)
+        signal["fvg_detected"] = state.pending_fvg_detected
+        signal["htf_confirmed_timeframes"] = state.pending_htf_confirmed_tfs
+
+        if HYPOTHESIS_FILTER and signal.get("matches_hypothesis") is not True:
+            state.scan_state = "IDLE"
+            state.pending_direction = None
+            state.anchor_close = None
+            return None
+
+        _body_ratio = signal.get("entry_bar_body_ratio", 0.0)
+        _use_forward_limit = (
+            LIMIT_ENTRY_BUFFER_PTS is not None
+            and LIMIT_EXPIRY_SECONDS is not None
+            and (LIMIT_RATIO_THRESHOLD is None or _body_ratio < LIMIT_RATIO_THRESHOLD)
+        )
+
+        if _use_forward_limit:
+            signal["secondary_target"]      = _sec_tp
+            signal["secondary_target_name"] = _sec_tp_name
+            if DISPLACEMENT_STOP_MODE and signal.get("smt_type") == "displacement":
+                _extreme = state.pending_displacement_bar_extreme
+                if _extreme is not None:
+                    if signal["direction"] == "long":
+                        signal["stop_price"] = _extreme - STRUCTURAL_STOP_BUFFER_PTS
+                    else:
+                        signal["stop_price"] = _extreme + STRUCTURAL_STOP_BUFFER_PTS
+            state.scan_state = "WAITING_FOR_LIMIT_FILL"
+            state.pending_limit_signal = signal
+            state.limit_bars_elapsed = 0
+            state.limit_max_bars = max(1, round(LIMIT_EXPIRY_SECONDS / context.bar_seconds))
+            state.limit_missed_move = 0.0
+            return None
+
+        signal["limit_fill_bars"] = 0 if LIMIT_ENTRY_BUFFER_PTS is not None else None
+        if DISPLACEMENT_STOP_MODE and signal.get("smt_type") == "displacement":
+            _extreme = state.pending_displacement_bar_extreme
+            if _extreme is not None:
+                if signal["direction"] == "long":
+                    signal["stop_price"] = _extreme - STRUCTURAL_STOP_BUFFER_PTS
+                else:
+                    signal["stop_price"] = _extreme + STRUCTURAL_STOP_BUFFER_PTS
+        signal["secondary_target"]      = _sec_tp
+        signal["secondary_target_name"] = _sec_tp_name
+        state.reentry_count += 1
+        signal["reentry_sequence"]      = state.reentry_count
+        signal["prior_trade_bars_held"] = state.prior_trade_bars_held
+        state.scan_state = "IDLE"
+        return {"type": "signal", **signal}
+
+    # ── IDLE ──────────────────────────────────────────────────────────────────
+    if context.tdo is None:
+        return None
+    if ts < min_signal_ts:
+        return None
+    if _in_blackout(ts.time()):
+        return None
+    if bar_idx < 3:
+        return None
+
+    _smt = detect_smt_divergence(mes_reset, mnq_reset, bar_idx, 0, _cached=smt_cache)
+
+    # Expanded reference levels: check prev-day/week extremes
+    if _smt is None and EXPANDED_REFERENCE_LEVELS and context.ref_lvls:
+        _cur_mes_b = mes_reset.iloc[bar_idx]
+        _cur_mnq_b = mnq_reset.iloc[bar_idx]
+        _best_ref = None
+        for _rk in (
+            ("prev_day_mes_high", "prev_day_mes_low", "prev_day_mnq_high", "prev_day_mnq_low", False),
+            ("prev_session_mes_high", "prev_session_mes_low", "prev_session_mnq_high", "prev_session_mnq_low", False),
+            ("week_mes_high", "week_mes_low", "week_mnq_high", "week_mnq_low", False),
+            ("prev_day_mes_close_high", "prev_day_mes_close_low", "prev_day_mnq_close_high", "prev_day_mnq_close_low", True),
+            ("prev_session_mes_close_high", "prev_session_mes_close_low", "prev_session_mnq_close_high", "prev_session_mnq_close_low", True),
+            ("week_mes_close_high", "week_mes_close_low", "week_mnq_close_high", "week_mnq_close_low", True),
+        ):
+            _mh, _ml, _nh, _nl, _uc = _rk
+            if _uc and not HIDDEN_SMT_ENABLED:
+                continue
+            _cand = _check_smt_against_ref(
+                _cur_mes_b, _cur_mnq_b,
+                context.ref_lvls.get(_mh), context.ref_lvls.get(_ml),
+                context.ref_lvls.get(_nh), context.ref_lvls.get(_nl),
+                use_close=_uc,
+            )
+            if _cand is not None and (_best_ref is None or _cand[1] > _best_ref[1]):
+                _best_ref = _cand
+        if _best_ref is not None:
+            _smt = _best_ref
+
+    _smt_fill = None
+    _displacement_dir = None
+    if _smt is None:
+        if SMT_FILL_ENABLED:
+            _smt_fill = detect_smt_fill(mes_reset, mnq_reset, bar_idx)
+        if _smt_fill is None and SMT_OPTIONAL:
+            for _d in ("short", "long"):
+                if TRADE_DIRECTION in ("both", _d) and detect_displacement(mnq_reset, bar_idx, _d):
+                    _displacement_dir = _d
+                    break
+
+    if _smt is None and _smt_fill is None and _displacement_dir is None:
+        return None
+
+    if _smt is not None:
+        direction, _smt_sweep, _smt_miss, _smt_type, _smt_defended = _smt
+    elif _smt_fill is not None:
+        direction, _, _ = _smt_fill
+        _smt_sweep = _smt_miss = 0.0; _smt_type = "fill"; _smt_defended = None
+    else:
+        direction = _displacement_dir
+        _smt_sweep = _smt_miss = 0.0; _smt_type = "displacement"; _smt_defended = None
+
+    if TRADE_DIRECTION != "both" and direction != TRADE_DIRECTION:
+        return None
+
+    # HTF visibility filter — also collect which TFs confirmed (stored for signal annotation)
+    if HTF_VISIBILITY_REQUIRED and state.htf_state:
+        _htf_confirmed: list = []
+        for _T, _hs in state.htf_state.items():
+            if _hs["p_mes_h"] is None:
+                continue
+            if direction == "short":
+                if _hs["c_mes_h"] > _hs["p_mes_h"] and _hs["c_mnq_h"] <= _hs["p_mnq_h"]:
+                    _htf_confirmed.append(_T)
+                elif HIDDEN_SMT_ENABLED and _hs["c_mes_ch"] > _hs["p_mes_ch"] and _hs["c_mnq_ch"] <= _hs["p_mnq_ch"]:
+                    _htf_confirmed.append(_T)
+            else:
+                if _hs["c_mes_l"] < _hs["p_mes_l"] and _hs["c_mnq_l"] >= _hs["p_mnq_l"]:
+                    _htf_confirmed.append(_T)
+                elif HIDDEN_SMT_ENABLED and _hs["c_mes_cl"] < _hs["p_mes_cl"] and _hs["c_mnq_cl"] >= _hs["p_mnq_cl"]:
+                    _htf_confirmed.append(_T)
+        if not _htf_confirmed:
+            return None
+        _htf_confirmed_tfs: "list | None" = _htf_confirmed
+    else:
+        _htf_confirmed_tfs = None
+
+    _displacement_bar_extreme = None
+    if _smt_type == "displacement":
+        _displacement_bar_extreme = (
+            float(mnq_lows[bar_idx]) if direction == "long" else float(mnq_highs[bar_idx])
+        )
+
+    if _smt_type == "displacement" and MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT > 0:
+        _score = context.hyp_ctx.get("hypothesis_score", 0) if context.hyp_ctx else 0
+        if _score < MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT:
+            return None
+
+    fvg_lookback = max(3, round(1200 / context.bar_seconds))
+    _pending_fvg = detect_fvg(mnq_reset, bar_idx, direction, lookback=fvg_lookback)
+    _raw_fvg_present = _pending_fvg is not None
+
+    if FVG_LAYER_B_REQUIRES_HYPOTHESIS:
+        _score = context.hyp_ctx.get("hypothesis_score", 0) if context.hyp_ctx else 0
+        if _score < MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT:
+            _pending_fvg = None
+
+    if OVERNIGHT_SWEEP_REQUIRED:
+        oh = context.overnight.get("overnight_high")
+        ol = context.overnight.get("overnight_low")
+        if direction == "short" and oh is not None:
+            if run_ses_high <= oh:
+                return None
+        if direction == "long" and ol is not None:
+            if run_ses_low >= ol:
+                return None
+
+    if SILVER_BULLET_WINDOW_ONLY and not _in_silver_bullet(ts.time()):
+        return None
+
+    ac = find_anchor_close(mnq_reset, bar_idx, direction)
+    if ac is None:
+        return None
+
+    state.pending_direction               = direction
+    state.anchor_close                    = ac
+    state.pending_smt_sweep               = _smt_sweep
+    state.pending_smt_miss                = _smt_miss
+    state.divergence_bar_idx              = bar_idx
+    state.pending_div_bar_high            = float(mnq_highs[bar_idx])
+    state.pending_div_bar_low             = float(mnq_lows[bar_idx])
+    state.pending_smt_defended            = _smt_defended
+    state.pending_smt_type                = _smt_type
+    state.pending_fvg_zone                = _pending_fvg
+    state.pending_fvg_detected            = _raw_fvg_present
+    state.pending_displacement_bar_extreme = _displacement_bar_extreme
+    state.pending_htf_confirmed_tfs       = _htf_confirmed_tfs
+    state.scan_state                      = "WAITING_FOR_ENTRY"
+    state.conf_window_start               = bar_idx + 1
+    state.pending_div_score = divergence_score(
+        _smt_sweep, _smt_miss,
+        body_pts=abs(float(mnq_closes[bar_idx]) - float(mnq_opens[bar_idx])),
+        smt_type=_smt_type,
+        hypothesis_direction=context.hyp_dir,
+        div_direction=direction,
+    )
+    if MIN_DIV_SCORE > 0 and state.pending_div_score < MIN_DIV_SCORE:
+        state.scan_state = "IDLE"
+        state.pending_direction = None
+        state.anchor_close = None
+        return None
+    state.pending_div_provisional   = (_smt_type == "displacement")
+    state.pending_discovery_bar_idx = bar_idx
+    state.pending_discovery_price   = float(mnq_closes[bar_idx])
+    return None
 
 
 def manage_position(

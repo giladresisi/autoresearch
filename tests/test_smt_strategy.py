@@ -142,65 +142,6 @@ def test_detect_smt_resets_on_opposite():
     assert result is not None and result[0] == "long"
 
 
-# ══ find_entry_bar tests ═════════════════════════════════════════════════════
-
-def test_find_entry_bar_short():
-    """Bearish bar + upper wick past most recent bull body → returns index."""
-    import strategy_smt as train_smt
-    # 6 bars: bar 2 is bullish (close=202, open=200), bar 3 is bearish with wick above 202
-    mnq = _make_1m_bars(
-        opens= [200, 200, 200, 205, 200, 200],
-        highs= [201, 201, 202, 206, 201, 201],
-        lows=  [199, 199, 199, 199, 199, 199],
-        closes=[200, 200, 202, 201, 200, 200],  # bar 2: close>open (bull); bar 3: close<open (bear)
-    )
-    # divergence at bar 2; look for entry from bar 3 onward
-    result = train_smt.find_entry_bar(mnq, "short", divergence_idx=2, session_end_idx=6)
-    assert result == 3
-
-
-def test_find_entry_bar_long():
-    """Bullish bar + lower wick past most recent bear body → returns index."""
-    import strategy_smt as train_smt
-    # bar 2 is bearish (close=198, open=200), bar 3 is bullish with wick below 198
-    mnq = _make_1m_bars(
-        opens= [200, 200, 200, 195, 200, 200],
-        highs= [201, 201, 201, 201, 201, 201],
-        lows=  [199, 199, 199, 194, 199, 199],
-        closes=[200, 200, 198, 199, 200, 200],  # bar 2: close<open (bear); bar 3: close>open (bull)
-    )
-    result = train_smt.find_entry_bar(mnq, "long", divergence_idx=2, session_end_idx=6)
-    assert result == 3
-
-
-def test_find_entry_bar_no_match_returns_none():
-    """No valid confirmation bar before session_end_idx → None."""
-    import strategy_smt as train_smt
-    # All doji bars — no clear bull or bear bars
-    mnq = _make_1m_bars(
-        opens= [200, 200, 200, 200, 200],
-        highs= [201, 201, 201, 201, 201],
-        lows=  [199, 199, 199, 199, 199],
-        closes=[200, 200, 200, 200, 200],
-    )
-    result = train_smt.find_entry_bar(mnq, "short", divergence_idx=2, session_end_idx=5)
-    assert result is None
-
-
-def test_find_entry_requires_wick_past_body():
-    """Bearish bar present but wick does NOT pierce the bull body close → None."""
-    import strategy_smt as train_smt
-    # bar 1 is bullish close=202; bar 3 is bearish but high=201 which is BELOW 202
-    mnq = _make_1m_bars(
-        opens= [200, 200, 205, 203, 200],
-        highs= [201, 201, 206, 201, 201],  # bar 3 high=201 < bull close=202
-        lows=  [199, 199, 199, 199, 199],
-        closes=[200, 202, 201, 200, 200],  # bar 1: bull close=202; bar 3: bear close<open
-    )
-    result = train_smt.find_entry_bar(mnq, "short", divergence_idx=2, session_end_idx=5)
-    assert result is None
-
-
 # ══ compute_tdo tests ════════════════════════════════════════════════════════
 
 def test_compute_tdo_finds_midnight_bar():
@@ -470,12 +411,16 @@ def _patch_direction_test_guards(monkeypatch, trade_direction):
     """
     import strategy_smt as _strat
     import backtest_smt as _bk
-    # Strategy-side: affect _build_signal_from_bar, manage_position
+    # Strategy-side: affect _build_signal_from_bar, manage_position, and process_scan_bar
     monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
     monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
     monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
     monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
     monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
+    # TRADE_DIRECTION and SIGNAL_BLACKOUT now read by process_scan_bar from strategy_smt
+    monkeypatch.setattr(_strat, "TRADE_DIRECTION", trade_direction)
+    monkeypatch.setattr(_strat, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(_strat, "SIGNAL_BLACKOUT_END", "")
     # Harness-side: affect run_backtest directly
     monkeypatch.setattr(_bk, "TRADE_DIRECTION", trade_direction)
     monkeypatch.setattr(_bk, "SIGNAL_BLACKOUT_START", "")
@@ -633,7 +578,7 @@ def test_short_stop_ratio_applied(monkeypatch):
 
 def test_print_direction_breakdown_format(capsys):
     """print_direction_breakdown prints per-direction metrics with correct prefix."""
-    import strategy_smt as train_smt
+    import backtest_smt as train_smt
     fake_stats = {
         "total_pnl": 100.0,
         "trade_records": [
@@ -654,7 +599,7 @@ def test_print_direction_breakdown_format(capsys):
 
 def test_print_direction_breakdown_empty_trades(capsys):
     """print_direction_breakdown prints nothing when trade_records is empty."""
-    import strategy_smt as train_smt
+    import backtest_smt as train_smt
     train_smt.print_direction_breakdown({"trade_records": []}, prefix="test_")
     out = capsys.readouterr().out
     assert out == ""
@@ -902,6 +847,11 @@ def _patch_reentry_guards(monkeypatch, reentry_max_move=50.0, breakeven_pct=0.0)
     # Must patch both modules since backtest_smt holds its own bound name.
     monkeypatch.setattr(_strat, "MIDNIGHT_OPEN_AS_TP", False)
     monkeypatch.setattr(_bk, "MIDNIGHT_OPEN_AS_TP", False)
+    # MAX_REENTRY_COUNT and SIGNAL_BLACKOUT are read by process_scan_bar from strategy_smt
+    monkeypatch.setattr(_strat, "MAX_REENTRY_COUNT", 999)
+    monkeypatch.setattr(_strat, "SIGNAL_BLACKOUT_START", "")
+    monkeypatch.setattr(_strat, "SIGNAL_BLACKOUT_END", "")
+    monkeypatch.setattr(_strat, "PARTIAL_EXIT_ENABLED", False)
     # Harness-side
     monkeypatch.setattr(_bk, "REENTRY_MAX_MOVE_PTS", reentry_max_move)
     monkeypatch.setattr(_bk, "MAX_REENTRY_COUNT", 999)  # disable cap; initial entry also uses reentry_count

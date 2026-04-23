@@ -348,10 +348,10 @@ def test_print_analysis_no_rule_columns(capsys):
 
 # ── Group 5: Displacement entry controls (6 tests) ────────────────────────────
 
-def test_displacement_stop_mode_constant_exists_and_is_false():
-    """DISPLACEMENT_STOP_MODE must be False by default (Plan 3 safe default)."""
-    assert DISPLACEMENT_STOP_MODE is False, (
-        f"Default must be False, got {DISPLACEMENT_STOP_MODE}"
+def test_displacement_stop_mode_constant_exists_and_is_true():
+    """DISPLACEMENT_STOP_MODE must be True by default (Round 3 approved value)."""
+    assert DISPLACEMENT_STOP_MODE is True, (
+        f"Default must be True (Round 3 approved), got {DISPLACEMENT_STOP_MODE}"
     )
 
 
@@ -362,10 +362,10 @@ def test_min_hypothesis_score_constant_exists_and_is_zero():
     )
 
 
-def test_displacement_stop_disabled_by_default():
-    """When DISPLACEMENT_STOP_MODE is False, structural stop uses original logic."""
-    assert DISPLACEMENT_STOP_MODE is False, (
-        "Displacement stop must be opt-in, never default-on"
+def test_displacement_stop_enabled_by_default():
+    """DISPLACEMENT_STOP_MODE is True by default (Round 3 optimizer approved)."""
+    assert DISPLACEMENT_STOP_MODE is True, (
+        "Displacement stop default is True per Round 3 approval"
     )
 
 
@@ -392,10 +392,10 @@ def test_displacement_stop_math_short():
 
 # ── Group 6: PARTIAL_EXIT_LEVEL_RATIO (2 tests) ───────────────────────────────
 
-def test_partial_exit_level_ratio_default_is_half():
-    """PARTIAL_EXIT_LEVEL_RATIO must default to 0.5 (midpoint)."""
-    assert PARTIAL_EXIT_LEVEL_RATIO == 0.5, (
-        f"Default must be 0.5, got {PARTIAL_EXIT_LEVEL_RATIO}"
+def test_partial_exit_level_ratio_default_is_0_33():
+    """PARTIAL_EXIT_LEVEL_RATIO must default to 0.33 (Round 3 approved value)."""
+    assert PARTIAL_EXIT_LEVEL_RATIO == 0.33, (
+        f"Default must be 0.33 (Round 3 approved), got {PARTIAL_EXIT_LEVEL_RATIO}"
     )
 
 

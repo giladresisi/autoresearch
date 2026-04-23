@@ -1,7 +1,7 @@
 # signal_smt.py
 # Realtime SMT divergence signal generator for MNQ1!/MES1!.
 # Subscribes to dual 1m IB streams + reqTickByTickData("AllLast") per instrument; detects signals on each 1s bar
-# via screen_session, then manages the position through the session using manage_position.
+# via process_scan_bar, then manages the position through the session using manage_position.
 """
 Usage: python signal_smt.py
 
@@ -10,6 +10,7 @@ State machine: SCANNING → MANAGING, one trade per session.
 """
 from pathlib import Path
 import json
+import math as _math
 import time
 
 from dotenv import load_dotenv
@@ -19,18 +20,13 @@ import pandas as pd
 from ib_insync import IB, Future, util
 
 from strategy_smt import (
-    screen_session, manage_position, compute_tdo, set_bar_data,
+    manage_position, compute_tdo, set_bar_data,
     compute_midnight_open, compute_overnight_range,
-    compute_pdh_pdl, select_draw_on_liquidity,
-    detect_fvg, detect_displacement, detect_smt_fill,
+    compute_pdh_pdl,
     MIDNIGHT_OPEN_AS_TP, OVERNIGHT_SWEEP_REQUIRED, OVERNIGHT_RANGE_AS_TP,
     MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
     MAX_REENTRY_COUNT,
-    divergence_score, _effective_div_score,
-    MIN_DIV_SCORE, REPLACE_THRESHOLD,
-    DIV_SCORE_DECAY_FACTOR, DIV_SCORE_DECAY_INTERVAL,
-    ADVERSE_MOVE_FULL_DECAY_PTS, ADVERSE_MOVE_MIN_DECAY,
-    HYPOTHESIS_INVALIDATION_PTS,
+    MIN_BARS_BEFORE_SIGNAL,
 )
 import strategy_smt
 from hypothesis_smt import HypothesisManager
@@ -45,9 +41,9 @@ IB_CLIENT_ID = 15
 MNQ_CONID = "770561201"
 MES_CONID = "770561194"
 
-# ── Session window (caller-side only; never passed to screen_session) ─────────
-SESSION_START = "09:00"   # ET
-SESSION_END   = "13:30"   # ET
+# ── Session window ───────────────────────────────────────────────────────────
+SESSION_START      = "09:00"   # ET
+SIGNAL_SESSION_END = "13:30"   # ET  (named to avoid shadowing strategy_smt.SESSION_END)
 
 # ── Trade configuration ───────────────────────────────────────────────────────
 # 2-tick adverse fill; 1 tick = 0.25 MNQ points
@@ -101,9 +97,25 @@ _day_pdh: "float | None" = None
 _day_pdl: "float | None" = None
 _pdh_pdl_date = None  # tracks which date PDH/PDL was last computed
 
-# Derived time objects (set from SESSION_START/END strings in main())
+# Derived time objects (set from SESSION_START/SIGNAL_SESSION_END strings in main())
 _session_start_time = None
 _session_end_time   = None
+
+# ── Stateful scanner state (Phase 5: one ScanState per trading day) ───────────
+_scan_state: "strategy_smt.ScanState | None" = None
+_session_ctx: "strategy_smt.SessionContext | None" = None
+_session_init_date = None   # date of last session init; triggers re-init on day change
+_session_mnq_rows: list = []   # accumulated MNQ bar dicts for the current session
+_session_mes_rows: list = []   # accumulated MES bar dicts for the current session
+# Running session extremes used for smt_cache and run_ses_high/low
+_session_smt_cache: dict = {
+    "mes_h": float("nan"), "mes_l": float("nan"),
+    "mnq_h": float("nan"), "mnq_l": float("nan"),
+    "mes_ch": float("nan"), "mes_cl": float("nan"),
+    "mnq_ch": float("nan"), "mnq_cl": float("nan"),
+}
+_session_run_ses_high: float = -float("inf")
+_session_run_ses_low: float  =  float("inf")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -185,21 +197,12 @@ def _build_1s_buffer_df() -> pd.DataFrame:
     return _empty_bar_df()
 
 
-class _SyntheticBar:
-    """Minimal bar-like object built from a finalized tick accumulator.
-
-    Allows on_mnq_tick to pass a finalized second's data to _process()
-    without modifying _process(), _process_scanning(), or _process_managing().
-    """
-    __slots__ = ("date", "open", "high", "low", "close", "volume")
-
-    def __init__(self, acc: dict) -> None:
-        self.date   = acc["second_ts"]
-        self.open   = acc["open"]
-        self.high   = acc["high"]
-        self.low    = acc["low"]
-        self.close  = acc["close"]
-        self.volume = acc["volume"]
+def _acc_to_bar_row(acc: dict) -> "strategy_smt._BarRow":
+    """Build a _BarRow from a finalized tick accumulator dict."""
+    return strategy_smt._BarRow(
+        acc["open"], acc["high"], acc["low"], acc["close"], acc["volume"],
+        acc["second_ts"],
+    )
 
 
 def _update_tick_accumulator(
@@ -252,8 +255,8 @@ def _append_1s_bar(buf: pd.DataFrame, bar) -> pd.DataFrame:
 
 
 def _bar_timestamp(bar) -> pd.Timestamp:
-    # bar.date from ib_insync is typically a naive datetime; localize if needed
-    ts = pd.Timestamp(bar.date)
+    # IB bars expose .date; strategy_smt._BarRow exposes .name
+    ts = pd.Timestamp(getattr(bar, "date", None) or bar.name)
     if ts.tz is None:
         return ts.tz_localize("America/New_York")
     return ts.tz_convert("America/New_York")
@@ -427,7 +430,7 @@ def on_mnq_tick(ticker) -> None:
     _mnq_tick_bar, finalized = _update_tick_accumulator(_mnq_tick_bar, t.price, t.size, second_ts)
     if finalized is not None:
         _mnq_1s_buf = pd.concat([_mnq_1s_buf, _acc_to_df_row(finalized)])
-        _process(_SyntheticBar(finalized))
+        _process(_acc_to_bar_row(finalized))
 
 
 # ── State machine ─────────────────────────────────────────────────────────────
@@ -444,134 +447,256 @@ def _process(bar) -> None:
 
 
 def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
-    """SCANNING state: check all gates then attempt signal detection on each 1s bar."""
+    """SCANNING state: stateful per-bar signal detection via process_scan_bar."""
     global _state, _position, _last_exit_ts
     global _current_session_date, _current_divergence_level, _divergence_reentry_count
     global _day_pdh, _day_pdl, _pdh_pdl_date
+    global _scan_state, _session_ctx, _session_init_date
+    global _session_mnq_rows, _session_mes_rows
+    global _session_smt_cache, _session_run_ses_high, _session_run_ses_low
 
-    # 1. Session gate: only scan during kill zone
+    # 1. Session gate
     if bar_time < _session_start_time or bar_time > _session_end_time:
         return
 
-    # 1a. Hypothesis gate: do not scan until generate() has run for today's session
+    # 1a. Hypothesis gate
     if _hypothesis_manager is not None and not _hypothesis_generated:
         return
 
-    # 2. Alignment gate: MES 1s buffer must be current (same latest ts as MNQ)
+    # 2. Alignment gate: MES 1s buffer must match MNQ latest timestamp
     if _mes_1s_buf.empty or _mes_1s_buf.index[-1] != _mnq_1s_buf.index[-1]:
         return
 
-    # 3. Build combined 1m + 1s DataFrames for signal detection
-    combined_mnq = pd.concat([_mnq_1m_df, _mnq_1s_buf]).sort_index() if not _mnq_1s_buf.empty else _mnq_1m_df
-    combined_mes = pd.concat([_mes_1m_df, _mes_1s_buf]).sort_index() if not _mes_1s_buf.empty else _mes_1m_df
-
-    # 4. Slice to today's session window
     today = bar_ts.date()
-    session_mask = (
-        (combined_mnq.index.date == today)
-        & (combined_mnq.index.time >= _session_start_time)
-        & (combined_mnq.index.time <= _session_end_time)
-    )
-    mnq_session = combined_mnq[session_mask]
-    mes_session = combined_mes[
-        (combined_mes.index.date == today)
-        & (combined_mes.index.time >= _session_start_time)
-        & (combined_mes.index.time <= _session_end_time)
-    ]
 
-    # 5. Compute TDO from the full 1m parquet (needs the midnight bar)
+    # 3. Session metadata (computed once; fast on subsequent bars due to caching)
     tdo = compute_tdo(_mnq_1m_df, today)
     if tdo is None:
         return
-
     midnight_open_price = compute_midnight_open(_mnq_1m_df, today) if MIDNIGHT_OPEN_AS_TP else None
     overnight_range = (
         compute_overnight_range(_mnq_1m_df, today)
         if (OVERNIGHT_SWEEP_REQUIRED or OVERNIGHT_RANGE_AS_TP)
         else None
     )
-
-    # Compute PDH/PDL once per session day (Solution F)
     if today != _pdh_pdl_date and _hist_daily_df is not None:
         _day_pdh, _day_pdl = compute_pdh_pdl(_hist_daily_df, today)
         _pdh_pdl_date = today
 
-    # 6. Detect signal
-    signal = screen_session(mnq_session, mes_session, tdo,
-                            midnight_open=midnight_open_price,
-                            overnight_range=overnight_range)
-    if signal is None:
-        return
-
-    # Apply draw-on-liquidity target selection (Solution F)
-    _ep = signal["entry_price"]
-    _sp = signal["stop_price"]
-    _direction = signal["direction"]
-    _ses_high = float(mnq_session["High"].max()) if not mnq_session.empty else 0.0
-    _ses_low  = float(mnq_session["Low"].min())  if not mnq_session.empty else float("inf")
-    _fvg_high = signal.get("fvg_high")
-    _fvg_low  = signal.get("fvg_low")
-    _ovn_high = overnight_range.get("overnight_high") if overnight_range else None
-    _ovn_low  = overnight_range.get("overnight_low")  if overnight_range else None
-    if _direction == "long":
-        _draws = {
-            "fvg_top":        _fvg_high if _fvg_high and _fvg_high > _ep else None,
-            "tdo":            tdo if tdo and tdo > _ep else None,
-            "midnight_open":  midnight_open_price if midnight_open_price and midnight_open_price > _ep else None,
-            "session_high":   _ses_high if _ses_high > _ep + 1 else None,
-            "overnight_high": _ovn_high if _ovn_high and _ovn_high > _ep else None,
-            "pdh":            _day_pdh if _day_pdh and _day_pdh > _ep else None,
-        }
-    else:
-        _draws = {
-            "fvg_bottom":    _fvg_low if _fvg_low and _fvg_low < _ep else None,
-            "tdo":           tdo if tdo and tdo < _ep else None,
-            "midnight_open": midnight_open_price if midnight_open_price and midnight_open_price < _ep else None,
-            "session_low":   _ses_low if _ses_low < _ep - 1 else None,
-            "overnight_low": _ovn_low if _ovn_low and _ovn_low < _ep else None,
-            "pdl":           _day_pdl if _day_pdl and _day_pdl < _ep else None,
-        }
-    _tp_name, _selected_tp, _sec_tp_name, _sec_tp = select_draw_on_liquidity(
-        _direction, _ep, _sp, _draws, MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
-    )
-    if _selected_tp is None:
-        return  # no viable draw — skip this signal
-    signal["take_profit"]  = _selected_tp
-    signal["tp_name"]      = _tp_name
-
-    # Annotate signal with hypothesis alignment
-    if _hypothesis_manager is not None and _hypothesis_manager.direction_bias is not None:
-        signal["matches_hypothesis"] = (
-            signal.get("direction") == _hypothesis_manager.direction_bias
+    # 4. Session state init: reset ScanState and SessionContext on new trading day.
+    # Pre-loads historical 1m session bars to compute running extremes (no state replay;
+    # any pre-startup signals are filtered by _startup_ts guard downstream).
+    _session_just_inited = False
+    if today != _session_init_date:
+        _session_init_date = today
+        _scan_state = strategy_smt.ScanState()
+        _hyp_dir = _hypothesis_manager.direction_bias if _hypothesis_manager else None
+        _hyp_ctx = (
+            _hypothesis_manager.context_dict
+            if _hypothesis_manager and hasattr(_hypothesis_manager, "context_dict")
+            else None
         )
-    else:
-        signal["matches_hypothesis"] = None
+        _session_ctx = strategy_smt.SessionContext(
+            day=today, tdo=tdo,
+            midnight_open=midnight_open_price,
+            overnight=overnight_range or {},
+            pdh=_day_pdh, pdl=_day_pdl,
+            hyp_ctx=_hyp_ctx, hyp_dir=_hyp_dir,
+            bar_seconds=1.0,
+        )
+        _session_mnq_rows = []
+        _session_mes_rows = []
+        _session_smt_cache = {
+            "mes_h": float("nan"), "mes_l": float("nan"),
+            "mnq_h": float("nan"), "mnq_l": float("nan"),
+            "mes_ch": float("nan"), "mes_cl": float("nan"),
+            "mnq_ch": float("nan"), "mnq_cl": float("nan"),
+        }
+        _session_run_ses_high = -float("inf")
+        _session_run_ses_low  =  float("inf")
+        # Pre-load today's completed 1m session bars to populate running extremes.
+        if _mnq_1m_df is not None and not _mnq_1m_df.empty:
+            _hist_mask = (
+                (_mnq_1m_df.index.date == today)
+                & (_mnq_1m_df.index.time >= _session_start_time)
+            )
+            for _ts_h, _row_h in _mnq_1m_df[_hist_mask].iterrows():
+                _session_mnq_rows.append({
+                    "Open": float(_row_h["Open"]), "High": float(_row_h["High"]),
+                    "Low": float(_row_h["Low"]), "Close": float(_row_h["Close"]),
+                    "Volume": float(_row_h.get("Volume", 0.0)),
+                })
+                _v = float(_row_h["High"])
+                _session_smt_cache["mnq_h"] = (
+                    _v if _math.isnan(_session_smt_cache["mnq_h"])
+                    else max(_session_smt_cache["mnq_h"], _v)
+                )
+                _session_run_ses_high = max(_session_run_ses_high, _v)
+                _v = float(_row_h["Low"])
+                _session_smt_cache["mnq_l"] = (
+                    _v if _math.isnan(_session_smt_cache["mnq_l"])
+                    else min(_session_smt_cache["mnq_l"], _v)
+                )
+                _session_run_ses_low = min(_session_run_ses_low, _v)
+                _v = float(_row_h["Close"])
+                _session_smt_cache["mnq_ch"] = (
+                    _v if _math.isnan(_session_smt_cache["mnq_ch"])
+                    else max(_session_smt_cache["mnq_ch"], _v)
+                )
+                _session_smt_cache["mnq_cl"] = (
+                    _v if _math.isnan(_session_smt_cache["mnq_cl"])
+                    else min(_session_smt_cache["mnq_cl"], _v)
+                )
+        if _mes_1m_df is not None and not _mes_1m_df.empty:
+            _mes_hist_mask = (
+                (_mes_1m_df.index.date == today)
+                & (_mes_1m_df.index.time >= _session_start_time)
+            )
+            for _ts_h, _row_h in _mes_1m_df[_mes_hist_mask].iterrows():
+                _session_mes_rows.append({
+                    "Open": float(_row_h["Open"]), "High": float(_row_h["High"]),
+                    "Low": float(_row_h["Low"]), "Close": float(_row_h["Close"]),
+                    "Volume": float(_row_h.get("Volume", 0.0)),
+                })
+                _v = float(_row_h["High"])
+                _session_smt_cache["mes_h"] = (
+                    _v if _math.isnan(_session_smt_cache["mes_h"])
+                    else max(_session_smt_cache["mes_h"], _v)
+                )
+                _v = float(_row_h["Low"])
+                _session_smt_cache["mes_l"] = (
+                    _v if _math.isnan(_session_smt_cache["mes_l"])
+                    else min(_session_smt_cache["mes_l"], _v)
+                )
+                _v = float(_row_h["Close"])
+                _session_smt_cache["mes_ch"] = (
+                    _v if _math.isnan(_session_smt_cache["mes_ch"])
+                    else max(_session_smt_cache["mes_ch"], _v)
+                )
+                _session_smt_cache["mes_cl"] = (
+                    _v if _math.isnan(_session_smt_cache["mes_cl"])
+                    else min(_session_smt_cache["mes_cl"], _v)
+                )
+        _session_just_inited = True
 
-    # 7. Stale startup guard: skip signals that fired before this process started
+    # 5. Update running extremes from previous bar (before appending current bar).
+    # Skipped on session init: the init block already folded all historical bars into the
+    # cache; re-reading the last row here would double-count its extremes.
+    if not _session_just_inited and _session_mnq_rows:
+        _prev = _session_mnq_rows[-1]
+        _v = float(_prev["High"])
+        _session_smt_cache["mnq_h"] = (
+            _v if _math.isnan(_session_smt_cache["mnq_h"])
+            else max(_session_smt_cache["mnq_h"], _v)
+        )
+        _session_run_ses_high = max(_session_run_ses_high, _v)
+        _v = float(_prev["Low"])
+        _session_smt_cache["mnq_l"] = (
+            _v if _math.isnan(_session_smt_cache["mnq_l"])
+            else min(_session_smt_cache["mnq_l"], _v)
+        )
+        _session_run_ses_low = min(_session_run_ses_low, _v)
+        _v = float(_prev["Close"])
+        _session_smt_cache["mnq_ch"] = (
+            _v if _math.isnan(_session_smt_cache["mnq_ch"])
+            else max(_session_smt_cache["mnq_ch"], _v)
+        )
+        _session_smt_cache["mnq_cl"] = (
+            _v if _math.isnan(_session_smt_cache["mnq_cl"])
+            else min(_session_smt_cache["mnq_cl"], _v)
+        )
+    if not _session_just_inited and _session_mes_rows:
+        _prev_m = _session_mes_rows[-1]
+        _v = float(_prev_m["High"])
+        _session_smt_cache["mes_h"] = (
+            _v if _math.isnan(_session_smt_cache["mes_h"])
+            else max(_session_smt_cache["mes_h"], _v)
+        )
+        _v = float(_prev_m["Low"])
+        _session_smt_cache["mes_l"] = (
+            _v if _math.isnan(_session_smt_cache["mes_l"])
+            else min(_session_smt_cache["mes_l"], _v)
+        )
+        _v = float(_prev_m["Close"])
+        _session_smt_cache["mes_ch"] = (
+            _v if _math.isnan(_session_smt_cache["mes_ch"])
+            else max(_session_smt_cache["mes_ch"], _v)
+        )
+        _session_smt_cache["mes_cl"] = (
+            _v if _math.isnan(_session_smt_cache["mes_cl"])
+            else min(_session_smt_cache["mes_cl"], _v)
+        )
+
+    # 6. Append current MNQ and MES bars to session rows
+    _session_mnq_rows.append({
+        "Open": float(bar.Open), "High": float(bar.High),
+        "Low": float(bar.Low), "Close": float(bar.Close), "Volume": float(bar.Volume),
+    })
+    _mes_cur = _mes_1s_buf.iloc[-1]
+    _session_mes_rows.append({
+        "Open": float(_mes_cur["Open"]), "High": float(_mes_cur["High"]),
+        "Low": float(_mes_cur["Low"]), "Close": float(_mes_cur["Close"]),
+        "Volume": float(_mes_cur.get("Volume", 0.0)),
+    })
+    bar_idx = len(_session_mnq_rows) - 1
+
+    # 7. Build DataFrames from accumulated rows
+    mnq_reset = pd.DataFrame(_session_mnq_rows)
+    mes_reset = pd.DataFrame(_session_mes_rows)
+    _min_n = min(len(mnq_reset), len(mes_reset))
+    mnq_reset = mnq_reset.iloc[:_min_n].reset_index(drop=True)
+    mes_reset  = mes_reset.iloc[:_min_n].reset_index(drop=True)
+
+    # 8. Extract numpy arrays for process_scan_bar
+    _mnq_o = mnq_reset["Open"].values
+    _mnq_h = mnq_reset["High"].values
+    _mnq_l = mnq_reset["Low"].values
+    _mnq_c = mnq_reset["Close"].values
+    _mnq_v = mnq_reset["Volume"].values
+    _mes_h = mes_reset["High"].values
+    _mes_l = mes_reset["Low"].values
+    _mes_c = mes_reset["Close"].values
+
+    _bar_row = strategy_smt._BarRow(
+        float(bar.Open), float(bar.High), float(bar.Low), float(bar.Close),
+        float(bar.Volume), bar_ts,
+    )
+    _min_signal_ts = bar_ts.normalize().replace(
+        hour=_session_start_time.hour, minute=_session_start_time.minute, second=0
+    ) + pd.Timedelta(minutes=MIN_BARS_BEFORE_SIGNAL)
+
+    # 9. Call stateful scanner — O(1) per bar, no rescan from bar 0
+    result = strategy_smt.process_scan_bar(
+        _scan_state, _session_ctx, bar_idx, _bar_row,
+        mnq_reset, mes_reset, _session_smt_cache,
+        _session_run_ses_high, _session_run_ses_low,
+        bar_ts, _min_signal_ts,
+        _mnq_o, _mnq_h, _mnq_l, _mnq_c, _mnq_v,
+        _mes_h, _mes_l, _mes_c,
+    )
+    if result is None or result["type"] != "signal":
+        return
+    signal = result
+
+    # 10. Live-only guards (startup, re-detection, per-divergence reentry)
     if _startup_ts is not None and signal["entry_time"] <= _startup_ts:
         return
-
-    # 8. Re-detection guard: skip signals at or before the last exit timestamp
     if signal["entry_time"] <= _last_exit_ts:
         return
 
-    # 8a. Session date reset: clear divergence tracking when a new trading day starts
     if today != _current_session_date:
         _current_session_date = today
         _current_divergence_level = None
         _divergence_reentry_count = 0
 
-    # 8b. Per-divergence reentry guard: enforce MAX_REENTRY_COUNT on the live path
     defended = signal.get("smt_defended_level")
     if defended != _current_divergence_level:
         _current_divergence_level = defended
         _divergence_reentry_count = 0
-    else:
-        _divergence_reentry_count += 1
-        if MAX_REENTRY_COUNT < 999 and _divergence_reentry_count >= MAX_REENTRY_COUNT:
-            return
+    if MAX_REENTRY_COUNT < 999 and _divergence_reentry_count >= MAX_REENTRY_COUNT:
+        return
 
-    # 9. Open position with slippage-adjusted assumed fill
+    # 11. Open position with slippage-adjusted assumed fill
     assumed_entry = _apply_slippage(signal)
     _position = {
         **signal,
@@ -579,12 +704,11 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         "contracts": 1,
         "instrument": "MNQ1!",
         "entry_time": str(signal["entry_time"]),
-        "secondary_target":      _sec_tp,
-        "secondary_target_name": _sec_tp_name,
-        "tp_breached":           False,
+        "tp_breached": False,
     }
     POSITION_FILE.write_text(json.dumps(_position, indent=2))
     print(_format_signal_line(bar_ts, signal, assumed_entry), flush=True)
+    _divergence_reentry_count += 1
     _state = "MANAGING"
 
 
@@ -595,28 +719,22 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     """
     global _state, _position, _last_exit_ts
 
-    bar_series = pd.Series(
-        {
-            "Open":   float(bar.open),
-            "High":   float(bar.high),
-            "Low":    float(bar.low),
-            "Close":  float(bar.close),
-            "Volume": float(bar.volume),
-        },
-        name=bar_ts,
+    bar_row = strategy_smt._BarRow(
+        float(bar.Open), float(bar.High), float(bar.Low), float(bar.Close),
+        float(bar.Volume), bar_ts,
     )
 
     old_stop        = _position.get("stop_price")
     old_tp_breached = _position.get("tp_breached", False)
     old_breakeven   = _position.get("breakeven_active", False)
 
-    result = manage_position(_position, bar_series)
+    result = manage_position(_position, bar_row)
 
     if result == "hold":
         if bar_time >= _session_end_time:
             # Force close at session end — no TP/stop triggered
             result = "exit_session_end"
-            exit_price = float(bar.close)
+            exit_price = float(bar.Close)
         else:
             # Log any stop mutations before persisting to disk.
             new_stop = _position.get("stop_price")
@@ -637,7 +755,7 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     elif result == "exit_stop":
         exit_price = _position["stop_price"]
     elif result in ("exit_market", "exit_invalidation_mss", "exit_invalidation_cisd", "exit_invalidation_smt"):
-        exit_price = float(bar.close)
+        exit_price = float(bar.Close)
     elif result != "exit_session_end":
         # Unknown exit type — log and bail rather than corrupt state with unbound exit_price
         return
@@ -652,6 +770,18 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
 
     _last_exit_ts = bar_ts
     POSITION_FILE.unlink(missing_ok=True)
+    # Reset scanner atomically so no stale pending fields survive into the next scan.
+    # prior_trade_bars_held is preserved across the reset (computed from entry time).
+    if _scan_state is not None:
+        try:
+            _entry_ts = pd.Timestamp(_position["entry_time"])
+            if _entry_ts.tz is None:
+                _entry_ts = _entry_ts.tz_localize("America/New_York")
+            _bars_held = max(0, int((bar_ts - _entry_ts).total_seconds()))
+        except Exception:
+            _bars_held = 0
+        _scan_state.reset()
+        _scan_state.prior_trade_bars_held = _bars_held
     _position = None
     _state = "SCANNING"
 
@@ -696,7 +826,7 @@ def main() -> None:
 
     # Parse session window into time objects used by callbacks
     _session_start_time = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
-    _session_end_time   = pd.Timestamp(f"2000-01-01 {SESSION_END}").time()
+    _session_end_time   = pd.Timestamp(f"2000-01-01 {SIGNAL_SESSION_END}").time()
 
     _mnq_1s_buf = _empty_bar_df()
     _mes_1s_buf = _empty_bar_df()
