@@ -953,6 +953,8 @@ def _write_trades_tsv(trades: list[dict]) -> None:
         "partial_adjustments",
         # Position linkage
         "position_id",
+        # DOL target diagnostic (Solution F)
+        "tp_name", "secondary_target_name",
     ]
     with open("trades.tsv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t",
