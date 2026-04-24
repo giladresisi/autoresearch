@@ -161,13 +161,15 @@ def _format_signal_line(ts: pd.Timestamp, signal: dict, assumed_entry: float) ->
     rr = dist / stop_dist if stop_dist > 0 else 0.0
     slip_label = f"+{ENTRY_SLIPPAGE_TICKS}t slip" if signal["direction"] == "long" else f"-{ENTRY_SLIPPAGE_TICKS}t slip"
     entry_time = pd.Timestamp(signal["entry_time"])
+    signal_type = signal.get("signal_type", "UNKNOWN")
     return (
         f"[{ts.strftime('%H:%M:%S')}] SIGNAL    {signal['direction']:<5} | "
         f"entry_time {entry_time.strftime('%H:%M:%S')} | "
         f"entry ~{assumed_entry:.2f} ({slip_label}) | "
         f"stop {signal['stop_price']:.2f} | "
         f"TP {signal['take_profit']:.2f} | "
-        f"RR ~{rr:.1f}x"
+        f"RR ~{rr:.1f}x | "
+        f"type {signal_type}"
     )
 
 
@@ -198,6 +200,58 @@ def _format_stop_moved_line(ts: pd.Timestamp, reason: str, new_stop: float, old_
     return (
         f"[{ts.strftime('%H:%M:%S')}] STOP_MOVE {reason:<10} | "
         f"stop {old_stop:.2f} {direction} {new_stop:.2f}"
+    )
+
+
+def _format_limit_placed_line(ts: pd.Timestamp, signal: dict) -> str:
+    """Human-readable LIMIT_PLACED log line."""
+    dist = abs(signal["entry_price"] - signal["take_profit"])
+    stop_dist = abs(signal["entry_price"] - signal["stop_price"])
+    rr = dist / stop_dist if stop_dist > 0 else 0.0
+    return (
+        f"[{ts.strftime('%H:%M:%S')}] LIMIT_PLACED  {signal['direction']:<5} | "
+        f"entry {signal['entry_price']:.2f} | "
+        f"stop {signal['stop_price']:.2f} | "
+        f"TP {signal['take_profit']:.2f} | "
+        f"RR ~{rr:.1f}x"
+    )
+
+
+def _format_limit_moved_line(ts: pd.Timestamp, old: dict, new: dict) -> str:
+    """Human-readable LIMIT_MOVED log line."""
+    return (
+        f"[{ts.strftime('%H:%M:%S')}] LIMIT_MOVED   {new['direction']:<5} | "
+        f"entry {old['entry_price']:.2f} -> {new['entry_price']:.2f} | "
+        f"stop {old['stop_price']:.2f} -> {new['stop_price']:.2f} | "
+        f"TP {old['take_profit']:.2f} -> {new['take_profit']:.2f}"
+    )
+
+
+def _format_limit_cancelled_line(ts: pd.Timestamp, signal: dict, reason: str) -> str:
+    """Human-readable LIMIT_CANCELLED log line."""
+    return (
+        f"[{ts.strftime('%H:%M:%S')}] LIMIT_CANCELLED {signal['direction']:<5} | "
+        f"entry {signal['entry_price']:.2f} | "
+        f"reason {reason}"
+    )
+
+
+def _format_limit_expired_line(ts: pd.Timestamp, signal: dict, missed_move: float) -> str:
+    """Human-readable LIMIT_EXPIRED log line."""
+    return (
+        f"[{ts.strftime('%H:%M:%S')}] LIMIT_EXPIRED  {signal['direction']:<5} | "
+        f"entry {signal['entry_price']:.2f} | "
+        f"missed {missed_move:.1f} pts"
+    )
+
+
+def _format_limit_filled_line(ts: pd.Timestamp, evt: dict) -> str:
+    """Human-readable LIMIT_FILLED log line."""
+    return (
+        f"[{ts.strftime('%H:%M:%S')}] LIMIT_FILLED  {evt['direction']:<5} | "
+        f"filled {evt['filled_price']:.2f} | "
+        f"orig {evt['original_limit_price']:.2f} | "
+        f"queue_s {evt['time_in_queue_secs']:.0f}"
     )
 
 
@@ -455,6 +509,71 @@ def _process(bar) -> None:
         _process_managing(bar, bar_ts, bar_time)
 
 
+def _dispatch_event(bar_ts: pd.Timestamp, evt: dict) -> None:
+    """Print human-readable log line + JSON payload for a single lifecycle event."""
+    evt_type = evt.get("type")
+    if evt_type == "limit_placed":
+        print(_format_limit_placed_line(bar_ts, evt["signal"]), flush=True)
+        print(json.dumps({
+            "signal_type":          "LIMIT_PLACED",
+            "direction":            evt["signal"]["direction"],
+            "entry_price":          round(float(evt["signal"]["entry_price"]), 4),
+            "stop_price":           round(float(evt["signal"]["stop_price"]), 4),
+            "take_profit":          round(float(evt["signal"]["take_profit"]), 4),
+            "tp_name":              evt["signal"].get("tp_name"),
+            "confidence":           evt["signal"].get("confidence"),
+            "divergence_bar_time":  evt["signal"].get("divergence_bar_time"),
+        }), flush=True)
+    elif evt_type == "limit_moved":
+        print(_format_limit_moved_line(bar_ts, evt["old_signal"], evt["new_signal"]), flush=True)
+        print(json.dumps({
+            "signal_type":          "MOVE_LIMIT",
+            "direction":            evt["new_signal"]["direction"],
+            "old_entry_price":      round(float(evt["old_signal"]["entry_price"]), 4),
+            "new_entry_price":      round(float(evt["new_signal"]["entry_price"]), 4),
+            "old_stop_price":       round(float(evt["old_signal"]["stop_price"]), 4),
+            "new_stop_price":       round(float(evt["new_signal"]["stop_price"]), 4),
+            "old_take_profit":      round(float(evt["old_signal"]["take_profit"]), 4),
+            "new_take_profit":      round(float(evt["new_signal"]["take_profit"]), 4),
+            "reason":               "anchor_shift",
+        }), flush=True)
+    elif evt_type == "limit_cancelled":
+        print(_format_limit_cancelled_line(bar_ts, evt["signal"], evt.get("reason", "unknown")), flush=True)
+        print(json.dumps({
+            "signal_type":  "CANCEL_LIMIT",
+            "direction":    evt["signal"]["direction"],
+            "entry_price":  round(float(evt["signal"]["entry_price"]), 4),
+            "reason":       evt.get("reason", "unknown"),
+        }), flush=True)
+    elif evt_type in ("limit_expired", "expired"):
+        sig = evt.get("signal", {})
+        missed = float(evt.get("limit_missed_move", 0.0))
+        print(_format_limit_expired_line(bar_ts, sig, missed), flush=True)
+        print(json.dumps({
+            "signal_type":      "LIMIT_EXPIRED",
+            "direction":        sig.get("direction"),
+            "entry_price":      round(float(sig.get("entry_price", 0)), 4),
+            "missed_move_pts":  round(missed, 4),
+        }), flush=True)
+    elif evt_type == "limit_filled":
+        print(_format_limit_filled_line(bar_ts, evt), flush=True)
+        print(json.dumps({
+            "signal_type":          "LIMIT_FILLED",
+            "direction":            evt["direction"],
+            "filled_price":         round(float(evt["filled_price"]), 4),
+            "original_limit_price": round(float(evt["original_limit_price"]), 4),
+            "time_in_queue_secs":   round(float(evt["time_in_queue_secs"]), 1),
+        }), flush=True)
+    elif evt_type == "lifecycle_batch":
+        for sub in evt.get("events", []):
+            _dispatch_event(bar_ts, sub)
+    elif evt_type == "signal":
+        pass  # signal events handled by existing downstream code after _dispatch_event returns
+    else:
+        # Unknown event type: log warning without crashing
+        print(f"[{bar_ts.strftime('%H:%M:%S')}] WARNING unknown event type: {evt_type}", flush=True)
+
+
 def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     """SCANNING state: stateful per-bar signal detection via process_scan_bar."""
     global _state, _position, _last_exit_ts
@@ -703,7 +822,20 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         _mnq_o, _mnq_h, _mnq_l, _mnq_c, _mnq_v,
         _mes_h, _mes_l, _mes_c,
     )
-    if result is None or result["type"] != "signal":
+    if result is None:
+        return
+    evt_type = result["type"]
+    if evt_type == "lifecycle_batch":
+        for _sub in result["events"]:
+            _dispatch_event(bar_ts, _sub)
+        # Extract signal from batch for downstream handling
+        _signal_evts = [e for e in result["events"] if e["type"] == "signal"]
+        if not _signal_evts:
+            return
+        result = _signal_evts[0]
+        evt_type = "signal"
+    if evt_type != "signal":
+        _dispatch_event(bar_ts, result)
         return
     signal = result
 
@@ -726,7 +858,8 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         return
 
     # 10a. Human-mode confidence filter + ENTRY_LIMIT/ENTRY_MARKET classification.
-    # Gated on HUMAN_EXECUTION_MODE so algo behaviour is unchanged at default.
+    # HUMAN_EXECUTION_MODE gate removed — main() always sets it True; keep guard for
+    # safety in case this code path is reached from a non-main() caller.
     if strategy_smt.HUMAN_EXECUTION_MODE:
         conf = signal.get("confidence")
         if conf is not None and conf < strategy_smt.MIN_CONFIDENCE_THRESHOLD:
@@ -737,9 +870,10 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
                 flush=True,
             )
             return
-        # Classify: distance from current bar close to the signal's committed entry_price.
-        current_price = float(bar.Close)
-        if abs(current_price - signal["entry_price"]) >= strategy_smt.ENTRY_LIMIT_CLASSIFICATION_PTS:
+        # Classify deterministically: ENTRY_LIMIT if the algo went through a limit stage
+        # (limit_fill_bars is set by WAITING_FOR_LIMIT_FILL and same-bar limit paths);
+        # ENTRY_MARKET otherwise.
+        if signal.get("limit_fill_bars") is not None:
             signal["signal_type"] = "ENTRY_LIMIT"
         else:
             signal["signal_type"] = "ENTRY_MARKET"
@@ -973,7 +1107,11 @@ def main() -> None:
             _ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
             _setup_ib_subscriptions(_ib, mnq_contract, mes_contract)
             util.run()
-            break  # clean exit — do not retry
+            # util.run() exits normally on unexpected IB disconnects (e.g. error 1100/10141);
+            # only treat it as a clean exit if the connection is still live.
+            if _ib.isConnected():
+                break
+            raise ConnectionError("IB disconnected unexpectedly")
         except Exception as exc:
             print(
                 f"[{attempt + 1}/{MAX_RETRIES}] IB connection error: {exc}. "

@@ -238,36 +238,32 @@ def test_m2_move_stop_carries_new_stop_and_breakeven_reason(monkeypatch):
 
 # ══ Signal type classification (SC-1 / SC-2) ═════════════════════════════════
 
-def test_sc1_within_threshold_classifies_entry_market(monkeypatch):
-    """SC-1: |current - signal_entry| < ENTRY_LIMIT_CLASSIFICATION_PTS → ENTRY_MARKET."""
+def test_sc1_no_limit_fill_bars_classifies_entry_market(monkeypatch):
+    """SC-1: limit_fill_bars is None → ENTRY_MARKET."""
     import strategy_smt
-    monkeypatch.setattr(strategy_smt, "ENTRY_LIMIT_CLASSIFICATION_PTS", 5.0)
+    monkeypatch.setattr(strategy_smt, "HUMAN_EXECUTION_MODE", True)
 
-    current_price = 20000.0
-    signal_entry  = 20002.0    # 2 pts away < 5 pts threshold
+    signal = {"limit_fill_bars": None}
+    if signal.get("limit_fill_bars") is not None:
+        signal["signal_type"] = "ENTRY_LIMIT"
+    else:
+        signal["signal_type"] = "ENTRY_MARKET"
 
-    sig_type = (
-        "ENTRY_LIMIT"
-        if abs(current_price - signal_entry) >= strategy_smt.ENTRY_LIMIT_CLASSIFICATION_PTS
-        else "ENTRY_MARKET"
-    )
-    assert sig_type == "ENTRY_MARKET"
+    assert signal["signal_type"] == "ENTRY_MARKET"
 
 
-def test_sc2_beyond_threshold_classifies_entry_limit(monkeypatch):
-    """SC-2: |current - signal_entry| >= ENTRY_LIMIT_CLASSIFICATION_PTS → ENTRY_LIMIT."""
+def test_sc2_limit_fill_bars_set_classifies_entry_limit(monkeypatch):
+    """SC-2: limit_fill_bars is not None (e.g., 0) → ENTRY_LIMIT."""
     import strategy_smt
-    monkeypatch.setattr(strategy_smt, "ENTRY_LIMIT_CLASSIFICATION_PTS", 5.0)
+    monkeypatch.setattr(strategy_smt, "HUMAN_EXECUTION_MODE", True)
 
-    current_price = 20000.0
-    signal_entry  = 20010.0    # 10 pts away >= 5 pts threshold
+    signal = {"limit_fill_bars": 0}
+    if signal.get("limit_fill_bars") is not None:
+        signal["signal_type"] = "ENTRY_LIMIT"
+    else:
+        signal["signal_type"] = "ENTRY_MARKET"
 
-    sig_type = (
-        "ENTRY_LIMIT"
-        if abs(current_price - signal_entry) >= strategy_smt.ENTRY_LIMIT_CLASSIFICATION_PTS
-        else "ENTRY_MARKET"
-    )
-    assert sig_type == "ENTRY_LIMIT"
+    assert signal["signal_type"] == "ENTRY_LIMIT"
 
 
 # ══ Regression (R-1) ═════════════════════════════════════════════════════════

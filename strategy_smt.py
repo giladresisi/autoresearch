@@ -195,8 +195,8 @@ OVERNIGHT_SWEEP_REQUIRED: bool = False
 OVERNIGHT_RANGE_AS_TP: bool = False
 
 # ── Solution F: Draw-on-Liquidity target selection ────────────────────────────
-MIN_RR_FOR_TARGET: float = 0.0   # reward >= min_rr * |entry - stop|; optimizer: [1.0, 1.5, 2.0]
-MIN_TARGET_PTS:    float = 0.0   # absolute min target distance in MNQ pts; optimizer: [10, 15, 20, 25]
+MIN_RR_FOR_TARGET: float = 1.5   # reward >= min_rr * |entry - stop|; optimizer: [1.0, 1.5, 2.0]
+MIN_TARGET_PTS:    float = 15.0  # absolute min target distance in MNQ pts; optimizer: [10, 15, 20, 25]
 
 # Silver Bullet window: restrict new divergence detection to 09:50–10:10 ET.
 # Re-entries allowed outside window if original divergence was inside it.
@@ -361,6 +361,14 @@ LIMIT_EXPIRY_SECONDS: "float | None" = 120.0
 # Optimizer search space: [None, 0.40, 0.50, 0.60, 0.70]
 LIMIT_RATIO_THRESHOLD: "float | None" = 0.70
 
+# ── Lifecycle event types returned by process_scan_bar ────────────────────────
+EVT_SIGNAL          = "signal"
+EVT_LIMIT_PLACED    = "limit_placed"
+EVT_LIMIT_MOVED     = "limit_moved"
+EVT_LIMIT_CANCELLED = "limit_cancelled"
+EVT_LIMIT_EXPIRED   = "limit_expired"
+EVT_LIMIT_FILLED    = "limit_filled"
+
 # Confirmation window size in bars.
 # 1 = check every bar (default, current behaviour).
 # N > 1 = build a synthetic N-bar candle (open of first bar, max high, min low, close of last)
@@ -379,11 +387,15 @@ HUMAN_EXECUTION_MODE: bool = False
 HUMAN_ENTRY_SLIPPAGE_PTS: float = 0.0
 # Signals with confidence below this threshold are suppressed (logged) in human mode.
 MIN_CONFIDENCE_THRESHOLD: float = 0.50
-# Classify signal as ENTRY_LIMIT when |current_price - signal_entry| >= this value.
-# Independent of LIMIT_ENTRY_BUFFER_PTS (which governs algo-side limit fill simulation).
+# DEPRECATED: no longer used by the classifier (signal_smt.py now derives signal_type
+# from limit_fill_bars). Retained for optimizer compatibility only.
 ENTRY_LIMIT_CLASSIFICATION_PTS: float = 5.0
 # Minimum bar gap between consecutive MOVE_STOP signals; 0 = no rate limiting.
 MOVE_STOP_MIN_GAP_BARS: int = 0
+# Minimum bar gap between consecutive MOVE_LIMIT signals; 0 = no rate limiting.
+# Distinct from MOVE_STOP_MIN_GAP_BARS — trader's tolerance for limit revisions
+# is usually lower than for stop revisions.
+MOVE_LIMIT_MIN_GAP_BARS: int = 0
 # Opt-in deception-exit flag — active regardless of HUMAN_EXECUTION_MODE.
 # When True, an opposing-direction displacement candle after entry triggers a market exit.
 DECEPTION_OPPOSING_DISP_EXIT: bool = False
@@ -491,6 +503,7 @@ class ScanState:
         "limit_bars_elapsed", "limit_max_bars", "limit_missed_move",
         "reentry_count", "prior_trade_bars_held",
         "htf_state", "pending_htf_confirmed_tfs",
+        "last_limit_move_bar_idx", "last_limit_signal_snapshot",
     )
 
     def __init__(self) -> None:
@@ -525,6 +538,8 @@ class ScanState:
         # HTF state initialised to empty; caller populates when HTF_VISIBILITY_REQUIRED.
         self.htf_state: dict                = {}
         self.pending_htf_confirmed_tfs: "list | None" = None
+        self.last_limit_move_bar_idx: int   = -999
+        self.last_limit_signal_snapshot: "dict | None" = None
 
 
 class SessionContext:
@@ -1393,8 +1408,13 @@ def screen_session(
             _mnq_v if _mnq_v is not None else _mnq_c,  # vols fallback
             _mes_h, _mes_l, _mes_c,
         )
-        if result is not None and result["type"] == "signal":
-            return result
+        if result is not None:
+            if result["type"] == "lifecycle_batch":
+                _sig_evts = [e for e in result["events"] if e["type"] == "signal"]
+                if _sig_evts:
+                    return _sig_evts[0]
+            elif result["type"] == "signal":
+                return result
 
     return None
 
@@ -1406,12 +1426,13 @@ def select_draw_on_liquidity(
     draws: dict,
     min_rr: float = 1.5,
     min_pts: float = 15.0,
-) -> "tuple[str | None, float | None, str | None, float | None]":
-    """Return (primary_name, primary_price, secondary_name, secondary_price).
+) -> "tuple[str | None, float | None, str | None, float | None, list]":
+    """Return (primary_name, primary_price, secondary_name, secondary_price, valid_draws).
 
     Primary = nearest draw satisfying both RR and pts constraints.
     Secondary = next farther draw at least 1.5x primary distance away.
-    Returns (None, None, None, None) if no valid draw exists.
+    valid_draws = full sorted list of (name, price, dist) tuples that passed the filter.
+    Returns (None, None, None, None, []) if no valid draw exists.
     """
     stop_dist = abs(entry_price - stop_price)
     min_dist  = max(min_pts, min_rr * stop_dist)
@@ -1423,11 +1444,11 @@ def select_draw_on_liquidity(
         if dist >= min_dist:
             valid.append((name, price, dist))
     if not valid:
-        return None, None, None, None
+        return None, None, None, None, []
     valid.sort(key=lambda x: x[2])
     pri = valid[0]
     sec = next((v for v in valid[1:] if v[2] >= pri[2] * 1.5), None)
-    return pri[0], pri[1], (sec[0] if sec else None), (sec[1] if sec else None)
+    return pri[0], pri[1], (sec[0] if sec else None), (sec[1] if sec else None), valid
 
 
 def compute_confidence(
@@ -1632,8 +1653,8 @@ def _build_draws_and_select(
     overnight: dict, pdh: "float | None", pdl: "float | None",
     eqh_levels: "list | None" = None,
     eql_levels: "list | None" = None,
-) -> "tuple[str | None, float | None, str | None, float | None]":
-    """Assemble draw-on-liquidity targets and delegate to select_draw_on_liquidity."""
+) -> "tuple[str | None, float | None, str | None, float | None, list]":
+    """Assemble draw-on-liquidity targets and delegate to select_draw_on_liquidity. Returns 5-tuple including full valid_draws list."""
     if direction == "long":
         draws = {
             "fvg_top":        fvg_zone["fvg_high"] if fvg_zone else None,
@@ -1667,6 +1688,68 @@ def _build_draws_and_select(
             )
             draws["eql"] = nearest["price"] if nearest else None
     return select_draw_on_liquidity(direction, ep, sp, draws, MIN_RR_FOR_TARGET, MIN_TARGET_PTS)
+
+
+def _build_preliminary_limit_signal(
+    state: "ScanState",
+    context: "SessionContext",
+    ts: "pd.Timestamp",
+    run_ses_high: float,
+    run_ses_low: float,
+) -> "dict | None":
+    """Build a preliminary limit-order signal at divergence time for LIMIT_PLACED emission.
+
+    Uses the divergence bar's wick extremes for stop rather than a confirmation bar.
+    Does not run TDO_VALIDITY_CHECK or displacement guards (confirmation-side only).
+    Returns None if TP selection fails — divergence state is preserved by caller.
+    """
+    if LIMIT_ENTRY_BUFFER_PTS is None or context.tdo is None:
+        return None
+    direction = state.pending_direction
+    ac = state.anchor_close
+    entry_price = (
+        ac - LIMIT_ENTRY_BUFFER_PTS if direction == "short"
+        else ac + LIMIT_ENTRY_BUFFER_PTS
+    )
+    if STRUCTURAL_STOP_MODE:
+        if direction == "short":
+            stop_price = state.pending_div_bar_high + STRUCTURAL_STOP_BUFFER_PTS
+        else:
+            stop_price = state.pending_div_bar_low - STRUCTURAL_STOP_BUFFER_PTS
+    else:
+        dist = abs(entry_price - context.tdo)
+        stop_ratio = SHORT_STOP_RATIO if direction == "short" else LONG_STOP_RATIO
+        stop_price = (
+            entry_price + stop_ratio * dist if direction == "short"
+            else entry_price - stop_ratio * dist
+        )
+    # Reject inverted stops
+    if direction == "long" and stop_price >= entry_price:
+        return None
+    if direction == "short" and stop_price <= entry_price:
+        return None
+    tp_name, day_tp, sec_tp_name, sec_tp, _ = _build_draws_and_select(
+        direction, entry_price, stop_price, state.pending_fvg_zone,
+        context.tdo, context.midnight_open, run_ses_high, run_ses_low,
+        context.overnight, context.pdh, context.pdl,
+        eqh_levels=context.eqh_levels, eql_levels=context.eql_levels,
+    )
+    if day_tp is None:
+        return None
+    return {
+        "direction":              direction,
+        "entry_price":            round(entry_price, 4),
+        "stop_price":             round(stop_price, 4),
+        "take_profit":            day_tp,
+        "tp_name":                tp_name,
+        "secondary_target":       sec_tp,
+        "secondary_target_name":  sec_tp_name,
+        "tdo":                    context.tdo,
+        "divergence_bar":         state.divergence_bar_idx,
+        "divergence_bar_time":    str(ts),
+        "signal_type":            "ENTRY_LIMIT",
+        "anchor_close_price":     ac,
+    }
 
 
 def process_scan_bar(
@@ -1773,16 +1856,26 @@ def process_scan_bar(
             state.reentry_count += 1
             signal_out["reentry_sequence"]      = state.reentry_count
             signal_out["prior_trade_bars_held"] = state.prior_trade_bars_held
+            state.last_limit_signal_snapshot = None
             state.pending_limit_signal = None
             state.scan_state = "IDLE"
-            return {"type": "signal", **signal_out}
+            _filled_evt = {
+                "type":                  EVT_LIMIT_FILLED,
+                "direction":             pls["direction"],
+                "filled_price":          pls["entry_price"],
+                "original_limit_price":  pls.get("anchor_close_price", pls["entry_price"]),
+                "time_in_queue_secs":    state.limit_bars_elapsed * context.bar_seconds,
+                "divergence_bar_time":   pls.get("divergence_bar_time"),
+            }
+            return {"type": "lifecycle_batch", "events": [_filled_evt, {"type": "signal", **signal_out}]}
 
         if state.limit_bars_elapsed >= state.limit_max_bars:
             expired_out = {
-                "type": "expired",
-                "signal": dict(pls),
+                "type":              EVT_LIMIT_EXPIRED,
+                "signal":            dict(pls),
                 "limit_missed_move": state.limit_missed_move,
             }
+            state.last_limit_signal_snapshot = None
             state.pending_limit_signal = None
             state.anchor_close = None
             state.scan_state = "IDLE"
@@ -1794,10 +1887,14 @@ def process_scan_bar(
     if state.scan_state in ("WAITING_FOR_ENTRY", "REENTRY_ELIGIBLE"):
         if state.scan_state == "REENTRY_ELIGIBLE":
             if MAX_REENTRY_COUNT < 999 and state.reentry_count >= MAX_REENTRY_COUNT:
+                _snap = state.last_limit_signal_snapshot
                 state.scan_state = "IDLE"
                 state.pending_direction = None
                 state.anchor_close = None
                 state.conf_window_start = -1
+                state.last_limit_signal_snapshot = None
+                if _snap is not None:
+                    return {"type": EVT_LIMIT_CANCELLED, "signal": _snap, "reason": "max_reentry"}
                 return None
 
         if _in_blackout(ts.time()):
@@ -1838,6 +1935,7 @@ def process_scan_bar(
                         if _new_ac is not None:
                             fvg_lookback = max(3, round(1200 / context.bar_seconds))
                             _new_fvg = detect_fvg(mnq_reset, bar_idx, _nd_dir, lookback=fvg_lookback)
+                            _old_direction = state.pending_direction
                             state.pending_direction           = _nd_dir
                             state.anchor_close                = _new_ac
                             state.pending_smt_sweep           = _nd_sweep
@@ -1857,6 +1955,42 @@ def process_scan_bar(
                             state.pending_fvg_zone            = _new_fvg
                             state.pending_fvg_detected        = _new_fvg is not None
                             state.conf_window_start           = bar_idx + 1
+                            _old_snap = state.last_limit_signal_snapshot
+                            _new_prelim = _build_preliminary_limit_signal(
+                                state, context, ts, run_ses_high, run_ses_low
+                            )
+                            if _new_prelim is not None:
+                                _rate_ok = (
+                                    MOVE_LIMIT_MIN_GAP_BARS == 0
+                                    or bar_idx - state.last_limit_move_bar_idx >= MOVE_LIMIT_MIN_GAP_BARS
+                                )
+                                if _rate_ok:
+                                    state.last_limit_move_bar_idx = bar_idx
+                                    state.last_limit_signal_snapshot = dict(_new_prelim)
+                                    if _nd_dir == _old_direction and _old_snap is not None:
+                                        _prices_changed = (
+                                            _new_prelim["entry_price"] != _old_snap.get("entry_price")
+                                            or _new_prelim["stop_price"] != _old_snap.get("stop_price")
+                                            or _new_prelim["take_profit"] != _old_snap.get("take_profit")
+                                        )
+                                        if _prices_changed:
+                                            return {
+                                                "type": EVT_LIMIT_MOVED,
+                                                "old_signal": _old_snap,
+                                                "new_signal": dict(_new_prelim),
+                                            }
+                                    elif _nd_dir != _old_direction and _old_snap is not None:
+                                        return {
+                                            "type": "lifecycle_batch",
+                                            "events": [
+                                                {"type": EVT_LIMIT_CANCELLED, "signal": _old_snap, "reason": "direction_replaced"},
+                                                {"type": EVT_LIMIT_PLACED, "signal": dict(_new_prelim)},
+                                            ],
+                                        }
+                                    elif _old_snap is None:
+                                        return {"type": EVT_LIMIT_PLACED, "signal": dict(_new_prelim)}
+                                else:
+                                    state.last_limit_signal_snapshot = dict(_new_prelim)
 
             # Solution D: abandon hypothesis if adverse move exceeds threshold
             if HYPOTHESIS_INVALIDATION_PTS < 999:
@@ -1865,9 +1999,13 @@ def process_scan_bar(
                 else:
                     _adverse = state.pending_discovery_price - float(bar["Low"])
                 if _adverse > HYPOTHESIS_INVALIDATION_PTS:
+                    _snap = state.last_limit_signal_snapshot
                     state.scan_state = "IDLE"
                     state.pending_direction = None
                     state.anchor_close = None
+                    state.last_limit_signal_snapshot = None
+                    if _snap is not None:
+                        return {"type": EVT_LIMIT_CANCELLED, "signal": _snap, "reason": "hypothesis_invalidated"}
                     return None
 
         # Build confirmation bar: raw bar or synthetic N-bar candle
@@ -1927,7 +2065,7 @@ def process_scan_bar(
 
         _ep = signal["entry_price"]
         _sp = signal["stop_price"]
-        _tp_name, _day_tp, _sec_tp_name, _sec_tp = _build_draws_and_select(
+        _tp_name, _day_tp, _sec_tp_name, _sec_tp, _valid_draws = _build_draws_and_select(
             state.pending_direction, _ep, _sp, state.pending_fvg_zone,
             context.tdo, context.midnight_open, run_ses_high, run_ses_low,
             context.overnight, context.pdh, context.pdl,
@@ -1947,9 +2085,13 @@ def process_scan_bar(
         signal["htf_confirmed_timeframes"] = state.pending_htf_confirmed_tfs
 
         if HYPOTHESIS_FILTER and signal.get("matches_hypothesis") is not True:
+            _snap = state.last_limit_signal_snapshot
             state.scan_state = "IDLE"
             state.pending_direction = None
             state.anchor_close = None
+            state.last_limit_signal_snapshot = None
+            if _snap is not None:
+                return {"type": EVT_LIMIT_CANCELLED, "signal": _snap, "reason": "hypothesis_filter_miss"}
             return None
 
         _body_ratio = signal.get("entry_bar_body_ratio", 0.0)
@@ -1989,7 +2131,18 @@ def process_scan_bar(
         state.reentry_count += 1
         signal["reentry_sequence"]      = state.reentry_count
         signal["prior_trade_bars_held"] = state.prior_trade_bars_held
+        state.last_limit_signal_snapshot = None
         state.scan_state = "IDLE"
+        if LIMIT_ENTRY_BUFFER_PTS is not None:
+            _filled_evt = {
+                "type":                 EVT_LIMIT_FILLED,
+                "direction":            signal["direction"],
+                "filled_price":         signal["entry_price"],
+                "original_limit_price": signal.get("anchor_close_price", signal["entry_price"]),
+                "time_in_queue_secs":   0,
+                "divergence_bar_time":  signal.get("divergence_bar_time"),
+            }
+            return {"type": "lifecycle_batch", "events": [_filled_evt, {"type": "signal", **signal}]}
         return {"type": "signal", **signal}
 
     # ── IDLE ──────────────────────────────────────────────────────────────────
@@ -2146,6 +2299,15 @@ def process_scan_bar(
     state.pending_div_provisional   = (_smt_type == "displacement")
     state.pending_discovery_bar_idx = bar_idx
     state.pending_discovery_price   = float(mnq_closes[bar_idx])
+    # Emit LIMIT_PLACED when operating in limit mode
+    if LIMIT_ENTRY_BUFFER_PTS is not None:
+        _prelim = _build_preliminary_limit_signal(
+            state, context, ts, run_ses_high, run_ses_low
+        )
+        if _prelim is not None:
+            state.last_limit_signal_snapshot = dict(_prelim)
+            state.last_limit_move_bar_idx    = bar_idx
+            return {"type": EVT_LIMIT_PLACED, "signal": _prelim}
     return None
 
 

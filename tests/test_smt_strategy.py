@@ -1266,16 +1266,16 @@ def test_inverted_stop_guard_valid_passes():
 # ══ Solution F: select_draw_on_liquidity unit tests ═══════════════════════════
 
 def test_select_draw_no_valid():
-    """Returns (None, None, None, None) when all draws are below min_dist."""
+    """Returns (None, None, None, None, []) when all draws are below min_dist."""
     from strategy_smt import select_draw_on_liquidity
     result = select_draw_on_liquidity("long", 100.0, 98.0, {"level_a": 103.0, "level_b": 104.0}, min_rr=1.5, min_pts=15.0)
-    assert result == (None, None, None, None)
+    assert result == (None, None, None, None, [])
 
 
 def test_select_draw_single_valid_no_secondary():
     """Primary returned, secondary None when only one draw qualifies."""
     from strategy_smt import select_draw_on_liquidity
-    name, price, sname, sprice = select_draw_on_liquidity(
+    name, price, sname, sprice, valid = select_draw_on_liquidity(
         "long", 100.0, 97.0, {"only": 120.0}, min_rr=1.5, min_pts=15.0
     )
     assert name == "only"
@@ -1288,7 +1288,7 @@ def test_select_draw_secondary_requires_1pt5x():
     """Second draw at 1.6x primary distance is selected as secondary."""
     from strategy_smt import select_draw_on_liquidity
     # primary dist=20 (at 120), secondary dist=32 (at 132); 32 >= 1.5*20=30
-    name, price, sname, sprice = select_draw_on_liquidity(
+    name, price, sname, sprice, valid = select_draw_on_liquidity(
         "long", 100.0, 97.0, {"pri": 120.0, "sec": 132.0}, min_rr=0.0, min_pts=15.0
     )
     assert name == "pri" and price == 120.0
@@ -1299,7 +1299,7 @@ def test_select_draw_secondary_below_threshold():
     """Second draw at 1.4x primary distance gives secondary=None."""
     from strategy_smt import select_draw_on_liquidity
     # primary dist=20 (at 120), second dist=28 (at 128); 28 < 1.5*20=30
-    name, price, sname, sprice = select_draw_on_liquidity(
+    name, price, sname, sprice, valid = select_draw_on_liquidity(
         "long", 100.0, 97.0, {"pri": 120.0, "sec": 128.0}, min_rr=0.0, min_pts=15.0
     )
     assert name == "pri"
@@ -1310,7 +1310,7 @@ def test_select_draw_short_direction():
     """Distance computed as entry - price for short signals."""
     from strategy_smt import select_draw_on_liquidity
     # For short: entry=100, draw at 80 → dist = 100-80 = 20 >= min_pts=15
-    name, price, sname, sprice = select_draw_on_liquidity(
+    name, price, sname, sprice, valid = select_draw_on_liquidity(
         "short", 100.0, 103.0, {"target": 80.0}, min_rr=0.0, min_pts=15.0
     )
     assert name == "target" and price == 80.0
@@ -1322,7 +1322,7 @@ def test_select_draw_min_pts_overrides_rr():
     # stop_dist=1.0, rr=1.5 → rr*stop=1.5; min_pts=15 → min_dist=15
     # draw at dist=10 < 15 → filtered out
     result = select_draw_on_liquidity("long", 100.0, 99.0, {"close": 110.0}, min_rr=1.5, min_pts=15.0)
-    assert result == (None, None, None, None)
+    assert result == (None, None, None, None, [])
 
 
 # ══ Solution F: compute_pdh_pdl unit tests ════════════════════════════════════

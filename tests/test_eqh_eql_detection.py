@@ -268,7 +268,7 @@ def test_build_draws_includes_eqh_candidate():
     eqh_levels = [{"price": 118.0, "touches": 3, "last_bar": 50}]
     eql_levels = []
 
-    tp_name, tp_price, _sec_name, _sec_price = _build_draws_and_select(
+    tp_name, tp_price, _sec_name, _sec_price, _valid = _build_draws_and_select(
         direction="long", ep=100.0, sp=98.0, fvg_zone=None,
         day_tdo=125.0, midnight_open=None,
         run_ses_high=100.0, run_ses_low=95.0,
@@ -284,7 +284,7 @@ def test_build_draws_skips_eqh_when_below_entry_for_long():
     """EQH must be ABOVE entry price for longs to qualify as a target."""
     from strategy_smt import _build_draws_and_select
     eqh_levels = [{"price": 95.0, "touches": 3, "last_bar": 50}]
-    tp_name, _tp_price, _, _ = _build_draws_and_select(
+    tp_name, _tp_price, _, _, _valid = _build_draws_and_select(
         direction="long", ep=100.0, sp=98.0, fvg_zone=None,
         day_tdo=120.0, midnight_open=None,
         run_ses_high=100.0, run_ses_low=95.0,
@@ -302,7 +302,7 @@ def test_build_draws_short_picks_eql():
     # ep=100, sp=102 (stop_dist=2, min_dist=15). EQL at 82 (18pt) beats TDO at 75 (25pt).
     # run_ses_low=100 silences session_low (requires < ep-1=99).
     eql_levels = [{"price": 82.0, "touches": 3, "last_bar": 50}]
-    tp_name, tp_price, _, _ = _build_draws_and_select(
+    tp_name, tp_price, _, _, _valid = _build_draws_and_select(
         direction="short", ep=100.0, sp=102.0, fvg_zone=None,
         day_tdo=75.0, midnight_open=None,
         run_ses_high=105.0, run_ses_low=100.0,
@@ -317,7 +317,7 @@ def test_build_draws_short_picks_eql():
 def test_build_draws_empty_eqh_degrades_gracefully():
     """With empty lists, behavior is identical to before Gap 1 — TDO is picked."""
     from strategy_smt import _build_draws_and_select
-    tp_name, _tp_price, _, _ = _build_draws_and_select(
+    tp_name, _tp_price, _, _, _valid = _build_draws_and_select(
         direction="long", ep=100.0, sp=98.0, fvg_zone=None,
         day_tdo=120.0, midnight_open=None,
         run_ses_high=100.0, run_ses_low=95.0,

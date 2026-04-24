@@ -474,6 +474,9 @@ def test_process_scan_bar_limit_fill_returns_signal(monkeypatch):
     )
 
     assert result is not None
+    # lifecycle_batch wraps [limit_filled, signal]; extract the signal event
+    if result["type"] == "lifecycle_batch":
+        result = next(e for e in result["events"] if e["type"] == "signal")
     assert result["type"] == "signal"
     assert result["direction"] == "short"
     assert result["limit_fill_bars"] == 1
@@ -518,7 +521,7 @@ def test_process_scan_bar_limit_expired_returns_expired(monkeypatch):
     )
 
     assert result is not None
-    assert result["type"] == "expired"
+    assert result["type"] in ("expired", "limit_expired")
     assert result["signal"]["direction"] == "short"
     # ep - Low = 19990 - 19998 = -8; max(-8, pre-existing 2.0) = 2.0.
     assert result["limit_missed_move"] == pytest.approx(2.0)

@@ -1,6 +1,23 @@
 # PROGRESS
 
 
+## Feature: SMT Limit Entry Lifecycle & Min-TP Fallback
+
+**Status**: Complete
+**Plan File**: `.agents/plans/smt-limit-entry-lifecycle.md`
+
+Reworked the entry-signal lifecycle so the human trader sees LIMIT_PLACED at divergence time (not only on fill). Introduces five typed lifecycle events (`limit_placed`, `limit_moved`, `limit_cancelled`, `limit_expired`, `limit_filled`) emitted by `process_scan_bar` and dispatched by `signal_smt.py`. Drops the pts-distance `ENTRY_LIMIT_CLASSIFICATION_PTS` heuristic; `signal_type` is now derived from whether the scan path went through a limit stage. Raises `MIN_TARGET_PTS=15.0` / `MIN_RR_FOR_TARGET=1.5` with fallback-to-next-ranked draw when the nearest target fails the floor; divergence is preserved when no draw qualifies.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-limit-entry-lifecycle.md`
+- 51/51 tests pass in test_smt_limit_lifecycle.py; full suite 792 passed / 9 skipped / 5 failed (pre-existing)
+- Three divergences: 51 tests vs ~46 planned (extra MOVE_LIMIT + cancel+replace tests — good); original_limit_price semantics clarified in test assertion; SYMMETRIC_SMT_ENABLED=False added to _patch_base for test isolation
+- Backtest smoke: mean_test_pnl=$5,023.74 (within ±10% of baseline)
+- Alignment score: 9/10
+
+---
+
 ## Feature: EQH/EQL Detection Extending Secondary-Target Candidate Pool (Gap 1)
 
 **Status**: Complete

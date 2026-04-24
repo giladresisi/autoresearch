@@ -48,6 +48,7 @@ from strategy_smt import (
     ScanState, SessionContext, process_scan_bar,
     detect_eqh_eql,
     EQH_ENABLED, EQH_SWING_BARS, EQH_TOLERANCE_PTS, EQH_MIN_TOUCHES, EQH_LOOKBACK_BARS,
+    EVT_LIMIT_PLACED, EVT_LIMIT_MOVED, EVT_LIMIT_CANCELLED, EVT_LIMIT_FILLED, EVT_LIMIT_EXPIRED,
 )
 
 # Cache directory for futures parquet files.
@@ -366,6 +367,23 @@ def _compute_fold_params(
         effective_test_days = max(1, min(10, total_bdays // 2))
         return 1, effective_test_days
     return n_folds, fold_test_days
+
+
+def _resolve_scan_result(result: "dict | None") -> "dict | None":
+    """Unwrap lifecycle_batch and filter lifecycle-only events from scan results.
+
+    Extracts the signal from a lifecycle_batch (if present), drops pure lifecycle
+    events that should not open positions, and passes signals and expired events
+    through unchanged.
+    """
+    if result is None:
+        return None
+    if result["type"] == "lifecycle_batch":
+        signal_evts = [e for e in result["events"] if e["type"] == "signal"]
+        return signal_evts[0] if signal_evts else None
+    if result["type"] in (EVT_LIMIT_PLACED, EVT_LIMIT_MOVED, EVT_LIMIT_CANCELLED, EVT_LIMIT_FILLED):
+        return None
+    return result
 
 
 def run_backtest(
@@ -758,7 +776,10 @@ def run_backtest(
                 )
                 if _scan_result is None:
                     continue
-                if _scan_result["type"] == "expired":
+                _scan_result = _resolve_scan_result(_scan_result)
+                if _scan_result is None:
+                    continue
+                if _scan_result["type"] in ("expired", EVT_LIMIT_EXPIRED):
                     expired_record = _build_limit_expired_record(
                         _scan_result["signal"], _scan_result["limit_missed_move"], day, ts,
                     )

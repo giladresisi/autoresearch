@@ -1494,7 +1494,7 @@ def test_trail_mode_holds_past_tdo_and_exits_via_stop(futures_tmpdir, monkeypatc
     # No secondary target — trail block requires secondary_target is None.
     # Patch on both modules: _build_draws_and_select now lives in strategy_smt
     # and reads select_draw_on_liquidity from that namespace.
-    _no_sec = lambda *a, **kw: ("tdo", 20050.0, None, None)
+    _no_sec = lambda *a, **kw: ("tdo", 20050.0, None, None, [])
     monkeypatch.setattr(train_smt, "select_draw_on_liquidity", _no_sec)
     monkeypatch.setattr(_strat, "select_draw_on_liquidity", _no_sec)
     monkeypatch.setattr(_strat, "MIDNIGHT_OPEN_AS_TP", False)
@@ -1562,7 +1562,7 @@ def test_trail_mode_partial_slides_stop_no_contract_reduction(futures_tmpdir, mo
     monkeypatch.setattr(train_smt, "compute_tdo", lambda *a: 20050.0)
     # No secondary target — trail block requires secondary_target is None.
     # Patch on both modules: _build_draws_and_select now lives in strategy_smt.
-    _no_sec2 = lambda *a, **kw: ("tdo", 20050.0, None, None)
+    _no_sec2 = lambda *a, **kw: ("tdo", 20050.0, None, None, [])
     monkeypatch.setattr(train_smt, "select_draw_on_liquidity", _no_sec2)
     monkeypatch.setattr(_strat, "select_draw_on_liquidity", _no_sec2)
     monkeypatch.setattr(_strat, "MIDNIGHT_OPEN_AS_TP", False)
