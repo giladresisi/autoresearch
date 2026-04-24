@@ -382,6 +382,29 @@ MOVE_STOP_MIN_GAP_BARS: int = 0
 # When True, an opposing-direction displacement candle after entry triggers a market exit.
 DECEPTION_OPPOSING_DISP_EXIT: bool = False
 
+# ── Equal Highs / Equal Lows (Gap 1) ──────────────────────────────────────
+# Master enable flag — when False, detect_eqh_eql returns ([], []) and no candidates
+# flow into draws dict. Keep True by default after initial validation.
+# Optimizer search space: [True, False]
+EQH_ENABLED: bool = True
+# Number of bars on each side for a fractal swing-point qualification.
+# A bar at index i is a swing high iff its High beats all N bars on each side.
+# Optimizer search space: [2, 3, 4]
+EQH_SWING_BARS: int = 3
+# Clustering tolerance in MNQ points. Two swing points within this distance
+# are grouped into one EQH/EQL level at their mean price.
+# Optimizer search space: [2.0, 3.0, 5.0, 8.0]
+EQH_TOLERANCE_PTS: float = 3.0
+# Minimum swing-point count to qualify as a valid EQH/EQL cluster.
+# Single swing points (count=1) are plain PDH/PDL-style levels, not EQH/EQL.
+# Optimizer search space: [2, 3]
+EQH_MIN_TOUCHES: int = 2
+# Lookback window in bars for the detection scan. ~100 bars = ~1.5 hrs of 1m data
+# (overnight + prior-session window). Larger values find more candidates but
+# include older, potentially-less-relevant levels.
+# Optimizer search space: [50, 100, 200, 400]
+EQH_LOOKBACK_BARS: int = 100
+
 
 # ── Module-level bar data ─────────────────────────────────────────────────────
 _mnq_bars: "pd.DataFrame | None" = None
@@ -508,6 +531,7 @@ class SessionContext:
         "day", "tdo", "midnight_open", "overnight",
         "pdh", "pdl", "hyp_ctx", "hyp_dir",
         "bar_seconds", "ref_lvls",
+        "eqh_levels", "eql_levels",   # Gap 1
     )
 
     def __init__(
@@ -522,6 +546,8 @@ class SessionContext:
         hyp_dir: "str | None" = None,
         bar_seconds: float = 60.0,
         ref_lvls: "dict | None" = None,
+        eqh_levels: "list | None" = None,
+        eql_levels: "list | None" = None,
     ) -> None:
         self.day          = day
         self.tdo          = tdo
@@ -533,6 +559,8 @@ class SessionContext:
         self.hyp_dir      = hyp_dir
         self.bar_seconds  = bar_seconds
         self.ref_lvls     = ref_lvls or {}
+        self.eqh_levels   = eqh_levels or []
+        self.eql_levels   = eql_levels or []
 
 
 def build_synthetic_confirmation_bar(
@@ -863,6 +891,156 @@ def compute_pdh_pdl(
     return float(prev["High"]), float(prev["Low"])
 
 
+def _find_swing_points(
+    highs,
+    lows,
+    start: int,
+    end: int,
+    swing_bars: int,
+) -> "tuple[list[tuple[int, float]], list[tuple[int, float]]]":
+    # Fractal swing detection: bar i qualifies iff its extreme strictly beats all
+    # swing_bars neighbours on each side. Pure function — caller passes numpy arrays.
+    swing_highs: "list[tuple[int, float]]" = []
+    swing_lows:  "list[tuple[int, float]]" = []
+    i_start = start + swing_bars
+    # Forward window must fit: i + swing_bars <= end - 1 → i <= end - swing_bars - 1
+    i_end   = end - swing_bars - 1
+    for i in range(i_start, i_end + 1):
+        h_i = highs[i]
+        l_i = lows[i]
+        is_high = True
+        is_low  = True
+        for j in range(1, swing_bars + 1):
+            if highs[i - j] >= h_i or highs[i + j] >= h_i:
+                is_high = False
+            if lows[i - j] <= l_i or lows[i + j] <= l_i:
+                is_low = False
+            if not is_high and not is_low:
+                break
+        if is_high:
+            swing_highs.append((i, float(h_i)))
+        if is_low:
+            swing_lows.append((i, float(l_i)))
+    return swing_highs, swing_lows
+
+
+def _cluster_swing_points(
+    points: "list[tuple[int, float]]",
+    tolerance: float,
+    min_touches: int,
+) -> "list[dict]":
+    # Greedy price-adjacent clustering: sort by price, accumulate into a running
+    # cluster while next point is within `tolerance` of the cluster's mean price.
+    if not points:
+        return []
+    sorted_pts = sorted(points, key=lambda p: p[1])
+    clusters: "list[dict]" = []
+    cur_prices: "list[float]" = []
+    cur_idxs:   "list[int]"   = []
+    cur_mean = 0.0
+    for idx, price in sorted_pts:
+        if not cur_prices:
+            cur_prices.append(price)
+            cur_idxs.append(idx)
+            cur_mean = price
+            continue
+        if abs(price - cur_mean) <= tolerance:
+            cur_prices.append(price)
+            cur_idxs.append(idx)
+            cur_mean = sum(cur_prices) / len(cur_prices)
+        else:
+            if len(cur_prices) >= min_touches:
+                clusters.append({
+                    "price":    cur_mean,
+                    "touches":  len(cur_prices),
+                    "last_bar": max(cur_idxs),
+                })
+            cur_prices = [price]
+            cur_idxs   = [idx]
+            cur_mean   = price
+    if len(cur_prices) >= min_touches:
+        clusters.append({
+            "price":    cur_mean,
+            "touches":  len(cur_prices),
+            "last_bar": max(cur_idxs),
+        })
+    # Sort by touches desc, then last_bar desc (most recent tie-break)
+    clusters.sort(key=lambda c: (-c["touches"], -c["last_bar"]))
+    return clusters
+
+
+def _filter_stale_levels(
+    levels: "list[dict]",
+    closes,
+    bar_idx: int,
+    direction: str,
+) -> "list[dict]":
+    # Stale = a close in (last_bar, bar_idx) has passed through the level
+    # on the relevant side (above for EQH, below for EQL).
+    if not levels:
+        return []
+    active: "list[dict]" = []
+    for lvl in levels:
+        last_bar = lvl["last_bar"]
+        price    = lvl["price"]
+        scan_start = last_bar + 1
+        scan_end   = bar_idx
+        if scan_start >= scan_end:
+            active.append(lvl)
+            continue
+        stale = False
+        if direction == "eqh":
+            for k in range(scan_start, scan_end):
+                if closes[k] > price:
+                    stale = True
+                    break
+        else:  # "eql"
+            for k in range(scan_start, scan_end):
+                if closes[k] < price:
+                    stale = True
+                    break
+        if not stale:
+            active.append(lvl)
+    return active
+
+
+def detect_eqh_eql(
+    bars: pd.DataFrame,
+    bar_idx: int,
+    lookback: int = 100,
+    swing_bars: int = 3,
+    tolerance: float = 3.0,
+    min_touches: int = 2,
+) -> "tuple[list[dict], list[dict]]":
+    """Return (eqh_levels, eql_levels) — clusters of equal swing highs/lows.
+
+    Each level: {"price": float, "touches": int, "last_bar": int}.
+    Returns ([], []) when EQH_ENABLED is False or insufficient data.
+    Stale levels (any close in (last_bar, bar_idx) passed through the level) are removed.
+    Results sorted by touches desc, then last_bar desc (most recent tie-break).
+    """
+    if not EQH_ENABLED:
+        return [], []
+    if len(bars) == 0:
+        return [], []
+    if bar_idx < 2 * swing_bars + min_touches:
+        return [], []
+    # Pre-extract numpy arrays — avoids pandas accessor overhead in the hot loop
+    highs  = bars["High"].values
+    lows   = bars["Low"].values
+    closes = bars["Close"].values
+    scan_start = max(0, bar_idx - lookback)
+    scan_end   = bar_idx
+    swing_highs, swing_lows = _find_swing_points(
+        highs, lows, scan_start, scan_end, swing_bars
+    )
+    eqh_clusters = _cluster_swing_points(swing_highs, tolerance, min_touches)
+    eql_clusters = _cluster_swing_points(swing_lows,  tolerance, min_touches)
+    active_eqh = _filter_stale_levels(eqh_clusters, closes, bar_idx, "eqh")
+    active_eql = _filter_stale_levels(eql_clusters, closes, bar_idx, "eql")
+    return active_eqh, active_eql
+
+
 def detect_fvg(
     bars: pd.DataFrame,
     bar_idx: int,
@@ -1148,6 +1326,8 @@ def screen_session(
         hyp_dir=hyp_dir,
         bar_seconds=60.0,
         ref_lvls=_ref_lvls,
+        eqh_levels=[],
+        eql_levels=[],
     )
     _scan_state  = ScanState()
     _smt_cache: dict = {
@@ -1438,6 +1618,8 @@ def _build_draws_and_select(
     day_tdo: "float | None", midnight_open: "float | None",
     run_ses_high: float, run_ses_low: float,
     overnight: dict, pdh: "float | None", pdl: "float | None",
+    eqh_levels: "list | None" = None,
+    eql_levels: "list | None" = None,
 ) -> "tuple[str | None, float | None, str | None, float | None]":
     """Assemble draw-on-liquidity targets and delegate to select_draw_on_liquidity."""
     if direction == "long":
@@ -1449,6 +1631,13 @@ def _build_draws_and_select(
             "overnight_high": overnight.get("overnight_high") if overnight.get("overnight_high") and overnight.get("overnight_high") > ep else None,
             "pdh":            pdh if pdh and pdh > ep else None,
         }
+        if eqh_levels:
+            # Nearest active EQH ABOVE entry — EQH is only a meaningful long TP above ep.
+            nearest = next(
+                (lvl for lvl in sorted(eqh_levels, key=lambda l: l["price"]) if lvl["price"] > ep),
+                None,
+            )
+            draws["eqh"] = nearest["price"] if nearest else None
     else:
         draws = {
             "fvg_bottom":    fvg_zone["fvg_low"] if fvg_zone else None,
@@ -1458,6 +1647,13 @@ def _build_draws_and_select(
             "overnight_low": overnight.get("overnight_low") if overnight.get("overnight_low") and overnight.get("overnight_low") < ep else None,
             "pdl":           pdl if pdl and pdl < ep else None,
         }
+        if eql_levels:
+            # Nearest active EQL BELOW entry
+            nearest = next(
+                (lvl for lvl in sorted(eql_levels, key=lambda l: -l["price"]) if lvl["price"] < ep),
+                None,
+            )
+            draws["eql"] = nearest["price"] if nearest else None
     return select_draw_on_liquidity(direction, ep, sp, draws, MIN_RR_FOR_TARGET, MIN_TARGET_PTS)
 
 
@@ -1723,6 +1919,7 @@ def process_scan_bar(
             state.pending_direction, _ep, _sp, state.pending_fvg_zone,
             context.tdo, context.midnight_open, run_ses_high, run_ses_low,
             context.overnight, context.pdh, context.pdl,
+            eqh_levels=context.eqh_levels, eql_levels=context.eql_levels,
         )
         if _day_tp is None:
             return None

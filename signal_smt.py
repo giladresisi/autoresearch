@@ -27,6 +27,8 @@ from strategy_smt import (
     MIN_RR_FOR_TARGET, MIN_TARGET_PTS,
     MAX_REENTRY_COUNT,
     MIN_BARS_BEFORE_SIGNAL,
+    detect_eqh_eql,
+    EQH_ENABLED, EQH_SWING_BARS, EQH_TOLERANCE_PTS, EQH_MIN_TOUCHES, EQH_LOOKBACK_BARS,
 )
 # Human-mode flags read lazily via strategy_smt.<NAME> so monkeypatching
 # strategy_smt attributes in tests affects signal_smt without a re-import.
@@ -503,6 +505,24 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
             if _hypothesis_manager and hasattr(_hypothesis_manager, "context_dict")
             else None
         )
+        # Gap 1: compute EQH/EQL from the loaded 1m history (pre-session + overnight slice).
+        _eqh_levels: list = []
+        _eql_levels: list = []
+        if EQH_ENABLED and _mnq_1m_df is not None and not _mnq_1m_df.empty:
+            _session_start_dt = pd.Timestamp(f"{today} {SESSION_START}", tz="America/New_York")
+            _eqh_window_start = _session_start_dt - pd.Timedelta(days=2)
+            _eqh_bars = _mnq_1m_df[
+                (_mnq_1m_df.index >= _eqh_window_start) & (_mnq_1m_df.index < _session_start_dt)
+            ]
+            if not _eqh_bars.empty:
+                _eqh_levels, _eql_levels = detect_eqh_eql(
+                    _eqh_bars, len(_eqh_bars),
+                    lookback=EQH_LOOKBACK_BARS,
+                    swing_bars=EQH_SWING_BARS,
+                    tolerance=EQH_TOLERANCE_PTS,
+                    min_touches=EQH_MIN_TOUCHES,
+                )
+
         _session_ctx = strategy_smt.SessionContext(
             day=today, tdo=tdo,
             midnight_open=midnight_open_price,
@@ -510,6 +530,8 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
             pdh=_day_pdh, pdl=_day_pdl,
             hyp_ctx=_hyp_ctx, hyp_dir=_hyp_dir,
             bar_seconds=1.0,
+            eqh_levels=_eqh_levels,
+            eql_levels=_eql_levels,
         )
         _session_mnq_rows = []
         _session_mes_rows = []

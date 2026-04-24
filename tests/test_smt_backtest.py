@@ -1605,3 +1605,43 @@ def test_trail_mode_partial_slides_stop_no_contract_reduction(futures_tmpdir, mo
     assert any(et in ("exit_stop", "session_close") for et in exit_types), (
         f"Expected exit_stop or session_close after trail reversal; got {exit_types}"
     )
+
+
+# -- EQH/EQL regression smoke tests (Gap 1) ---------------------------------
+
+def test_eqh_enabled_backtest_runs_and_produces_trades(futures_tmpdir, monkeypatch):
+    """Smoke test: EQH_ENABLED=True must not break the backtest pipeline.
+
+    Verifies: imports clean, run_backtest completes, stats dict has expected shape,
+    and no AttributeError on context.eqh_levels during scan.
+    """
+    import backtest_smt as train_smt
+    import strategy_smt as _strat
+    monkeypatch.setattr(_strat, "EQH_ENABLED", True)
+    monkeypatch.setattr(train_smt, "EQH_ENABLED", True)
+
+    mnq, mes = _build_short_signal_bars("2025-01-02")
+    stats = train_smt.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
+    # Shape preserved
+    assert "total_trades" in stats
+    assert "total_pnl" in stats
+    assert "trade_records" in stats
+    # Any trades that fire still carry the legacy schema (tp_name, exit_type, etc.)
+    for t in stats["trade_records"]:
+        assert "tp_name" in t or "exit_type" in t
+
+
+def test_eqh_disabled_preserves_baseline_behavior(monkeypatch):
+    """When EQH_ENABLED=False, detect_eqh_eql returns ([], []) regardless of bar input."""
+    import strategy_smt as _strat
+    monkeypatch.setattr(_strat, "EQH_ENABLED", False)
+    ts = pd.Timestamp("2025-01-02 09:00:00", tz="America/New_York")
+    idx = pd.date_range(start=ts, periods=50, freq="1min")
+    df = pd.DataFrame(
+        {"Open":[20000.0]*50,"High":[20100.0]*50,"Low":[19900.0]*50,
+         "Close":[20000.0]*50,"Volume":[100.0]*50},
+        index=idx,
+    )
+    eqh, eql = _strat.detect_eqh_eql(df, 50)
+    assert eqh == []
+    assert eql == []

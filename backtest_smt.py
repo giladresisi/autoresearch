@@ -46,6 +46,8 @@ from strategy_smt import (
     MNQ_PNL_PER_POINT,
     _annotate_hypothesis, _build_draws_and_select,
     ScanState, SessionContext, process_scan_bar,
+    detect_eqh_eql,
+    EQH_ENABLED, EQH_SWING_BARS, EQH_TOLERANCE_PTS, EQH_MIN_TOUCHES, EQH_LOOKBACK_BARS,
 )
 
 # Cache directory for futures parquet files.
@@ -450,6 +452,25 @@ def run_backtest(
         )
         _day_pdh, _day_pdl = compute_pdh_pdl(_hist_mnq_df, day)
 
+        # Gap 1: compute EQH/EQL from prior-day + overnight MNQ bars for secondary_target candidate pool.
+        # Window = 2 days of history up to the session open — covers prior RTH + overnight reaction range.
+        _day_eqh: list = []
+        _day_eql: list = []
+        if EQH_ENABLED:
+            _session_start_ts = mnq_session.index[0]
+            _eqh_window_start = _session_start_ts - pd.Timedelta(days=2)
+            _eqh_bars = mnq_df[
+                (mnq_df.index >= _eqh_window_start) & (mnq_df.index < _session_start_ts)
+            ]
+            if not _eqh_bars.empty:
+                _day_eqh, _day_eql = detect_eqh_eql(
+                    _eqh_bars, len(_eqh_bars),
+                    lookback=EQH_LOOKBACK_BARS,
+                    swing_bars=EQH_SWING_BARS,
+                    tolerance=EQH_TOLERANCE_PTS,
+                    min_touches=EQH_MIN_TOUCHES,
+                )
+
         # Hypothesis direction + per-rule context for this session (deterministic, no LLM)
         _session_hyp_ctx = compute_hypothesis_context(mnq_df, _hist_mnq_df, day)
         _session_hyp_dir = _session_hyp_ctx["direction"] if _session_hyp_ctx else None
@@ -534,6 +555,8 @@ def run_backtest(
             hyp_dir=_session_hyp_dir,
             bar_seconds=bar_seconds,
             ref_lvls=_bt_ref_lvls,
+            eqh_levels=_day_eqh,   # Gap 1
+            eql_levels=_day_eql,   # Gap 1
         )
 
         # Running session extremes — updated at start of each bar for bars [0..bar_idx-1]

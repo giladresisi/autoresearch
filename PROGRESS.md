@@ -1,6 +1,24 @@
 # PROGRESS
 
 
+## Feature: EQH/EQL Detection Extending Secondary-Target Candidate Pool (Gap 1)
+
+**Status**: Complete
+**Started**: 2026-04-23
+**Plan File**: `.agents/plans/eqh-eql-secondary-target.md`
+
+Adds Equal Highs / Equal Lows detection to the DOL candidate pool used by `_build_draws_and_select`. Computes EQH/EQL levels once per session from prior-day + overnight MNQ bars (swing point clustering with tolerance + staleness invalidation), stores them on `SessionContext`, and feeds them into `_build_draws_and_select` so the existing `secondary_target` mechanism can pick them when they are the closest qualifying liquidity. Purely additive — does NOT change TDO as primary TP, does NOT modify stop/partial/trail mechanics (all locked from prior campaign). Expected lift: +10–20% on total P&L concentrated in the 43 secondary-hit trades. Critical risk: staleness logic must correctly deactivate levels that have been closed through (not just wicked through); adversarial unit tests for staleness must precede integration.
+
+### Reports Generated
+
+**Execution Report:** `.agents/plans/eqh-eql-secondary-target.execution-report.md`
+- All 8 tasks across 3 waves complete; 25 tests added (23 unit + 2 regression smoke); 708/708 non-orchestrator suite green, 0 regressions
+- Three divergences: extra `_build_draws_and_select` integration tests (good), Windows-forced `uv run -- python -m pytest` invocation and missing `pytest-timeout` (environmental), constant placement shifted past Human execution mode block (good)
+- Test results: 25/25 EQH-scoped pass; 5 unrelated orchestrator failures due to Windows Application Control blocking `jiter` DLL
+- Alignment score: 9/10
+
+---
+
 ## Feature: Uncap Hold Time — Trail Width + Session Extension
 
 **Status**: ✅ Complete
@@ -95,6 +113,16 @@ Combines findings.md fixes (F1 live reentry guard, F2a/b midnight open TP defaul
 - Three divergences: MIN_DISPLACEMENT_BODY_PTS applied in two locations (plan gap); ALWAYS_REQUIRE_CONFIRMATION checked in backtest WAITING_FOR_ENTRY blocks (plan gap); ratio threshold combined with existing PTS sentinel for backward compatibility
 - Test results: 28 new tests passing (tests/test_smt_structural_fixes.py) + 2 pre-existing tests fixed; full suite 605 passed, 5 pre-existing failures unchanged
 - Alignment score: 9/10
+
+---
+
+## Feature: Declockify — Single-Source Session Config
+
+**Status**: ✅ Planned
+**Started**: 2026-04-23
+**Plan File**: `.agents/plans/declockify-session-config.md`
+
+Moves every session-time constant out of `strategy_smt.py` into a new top-level `session_config.py`. Removes session-time gates from `strategy_smt.py` and `signal_smt.py` entirely — the orchestrator becomes the sole clock owner, starting/stopping the signal engine and triggering graceful shutdown (position close + CLOSE_MARKET emission + IB disconnect) at session boundaries via a sentinel-file protocol. Also adds walk-back fallback to `compute_tdo()` and `_price_at_900()` so hypothesis generation and TDO resolution work at any clock time.
 
 ---
 
