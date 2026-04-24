@@ -36,6 +36,12 @@ TRADE_DIRECTION = "both"
 # Set False to disable and restore legacy behavior.
 TDO_VALIDITY_CHECK = True
 
+# TDO anchor choice: False = 9:30 RTH open (legacy, the code's "TDO"); True = 00:00 ET
+# Midnight Open (ICT-canonical bias/reversion reference). Flipping changes the reference
+# used everywhere — target, stop (|entry-TDO|), validity check, partial-exit level, trail.
+# Separate from MIDNIGHT_OPEN_AS_TP which only swaps the TP target.
+TDO_USE_MIDNIGHT: bool = True
+
 # Minimum stop distance in MNQ points. Signals with |entry - stop| < this value are skipped.
 # Prevents degenerate sizing when TDO is very close to entry.
 # Set 0.0 to disable.
@@ -821,12 +827,18 @@ def detect_smt_divergence(
 
 
 def compute_tdo(mnq_bars: pd.DataFrame, date: datetime.date) -> float | None:
-    """Return True Day Open = opening price of the 9:30 AM ET bar for given date.
+    """Return the "TDO" reference for a given date.
 
-    Falls back to the first available bar on that date if 9:30 bar is absent
-    (e.g., for signals detected before 9:30 AM in the 9:00–9:30 window).
+    Default (TDO_USE_MIDNIGHT=False): 09:30 AM ET RTH open (legacy behaviour).
+    When TDO_USE_MIDNIGHT=True: routes to compute_midnight_open() — the ICT
+    canonical 00:00 ET reference.
+
+    Falls back to the first available bar on that date if the target bar is
+    absent (e.g., for signals detected before 9:30 AM in the 9:00–9:30 window).
     Returns None if no bars exist for the date.
     """
+    if TDO_USE_MIDNIGHT:
+        return compute_midnight_open(mnq_bars, date)
     target_time = pd.Timestamp(f"{date} 09:30:00", tz="America/New_York")
     if target_time in mnq_bars.index:
         return float(mnq_bars.loc[target_time, "Open"])
