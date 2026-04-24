@@ -50,8 +50,8 @@ MIN_STOP_POINTS = 2.5
 #
 # LONG_STOP_RATIO: frozen at 0.05 — longs disabled (TRADE_DIRECTION = "short"),
 # value is irrelevant but kept valid to avoid breaking the position-sizing path.
-LONG_STOP_RATIO  = 0.35
-SHORT_STOP_RATIO = 0.35
+LONG_STOP_RATIO  = 0.40
+SHORT_STOP_RATIO = 0.40
 
 # MNQ futures P&L per point per contract.
 MNQ_PNL_PER_POINT = 2.0
@@ -105,7 +105,7 @@ SIGNAL_BLACKOUT_END   = "13:00"
 # When price first crosses TDO the position stays open; the stop is then trailed
 # this many points behind the best post-TDO price. Set 0.0 to disable (exit at TDO).
 # Optimizer search space: [25.0, 50.0, 75.0, 100.0].
-TRAIL_AFTER_TP_PTS = 0.0
+TRAIL_AFTER_TP_PTS = 25.0
 
 # TRAIL_ACTIVATION_R: trail only takes over after price travels this many R-multiples
 # of |entry - stop| past TDO. 0.0 = activate immediately at TDO (legacy behaviour).
@@ -120,7 +120,7 @@ TRAIL_ACTIVATION_R: float = 1.0
 # even. The quality degradation at high re-entry counts is driven by TDO distance, not depth.
 # Optimizer search space: [15, 20, 25, 30, 40, 999].
 # Set 999.0 to disable (pass-through for all distances).
-MAX_TDO_DISTANCE_PTS = 15.0
+MAX_TDO_DISTANCE_PTS = 40.0
 
 # Maximum re-entries per session day.
 # At TDO<20 (with MAX_TDO_DISTANCE_PTS applied), even Seq#5+ has EP=$32, so this filter
@@ -129,7 +129,7 @@ MAX_TDO_DISTANCE_PTS = 15.0
 # Semantic note: in signal_smt this counts repeated divergence SIGNALS on the same level;
 # in backtest_smt it counts ENTRY attempts. The two counts can differ when a signal fires
 # but fails a filter (TDO_VALIDITY_CHECK, MIN_STOP_POINTS, etc.) before entry.
-MAX_REENTRY_COUNT = 1
+MAX_REENTRY_COUNT = 4
 
 # Minimum bars the prior trade must have survived before re-entry is allowed.
 # DIAGNOSTIC ONLY — do not include in optimization runs. Extended diagnostics showed:
@@ -225,7 +225,7 @@ FVG_LAYER_B_TRIGGER: bool = False
 # even when no wick-based SMT exists. Fires only when detect_smt_divergence returns None.
 # Optimizer search space: SMT_OPTIONAL [True, False]; MIN_DISPLACEMENT_PTS [8.0, 10.0, 15.0]
 SMT_OPTIONAL: bool = True
-MIN_DISPLACEMENT_PTS: float = 10.0
+MIN_DISPLACEMENT_PTS: float = 8.0
 
 # Partial exit at first draw on liquidity.
 # PARTIAL_EXIT_FRACTION: fraction of open contracts to close at the partial level.
@@ -248,7 +248,7 @@ SMT_FILL_ENABLED: bool = False
 #   instead of the SMT structural stop. Mechanistically correct: the displacement
 #   thesis fails when price closes back through the impulse bar.
 #   Optimizer search space: [True, False]
-DISPLACEMENT_STOP_MODE: bool = True
+DISPLACEMENT_STOP_MODE: bool = False
 
 # MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT: minimum count of hypothesis rules that
 #   must agree with signal direction for a displacement entry to be accepted.
@@ -265,12 +265,12 @@ MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT: int = 0
 #   0.33 (earlier lock-in, higher probability) and 0.67 (later, more favorable RR).
 #   Only read by manage_position() when PARTIAL_EXIT_ENABLED=True.
 #   Optimizer search space: [0.33, 0.5, 0.67]
-PARTIAL_EXIT_LEVEL_RATIO: float = 0.33
+PARTIAL_EXIT_LEVEL_RATIO: float = 0.50
 # After partial exit, slide the stop to partial_exit_price ± this buffer so the remaining
 # contracts cannot lose significantly if price reverses before reaching TP.
 # Set to 0.0 to lock the stop exactly at the partial price (no buffer).
 # Optimizer search space: [0.5, 1.0, 2.0, 3.0]
-PARTIAL_STOP_BUFFER_PTS: float = 2.0
+PARTIAL_STOP_BUFFER_PTS: float = 0.5
 
 # ── Layer B hypothesis gate (Plan 3) ─────────────────────────────────────────
 # FVG_LAYER_B_REQUIRES_HYPOTHESIS: when True, the FVG retracement add-on (Layer B)
@@ -286,7 +286,7 @@ FVG_LAYER_B_REQUIRES_HYPOTHESIS: bool = False
 # Symmetric SMT: also detect divergences where MNQ leads and MES fails (not only MES-leads).
 # smt_type = "wick_sym" for MNQ-leads signals.
 # Optimizer search space: [True, False]
-SYMMETRIC_SMT_ENABLED: bool = False
+SYMMETRIC_SMT_ENABLED: bool = True
 
 # Displacement body size filter: minimum |Close - Open| of the displacement bar.
 # 0.0 = disabled. displacement_body_pts is always recorded as a diagnostic field.
@@ -335,7 +335,7 @@ HYPOTHESIS_FILTER:             bool  = False  # when True, only fire signals mat
 # 0.0  = exactly at anchor_close.
 # >0   = anchor_close offset by buffer (SHORT: −buffer; LONG: +buffer).
 # Optimizer search space: [1.0, 2.0, 3.0]
-LIMIT_ENTRY_BUFFER_PTS: "float | None" = 3.0
+LIMIT_ENTRY_BUFFER_PTS: "float | None" = 1.0
 
 # Forward-looking limit expiry window in wall-clock seconds.
 # None = same-bar fill (LIMIT_ENTRY_BUFFER_PTS still controls entry_price;
@@ -353,7 +353,7 @@ LIMIT_EXPIRY_SECONDS: "float | None" = 120.0
 # None = all bars use forward-looking limit (no bypass).
 # 0.60 = bars where the confirmation bar used >= 60% of its range as body use same-bar fill.
 # Optimizer search space: [None, 0.40, 0.50, 0.60, 0.70]
-LIMIT_RATIO_THRESHOLD: "float | None" = None
+LIMIT_RATIO_THRESHOLD: "float | None" = 0.70
 
 # Confirmation window size in bars.
 # 1 = check every bar (default, current behaviour).
