@@ -440,6 +440,38 @@ def set_bar_data(mnq_df: pd.DataFrame, mes_df: pd.DataFrame) -> None:
     _mes_bars = mes_df
 
 
+def init_bar_data(
+    mnq_df: "pd.DataFrame | None" = None,
+    mes_df: "pd.DataFrame | None" = None,
+) -> None:
+    """Initialise module-level bar globals, optionally from seed DataFrames.
+
+    Call once before iterating bars. Pass seed DataFrames to pre-load historical
+    data (e.g. realtime gap-fill on startup); call with no args to start empty
+    (backtest, where bars are appended chronologically via append_bar_data).
+    """
+    global _mnq_bars, _mes_bars
+    _empty = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    _mnq_bars = mnq_df.copy() if mnq_df is not None else _empty.copy()
+    _mes_bars = mes_df.copy() if mes_df is not None else _empty.copy()
+
+
+def append_bar_data(
+    mnq_rows: "pd.DataFrame | None",
+    mes_rows: "pd.DataFrame | None",
+) -> None:
+    """Append one or more bars to the module-level bar data globals.
+
+    Accepts single-row or multi-row DataFrames. Pass None to skip updating
+    that instrument (e.g. when MNQ and MES bars arrive in separate callbacks).
+    """
+    global _mnq_bars, _mes_bars
+    if mnq_rows is not None and not mnq_rows.empty:
+        _mnq_bars = mnq_rows.copy() if (_mnq_bars is None or _mnq_bars.empty) else pd.concat([_mnq_bars, mnq_rows])
+    if mes_rows is not None and not mes_rows.empty:
+        _mes_bars = mes_rows.copy() if (_mes_bars is None or _mes_bars.empty) else pd.concat([_mes_bars, mes_rows])
+
+
 # ══ DATA STRUCTURES ══════════════════════════════════════════════════════════
 
 class _BarRow:

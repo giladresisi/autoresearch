@@ -13,7 +13,7 @@ from hypothesis_smt import compute_hypothesis_context
 import strategy_smt
 from strategy_smt import (
     _BarRow,
-    set_bar_data, load_futures_data, compute_tdo, find_anchor_close,
+    init_bar_data, append_bar_data, load_futures_data, compute_tdo, find_anchor_close,
     is_confirmation_bar, detect_smt_divergence, _build_signal_from_bar,
     manage_position, screen_session,
     compute_midnight_open, compute_overnight_range,
@@ -400,7 +400,7 @@ def run_backtest(
 
     Returns a stats dict with all performance metrics.
     """
-    set_bar_data(mnq_df, mes_df)
+    init_bar_data()
     start_dt = pd.Timestamp(start or BACKTEST_START).date()
     end_dt   = pd.Timestamp(end   or BACKTEST_END).date()
 
@@ -431,6 +431,7 @@ def run_backtest(
     _mnq_times   = mnq_df.index.time
     _ses_start_t = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
     _ses_end_t   = pd.Timestamp(f"2000-01-01 {SESSION_END}").time()
+    _prev_appended_ts: "pd.Timestamp | None" = None
 
     for day in trading_days:
         # Weekday filter: skip disallowed trading days (e.g. Thursday)
@@ -453,6 +454,20 @@ def run_backtest(
             f"{day} {SESSION_END}", tz=mnq_session.index.tz
         )
         day_pnl = 0.0
+
+        # Append overnight / pre-session bars to strategy globals before any
+        # session-init computation that may read them.
+        _session_open_ts = mnq_session.index[0]
+        _overnight_mnq = (
+            mnq_df[mnq_df.index < _session_open_ts]
+            if _prev_appended_ts is None
+            else mnq_df[(mnq_df.index > _prev_appended_ts) & (mnq_df.index < _session_open_ts)]
+        )
+        if not _overnight_mnq.empty:
+            _overnight_mes = mes_df[
+                (mes_df.index >= _overnight_mnq.index[0]) & (mes_df.index <= _overnight_mnq.index[-1])
+            ]
+            append_bar_data(_overnight_mnq, _overnight_mes if not _overnight_mes.empty else None)
 
         # Compute TDO for new signal generation; skip the day only if TDO is
         # missing AND we are not currently managing a carried position.
@@ -794,6 +809,16 @@ def run_backtest(
                     position["position_id"] = _position_id
                     state = "IN_TRADE"
                     entry_bar_count = 0
+
+        # Bulk-append completed session bars to strategy globals.
+        _ses_mes_slice = mes_df[
+            (mes_df.index >= mnq_session.index[0]) & (mes_df.index <= mnq_session.index[-1])
+        ]
+        append_bar_data(
+            mnq_session,
+            _ses_mes_slice if not _ses_mes_slice.empty else None,
+        )
+        _prev_appended_ts = mnq_session.index[-1]
 
         # End of session: expire any pending limit order still waiting for fill.
         if _scan_state.scan_state == "WAITING_FOR_LIMIT_FILL" and _scan_state.pending_limit_signal is not None:

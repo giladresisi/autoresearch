@@ -1064,18 +1064,16 @@ def test_set_bar_data_overwrites_previous():
     assert train_smt._mnq_bars is df2
 
 
-def test_run_backtest_calls_set_bar_data(monkeypatch):
-    import strategy_smt as _strat
+def test_run_backtest_calls_init_bar_data(monkeypatch):
     import backtest_smt as _bk
     calls = []
-    # set_bar_data is called via backtest_smt's imported reference — patch there
-    monkeypatch.setattr(_bk, "set_bar_data", lambda mnq, mes: calls.append((mnq, mes)))
+    monkeypatch.setattr(_bk, "init_bar_data", lambda *a, **kw: calls.append(True))
     mnq = _make_1m_bars([100]*2, [101]*2, [99]*2, [100]*2)
     mes = _make_1m_bars([50]*2, [51]*2, [49]*2, [50]*2)
     monkeypatch.setattr(_bk, "BACKTEST_START", "2025-01-02")
     monkeypatch.setattr(_bk, "BACKTEST_END",   "2025-01-03")
     _bk.run_backtest(mnq, mes)
-    assert len(calls) == 1 and calls[0][0] is mnq
+    assert len(calls) == 1
 
 
 # ══ Phase 2: exit_market infrastructure ══════════════════════════════════════
