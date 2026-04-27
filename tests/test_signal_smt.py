@@ -533,7 +533,7 @@ def test_1s_buf_cleared_on_1m_bar(monkeypatch, tmp_path):
     """on_mnq_1m_bar with hasNewBar=True resets _mnq_1s_buf to empty."""
     import signal_smt
 
-    monkeypatch.setattr(signal_smt, "REALTIME_DATA_DIR", tmp_path)
+    monkeypatch.setattr(signal_smt, "BAR_DATA_DIR", tmp_path)
 
     empty = signal_smt._empty_bar_df()
     # Pre-populate buffer with one bar
@@ -685,7 +685,7 @@ def test_acc_to_df_row_schema():
 def test_load_parquets_missing_files(monkeypatch, tmp_path):
     """_load_parquets returns empty DataFrames (not FileNotFoundError) when files absent."""
     import signal_smt
-    monkeypatch.setattr(signal_smt, "REALTIME_DATA_DIR", tmp_path)
+    monkeypatch.setattr(signal_smt, "BAR_DATA_DIR", tmp_path)
 
     mnq_df, mes_df = signal_smt._load_parquets()
 
@@ -700,7 +700,7 @@ def test_30_day_cap_on_gap_fill(monkeypatch, tmp_path):
     """_gap_fill_1m requests no more than 30 days back even when df is empty."""
     import signal_smt
 
-    monkeypatch.setattr(signal_smt, "REALTIME_DATA_DIR", tmp_path)
+    monkeypatch.setattr(signal_smt, "BAR_DATA_DIR", tmp_path)
 
     start_args = []
 

@@ -3,7 +3,7 @@
 Usage:
     uv run prepare_futures_1m.py
 
-Downloads from Databento (GLBX.MDP3, MNQ.v.0/MES.v.0) to data/historical/.
+Downloads from Databento (GLBX.MDP3, MNQ.v.0/MES.v.0) to data/.
 Requires DATABENTO_API_KEY in environment (or .env file).
 Running again skips tickers whose file already exists (idempotent).
 """
@@ -32,8 +32,8 @@ BACKTEST_END   = "2026-04-15"
 
 INTERVAL = "1m"
 
-# Databento permanent store — survives cache clears
-HISTORICAL_DATA_DIR = Path("data/historical")
+# Unified bar data store (also read by signal_smt and backtest)
+HISTORICAL_DATA_DIR = Path("data")
 
 # Databento continuous front-month symbols (volume-roll, stype_in="continuous")
 DATABENTO_SYMBOLS = {

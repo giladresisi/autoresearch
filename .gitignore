@@ -35,10 +35,9 @@ harness_upgrade.md
 # Live session logs (real trading data, not committed)
 sessions/
 
-# Databento permanent parquet store (large, not committed)
+# Parquet data files (large, not committed)
+data/*.parquet
 data/historical/*.parquet
-
-# Realtime intraday parquet data (large, not committed)
 data/realtime/*.parquet
 
 # Agent format-patch archives (stored in .agents/ but not committed)

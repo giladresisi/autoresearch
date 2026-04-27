@@ -658,20 +658,24 @@ def load_futures_data() -> dict[str, pd.DataFrame]:
     """Load MNQ and MES futures parquets.
 
     Checks in priority order:
-      1. data/historical/{ticker}_{interval}.parquet  — interval-specific Databento file
-      2. data/historical/{ticker}.parquet             — default Databento file
-      3. FUTURES_CACHE_DIR/{interval}/{ticker}.parquet — IB ephemeral cache
+      1. data/{ticker}_{interval}.parquet             — unified live+historical file
+      2. data/historical/{ticker}_{interval}.parquet  — legacy Databento-only file
+      3. data/historical/{ticker}.parquet             — legacy default Databento file
+      4. FUTURES_CACHE_DIR/{interval}/{ticker}.parquet — IB ephemeral cache
     Returns {"MNQ": df, "MES": df} with tz-aware ET DatetimeIndex.
-    Raises FileNotFoundError if parquets are missing (run prepare_futures.py).
+    Raises FileNotFoundError if parquets are missing (run prepare_futures_1m.py).
     """
     manifest = _load_futures_manifest()
     interval = manifest.get("fetch_interval", "1m")
     result: dict[str, pd.DataFrame] = {}
     for ticker in ["MNQ", "MES"]:
+        unified_path    = Path("data") / f"{ticker}_{interval}.parquet"
         interval_path   = Path("data/historical") / f"{ticker}_{interval}.parquet"
         historical_path = Path("data/historical") / f"{ticker}.parquet"
         ib_path         = Path(FUTURES_CACHE_DIR) / interval / f"{ticker}.parquet"
-        if interval_path.exists():
+        if unified_path.exists():
+            path = unified_path
+        elif interval_path.exists():
             path = interval_path
         elif historical_path.exists():
             path = historical_path
@@ -679,7 +683,7 @@ def load_futures_data() -> dict[str, pd.DataFrame]:
             path = ib_path
         else:
             raise FileNotFoundError(
-                f"Missing futures parquet for {ticker}. Run prepare_futures.py."
+                f"Missing futures parquet for {ticker}. Run prepare_futures_1m.py."
             )
         result[ticker] = pd.read_parquet(path)
     # Align MNQ and MES to their common timestamps so run_backtest can apply

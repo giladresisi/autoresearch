@@ -251,8 +251,8 @@ def find_session_trade(session_date: str) -> tuple[dict, pd.DataFrame] | tuple[N
     import strategy_smt as s
 
     _root = Path(__file__).parent.parent
-    mnq = pd.read_parquet(_root / "data" / "historical" / "MNQ_1m.parquet")
-    mes = pd.read_parquet(_root / "data" / "historical" / "MES_1m.parquet")
+    mnq = pd.read_parquet(_root / "data" / "MNQ_1m.parquet")
+    mes = pd.read_parquet(_root / "data" / "MES_1m.parquet")
 
     day = pd.Timestamp(session_date, tz="America/New_York")
     session_start = day.replace(hour=9, minute=0)

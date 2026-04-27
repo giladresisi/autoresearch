@@ -53,16 +53,16 @@ SIGNAL_SESSION_END = "13:30"   # ET  (named to avoid shadowing strategy_smt.SESS
 # 2-tick adverse fill; 1 tick = 0.25 MNQ points
 ENTRY_SLIPPAGE_TICKS = 2
 MAX_LOOKBACK_DAYS    = 30
-GAP_FILL_MAX_DAYS    = 3   # cap pacing load at startup; 30-day history already in parquet
+GAP_FILL_MAX_DAYS    = 14  # covers long weekends and occasional missed days
 MNQ_PNL_PER_POINT    = 2.0
 
 # ── Reconnect settings ────────────────────────────────────────────────────────
 MAX_RETRIES   = 10
 RETRY_DELAY_S = 15
 
-# ── Realtime data paths ───────────────────────────────────────────────────────
-REALTIME_DATA_DIR = Path("data/realtime")
-POSITION_FILE     = REALTIME_DATA_DIR / "position.json"
+# ── Data paths ───────────────────────────────────────────────────────────────
+BAR_DATA_DIR = Path("data")
+POSITION_FILE = BAR_DATA_DIR / "position.json"
 
 # ── Module-level state (set in main()) ───────────────────────────────────────
 _ib: IB = None
@@ -335,8 +335,8 @@ def _load_hist_mnq() -> pd.DataFrame:
 
 def _load_parquets() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load cached 1m parquet files. Returns empty DataFrames if files don't exist."""
-    mnq_path = REALTIME_DATA_DIR / "MNQ_1m.parquet"
-    mes_path  = REALTIME_DATA_DIR / "MES_1m.parquet"
+    mnq_path = BAR_DATA_DIR / "MNQ_1m.parquet"
+    mes_path  = BAR_DATA_DIR / "MES_1m.parquet"
     mnq_df = pd.read_parquet(mnq_path) if mnq_path.exists() else _empty_bar_df()
     mes_df = pd.read_parquet(mes_path) if mes_path.exists() else _empty_bar_df()
     return mnq_df, mes_df
@@ -380,9 +380,9 @@ def _gap_fill_1m(
         mes_df = mes_df[~mes_df.index.duplicated(keep="last")]
 
     # Persist updated caches
-    REALTIME_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    mnq_df.to_parquet(REALTIME_DATA_DIR / "MNQ_1m.parquet")
-    mes_df.to_parquet(REALTIME_DATA_DIR / "MES_1m.parquet")
+    BAR_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    mnq_df.to_parquet(BAR_DATA_DIR / "MNQ_1m.parquet")
+    mes_df.to_parquet(BAR_DATA_DIR / "MES_1m.parquet")
 
     return mnq_df, mes_df
 
@@ -407,7 +407,7 @@ def on_mnq_1m_bar(bars, hasNewBar):
     )
     _mnq_1m_df = pd.concat([_mnq_1m_df, row])
     _mnq_1m_df = _mnq_1m_df[~_mnq_1m_df.index.duplicated(keep="last")]
-    _mnq_1m_df.to_parquet(REALTIME_DATA_DIR / "MNQ_1m.parquet")
+    _mnq_1m_df.to_parquet(BAR_DATA_DIR / "MNQ_1m.parquet")
     _mnq_1s_buf = _empty_bar_df()
     # Reset tick accumulator so the last second of the expiring minute is not
     # re-appended to the fresh buffer on the first tick of the next minute.
@@ -442,7 +442,7 @@ def on_mes_1m_bar(bars, hasNewBar):
     )
     _mes_1m_df = pd.concat([_mes_1m_df, row])
     _mes_1m_df = _mes_1m_df[~_mes_1m_df.index.duplicated(keep="last")]
-    _mes_1m_df.to_parquet(REALTIME_DATA_DIR / "MES_1m.parquet")
+    _mes_1m_df.to_parquet(BAR_DATA_DIR / "MES_1m.parquet")
     _mes_1s_buf = _empty_bar_df()
     # Reset tick accumulator alongside 1s buffer to avoid stale second bleeding
     # into the next minute's buffer on the first tick.
@@ -1056,7 +1056,7 @@ def main() -> None:
     global _hypothesis_manager, _hypothesis_generated
     global _hist_daily_df
 
-    REALTIME_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    BAR_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # This module is only used for signalling to a human trader, so human-mode
     # classification/emission is always on when signal_smt is the entry point.
