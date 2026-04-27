@@ -71,12 +71,12 @@ _mes_contract = None
 
 _mnq_1m_df: pd.DataFrame = None   # loaded from parquet + gap-filled
 _mes_1m_df: pd.DataFrame = None
-_mnq_1s_buf: pd.DataFrame = None  # current-minute 1s bars, cleared on each new 1m bar
-_mes_1s_buf: pd.DataFrame = None
+# Per-instrument partial 1m bar accumulators — OHLCV built from ticks since the current minute started
+_mnq_partial_1m: dict | None = None
+_mes_partial_1m: dict | None = None
 
-# Per-instrument tick accumulators for the current in-progress second
-_mnq_tick_bar: dict | None = None   # running OHLCV accumulator for in-progress second
-_mes_tick_bar: dict | None = None
+# Per-instrument tick accumulator for the current in-progress second (MNQ only; used for second-boundary detection)
+_mnq_tick_bar: dict | None = None
 
 _state: str = "SCANNING"          # "SCANNING" | "MANAGING"
 _position: dict | None = None
@@ -255,19 +255,6 @@ def _format_limit_filled_line(ts: pd.Timestamp, evt: dict) -> str:
     )
 
 
-def _build_1s_buffer_df() -> pd.DataFrame:
-    """Factory alias for _empty_bar_df; used in tests to verify buffer schema."""
-    return _empty_bar_df()
-
-
-def _acc_to_bar_row(acc: dict) -> "strategy_smt._BarRow":
-    """Build a _BarRow from a finalized tick accumulator dict."""
-    return strategy_smt._BarRow(
-        acc["open"], acc["high"], acc["low"], acc["close"], acc["volume"],
-        acc["second_ts"],
-    )
-
-
 def _update_tick_accumulator(
     acc: dict | None, price: float, size: float, second_ts: pd.Timestamp
 ) -> tuple[dict, dict | None]:
@@ -290,31 +277,24 @@ def _update_tick_accumulator(
     return acc, None
 
 
-def _acc_to_df_row(acc: dict) -> pd.DataFrame:
-    """Convert a finalized tick accumulator to a one-row OHLCV DataFrame.
+def _update_partial_1m(acc: dict | None, price: float, size: float, minute_ts: pd.Timestamp) -> dict:
+    """Update or create the partial 1m bar accumulator for the current minute.
 
-    Output schema is identical to _append_1s_bar: columns Open/High/Low/Close/Volume,
-    ET-localized DatetimeIndex.
+    On minute boundary the accumulator resets; within a minute it tracks running OHLCV
+    since the first tick of that minute.
     """
-    return pd.DataFrame(
-        [[acc["open"], acc["high"], acc["low"], acc["close"], acc["volume"]]],
-        columns=["Open", "High", "Low", "Close", "Volume"],
-        index=pd.DatetimeIndex([acc["second_ts"]]),
-    )
+    if acc is None or minute_ts != acc["minute_ts"]:
+        return {"open": price, "high": price, "low": price, "close": price, "volume": size, "minute_ts": minute_ts}
+    acc["high"]   = max(acc["high"], price)
+    acc["low"]    = min(acc["low"], price)
+    acc["close"]  = price
+    acc["volume"] += size
+    return acc
 
 
-def _append_1s_bar(buf: pd.DataFrame, bar) -> pd.DataFrame:
-    """Append an ib_insync bar object to a 1s buffer DataFrame.
-
-    Returns the updated buffer. Caller must reassign the module variable.
-    """
-    bar_ts = _bar_timestamp(bar)
-    row = pd.DataFrame(
-        [[float(bar.open), float(bar.high), float(bar.low), float(bar.close), float(bar.volume)]],
-        columns=["Open", "High", "Low", "Close", "Volume"],
-        index=pd.DatetimeIndex([bar_ts]),
-    )
-    return pd.concat([buf, row])
+def _partial_1m_to_bar_row(acc: dict, ts: pd.Timestamp) -> "strategy_smt._BarRow":
+    """Build a _BarRow from a partial 1m accumulator, stamped with the current second boundary."""
+    return strategy_smt._BarRow(acc["open"], acc["high"], acc["low"], acc["close"], acc["volume"], ts)
 
 
 def _bar_timestamp(bar) -> pd.Timestamp:
@@ -395,7 +375,7 @@ def on_mnq_1m_bar(bars, hasNewBar):
     Appends the bar to the persistent 1m DataFrame, saves the parquet,
     and clears the 1s buffer and tick accumulator so the next minute starts fresh.
     """
-    global _mnq_1m_df, _mnq_1s_buf, _mnq_tick_bar
+    global _mnq_1m_df, _mnq_tick_bar
     if not hasNewBar:
         return
     bar = bars[-1]
@@ -408,9 +388,8 @@ def on_mnq_1m_bar(bars, hasNewBar):
     _mnq_1m_df = pd.concat([_mnq_1m_df, row])
     _mnq_1m_df = _mnq_1m_df[~_mnq_1m_df.index.duplicated(keep="last")]
     _mnq_1m_df.to_parquet(BAR_DATA_DIR / "MNQ_1m.parquet")
-    _mnq_1s_buf = _empty_bar_df()
-    # Reset tick accumulator so the last second of the expiring minute is not
-    # re-appended to the fresh buffer on the first tick of the next minute.
+    # Reset second accumulator so the last second of the expiring minute does not
+    # bleed into the next minute's second boundary detection.
     _mnq_tick_bar = None
     set_bar_data(_mnq_1m_df, _mes_1m_df)
 
@@ -430,7 +409,7 @@ def on_mes_1m_bar(bars, hasNewBar):
 
     Appends to the persistent 1m DataFrame and saves the parquet.
     """
-    global _mes_1m_df, _mes_1s_buf, _mes_tick_bar
+    global _mes_1m_df
     if not hasNewBar:
         return
     bar = bars[-1]
@@ -443,10 +422,6 @@ def on_mes_1m_bar(bars, hasNewBar):
     _mes_1m_df = pd.concat([_mes_1m_df, row])
     _mes_1m_df = _mes_1m_df[~_mes_1m_df.index.duplicated(keep="last")]
     _mes_1m_df.to_parquet(BAR_DATA_DIR / "MES_1m.parquet")
-    _mes_1s_buf = _empty_bar_df()
-    # Reset tick accumulator alongside 1s buffer to avoid stale second bleeding
-    # into the next minute's buffer on the first tick.
-    _mes_tick_bar = None
     set_bar_data(_mnq_1m_df, _mes_1m_df)
 
 
@@ -464,36 +439,36 @@ def _tick_second_ts(t) -> pd.Timestamp:
 def on_mes_tick(ticker) -> None:
     """Fired on each trade tick for MES via reqTickByTickData("AllLast").
 
-    Accumulates ticks into per-second OHLCV. Appends the completed bar to
-    _mes_1s_buf when the first tick of a new second arrives (boundary crossing).
-    MES is passive — never calls _process().
+    Updates the partial 1m bar accumulator with each tick. MES is passive — never
+    calls _process(); the MNQ tick handler drives session scanning.
     """
-    global _mes_tick_bar, _mes_1s_buf
+    global _mes_partial_1m
     if not ticker.tickByTicks:
         return
     t = ticker.tickByTicks[-1]
     second_ts = _tick_second_ts(t)
-    _mes_tick_bar, finalized = _update_tick_accumulator(_mes_tick_bar, t.price, t.size, second_ts)
-    if finalized is not None:
-        _mes_1s_buf = pd.concat([_mes_1s_buf, _acc_to_df_row(finalized)])
+    minute_ts = second_ts.floor("min")
+    _mes_partial_1m = _update_partial_1m(_mes_partial_1m, t.price, t.size, minute_ts)
 
 
 def on_mnq_tick(ticker) -> None:
     """Fired on each trade tick for MNQ via reqTickByTickData("AllLast").
 
-    Accumulates ticks into per-second OHLCV. On second boundary crossing,
-    appends the completed bar to _mnq_1s_buf and triggers _process() for
-    signal detection / position management.
+    On each second boundary, fires _process() with the current partial 1m bar
+    (OHLCV accumulated since the start of the current minute, stamped at the
+    completed second). The partial bar is updated with the triggering tick after
+    firing so _process sees the bar's state at the end of the completed second.
     """
-    global _mnq_tick_bar, _mnq_1s_buf
+    global _mnq_tick_bar, _mnq_partial_1m
     if not ticker.tickByTicks:
         return
     t = ticker.tickByTicks[-1]
     second_ts = _tick_second_ts(t)
+    minute_ts = second_ts.floor("min")
     _mnq_tick_bar, finalized = _update_tick_accumulator(_mnq_tick_bar, t.price, t.size, second_ts)
-    if finalized is not None:
-        _mnq_1s_buf = pd.concat([_mnq_1s_buf, _acc_to_df_row(finalized)])
-        _process(_acc_to_bar_row(finalized))
+    if finalized is not None and _mnq_partial_1m is not None:
+        _process(_partial_1m_to_bar_row(_mnq_partial_1m, finalized["second_ts"]))
+    _mnq_partial_1m = _update_partial_1m(_mnq_partial_1m, t.price, t.size, minute_ts)
 
 
 # ── State machine ─────────────────────────────────────────────────────────────
@@ -591,8 +566,10 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     if _hypothesis_manager is not None and not _hypothesis_generated:
         return
 
-    # 2. Alignment gate: MES 1s buffer must match MNQ latest timestamp
-    if _mes_1s_buf.empty or _mes_1s_buf.index[-1] != _mnq_1s_buf.index[-1]:
+    # 2. Alignment gate: both partial 1m bars must exist and be for the same minute
+    if _mes_partial_1m is None or _mnq_partial_1m is None:
+        return
+    if _mes_partial_1m["minute_ts"] != _mnq_partial_1m["minute_ts"]:
         return
 
     today = bar_ts.date()
@@ -780,11 +757,10 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         "Open": float(bar.Open), "High": float(bar.High),
         "Low": float(bar.Low), "Close": float(bar.Close), "Volume": float(bar.Volume),
     })
-    _mes_cur = _mes_1s_buf.iloc[-1]
     _session_mes_rows.append({
-        "Open": float(_mes_cur["Open"]), "High": float(_mes_cur["High"]),
-        "Low": float(_mes_cur["Low"]), "Close": float(_mes_cur["Close"]),
-        "Volume": float(_mes_cur.get("Volume", 0.0)),
+        "Open": float(_mes_partial_1m["open"]), "High": float(_mes_partial_1m["high"]),
+        "Low": float(_mes_partial_1m["low"]), "Close": float(_mes_partial_1m["close"]),
+        "Volume": float(_mes_partial_1m["volume"]),
     })
     bar_idx = len(_session_mnq_rows) - 1
 
@@ -1050,9 +1026,9 @@ def _setup_ib_subscriptions(ib: IB, mnq_contract, mes_contract) -> None:
 
 def main() -> None:
     global _ib, _mnq_contract, _mes_contract, _mnq_1m_df, _mes_1m_df
-    global _mnq_1s_buf, _mes_1s_buf, _state, _position, _startup_ts
+    global _mnq_partial_1m, _mes_partial_1m, _state, _position, _startup_ts
     global _session_start_time, _session_end_time
-    global _mnq_tick_bar, _mes_tick_bar
+    global _mnq_tick_bar
     global _hypothesis_manager, _hypothesis_generated
     global _hist_daily_df
 
@@ -1067,10 +1043,9 @@ def main() -> None:
     _session_start_time = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
     _session_end_time   = pd.Timestamp(f"2000-01-01 {SIGNAL_SESSION_END}").time()
 
-    _mnq_1s_buf = _empty_bar_df()
-    _mes_1s_buf = _empty_bar_df()
+    _mnq_partial_1m = None
+    _mes_partial_1m = None
     _mnq_tick_bar = None
-    _mes_tick_bar = None
 
     # Load and gap-fill the persistent 1m parquet caches
     _mnq_1m_df, _mes_1m_df = _load_parquets()
