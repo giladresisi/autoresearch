@@ -391,8 +391,12 @@ def run_hypothesis(
         if _init_candidates:
             _ini = max(_init_candidates, key=lambda x: x[0]) if direction == "up" \
                    else min(_init_candidates, key=lambda x: x[0])
-            cautious_price_initial       = _ini[0]
-            cautious_price_initial_level = _ini[1]
+            if abs(_ini[0] - current_close) >= CAUTIOUS_MIN_DIST:
+                cautious_price_initial       = _ini[0]
+                cautious_price_initial_level = _ini[1]
+            else:
+                cautious_price_initial       = ""
+                cautious_price_initial_level = ""
         else:
             cautious_price_initial       = ""
             cautious_price_initial_level = ""
