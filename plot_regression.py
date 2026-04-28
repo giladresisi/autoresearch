@@ -394,6 +394,22 @@ for kind, style in OTHER_MARKER_STYLE.items():
                 parts.append("cautious_initial: none")
             for er in e.get("entry_ranges", []):
                 parts.append(f"entry_{er['source']}: [{er['low']}, {er['high']}]")
+            dr = e.get("direction_reason", {})
+            if dr:
+                parts.append(f"decided_by: {dr.get('rule', '?')}")
+                parts.append(f"weekly: {dr.get('weekly_zone', '?')} | daily: {dr.get('daily_zone', '?')}")
+                parts.append(f"smt_score: {dr.get('smt_score', '?')}")
+                if dr.get("fresh_touch_level"):
+                    parts.append(f"touched: {dr['fresh_touch_level']}  smt: {dr.get('smt_alignment', '?')}")
+                if dr.get("approaching_level"):
+                    parts.append(f"approaching: {dr['approaching_level']} ({dr.get('approaching_dist', '?')} pts)")
+                if dr.get("combined_score") is not None:
+                    parts.append(
+                        f"pd: {dr.get('pd_score', '?')}  "
+                        f"bos1h: {dr.get('bos_score_1hr', '?')}  "
+                        f"bos4h: {dr.get('bos_score_4hr', '?')}  "
+                        f"→ {dr.get('combined_score', '?')}"
+                    )
         hover.append("<br>".join(parts))
     fig.add_trace(go.Scatter(
         x=[e["ts"] for e in group],

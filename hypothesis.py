@@ -12,6 +12,14 @@ CAUTIOUS_SECONDARY_MAX_DIST = 150  # pts — secondary (1m confirmation) max dis
 CAUTIOUS_INITIAL_MAX_DIST   = 100  # pts — initial (5m confirmation) max distance
 CAUTIOUS_MIN_DIST           =  40  # pts — below this secondary distance, skip the entry
 
+LIQUIDITY_APPROACH_DIST    = 100   # pts — Rule 2: "nearly approaching" radius
+NEAR_EXTREME_DIST          =  75   # pts — Rule 3a: proximity boost to daily extreme
+MOMENTUM_BARS              =   5   # 1m bars — Rule 2: recent momentum window
+BOS_SWING_N                =   2   # bars each side for swing high/low detection
+BOS_LOOKBACK_1HR           =   8   # 1hr bars — recency window for BOS/CHoCH
+BOS_LOOKBACK_4HR           =   3   # 4hr bars — recency window for BOS/CHoCH
+DIRECTION_SCORE_THRESHOLD  =  0.35 # combined Rule 3+4 score required to commit
+
 from smt_state import (
     load_global,
     load_daily,
@@ -258,6 +266,322 @@ def _find_nearest_bar(combined: pd.DataFrame, target_ts: pd.Timestamp) -> dict |
     return {"Low": float(bar["Low"]), "High": float(bar["High"])}
 
 
+# ---------------------------------------------------------------------------
+# Direction-determination helpers (Rules 1-5)
+# ---------------------------------------------------------------------------
+
+def _named_price(liquidities: list, name: str) -> float | None:
+    for liq in liquidities:
+        if liq.get("name") == name and liq.get("kind") == "level":
+            return float(liq["price"])
+    return None
+
+
+def _detect_fvg_1hr(hist_mnq_1m: pd.DataFrame, session_mnq_1m: pd.DataFrame) -> list:
+    combined = pd.concat([hist_mnq_1m, session_mnq_1m])
+    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    bars = combined.resample("1h").agg(agg).dropna(subset=["Open"])
+    bars = bars.iloc[-(BOS_LOOKBACK_1HR + 5):]
+    n = len(bars)
+    fvgs = []
+    for i in range(1, n - 1):
+        hi_prev = float(bars["High"].iloc[i - 1])
+        lo_prev = float(bars["Low"].iloc[i - 1])
+        hi_next = float(bars["High"].iloc[i + 1])
+        lo_next = float(bars["Low"].iloc[i + 1])
+        if lo_next > hi_prev:
+            fvgs.append({"kind": "bullish", "bottom": hi_prev, "top": lo_next,
+                         "bar_time": bars.index[i], "bar_pos": i})
+        elif hi_next < lo_prev:
+            fvgs.append({"kind": "bearish", "bottom": hi_next, "top": lo_prev,
+                         "bar_time": bars.index[i], "bar_pos": i})
+    min_pos = n - 1 - 5
+    return [f for f in fvgs if f["bar_pos"] >= min_pos]
+
+
+def _build_meaningful_levels(liquidities: list, fvg_1hr: list) -> list:
+    levels = []
+    for liq in liquidities:
+        name = liq.get("name")
+        if liq.get("kind") != "level":
+            continue
+        if name == "week_high":
+            levels.append({"price": float(liq["price"]), "kind": "high", "name": "week_high", "priority": 1})
+        elif name == "week_low":
+            levels.append({"price": float(liq["price"]), "kind": "low",  "name": "week_low",  "priority": 1})
+        elif name == "day_high":
+            levels.append({"price": float(liq["price"]), "kind": "high", "name": "day_high",  "priority": 2})
+        elif name == "day_low":
+            levels.append({"price": float(liq["price"]), "kind": "low",  "name": "day_low",   "priority": 2})
+    for fvg in fvg_1hr:
+        if fvg["kind"] == "bullish":
+            levels.append({"price": fvg["bottom"], "kind": "low",  "name": "fvg_1hr_bull_bottom", "priority": 3})
+        else:
+            levels.append({"price": fvg["top"],    "kind": "high", "name": "fvg_1hr_bear_top",    "priority": 3})
+    return sorted(levels, key=lambda lv: lv["priority"])
+
+
+def _was_previously_touched(level: dict, prior_bars: pd.DataFrame) -> bool:
+    if prior_bars.empty:
+        return False
+    if level["kind"] == "high":
+        return bool((prior_bars["High"] >= level["price"]).any())
+    return bool((prior_bars["Low"] <= level["price"]).any())
+
+
+def _check_fresh_touch(current_bar: dict, prior_bars: pd.DataFrame, levels: list) -> dict | None:
+    for level in levels:
+        if level["kind"] == "high":
+            touched_now = float(current_bar["High"]) >= level["price"]
+        else:
+            touched_now = float(current_bar["Low"]) <= level["price"]
+        if not touched_now:
+            continue
+        if _was_previously_touched(level, prior_bars):
+            continue
+        direction = "down" if level["kind"] == "high" else "up"
+        return {"direction": direction, "touched_level": level, "base_conf": 1.0}
+    return None
+
+
+def _co_evaluate_with_smt(direction: str, base_conf: float, smt_score: float) -> tuple:
+    smt_sign = 1 if direction == "up" else -1
+    aligned = (smt_sign * smt_score) > 0
+    if aligned and abs(smt_score) >= 0.30:
+        smt_alignment = "confirmed"
+    elif not aligned and abs(smt_score) >= 0.60:
+        smt_alignment = "contradicted"
+    else:
+        smt_alignment = "neutral"
+    return base_conf, smt_alignment
+
+
+def _check_approaching(
+    current_bar: dict,
+    prior_bars: pd.DataFrame,
+    levels: list,
+    mnq_1m: pd.DataFrame,
+) -> dict | None:
+    current_close = float(current_bar["Close"])
+    for level in levels:
+        if _was_previously_touched(level, prior_bars):
+            continue
+        dist = abs(level["price"] - current_close)
+        if dist > LIQUIDITY_APPROACH_DIST:
+            continue
+        if level["kind"] == "high":
+            approaching = current_close < level["price"]
+        else:
+            approaching = current_close > level["price"]
+        if not approaching:
+            continue
+        recent = mnq_1m["Close"].iloc[-MOMENTUM_BARS:]
+        if len(recent) < 2:
+            continue
+        if level["kind"] == "high":
+            momentum_ok = float(recent.iloc[-1]) > float(recent.iloc[0])
+        else:
+            momentum_ok = float(recent.iloc[-1]) < float(recent.iloc[0])
+        if not momentum_ok:
+            continue
+        direction = "up" if level["kind"] == "high" else "down"
+        return {"direction": direction, "approaching_level": level, "dist": dist, "conf": 0.75}
+    return None
+
+
+def _compute_pd_score(
+    close: float,
+    week_h: float | None,
+    week_l: float | None,
+    day_h: float | None,
+    day_l: float | None,
+) -> float:
+    if week_h is None or week_l is None or day_h is None or day_l is None:
+        return 0.0
+    week_mid = (week_h + week_l) / 2.0
+    day_mid  = (day_h  + day_l)  / 2.0
+    weekly_premium = close > week_mid
+    daily_premium  = close > day_mid
+    if weekly_premium and daily_premium:
+        pd_score = -0.70
+    elif not weekly_premium and not daily_premium:
+        pd_score = +0.70
+    elif weekly_premium and not daily_premium:
+        pd_score = +0.30
+    else:
+        pd_score = -0.30
+    if (day_h - close) < NEAR_EXTREME_DIST:
+        pd_score -= 0.15
+    if (close - day_l) < NEAR_EXTREME_DIST:
+        pd_score += 0.15
+    return max(-1.0, min(1.0, pd_score))
+
+
+def _compute_bos_choch_score(bars_df: pd.DataFrame, swing_n: int, lookback: int) -> float:
+    n = len(bars_df)
+    if n < 2 * swing_n + 1:
+        return 0.0
+    highs  = bars_df["High"].values
+    lows   = bars_df["Low"].values
+    closes = bars_df["Close"].values
+    shs = [i for i in range(swing_n, n - swing_n)
+           if highs[i] == highs[i - swing_n: i + swing_n + 1].max()]
+    sls = [i for i in range(swing_n, n - swing_n)
+           if lows[i]  == lows[i  - swing_n: i + swing_n + 1].min()]
+    last_idx = n - 1
+    current_close = float(closes[-1])
+    score = 0.0
+    recent_shs = [i for i in shs if last_idx - i <= lookback]
+    if recent_shs:
+        latest_sh = max(recent_shs)
+        if current_close > float(highs[latest_sh]):
+            recency = 1.0 - (last_idx - latest_sh) / lookback
+            score += recency
+    recent_sls = [i for i in sls if last_idx - i <= lookback]
+    if recent_sls:
+        latest_sl = max(recent_sls)
+        if current_close < float(lows[latest_sl]):
+            recency = 1.0 - (last_idx - latest_sl) / lookback
+            score -= recency
+    return max(-1.0, min(1.0, score))
+
+
+def _closest_level_name(price: float | None, liquidities: list) -> str | None:
+    if price is None:
+        return None
+    best_name = None
+    best_dist = float("inf")
+    for liq in liquidities:
+        if liq.get("kind") == "level":
+            p = liq.get("price")
+        elif liq.get("kind") == "fvg":
+            top = liq.get("top")
+            bottom = liq.get("bottom")
+            if top is None or bottom is None:
+                continue
+            p = (top + bottom) / 2.0
+        else:
+            continue
+        if p is None:
+            continue
+        d = abs(p - price)
+        if d < best_dist:
+            best_dist = d
+            best_name = liq.get("name")
+    return best_name if best_dist <= 10 else None
+
+
+def _compute_smt_score(divs: list, liquidities: list) -> float:
+    LEVEL_WEIGHT = {
+        "week_high": 3, "week_low": 3,
+        "day_high":  2, "day_low":  2,
+        "ny_morning_high": 1, "ny_morning_low": 1,
+        "london_high": 1,     "london_low": 1,
+    }
+    TF_WEIGHT   = {"30m": 2.0, "15m": 1.0}
+    TYPE_WEIGHT = {"wick": 2.0, "wick_sym": 2.0, "body": 1.5, "body_sym": 1.5, "fill": 1.0}
+    score = 0.0
+    max_possible = 0.0
+    for div in divs:
+        level_name = _closest_level_name(div.get("mnq_div_price"), liquidities)
+        lw = LEVEL_WEIGHT.get(level_name, 1) if level_name else 1
+        tw = TF_WEIGHT.get(div.get("timeframe", ""), 1.0)
+        yw = TYPE_WEIGHT.get(div.get("type", ""), 1.0)
+        w  = lw * tw * yw
+        sign = 1 if div.get("side") == "bullish" else -1
+        score        += sign * w
+        max_possible += w
+    if max_possible == 0:
+        return 0.0
+    return max(-1.0, min(1.0, score / max_possible))
+
+
+def _determine_direction(
+    current_bar: dict,
+    mnq_1m: pd.DataFrame,
+    hist_mnq_1m: pd.DataFrame,
+    liquidities: list,
+    global_state: dict,
+    divs: list,
+) -> tuple:
+    fvg_1hr = _detect_fvg_1hr(hist_mnq_1m, mnq_1m)
+    levels  = _build_meaningful_levels(liquidities, fvg_1hr)
+    prior   = mnq_1m.iloc[:-1]
+    smt_sc  = _compute_smt_score(divs, liquidities)
+
+    week_high = _named_price(liquidities, "week_high")
+    week_low  = _named_price(liquidities, "week_low")
+    day_high  = _named_price(liquidities, "day_high")
+    day_low   = _named_price(liquidities, "day_low")
+    current_close = float(current_bar["Close"])
+
+    def _zone(close, hi, lo):
+        if hi is None or lo is None:
+            return "unknown"
+        return "premium" if close > (hi + lo) / 2.0 else "discount"
+
+    reason = {
+        "rule":              None,
+        "weekly_zone":       _zone(current_close, week_high, week_low),
+        "daily_zone":        _zone(current_close, day_high,  day_low),
+        "smt_score":         round(smt_sc, 3),
+        "pd_score":          None,
+        "bos_score_1hr":     None,
+        "bos_score_4hr":     None,
+        "rule3_score":       None,
+        "combined_score":    None,
+        "fresh_touch_level": None,
+        "smt_alignment":     None,
+        "approaching_level": None,
+        "approaching_dist":  None,
+    }
+
+    # Rule 1: fresh sweep of a meaningful level — decisive state-change event.
+    r1 = _check_fresh_touch(current_bar, prior, levels)
+    if r1:
+        _conf, smt_aln = _co_evaluate_with_smt(r1["direction"], r1["base_conf"], smt_sc)
+        reason["rule"]              = "rule1"
+        reason["fresh_touch_level"] = r1["touched_level"]["name"]
+        reason["smt_alignment"]     = smt_aln
+        return r1["direction"], reason
+
+    # Rule 2: trending toward an unvisited level with momentum — decisive continuation.
+    r2 = _check_approaching(current_bar, prior, levels, mnq_1m)
+    if r2:
+        reason["rule"]              = "rule2"
+        reason["approaching_level"] = r2["approaching_level"]["name"]
+        reason["approaching_dist"]  = round(r2["dist"], 1)
+        return r2["direction"], reason
+
+    # Rules 3+4: multi-TF premium/discount bias + BOS/CHoCH + SMT scoring layer.
+    pd_sc = _compute_pd_score(current_close, week_high, week_low, day_high, day_low)
+    combined_bars = pd.concat([hist_mnq_1m, mnq_1m])
+    combined_bars = combined_bars[~combined_bars.index.duplicated(keep="last")].sort_index()
+    agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    mnq_1hr = combined_bars.resample("1h").agg(agg).dropna(subset=["Open"])
+    mnq_4hr = combined_bars.resample("4h").agg(agg).dropna(subset=["Open"])
+    b1hr = _compute_bos_choch_score(mnq_1hr, BOS_SWING_N, BOS_LOOKBACK_1HR)
+    b4hr = _compute_bos_choch_score(mnq_4hr, BOS_SWING_N, BOS_LOOKBACK_4HR)
+    bos_sc   = 0.35 * b1hr + 0.65 * b4hr
+    r3_sc    = 0.55 * pd_sc + 0.45 * bos_sc
+    combined = 0.65 * r3_sc + 0.35 * smt_sc
+
+    reason["pd_score"]       = round(pd_sc,    3)
+    reason["bos_score_1hr"]  = round(b1hr,     3)
+    reason["bos_score_4hr"]  = round(b4hr,     3)
+    reason["rule3_score"]    = round(r3_sc,    3)
+    reason["combined_score"] = round(combined, 3)
+
+    if abs(combined) >= DIRECTION_SCORE_THRESHOLD:
+        reason["rule"] = "rule3_4"
+        return ("up" if combined > 0 else "down"), reason
+
+    # Rule 5: global trend fallback when no rule commits.
+    reason["rule"] = "rule5_trend"
+    return global_state.get("trend", "up"), reason
+
+
 def run_hypothesis(
     now: datetime,
     mnq_1m: pd.DataFrame,
@@ -326,8 +650,15 @@ def run_hypothesis(
     # Step 5: divs — SMT divergences at 15m and 30m.
     divs = _compute_divs(mnq_1m, mes_1m)
 
-    # Step 6: direction (TBD hardcoded).
-    direction = "up"
+    # Step 6: direction — determined by ICT rules (see direction.md).
+    direction, direction_reason = _determine_direction(
+        current_bar  = bar,
+        mnq_1m       = mnq_1m,
+        hist_mnq_1m  = hist_mnq_1m,
+        liquidities  = liquidities,
+        global_state = global_state,
+        divs         = divs,
+    )
 
     # Step 7: targets — filter liquidities in direction from current close.
     targets = []
@@ -481,6 +812,7 @@ def run_hypothesis(
         "cautious_price_secondary":      cautious_price_secondary,
         "cautious_price_secondary_level": cautious_price_secondary_level,
         "entry_ranges":                  entry_ranges,
+        "direction_reason":              direction_reason,
     }
     if direction == "none":
         return divs
