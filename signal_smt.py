@@ -1063,14 +1063,16 @@ class SmtV2Dispatcher:
         recent = today_mnq[today_mnq.index <= now]
         is_5m = now.minute % 5 == 0
 
+        # Trend always runs first: validates existing hypothesis before a new one may form.
+        trend_sig = self._trend.run_trend(now, bar_dict, recent)
+        if trend_sig is not None:
+            _emit_v2_signal(trend_sig)
+
         if is_5m:
             today_mes = self._mes_1m_df[self._mes_1m_df.index.date == now.date()]
             self._hyp.run_hypothesis(
                 now, today_mnq, today_mes, self._hist_mnq_1m, self._hist_mes_1m
             )
-            trend_sig = self._trend.run_trend(now, bar_dict, recent)
-            if trend_sig is not None:
-                _emit_v2_signal(trend_sig)
             start_5m = now - pd.Timedelta(minutes=4)
             window = today_mnq.loc[start_5m:now]
             if not window.empty:
@@ -1086,10 +1088,6 @@ class SmtV2Dispatcher:
                 strat_sig = self._strat.run_strategy(now, mnq_5m_bar, recent)
                 if strat_sig is not None:
                     _emit_v2_signal(strat_sig)
-        else:
-            trend_sig = self._trend.run_trend(now, bar_dict, recent)
-            if trend_sig is not None:
-                _emit_v2_signal(trend_sig)
 
 
 def _setup_ib_subscriptions(ib: IB, mnq_contract, mes_contract) -> None:

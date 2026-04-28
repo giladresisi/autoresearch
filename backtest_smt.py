@@ -1260,18 +1260,19 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
             is_5m_boundary = (bar_ts.minute % 5 == 0)
 
+            # Trend runs first: validates existing hypothesis before a new one may form.
+            trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, mnq_1m_recent)
+            if trend_sig is not None:
+                day_events.append(trend_sig)
+
+            # Hypothesis runs on every 5m boundary, after trend has had a chance to clear state.
             if is_5m_boundary:
-                # Hypothesis runs on every 5m boundary
                 hyp_divs = _hyp_mod.run_hypothesis(
                     now, mnq_session_bars.loc[:now], mes_session_bars.loc[:now],
                     hist_mnq_1m, hist_mes_1m,
                 )
-                day_events.extend(hyp_divs)
-
-            # Trend and strategy run on every 1m bar
-            trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, mnq_1m_recent)
-            if trend_sig is not None:
-                day_events.append(trend_sig)
+                if hyp_divs:
+                    day_events.extend(hyp_divs)
 
             strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, mnq_1m_recent)
             if strat_sig is not None:

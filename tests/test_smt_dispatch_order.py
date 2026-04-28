@@ -45,13 +45,13 @@ def _isolate_state(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Test 1: 5m dispatch order is hypothesis → trend → strategy
+# Test 1: 5m dispatch order is trend → hypothesis → strategy
 # ---------------------------------------------------------------------------
 
-def test_5m_dispatch_order_is_hypothesis_then_trend_then_strategy(
+def test_5m_dispatch_order_is_trend_then_hypothesis_then_strategy(
     tmp_path, monkeypatch, _isolate_state
 ):
-    """At a 5m boundary, dispatch order must be: hypothesis → trend → strategy."""
+    """At a 5m boundary, dispatch order must be: trend → hypothesis → strategy."""
     call_order: list[str] = []
 
     def fake_run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly_mnq):
@@ -115,16 +115,16 @@ def test_5m_dispatch_order_is_hypothesis_then_trend_then_strategy(
     assert trend_indices, "run_trend was never called on a 5m boundary"
     assert strat_indices, "run_strategy was never called on a 5m boundary"
 
-    # For the first 5m boundary: hypothesis index < trend index < strategy index
+    # For the first 5m boundary: trend index < hypothesis index < strategy index
     first_hyp   = hyp_indices[0]
     first_trend = trend_indices[0]
     first_strat = strat_indices[0]
 
-    assert first_hyp < first_trend, (
-        f"hypothesis (pos {first_hyp}) must fire before trend (pos {first_trend})"
+    assert first_trend < first_hyp, (
+        f"trend (pos {first_trend}) must fire before hypothesis (pos {first_hyp})"
     )
-    assert first_trend < first_strat, (
-        f"trend (pos {first_trend}) must fire before strategy (pos {first_strat})"
+    assert first_hyp < first_strat, (
+        f"hypothesis (pos {first_hyp}) must fire before strategy (pos {first_strat})"
     )
 
 
@@ -174,20 +174,16 @@ def test_1m_only_dispatches_trend(tmp_path, monkeypatch, _isolate_state):
     from backtest_smt import run_backtest_v2
     run_backtest_v2(date_str, date_str, write_events=False)
 
-    # Bar 09:21 (minute=21, 21%5==1 ≠ 0) is non-5m; trend should be called for it.
-    # hypothesis and strategy are only called at 5m boundaries.
     # There is 1 5m-boundary bar (09:20) and 1 non-5m bar (09:21).
-    # At 09:21: only trend fires (not hypothesis, not strategy).
-    # Verify counts: hypothesis == 1 (only for 09:20), strategy == 1 (only for 09:20),
-    # trend == 2 (for both bars).
+    # trend and strategy fire on every bar; hypothesis only on 5m boundaries.
     assert calls["hypothesis"] == 1, (
         f"hypothesis should be called once (only at 5m boundary), got {calls['hypothesis']}"
     )
-    assert calls["strategy"] == 1, (
-        f"strategy should be called once (only at 5m boundary), got {calls['strategy']}"
-    )
     assert calls["trend"] == 2, (
         f"trend should be called for every bar (2 bars), got {calls['trend']}"
+    )
+    assert calls["strategy"] == 2, (
+        f"strategy should be called for every bar (2 bars), got {calls['strategy']}"
     )
 
 
@@ -209,7 +205,10 @@ def test_trend_invalidation_blocks_same_bar_fill(tmp_path, monkeypatch, _isolate
         "last_liquidity": "",
         "divs": [],
         "targets": [],
-        "cautious_price": "",
+        "cautious_price_initial":         "",
+        "cautious_price_initial_level":   "",
+        "cautious_price_secondary":       "",
+        "cautious_price_secondary_level": "",
         "entry_ranges": [],
     })
 
