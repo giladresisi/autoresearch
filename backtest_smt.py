@@ -1203,6 +1203,17 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         now_daily = pd.Timestamp(f"{date} 09:20:00", tz="America/New_York")
         _daily_mod.run_daily(now_daily, mnq_1m_today, hist_mnq_1m, hist_hourly_mnq)
 
+        # Save levels snapshot for chart visualisation (after run_daily populates state)
+        if write_events:
+            from smt_state import load_daily as _ld, load_global as _lg
+            _levels_snap = {
+                "liquidities":  _ld().get("liquidities", []),
+                "all_time_high": _lg().get("all_time_high"),
+            }
+            _lvl_path = Path(f"data/regression/{date}") / "levels.json"
+            _lvl_path.parent.mkdir(parents=True, exist_ok=True)
+            _lvl_path.write_text(_json.dumps(_levels_snap, indent=2), encoding="utf-8")
+
         # ------------------------------------------------------------------ #
         # Define 09:20–16:00 session window                                    #
         # ------------------------------------------------------------------ #
@@ -1244,11 +1255,12 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                 # Build just-completed 5m bar
                 mnq_5m_bar = _build_5m_bar_v2(mnq_session_bars, bar_ts)
 
-                # Hypothesis — ignore return value (always None)
-                _hyp_mod.run_hypothesis(
-                    now, mnq_session_bars, mes_session_bars,
+                # Hypothesis — pass bars sliced to now to avoid look-ahead
+                hyp_divs = _hyp_mod.run_hypothesis(
+                    now, mnq_session_bars.loc[:now], mes_session_bars.loc[:now],
                     hist_mnq_1m, hist_mes_1m,
                 )
+                day_events.extend(hyp_divs)
 
                 # Trend
                 trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, mnq_1m_recent)
@@ -1267,6 +1279,22 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                     day_events.append(trend_sig)
 
         # ------------------------------------------------------------------ #
+        # Emit end-of-session event if a position is still open               #
+        # ------------------------------------------------------------------ #
+        from smt_state import load_position as _load_pos
+        _end_pos = _load_pos()
+        if _end_pos.get("active"):
+            _last_bar = mnq_session_bars.iloc[-1]
+            _eod_ts   = mnq_session_bars.index[-1]
+            day_events.append({
+                "kind":      "end-of-session",
+                "time":      _eod_ts.isoformat(),
+                "price":     float(_last_bar["Close"]),
+                "stop":      float(_end_pos["active"].get("stop", 0)),
+                "direction": _end_pos["active"].get("direction", ""),
+            })
+
+        # ------------------------------------------------------------------ #
         # End-of-day trade pairing                                              #
         # ------------------------------------------------------------------ #
         day_trades: list[dict] = []
@@ -1275,7 +1303,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             kind = evt.get("kind", "")
             if kind == "limit-entry-filled":
                 entry_event = evt
-            elif kind in ("market-close", "stopped-out") and entry_event is not None:
+            elif kind in ("market-close", "stopped-out", "end-of-session") and entry_event is not None:
                 direction = entry_event.get("payload", {}).get("direction") if "payload" in entry_event else None
                 # Try to get direction from position state snapshot embedded in signal
                 # Fall back to active direction from hypothesis at fill time

@@ -155,42 +155,43 @@ def _compute_divs(
         mnq_df = mnq_aligned.set_index(mnq_aligned.columns[0])
         mes_df = mes_aligned.set_index(mes_aligned.columns[0])
 
-        # Iterate bars starting from index 1 (need prior bars for session context)
-        for bar_idx in range(1, len(mnq_df)):
-            bar_ts = mnq_df.index[bar_idx]
+        # Only check the most recently completed bar — prevents re-firing old divs
+        # on each successive call as the session window grows.
+        bar_idx = len(mnq_df) - 1
+        if bar_idx < 1:
+            continue
+        bar_ts = mnq_df.index[bar_idx]
 
-            # detect_smt_divergence expects positional index; pass the DataFrame slices
-            # We pass the full aligned df and use bar_idx as positional
-            mnq_pos = mnq_df.iloc[:bar_idx + 1].copy()
-            mes_pos = mes_df.iloc[:bar_idx + 1].copy()
+        mnq_pos = mnq_df.iloc[:bar_idx + 1].copy().reset_index(drop=True)
+        mes_pos = mes_df.iloc[:bar_idx + 1].copy().reset_index(drop=True)
 
-            # Reset to positional index for the detector
-            mnq_pos = mnq_pos.reset_index(drop=True)
-            mes_pos = mes_pos.reset_index(drop=True)
+        result = detect_smt_divergence(
+            mes_pos, mnq_pos, bar_idx=bar_idx, session_start_idx=0
+        )
+        if result is not None:
+            direction, _sweep, _miss, smt_type, smt_level = result
+            side = "bullish" if direction == "long" else "bearish"
+            divs.append({
+                "kind":      "smt-div",
+                "timeframe": tf_label,
+                "type":      smt_type,
+                "side":      side,
+                "time":      bar_ts.isoformat(),
+                "level":     float(smt_level),
+            })
 
-            result = detect_smt_divergence(
-                mes_pos, mnq_pos, bar_idx=bar_idx, session_start_idx=0
-            )
-            if result is not None:
-                direction, _sweep, _miss, smt_type, _level = result
-                side = "bullish" if direction == "long" else "bearish"
-                divs.append({
-                    "timeframe": tf_label,
-                    "type": smt_type,
-                    "side": side,
-                    "time": bar_ts.isoformat(),
-                })
-
-            fill_result = detect_smt_fill(mes_pos, mnq_pos, bar_idx=bar_idx)
-            if fill_result is not None:
-                fill_dir, _fvg_high, _fvg_low = fill_result
-                fill_side = "bullish" if fill_dir == "long" else "bearish"
-                divs.append({
-                    "timeframe": tf_label,
-                    "type": "fill",
-                    "side": fill_side,
-                    "time": bar_ts.isoformat(),
-                })
+        fill_result = detect_smt_fill(mes_pos, mnq_pos, bar_idx=bar_idx)
+        if fill_result is not None:
+            fill_dir, _fvg_high, _fvg_low = fill_result
+            fill_side = "bullish" if fill_dir == "long" else "bearish"
+            divs.append({
+                "kind":      "smt-div",
+                "timeframe": tf_label,
+                "type":      "fill",
+                "side":      fill_side,
+                "time":      bar_ts.isoformat(),
+                "level":     None,
+            })
 
     return divs
 
@@ -232,20 +233,20 @@ def run_hypothesis(
     mes_1m: pd.DataFrame,
     hist_mnq_1m: pd.DataFrame,
     hist_mes_1m: pd.DataFrame,
-) -> None:
+) -> list:
     """Run the hypothesis module for the current 5m boundary.
 
     Reads hypothesis.json; if direction is already set, returns early.
     Otherwise computes all hypothesis fields and writes hypothesis.json.
     Also handles position reset on direction transition from "none".
 
-    Returns None — this module only writes JSON files.
+    Returns a list of smt-div event dicts found this bar (empty list if none).
     """
     # Step 1: Read hypothesis.json; early-exit if direction already set.
     hypothesis = load_hypothesis()
     old_direction = hypothesis["direction"]
     if old_direction != "none":
-        return
+        return []
 
     # Step 2: Read global.json ATH; build current 5m bar; check ATH gate.
     global_state = load_global()
@@ -253,10 +254,10 @@ def run_hypothesis(
 
     bar = _build_5m_bar(mnq_1m, now)
     if bar is None:
-        return
+        return []
 
     if bar["Low"] > all_time_high and bar["High"] > all_time_high:
-        return  # Both extremes above ATH — no entry opportunity
+        return []  # Both extremes above ATH — no entry opportunity
 
     current_close = bar["Close"]
 
@@ -368,3 +369,5 @@ def run_hypothesis(
         position["failed_entries"] = 0
         position["confirmation_bar"] = {}
         save_position(position)
+
+    return divs

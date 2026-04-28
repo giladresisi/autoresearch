@@ -135,7 +135,7 @@ def run_strategy(
             position["confirmation_bar"] = {}
             smt_state.save_position(position)
 
-            return _make_signal("limit-entry-filled", now, fill_price, direction=direction)
+            return _make_signal("limit-entry-filled", now, fill_price, direction=direction, stop=stop)
 
         # Nothing triggered
         return None
