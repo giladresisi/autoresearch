@@ -1245,12 +1245,15 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             now = bar_ts
 
             bar = mnq_session_bars.loc[bar_ts]
+            _o = float(bar["Open"]); _c = float(bar["Close"])
             mnq_1m_bar = {
-                "time":  bar_ts.isoformat(),
-                "open":  float(bar["Open"]),
-                "high":  float(bar["High"]),
-                "low":   float(bar["Low"]),
-                "close": float(bar["Close"]),
+                "time":      bar_ts.isoformat(),
+                "open":      _o,
+                "high":      float(bar["High"]),
+                "low":       float(bar["Low"]),
+                "close":     _c,
+                "body_high": max(_o, _c),
+                "body_low":  min(_o, _c),
             }
 
             mnq_1m_recent = mnq_session_bars.loc[:bar_ts]
@@ -1258,31 +1261,21 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             is_5m_boundary = (bar_ts.minute % 5 == 0)
 
             if is_5m_boundary:
-                # Build just-completed 5m bar
-                mnq_5m_bar = _build_5m_bar_v2(mnq_session_bars, bar_ts)
-
-                # Hypothesis — pass bars sliced to now to avoid look-ahead
+                # Hypothesis runs on every 5m boundary
                 hyp_divs = _hyp_mod.run_hypothesis(
                     now, mnq_session_bars.loc[:now], mes_session_bars.loc[:now],
                     hist_mnq_1m, hist_mes_1m,
                 )
                 day_events.extend(hyp_divs)
 
-                # Trend
-                trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, mnq_1m_recent)
-                if trend_sig is not None:
-                    day_events.append(trend_sig)
+            # Trend and strategy run on every 1m bar
+            trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, mnq_1m_recent)
+            if trend_sig is not None:
+                day_events.append(trend_sig)
 
-                # Strategy (only if we have a valid 5m bar)
-                if mnq_5m_bar is not None:
-                    strat_sig = _strat_mod.run_strategy(now, mnq_5m_bar, mnq_1m_recent)
-                    if strat_sig is not None:
-                        day_events.append(strat_sig)
-            else:
-                # 1m-only: trend only
-                trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, mnq_1m_recent)
-                if trend_sig is not None:
-                    day_events.append(trend_sig)
+            strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, mnq_1m_recent)
+            if strat_sig is not None:
+                day_events.append(strat_sig)
 
         # ------------------------------------------------------------------ #
         # Emit end-of-session event if a position is still open               #

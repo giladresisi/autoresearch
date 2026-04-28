@@ -54,15 +54,15 @@ def _make_signal(kind: str, now: datetime, price: float, **kwargs) -> dict:
 
 def run_strategy(
     now: datetime,
-    mnq_5m_bar: dict,
+    mnq_bar: dict,
     mnq_1m_recent: pd.DataFrame,
 ) -> Optional[dict]:
-    """Process a just-completed 5m bar and return an Optional Signal.
+    """Process a completed 1m bar and return an Optional Signal.
 
     Args:
-        now:            Timestamp of the bar boundary (end of the completing bar).
-        mnq_5m_bar:     Dict with keys time, open, high, low, close, body_high, body_low.
-        mnq_1m_recent:  Recent 1m bars (for context; not currently used in strategy logic).
+        now:           Timestamp of the bar boundary.
+        mnq_bar:       Dict with keys time, open, high, low, close, body_high, body_low.
+        mnq_1m_recent: Recent 1m bars (for context; not currently used in strategy logic).
 
     Returns:
         A Signal dict or None.
@@ -83,23 +83,23 @@ def run_strategy(
             return None
 
         # 2.3 PRIORITY: same-bar new-opposite-confirmation overrides fill
-        if _body_opposite_to(direction, mnq_5m_bar):
+        if _body_opposite_to(direction, mnq_bar):
             # Update confirmation bar
             position["confirmation_bar"] = {
-                "time":      mnq_5m_bar["time"],
-                "high":      mnq_5m_bar["high"],
-                "low":       mnq_5m_bar["low"],
-                "body_high": mnq_5m_bar["body_high"],
-                "body_low":  mnq_5m_bar["body_low"],
+                "time":      mnq_bar["time"],
+                "high":      mnq_bar["high"],
+                "low":       mnq_bar["low"],
+                "body_high": mnq_bar["body_high"],
+                "body_low":  mnq_bar["body_low"],
             }
 
             # body_end_price: entry price for the limit order
             # For longs (direction=up): enter at body_high of the bearish bar
             # For shorts (direction=down): enter at body_low of the bullish bar
             if direction == "up":
-                body_end_price = mnq_5m_bar["body_high"]
+                body_end_price = mnq_bar["body_high"]
             else:
-                body_end_price = mnq_5m_bar["body_low"]
+                body_end_price = mnq_bar["body_low"]
 
             if position["limit_entry"] == "":
                 kind = "new-limit-entry"
@@ -113,7 +113,7 @@ def run_strategy(
 
         # 2.4 No new opposite bar — check fill
         limit_entry = position["limit_entry"]
-        if limit_entry != "" and _bar_crosses(mnq_5m_bar, float(limit_entry)):
+        if limit_entry != "" and _bar_crosses(mnq_bar, float(limit_entry)):
             fill_price  = float(limit_entry)
             conf_bar    = position["confirmation_bar"]
 
@@ -124,7 +124,7 @@ def run_strategy(
                 stop = conf_bar["high"]
 
             position["active"] = {
-                "time":       mnq_5m_bar["time"],
+                "time":       mnq_bar["time"],
                 "fill_price": fill_price,
                 "direction":  direction,
                 "stop":       stop,
@@ -151,15 +151,15 @@ def run_strategy(
         position["limit_entry"]       = ""
         position["confirmation_bar"]  = {}
         smt_state.save_position(position)
-        return _make_signal("market-close", now, mnq_5m_bar["close"], reason="direction-mismatch")
+        return _make_signal("market-close", now, mnq_bar["close"], reason="direction-mismatch")
 
     # 3.2 Stop crossed
     stop = active["stop"]
     active_dir = active["direction"]
     stopped = False
-    if active_dir == "up" and mnq_5m_bar["low"] <= stop:
+    if active_dir == "up" and mnq_bar["low"] <= stop:
         stopped = True
-    elif active_dir == "down" and mnq_5m_bar["high"] >= stop:
+    elif active_dir == "down" and mnq_bar["high"] >= stop:
         stopped = True
 
     if stopped:
