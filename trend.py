@@ -232,9 +232,13 @@ def run_trend(
                 save_position(position)
                 save_hypothesis(hypothesis)
                 return {
-                    "kind": "trend-broken",
-                    "time": now.isoformat(),
-                    "price": bar_close,
+                    "kind":            "trend-broken",
+                    "time":            now.isoformat(),
+                    "price":           bar_close,
+                    "broken_direction": direction,
+                    "level_name":      level.get("name", ""),
+                    "level_price":     level_price,
+                    "bar_low":         bar_low,
                 }
         else:  # direction == "down"
             # Opposite-direction levels are those *above* current price.
@@ -245,9 +249,13 @@ def run_trend(
                 save_position(position)
                 save_hypothesis(hypothesis)
                 return {
-                    "kind": "trend-broken",
-                    "time": now.isoformat(),
-                    "price": bar_close,
+                    "kind":            "trend-broken",
+                    "time":            now.isoformat(),
+                    "price":           bar_close,
+                    "broken_direction": direction,
+                    "level_name":      level.get("name", ""),
+                    "level_price":     level_price,
+                    "bar_high":        bar_high,
                 }
 
     return None

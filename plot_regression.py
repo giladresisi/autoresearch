@@ -228,30 +228,61 @@ for p in pairs:
 # ── SMT divergence markers ────────────────────────────────────────────────────
 div_events = [e for e in events if e.get("kind") == "smt-div"]
 
+_LEVEL_SCOPE = {
+    "week_high": "week", "week_low": "week", "week_mid": "week",
+    "day_high":  "day",  "day_low":  "day",  "day_mid":  "day",
+    "ny_morning_high": "6hr session", "ny_morning_low": "6hr session",
+    "ny_evening_high": "6hr session", "ny_evening_low": "6hr session",
+    "london_high":     "6hr session", "london_low":     "6hr session",
+    "asia_high":       "6hr session", "asia_low":       "6hr session",
+    "ATH": "ATH",
+}
+
+def _closest_level_name(lv: float) -> str | None:
+    if not all_named:
+        return None
+    closest = min(all_named.items(), key=lambda x: abs(x[1] - lv))
+    return closest[0] if abs(closest[1] - lv) <= 10 else None
+
 def _div_label(e: dict) -> str:
     tf   = e.get("timeframe", "?")
     typ  = {"wick": "W", "body": "H", "fill": "F"}.get(e.get("type", ""), e.get("type", "?")[:1].upper())
     side = "↑" if e.get("side") == "bullish" else "↓"
-    lv   = e.get("level")
-    if lv is not None:
-        closest = min(all_named.items(), key=lambda x: abs(x[1] - lv), default=(None, None))
-        if closest[0] and abs(closest[1] - lv) <= 10:
-            lv_name = LEVEL_STYLE.get(closest[0], (closest[0],))[0]
+    mnq_lv = e.get("mnq_div_price")
+    if mnq_lv is not None:
+        name = _closest_level_name(mnq_lv)
+        if name:
+            lv_name = LEVEL_STYLE.get(name, (name,))[0]
             return f"{tf}{side}{typ}@{lv_name}"
     return f"{tf}{side}{typ}"
+
+def _div_hover(e: dict) -> str:
+    parts = [
+        f"<b>SMT div</b>",
+        f"tf: {e.get('timeframe')}",
+        f"type: {e.get('type')}",
+        f"side: {e.get('side')}",
+        f"time: {e['ts'].strftime('%H:%M')}",
+    ]
+    mnq_lv = e.get("mnq_div_price")
+    mes_lv = e.get("mes_div_price")
+    if mnq_lv is not None:
+        parts.append(f"div_price: {mnq_lv}")
+        if e.get("type") in ("wick", "body", "wick_sym", "body_sym"):
+            name = _closest_level_name(mnq_lv)
+            scope = _LEVEL_SCOPE.get(name, "") if name else ""
+            if scope:
+                parts.append(f"scope: {scope}")
+    return "<br>".join(parts)
 
 for side_val, symbol, color in [("bullish", "triangle-up", "#4CAF50"), ("bearish", "triangle-down", "#EF5350")]:
     grp = [e for e in div_events if e.get("side") == side_val]
     if not grp:
         continue
-    hover = [
-        f"<b>SMT div</b><br>tf: {e.get('timeframe')}<br>type: {e.get('type')}<br>"
-        f"level: {e.get('level')}<br>time: {e['ts'].strftime('%H:%M')}"
-        for e in grp
-    ]
+    hover = [_div_hover(e) for e in grp]
     fig.add_trace(go.Scatter(
         x=[e["ts"] for e in grp],
-        y=[e["level"] if e.get("level") is not None else e["price"] for e in grp],
+        y=[e["price"] for e in grp],
         mode="markers+text",
         name=f"SMT div {side_val[:4]}",
         marker=dict(symbol=symbol, color=color, size=12, line=dict(width=1.5, color=color)),
@@ -273,6 +304,7 @@ OTHER_MARKER_STYLE = {
     "move-limit-entry":   dict(symbol="triangle-right-open", color="#9C27B0", size=13),
     "limit-entry-filled": dict(symbol="star",                color="#4CAF50", size=17),
     "trend-broken":       dict(symbol="diamond-open",        color="#FF9800", size=13),
+    "new-hypothesis":     dict(symbol="pentagon",            color="#E040FB", size=15),
 }
 
 pnl_by_exit = {(p["exit"]["time"], p["exit"]["kind"]): p for p in pairs}
@@ -320,7 +352,42 @@ for kind, style in OTHER_MARKER_STYLE.items():
         if "direction" in e:
             parts.append(f"direction: {e['direction']}")
         if "stop" in e:
-            parts.append(f"stop: {e['stop']}")
+            stop = e["stop"]
+            if kind == "limit-entry-filled":
+                dist = abs(e["price"] - stop)
+                dir_sign = 1 if e.get("direction") == "up" else -1
+                signed = dir_sign * (stop - e["price"])
+                parts.append(f"stop: {stop} ({dist:.2f} pts)")
+            else:
+                parts.append(f"stop: {stop}")
+        if kind == "trend-broken":
+            if e.get("broken_direction"):
+                parts.append(f"was: {e['broken_direction']}")
+            if e.get("level_name"):
+                parts.append(f"broke level: {e['level_name']} @ {e['level_price']}")
+            if "bar_low" in e:
+                parts.append(f"bar low: {e['bar_low']}")
+            if "bar_high" in e:
+                parts.append(f"bar high: {e['bar_high']}")
+        if kind == "new-hypothesis":
+            if e.get("weekly_mid"):
+                parts.append(f"weekly_mid: {e['weekly_mid']}")
+            if e.get("daily_mid"):
+                parts.append(f"daily_mid: {e['daily_mid']}")
+            if e.get("last_liquidity"):
+                parts.append(f"last_liquidity: {e['last_liquidity']}")
+            targets = e.get("targets", [])
+            if targets:
+                tgt_str = ", ".join(f"{t['name']}@{t['price']}" for t in targets)
+                parts.append(f"targets: {tgt_str}")
+            cp  = e.get("cautious_price", "")
+            cpl = e.get("cautious_price_level", "")
+            if cp not in ("", None):
+                parts.append(f"cautious_price: {cp} ({cpl})" if cpl else f"cautious_price: {cp}")
+            else:
+                parts.append("cautious_price: none")
+            for er in e.get("entry_ranges", []):
+                parts.append(f"entry_{er['source']}: [{er['low']}, {er['high']}]")
         hover.append("<br>".join(parts))
     fig.add_trace(go.Scatter(
         x=[e["ts"] for e in group],
@@ -337,7 +404,7 @@ session_hours = (last_t - first_t).total_seconds() / 3600
 chart_height  = max(700, min(1200, int(600 + session_hours * 40)))
 
 fig.update_layout(
-    title=f"SMT Events — MNQ {DATE}",
+    title=f"SMT Events — MNQ {DATE} | {len(pairs)} trades | PnL: {'+'if sum(p['pnl_usd'] for p in pairs)>=0 else ''}${sum(p['pnl_usd'] for p in pairs):.0f}",
     xaxis_title="Time (ET)",
     yaxis_title="Price",
     xaxis_rangeslider_visible=False,

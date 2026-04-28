@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+CAUTIOUS_PRICE_MAX_DIST = 100  # pts — max distance for cautious_price candidate
+
 from smt_state import (
     load_global,
     load_daily,
@@ -168,16 +170,42 @@ def _compute_divs(
         result = detect_smt_divergence(
             mes_pos, mnq_pos, bar_idx=bar_idx, session_start_idx=0
         )
+        bar_close = float(mnq_df.iloc[bar_idx]["Close"])
+
         if result is not None:
             direction, _sweep, _miss, smt_type, smt_level = result
             side = "bullish" if direction == "long" else "bearish"
+
+            # Compute both MNQ and MES session extremes involved in the divergence,
+            # independent of which instrument leads. smt_level alone is ambiguous
+            # (it's MNQ for normal, MES for symmetric).
+            _sess = slice(0, bar_idx)
+            if "body" in smt_type:
+                _mnq_hi = float(mnq_pos["Close"].iloc[_sess].max())
+                _mnq_lo = float(mnq_pos["Close"].iloc[_sess].min())
+                _mes_hi = float(mes_pos["Close"].iloc[_sess].max())
+                _mes_lo = float(mes_pos["Close"].iloc[_sess].min())
+            else:
+                _mnq_hi = float(mnq_pos["High"].iloc[_sess].max())
+                _mnq_lo = float(mnq_pos["Low"].iloc[_sess].min())
+                _mes_hi = float(mes_pos["High"].iloc[_sess].max())
+                _mes_lo = float(mes_pos["Low"].iloc[_sess].min())
+            if direction == "short":  # bearish — a session high was swept
+                mnq_div_price = _mnq_hi
+                mes_div_price = _mes_hi
+            else:                     # bullish — a session low was swept
+                mnq_div_price = _mnq_lo
+                mes_div_price = _mes_lo
+
             divs.append({
-                "kind":      "smt-div",
-                "timeframe": tf_label,
-                "type":      smt_type,
-                "side":      side,
-                "time":      bar_ts.isoformat(),
-                "level":     float(smt_level),
+                "kind":          "smt-div",
+                "timeframe":     tf_label,
+                "type":          smt_type,
+                "side":          side,
+                "time":          bar_ts.isoformat(),
+                "price":         bar_close,
+                "mnq_div_price": mnq_div_price,
+                "mes_div_price": mes_div_price,
             })
 
         fill_result = detect_smt_fill(mes_pos, mnq_pos, bar_idx=bar_idx)
@@ -190,6 +218,7 @@ def _compute_divs(
                 "type":      "fill",
                 "side":      fill_side,
                 "time":      bar_ts.isoformat(),
+                "price":     bar_close,
                 "level":     None,
             })
 
@@ -320,8 +349,34 @@ def run_hypothesis(
             elif direction == "down" and top < current_close:
                 targets.append({"name": liq["name"], "price": top})
 
-    # Step 8: cautious_price (TBD hardcoded).
-    cautious_price = ""
+    # Step 8: cautious_price — furthest in-direction liquidity within CAUTIOUS_PRICE_MAX_DIST pts.
+    _cautious_candidates = []  # list of (price, name)
+    for liq in liquidities:
+        liq_kind = liq.get("kind")
+        if liq_kind == "level":
+            p = liq.get("price")
+        elif liq_kind == "fvg":
+            p = liq.get("bottom") if direction == "up" else liq.get("top")
+        else:
+            continue
+        if p is None:
+            continue
+        if direction == "up" and current_close < p <= current_close + CAUTIOUS_PRICE_MAX_DIST:
+            _cautious_candidates.append((p, liq.get("name", "")))
+        elif direction == "down" and current_close - CAUTIOUS_PRICE_MAX_DIST <= p < current_close:
+            _cautious_candidates.append((p, liq.get("name", "")))
+    # Include ATH as a candidate level
+    ath = global_state["all_time_high"]
+    if direction == "up" and current_close < ath <= current_close + CAUTIOUS_PRICE_MAX_DIST:
+        _cautious_candidates.append((ath, "ATH"))
+    if _cautious_candidates:
+        _chosen = max(_cautious_candidates, key=lambda x: x[0]) if direction == "up" \
+                  else min(_cautious_candidates, key=lambda x: x[0])
+        cautious_price = _chosen[0]
+        cautious_price_level = _chosen[1]
+    else:
+        cautious_price = ""
+        cautious_price_level = ""
 
     # Step 9: entry_ranges — 12hr ago and 1week ago same time anchors.
     ts_now = pd.Timestamp(now)
@@ -370,4 +425,17 @@ def run_hypothesis(
         position["confirmation_bar"] = {}
         save_position(position)
 
-    return divs
+    hyp_event = {
+        "kind":          "new-hypothesis",
+        "time":          pd.Timestamp(now).isoformat(),
+        "price":         current_close,
+        "direction":     direction,
+        "weekly_mid":    weekly_mid,
+        "daily_mid":     daily_mid,
+        "last_liquidity": last_liquidity,
+        "targets":       targets,
+        "cautious_price":       cautious_price,
+        "cautious_price_level": cautious_price_level,
+        "entry_ranges":         entry_ranges,
+    }
+    return [hyp_event] + divs
