@@ -126,6 +126,10 @@ _session_run_ses_low: float  =  float("inf")
 _last_move_stop_bar_idx: int = -10**9
 _move_stop_bar_counter: int  = 0
 
+# ── v2 pipeline env gate (set in main()) ─────────────────────────────────────
+_smtv2_pipeline: str = "v1"
+_smtv2_dispatcher: "SmtV2Dispatcher | None" = None
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -998,6 +1002,96 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
 
 # ── IB subscription setup ─────────────────────────────────────────────────────
 
+def _emit_v2_signal(sig: dict) -> None:
+    """Print a v2 signal dict as a JSON line to stdout (mirrors _dispatch_event for v2)."""
+    print(json.dumps(sig, sort_keys=True), flush=True)
+
+
+class SmtV2Dispatcher:
+    """Routes IB bar callbacks through the v2 per-bar module pipeline.
+
+    Selected when SMT_PIPELINE=v2. Accumulates 1m bars to build 5m bars at round
+    boundaries and invokes hypothesis → trend → strategy in order per spec.
+    """
+
+    def __init__(self, mnq_1m_df: pd.DataFrame, mes_1m_df: pd.DataFrame,
+                 hist_mnq_1m: pd.DataFrame, hist_mes_1m: pd.DataFrame) -> None:
+        import daily as _daily_mod
+        import hypothesis as _hyp_mod
+        import strategy as _strat_mod
+        import trend as _trend_mod
+        self._daily = _daily_mod
+        self._hyp = _hyp_mod
+        self._strat = _strat_mod
+        self._trend = _trend_mod
+        self._mnq_1m_df = mnq_1m_df
+        self._mes_1m_df = mes_1m_df
+        self._hist_mnq_1m = hist_mnq_1m
+        self._hist_mes_1m = hist_mes_1m
+        self._daily_triggered = False
+        self._session_date = None
+
+    def on_session_start(self, now: pd.Timestamp) -> None:
+        """Call once at 09:20 ET each session to run daily computations."""
+        from smt_state import save_global, save_daily, save_hypothesis, save_position
+        from smt_state import DEFAULT_GLOBAL, DEFAULT_DAILY, DEFAULT_HYPOTHESIS, DEFAULT_POSITION
+        import copy
+        save_global(copy.deepcopy(DEFAULT_GLOBAL))
+        save_daily(copy.deepcopy(DEFAULT_DAILY))
+        save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
+        save_position(copy.deepcopy(DEFAULT_POSITION))
+        hist_hourly = self._hist_mnq_1m.resample("1h", label="left").agg(
+            {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+        ).dropna()
+        today_bars = self._mnq_1m_df[self._mnq_1m_df.index.date == now.date()]
+        self._daily.run_daily(now, today_bars, self._hist_mnq_1m, hist_hourly)
+        self._daily_triggered = True
+        self._session_date = now.date()
+
+    def on_1m_bar(self, now: pd.Timestamp, mnq_bar_row: pd.Series, mes_bar_row: pd.Series) -> None:
+        """Process one completed 1m bar."""
+        if not self._daily_triggered:
+            return
+        bar_dict = {
+            "time":  now.isoformat(),
+            "open":  float(mnq_bar_row["Open"]),
+            "high":  float(mnq_bar_row["High"]),
+            "low":   float(mnq_bar_row["Low"]),
+            "close": float(mnq_bar_row["Close"]),
+        }
+        today_mnq = self._mnq_1m_df[self._mnq_1m_df.index.date == now.date()]
+        recent = today_mnq[today_mnq.index <= now]
+        is_5m = now.minute % 5 == 0
+
+        if is_5m:
+            today_mes = self._mes_1m_df[self._mes_1m_df.index.date == now.date()]
+            self._hyp.run_hypothesis(
+                now, today_mnq, today_mes, self._hist_mnq_1m, self._hist_mes_1m
+            )
+            trend_sig = self._trend.run_trend(now, bar_dict, recent)
+            if trend_sig is not None:
+                _emit_v2_signal(trend_sig)
+            start_5m = now - pd.Timedelta(minutes=4)
+            window = today_mnq.loc[start_5m:now]
+            if not window.empty:
+                mnq_5m_bar = {
+                    "time":      now.isoformat(),
+                    "open":      float(window.iloc[0]["Open"]),
+                    "high":      float(window["High"].max()),
+                    "low":       float(window["Low"].min()),
+                    "close":     float(window.iloc[-1]["Close"]),
+                    "body_high": max(float(window.iloc[0]["Open"]), float(window.iloc[-1]["Close"])),
+                    "body_low":  min(float(window.iloc[0]["Open"]), float(window.iloc[-1]["Close"])),
+                }
+                strat_sig = self._strat.run_strategy(now, mnq_5m_bar, recent)
+                if strat_sig is not None:
+                    _emit_v2_signal(strat_sig)
+        else:
+            trend_sig = self._trend.run_trend(now, bar_dict, recent)
+            if trend_sig is not None:
+                _emit_v2_signal(trend_sig)
+
+
 def _setup_ib_subscriptions(ib: IB, mnq_contract, mes_contract) -> None:
     """Register all 4 IB data subscriptions and wire their event callbacks.
 
@@ -1031,6 +1125,7 @@ def main() -> None:
     global _mnq_tick_bar
     global _hypothesis_manager, _hypothesis_generated
     global _hist_daily_df
+    global _smtv2_pipeline, _smtv2_dispatcher
 
     BAR_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1059,6 +1154,15 @@ def main() -> None:
     # Load historical daily data for PDH/PDL computation (Solution F)
     _hist_daily_df = _hist_mnq_df  # reuse 5m hist; compute_pdh_pdl uses index.date
     _hypothesis_generated = False
+
+    # v2 pipeline: instantiate dispatcher if SMT_PIPELINE=v2.
+    # NOTE: IB callback routing to on_session_start / on_1m_bar is a stub — the existing
+    # on_mnq_1m_bar / on_mes_1m_bar callbacks still drive the v1 path.  Wiring is deferred
+    # to the first realtime trial (see spec § "Out of Scope").
+    import os as _os
+    _smtv2_pipeline = _os.environ.get("SMT_PIPELINE", "v1")
+    if _smtv2_pipeline == "v2":
+        _smtv2_dispatcher = SmtV2Dispatcher(_mnq_1m_df, _mes_1m_df, _mnq_1m_df, _mes_1m_df)
 
     # Restore open position from disk if the process was restarted mid-trade
     if POSITION_FILE.exists():

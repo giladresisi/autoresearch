@@ -43,3 +43,12 @@ data/realtime/*.parquet
 # Agent format-patch archives (stored in .agents/ but not committed)
 .agents/*.patch
 trades.tsv
+
+# SMT v2 regression outputs (baselines are local, not committed)
+data/regression/
+
+# SMT v2 runtime state files (ephemeral, not committed)
+data/*.json
+
+# Local regression notes
+regression.md

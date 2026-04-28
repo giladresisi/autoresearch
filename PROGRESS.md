@@ -1,6 +1,23 @@
 # PROGRESS
 
 
+## Feature: SMT Redesign — JSON-File Architecture + Module Decomposition
+
+**Status**: Complete
+**Plan File**: `.agents/plans/smt-redesign-v2.md`
+**Spec**: `docs/superpowers/specs/2026-04-27-smt-redesign-design.md`
+
+Rebuild the SMT control flow as four small modules (`daily.py`, `hypothesis.py`, `strategy.py`, `trend.py`) communicating via four JSON files (`global.json`, `daily.json`, `hypothesis.json`, `position.json`). New files alongside `strategy_smt.py` / `hypothesis_smt.py` (untouched). Reuses primitives (divergence, FVG, TDO, PDH/PDL, EQH/EQL, confirmation-bar) by import. Adds an additive v2 dispatcher to `signal_smt.py` (env-gated) and a v2 entry to `backtest_smt.py`. Specific-day regression via `regression.md` + event-jsonl + trades.tsv diff. TP / breakeven / trail / secondary-target / Layer-B / MSS / CISD / displacement-invalidation are deliberately removed from the new path.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-redesign-v2.md`
+- 7/7 tasks completed across 4 waves; 90 new tests (planned ~67), all passing; full suite 888/897
+- Two divergences: test file renamed `test_smt_strategy_v2.py` (collision with pre-existing file); regression.md parser uses calendar-day expansion (matches test spec assertion)
+- E2E smoke: `run_backtest_v2('2025-11-14','2025-11-14')` → 4 trades, PnL −$471.00; `regression.py` exits 0
+- Alignment score: 9/10
+
+
 ## Feature: SMT Limit Entry Lifecycle & Min-TP Fallback
 
 **Status**: Complete

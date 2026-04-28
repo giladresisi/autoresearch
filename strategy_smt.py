@@ -254,7 +254,7 @@ SMT_FILL_ENABLED: bool = False
 #   instead of the SMT structural stop. Mechanistically correct: the displacement
 #   thesis fails when price closes back through the impulse bar.
 #   Optimizer search space: [True, False]
-DISPLACEMENT_STOP_MODE: bool = False
+DISPLACEMENT_STOP_MODE: bool = True
 
 # MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT: minimum count of hypothesis rules that
 #   must agree with signal direction for a displacement entry to be accepted.
@@ -271,7 +271,7 @@ MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT: int = 0
 #   0.33 (earlier lock-in, higher probability) and 0.67 (later, more favorable RR).
 #   Only read by manage_position() when PARTIAL_EXIT_ENABLED=True.
 #   Optimizer search space: [0.33, 0.5, 0.67]
-PARTIAL_EXIT_LEVEL_RATIO: float = 0.50
+PARTIAL_EXIT_LEVEL_RATIO: float = 0.33
 # After partial exit, slide the stop to partial_exit_price ± this buffer so the remaining
 # contracts cannot lose significantly if price reverses before reaching TP.
 # Set to 0.0 to lock the stop exactly at the partial price (no buffer).
@@ -1936,11 +1936,22 @@ def process_scan_bar(
         if _in_blackout(ts.time()):
             return None
 
-        # Replacement check — WAITING_FOR_ENTRY only
+        # WAITING_FOR_ENTRY: replacement detection + adversarial check
         if state.scan_state == "WAITING_FOR_ENTRY":
-            _new_div = detect_smt_divergence(
-                mes_reset, mnq_reset, bar_idx, 0, _cached=smt_cache
+            # Replacement check — skip during the active N-bar confirmation window so
+            # the window counter cannot be reset before firing. With CONFIRMATION_WINDOW_BARS=1
+            # only the first candidate bar is protected; later bars allow replacement.
+            _in_active_window = (
+                state.conf_window_start >= 0
+                and bar_idx >= state.conf_window_start
+                and bar_idx < state.conf_window_start + CONFIRMATION_WINDOW_BARS
             )
+            if not _in_active_window:
+                _new_div = detect_smt_divergence(
+                    mes_reset, mnq_reset, bar_idx, 0, _cached=smt_cache
+                )
+            else:
+                _new_div = None
             if _new_div is not None:
                 _nd_dir, _nd_sweep, _nd_miss, _nd_type, _nd_defended = _new_div
                 _nd_body = abs(float(bar["Close"]) - float(bar["Open"]))

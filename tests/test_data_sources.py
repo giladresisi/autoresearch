@@ -589,6 +589,10 @@ class TestDatabentSourceIntegration:
         import os
         if not os.environ.get("DATABENTO_API_KEY"):
             pytest.skip("DATABENTO_API_KEY not set -- skipping live Databento test")
+        try:
+            import databento  # noqa: F401
+        except ImportError:
+            pytest.skip("databento package not installed -- skipping live Databento test")
 
     def test_fetch_5day_window_returns_valid_schema(self):
         """Live fetch: 5 trading days of MNQ.c.0 5m bars, validates OHLCV + ET timezone."""

@@ -1108,4 +1108,245 @@ if __name__ == "__main__":
         "avg_expectancy":   f"{_avg_exp:.2f}",
         "wl_ratio":         f"{_wl:.4f}",
     })
-    _write_trades_tsv(_all_test_trades)
+
+
+# ---------------------------------------------------------------------------
+# SMT v2 backtest harness
+# ---------------------------------------------------------------------------
+
+def _build_5m_bar_v2(session_bars: "pd.DataFrame", bar_ts: "pd.Timestamp") -> "dict | None":
+    """Build a completed 5m bar dict from 1m session bars ending at bar_ts.
+
+    The window spans [bar_ts - 4min, bar_ts] (5 bars total).
+    Returns None if the window is empty.
+    """
+    start_5m = bar_ts - pd.Timedelta(minutes=4)
+    window = session_bars.loc[start_5m:bar_ts]
+    if window.empty:
+        return None
+    return {
+        "time":      bar_ts.isoformat(),
+        "open":      float(window.iloc[0]["Open"]),
+        "high":      float(window["High"].max()),
+        "low":       float(window["Low"].min()),
+        "close":     float(window.iloc[-1]["Close"]),
+        "body_high": max(float(window.iloc[0]["Open"]), float(window.iloc[-1]["Close"])),
+        "body_low":  min(float(window.iloc[0]["Open"]), float(window.iloc[-1]["Close"])),
+    }
+
+
+def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True) -> dict:
+    """SMT v2 backtest: dispatches daily/hypothesis/trend/strategy per bar.
+
+    Self-contained — does not use any globals from the existing run_backtest path.
+    State JSON files are reset at the start of each day.
+
+    Returns a dict with keys: trades, events, metrics.
+    """
+    import copy
+    import json as _json
+
+    import daily as _daily_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    import trend as _trend_mod
+    from smt_state import (
+        DEFAULT_DAILY, DEFAULT_GLOBAL, DEFAULT_HYPOTHESIS, DEFAULT_POSITION,
+        save_daily, save_global, save_hypothesis, save_position,
+    )
+    from strategy_smt import load_futures_data
+
+    futures = load_futures_data()
+    mnq_all = futures["MNQ"]
+    mes_all = futures["MES"]
+
+    business_days = pd.bdate_range(start_date, end_date)
+
+    all_trades: list[dict] = []
+    all_events: list[dict] = []
+
+    for bday in business_days:
+        date = bday.date()
+
+        # ------------------------------------------------------------------ #
+        # Reset all four state files at the start of each day                 #
+        # ------------------------------------------------------------------ #
+        save_global(copy.deepcopy(DEFAULT_GLOBAL))
+        save_daily(copy.deepcopy(DEFAULT_DAILY))
+        save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
+        save_position(copy.deepcopy(DEFAULT_POSITION))
+
+        # ------------------------------------------------------------------ #
+        # Build per-day slices                                                 #
+        # ------------------------------------------------------------------ #
+        mnq_1m_today = mnq_all[mnq_all.index.date == date]
+        mes_1m_today = mes_all[mes_all.index.date == date]
+
+        if mnq_1m_today.empty:
+            continue
+
+        hist_mnq_1m = mnq_all[mnq_all.index.date < date]
+        hist_mes_1m = mes_all[mes_all.index.date < date]
+
+        hist_hourly_mnq = (
+            hist_mnq_1m.resample("1h", label="left").agg({
+                "Open": "first", "High": "max", "Low": "min",
+                "Close": "last", "Volume": "sum",
+            }).dropna()
+            if not hist_mnq_1m.empty
+            else pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        )
+
+        # ------------------------------------------------------------------ #
+        # Run daily module once at 09:20 ET                                    #
+        # ------------------------------------------------------------------ #
+        now_daily = pd.Timestamp(f"{date} 09:20:00", tz="America/New_York")
+        _daily_mod.run_daily(now_daily, mnq_1m_today, hist_mnq_1m, hist_hourly_mnq)
+
+        # ------------------------------------------------------------------ #
+        # Define 09:20–16:00 session window                                    #
+        # ------------------------------------------------------------------ #
+        session_start_ts = pd.Timestamp(f"{date} 09:20:00", tz="America/New_York")
+        session_end_ts   = pd.Timestamp(f"{date} 16:00:00", tz="America/New_York")
+
+        mnq_session_bars = mnq_1m_today[
+            (mnq_1m_today.index >= session_start_ts) & (mnq_1m_today.index <= session_end_ts)
+        ]
+        mes_session_bars = mes_1m_today[
+            (mes_1m_today.index >= session_start_ts) & (mes_1m_today.index <= session_end_ts)
+        ]
+
+        if mnq_session_bars.empty:
+            continue
+
+        day_events: list[dict] = []
+
+        # ------------------------------------------------------------------ #
+        # Per-bar loop                                                          #
+        # ------------------------------------------------------------------ #
+        for bar_ts in mnq_session_bars.index:
+            now = bar_ts
+
+            bar = mnq_session_bars.loc[bar_ts]
+            mnq_1m_bar = {
+                "time":  bar_ts.isoformat(),
+                "open":  float(bar["Open"]),
+                "high":  float(bar["High"]),
+                "low":   float(bar["Low"]),
+                "close": float(bar["Close"]),
+            }
+
+            mnq_1m_recent = mnq_session_bars.loc[:bar_ts]
+
+            is_5m_boundary = (bar_ts.minute % 5 == 0)
+
+            if is_5m_boundary:
+                # Build just-completed 5m bar
+                mnq_5m_bar = _build_5m_bar_v2(mnq_session_bars, bar_ts)
+
+                # Hypothesis — ignore return value (always None)
+                _hyp_mod.run_hypothesis(
+                    now, mnq_session_bars, mes_session_bars,
+                    hist_mnq_1m, hist_mes_1m,
+                )
+
+                # Trend
+                trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, mnq_1m_recent)
+                if trend_sig is not None:
+                    day_events.append(trend_sig)
+
+                # Strategy (only if we have a valid 5m bar)
+                if mnq_5m_bar is not None:
+                    strat_sig = _strat_mod.run_strategy(now, mnq_5m_bar, mnq_1m_recent)
+                    if strat_sig is not None:
+                        day_events.append(strat_sig)
+            else:
+                # 1m-only: trend only
+                trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, mnq_1m_recent)
+                if trend_sig is not None:
+                    day_events.append(trend_sig)
+
+        # ------------------------------------------------------------------ #
+        # End-of-day trade pairing                                              #
+        # ------------------------------------------------------------------ #
+        day_trades: list[dict] = []
+        entry_event: "dict | None" = None
+        for evt in day_events:
+            kind = evt.get("kind", "")
+            if kind == "limit-entry-filled":
+                entry_event = evt
+            elif kind in ("market-close", "stopped-out") and entry_event is not None:
+                direction = entry_event.get("payload", {}).get("direction") if "payload" in entry_event else None
+                # Try to get direction from position state snapshot embedded in signal
+                # Fall back to active direction from hypothesis at fill time
+                # The simplest pairing: direction sign from "stopped-out" vs "market-close"
+                exit_reason = kind
+                entry_price = float(entry_event["price"])
+                exit_price  = float(evt["price"])
+                # Direction is encoded in the fill signal's payload if present; default "up"
+                direction = entry_event.get("direction", "up")
+                direction_sign = 1 if direction == "up" else -1
+                contracts = 2  # default per spec
+                pnl_points = (exit_price - entry_price) * direction_sign
+                pnl_dollars = pnl_points * 2.0 * contracts
+                day_trades.append({
+                    "entry_time":  entry_event["time"],
+                    "entry_price": entry_price,
+                    "direction":   direction,
+                    "contracts":   contracts,
+                    "exit_time":   evt["time"],
+                    "exit_price":  exit_price,
+                    "exit_reason": exit_reason,
+                    "pnl_points":  round(pnl_points, 4),
+                    "pnl_dollars": round(pnl_dollars, 2),
+                })
+                entry_event = None
+
+        all_events.extend(day_events)
+        all_trades.extend(day_trades)
+
+        # ------------------------------------------------------------------ #
+        # Write per-day outputs                                                 #
+        # ------------------------------------------------------------------ #
+        if write_events:
+            import os as _os
+            out_dir = Path(f"data/regression/{date}")
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            # events.jsonl
+            events_path = out_dir / "events.jsonl"
+            with open(events_path, "w", encoding="utf-8") as _f:
+                for evt in day_events:
+                    _f.write(_json.dumps(evt, sort_keys=True) + "\n")
+
+            # trades.tsv
+            trades_path = out_dir / "trades.tsv"
+            if day_trades:
+                fieldnames = [
+                    "entry_time", "entry_price", "direction", "contracts",
+                    "exit_time", "exit_price", "exit_reason", "pnl_points", "pnl_dollars",
+                ]
+                import csv as _csv
+                with open(trades_path, "w", newline="", encoding="utf-8") as _f:
+                    w = _csv.DictWriter(_f, fieldnames=fieldnames, delimiter="\t",
+                                        extrasaction="ignore")
+                    w.writeheader()
+                    w.writerows(day_trades)
+
+    # ------------------------------------------------------------------ #
+    # Aggregate metrics                                                     #
+    # ------------------------------------------------------------------ #
+    n_trades = len(all_trades)
+    total_pnl = sum(t["pnl_dollars"] for t in all_trades)
+    wins = sum(1 for t in all_trades if t["pnl_dollars"] > 0)
+    win_rate = wins / n_trades if n_trades > 0 else 0.0
+
+    return {
+        "trades":  all_trades,
+        "events":  all_events,
+        "metrics": {
+            "n_trades":  n_trades,
+            "total_pnl": round(total_pnl, 2),
+            "win_rate":  round(win_rate, 4),
+        },
+    }
