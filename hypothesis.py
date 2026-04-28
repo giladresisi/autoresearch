@@ -478,4 +478,6 @@ def run_hypothesis(
         "cautious_price_secondary_level": cautious_price_secondary_level,
         "entry_ranges":                  entry_ranges,
     }
+    if direction == "none":
+        return divs
     return [hyp_event] + divs
