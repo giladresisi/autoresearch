@@ -1171,7 +1171,13 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         # ------------------------------------------------------------------ #
         # Reset all four state files at the start of each day                 #
         # ------------------------------------------------------------------ #
-        save_global(copy.deepcopy(DEFAULT_GLOBAL))
+        # Seed ATH from all historical bars so the hypothesis gate uses a real
+        # cumulative high, not the default 0.0 which would be exceeded immediately.
+        hist_for_ath = mnq_all[mnq_all.index.date < date]
+        seeded_global = copy.deepcopy(DEFAULT_GLOBAL)
+        if not hist_for_ath.empty:
+            seeded_global["all_time_high"] = float(hist_for_ath["High"].max())
+        save_global(seeded_global)
         save_daily(copy.deepcopy(DEFAULT_DAILY))
         save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
         save_position(copy.deepcopy(DEFAULT_POSITION))
@@ -1201,7 +1207,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         # Run daily module once at 09:20 ET                                    #
         # ------------------------------------------------------------------ #
         now_daily = pd.Timestamp(f"{date} 09:20:00", tz="America/New_York")
-        _daily_mod.run_daily(now_daily, mnq_1m_today, hist_mnq_1m, hist_hourly_mnq)
+        _daily_mod.run_daily(now_daily, mnq_1m_today[mnq_1m_today.index <= now_daily], hist_mnq_1m, hist_hourly_mnq)
 
         # Save levels snapshot for chart visualisation (after run_daily populates state)
         if write_events:
