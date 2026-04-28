@@ -10,6 +10,7 @@ import pandas as pd
 
 CAUTIOUS_SECONDARY_MAX_DIST = 150  # pts — secondary (1m confirmation) max distance
 CAUTIOUS_INITIAL_MAX_DIST   = 100  # pts — initial (5m confirmation) max distance
+CAUTIOUS_MIN_DIST           =  40  # pts — below this secondary distance, skip the entry
 
 from smt_state import (
     load_global,
@@ -400,6 +401,17 @@ def run_hypothesis(
         cautious_price_secondary_level = ""
         cautious_price_initial         = ""
         cautious_price_initial_level   = ""
+
+    # Step 8b: veto direction when entry conditions are unfavourable.
+    # (1) Secondary cautious price is too close — not enough room to run.
+    # (2) Up direction but we are already at or above the recorded ATH — price in uncharted territory.
+    if direction != "none":
+        sec_dist = (abs(float(cautious_price_secondary) - current_close)
+                    if cautious_price_secondary != "" else 0)
+        if cautious_price_secondary != "" and sec_dist < CAUTIOUS_MIN_DIST:
+            direction = "none"
+        elif direction == "up" and current_close >= ath:
+            direction = "none"
 
     # Step 9: entry_ranges — 12hr ago and 1week ago same time anchors.
     ts_now = pd.Timestamp(now)
