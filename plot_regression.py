@@ -380,12 +380,18 @@ for kind, style in OTHER_MARKER_STYLE.items():
             if targets:
                 tgt_str = ", ".join(f"{t['name']}@{t['price']}" for t in targets)
                 parts.append(f"targets: {tgt_str}")
-            cp  = e.get("cautious_price", "")
-            cpl = e.get("cautious_price_level", "")
-            if cp not in ("", None):
-                parts.append(f"cautious_price: {cp} ({cpl})" if cpl else f"cautious_price: {cp}")
+            cp_sec  = e.get("cautious_price_secondary", "")
+            cpl_sec = e.get("cautious_price_secondary_level", "")
+            cp_ini  = e.get("cautious_price_initial", "")
+            cpl_ini = e.get("cautious_price_initial_level", "")
+            if cp_sec not in ("", None):
+                parts.append(f"cautious_secondary: {cp_sec} ({cpl_sec})" if cpl_sec else f"cautious_secondary: {cp_sec}")
             else:
-                parts.append("cautious_price: none")
+                parts.append("cautious_secondary: none")
+            if cp_ini not in ("", None):
+                parts.append(f"cautious_initial: {cp_ini} ({cpl_ini})" if cpl_ini else f"cautious_initial: {cp_ini}")
+            else:
+                parts.append("cautious_initial: none")
             for er in e.get("entry_ranges", []):
                 parts.append(f"entry_{er['source']}: [{er['low']}, {er['high']}]")
         hover.append("<br>".join(parts))

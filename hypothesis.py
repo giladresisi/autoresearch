@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-CAUTIOUS_PRICE_MAX_DIST = 100  # pts — max distance for cautious_price candidate
+CAUTIOUS_SECONDARY_MAX_DIST = 150  # pts — secondary (1m confirmation) max distance
+CAUTIOUS_INITIAL_MAX_DIST   = 100  # pts — initial (5m confirmation) max distance
 
 from smt_state import (
     load_global,
@@ -349,8 +350,11 @@ def run_hypothesis(
             elif direction == "down" and top < current_close:
                 targets.append({"name": liq["name"], "price": top})
 
-    # Step 8: cautious_price — furthest in-direction liquidity within CAUTIOUS_PRICE_MAX_DIST pts.
-    _cautious_candidates = []  # list of (price, name)
+    # Step 8: two-tier cautious prices.
+    # Secondary (1m confirmation): furthest in-direction level within CAUTIOUS_SECONDARY_MAX_DIST.
+    # Initial  (5m confirmation): furthest in-direction level within CAUTIOUS_INITIAL_MAX_DIST
+    #   that is closer to current price than the secondary (intermediate target).
+    _cautious_all = []  # list of (price, name) within secondary range
     for liq in liquidities:
         liq_kind = liq.get("kind")
         if liq_kind == "level":
@@ -361,22 +365,41 @@ def run_hypothesis(
             continue
         if p is None:
             continue
-        if direction == "up" and current_close < p <= current_close + CAUTIOUS_PRICE_MAX_DIST:
-            _cautious_candidates.append((p, liq.get("name", "")))
-        elif direction == "down" and current_close - CAUTIOUS_PRICE_MAX_DIST <= p < current_close:
-            _cautious_candidates.append((p, liq.get("name", "")))
-    # Include ATH as a candidate level
+        if direction == "up" and current_close < p <= current_close + CAUTIOUS_SECONDARY_MAX_DIST:
+            _cautious_all.append((p, liq.get("name", "")))
+        elif direction == "down" and current_close - CAUTIOUS_SECONDARY_MAX_DIST <= p < current_close:
+            _cautious_all.append((p, liq.get("name", "")))
     ath = global_state["all_time_high"]
-    if direction == "up" and current_close < ath <= current_close + CAUTIOUS_PRICE_MAX_DIST:
-        _cautious_candidates.append((ath, "ATH"))
-    if _cautious_candidates:
-        _chosen = max(_cautious_candidates, key=lambda x: x[0]) if direction == "up" \
-                  else min(_cautious_candidates, key=lambda x: x[0])
-        cautious_price = _chosen[0]
-        cautious_price_level = _chosen[1]
+    if direction == "up" and current_close < ath <= current_close + CAUTIOUS_SECONDARY_MAX_DIST:
+        _cautious_all.append((ath, "ATH"))
+
+    if _cautious_all:
+        _sec = max(_cautious_all, key=lambda x: x[0]) if direction == "up" \
+               else min(_cautious_all, key=lambda x: x[0])
+        cautious_price_secondary       = _sec[0]
+        cautious_price_secondary_level = _sec[1]
+
+        # Initial: furthest within CAUTIOUS_INITIAL_MAX_DIST that is strictly closer than secondary
+        if direction == "up":
+            _init_candidates = [(p, n) for p, n in _cautious_all
+                                if p < cautious_price_secondary and p <= current_close + CAUTIOUS_INITIAL_MAX_DIST]
+        else:
+            _init_candidates = [(p, n) for p, n in _cautious_all
+                                if p > cautious_price_secondary and p >= current_close - CAUTIOUS_INITIAL_MAX_DIST]
+
+        if _init_candidates:
+            _ini = max(_init_candidates, key=lambda x: x[0]) if direction == "up" \
+                   else min(_init_candidates, key=lambda x: x[0])
+            cautious_price_initial       = _ini[0]
+            cautious_price_initial_level = _ini[1]
+        else:
+            cautious_price_initial       = ""
+            cautious_price_initial_level = ""
     else:
-        cautious_price = ""
-        cautious_price_level = ""
+        cautious_price_secondary       = ""
+        cautious_price_secondary_level = ""
+        cautious_price_initial         = ""
+        cautious_price_initial_level   = ""
 
     # Step 9: entry_ranges — 12hr ago and 1week ago same time anchors.
     ts_now = pd.Timestamp(now)
@@ -407,14 +430,17 @@ def run_hypothesis(
 
     # Write hypothesis.json
     new_hypothesis = {
-        "direction":      direction,
-        "weekly_mid":     weekly_mid,
-        "daily_mid":      daily_mid,
-        "last_liquidity": last_liquidity,
-        "divs":           divs,
-        "targets":        targets,
-        "cautious_price": cautious_price,
-        "entry_ranges":   entry_ranges,
+        "direction":                     direction,
+        "weekly_mid":                    weekly_mid,
+        "daily_mid":                     daily_mid,
+        "last_liquidity":                last_liquidity,
+        "divs":                          divs,
+        "targets":                       targets,
+        "cautious_price_initial":        cautious_price_initial,
+        "cautious_price_initial_level":  cautious_price_initial_level,
+        "cautious_price_secondary":      cautious_price_secondary,
+        "cautious_price_secondary_level": cautious_price_secondary_level,
+        "entry_ranges":                  entry_ranges,
     }
     save_hypothesis(new_hypothesis)
 
@@ -434,8 +460,10 @@ def run_hypothesis(
         "daily_mid":     daily_mid,
         "last_liquidity": last_liquidity,
         "targets":       targets,
-        "cautious_price":       cautious_price,
-        "cautious_price_level": cautious_price_level,
-        "entry_ranges":         entry_ranges,
+        "cautious_price_initial":        cautious_price_initial,
+        "cautious_price_initial_level":  cautious_price_initial_level,
+        "cautious_price_secondary":      cautious_price_secondary,
+        "cautious_price_secondary_level": cautious_price_secondary_level,
+        "entry_ranges":                  entry_ranges,
     }
     return [hyp_event] + divs

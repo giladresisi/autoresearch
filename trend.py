@@ -118,7 +118,8 @@ def run_trend(
     daily = load_daily()
 
     direction = hypothesis.get("direction", "none")
-    cautious_price_raw = hypothesis.get("cautious_price", "")
+    cautious_initial_raw   = hypothesis.get("cautious_price_initial",   "")
+    cautious_secondary_raw = hypothesis.get("cautious_price_secondary", "")
 
     # ------------------------------------------------------------------
     # Step 2: early exit when no active direction.
@@ -139,63 +140,102 @@ def run_trend(
     if active:
         cautious_state = active.get("cautious", "no")
 
-        # ---- 3a: attempt cautious arming -----------------------------------
+        cautious_initial   = float(cautious_initial_raw)   if cautious_initial_raw   != "" else None
+        cautious_secondary = float(cautious_secondary_raw) if cautious_secondary_raw != "" else None
+
+        def _surpassed(price: float) -> bool:
+            return (bar_high >= price) if direction == "up" else (bar_low <= price)
+
+        def _close_beyond(price: float) -> bool:
+            return (bar_close > price) if direction == "up" else (bar_close < price)
+
+        def _reversal(price: float) -> bool:
+            return (bar_low <= price) if direction == "up" else (bar_high >= price)
+
+        # ---- 3a: unarmed — check if a cautious level was reached -----------
         if cautious_state == "no":
-            # Only attempt arming if cautious_price is set.
-            if cautious_price_raw == "":
-                return None  # No cautious_price configured; nothing to do.
+            if cautious_secondary is None and cautious_initial is None:
+                return None
 
-            cautious_price = float(cautious_price_raw)
+            # Secondary takes priority if surpassed (it's farther, confirms strong move).
+            if cautious_secondary is not None and _surpassed(cautious_secondary):
+                if _close_beyond(cautious_secondary):
+                    position["active"]["cautious"] = "secondary"
+                    save_position(position)
+                    return {"kind": "cautious-armed", "time": now.isoformat(),
+                            "price": bar_close, "level": "secondary"}
+                else:
+                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                    save_position(position)
+                    save_hypothesis(hypothesis)
+                    return _market_close_signal(now, bar_close, reason="cautious-rejected")
 
-            # Check whether the bar surpassed cautious_price.
-            if direction == "up":
-                surpassed = bar_high >= cautious_price
-            else:  # direction == "down"
-                surpassed = bar_low <= cautious_price
+            if cautious_initial is not None and _surpassed(cautious_initial):
+                if _close_beyond(cautious_initial):
+                    position["active"]["cautious"] = "initial"
+                    save_position(position)
+                    return {"kind": "cautious-armed", "time": now.isoformat(),
+                            "price": bar_close, "level": "initial"}
+                else:
+                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                    save_position(position)
+                    save_hypothesis(hypothesis)
+                    return _market_close_signal(now, bar_close, reason="cautious-rejected")
 
-            if not surpassed:
-                return None  # Bar did not reach the threshold.
+            return None
 
-            # Check whether close went *beyond* cautious_price.
-            if direction == "up":
-                close_beyond = bar_close > cautious_price
-            else:
-                close_beyond = bar_close < cautious_price
+        # ---- 3b: initial cautious — wait for 5m bar opposite body ----------
+        if cautious_state == "initial":
+            armed_price = cautious_initial if cautious_initial is not None else 0.0
 
-            if close_beyond:
-                # Arm cautious mode.
-                position["active"]["cautious"] = "yes"
-                save_position(position)
-                return {
-                    "kind": "cautious-armed",
-                    "time": now.isoformat(),
-                    "price": bar_close,
-                }
-            else:
-                # Touched but did not close beyond → reject and exit.
-                _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
-                save_position(position)
-                save_hypothesis(hypothesis)
-                return _market_close_signal(now, bar_close, reason="cautious-rejected")
-
-        # ---- 3b: cautious already armed ------------------------------------
-        if cautious_state == "yes":
-            # cautious_price must be set if cautious is "yes"; parse it safely.
-            cautious_price = float(cautious_price_raw) if cautious_price_raw != "" else 0.0
-
-            # Reversal check: price crossed back to the pre-cautious side.
-            if direction == "up":
-                reversal = bar_low <= cautious_price
-            else:
-                reversal = bar_high >= cautious_price
-
-            if reversal:
+            if _reversal(armed_price):
                 _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                 save_position(position)
                 save_hypothesis(hypothesis)
                 return _market_close_signal(now, bar_close, reason="cautious-reversal")
 
-            # 1m-break check: current bar broke below/above the last opposite 1m bar.
+            # Upgrade to secondary if secondary level is now reached.
+            if cautious_secondary is not None and _surpassed(cautious_secondary):
+                if _close_beyond(cautious_secondary):
+                    position["active"]["cautious"] = "secondary"
+                    save_position(position)
+                    return {"kind": "cautious-armed", "time": now.isoformat(),
+                            "price": bar_close, "level": "secondary"}
+                else:
+                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                    save_position(position)
+                    save_hypothesis(hypothesis)
+                    return _market_close_signal(now, bar_close, reason="cautious-rejected")
+
+            # 5m confirmation: on a 5m boundary, check if the completed 5m bar body
+            # is opposite to direction → exit.
+            ts = pd.Timestamp(now)
+            if ts.minute % 5 == 0:
+                five_start = ts - pd.Timedelta(minutes=5)
+                five_bars = mnq_1m_recent[mnq_1m_recent.index >= five_start]
+                if not five_bars.empty:
+                    five_open  = float(five_bars["Open"].iloc[0])
+                    five_close = float(five_bars["Close"].iloc[-1])
+                    opposite_body = (five_close < five_open) if direction == "up" \
+                                    else (five_close > five_open)
+                    if opposite_body:
+                        _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                        save_position(position)
+                        save_hypothesis(hypothesis)
+                        return _market_close_signal(now, bar_close, reason="cautious-5m-break")
+
+            return None
+
+        # ---- 3c: secondary cautious — 1m confirmation ----------------------
+        if cautious_state in ("secondary", "yes"):
+            armed_price = cautious_secondary if cautious_secondary is not None else 0.0
+
+            if _reversal(armed_price):
+                _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                save_position(position)
+                save_hypothesis(hypothesis)
+                return _market_close_signal(now, bar_close, reason="cautious-reversal")
+
             last_opp = _last_opposite_bar(mnq_1m_recent, bar_time_str, direction)
             if last_opp is not None:
                 if direction == "up":

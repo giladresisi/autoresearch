@@ -30,7 +30,10 @@ DEFAULT_HYPOTHESIS = {
     "last_liquidity": "",
     "divs": [],
     "targets": [],
-    "cautious_price": "",
+    "cautious_price_initial":         "",
+    "cautious_price_initial_level":   "",
+    "cautious_price_secondary":       "",
+    "cautious_price_secondary_level": "",
     "entry_ranges": [],
 }
 
