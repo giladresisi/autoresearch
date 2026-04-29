@@ -401,6 +401,10 @@ for kind, style in OTHER_MARKER_STYLE.items():
                     _lvl = dr.get("approaching_level", "?")
                     _dist = dr.get("approaching_dist", "?")
                     _decided = f"approaching {_lvl} ({_dist} pts)"
+                elif _rule == "rule2b":
+                    _lvl = dr.get("last_swept_level", "?")
+                    _mid = e.get("daily_mid", "?")
+                    _decided = f"last swept {_lvl}, mid={_mid}"
                 elif _rule == "rule3_4":
                     _sc = dr.get("combined_score", "?")
                     _decided = f"bias score {_sc}"

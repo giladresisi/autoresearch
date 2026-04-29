@@ -121,6 +121,22 @@ def run_trend(
     cautious_initial_raw   = hypothesis.get("cautious_price_initial",   "")
     cautious_secondary_raw = hypothesis.get("cautious_price_secondary", "")
 
+    _liq_map = {l["name"]: l["price"] for l in daily.get("liquidities", [])
+                if l.get("kind") == "level"}
+    _dh = _liq_map.get("day_high")
+    _dl = _liq_map.get("day_low")
+    daily_mid_price = (_dh + _dl) / 2.0 if _dh is not None and _dl is not None else None
+
+    # Guard: only apply mid-crossing invalidation when the hypothesis was formed
+    # with price on the side consistent with the direction.  If direction=down was
+    # set while price was already above the mid (e.g. Rule 2 approaching a low),
+    # crossing the mid upward is expected behaviour, not invalidation.
+    _hyp_daily_mid = hypothesis.get("daily_mid", "")
+    _mid_cross_guard = (
+        (direction == "up"   and _hyp_daily_mid in ("above", "mid")) or
+        (direction == "down" and _hyp_daily_mid in ("below", "mid"))
+    )
+
     # ------------------------------------------------------------------
     # Step 2: early exit when no active direction.
     # ------------------------------------------------------------------
@@ -154,6 +170,17 @@ def run_trend(
 
         # ---- 3a: unarmed — check if a cautious level was reached -----------
         if cautious_state == "no":
+            # Daily-mid invalidation: close crossed the mid against direction before any
+            # cautious level was reached — the entry thesis is already broken.
+            if daily_mid_price is not None and _mid_cross_guard:
+                _mid_broken = (direction == "up"   and bar_close < daily_mid_price) or \
+                              (direction == "down" and bar_close > daily_mid_price)
+                if _mid_broken:
+                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                    save_position(position)
+                    save_hypothesis(hypothesis)
+                    return _market_close_signal(now, bar_close, reason="daily_mid_cross")
+
             if cautious_secondary is None and cautious_initial is None:
                 return None
 
@@ -256,8 +283,33 @@ def run_trend(
     # ------------------------------------------------------------------
     liquidities = daily.get("liquidities", [])
 
+    # Daily-mid invalidation: if the hypothesized direction is contradicted by price
+    # crossing the daily mid (e.g. direction=up but close fell below mid), the thesis
+    # is stale — reset before placing any new entry.
+    if daily_mid_price is not None and _mid_cross_guard:
+        _mid_broken = (direction == "up"   and bar_close < daily_mid_price) or \
+                      (direction == "down" and bar_close > daily_mid_price)
+        if _mid_broken:
+            hypothesis["direction"] = "none"
+            position["confirmation_bar"] = {}
+            position["limit_entry"] = ""
+            save_position(position)
+            save_hypothesis(hypothesis)
+            return {
+                "kind":             "trend-broken",
+                "time":             now.isoformat(),
+                "price":            bar_close,
+                "broken_direction": direction,
+                "level_name":       "daily_mid",
+                "level_price":      daily_mid_price,
+            }
+
+    _HIGH_PRIO_LEVELS = {"week_high", "week_low", "day_high", "day_low"}
+
     for level in liquidities:
         if level.get("kind") != "level":
+            continue
+        if level.get("name") not in _HIGH_PRIO_LEVELS:
             continue
 
         level_price = float(level["price"])

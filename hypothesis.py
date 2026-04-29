@@ -535,6 +535,7 @@ def _determine_direction(
         "smt_alignment":     None,
         "approaching_level": None,
         "approaching_dist":  None,
+        "last_swept_level":  None,
     }
 
     # Rule 1: fresh sweep of a meaningful level — decisive state-change event.
@@ -553,6 +554,28 @@ def _determine_direction(
         reason["approaching_level"] = r2["approaching_level"]["name"]
         reason["approaching_dist"]  = round(r2["dist"], 1)
         return r2["direction"], reason
+
+    # Rule 2b: last high-priority sweep + daily-mid position (failed reversal / confirmation).
+    # A high-priority level (day/week extreme) being the most recent touch creates a
+    # directional expectation that is confirmed or cancelled by position vs daily_mid:
+    #   last swept = low → above mid ⇒ up (bounce confirmed)  | below mid ⇒ down (bounce failed)
+    #   last swept = high → below mid ⇒ down (drop confirmed) | above mid ⇒ up (drop failed)
+    _low_names  = {"day_low", "week_low"}
+    _high_names = {"day_high", "week_high"}
+    _last_liq   = _find_last_liquidity(mnq_1m, liquidities)
+    if _last_liq and day_high is not None and day_low is not None:
+        _daily_mid  = (day_high + day_low) / 2.0
+        _above_mid  = current_close > _daily_mid
+        if _last_liq in _low_names:
+            r2b_dir = "up" if _above_mid else "down"
+        elif _last_liq in _high_names:
+            r2b_dir = "down" if not _above_mid else "up"
+        else:
+            r2b_dir = None
+        if r2b_dir is not None:
+            reason["rule"]            = "rule2b"
+            reason["last_swept_level"] = _last_liq
+            return r2b_dir, reason
 
     # Rules 3+4: multi-TF premium/discount bias + BOS/CHoCH + SMT scoring layer.
     pd_sc = _compute_pd_score(current_close, week_high, week_low, day_high, day_low)
