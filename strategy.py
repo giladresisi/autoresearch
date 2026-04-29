@@ -19,17 +19,62 @@ import smt_state
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _body_opposite_to(direction: str, bar: dict) -> bool:
-    """Return True if the bar's body is in the direction opposite to the hypothesis.
+def _find_last_opposite_5m_bar(
+    mnq_1m_recent: pd.DataFrame,
+    now: datetime,
+    direction: str,
+    hypothesis_formed_at: str,
+) -> Optional[dict]:
+    """Return the most recently completed 5m bar that is opposite to direction,
+    but only if it completed at or after the hypothesis was formed.
 
-    For an up hypothesis the opposite bar is bearish (close < open).
-    For a down hypothesis the opposite bar is bullish (close > open).
+    direction='up'   → look for bearish 5m bar (close < open)
+    direction='down' → look for bullish 5m bar (close > open)
     """
-    if direction == "up":
-        return bar["close"] < bar["open"]
-    elif direction == "down":
-        return bar["close"] > bar["open"]
-    return False
+    if mnq_1m_recent is None or mnq_1m_recent.empty:
+        return None
+
+    five_m = mnq_1m_recent.resample("5min").agg(
+        {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    ).dropna(subset=["Open", "Close"])
+
+    if five_m.empty:
+        return None
+
+    # Exclude the currently-forming 5m period.
+    current_5m_start = pd.Timestamp(now).floor("5min")
+    completed = five_m[five_m.index < current_5m_start]
+
+    # Only consider 5m bars that completed at or after the hypothesis was formed.
+    # A bar at index T completes at T + 5min, so we keep bars where T >= formed_at - 5min.
+    if hypothesis_formed_at:
+        formed_ts = pd.Timestamp(hypothesis_formed_at)
+        cutoff = formed_ts - pd.Timedelta(minutes=5)
+        completed = completed[completed.index >= cutoff]
+
+    if completed.empty:
+        return None
+
+    # Only check the single most-recently-completed bar.
+    row = completed.iloc[-1]
+    o, c = float(row["Open"]), float(row["Close"])
+    if direction == "up" and c < o:
+        return {
+            "time":      completed.index[-1].isoformat(),
+            "high":      float(row["High"]),
+            "low":       float(row["Low"]),
+            "body_high": max(o, c),
+            "body_low":  min(o, c),
+        }
+    if direction == "down" and c > o:
+        return {
+            "time":      completed.index[-1].isoformat(),
+            "high":      float(row["High"]),
+            "low":       float(row["Low"]),
+            "body_high": max(o, c),
+            "body_low":  min(o, c),
+        }
+    return None
 
 
 def _bar_crosses(bar: dict, price: float) -> bool:
@@ -70,7 +115,8 @@ def run_strategy(
     hypothesis = smt_state.load_hypothesis()
     position   = smt_state.load_position()
 
-    direction = hypothesis.get("direction", "none")
+    direction    = hypothesis.get("direction", "none")
+    formed_at    = hypothesis.get("formed_at", "")
 
     # ------------------------------------------------------------------ #
     # Section 2: No active position                                        #
@@ -82,44 +128,37 @@ def run_strategy(
         if position["failed_entries"] > 2:
             return None
 
-        # 2.3 PRIORITY: same-bar new-opposite-confirmation overrides fill
-        if _body_opposite_to(direction, mnq_bar):
-            # Update confirmation bar
-            position["confirmation_bar"] = {
-                "time":      mnq_bar["time"],
-                "high":      mnq_bar["high"],
-                "low":       mnq_bar["low"],
-                "body_high": mnq_bar["body_high"],
-                "body_low":  mnq_bar["body_low"],
-            }
+        # 2.3 Find the most recent completed opposite 5m bar and set/update limit.
+        # Only emits a signal when the reference bar changes; otherwise falls
+        # through to 2.4 to check fill on the existing limit.
+        opp_5m = _find_last_opposite_5m_bar(mnq_1m_recent, now, direction, formed_at)
+        if opp_5m is not None:
+            body_end_price = opp_5m["body_high"] if direction == "up" else opp_5m["body_low"]
+            current_conf_time = position.get("confirmation_bar", {}).get("time", "")
+            if opp_5m["time"] != current_conf_time or position["limit_entry"] == "":
+                position["confirmation_bar"] = {
+                    "time":      opp_5m["time"],
+                    "high":      opp_5m["high"],
+                    "low":       opp_5m["low"],
+                    "body_high": opp_5m["body_high"],
+                    "body_low":  opp_5m["body_low"],
+                }
+                kind = "new-limit-entry" if position["limit_entry"] == "" else "move-limit-entry"
+                position["limit_entry"] = body_end_price
+                smt_state.save_position(position)
+                return _make_signal(kind, now, body_end_price)
 
-            # body_end_price: entry price for the limit order
-            # For longs (direction=up): enter at body_high of the bearish bar
-            # For shorts (direction=down): enter at body_low of the bullish bar
-            if direction == "up":
-                body_end_price = mnq_bar["body_high"]
-            else:
-                body_end_price = mnq_bar["body_low"]
-
-            if position["limit_entry"] == "":
-                kind = "new-limit-entry"
-            else:
-                kind = "move-limit-entry"
-
-            position["limit_entry"] = body_end_price
-            smt_state.save_position(position)
-
-            return _make_signal(kind, now, body_end_price)
-
-        # 2.4 No new opposite bar — check fill
+        # 2.4 No updated 5m reference bar — check fill on existing limit.
+        # Long fills when bar_high >= limit (bar reached or gapped above it).
+        # Short fills when bar_low  <= limit (bar reached or gapped below it).
         limit_entry = position["limit_entry"]
         _limit_f = float(limit_entry) if limit_entry != "" else None
-        _gap_over = _limit_f is not None and (
-            (direction == "up"   and float(mnq_bar["open"]) >= _limit_f)
-            or (direction == "down" and float(mnq_bar["open"]) <= _limit_f)
+        _limit_reached = _limit_f is not None and (
+            (direction == "up"   and float(mnq_bar["high"]) >= _limit_f) or
+            (direction == "down" and float(mnq_bar["low"])  <= _limit_f)
         )
         MIN_STOP_DISTANCE = 5.0
-        if limit_entry != "" and (_bar_crosses(mnq_bar, _limit_f) or _gap_over):
+        if limit_entry != "" and _limit_reached:
             fill_price  = float(limit_entry)
             conf_bar    = position["confirmation_bar"]
 

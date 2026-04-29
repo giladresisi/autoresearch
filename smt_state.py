@@ -25,6 +25,7 @@ DEFAULT_DAILY = {
 
 DEFAULT_HYPOTHESIS = {
     "direction": "none",
+    "formed_at": "",
     "weekly_mid": "",
     "daily_mid": "",
     "last_liquidity": "",

@@ -898,8 +898,16 @@ def run_hypothesis(
         })
 
     # Write hypothesis.json
+    if direction != "none" and direction != old_direction:
+        formed_at = pd.Timestamp(now).isoformat()
+    elif direction != "none":
+        formed_at = hypothesis.get("formed_at", pd.Timestamp(now).isoformat())
+    else:
+        formed_at = ""
+
     new_hypothesis = {
         "direction":                     direction,
+        "formed_at":                     formed_at,
         "weekly_mid":                    weekly_mid,
         "daily_mid":                     daily_mid,
         "last_liquidity":                last_liquidity,
