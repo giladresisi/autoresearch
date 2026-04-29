@@ -1191,8 +1191,9 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         if mnq_1m_today.empty:
             continue
 
-        hist_mnq_1m = mnq_all[mnq_all.index.date < date]
-        hist_mes_1m = mes_all[mes_all.index.date < date]
+        session_start_ts = pd.Timestamp(f"{date} 09:20:00", tz="America/New_York")
+        hist_mnq_1m = mnq_all[mnq_all.index < session_start_ts]
+        hist_mes_1m = mes_all[mes_all.index < session_start_ts]
 
         hist_hourly_mnq = (
             hist_mnq_1m.resample("1h", label="left").agg({
@@ -1206,7 +1207,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         # ------------------------------------------------------------------ #
         # Run daily module once at 09:20 ET                                    #
         # ------------------------------------------------------------------ #
-        now_daily = pd.Timestamp(f"{date} 09:20:00", tz="America/New_York")
+        now_daily = session_start_ts
         _daily_mod.run_daily(now_daily, mnq_1m_today[mnq_1m_today.index <= now_daily], hist_mnq_1m, hist_hourly_mnq)
 
         # Save levels snapshot for chart visualisation (after run_daily populates state)
@@ -1223,8 +1224,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         # ------------------------------------------------------------------ #
         # Define 09:20–16:00 session window                                    #
         # ------------------------------------------------------------------ #
-        session_start_ts = pd.Timestamp(f"{date} 09:20:00", tz="America/New_York")
-        session_end_ts   = pd.Timestamp(f"{date} 16:00:00", tz="America/New_York")
+        session_end_ts = pd.Timestamp(f"{date} 16:00:00", tz="America/New_York")
 
         mnq_session_bars = mnq_1m_today[
             (mnq_1m_today.index >= session_start_ts) & (mnq_1m_today.index <= session_end_ts)

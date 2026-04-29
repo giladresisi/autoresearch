@@ -84,8 +84,15 @@ def _compute_mid_label(current_close: float, high_price: float, low_price: float
     return "above" if diff > 0 else "below"
 
 
-def _find_last_liquidity(mnq_1m: pd.DataFrame, liquidities: list) -> str:
+def _find_last_liquidity(
+    mnq_1m: pd.DataFrame,
+    liquidities: list,
+    extra_bars: pd.DataFrame | None = None,
+) -> str:
     """Find the most recently-touched meaningful liquidity level.
+
+    Scans mnq_1m (session bars) and optionally extra_bars (True Day pre-session bars)
+    so overnight/London-session level touches are captured, not just post-09:20 bars.
 
     Restricted to: {week_high, week_low, day_high, day_low}.
     A level is "touched" when bar.High >= price (for highs) or bar.Low <= price (for lows).
@@ -93,7 +100,6 @@ def _find_last_liquidity(mnq_1m: pd.DataFrame, liquidities: list) -> str:
     """
     meaningful_names = {"week_high", "week_low", "day_high", "day_low"}
 
-    # Build a mapping: name -> price for the meaningful levels
     level_map = {}
     for liq in liquidities:
         if liq.get("name") in meaningful_names and liq.get("kind") == "level":
@@ -102,17 +108,17 @@ def _find_last_liquidity(mnq_1m: pd.DataFrame, liquidities: list) -> str:
     if not level_map:
         return ""
 
-    # Scan bars backward to find most recently touched level
-    # "Highs" (week_high, day_high): touched when bar.High >= price
-    # "Lows" (week_low, day_low): touched when bar.Low <= price
+    if extra_bars is not None and not extra_bars.empty:
+        bars_array = pd.concat([extra_bars, mnq_1m])
+        bars_array = bars_array[~bars_array.index.duplicated(keep="last")].sort_index()
+    else:
+        bars_array = mnq_1m
+
     high_names = {"week_high", "day_high"}
-    low_names = {"week_low", "day_low"}
+    low_names  = {"week_low",  "day_low"}
+    best_idx   = -1
+    best_name  = ""
 
-    # Track the last (most recent index) touch for each level
-    best_idx = -1
-    best_name = ""
-
-    bars_array = mnq_1m
     for i in range(len(bars_array) - 1, -1, -1):
         bar = bars_array.iloc[i]
         for name, price in level_map.items():
@@ -125,7 +131,6 @@ def _find_last_liquidity(mnq_1m: pd.DataFrame, liquidities: list) -> str:
                 best_idx = i
                 best_name = name
         if best_idx == len(bars_array) - 1:
-            # Can't do better — the most recent bar touched something
             break
 
     return best_name
@@ -538,6 +543,24 @@ def _determine_direction(
         "last_swept_level":  None,
     }
 
+    # Pre-session True Day bars (18:00 prior calendar day to session open).
+    # Used by Rule 2b so overnight/London level touches are visible at NY open.
+    _pre_session: pd.DataFrame | None = None
+    if not mnq_1m.empty and not hist_mnq_1m.empty:
+        _ts = mnq_1m.index[0]
+        if _ts.tzinfo is None:
+            _ts = _ts.tz_localize("America/New_York")
+        else:
+            _ts = _ts.tz_convert("America/New_York")
+        _prior = _ts.date() - timedelta(days=1)
+        _true_day_start = pd.Timestamp(
+            datetime(_prior.year, _prior.month, _prior.day, 18, 0, 0),
+            tz="America/New_York",
+        )
+        _pre_session = hist_mnq_1m[
+            (hist_mnq_1m.index >= _true_day_start) & (hist_mnq_1m.index < _ts)
+        ]
+
     # Rule 1: fresh sweep of a meaningful level — decisive state-change event.
     r1 = _check_fresh_touch(current_bar, prior, levels)
     if r1:
@@ -547,22 +570,15 @@ def _determine_direction(
         reason["smt_alignment"]     = smt_aln
         return r1["direction"], reason
 
-    # Rule 2: trending toward an unvisited level with momentum — decisive continuation.
-    r2 = _check_approaching(current_bar, prior, levels, mnq_1m)
-    if r2:
-        reason["rule"]              = "rule2"
-        reason["approaching_level"] = r2["approaching_level"]["name"]
-        reason["approaching_dist"]  = round(r2["dist"], 1)
-        return r2["direction"], reason
-
     # Rule 2b: last high-priority sweep + daily-mid position (failed reversal / confirmation).
-    # A high-priority level (day/week extreme) being the most recent touch creates a
-    # directional expectation that is confirmed or cancelled by position vs daily_mid:
+    # Scans the full True Day (pre-session + session) so overnight/London level touches are
+    # visible at NY open.  Takes priority over Rule 2 because the ICT context from the last
+    # swept extreme is more fundamental than short-term momentum toward a nearby level.
     #   last swept = low → above mid ⇒ up (bounce confirmed)  | below mid ⇒ down (bounce failed)
     #   last swept = high → below mid ⇒ down (drop confirmed) | above mid ⇒ up (drop failed)
     _low_names  = {"day_low", "week_low"}
     _high_names = {"day_high", "week_high"}
-    _last_liq   = _find_last_liquidity(mnq_1m, liquidities)
+    _last_liq   = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_pre_session)
     if _last_liq and day_high is not None and day_low is not None:
         _daily_mid  = (day_high + day_low) / 2.0
         _above_mid  = current_close > _daily_mid
@@ -576,6 +592,14 @@ def _determine_direction(
             reason["rule"]            = "rule2b"
             reason["last_swept_level"] = _last_liq
             return r2b_dir, reason
+
+    # Rule 2: trending toward an unvisited level with momentum — decisive continuation.
+    r2 = _check_approaching(current_bar, prior, levels, mnq_1m)
+    if r2:
+        reason["rule"]              = "rule2"
+        reason["approaching_level"] = r2["approaching_level"]["name"]
+        reason["approaching_dist"]  = round(r2["dist"], 1)
+        return r2["direction"], reason
 
     # Rules 3+4: multi-TF premium/discount bias + BOS/CHoCH + SMT scoring layer.
     pd_sc = _compute_pd_score(current_close, week_high, week_low, day_high, day_low)
@@ -667,8 +691,22 @@ def run_hypothesis(
     if day_high_price is not None and day_low_price is not None:
         daily_mid = _compute_mid_label(current_close, day_high_price, day_low_price)
 
-    # Step 4: last_liquidity — most recently touched meaningful level.
-    last_liquidity = _find_last_liquidity(mnq_1m, liquidities)
+    # Step 4: last_liquidity — most recently touched meaningful level (True Day scope).
+    _ts_now = pd.Timestamp(now)
+    if _ts_now.tzinfo is None:
+        _ts_now = _ts_now.tz_localize("America/New_York")
+    else:
+        _ts_now = _ts_now.tz_convert("America/New_York")
+    _prior_cal = _ts_now.date() - timedelta(days=1)
+    _true_day_start_hyp = pd.Timestamp(
+        datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 18, 0, 0),
+        tz="America/New_York",
+    )
+    _hyp_pre_session = hist_mnq_1m[
+        (hist_mnq_1m.index >= _true_day_start_hyp)
+        & (hist_mnq_1m.index < (mnq_1m.index[0] if not mnq_1m.empty else _ts_now))
+    ]
+    last_liquidity = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_hyp_pre_session)
 
     # Step 5: divs — SMT divergences at 15m and 30m.
     divs = _compute_divs(mnq_1m, mes_1m)
