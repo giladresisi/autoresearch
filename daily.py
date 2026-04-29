@@ -130,6 +130,17 @@ def _compute_two(hist_mnq_1m: pd.DataFrame, today: datetime.date) -> Optional[fl
     return float(week_bars.iloc[0]["Open"])
 
 
+def _last_n_trading_dates(today: datetime.date, n: int) -> list[datetime.date]:
+    """Return the last n trading dates (Mon–Fri) strictly before today."""
+    dates: list[datetime.date] = []
+    d = today - datetime.timedelta(days=1)
+    while len(dates) < n:
+        if d.weekday() < 5:  # Mon=0…Fri=4; skip Sat=5, Sun=6
+            dates.append(d)
+        d -= datetime.timedelta(days=1)
+    return dates
+
+
 def _detect_fvgs(
     hourly_bars: pd.DataFrame,
     mnq_1m: pd.DataFrame,
@@ -266,6 +277,19 @@ def run_daily(
                             "price": float(today_bars["High"].max())})
         liquidities.append({"name": "day_low",  "kind": "level",
                             "price": float(today_bars["Low"].min())})
+
+    # Prior 2 trading days: high, low, TDO
+    for i, prior_date in enumerate(_last_n_trading_dates(today, 2), start=1):
+        prior_bars = combined_1m[combined_1m.index.date == prior_date]
+        if not prior_bars.empty:
+            liquidities.append({"name": f"prev{i}_day_high", "kind": "level",
+                                "price": float(prior_bars["High"].max())})
+            liquidities.append({"name": f"prev{i}_day_low", "kind": "level",
+                                "price": float(prior_bars["Low"].min())})
+        prior_tdo = compute_tdo(combined_1m, prior_date)
+        if prior_tdo is not None:
+            liquidities.append({"name": f"prev{i}_TDO", "kind": "level",
+                                "price": float(prior_tdo)})
 
     # Session highs/lows — use combined_1m so we can look back into hist for asia
     for session in ("asia", "london", "ny_morning", "ny_evening"):
