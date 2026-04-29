@@ -122,6 +122,10 @@ MAX_CONTRACTS = 4
 # PESSIMISTIC_FILLS is True. 5 pts is intentionally pessimistic for MNQ in RTH.
 MARKET_ORDER_SLIPPAGE_PTS: float = 5.0
 
+# Slippage applied to v2 market-close exits. 2 pts covers typical automated-trading
+# latency (network + exchange queue) for MNQ in RTH. Will move to simulated-fill module.
+V2_MARKET_CLOSE_SLIPPAGE_PTS: float = 2.0
+
 
 def print_direction_breakdown(stats: dict, prefix: str = "") -> None:
     """Print per-direction trade count, win rate, avg PnL, and exit breakdown."""
@@ -1263,6 +1267,8 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             # Trend runs first: validates existing hypothesis before a new one may form.
             trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, mnq_1m_recent)
             if trend_sig is not None:
+                if trend_sig.get("kind") == "market-close":
+                    trend_sig["slippage"] = V2_MARKET_CLOSE_SLIPPAGE_PTS
                 day_events.append(trend_sig)
 
             # Hypothesis runs on every 5m boundary, after trend has had a chance to clear state.
@@ -1276,6 +1282,8 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
             strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, mnq_1m_recent)
             if strat_sig is not None:
+                if strat_sig.get("kind") == "market-close":
+                    strat_sig["slippage"] = V2_MARKET_CLOSE_SLIPPAGE_PTS
                 day_events.append(strat_sig)
 
         # ------------------------------------------------------------------ #
@@ -1314,6 +1322,8 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                 # Direction is encoded in the fill signal's payload if present; default "up"
                 direction = entry_event.get("direction", "up")
                 direction_sign = 1 if direction == "up" else -1
+                slip = float(evt.get("slippage", 0.0))
+                exit_price -= direction_sign * slip
                 contracts = 2  # default per spec
                 pnl_points = (exit_price - entry_price) * direction_sign
                 pnl_dollars = pnl_points * 2.0 * contracts

@@ -153,6 +153,7 @@ def run_trend(
     bar_high = float(mnq_1m_bar["high"])
     bar_low = float(mnq_1m_bar["low"])
     bar_close = float(mnq_1m_bar["close"])
+    bar_mid = (bar_high + bar_low) / 2.0
     bar_time_str = str(mnq_1m_bar.get("time", now.isoformat()))
 
     active = position.get("active", {})
@@ -186,7 +187,7 @@ def run_trend(
                     _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                     save_position(position)
                     save_hypothesis(hypothesis)
-                    return _market_close_signal(now, bar_close, reason="daily_mid_cross", close_reason="daily-mid-cross")
+                    return _market_close_signal(now, bar_mid, reason="daily_mid_cross", close_reason="daily-mid-cross")
 
             if cautious_secondary is None and cautious_initial is None:
                 return None
@@ -202,7 +203,7 @@ def run_trend(
                     _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                     save_position(position)
                     save_hypothesis(hypothesis)
-                    return _market_close_signal(now, bar_close, reason="cautious-rejected", close_reason=_cr2)
+                    return _market_close_signal(now, bar_mid, reason="cautious-rejected", close_reason=_cr2)
 
             if cautious_initial is not None and _surpassed(cautious_initial):
                 if _close_beyond(cautious_initial):
@@ -214,7 +215,7 @@ def run_trend(
                     _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                     save_position(position)
                     save_hypothesis(hypothesis)
-                    return _market_close_signal(now, bar_close, reason="cautious-rejected", close_reason=_cr1)
+                    return _market_close_signal(now, bar_mid, reason="cautious-rejected", close_reason=_cr1)
 
             return None
 
@@ -226,7 +227,7 @@ def run_trend(
                 _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                 save_position(position)
                 save_hypothesis(hypothesis)
-                return _market_close_signal(now, bar_close, reason="cautious-reversal", close_reason=_cr1)
+                return _market_close_signal(now, bar_mid, reason="cautious-reversal", close_reason=_cr1)
 
             # Upgrade to secondary if secondary level is now reached.
             if cautious_secondary is not None and _surpassed(cautious_secondary):
@@ -239,7 +240,7 @@ def run_trend(
                     _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                     save_position(position)
                     save_hypothesis(hypothesis)
-                    return _market_close_signal(now, bar_close, reason="cautious-rejected", close_reason=_cr2)
+                    return _market_close_signal(now, bar_mid, reason="cautious-rejected", close_reason=_cr2)
 
             # 5m confirmation: on a 5m boundary, check if the completed 5m bar body
             # is opposite to direction → exit.
@@ -256,7 +257,7 @@ def run_trend(
                         _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                         save_position(position)
                         save_hypothesis(hypothesis)
-                        return _market_close_signal(now, bar_close, reason="cautious-5m-break", close_reason=_cr1)
+                        return _market_close_signal(now, bar_mid, reason="cautious-5m-break", close_reason=_cr1)
 
             return None
 
@@ -268,7 +269,7 @@ def run_trend(
                 _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                 save_position(position)
                 save_hypothesis(hypothesis)
-                return _market_close_signal(now, bar_close, reason="cautious-reversal", close_reason=_cr2)
+                return _market_close_signal(now, bar_mid, reason="cautious-reversal", close_reason=_cr2)
 
             last_opp = _last_opposite_bar(mnq_1m_recent, bar_time_str, direction)
             if last_opp is not None:
@@ -281,7 +282,7 @@ def run_trend(
                     _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                     save_position(position)
                     save_hypothesis(hypothesis)
-                    return _market_close_signal(now, bar_close, reason="cautious-1m-break", close_reason=_cr2)
+                    return _market_close_signal(now, bar_mid, reason="cautious-1m-break", close_reason=_cr2)
 
         return None
 

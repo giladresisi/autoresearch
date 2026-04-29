@@ -89,9 +89,12 @@ for e in events:
         pending_fill = e
     elif e["kind"] in EXIT_KINDS and pending_fill is not None:
         direction_sign = 1 if pending_fill.get("direction", "up") == "up" else -1
-        pnl_pts = round((e["price"] - pending_fill["price"]) * direction_sign, 2)
+        slip = float(e.get("slippage", 0.0))
+        exit_fill_price = e["price"] - direction_sign * slip
+        pnl_pts = round((exit_fill_price - pending_fill["price"]) * direction_sign, 2)
         pnl_usd = round(pnl_pts * MNQ_DOLLARS_PER_POINT_PER_CONTRACT * DEFAULT_CONTRACTS, 2)
-        pairs.append({"fill": pending_fill, "exit": e, "pnl_pts": pnl_pts, "pnl_usd": pnl_usd})
+        pairs.append({"fill": pending_fill, "exit": e, "exit_fill_price": exit_fill_price,
+                      "pnl_pts": pnl_pts, "pnl_usd": pnl_usd})
         pending_fill = None
 
 # ── Zoom window ───────────────────────────────────────────────────────────────
@@ -219,7 +222,7 @@ for p in pairs:
     color = "#4CAF50" if p["pnl_pts"] >= 0 else "#EF5350"
     fig.add_trace(go.Scatter(
         x=[p["fill"]["ts"], p["exit"]["ts"]],
-        y=[p["fill"]["price"], p["exit"]["price"]],
+        y=[p["fill"]["price"], p["exit_fill_price"]],
         mode="lines", name="position",
         line=dict(color=color, width=2),
         showlegend=False, hoverinfo="skip",
