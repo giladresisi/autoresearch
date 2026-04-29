@@ -88,7 +88,7 @@ def _find_last_liquidity(
     mnq_1m: pd.DataFrame,
     liquidities: list,
     extra_bars: pd.DataFrame | None = None,
-) -> str:
+) -> tuple[str, "pd.Timestamp | None"]:
     """Find the most recently-touched meaningful liquidity level.
 
     Scans mnq_1m (session bars) and optionally extra_bars (True Day pre-session bars)
@@ -96,7 +96,7 @@ def _find_last_liquidity(
 
     Restricted to: {week_high, week_low, day_high, day_low}.
     A level is "touched" when bar.High >= price (for highs) or bar.Low <= price (for lows).
-    Returns the name of the most recently-touched level (highest bar index), or "" if none.
+    Returns (name, touch_timestamp) of the most recently-touched level, or ("", None).
     """
     meaningful_names = {"week_high", "week_low", "day_high", "day_low"}
 
@@ -106,7 +106,7 @@ def _find_last_liquidity(
             level_map[liq["name"]] = liq["price"]
 
     if not level_map:
-        return ""
+        return "", None
 
     if extra_bars is not None and not extra_bars.empty:
         bars_array = pd.concat([extra_bars, mnq_1m])
@@ -133,7 +133,9 @@ def _find_last_liquidity(
         if best_idx == len(bars_array) - 1:
             break
 
-    return best_name
+    if best_idx < 0:
+        return "", None
+    return best_name, bars_array.index[best_idx]
 
 
 def _compute_divs(
@@ -570,26 +572,85 @@ def _determine_direction(
         reason["smt_alignment"]     = smt_aln
         return r1["direction"], reason
 
-    # Rule 2b: last high-priority sweep + daily-mid position (failed reversal / confirmation).
+    # Rule 2b: last high-priority sweep + daily-mid position.
     # Scans the full True Day (pre-session + session) so overnight/London level touches are
-    # visible at NY open.  Takes priority over Rule 2 because the ICT context from the last
-    # swept extreme is more fundamental than short-term momentum toward a nearby level.
-    #   last swept = low → above mid ⇒ up (bounce confirmed)  | below mid ⇒ down (bounce failed)
-    #   last swept = high → below mid ⇒ down (drop confirmed) | above mid ⇒ up (drop failed)
+    # visible at NY open.
+    #
+    # For the "same-side" cases (last=high + above_mid, last=low + below_mid):
+    # the exception "advance further beyond the sweep" applies only when price crossed the
+    # mid toward the sweep level AND did NOT revisit the opposite meaningful level between
+    # that mid crossing and the sweep.  If the opposite level was revisited, the market
+    # did not make a committed directional move — aim for the other half instead.
+    #
+    #   last=low  + above mid                                       => up  (bounce confirmed)
+    #   last=low  + below mid + mid crossed down + opp high not hit => down (advance below low)
+    #   last=low  + below mid + no mid cross or opp high was hit    => up  (target opposite half)
+    #   last=high + below mid                                       => down (drop confirmed)
+    #   last=high + above mid + mid crossed up   + opp low not hit  => up  (advance above high)
+    #   last=high + above mid + no mid cross or opp low was hit     => down (target opposite half)
     _low_names  = {"day_low", "week_low"}
     _high_names = {"day_high", "week_high"}
-    _last_liq   = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_pre_session)
+    _last_liq, _last_liq_ts = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_pre_session)
     if _last_liq and day_high is not None and day_low is not None:
-        _daily_mid  = (day_high + day_low) / 2.0
-        _above_mid  = current_close > _daily_mid
+        _daily_mid = (day_high + day_low) / 2.0
+        _above_mid = current_close > _daily_mid
+
+        if _pre_session is not None and not _pre_session.empty:
+            _true_day_bars = pd.concat([_pre_session, mnq_1m])
+            _true_day_bars = _true_day_bars[~_true_day_bars.index.duplicated(keep="last")].sort_index()
+        else:
+            _true_day_bars = mnq_1m
+
+        _liq_price_map = {l["name"]: float(l["price"]) for l in liquidities if l.get("kind") == "level"}
+
+        def _first_mid_cross(before_ts: "pd.Timestamp | None", upward: bool) -> "pd.Timestamp | None":
+            _bars = _true_day_bars[_true_day_bars.index <= before_ts] if before_ts is not None else _true_day_bars
+            for i in range(1, len(_bars)):
+                c_now  = float(_bars["Close"].iloc[i])
+                c_prev = float(_bars["Close"].iloc[i - 1])
+                if upward     and c_now > _daily_mid and c_prev <= _daily_mid:
+                    return _bars.index[i]
+                if not upward and c_now < _daily_mid and c_prev >= _daily_mid:
+                    return _bars.index[i]
+            return None
+
+        def _opp_level_touched(from_ts: "pd.Timestamp | None", to_ts: "pd.Timestamp | None",
+                               names: set, check_high: bool) -> bool:
+            _w = _true_day_bars
+            if from_ts is not None:
+                _w = _w[_w.index > from_ts]
+            if to_ts is not None:
+                _w = _w[_w.index <= to_ts]
+            if _w.empty:
+                return False
+            for _n in names:
+                _lp = _liq_price_map.get(_n)
+                if _lp is None:
+                    continue
+                if check_high and bool((_w["High"] >= _lp).any()):
+                    return True
+                if not check_high and bool((_w["Low"] <= _lp).any()):
+                    return True
+            return False
+
         if _last_liq in _low_names:
-            r2b_dir = "up" if _above_mid else "down"
+            if _above_mid:
+                r2b_dir = "up"
+            else:
+                r2b_dir = "down"
         elif _last_liq in _high_names:
-            r2b_dir = "down" if not _above_mid else "up"
+            if not _above_mid:
+                r2b_dir = "down"
+            else:
+                _cross_ts = _first_mid_cross(_last_liq_ts, upward=True)
+                if _cross_ts is not None and not _opp_level_touched(_cross_ts, _last_liq_ts, _low_names, check_high=False):
+                    r2b_dir = "up"
+                else:
+                    r2b_dir = "down"
         else:
             r2b_dir = None
         if r2b_dir is not None:
-            reason["rule"]            = "rule2b"
+            reason["rule"]             = "rule2b"
             reason["last_swept_level"] = _last_liq
             return r2b_dir, reason
 
@@ -706,7 +767,7 @@ def run_hypothesis(
         (hist_mnq_1m.index >= _true_day_start_hyp)
         & (hist_mnq_1m.index < (mnq_1m.index[0] if not mnq_1m.empty else _ts_now))
     ]
-    last_liquidity = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_hyp_pre_session)
+    last_liquidity, _ = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_hyp_pre_session)
 
     # Step 5: divs — SMT divergences at 15m and 30m.
     divs = _compute_divs(mnq_1m, mes_1m)
