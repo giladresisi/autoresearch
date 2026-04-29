@@ -85,15 +85,20 @@ LEVEL_PRIORITY = list(LEVEL_STYLE.keys())
 pairs = []
 pending_fill = None
 for e in events:
-    if e["kind"] == "limit-entry-filled":
+    if e["kind"] in ("limit-entry-filled", "market-entry"):
         pending_fill = e
     elif e["kind"] in EXIT_KINDS and pending_fill is not None:
         direction_sign = 1 if pending_fill.get("direction", "up") == "up" else -1
+        # Entry slippage: market entries cost more for longs, less for shorts.
+        entry_slip = float(pending_fill.get("slippage", 0.0))
+        entry_fill_price = pending_fill["price"] + direction_sign * entry_slip
         slip = float(e.get("slippage", 0.0))
         exit_fill_price = e["price"] - direction_sign * slip
-        pnl_pts = round((exit_fill_price - pending_fill["price"]) * direction_sign, 2)
+        pnl_pts = round((exit_fill_price - entry_fill_price) * direction_sign, 2)
         pnl_usd = round(pnl_pts * MNQ_DOLLARS_PER_POINT_PER_CONTRACT * DEFAULT_CONTRACTS, 2)
-        pairs.append({"fill": pending_fill, "exit": e, "exit_fill_price": exit_fill_price,
+        pairs.append({"fill": pending_fill, "exit": e,
+                      "entry_fill_price": entry_fill_price,
+                      "exit_fill_price": exit_fill_price,
                       "pnl_pts": pnl_pts, "pnl_usd": pnl_usd})
         pending_fill = None
 
@@ -168,7 +173,7 @@ for e in events:
             limit_x += [pending_t, e["ts"], None]
             limit_y += [pending_p, pending_p, None]
         pending_t, pending_p = e["ts"], e["price"]
-    elif e["kind"] in ("limit-entry-filled", "limit-entry-cancelled", "limit-entry-expired"):
+    elif e["kind"] in ("limit-entry-filled", "limit-entry-cancelled", "limit-entry-expired", "market-entry"):
         if pending_t is not None:
             limit_x += [pending_t, e["ts"], None]
             limit_y += [pending_p, pending_p, None]
@@ -222,7 +227,7 @@ for p in pairs:
     color = "#4CAF50" if p["pnl_pts"] >= 0 else "#EF5350"
     fig.add_trace(go.Scatter(
         x=[p["fill"]["ts"], p["exit"]["ts"]],
-        y=[p["fill"]["price"], p["exit_fill_price"]],
+        y=[p["entry_fill_price"], p["exit_fill_price"]],
         mode="lines", name="position",
         line=dict(color=color, width=2),
         showlegend=False, hoverinfo="skip",
@@ -306,6 +311,7 @@ OTHER_MARKER_STYLE = {
     "new-limit-entry":    dict(symbol="triangle-right",      color="#2196F3", size=13),
     "move-limit-entry":   dict(symbol="triangle-right-open", color="#9C27B0", size=13),
     "limit-entry-filled": dict(symbol="star",                color="#4CAF50", size=17),
+    "market-entry":       dict(symbol="circle",              color="#FF9800", size=15),
     "trend-broken":       dict(symbol="diamond-open",        color="#FF9800", size=13),
     "new-hypothesis":     dict(symbol="pentagon",            color="#E040FB", size=15),
 }

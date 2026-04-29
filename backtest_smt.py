@@ -1282,7 +1282,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
             strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, mnq_1m_recent)
             if strat_sig is not None:
-                if strat_sig.get("kind") == "market-close":
+                if strat_sig.get("kind") in ("market-close", "market-entry"):
                     strat_sig["slippage"] = V2_MARKET_CLOSE_SLIPPAGE_PTS
                 day_events.append(strat_sig)
 
@@ -1309,19 +1309,17 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         entry_event: "dict | None" = None
         for evt in day_events:
             kind = evt.get("kind", "")
-            if kind == "limit-entry-filled":
+            if kind in ("limit-entry-filled", "market-entry"):
                 entry_event = evt
             elif kind in ("market-close", "stopped-out", "end-of-session") and entry_event is not None:
-                direction = entry_event.get("payload", {}).get("direction") if "payload" in entry_event else None
-                # Try to get direction from position state snapshot embedded in signal
-                # Fall back to active direction from hypothesis at fill time
-                # The simplest pairing: direction sign from "stopped-out" vs "market-close"
                 exit_reason = kind
-                entry_price = float(entry_event["price"])
-                exit_price  = float(evt["price"])
-                # Direction is encoded in the fill signal's payload if present; default "up"
                 direction = entry_event.get("direction", "up")
                 direction_sign = 1 if direction == "up" else -1
+                entry_price = float(entry_event["price"])
+                # Market entries carry slippage that goes against the trader (long pays more, short less).
+                entry_slip = float(entry_event.get("slippage", 0.0))
+                entry_price += direction_sign * entry_slip
+                exit_price  = float(evt["price"])
                 slip = float(evt.get("slippage", 0.0))
                 exit_price -= direction_sign * slip
                 contracts = 2  # default per spec

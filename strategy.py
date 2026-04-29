@@ -131,18 +131,50 @@ def run_strategy(
         # 2.3 Find the most recent completed opposite 5m bar and set/update limit.
         # Only emits a signal when the reference bar changes; otherwise falls
         # through to 2.4 to check fill on the existing limit.
+        _MARKET_ENTRY_THRESHOLD = 5.0  # pts: switch to market if price is this close
+        MIN_STOP_DISTANCE = 5.0
+
         opp_5m = _find_last_opposite_5m_bar(mnq_1m_recent, now, direction, formed_at)
         if opp_5m is not None:
             body_end_price = opp_5m["body_high"] if direction == "up" else opp_5m["body_low"]
             current_conf_time = position.get("confirmation_bar", {}).get("time", "")
             if opp_5m["time"] != current_conf_time or position["limit_entry"] == "":
-                position["confirmation_bar"] = {
+                conf_bar_snap = {
                     "time":      opp_5m["time"],
                     "high":      opp_5m["high"],
                     "low":       opp_5m["low"],
                     "body_high": opp_5m["body_high"],
                     "body_low":  opp_5m["body_low"],
                 }
+
+                # Approach distance: how far (in pts) price must still travel to reach entry.
+                # Negative means the bar's open already blew past the entry price.
+                bar_open = float(mnq_bar["open"])
+                if direction == "up":
+                    approach = body_end_price - bar_open
+                else:
+                    approach = bar_open - body_end_price
+
+                if approach < _MARKET_ENTRY_THRESHOLD:
+                    # Price is at or within threshold of the entry — fill immediately at bar mid.
+                    bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
+                    stop = opp_5m["low"] if direction == "up" else opp_5m["high"]
+                    if abs(bar_mid - float(stop)) < MIN_STOP_DISTANCE:
+                        return None
+                    position["active"] = {
+                        "time":       mnq_bar["time"],
+                        "fill_price": bar_mid,
+                        "direction":  direction,
+                        "stop":       stop,
+                        "contracts":  2,
+                        "cautious":   "no",
+                    }
+                    position["confirmation_bar"] = conf_bar_snap
+                    position["limit_entry"]      = ""
+                    smt_state.save_position(position)
+                    return _make_signal("market-entry", now, bar_mid, direction=direction, stop=stop)
+
+                position["confirmation_bar"] = conf_bar_snap
                 kind = "new-limit-entry" if position["limit_entry"] == "" else "move-limit-entry"
                 position["limit_entry"] = body_end_price
                 smt_state.save_position(position)
@@ -157,7 +189,6 @@ def run_strategy(
             (direction == "up"   and float(mnq_bar["high"]) >= _limit_f) or
             (direction == "down" and float(mnq_bar["low"])  <= _limit_f)
         )
-        MIN_STOP_DISTANCE = 5.0
         if limit_entry != "" and _limit_reached:
             fill_price  = float(limit_entry)
             conf_bar    = position["confirmation_bar"]
