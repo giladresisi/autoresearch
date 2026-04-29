@@ -1,11 +1,15 @@
 # regression.py
 # Specific-day regression runner for the SMT v2 pipeline.
 # Runs run_backtest_v2 for each date in regression.md, writes events.jsonl + trades.tsv,
-# and diffs against committed baselines. Exit 0 if all pass; exit 1 on any diff.
+# records baselines, and optionally diffs against them. Also plots a chart per date.
+#
+# Default: record baseline + plot chart for each date.
+# --skip-record: diff against existing baseline instead of overwriting it.
 
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,16 +21,12 @@ def _parse_regression_md(path: str) -> list[str]:
     dates: list[str] = []
     with open(path, encoding="utf-8") as f:
         for raw_line in f:
-            # Strip inline comments and whitespace
             line = raw_line.split("#")[0].strip()
             if not line:
                 continue
             if ":" in line:
-                # Inclusive date range — all calendar days (run_backtest_v2 skips non-trading days)
                 start_str, end_str = line.split(":", 1)
-                start_str = start_str.strip()
-                end_str = end_str.strip()
-                date_range = pd.date_range(start_str, end_str, freq="D")
+                date_range = pd.date_range(start_str.strip(), end_str.strip(), freq="D")
                 for d in date_range:
                     dates.append(d.strftime("%Y-%m-%d"))
             else:
@@ -53,12 +53,14 @@ def _write_trades_tsv(path: Path, trades: list[dict]) -> None:
 def run_regression(
     regression_md_path: str = "regression.md",
     *,
-    update_baseline: bool = False,
+    record: bool = True,
 ) -> dict:
     """Run regression for every date in regression_md_path.
 
-    Returns {date: {events_match: bool, trades_match: bool, n_trades: int, pnl: float}}.
-    When update_baseline=True, copies current output to baseline files and skips diff.
+    record=True (default): write baseline and plot chart for each date.
+    record=False: diff against existing baseline and plot chart for each date.
+
+    Returns {date: {events_match, trades_match, n_trades, pnl, recorded, locked}}.
     """
     from backtest_smt import run_backtest_v2
 
@@ -67,59 +69,56 @@ def run_regression(
 
     for date in dates:
         result = run_backtest_v2(date, date, write_events=True)
-        trades = result.get("trades", [])
-        events = result.get("events", [])
+        trades  = result.get("trades", [])
+        events  = result.get("events", [])
         metrics = result.get("metrics", {})
 
-        reg_dir = Path("data") / "regression" / date
-        events_path  = reg_dir / "events.jsonl"
-        trades_path  = reg_dir / "trades.tsv"
-        bl_events    = reg_dir / "baseline_events.jsonl"
-        bl_trades    = reg_dir / "baseline_trades.tsv"
+        reg_dir     = Path("data") / "regression" / date
+        events_path = reg_dir / "events.jsonl"
+        trades_path = reg_dir / "trades.tsv"
+        bl_events   = reg_dir / "baseline_events.jsonl"
+        bl_trades   = reg_dir / "baseline_trades.tsv"
 
-        # Ensure files are written (run_backtest_v2 does this with write_events=True,
-        # but we also write here to guarantee sort_keys=True canonical form)
         _write_events_jsonl(events_path, events)
         _write_trades_tsv(trades_path, trades)
 
-        if update_baseline:
+        if record:
             shutil.copy2(events_path, bl_events)
             shutil.copy2(trades_path, bl_trades)
-            results[date] = {
+            res = {
                 "events_match": True,
                 "trades_match": True,
                 "n_trades":     metrics.get("n_trades", 0),
                 "pnl":          metrics.get("total_pnl", 0.0),
-                "updated":      True,
+                "recorded":     True,
             }
-            continue
-
-        # Auto-lock: if no baseline exists yet, create it and report LOCKED
-        if not bl_events.exists() or not bl_trades.exists():
+        elif not bl_events.exists() or not bl_trades.exists():
             shutil.copy2(events_path, bl_events)
             shutil.copy2(trades_path, bl_trades)
-            results[date] = {
+            res = {
                 "events_match": True,
                 "trades_match": True,
                 "n_trades":     metrics.get("n_trades", 0),
                 "pnl":          metrics.get("total_pnl", 0.0),
                 "locked":       True,
             }
-            continue
+        else:
+            res = {
+                "events_match": (events_path.read_text(encoding="utf-8").splitlines()
+                                 == bl_events.read_text(encoding="utf-8").splitlines()),
+                "trades_match": (trades_path.read_text(encoding="utf-8")
+                                 == bl_trades.read_text(encoding="utf-8")),
+                "n_trades":     metrics.get("n_trades", 0),
+                "pnl":          metrics.get("total_pnl", 0.0),
+            }
 
-        # Canonical comparison
-        current_events_lines = events_path.read_text(encoding="utf-8").splitlines()
-        current_trades_text  = trades_path.read_text(encoding="utf-8")
+        # Plot chart for this date regardless of record/skip-record mode.
+        subprocess.run(
+            [sys.executable, "data/regression/plot_regression.py", date],
+            check=False,
+        )
 
-        baseline_events_lines = bl_events.read_text(encoding="utf-8").splitlines()
-        baseline_trades_text  = bl_trades.read_text(encoding="utf-8")
-
-        results[date] = {
-            "events_match": current_events_lines == baseline_events_lines,
-            "trades_match": current_trades_text == baseline_trades_text,
-            "n_trades":     metrics.get("n_trades", 0),
-            "pnl":          metrics.get("total_pnl", 0.0),
-        }
+        results[date] = res
 
     return results
 
@@ -131,26 +130,25 @@ def main() -> int:
         help="Path to regression.md (default: regression.md)",
     )
     parser.add_argument(
-        "--update-baseline", action="store_true",
-        help="Update baseline files instead of diffing",
+        "--skip-record", action="store_true",
+        help="Diff against existing baseline instead of recording a new one",
     )
     args = parser.parse_args()
 
-    results = run_regression(args.regression_md, update_baseline=args.update_baseline)
+    results = run_regression(args.regression_md, record=not args.skip_record)
 
     all_pass = True
     for date, res in results.items():
-        if res.get("updated"):
-            print(f"{date}: baseline updated (n_trades={res['n_trades']}, pnl={res['pnl']:.2f})")
+        n = res["n_trades"]
+        pnl = res["pnl"]
+        if res.get("recorded"):
+            print(f"{date}: recorded  n_trades={n} pnl={pnl:.2f}")
         elif res.get("locked"):
-            print(f"{date}: events=LOCKED trades=LOCKED n_trades={res['n_trades']} pnl={res['pnl']:.2f}")
+            print(f"{date}: events=LOCKED trades=LOCKED n_trades={n} pnl={pnl:.2f}")
         else:
             status_e = "PASS" if res["events_match"] else "FAIL"
             status_t = "PASS" if res["trades_match"] else "FAIL"
-            print(
-                f"{date}: events={status_e} trades={status_t} "
-                f"n_trades={res['n_trades']} pnl={res['pnl']:.2f}"
-            )
+            print(f"{date}: events={status_e} trades={status_t} n_trades={n} pnl={pnl:.2f}")
             if not res["events_match"] or not res["trades_match"]:
                 all_pass = False
 

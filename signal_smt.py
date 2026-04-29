@@ -62,7 +62,7 @@ RETRY_DELAY_S = 15
 
 # ── Data paths ───────────────────────────────────────────────────────────────
 BAR_DATA_DIR = Path("data")
-POSITION_FILE = BAR_DATA_DIR / "position.json"
+POSITION_FILE = BAR_DATA_DIR / "live_position.json"
 
 # ── Module-level state (set in main()) ───────────────────────────────────────
 _ib: IB = None
@@ -976,6 +976,15 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
 
     pnl = _compute_pnl(_position, exit_price)
     print(_format_exit_line(bar_ts, result, exit_price, pnl, _position["contracts"], _position["entry_time"]), flush=True)
+    print(json.dumps({
+        "signal_type":  "EXIT",
+        "exit_reason":  result,
+        "direction":    _position["direction"],
+        "exit_price":   round(float(exit_price), 4),
+        "entry_price":  round(float(_position["assumed_entry"]), 4),
+        "pnl_dollars":  round(float(pnl), 4),
+        "contracts":    _position["contracts"],
+    }), flush=True)
 
     # Finalize hypothesis at session end (called before _position is cleared)
     if _hypothesis_manager is not None and result != "hold":

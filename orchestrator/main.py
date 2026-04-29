@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from orchestrator.output import FileSink, OutputChannel, StdoutSink
+from orchestrator.output import FileSink, JsonlFileSink, OutputChannel, StdoutSink
 from orchestrator.process import ProcessManager
 from orchestrator.relay import SessionRelay
 from orchestrator.scheduler import get_et_now, is_trading_day, next_session_open
@@ -27,6 +27,7 @@ def _make_session_channels(date: datetime.date) -> tuple[OutputChannel, OutputCh
     signal_ch = OutputChannel()
     signal_ch.add_sink(StdoutSink())
     signal_ch.add_sink(FileSink(session_dir / "signals.log"))
+    signal_ch.add_sink(JsonlFileSink(session_dir / "events.jsonl"))
 
     orch_ch = OutputChannel()
     orch_ch.add_sink(StdoutSink())
@@ -72,6 +73,7 @@ def run(summarizer: Summarizer | None = None) -> None:
             signal_ch, orch_ch = _make_session_channels(today)
             relay = SessionRelay(signal_ch)
             ProcessManager(_SIGNAL_SMT, relay, orch_ch).run_session(today)
+            relay.write_trades_tsv(_SESSIONS_DIR / today.isoformat() / "trades.tsv", today)
             summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)
             _sleep_until(next_session_open(get_et_now()), "next trading session")
     except KeyboardInterrupt:
