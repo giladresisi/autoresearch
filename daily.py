@@ -268,8 +268,15 @@ def run_daily(
         liquidities.append({"name": "week_low",  "kind": "level",
                             "price": float(week_bars["Low"].min())})
 
-    # day_high / day_low from mnq_1m filtered to today
-    today_bars = mnq_1m[mnq_1m.index.date == today]
+    # day_high / day_low: full futures trading day = prior calendar day 18:00 ET → now.
+    # Overnight session bars (18:00–23:59 prior day) carry date == prior day in the
+    # DatetimeIndex, so a plain .date == today filter misses them.
+    _prior_cal = today - datetime.timedelta(days=1)
+    _overnight_start = pd.Timestamp(
+        datetime.datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 18, 0, 0),
+        tz="America/New_York",
+    )
+    today_bars = combined_1m[combined_1m.index >= _overnight_start]
     if today_bars.empty:
         today_bars = combined_1m[combined_1m.index.date == today]
     if not today_bars.empty:
