@@ -113,7 +113,12 @@ def run_strategy(
 
         # 2.4 No new opposite bar — check fill
         limit_entry = position["limit_entry"]
-        if limit_entry != "" and _bar_crosses(mnq_bar, float(limit_entry)):
+        _limit_f = float(limit_entry) if limit_entry != "" else None
+        _gap_over = _limit_f is not None and (
+            (direction == "up"   and float(mnq_bar["open"]) >= _limit_f)
+            or (direction == "down" and float(mnq_bar["open"]) <= _limit_f)
+        )
+        if limit_entry != "" and (_bar_crosses(mnq_bar, _limit_f) or _gap_over):
             fill_price  = float(limit_entry)
             conf_bar    = position["confirmation_bar"]
 
