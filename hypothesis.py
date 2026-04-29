@@ -918,6 +918,7 @@ def run_hypothesis(
         position = load_position()
         position["failed_entries"] = 0
         position["confirmation_bar"] = {}
+        position["limit_entry"] = ""
         save_position(position)
 
     hyp_event = {

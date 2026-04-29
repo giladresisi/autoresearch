@@ -118,6 +118,7 @@ def run_strategy(
             (direction == "up"   and float(mnq_bar["open"]) >= _limit_f)
             or (direction == "down" and float(mnq_bar["open"]) <= _limit_f)
         )
+        MIN_STOP_DISTANCE = 5.0
         if limit_entry != "" and (_bar_crosses(mnq_bar, _limit_f) or _gap_over):
             fill_price  = float(limit_entry)
             conf_bar    = position["confirmation_bar"]
@@ -127,6 +128,9 @@ def run_strategy(
                 stop = conf_bar["low"]
             else:
                 stop = conf_bar["high"]
+
+            if abs(fill_price - float(stop)) < MIN_STOP_DISTANCE:
+                return None
 
             position["active"] = {
                 "time":       mnq_bar["time"],
