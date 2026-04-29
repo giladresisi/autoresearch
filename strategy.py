@@ -160,7 +160,7 @@ def run_strategy(
         position["limit_entry"]       = ""
         position["confirmation_bar"]  = {}
         smt_state.save_position(position)
-        return _make_signal("market-close", now, mnq_bar["close"], reason="direction-mismatch")
+        return _make_signal("market-close", now, mnq_bar["close"], reason="direction-mismatch", close_reason="trend-broken")
 
     # 3.2 Stop crossed
     stop = active["stop"]
