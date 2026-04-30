@@ -11,13 +11,11 @@ State machine: SCANNING → MANAGING, one trade per session.
 from pathlib import Path
 import json
 import math as _math
-import time
 
 from dotenv import load_dotenv
 load_dotenv()
 
 import pandas as pd
-from ib_insync import IB, Future, util
 
 from strategy_smt import (
     manage_position, compute_tdo, set_bar_data,
@@ -34,6 +32,8 @@ from strategy_smt import (
 # strategy_smt attributes in tests affects signal_smt without a re-import.
 import strategy_smt
 from hypothesis_smt import HypothesisManager
+from data.ib_realtime import IbRealtimeSource
+from execution.simulated import SimulatedFillExecutor
 
 # ── Connection constants ──────────────────────────────────────────────────────
 IB_HOST      = "127.0.0.1"
@@ -65,18 +65,11 @@ BAR_DATA_DIR = Path("data")
 POSITION_FILE = BAR_DATA_DIR / "live_position.json"
 
 # ── Module-level state (set in main()) ───────────────────────────────────────
-_ib: IB = None
-_mnq_contract = None
-_mes_contract = None
+_ib_source: IbRealtimeSource | None = None
+_executor: SimulatedFillExecutor | None = None
 
-_mnq_1m_df: pd.DataFrame = None   # loaded from parquet + gap-filled
-_mes_1m_df: pd.DataFrame = None
-# Per-instrument partial 1m bar accumulators — OHLCV built from ticks since the current minute started
-_mnq_partial_1m: dict | None = None
+# Partial 1m MES bar accumulator — updated by the IbRealtimeSource via _on_bar callback
 _mes_partial_1m: dict | None = None
-
-# Per-instrument tick accumulator for the current in-progress second (MNQ only; used for second-boundary detection)
-_mnq_tick_bar: dict | None = None
 
 _state: str = "SCANNING"          # "SCANNING" | "MANAGING"
 _position: dict | None = None
@@ -133,23 +126,23 @@ _smtv2_dispatcher: "SmtV2Dispatcher | None" = None
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _empty_bar_df() -> pd.DataFrame:
-    """Return an empty OHLCV DataFrame with a tz-aware ET DatetimeIndex."""
-    return pd.DataFrame(
-        columns=["Open", "High", "Low", "Close", "Volume"],
-        index=pd.DatetimeIndex([], tz="America/New_York"),
-        dtype=float,
-    )
+def _on_bar(bar, mes_partial) -> None:
+    """Callback fired by IbRealtimeSource on each second boundary.
 
-
-def _apply_slippage(signal: dict) -> float:
-    """Compute assumed fill price after adverse slippage.
-
-    Slippage is applied against the trade: long pays more, short receives less.
+    Receives the current MNQ partial-1m bar (as a _BarRow) and the MES partial accumulator
+    dict. Updates the module-level MES partial so _process_scanning can read it.
     """
-    if signal["direction"] == "long":
-        return signal["entry_price"] + ENTRY_SLIPPAGE_TICKS * 0.25
-    return signal["entry_price"] - ENTRY_SLIPPAGE_TICKS * 0.25
+    global _mes_partial_1m
+    _mes_partial_1m = mes_partial
+    _process(bar)
+
+
+def _bar_timestamp(bar) -> pd.Timestamp:
+    # IB bars expose .date; strategy_smt._BarRow exposes .name
+    ts = pd.Timestamp(getattr(bar, "date", None) or bar.name)
+    if ts.tz is None:
+        return ts.tz_localize("America/New_York")
+    return ts.tz_convert("America/New_York")
 
 
 def _compute_pnl(position: dict, exit_price: float) -> float:
@@ -259,220 +252,12 @@ def _format_limit_filled_line(ts: pd.Timestamp, evt: dict) -> str:
     )
 
 
-def _update_tick_accumulator(
-    acc: dict | None, price: float, size: float, second_ts: pd.Timestamp
-) -> tuple[dict, dict | None]:
-    """Update or create a tick accumulator for the current second.
-
-    Returns (new_acc, finalized_acc_or_None). A non-None finalized value means
-    a second boundary was crossed and the returned acc is the finalized bar.
-    """
-    if acc is None or second_ts != acc["second_ts"]:
-        # Second boundary crossed — finalize old accumulator, start a new one
-        finalized = acc
-        new_acc = {"open": price, "high": price, "low": price,
-                   "close": price, "volume": size, "second_ts": second_ts}
-        return new_acc, finalized
-    # Same second — update running OHLCV
-    acc["high"]   = max(acc["high"], price)
-    acc["low"]    = min(acc["low"], price)
-    acc["close"]  = price
-    acc["volume"] += size
-    return acc, None
-
-
-def _update_partial_1m(acc: dict | None, price: float, size: float, minute_ts: pd.Timestamp) -> dict:
-    """Update or create the partial 1m bar accumulator for the current minute.
-
-    On minute boundary the accumulator resets; within a minute it tracks running OHLCV
-    since the first tick of that minute.
-    """
-    if acc is None or minute_ts != acc["minute_ts"]:
-        return {"open": price, "high": price, "low": price, "close": price, "volume": size, "minute_ts": minute_ts}
-    acc["high"]   = max(acc["high"], price)
-    acc["low"]    = min(acc["low"], price)
-    acc["close"]  = price
-    acc["volume"] += size
-    return acc
-
-
-def _partial_1m_to_bar_row(acc: dict, ts: pd.Timestamp) -> "strategy_smt._BarRow":
-    """Build a _BarRow from a partial 1m accumulator, stamped with the current second boundary."""
-    return strategy_smt._BarRow(acc["open"], acc["high"], acc["low"], acc["close"], acc["volume"], ts)
-
-
-def _bar_timestamp(bar) -> pd.Timestamp:
-    # IB bars expose .date; strategy_smt._BarRow exposes .name
-    ts = pd.Timestamp(getattr(bar, "date", None) or bar.name)
-    if ts.tz is None:
-        return ts.tz_localize("America/New_York")
-    return ts.tz_convert("America/New_York")
-
-
 def _load_hist_mnq() -> pd.DataFrame:
     """Load the Databento 5m historical parquet for hypothesis rule engine."""
     hist_path = Path("data/historical/MNQ.parquet")
     if hist_path.exists():
         return pd.read_parquet(hist_path)
     return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-
-
-def _load_parquets() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load cached 1m parquet files. Returns empty DataFrames if files don't exist."""
-    mnq_path = BAR_DATA_DIR / "MNQ_1m.parquet"
-    mes_path  = BAR_DATA_DIR / "MES_1m.parquet"
-    mnq_df = pd.read_parquet(mnq_path) if mnq_path.exists() else _empty_bar_df()
-    mes_df = pd.read_parquet(mes_path) if mes_path.exists() else _empty_bar_df()
-    return mnq_df, mes_df
-
-
-def _gap_fill_1m(
-    mnq_df: pd.DataFrame, mes_df: pd.DataFrame
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Fetch any missing 1m bars from IB and append to the DataFrames.
-
-    Uses a separate IB client ID to avoid conflicts with the live subscription connection.
-    Caps the lookback at MAX_LOOKBACK_DAYS regardless of parquet age.
-    """
-    from data.sources import IBGatewaySource
-
-    now = pd.Timestamp.now(tz="America/New_York")
-
-    # Compute per-instrument start timestamps independently so that an empty MES
-    # parquet still gets the full 30-day fill even when MNQ is already populated.
-    def _start_ts_for(df: pd.DataFrame) -> pd.Timestamp:
-        gap_days = MAX_LOOKBACK_DAYS if df.empty else GAP_FILL_MAX_DAYS
-        floor = now - pd.Timedelta(days=gap_days)
-        return max(df.index[-1], floor) if not df.empty else floor
-
-    mnq_start_str = _start_ts_for(mnq_df).isoformat()
-    mes_start_str = _start_ts_for(mes_df).isoformat()
-    end_str = now.isoformat()
-
-    # Use a different client ID for the gap-fill fetch (avoids clash with main IB connection)
-    source = IBGatewaySource(host=IB_HOST, port=IB_PORT, client_id=IB_CLIENT_ID + 1)
-
-    mnq_new = source.fetch(MNQ_CONID, mnq_start_str, end_str, interval="1m", contract_type="future_by_conid")
-    mes_new = source.fetch(MES_CONID, mes_start_str, end_str, interval="1m", contract_type="future_by_conid")
-
-    if mnq_new is not None and not mnq_new.empty:
-        mnq_df = pd.concat([mnq_df, mnq_new]).sort_index()
-        mnq_df = mnq_df[~mnq_df.index.duplicated(keep="last")]
-
-    if mes_new is not None and not mes_new.empty:
-        mes_df = pd.concat([mes_df, mes_new]).sort_index()
-        mes_df = mes_df[~mes_df.index.duplicated(keep="last")]
-
-    # Persist updated caches
-    BAR_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    mnq_df.to_parquet(BAR_DATA_DIR / "MNQ_1m.parquet")
-    mes_df.to_parquet(BAR_DATA_DIR / "MES_1m.parquet")
-
-    return mnq_df, mes_df
-
-
-# ── IB bar callbacks ──────────────────────────────────────────────────────────
-
-def on_mnq_1m_bar(bars, hasNewBar):
-    """Fired when a new completed 1m MNQ bar arrives.
-
-    Appends the bar to the persistent 1m DataFrame, saves the parquet,
-    and clears the 1s buffer and tick accumulator so the next minute starts fresh.
-    """
-    global _mnq_1m_df, _mnq_tick_bar
-    if not hasNewBar:
-        return
-    bar = bars[-1]
-    bar_ts = _bar_timestamp(bar)
-    row = pd.DataFrame(
-        [[float(bar.open), float(bar.high), float(bar.low), float(bar.close), float(bar.volume)]],
-        columns=["Open", "High", "Low", "Close", "Volume"],
-        index=pd.DatetimeIndex([bar_ts]),
-    )
-    _mnq_1m_df = pd.concat([_mnq_1m_df, row])
-    _mnq_1m_df = _mnq_1m_df[~_mnq_1m_df.index.duplicated(keep="last")]
-    _mnq_1m_df.to_parquet(BAR_DATA_DIR / "MNQ_1m.parquet")
-    # Reset second accumulator so the last second of the expiring minute does not
-    # bleed into the next minute's second boundary detection.
-    _mnq_tick_bar = None
-    set_bar_data(_mnq_1m_df, _mes_1m_df)
-
-    # Hypothesis: generate on first 1m bar at/after 09:00 ET; evaluate every bar
-    global _hypothesis_manager, _hypothesis_generated
-    if _hypothesis_manager is not None:
-        bar_time = _bar_timestamp(bars[-1]).time()
-        _session_start_time_local = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
-        if not _hypothesis_generated and bar_time >= _session_start_time_local:
-            _hypothesis_manager.generate()
-            _hypothesis_generated = True
-        _hypothesis_manager.evaluate_bar(bars[-1])
-
-
-def on_mes_1m_bar(bars, hasNewBar):
-    """Fired when a new completed 1m MES bar arrives.
-
-    Appends to the persistent 1m DataFrame and saves the parquet.
-    """
-    global _mes_1m_df
-    if not hasNewBar:
-        return
-    bar = bars[-1]
-    bar_ts = _bar_timestamp(bar)
-    row = pd.DataFrame(
-        [[float(bar.open), float(bar.high), float(bar.low), float(bar.close), float(bar.volume)]],
-        columns=["Open", "High", "Low", "Close", "Volume"],
-        index=pd.DatetimeIndex([bar_ts]),
-    )
-    _mes_1m_df = pd.concat([_mes_1m_df, row])
-    _mes_1m_df = _mes_1m_df[~_mes_1m_df.index.duplicated(keep="last")]
-    _mes_1m_df.to_parquet(BAR_DATA_DIR / "MES_1m.parquet")
-    set_bar_data(_mnq_1m_df, _mes_1m_df)
-
-
-def _tick_second_ts(t) -> pd.Timestamp:
-    """Convert an IB tick timestamp to an ET-localized second boundary.
-
-    Guards against tz-naive timestamps, which IB can send on reconnect.
-    """
-    ts = pd.Timestamp(t.time)
-    if ts.tz is None:
-        ts = ts.tz_localize("UTC")
-    return ts.tz_convert("America/New_York").floor("s")
-
-
-def on_mes_tick(ticker) -> None:
-    """Fired on each trade tick for MES via reqTickByTickData("AllLast").
-
-    Updates the partial 1m bar accumulator with each tick. MES is passive — never
-    calls _process(); the MNQ tick handler drives session scanning.
-    """
-    global _mes_partial_1m
-    if not ticker.tickByTicks:
-        return
-    t = ticker.tickByTicks[-1]
-    second_ts = _tick_second_ts(t)
-    minute_ts = second_ts.floor("min")
-    _mes_partial_1m = _update_partial_1m(_mes_partial_1m, t.price, t.size, minute_ts)
-
-
-def on_mnq_tick(ticker) -> None:
-    """Fired on each trade tick for MNQ via reqTickByTickData("AllLast").
-
-    On each second boundary, fires _process() with the current partial 1m bar
-    (OHLCV accumulated since the start of the current minute, stamped at the
-    completed second). The partial bar is updated with the triggering tick after
-    firing so _process sees the bar's state at the end of the completed second.
-    """
-    global _mnq_tick_bar, _mnq_partial_1m
-    if not ticker.tickByTicks:
-        return
-    t = ticker.tickByTicks[-1]
-    second_ts = _tick_second_ts(t)
-    minute_ts = second_ts.floor("min")
-    _mnq_tick_bar, finalized = _update_tick_accumulator(_mnq_tick_bar, t.price, t.size, second_ts)
-    if finalized is not None and _mnq_partial_1m is not None:
-        _process(_partial_1m_to_bar_row(_mnq_partial_1m, finalized["second_ts"]))
-    _mnq_partial_1m = _update_partial_1m(_mnq_partial_1m, t.price, t.size, minute_ts)
 
 
 # ── State machine ─────────────────────────────────────────────────────────────
@@ -570,13 +355,17 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     if _hypothesis_manager is not None and not _hypothesis_generated:
         return
 
-    # 2. Alignment gate: both partial 1m bars must exist and be for the same minute
-    if _mes_partial_1m is None or _mnq_partial_1m is None:
+    # 2. Alignment gate: MES partial bar must exist and align with this 1s bar's minute
+    if _mes_partial_1m is None:
         return
-    if _mes_partial_1m["minute_ts"] != _mnq_partial_1m["minute_ts"]:
+    if _mes_partial_1m["minute_ts"] != bar_ts.floor("min"):
         return
 
     today = bar_ts.date()
+
+    # IB realtime data frames (read lazily so tests can monkeypatch _ib_source)
+    _mnq_1m_df = _ib_source.mnq_1m_df if _ib_source is not None else None
+    _mes_1m_df = _ib_source.mes_1m_df if _ib_source is not None else None
 
     # 3. Session metadata (computed once; fast on subsequent bars due to caching)
     tdo = compute_tdo(_mnq_1m_df, today)
@@ -858,14 +647,13 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         else:
             signal["signal_type"] = "ENTRY_MARKET"
 
-    # 11. Open position with slippage-adjusted assumed fill
-    assumed_entry = _apply_slippage(signal)
-    if strategy_smt.HUMAN_EXECUTION_MODE and strategy_smt.HUMAN_ENTRY_SLIPPAGE_PTS > 0:
-        # Additive human-reaction slippage for market fills (direction-correct).
-        if signal["direction"] == "long":
-            assumed_entry += strategy_smt.HUMAN_ENTRY_SLIPPAGE_PTS
-        else:
-            assumed_entry -= strategy_smt.HUMAN_ENTRY_SLIPPAGE_PTS
+    # 11. Open position with executor-supplied fill price
+    _bar_row_for_fill = strategy_smt._BarRow(
+        float(bar.Open), float(bar.High), float(bar.Low), float(bar.Close),
+        float(bar.Volume), bar_ts,
+    )
+    _entry_fill = _executor.place_entry(signal, _bar_row_for_fill)
+    assumed_entry = _entry_fill.fill_price
     _position = {
         **signal,
         "assumed_entry": assumed_entry,
@@ -955,22 +743,30 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
             POSITION_FILE.write_text(json.dumps(_position, indent=2))
             return
 
-    if result == "exit_tp":
-        exit_price = _position["take_profit"]
-    elif result == "exit_secondary":
-        # Limit order hit at secondary target — fills at defined price
-        exit_price = _position["secondary_target"]
-    elif result == "exit_stop":
-        exit_price = _position["stop_price"]
-    elif result in (
-        "exit_market",
-        "exit_invalidation_mss",
-        "exit_invalidation_cisd",
-        "exit_invalidation_smt",
-        "exit_invalidation_opposing_disp",
-    ):
+    if result == "partial_exit":
+        _exit_fill = _executor.place_exit(_position, "partial_exit", bar_row)
+        partial_price = _exit_fill.fill_price
+        pnl = _compute_pnl(_position, partial_price)
+        print(json.dumps({
+            "signal_type": "PARTIAL_EXIT",
+            "direction":   _position["direction"],
+            "price":       round(float(partial_price), 4),
+            "pnl":         round(float(pnl), 2),
+        }), flush=True)
+        POSITION_FILE.write_text(json.dumps(_position, indent=2))
+        return
+
+    if result == "exit_session_end":
         exit_price = float(bar.Close)
-    elif result != "exit_session_end":
+    elif result in (
+        "exit_tp", "exit_secondary", "exit_stop",
+        "exit_market",
+        "exit_invalidation_mss", "exit_invalidation_cisd",
+        "exit_invalidation_smt", "exit_invalidation_opposing_disp",
+    ):
+        _exit_fill = _executor.place_exit(_position, result, bar_row)
+        exit_price = _exit_fill.fill_price
+    else:
         # Unknown exit type — log and bail rather than corrupt state with unbound exit_price
         return
 
@@ -1009,7 +805,7 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     _state = "SCANNING"
 
 
-# ── IB subscription setup ─────────────────────────────────────────────────────
+# ── v2 pipeline dispatcher ───────────────────────────────────────────────────
 
 def _emit_v2_signal(sig: dict) -> None:
     """Print a v2 signal dict as a JSON line to stdout (mirrors _dispatch_event for v2)."""
@@ -1099,37 +895,12 @@ class SmtV2Dispatcher:
                     _emit_v2_signal(strat_sig)
 
 
-def _setup_ib_subscriptions(ib: IB, mnq_contract, mes_contract) -> None:
-    """Register all 4 IB data subscriptions and wire their event callbacks.
-
-    Called on every connection attempt so subscriptions are re-registered after
-    a disconnect; ib_insync does not automatically re-deliver them on reconnect.
-    """
-    mnq_1m = ib.reqHistoricalData(
-        mnq_contract, endDateTime="", durationStr="1 D",
-        barSizeSetting="1 min", whatToShow="TRADES",
-        useRTH=False, formatDate=2, keepUpToDate=True,
-    )
-    mes_1m = ib.reqHistoricalData(
-        mes_contract, endDateTime="", durationStr="1 D",
-        barSizeSetting="1 min", whatToShow="TRADES",
-        useRTH=False, formatDate=2, keepUpToDate=True,
-    )
-    mnq_tick = ib.reqTickByTickData(mnq_contract, "AllLast", 0, False)
-    mes_tick  = ib.reqTickByTickData(mes_contract, "AllLast", 0, False)
-    mnq_1m.updateEvent   += on_mnq_1m_bar
-    mes_1m.updateEvent   += on_mes_1m_bar
-    mnq_tick.updateEvent += on_mnq_tick
-    mes_tick.updateEvent += on_mes_tick
-
-
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global _ib, _mnq_contract, _mes_contract, _mnq_1m_df, _mes_1m_df
-    global _mnq_partial_1m, _mes_partial_1m, _state, _position, _startup_ts
+    global _ib_source, _executor, _state, _position, _startup_ts
     global _session_start_time, _session_end_time
-    global _mnq_tick_bar
+    global _mes_partial_1m
     global _hypothesis_manager, _hypothesis_generated
     global _hist_daily_df
     global _smtv2_pipeline, _smtv2_dispatcher
@@ -1138,38 +909,24 @@ def main() -> None:
 
     # This module is only used for signalling to a human trader, so human-mode
     # classification/emission is always on when signal_smt is the entry point.
-    # Backtest imports strategy_smt directly and keeps the module default (False).
     strategy_smt.HUMAN_EXECUTION_MODE = True
 
     # Parse session window into time objects used by callbacks
     _session_start_time = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
     _session_end_time   = pd.Timestamp(f"2000-01-01 {SIGNAL_SESSION_END}").time()
 
-    _mnq_partial_1m = None
     _mes_partial_1m = None
-    _mnq_tick_bar = None
-
-    # Load and gap-fill the persistent 1m parquet caches
-    _mnq_1m_df, _mes_1m_df = _load_parquets()
-    _mnq_1m_df, _mes_1m_df = _gap_fill_1m(_mnq_1m_df, _mes_1m_df)
 
     # Load historical 5m data for hypothesis rule engine
     _hist_mnq_df = _load_hist_mnq()
     today = pd.Timestamp.now(tz="America/New_York").date()
-    _hypothesis_manager = HypothesisManager(_mnq_1m_df, _hist_mnq_df, today)
-
-    # Load historical daily data for PDH/PDL computation (Solution F)
+    _hypothesis_manager = HypothesisManager(pd.DataFrame(), _hist_mnq_df, today)
     _hist_daily_df = _hist_mnq_df  # reuse 5m hist; compute_pdh_pdl uses index.date
     _hypothesis_generated = False
 
-    # v2 pipeline: instantiate dispatcher if SMT_PIPELINE=v2.
-    # NOTE: IB callback routing to on_session_start / on_1m_bar is a stub — the existing
-    # on_mnq_1m_bar / on_mes_1m_bar callbacks still drive the v1 path.  Wiring is deferred
-    # to the first realtime trial (see spec § "Out of Scope").
+    # v2 pipeline env gate (dispatcher wiring deferred per spec § "Out of Scope")
     import os as _os
     _smtv2_pipeline = _os.environ.get("SMT_PIPELINE", "v1")
-    if _smtv2_pipeline == "v2":
-        _smtv2_dispatcher = SmtV2Dispatcher(_mnq_1m_df, _mes_1m_df, _mnq_1m_df, _mes_1m_df)
 
     # Restore open position from disk if the process was restarted mid-trade
     if POSITION_FILE.exists():
@@ -1181,47 +938,41 @@ def main() -> None:
         # Startup guard timestamp: any signal entry_time <= this is considered stale
         _startup_ts = pd.Timestamp.now(tz="America/New_York")
 
-    # Contracts are stateless; create once outside the retry loop
-    mnq_contract = Future(conId=int(MNQ_CONID), exchange="CME")
-    mes_contract = Future(conId=int(MES_CONID), exchange="CME")
+    _executor = SimulatedFillExecutor(
+        human_mode=True,
+        human_slip_pts=getattr(strategy_smt, "HUMAN_ENTRY_SLIPPAGE_PTS", 0.0),
+        entry_slip_ticks=ENTRY_SLIPPAGE_TICKS,
+    )
 
-    # Retry loop: handles startup clientId conflicts (RC3) and IB Gateway restarts (RC2).
-    # Module-level state (_mnq_1m_df, _state, _position, etc.) is preserved across retries.
-    for attempt in range(MAX_RETRIES):
-        try:
-            _ib = IB()
-            _ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
-            _setup_ib_subscriptions(_ib, mnq_contract, mes_contract)
-            util.run()
-            # util.run() exits normally on unexpected IB disconnects (e.g. error 1100/10141);
-            # only treat it as a clean exit if the connection is still live.
-            if _ib.isConnected():
-                break
-            raise ConnectionError("IB disconnected unexpectedly")
-        except Exception as exc:
-            print(
-                f"[{attempt + 1}/{MAX_RETRIES}] IB connection error: {exc}. "
-                f"Retrying in {RETRY_DELAY_S}s ...",
-                flush=True,
-            )
-            try:
-                if _ib and _ib.isConnected():
-                    _ib.disconnect()
-            except Exception:
-                pass
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY_S)
+    def _on_bar_1m_complete(bars) -> None:
+        """Called by IbRealtimeSource after each completed 1m bar.
 
-    else:
-        # for-loop completed without break → all retry attempts exhausted
-        print(f"[FATAL] Failed to connect after {MAX_RETRIES} attempts. Exiting.", flush=True)
+        Drives the hypothesis rule engine: generate at the first 1m bar at/after
+        SESSION_START, then evaluate every subsequent bar.
+        """
+        global _hypothesis_generated
+        if _hypothesis_manager is None:
+            return
+        bar_time = pd.Timestamp(getattr(bars[-1], "date", None) or bars[-1].name)
+        if bar_time.tz is None:
+            bar_time = bar_time.tz_localize("America/New_York")
+        bar_time = bar_time.tz_convert("America/New_York").time()
+        _session_start_time_local = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
+        if not _hypothesis_generated and bar_time >= _session_start_time_local:
+            _hypothesis_manager.generate()
+            _hypothesis_generated = True
+        _hypothesis_manager.evaluate_bar(bars[-1])
 
-    # Graceful shutdown after loop exits (clean break or exhausted retries)
-    try:
-        if _ib and _ib.isConnected():
-            _ib.disconnect()
-    except Exception:
-        pass
+    _ib_source = IbRealtimeSource(
+        host=IB_HOST, port=IB_PORT, client_id=IB_CLIENT_ID,
+        mnq_conid=MNQ_CONID, mes_conid=MES_CONID,
+        bar_data_dir=BAR_DATA_DIR,
+        on_bar=_on_bar,
+        max_retries=MAX_RETRIES, retry_delay_s=RETRY_DELAY_S,
+        on_bar_1m_complete=_on_bar_1m_complete,
+    )
+
+    _ib_source.start()  # blocks; retry loop is inside IbRealtimeSource
 
 
 if __name__ == "__main__":

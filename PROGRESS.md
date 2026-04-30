@@ -1,6 +1,28 @@
 # PROGRESS
 
 
+## Feature: Tradovate Live Trading via PickMyTrade
+
+**Status**: ✅ Planned
+**Spec**: `docs/superpowers/specs/2026-04-30-tradovate-live-trading-design.md`
+**Plan File (Stage 1)**: `.agents/plans/stage1-fill-executor-ib-realtime.md`
+**Plan File (Stage 2)**: `.agents/plans/stage2-pickmytrade-automation.md`
+
+Two-stage refactor + new capability. Stage 1 extracts `SimulatedFillExecutor` and `IbRealtimeSource` from `backtest_smt.py` / `signal_smt.py` into shared modules; both existing consumers refactored to use them. Stage 2 adds `PickMyTradeExecutor` and `automation/main.py` for live automated trading on the Apex funded account via PickMyTrade as the authorised intermediary.
+
+### Stage 1 — Complete
+
+**Status**: Implementation complete, unstaged. 887 passed / 16 pre-existing failures / 15 skipped. No regressions.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/stage1-fill-executor-ib-realtime.md`
+- 7/7 tasks completed across 4 waves; 22 new tests (21 passing, 1 integration-skipped by design)
+- One unplanned fix: `tests/test_smt_humanize.py` S-1/S-2 updated to new executor API after `_open_position()` signature change
+- fills.jsonl deferred to Stage 2 per plan scope boundary
+- Alignment score: 9/10
+
+
 ## Feature: SMT Redesign — JSON-File Architecture + Module Decomposition
 
 **Status**: Complete

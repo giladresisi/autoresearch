@@ -987,6 +987,7 @@ def run_hypothesis(
         "last_liquidity":                last_liquidity,
         "divs":                          divs,
         "targets":                       targets,
+        "cautious_price":                "",
         "cautious_price_initial":        cautious_price_initial,
         "cautious_price_initial_level":  cautious_price_initial_level,
         "cautious_price_secondary":      cautious_price_secondary,

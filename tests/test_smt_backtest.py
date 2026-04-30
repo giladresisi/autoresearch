@@ -905,7 +905,8 @@ def test_exit_secondary_fill_at_secondary_price(monkeypatch):
     }
     bar = pd.Series({"High": 125.0, "Low": 110.0, "Close": 120.0, "Open": 112.0},
                     name=pd.Timestamp("2025-01-02 10:00", tz="America/New_York"))
-    trade, pnl = bk._build_trade_record(pos, "exit_secondary", bar, 2.0)
+    trade, pnl = bk._build_trade_record(pos, "exit_secondary", bar, 2.0,
+                                        fill_price=pos["secondary_target"])
     assert trade["exit_price"] == 120.0
     assert trade["exit_type"] == "exit_secondary"
 
@@ -989,7 +990,8 @@ def test_tp_name_in_trade_record(monkeypatch):
     }
     bar = pd.Series({"High": 98.0, "Low": 84.0, "Close": 86.0, "Open": 96.0},
                     name=pd.Timestamp("2025-01-02 10:30", tz="America/New_York"))
-    trade, _ = bk._build_trade_record(pos, "exit_tp", bar, 2.0)
+    trade, _ = bk._build_trade_record(pos, "exit_tp", bar, 2.0,
+                                      fill_price=pos["take_profit"])
     assert "tp_name" in trade
 
 

@@ -199,17 +199,14 @@ def test_trend_invalidation_blocks_same_bar_fill(tmp_path, monkeypatch, _isolate
     _ss.save_global(copy.deepcopy(_ss.DEFAULT_GLOBAL))
 
     _ss.save_hypothesis({
-        "direction": "up",
-        "weekly_mid": "",
-        "daily_mid": "",
+        "direction":      "up",
+        "weekly_mid":     "",
+        "daily_mid":      "",
         "last_liquidity": "",
-        "divs": [],
-        "targets": [],
-        "cautious_price_initial":         "",
-        "cautious_price_initial_level":   "",
-        "cautious_price_secondary":       "",
-        "cautious_price_secondary_level": "",
-        "entry_ranges": [],
+        "divs":           [],
+        "targets":        [],
+        "cautious_price": "",
+        "entry_ranges":   [],
     })
 
     conf_bar = {

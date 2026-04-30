@@ -32,32 +32,11 @@ def _make_bar(high, low, close=None, open_=None):
 
 # ══ Human-execution slippage (S-1 / S-2) ═════════════════════════════════════
 
-def test_s1_human_slippage_applied_to_long_entry(monkeypatch):
-    """S-1: HUMAN_EXECUTION_MODE=True, HUMAN_ENTRY_SLIPPAGE_PTS=2.0 → long entry = close+2.0."""
-    import strategy_smt
+def test_s1_human_slippage_applied_to_long_entry():
+    """S-1: human_mode=True, human_slip_pts=2.0 → SimulatedFillExecutor adds +2.0 to long entry."""
     import backtest_smt
-    monkeypatch.setattr(strategy_smt, "HUMAN_EXECUTION_MODE", True)
-    monkeypatch.setattr(strategy_smt, "HUMAN_ENTRY_SLIPPAGE_PTS", 2.0)
-
-    signal = {
-        "direction":   "long",
-        "entry_price": 20000.0,    # assumed bar close
-        "stop_price":  19980.0,
-        "take_profit": 20050.0,
-        "entry_time":  pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York"),
-        "tdo":         20050.0,
-        "divergence_bar": 0,
-    }
-    pos = backtest_smt._open_position(signal, datetime.date(2025, 1, 2), 1, 1, 0)
-    assert pos["entry_price"] == 20002.0
-
-
-def test_s2_human_slippage_not_applied_when_mode_off(monkeypatch):
-    """S-2: HUMAN_EXECUTION_MODE=False → slippage inactive even if pts > 0."""
-    import strategy_smt
-    import backtest_smt
-    monkeypatch.setattr(strategy_smt, "HUMAN_EXECUTION_MODE", False)
-    monkeypatch.setattr(strategy_smt, "HUMAN_ENTRY_SLIPPAGE_PTS", 2.0)
+    from execution.simulated import SimulatedFillExecutor
+    from strategy_smt import _BarRow
 
     signal = {
         "direction":   "long",
@@ -68,7 +47,37 @@ def test_s2_human_slippage_not_applied_when_mode_off(monkeypatch):
         "tdo":         20050.0,
         "divergence_bar": 0,
     }
-    pos = backtest_smt._open_position(signal, datetime.date(2025, 1, 2), 1, 1, 0)
+    bar = _BarRow(20000.0, 20005.0, 19995.0, 20000.0, 100.0,
+                  pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York"))
+    # entry_slip_ticks=0 isolates human-mode slippage; human_slip_pts=2.0 adds +2.0 for long
+    executor = SimulatedFillExecutor(human_mode=True, human_slip_pts=2.0, entry_slip_ticks=0)
+    fill = executor.place_entry(signal, bar)
+    pos = backtest_smt._open_position(signal, datetime.date(2025, 1, 2), 1, 1, 0,
+                                       fill_price=fill.fill_price)
+    assert pos["entry_price"] == 20002.0
+
+
+def test_s2_human_slippage_not_applied_when_mode_off():
+    """S-2: human_mode=False → slippage inactive even if human_slip_pts > 0."""
+    import backtest_smt
+    from execution.simulated import SimulatedFillExecutor
+    from strategy_smt import _BarRow
+
+    signal = {
+        "direction":   "long",
+        "entry_price": 20000.0,
+        "stop_price":  19980.0,
+        "take_profit": 20050.0,
+        "entry_time":  pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York"),
+        "tdo":         20050.0,
+        "divergence_bar": 0,
+    }
+    bar = _BarRow(20000.0, 20005.0, 19995.0, 20000.0, 100.0,
+                  pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York"))
+    executor = SimulatedFillExecutor(human_mode=False, human_slip_pts=2.0, entry_slip_ticks=0)
+    fill = executor.place_entry(signal, bar)
+    pos = backtest_smt._open_position(signal, datetime.date(2025, 1, 2), 1, 1, 0,
+                                       fill_price=fill.fill_price)
     assert pos["entry_price"] == 20000.0
 
 

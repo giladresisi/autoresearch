@@ -11,6 +11,7 @@ import pandas as pd
 
 from hypothesis_smt import compute_hypothesis_context
 import strategy_smt
+from execution.simulated import SimulatedFillExecutor
 from strategy_smt import (
     _BarRow,
     init_bar_data, append_bar_data, load_futures_data, compute_tdo, find_anchor_close,
@@ -123,7 +124,8 @@ MAX_CONTRACTS = 4
 MARKET_ORDER_SLIPPAGE_PTS: float = 5.0
 
 # Slippage applied to v2 market-close exits. 2 pts covers typical automated-trading
-# latency (network + exchange queue) for MNQ in RTH. Will move to simulated-fill module.
+# latency (network + exchange queue) for MNQ in RTH. Passed as v2_market_slip_pts to
+# SimulatedFillExecutor; v2 pipeline slippage (lines ~1257–1340) is out of Stage 1 scope.
 V2_MARKET_CLOSE_SLIPPAGE_PTS: float = 2.0
 
 
@@ -166,6 +168,7 @@ def _size_contracts(entry_price: float, stop_price: float) -> "tuple[int, int]":
 
 def _open_position(
     signal_dict: dict, day, contracts: int, total_contracts_target: int, bar_idx: int,
+    fill_price: float,
 ) -> dict:
     position = {
         **signal_dict, "entry_date": day, "contracts": contracts,
@@ -175,14 +178,7 @@ def _open_position(
     }
     position["tp_breached"] = False
     position["entry_bar"]   = bar_idx
-    # Human-mode additive fill slippage (direction-correct): long pays more, short receives less.
-    # Read via module attribute so monkeypatching strategy_smt in tests takes effect.
-    if strategy_smt.HUMAN_EXECUTION_MODE and strategy_smt.HUMAN_ENTRY_SLIPPAGE_PTS > 0:
-        slip = strategy_smt.HUMAN_ENTRY_SLIPPAGE_PTS
-        if position["direction"] == "long":
-            position["entry_price"] = round(position["entry_price"] + slip, 4)
-        else:
-            position["entry_price"] = round(position["entry_price"] - slip, 4)
+    position["entry_price"] = fill_price
     return position
 
 
@@ -191,28 +187,11 @@ def _build_trade_record(
     exit_result: str,
     exit_bar: "pd.Series | _BarRow",
     pnl_per_point: float,
+    fill_price: float,
 ) -> "tuple[dict, float]":
     """Build the trade dict and compute PnL from a closed position."""
     direction_sign = 1 if position["direction"] == "long" else -1
-    if exit_result == "exit_tp":
-        # Limit order — fills at the defined take-profit price; no slippage on liquid NQ
-        exit_price = position["take_profit"]
-    elif exit_result == "exit_secondary":
-        # Limit order hit at secondary target — fills at defined price, identical semantics to exit_tp
-        exit_price = position["secondary_target"]
-    elif exit_result == "exit_stop":
-        # Stop-limit order — fills at the defined stop price; no slippage on liquid NQ
-        exit_price = position["stop_price"]
-    else:
-        # Market orders (exit_time, session_close, exit_market, end_of_backtest,
-        # exit_invalidation_*) — simulate with bar mid +/- slippage
-        mid = (float(exit_bar["High"]) + float(exit_bar["Low"])) / 2.0
-        if PESSIMISTIC_FILLS:
-            slip = MARKET_ORDER_SLIPPAGE_PTS
-            direction_sign = 1 if position["direction"] == "long" else -1
-            exit_price = mid - direction_sign * slip
-        else:
-            exit_price = mid
+    exit_price = fill_price
 
     pnl = (
         direction_sign
@@ -405,6 +384,13 @@ def run_backtest(
     Returns a stats dict with all performance metrics.
     """
     init_bar_data()
+    executor = SimulatedFillExecutor(
+        pessimistic=PESSIMISTIC_FILLS,
+        market_slip_pts=MARKET_ORDER_SLIPPAGE_PTS,
+        v2_market_slip_pts=V2_MARKET_CLOSE_SLIPPAGE_PTS,
+        human_mode=strategy_smt.HUMAN_EXECUTION_MODE,
+        human_slip_pts=getattr(strategy_smt, "HUMAN_ENTRY_SLIPPAGE_PTS", 0.0),
+    )
     start_dt = pd.Timestamp(start or BACKTEST_START).date()
     end_dt   = pd.Timestamp(end   or BACKTEST_END).date()
 
@@ -702,8 +688,10 @@ def run_backtest(
                             else (position["entry_price"] - partial_exit_price)
                         )
                         partial_pnl = pnl_per_contract * partial_contracts * MNQ_PNL_PER_POINT
+                        _partial_fill = executor.place_exit(position, "partial_exit", bar)
                         partial_trade, _ = _build_trade_record(
-                            {**position, "contracts": partial_contracts}, "partial_exit", bar, MNQ_PNL_PER_POINT
+                            {**position, "contracts": partial_contracts}, "partial_exit", bar, MNQ_PNL_PER_POINT,
+                            fill_price=_partial_fill.fill_price,
                         )
                         partial_trade["matches_hypothesis"] = position.get("matches_hypothesis")
                         for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
@@ -729,8 +717,10 @@ def run_backtest(
                     continue
 
                 if result != "hold":
+                    _exit_fill = executor.place_exit(position, result, bar)
                     trade, day_pnl_delta = _build_trade_record(
-                        position, result, bar, MNQ_PNL_PER_POINT
+                        position, result, bar, MNQ_PNL_PER_POINT,
+                        fill_price=_exit_fill.fill_price,
                     )
                     trade["matches_hypothesis"] = position.get("matches_hypothesis")
                     for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
@@ -808,7 +798,9 @@ def run_backtest(
                     contracts, total_contracts_target = _size_contracts(
                         signal["entry_price"], signal["stop_price"]
                     )
-                    position = _open_position(signal, day, contracts, total_contracts_target, bar_idx)
+                    _entry_fill = executor.place_entry(signal, bar)
+                    position = _open_position(signal, day, contracts, total_contracts_target, bar_idx,
+                                              fill_price=_entry_fill.fill_price)
                     _position_id += 1
                     position["position_id"] = _position_id
                     state = "IN_TRADE"
@@ -838,8 +830,14 @@ def run_backtest(
         # End of session: force-close any position still open at session boundary.
         if state == "IN_TRADE" and position is not None:
             last_bar = mnq_session.iloc[-1]
+            _last_bar_row = _BarRow(
+                float(last_bar["Open"]), float(last_bar["High"]), float(last_bar["Low"]),
+                float(last_bar["Close"]), float(last_bar.get("Volume", 0.0)), last_bar.name,
+            )
+            _exit_fill = executor.place_exit(position, "session_close", _last_bar_row)
             trade, day_pnl_delta = _build_trade_record(
-                position, "session_close", last_bar, MNQ_PNL_PER_POINT
+                position, "session_close", last_bar, MNQ_PNL_PER_POINT,
+                fill_price=_exit_fill.fill_price,
             )
             trade["matches_hypothesis"] = position.get("matches_hypothesis")
             for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
@@ -861,8 +859,14 @@ def run_backtest(
         last_bars = mnq_df[mnq_df.index.date < end_dt]
         if not last_bars.empty:
             last_bar = last_bars.iloc[-1]
+            _last_bar_row = _BarRow(
+                float(last_bar["Open"]), float(last_bar["High"]), float(last_bar["Low"]),
+                float(last_bar["Close"]), float(last_bar.get("Volume", 0.0)), last_bar.name,
+            )
+            _exit_fill = executor.place_exit(position, "end_of_backtest", _last_bar_row)
             trade, pnl = _build_trade_record(
-                position, "end_of_backtest", last_bar, MNQ_PNL_PER_POINT
+                position, "end_of_backtest", last_bar, MNQ_PNL_PER_POINT,
+                fill_price=_exit_fill.fill_price,
             )
             trade["exit_time"] = ""   # no meaningful bar time at backtest end
             trade["matches_hypothesis"] = position.get("matches_hypothesis")
