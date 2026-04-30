@@ -135,7 +135,7 @@ def run_strategy(
         if opp_5m is not None and (opp_5m["body_high"] - opp_5m["body_low"]) <= MAX_CONFIRMATION_BODY_PTS:
             body_end_price = opp_5m["body_high"] if direction == "up" else opp_5m["body_low"]
             current_conf_time = position.get("confirmation_bar", {}).get("time", "")
-            if opp_5m["time"] != current_conf_time or position["limit_entry"] == "":
+            if opp_5m["time"] != current_conf_time:
                 conf_bar_snap = {
                     "time":      opp_5m["time"],
                     "high":      opp_5m["high"],
