@@ -428,6 +428,12 @@ EQH_LOOKBACK_BARS: int = 100
 _mnq_bars: "pd.DataFrame | None" = None
 _mes_bars: "pd.DataFrame | None" = None
 
+# ── Cached time objects derived from SESSION_START (used in hot-path functions) ──
+# These are module-level so they are computed once at import time, not per bar.
+_SESSION_START_TIME = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
+_SESSION_START_HOUR = _SESSION_START_TIME.hour
+_SESSION_START_MIN  = _SESSION_START_TIME.minute
+
 
 def set_bar_data(mnq_df: pd.DataFrame, mes_df: pd.DataFrame) -> None:
     """Populate module-level bar globals for strategy functions that need lookback.
@@ -498,17 +504,22 @@ def _in_blackout(t: "datetime.time") -> bool:
     """Return True if wall-clock time t falls inside the signal blackout window.
 
     Reads SIGNAL_BLACKOUT_START/END dynamically so monkeypatching works in tests.
+    Uses H*60+M integer comparison to avoid strftime overhead on every bar.
     """
     if not SIGNAL_BLACKOUT_START or not SIGNAL_BLACKOUT_END:
         return False
-    t_str = t.strftime("%H:%M")
-    return SIGNAL_BLACKOUT_START <= t_str < SIGNAL_BLACKOUT_END
+    _t = t.hour * 60 + t.minute
+    _bh, _bm = int(SIGNAL_BLACKOUT_START[:2]), int(SIGNAL_BLACKOUT_START[3:])
+    _eh, _em = int(SIGNAL_BLACKOUT_END[:2]),   int(SIGNAL_BLACKOUT_END[3:])
+    return (_bh * 60 + _bm) <= _t < (_eh * 60 + _em)
 
 
 def _in_silver_bullet(t: "datetime.time") -> bool:
     """Return True if wall-clock time t falls inside the silver-bullet window."""
-    t_str = t.strftime("%H:%M")
-    return SILVER_BULLET_START <= t_str < SILVER_BULLET_END
+    _t  = t.hour * 60 + t.minute
+    _sh, _sm = int(SILVER_BULLET_START[:2]), int(SILVER_BULLET_START[3:])
+    _eh, _em = int(SILVER_BULLET_END[:2]),   int(SILVER_BULLET_END[3:])
+    return (_sh * 60 + _sm) <= _t < (_eh * 60 + _em)
 
 
 # ══ STATEFUL SCANNER DATA STRUCTURES ═════════════════════════════════════════
@@ -755,6 +766,7 @@ def detect_smt_divergence(
     session_start_idx: int,
     _min_bars: int = 0,
     _cached: "dict | None" = None,
+    _cur_vals: "dict | None" = None,
 ) -> tuple[str, float, float, str, float] | None:
     """Check for SMT divergence at bar_idx.
 
@@ -798,22 +810,38 @@ def detect_smt_divergence(
         mnq_session_high = mnq_bars["High"].iloc[session_slice].max()
         mnq_session_low  = mnq_bars["Low"].iloc[session_slice].min()
 
-    cur_mes = mes_bars.iloc[bar_idx]
-    cur_mnq = mnq_bars.iloc[bar_idx]
+    # Current bar values: use pre-extracted floats when available (_cur_vals),
+    # otherwise fall back to DataFrame .iloc (slower pandas accessor path).
+    if _cur_vals is not None:
+        cur_mes_h = _cur_vals["mes_h"]
+        cur_mes_l = _cur_vals["mes_l"]
+        cur_mes_c = _cur_vals["mes_c"]
+        cur_mnq_h = _cur_vals["mnq_h"]
+        cur_mnq_l = _cur_vals["mnq_l"]
+        cur_mnq_c = _cur_vals["mnq_c"]
+    else:
+        _cur_mes_row = mes_bars.iloc[bar_idx]
+        _cur_mnq_row = mnq_bars.iloc[bar_idx]
+        cur_mes_h = float(_cur_mes_row["High"])
+        cur_mes_l = float(_cur_mes_row["Low"])
+        cur_mes_c = float(_cur_mes_row["Close"])
+        cur_mnq_h = float(_cur_mnq_row["High"])
+        cur_mnq_l = float(_cur_mnq_row["Low"])
+        cur_mnq_c = float(_cur_mnq_row["Close"])
 
     # Bearish SMT: MES sweeps session high (liquidity grab) but MNQ fails to confirm
-    if cur_mes["High"] > mes_session_high and cur_mnq["High"] <= mnq_session_high:
-        smt_sweep = cur_mes["High"] - mes_session_high
-        mnq_miss   = mnq_session_high - cur_mnq["High"]
+    if cur_mes_h > mes_session_high and cur_mnq_h <= mnq_session_high:
+        smt_sweep = cur_mes_h - mes_session_high
+        mnq_miss   = mnq_session_high - cur_mnq_h
         if MIN_SMT_SWEEP_PTS > 0 and smt_sweep < MIN_SMT_SWEEP_PTS:
             return None
         if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
             return None
         return ("short", smt_sweep, mnq_miss, "wick", mnq_session_high)
     # Bullish SMT: MES sweeps session low but MNQ fails to confirm
-    if cur_mes["Low"] < mes_session_low and cur_mnq["Low"] >= mnq_session_low:
-        smt_sweep = mes_session_low - cur_mes["Low"]
-        mnq_miss   = cur_mnq["Low"] - mnq_session_low
+    if cur_mes_l < mes_session_low and cur_mnq_l >= mnq_session_low:
+        smt_sweep = mes_session_low - cur_mes_l
+        mnq_miss   = cur_mnq_l - mnq_session_low
         if MIN_SMT_SWEEP_PTS > 0 and smt_sweep < MIN_SMT_SWEEP_PTS:
             return None
         if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
@@ -822,17 +850,17 @@ def detect_smt_divergence(
 
     # Symmetric SMT: MNQ leads, MES fails (mirror of MES-leads logic above).
     if SYMMETRIC_SMT_ENABLED:
-        if cur_mnq["High"] > mnq_session_high and cur_mes["High"] <= mes_session_high:
-            smt_sweep = cur_mnq["High"] - mnq_session_high
-            mnq_miss   = mnq_session_high - cur_mes["High"]
+        if cur_mnq_h > mnq_session_high and cur_mes_h <= mes_session_high:
+            smt_sweep = cur_mnq_h - mnq_session_high
+            mnq_miss   = mnq_session_high - cur_mes_h
             if MIN_SMT_SWEEP_PTS > 0 and smt_sweep < MIN_SMT_SWEEP_PTS:
                 return None
             if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
                 return None
             return ("short", smt_sweep, mnq_miss, "wick_sym", mes_session_high)
-        if cur_mnq["Low"] < mnq_session_low and cur_mes["Low"] >= mes_session_low:
-            smt_sweep = mnq_session_low - cur_mnq["Low"]
-            mnq_miss   = cur_mes["Low"] - mes_session_low
+        if cur_mnq_l < mnq_session_low and cur_mes_l >= mes_session_low:
+            smt_sweep = mnq_session_low - cur_mnq_l
+            mnq_miss   = cur_mes_l - mes_session_low
             if MIN_SMT_SWEEP_PTS > 0 and smt_sweep < MIN_SMT_SWEEP_PTS:
                 return None
             if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
@@ -853,17 +881,17 @@ def detect_smt_divergence(
             mnq_close_session_high = mnq_bars["Close"].iloc[session_slice].max()
             mes_close_session_low  = mes_bars["Close"].iloc[session_slice].min()
             mnq_close_session_low  = mnq_bars["Close"].iloc[session_slice].min()
-        if cur_mes["Close"] > mes_close_session_high and cur_mnq["Close"] <= mnq_close_session_high:
-            smt_sweep = cur_mes["Close"] - mes_close_session_high
-            mnq_miss   = mnq_close_session_high - cur_mnq["Close"]
+        if cur_mes_c > mes_close_session_high and cur_mnq_c <= mnq_close_session_high:
+            smt_sweep = cur_mes_c - mes_close_session_high
+            mnq_miss   = mnq_close_session_high - cur_mnq_c
             if MIN_SMT_SWEEP_PTS > 0 and smt_sweep < MIN_SMT_SWEEP_PTS:
                 return None
             if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
                 return None
             return ("short", smt_sweep, mnq_miss, "body", mnq_close_session_high)
-        if cur_mes["Close"] < mes_close_session_low and cur_mnq["Close"] >= mnq_close_session_low:
-            smt_sweep = mes_close_session_low - cur_mes["Close"]
-            mnq_miss   = cur_mnq["Close"] - mnq_close_session_low
+        if cur_mes_c < mes_close_session_low and cur_mnq_c >= mnq_close_session_low:
+            smt_sweep = mes_close_session_low - cur_mes_c
+            mnq_miss   = cur_mnq_c - mnq_close_session_low
             if MIN_SMT_SWEEP_PTS > 0 and smt_sweep < MIN_SMT_SWEEP_PTS:
                 return None
             if MIN_SMT_MISS_PTS > 0 and mnq_miss < MIN_SMT_MISS_PTS:
@@ -1045,27 +1073,20 @@ def _filter_stale_levels(
     if not levels:
         return []
     active: "list[dict]" = []
-    for lvl in levels:
-        last_bar = lvl["last_bar"]
-        price    = lvl["price"]
-        scan_start = last_bar + 1
-        scan_end   = bar_idx
-        if scan_start >= scan_end:
-            active.append(lvl)
-            continue
-        stale = False
-        if direction == "eqh":
-            for k in range(scan_start, scan_end):
-                if closes[k] > price:
-                    stale = True
-                    break
-        else:  # "eql"
-            for k in range(scan_start, scan_end):
-                if closes[k] < price:
-                    stale = True
-                    break
-        if not stale:
-            active.append(lvl)
+    if direction == "eqh":
+        for lvl in levels:
+            last_bar   = lvl["last_bar"]
+            price      = lvl["price"]
+            scan_start = last_bar + 1
+            if scan_start >= bar_idx or not any(closes[k] > price for k in range(scan_start, bar_idx)):
+                active.append(lvl)
+    else:  # "eql"
+        for lvl in levels:
+            last_bar   = lvl["last_bar"]
+            price      = lvl["price"]
+            scan_start = last_bar + 1
+            if scan_start >= bar_idx or not any(closes[k] < price for k in range(scan_start, bar_idx)):
+                active.append(lvl)
     return active
 
 
@@ -1648,10 +1669,10 @@ def _build_signal_from_bar(
     }
 
     # Confidence: session start is the bar's day at SESSION_START in the bar's tz.
-    ses_start_t = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
+    # Uses module-level cached hour/minute to avoid recreating pd.Timestamp per call.
     if hasattr(ts, "normalize"):
         session_start_ts = ts.normalize().replace(
-            hour=ses_start_t.hour, minute=ses_start_t.minute, second=0
+            hour=_SESSION_START_HOUR, minute=_SESSION_START_MIN, second=0
         )
     else:
         session_start_ts = ts  # fallback; tests pass Timestamp objects
@@ -1949,8 +1970,16 @@ def process_scan_bar(
                 and bar_idx < state.conf_window_start + CONFIRMATION_WINDOW_BARS
             )
             if not _in_active_window:
+                _wfe_cur_vals = {
+                    "mes_h": float(mes_highs[bar_idx]) if mes_highs is not None else float(mes_reset.iloc[bar_idx]["High"]),
+                    "mes_l": float(mes_lows[bar_idx])  if mes_lows  is not None else float(mes_reset.iloc[bar_idx]["Low"]),
+                    "mes_c": float(mes_closes[bar_idx]) if mes_closes is not None else float(mes_reset.iloc[bar_idx]["Close"]),
+                    "mnq_h": float(mnq_highs[bar_idx]),
+                    "mnq_l": float(mnq_lows[bar_idx]),
+                    "mnq_c": float(mnq_closes[bar_idx]),
+                }
                 _new_div = detect_smt_divergence(
-                    mes_reset, mnq_reset, bar_idx, 0, _cached=smt_cache
+                    mes_reset, mnq_reset, bar_idx, 0, _cached=smt_cache, _cur_vals=_wfe_cur_vals
                 )
             else:
                 _new_div = None
@@ -2204,7 +2233,19 @@ def process_scan_bar(
     if bar_idx < 3:
         return None
 
-    _smt = detect_smt_divergence(mes_reset, mnq_reset, bar_idx, 0, _cached=smt_cache)
+    # Pre-extract current bar values as floats once — used by detect_smt_divergence
+    # and the EXPANDED_REFERENCE_LEVELS fallback below.
+    _cur_mes_h = float(mes_highs[bar_idx]) if mes_highs is not None else float(mes_reset.iloc[bar_idx]["High"])
+    _cur_mes_l = float(mes_lows[bar_idx])  if mes_lows  is not None else float(mes_reset.iloc[bar_idx]["Low"])
+    _cur_mes_c = float(mes_closes[bar_idx]) if mes_closes is not None else float(mes_reset.iloc[bar_idx]["Close"])
+    _cur_mnq_h = float(mnq_highs[bar_idx])
+    _cur_mnq_l = float(mnq_lows[bar_idx])
+    _cur_mnq_c = float(mnq_closes[bar_idx])
+    _cur_vals_dict = {
+        "mes_h": _cur_mes_h, "mes_l": _cur_mes_l, "mes_c": _cur_mes_c,
+        "mnq_h": _cur_mnq_h, "mnq_l": _cur_mnq_l, "mnq_c": _cur_mnq_c,
+    }
+    _smt = detect_smt_divergence(mes_reset, mnq_reset, bar_idx, 0, _cached=smt_cache, _cur_vals=_cur_vals_dict)
 
     # Expanded reference levels: check prev-day/week extremes
     if _smt is None and EXPANDED_REFERENCE_LEVELS and context.ref_lvls:
@@ -2384,6 +2425,12 @@ def manage_position(
         crossed; instead the stop trails TRAIL_AFTER_TP_PTS points behind the
         best post-TDO price, letting profits run further.
     """
+    # Cache frequently accessed bar values as locals to avoid repeated dict/attr lookups.
+    _bar_high  = current_bar["High"]
+    _bar_low   = current_bar["Low"]
+    _bar_close = current_bar["Close"]
+    _bar_open  = current_bar["Open"]
+
     direction   = position["direction"]
     entry_price = position["entry_price"]
     tp          = position["take_profit"]
@@ -2397,14 +2444,14 @@ def manage_position(
         if position.get("tp_breached"):
             # Already past TDO — update trailing stop each bar
             if direction == "short":
-                best = min(position.get("best_after_tp", tp), current_bar["Low"])
+                best = min(position.get("best_after_tp", tp), _bar_low)
                 position["best_after_tp"] = best
                 activation_dist = TRAIL_ACTIVATION_R * position.get("initial_stop_pts", 0.0)
                 if tp - best >= activation_dist:
                     new_stop = best + TRAIL_AFTER_TP_PTS
                     position["stop_price"] = min(position["stop_price"], new_stop)  # never widen
             else:
-                best = max(position.get("best_after_tp", tp), current_bar["High"])
+                best = max(position.get("best_after_tp", tp), _bar_high)
                 position["best_after_tp"] = best
                 activation_dist = TRAIL_ACTIVATION_R * position.get("initial_stop_pts", 0.0)
                 if best - tp >= activation_dist:
@@ -2412,36 +2459,36 @@ def manage_position(
                     position["stop_price"] = max(position["stop_price"], new_stop)  # never widen
         else:
             # Check if TDO was crossed this bar for the first time
-            crossed = (direction == "short" and current_bar["Low"]  <= tp) or \
-                      (direction == "long"  and current_bar["High"] >= tp)
+            crossed = (direction == "short" and _bar_low  <= tp) or \
+                      (direction == "long"  and _bar_high >= tp)
             if crossed:
                 # Check original stop before marking breach — a bar can cross both TDO and stop.
                 stop = position["stop_price"]
-                if direction == "short" and float(current_bar["High"]) >= stop:
+                if direction == "short" and float(_bar_high) >= stop:
                     return "exit_stop"
-                if direction == "long"  and float(current_bar["Low"])  <= stop:
+                if direction == "long"  and float(_bar_low)  <= stop:
                     return "exit_stop"
                 position["tp_breached"] = True
                 if direction == "short":
-                    position["best_after_tp"] = min(tp, current_bar["Low"])
+                    position["best_after_tp"] = min(tp, _bar_low)
                 else:
-                    position["best_after_tp"] = max(tp, current_bar["High"])
+                    position["best_after_tp"] = max(tp, _bar_high)
                 return "hold"
 
     # ── Set tp_breached on first primary TP crossing (for secondary target tracking) ──
     # Runs when trail is disabled or secondary_target is set (trail block above is skipped in both cases).
     if not position.get("tp_breached"):
-        if direction == "long"  and float(current_bar["High"]) >= tp:
+        if direction == "long"  and float(_bar_high) >= tp:
             position["tp_breached"] = True
-        elif direction == "short" and float(current_bar["Low"])  <= tp:
+        elif direction == "short" and float(_bar_low)  <= tp:
             position["tp_breached"] = True
 
     # ── Secondary target check: exit after primary breach ────────────────────
     sec = position.get("secondary_target")
     if sec is not None and position.get("tp_breached"):
-        if direction == "long"  and float(current_bar["High"]) >= sec:
+        if direction == "long"  and float(_bar_high) >= sec:
             return "exit_secondary"
-        if direction == "short" and float(current_bar["Low"])  <= sec:
+        if direction == "short" and float(_bar_low)  <= sec:
             return "exit_secondary"
 
     # ── Layer B entry (FVG retracement) ─────────────────────────────────────
@@ -2451,14 +2498,14 @@ def manage_position(
             fvg_low  = position.get("fvg_low")
             if fvg_high is not None and fvg_low is not None:
                 in_fvg = (
-                    (direction == "long"  and current_bar["Low"]  <= fvg_high and current_bar["Low"]  >= fvg_low) or
-                    (direction == "short" and current_bar["High"] >= fvg_low  and current_bar["High"] <= fvg_high)
+                    (direction == "long"  and _bar_low  <= fvg_high and _bar_low  >= fvg_low) or
+                    (direction == "short" and _bar_high >= fvg_low  and _bar_high <= fvg_high)
                 )
                 if in_fvg:
                     total_target = position.get("total_contracts_target", position["contracts"])
                     layer_b_contracts = total_target - position["contracts"]
                     if layer_b_contracts > 0:
-                        lb_entry = float(current_bar["Close"])
+                        lb_entry = float(_bar_close)
                         n_a = position["contracts"]
                         position["entry_price"] = (
                             position["entry_price"] * n_a + lb_entry * layer_b_contracts
@@ -2481,9 +2528,9 @@ def manage_position(
         tdo_dist = abs(entry_price - tp)
         if tdo_dist > 0:
             if direction == "short":
-                progress = (entry_price - current_bar["Low"]) / tdo_dist
+                progress = (entry_price - _bar_low) / tdo_dist
             else:
-                progress = (current_bar["High"] - entry_price) / tdo_dist
+                progress = (_bar_high - entry_price) / tdo_dist
             if progress >= BREAKEVEN_TRIGGER_PCT:
                 # Only tighten the stop, never widen it
                 if direction == "short":
@@ -2498,41 +2545,41 @@ def manage_position(
     # Inlined (not via detect_displacement()) so the check runs regardless of SMT_OPTIONAL,
     # which detect_displacement gates on and which governs an unrelated entry path.
     if DECEPTION_OPPOSING_DISP_EXIT and MIN_DISPLACEMENT_PTS > 0:
-        opposing = "long" if direction == "short" else "short"
-        body_pts = abs(float(current_bar["Close"]) - float(current_bar["Open"]))
-        opposing_candle = (
-            (opposing == "long"  and current_bar["Close"] > current_bar["Open"]) or
-            (opposing == "short" and current_bar["Close"] < current_bar["Open"])
-        )
-        if body_pts >= MIN_DISPLACEMENT_PTS and opposing_candle:
-            return "exit_invalidation_opposing_disp"
+        body_pts = abs(float(_bar_close) - float(_bar_open))
+        if body_pts >= MIN_DISPLACEMENT_PTS:
+            opposing_candle = (
+                (direction == "short" and _bar_close > _bar_open) or
+                (direction == "long"  and _bar_close < _bar_open)
+            )
+            if opposing_candle:
+                return "exit_invalidation_opposing_disp"
 
     # ── Thesis-invalidation exits (close-based; fire before stop check) ─────────
     # MSS: divergence extreme breached on a closing basis.
     if INVALIDATION_MSS_EXIT:
         div_low  = position.get("divergence_bar_low")
         div_high = position.get("divergence_bar_high")
-        if direction == "long" and div_low is not None and current_bar["Close"] < div_low:
+        if direction == "long" and div_low is not None and _bar_close < div_low:
             return "exit_invalidation_mss"
-        if direction == "short" and div_high is not None and current_bar["Close"] > div_high:
+        if direction == "short" and div_high is not None and _bar_close > div_high:
             return "exit_invalidation_mss"
 
     # CISD: midnight open breached on a closing basis.
     if INVALIDATION_CISD_EXIT:
         mo = position.get("midnight_open")
         if mo is not None:
-            if direction == "long"  and current_bar["Close"] < mo:
+            if direction == "long"  and _bar_close < mo:
                 return "exit_invalidation_cisd"
-            if direction == "short" and current_bar["Close"] > mo:
+            if direction == "short" and _bar_close > mo:
                 return "exit_invalidation_cisd"
 
     # SMT: MNQ defended level breached on a closing basis.
     if INVALIDATION_SMT_EXIT:
         defended = position.get("smt_defended_level")
         if defended is not None:
-            if direction == "long"  and current_bar["Close"] < defended:
+            if direction == "long"  and _bar_close < defended:
                 return "exit_invalidation_smt"
-            if direction == "short" and current_bar["Close"] > defended:
+            if direction == "short" and _bar_close > defended:
                 return "exit_invalidation_smt"
 
     stop = position["stop_price"]
@@ -2541,11 +2588,11 @@ def manage_position(
     if PARTIAL_EXIT_ENABLED and not position.get("partial_done"):
         lvl = position.get("partial_exit_level")
         if lvl is not None:
-            if direction == "long"  and current_bar["High"] >= lvl:
+            if direction == "long"  and _bar_high >= lvl:
                 position["partial_done"]  = True
                 position["partial_price"] = lvl
                 return "partial_exit"
-            if direction == "short" and current_bar["Low"]  <= lvl:
+            if direction == "short" and _bar_low  <= lvl:
                 position["partial_done"]  = True
                 position["partial_price"] = lvl
                 return "partial_exit"
@@ -2554,11 +2601,11 @@ def manage_position(
     # exit_tp is only used when trail-after-TP is disabled; otherwise the stop
     # takes over once TDO is breached (handled in the block above).
     if direction == "long":
-        if current_bar["Low"]  <= stop:                                                         return "exit_stop"
-        if TRAIL_AFTER_TP_PTS == 0 and position.get("secondary_target") is None and current_bar["High"] >= tp: return "exit_tp"
+        if _bar_low  <= stop:                                                         return "exit_stop"
+        if TRAIL_AFTER_TP_PTS == 0 and position.get("secondary_target") is None and _bar_high >= tp: return "exit_tp"
     else:  # short
-        if current_bar["High"] >= stop:                                                         return "exit_stop"
-        if TRAIL_AFTER_TP_PTS == 0 and position.get("secondary_target") is None and current_bar["Low"]  <= tp: return "exit_tp"
+        if _bar_high >= stop:                                                         return "exit_stop"
+        if TRAIL_AFTER_TP_PTS == 0 and position.get("secondary_target") is None and _bar_low  <= tp: return "exit_tp"
     # Human mode: surface stop mutations as an explicit MOVE_STOP event so downstream
     # consumers (live signal emitter, backtest record) can act on the change rather
     # than silently inheriting the mutated position["stop_price"].

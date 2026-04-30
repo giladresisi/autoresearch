@@ -129,6 +129,20 @@ MARKET_ORDER_SLIPPAGE_PTS: float = 5.0
 V2_MARKET_CLOSE_SLIPPAGE_PTS: float = 2.0
 
 
+_HYP_FIELDS = (
+    "hypothesis_direction", "pd_range_case", "pd_range_bias",
+    "week_zone", "day_zone", "trend_direction", "hypothesis_score",
+    "fvg_detected",
+)
+
+
+def _stamp_hypothesis_fields(trade: dict, position: dict) -> None:
+    """Copy hypothesis annotation fields from position dict to trade dict in-place."""
+    trade["matches_hypothesis"] = position.get("matches_hypothesis")
+    for _f in _HYP_FIELDS:
+        trade[_f] = position.get(_f)
+
+
 def print_direction_breakdown(stats: dict, prefix: str = "") -> None:
     """Print per-direction trade count, win rate, avg PnL, and exit breakdown."""
     trades = stats.get("trade_records", [])
@@ -693,11 +707,7 @@ def run_backtest(
                             {**position, "contracts": partial_contracts}, "partial_exit", bar, MNQ_PNL_PER_POINT,
                             fill_price=_partial_fill.fill_price,
                         )
-                        partial_trade["matches_hypothesis"] = position.get("matches_hypothesis")
-                        for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
-                                   "week_zone", "day_zone", "trend_direction", "hypothesis_score",
-                                   "fvg_detected"):
-                            partial_trade[_f] = position.get(_f)
+                        _stamp_hypothesis_fields(partial_trade, position)
                         partial_trade["exit_type"] = "partial_exit"
                         partial_trade["pnl"] = round(partial_pnl, 2)
                         partial_trade["exit_price"] = round(partial_exit_price, 4)
@@ -722,11 +732,7 @@ def run_backtest(
                         position, result, bar, MNQ_PNL_PER_POINT,
                         fill_price=_exit_fill.fill_price,
                     )
-                    trade["matches_hypothesis"] = position.get("matches_hypothesis")
-                    for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
-                               "week_zone", "day_zone", "trend_direction", "hypothesis_score",
-                               "fvg_detected"):
-                        trade[_f] = position.get(_f)
+                    _stamp_hypothesis_fields(trade, position)
                     trades.append(trade)
                     day_pnl += day_pnl_delta
                     prior_trade_bars_held = entry_bar_count  # capture before reset
@@ -839,11 +845,7 @@ def run_backtest(
                 position, "session_close", last_bar, MNQ_PNL_PER_POINT,
                 fill_price=_exit_fill.fill_price,
             )
-            trade["matches_hypothesis"] = position.get("matches_hypothesis")
-            for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
-                       "week_zone", "day_zone", "trend_direction", "hypothesis_score",
-                       "fvg_detected"):
-                trade[_f] = position.get(_f)
+            _stamp_hypothesis_fields(trade, position)
             trades.append(trade)
             day_pnl += day_pnl_delta
             position = None
@@ -869,11 +871,7 @@ def run_backtest(
                 fill_price=_exit_fill.fill_price,
             )
             trade["exit_time"] = ""   # no meaningful bar time at backtest end
-            trade["matches_hypothesis"] = position.get("matches_hypothesis")
-            for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
-                       "week_zone", "day_zone", "trend_direction", "hypothesis_score",
-                       "fvg_detected"):
-                trade[_f] = position.get(_f)
+            _stamp_hypothesis_fields(trade, position)
             trades.append(trade)
             equity_curve.append(equity_curve[-1] + pnl)
 
@@ -881,16 +879,39 @@ def run_backtest(
 
 
 def _compute_metrics(trades: list[dict], equity_curve: list[float]) -> dict:
-    """Compute all performance metrics from trade list and equity curve."""
-    total_pnl    = sum(t["pnl"] for t in trades)
-    total_trades = len(trades)
-    winners      = [t for t in trades if t["pnl"] > 0]
-    losers       = [t for t in trades if t["pnl"] <= 0]
-    win_rate     = len(winners) / total_trades if total_trades > 0 else 0.0
-    avg_pnl      = total_pnl / total_trades if total_trades > 0 else 0.0
+    """Compute all performance metrics from trade list and equity curve.
 
-    long_pnl  = sum(t["pnl"] for t in trades if t["direction"] == "long")
-    short_pnl = sum(t["pnl"] for t in trades if t["direction"] == "short")
+    Single-pass over trades to avoid iterating 6+ times over the same list.
+    """
+    total_pnl  = 0.0
+    long_pnl   = 0.0
+    short_pnl  = 0.0
+    n_wins     = 0
+    win_pnl    = 0.0
+    loss_pnl   = 0.0
+    exit_types: dict[str, int] = {}
+
+    for t in trades:
+        p = t["pnl"]
+        total_pnl += p
+        if t["direction"] == "long":
+            long_pnl += p
+        else:
+            short_pnl += p
+        if p > 0:
+            n_wins  += 1
+            win_pnl += p
+        else:
+            loss_pnl += p
+        exit_types[t["exit_type"]] = exit_types.get(t["exit_type"], 0) + 1
+
+    total_trades = len(trades)
+    win_rate = n_wins / total_trades if total_trades > 0 else 0.0
+    avg_pnl  = total_pnl / total_trades if total_trades > 0 else 0.0
+    n_losers = total_trades - n_wins
+    avg_win  = win_pnl  / n_wins   if n_wins   > 0 else 0.0
+    avg_loss = loss_pnl / n_losers if n_losers > 0 else 0.0
+    avg_rr   = avg_win / abs(avg_loss) if avg_loss != 0 else 0.0
 
     # Annualized Sharpe from daily equity changes
     daily_changes = [equity_curve[i] - equity_curve[i - 1] for i in range(1, len(equity_curve))]
@@ -912,14 +933,6 @@ def _compute_metrics(trades: list[dict], equity_curve: list[float]) -> dict:
 
     calmar = total_pnl / max_dd if max_dd > 0 else 0.0
 
-    exit_types: dict[str, int] = {}
-    for t in trades:
-        exit_types[t["exit_type"]] = exit_types.get(t["exit_type"], 0) + 1
-
-    avg_win  = sum(t["pnl"] for t in winners) / len(winners) if winners else 0.0
-    avg_loss = sum(t["pnl"] for t in losers)  / len(losers)  if losers  else 0.0
-    avg_rr   = avg_win / abs(avg_loss) if avg_loss != 0 else 0.0
-
     return {
         "total_pnl":           round(total_pnl, 2),
         "total_trades":        total_trades,
@@ -937,16 +950,39 @@ def _compute_metrics(trades: list[dict], equity_curve: list[float]) -> dict:
 
 
 def _compute_metrics_v2(trades: list[dict], equity_curve: list[float]) -> dict:
-    """Compute performance metrics from v2 trade list (pnl_dollars, direction up/down, exit_reason)."""
-    total_pnl    = sum(t["pnl_dollars"] for t in trades)
-    total_trades = len(trades)
-    winners      = [t for t in trades if t["pnl_dollars"] > 0]
-    losers       = [t for t in trades if t["pnl_dollars"] <= 0]
-    win_rate     = len(winners) / total_trades if total_trades > 0 else 0.0
-    avg_pnl      = total_pnl / total_trades if total_trades > 0 else 0.0
+    """Compute performance metrics from v2 trade list (pnl_dollars, direction up/down, exit_reason).
 
-    long_pnl  = sum(t["pnl_dollars"] for t in trades if t["direction"] == "up")
-    short_pnl = sum(t["pnl_dollars"] for t in trades if t["direction"] == "down")
+    Single-pass over trades to avoid iterating 6+ times over the same list.
+    """
+    total_pnl  = 0.0
+    long_pnl   = 0.0
+    short_pnl  = 0.0
+    n_wins     = 0
+    win_pnl    = 0.0
+    loss_pnl   = 0.0
+    exit_types: dict[str, int] = {}
+
+    for t in trades:
+        p = t["pnl_dollars"]
+        total_pnl += p
+        if t["direction"] == "up":
+            long_pnl += p
+        else:
+            short_pnl += p
+        if p > 0:
+            n_wins  += 1
+            win_pnl += p
+        else:
+            loss_pnl += p
+        exit_types[t["exit_reason"]] = exit_types.get(t["exit_reason"], 0) + 1
+
+    total_trades = len(trades)
+    win_rate = n_wins / total_trades if total_trades > 0 else 0.0
+    avg_pnl  = total_pnl / total_trades if total_trades > 0 else 0.0
+    n_losers = total_trades - n_wins
+    avg_win  = win_pnl  / n_wins   if n_wins   > 0 else 0.0
+    avg_loss = loss_pnl / n_losers if n_losers > 0 else 0.0
+    avg_rr   = avg_win / abs(avg_loss) if avg_loss != 0 else 0.0
 
     daily_changes = [equity_curve[i] - equity_curve[i - 1] for i in range(1, len(equity_curve))]
     if len(daily_changes) > 1:
@@ -965,14 +1001,6 @@ def _compute_metrics_v2(trades: list[dict], equity_curve: list[float]) -> dict:
             max_dd = dd
 
     calmar = total_pnl / max_dd if max_dd > 0 else 0.0
-
-    exit_types: dict[str, int] = {}
-    for t in trades:
-        exit_types[t["exit_reason"]] = exit_types.get(t["exit_reason"], 0) + 1
-
-    avg_win  = sum(t["pnl_dollars"] for t in winners) / len(winners) if winners else 0.0
-    avg_loss = sum(t["pnl_dollars"] for t in losers)  / len(losers)  if losers  else 0.0
-    avg_rr   = avg_win / abs(avg_loss) if avg_loss != 0 else 0.0
 
     return {
         "total_pnl":           round(total_pnl, 2),
@@ -1233,24 +1261,39 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         day_events: list[dict] = []
 
         # ------------------------------------------------------------------ #
+        # Pre-extract numpy arrays once for the session (avoids per-bar       #
+        # DataFrame label lookups and slice copies in the hot loop)            #
+        # ------------------------------------------------------------------ #
+        _sess_idx    = mnq_session_bars.index
+        _sess_opens  = mnq_session_bars["Open"].values
+        _sess_highs  = mnq_session_bars["High"].values
+        _sess_lows   = mnq_session_bars["Low"].values
+        _sess_closes = mnq_session_bars["Close"].values
+        _n_sess      = len(_sess_idx)
+
+        # ------------------------------------------------------------------ #
         # Per-bar loop                                                          #
         # ------------------------------------------------------------------ #
-        for bar_ts in mnq_session_bars.index:
-            now = bar_ts
+        for _bar_i in range(_n_sess):
+            bar_ts = _sess_idx[_bar_i]
+            now    = bar_ts
 
-            bar = mnq_session_bars.loc[bar_ts]
-            _o = float(bar["Open"]); _c = float(bar["Close"])
+            _o = float(_sess_opens[_bar_i])
+            _h = float(_sess_highs[_bar_i])
+            _l = float(_sess_lows[_bar_i])
+            _c = float(_sess_closes[_bar_i])
             mnq_1m_bar = {
                 "time":      bar_ts.isoformat(),
                 "open":      _o,
-                "high":      float(bar["High"]),
-                "low":       float(bar["Low"]),
+                "high":      _h,
+                "low":       _l,
                 "close":     _c,
                 "body_high": max(_o, _c),
                 "body_low":  min(_o, _c),
             }
 
-            mnq_1m_recent = mnq_session_bars.loc[:bar_ts]
+            # iloc slice is O(1) view, avoids label-based loc search
+            mnq_1m_recent = mnq_session_bars.iloc[: _bar_i + 1]
 
             is_5m_boundary = (bar_ts.minute % 5 == 0)
 
@@ -1264,7 +1307,9 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             # Hypothesis runs on every 5m boundary, after trend has had a chance to clear state.
             if is_5m_boundary:
                 hyp_divs = _hyp_mod.run_hypothesis(
-                    now, mnq_session_bars.loc[:now], mes_session_bars.loc[:now],
+                    now,
+                    mnq_session_bars.iloc[: _bar_i + 1],
+                    mes_session_bars.iloc[: mes_session_bars.index.searchsorted(bar_ts, side="right")],
                     hist_mnq_1m, hist_mes_1m,
                     hist_1hr=hist_1hr_day, hist_4hr=hist_4hr_day,
                 )
