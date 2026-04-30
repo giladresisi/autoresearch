@@ -34,43 +34,39 @@ def _find_last_opposite_5m_bar(
     if mnq_1m_recent is None or mnq_1m_recent.empty:
         return None
 
-    five_m = mnq_1m_recent.resample("5min").agg(
-        {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
-    ).dropna(subset=["Open", "Close"])
-
-    if five_m.empty:
-        return None
-
-    # Exclude the currently-forming 5m period.
     current_5m_start = pd.Timestamp(now).floor("5min")
-    completed = five_m[five_m.index < current_5m_start]
+    last_5m_start = current_5m_start - pd.Timedelta(minutes=5)
 
-    # Only consider 5m bars that completed at or after the hypothesis was formed.
-    # A bar at index T completes at T + 5min, so we keep bars where T >= formed_at - 5min.
+    # Apply hypothesis timing constraint before doing any data work.
     if hypothesis_formed_at:
         formed_ts = pd.Timestamp(hypothesis_formed_at)
         cutoff = formed_ts - pd.Timedelta(minutes=5)
-        completed = completed[completed.index >= cutoff]
+        if last_5m_start < cutoff:
+            return None
 
-    if completed.empty:
+    # Only the 1m bars of the last completed 5m period are needed.
+    _idx = mnq_1m_recent.index
+    _sp = _idx.searchsorted(last_5m_start,    side="left")
+    _ep = _idx.searchsorted(current_5m_start, side="left")
+    window = mnq_1m_recent.iloc[_sp:_ep]
+    if window.empty:
         return None
 
-    # Only check the single most-recently-completed bar.
-    row = completed.iloc[-1]
-    o, c = float(row["Open"]), float(row["Close"])
+    o = float(window.iloc[0]["Open"])
+    c = float(window.iloc[-1]["Close"])
     if direction == "up" and c < o:
         return {
-            "time":      completed.index[-1].isoformat(),
-            "high":      float(row["High"]),
-            "low":       float(row["Low"]),
+            "time":      last_5m_start.isoformat(),
+            "high":      float(window["High"].max()),
+            "low":       float(window["Low"].min()),
             "body_high": max(o, c),
             "body_low":  min(o, c),
         }
     if direction == "down" and c > o:
         return {
-            "time":      completed.index[-1].isoformat(),
-            "high":      float(row["High"]),
-            "low":       float(row["Low"]),
+            "time":      last_5m_start.isoformat(),
+            "high":      float(window["High"].max()),
+            "low":       float(window["Low"].min()),
             "body_high": max(o, c),
             "body_low":  min(o, c),
         }
