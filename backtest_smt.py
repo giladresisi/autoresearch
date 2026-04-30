@@ -932,6 +932,60 @@ def _compute_metrics(trades: list[dict], equity_curve: list[float]) -> dict:
     }
 
 
+def _compute_metrics_v2(trades: list[dict], equity_curve: list[float]) -> dict:
+    """Compute performance metrics from v2 trade list (pnl_dollars, direction up/down, exit_reason)."""
+    total_pnl    = sum(t["pnl_dollars"] for t in trades)
+    total_trades = len(trades)
+    winners      = [t for t in trades if t["pnl_dollars"] > 0]
+    losers       = [t for t in trades if t["pnl_dollars"] <= 0]
+    win_rate     = len(winners) / total_trades if total_trades > 0 else 0.0
+    avg_pnl      = total_pnl / total_trades if total_trades > 0 else 0.0
+
+    long_pnl  = sum(t["pnl_dollars"] for t in trades if t["direction"] == "up")
+    short_pnl = sum(t["pnl_dollars"] for t in trades if t["direction"] == "down")
+
+    daily_changes = [equity_curve[i] - equity_curve[i - 1] for i in range(1, len(equity_curve))]
+    if len(daily_changes) > 1:
+        mean_chg = sum(daily_changes) / len(daily_changes)
+        std_chg  = statistics.stdev(daily_changes) or 1e-9
+        sharpe   = (mean_chg / std_chg) * (252 ** 0.5)
+    else:
+        sharpe = 0.0
+
+    peak, max_dd = 0.0, 0.0
+    for eq in equity_curve:
+        if eq > peak:
+            peak = eq
+        dd = peak - eq
+        if dd > max_dd:
+            max_dd = dd
+
+    calmar = total_pnl / max_dd if max_dd > 0 else 0.0
+
+    exit_types: dict[str, int] = {}
+    for t in trades:
+        exit_types[t["exit_reason"]] = exit_types.get(t["exit_reason"], 0) + 1
+
+    avg_win  = sum(t["pnl_dollars"] for t in winners) / len(winners) if winners else 0.0
+    avg_loss = sum(t["pnl_dollars"] for t in losers)  / len(losers)  if losers  else 0.0
+    avg_rr   = avg_win / abs(avg_loss) if avg_loss != 0 else 0.0
+
+    return {
+        "total_pnl":           round(total_pnl, 2),
+        "total_trades":        total_trades,
+        "win_rate":            round(win_rate, 4),
+        "avg_pnl_per_trade":   round(avg_pnl, 2),
+        "long_pnl":            round(long_pnl, 2),
+        "short_pnl":           round(short_pnl, 2),
+        "sharpe":              round(sharpe, 4),
+        "max_drawdown":        round(max_dd, 2),
+        "calmar":              round(calmar, 4),
+        "avg_rr":              round(avg_rr, 4),
+        "exit_type_breakdown": exit_types,
+        "trade_records":       trades,
+    }
+
+
 def print_results(stats: dict, prefix: str = "") -> None:
     """Print all scalar metrics with an optional prefix for agent parsing."""
     for key, value in stats.items():
@@ -1014,104 +1068,6 @@ def _write_trades_tsv(trades: list[dict]) -> None:
     print(f"Trades written -> trades.tsv ({len(trades)} records)")
 
 
-if __name__ == "__main__":
-    dfs = load_futures_data()
-    mnq_df = dfs["MNQ"]
-    mes_df = dfs["MES"]
-
-    if mnq_df.empty or mes_df.empty:
-        print("No futures data in cache. Run prepare_futures.py first.", file=sys.stderr)
-        sys.exit(1)
-
-    import pandas as _pd
-    from pandas.tseries.offsets import BDay as _BDay
-
-    _train_end_ts = _pd.Timestamp(TRAIN_END)
-
-    _effective_n_folds, _effective_fold_test_days = _compute_fold_params(
-        BACKTEST_START, TRAIN_END, WALK_FORWARD_WINDOWS, FOLD_TEST_DAYS
-    )
-
-    fold_test_pnls: list = []
-    _fold_test_stats_list: list = []  # collect per-fold stats for TSV aggregates
-    _all_test_trades: list = []       # collect per-trade records for trades.tsv
-
-    for _i in range(_effective_n_folds):
-        _steps_back         = _effective_n_folds - 1 - _i
-        _fold_test_end_ts   = _train_end_ts - _BDay(_steps_back * _effective_fold_test_days)
-        _fold_test_start_ts = _fold_test_end_ts - _BDay(_effective_fold_test_days)
-        _fold_train_end_ts  = _fold_test_start_ts
-
-        _fold_train_end  = str(_fold_train_end_ts.date())
-        _fold_test_start = str(_fold_test_start_ts.date())
-        _fold_test_end   = str(_fold_test_end_ts.date())
-        _fold_n          = _i + 1
-
-        if FOLD_TRAIN_DAYS > 0:
-            _fold_train_start_ts = _fold_train_end_ts - _BDay(FOLD_TRAIN_DAYS)
-            _fold_train_start = str(
-                max(_fold_train_start_ts.date(), datetime.date.fromisoformat(BACKTEST_START))
-            )
-        else:
-            _fold_train_start = BACKTEST_START
-
-        _fold_train_stats = run_backtest(mnq_df, mes_df, start=_fold_train_start, end=_fold_train_end)
-        _fold_test_stats  = run_backtest(mnq_df, mes_df, start=_fold_test_start,  end=_fold_test_end)
-
-        print_results(_fold_train_stats, prefix=f"fold{_fold_n}_train_")
-        print_results(_fold_test_stats,  prefix=f"fold{_fold_n}_test_")
-
-        fold_test_pnls.append((_fold_test_stats["total_pnl"], _fold_test_stats["total_trades"]))
-        _fold_test_stats_list.append(_fold_test_stats)
-        _all_test_trades.extend(_fold_test_stats.get("trade_records", []))
-
-    # R2: Exclude folds with < 3 test trades — sparse folds are noise-dominated
-    _qualified = [(p, t) for p, t in fold_test_pnls if t >= 3]
-    if _qualified:
-        min_test_pnl  = min(p for p, t in _qualified)
-        mean_test_pnl = sum(p for p, t in _qualified) / len(_qualified)
-        _n_included   = len(_qualified)
-    else:
-        # Sentinel prevents division-by-zero; _n_included counts real folds, not the sentinel.
-        _source       = fold_test_pnls if fold_test_pnls else [(0.0, 0)]
-        min_test_pnl  = min(p for p, t in _source)
-        mean_test_pnl = sum(p for p, t in _source) / len(_source)
-        _n_included   = len(fold_test_pnls)
-
-    print("---")
-    print(f"mean_test_pnl:               {mean_test_pnl:.2f}")
-    print(f"min_test_pnl:                {min_test_pnl:.2f}")
-    print(f"min_test_pnl_folds_included: {_n_included}")
-
-    # Silent holdout: [TRAIN_END, BACKTEST_END]
-    _silent_stats = run_backtest(mnq_df, mes_df, start=TRAIN_END, end=BACKTEST_END)
-    print("---")
-    if WRITE_FINAL_OUTPUTS:
-        print_results(_silent_stats, prefix="holdout_")
-    else:
-        print(f"holdout_total_pnl:    {_silent_stats['total_pnl']:.2f}")
-        print(f"holdout_total_trades: {_silent_stats['total_trades']}")
-
-    # Compute per-fold averages for results.tsv (only folds with trades)
-    _active = [s for s in _fold_test_stats_list if s["total_trades"] >= 3]
-    _n_act  = len(_active) or 1
-    _avg_wr  = sum(s["win_rate"]           for s in _active) / _n_act
-    _avg_rr  = sum(s["avg_rr"]             for s in _active) / _n_act
-    _avg_sh  = sum(s["sharpe"]             for s in _active) / _n_act
-    _avg_cal = sum(s["calmar"]             for s in _active) / _n_act
-    _avg_exp = sum(s["avg_pnl_per_trade"]  for s in _active) / _n_act
-    _wl      = _avg_wr / (1 - _avg_wr) if _avg_wr < 1.0 else float("inf")
-    _write_results_tsv({
-        "mean_test_pnl":    f"{mean_test_pnl:.2f}",
-        "min_test_pnl":     f"{min_test_pnl:.2f}",
-        "total_test_trades": sum(t for _, t in fold_test_pnls),
-        "avg_win_rate":     f"{_avg_wr:.4f}",
-        "avg_rr":           f"{_avg_rr:.4f}",
-        "avg_sharpe":       f"{_avg_sh:.4f}",
-        "avg_calmar":       f"{_avg_cal:.4f}",
-        "avg_expectancy":   f"{_avg_exp:.2f}",
-        "wl_ratio":         f"{_wl:.4f}",
-    })
 
 
 # ---------------------------------------------------------------------------
@@ -1154,11 +1110,14 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
     import hypothesis as _hyp_mod
     import strategy as _strat_mod
     import trend as _trend_mod
+    import smt_state as _smt_state
     from smt_state import (
         DEFAULT_DAILY, DEFAULT_GLOBAL, DEFAULT_HYPOTHESIS, DEFAULT_POSITION,
         save_daily, save_global, save_hypothesis, save_position,
     )
     from strategy_smt import load_futures_data
+
+    _smt_state.set_in_memory_mode(True)
 
     futures = load_futures_data()
     mnq_all = futures["MNQ"]
@@ -1168,16 +1127,31 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
     all_trades: list[dict] = []
     all_events: list[dict] = []
+    equity_curve_v2: list[float] = [0.0]
 
     for bday in business_days:
         date = bday.date()
+
+        # ------------------------------------------------------------------ #
+        # Per-day index positions (searchsorted avoids O(n) boolean masks)    #
+        # ------------------------------------------------------------------ #
+        day_midnight  = pd.Timestamp(date, tz="America/New_York")
+        next_midnight = day_midnight + pd.Timedelta(days=1)
+        session_start_ts = pd.Timestamp(f"{date} 09:20:00", tz="America/New_York")
+
+        _mnq_pos_day  = mnq_all.index.searchsorted(day_midnight,      side="left")
+        _mnq_pos_next = mnq_all.index.searchsorted(next_midnight,     side="left")
+        _mnq_pos_sess = mnq_all.index.searchsorted(session_start_ts,  side="left")
+        _mes_pos_day  = mes_all.index.searchsorted(day_midnight,      side="left")
+        _mes_pos_next = mes_all.index.searchsorted(next_midnight,     side="left")
+        _mes_pos_sess = mes_all.index.searchsorted(session_start_ts,  side="left")
 
         # ------------------------------------------------------------------ #
         # Reset all four state files at the start of each day                 #
         # ------------------------------------------------------------------ #
         # Seed ATH from all historical bars so the hypothesis gate uses a real
         # cumulative high, not the default 0.0 which would be exceeded immediately.
-        hist_for_ath = mnq_all[mnq_all.index.date < date]
+        hist_for_ath = mnq_all.iloc[:_mnq_pos_day]
         seeded_global = copy.deepcopy(DEFAULT_GLOBAL)
         if not hist_for_ath.empty:
             seeded_global["all_time_high"] = float(hist_for_ath["High"].max())
@@ -1189,24 +1163,30 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         # ------------------------------------------------------------------ #
         # Build per-day slices                                                 #
         # ------------------------------------------------------------------ #
-        mnq_1m_today = mnq_all[mnq_all.index.date == date]
-        mes_1m_today = mes_all[mes_all.index.date == date]
+        mnq_1m_today = mnq_all.iloc[_mnq_pos_day:_mnq_pos_next]
+        mes_1m_today = mes_all.iloc[_mes_pos_day:_mes_pos_next]
 
         if mnq_1m_today.empty:
             continue
 
-        session_start_ts = pd.Timestamp(f"{date} 09:20:00", tz="America/New_York")
-        hist_mnq_1m = mnq_all[mnq_all.index < session_start_ts]
-        hist_mes_1m = mes_all[mes_all.index < session_start_ts]
+        hist_mnq_1m = mnq_all.iloc[:_mnq_pos_sess]
+        hist_mes_1m = mes_all.iloc[:_mes_pos_sess]
 
-        hist_hourly_mnq = (
-            hist_mnq_1m.resample("1h", label="left").agg({
-                "Open": "first", "High": "max", "Low": "min",
-                "Close": "last", "Volume": "sum",
-            }).dropna()
+        # Precompute hourly/4hr resamples of full hist once per day.
+        # hist_1hr_day is reused for both daily FVG detection and hypothesis.
+        _agg_h = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+        hist_1hr_day = (
+            hist_mnq_1m.resample("1h").agg(_agg_h).dropna(subset=["Open"])
             if not hist_mnq_1m.empty
-            else pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+            else pd.DataFrame(columns=list(_agg_h))
         )
+        hist_4hr_day = (
+            hist_mnq_1m.resample("4h").agg(_agg_h).dropna(subset=["Open"])
+            if not hist_mnq_1m.empty
+            else pd.DataFrame(columns=list(_agg_h))
+        )
+        # _detect_fvgs only needs High/Low; hist_1hr_day covers the full history.
+        hist_hourly_mnq = hist_1hr_day
 
         # ------------------------------------------------------------------ #
         # Run daily module once at 09:20 ET                                    #
@@ -1276,6 +1256,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                 hyp_divs = _hyp_mod.run_hypothesis(
                     now, mnq_session_bars.loc[:now], mes_session_bars.loc[:now],
                     hist_mnq_1m, hist_mes_1m,
+                    hist_1hr=hist_1hr_day, hist_4hr=hist_4hr_day,
                 )
                 if hyp_divs:
                     day_events.extend(hyp_divs)
@@ -1340,6 +1321,8 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
         all_events.extend(day_events)
         all_trades.extend(day_trades)
+        _day_pnl = sum(t["pnl_dollars"] for t in day_trades)
+        equity_curve_v2.append(equity_curve_v2[-1] + _day_pnl)
 
         # ------------------------------------------------------------------ #
         # Write per-day outputs                                                 #
@@ -1372,17 +1355,120 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
     # ------------------------------------------------------------------ #
     # Aggregate metrics                                                     #
     # ------------------------------------------------------------------ #
-    n_trades = len(all_trades)
-    total_pnl = sum(t["pnl_dollars"] for t in all_trades)
-    wins = sum(1 for t in all_trades if t["pnl_dollars"] > 0)
-    win_rate = wins / n_trades if n_trades > 0 else 0.0
+    _smt_state.set_in_memory_mode(False)
+    stats = _compute_metrics_v2(all_trades, equity_curve_v2)
 
     return {
         "trades":  all_trades,
         "events":  all_events,
         "metrics": {
-            "n_trades":  n_trades,
-            "total_pnl": round(total_pnl, 2),
-            "win_rate":  round(win_rate, 4),
+            "n_trades":  stats["total_trades"],
+            "total_pnl": stats["total_pnl"],
+            "win_rate":  stats["win_rate"],
         },
+        "stats": stats,
     }
+
+
+if __name__ == "__main__":
+    dfs = load_futures_data()
+    mnq_df = dfs["MNQ"]
+    mes_df = dfs["MES"]
+
+    if mnq_df.empty or mes_df.empty:
+        print("No futures data in cache. Run prepare_futures.py first.", file=sys.stderr)
+        sys.exit(1)
+
+    import pandas as _pd
+    from pandas.tseries.offsets import BDay as _BDay
+
+    _train_end_ts = _pd.Timestamp(TRAIN_END)
+
+    _effective_n_folds, _effective_fold_test_days = _compute_fold_params(
+        BACKTEST_START, TRAIN_END, WALK_FORWARD_WINDOWS, FOLD_TEST_DAYS
+    )
+
+    fold_test_pnls: list = []
+    _fold_test_stats_list: list = []  # collect per-fold stats for TSV aggregates
+    _all_test_trades: list = []       # collect per-trade records for trades.tsv
+
+    for _i in range(_effective_n_folds):
+        _steps_back         = _effective_n_folds - 1 - _i
+        _fold_test_end_ts   = _train_end_ts - _BDay(_steps_back * _effective_fold_test_days)
+        _fold_test_start_ts = _fold_test_end_ts - _BDay(_effective_fold_test_days)
+        _fold_train_end_ts  = _fold_test_start_ts
+
+        _fold_train_end  = str(_fold_train_end_ts.date())
+        _fold_test_start = str(_fold_test_start_ts.date())
+        _fold_test_end   = str(_fold_test_end_ts.date())
+        _fold_n          = _i + 1
+
+        if FOLD_TRAIN_DAYS > 0:
+            _fold_train_start_ts = _fold_train_end_ts - _BDay(FOLD_TRAIN_DAYS)
+            _fold_train_start = str(
+                max(_fold_train_start_ts.date(), datetime.date.fromisoformat(BACKTEST_START))
+            )
+        else:
+            _fold_train_start = BACKTEST_START
+
+        # run_backtest_v2 uses inclusive end; legacy run_backtest uses exclusive end — adjust by -1 BDay.
+        _v2_train_end = str((_fold_train_end_ts - _BDay(1)).date())
+        _v2_test_end  = str((_fold_test_end_ts  - _BDay(1)).date())
+        _fold_train_stats = run_backtest_v2(_fold_train_start, _v2_train_end, write_events=False)["stats"]
+        _fold_test_stats  = run_backtest_v2(_fold_test_start,  _v2_test_end,  write_events=False)["stats"]
+
+        print_results(_fold_train_stats, prefix=f"fold{_fold_n}_train_")
+        print_results(_fold_test_stats,  prefix=f"fold{_fold_n}_test_")
+
+        fold_test_pnls.append((_fold_test_stats["total_pnl"], _fold_test_stats["total_trades"]))
+        _fold_test_stats_list.append(_fold_test_stats)
+        _all_test_trades.extend(_fold_test_stats.get("trade_records", []))
+
+    # R2: Exclude folds with < 3 test trades — sparse folds are noise-dominated
+    _qualified = [(p, t) for p, t in fold_test_pnls if t >= 3]
+    if _qualified:
+        min_test_pnl  = min(p for p, t in _qualified)
+        mean_test_pnl = sum(p for p, t in _qualified) / len(_qualified)
+        _n_included   = len(_qualified)
+    else:
+        # Sentinel prevents division-by-zero; _n_included counts real folds, not the sentinel.
+        _source       = fold_test_pnls if fold_test_pnls else [(0.0, 0)]
+        min_test_pnl  = min(p for p, t in _source)
+        mean_test_pnl = sum(p for p, t in _source) / len(_source)
+        _n_included   = len(fold_test_pnls)
+
+    print("---")
+    print(f"mean_test_pnl:               {mean_test_pnl:.2f}")
+    print(f"min_test_pnl:                {min_test_pnl:.2f}")
+    print(f"min_test_pnl_folds_included: {_n_included}")
+
+    # Silent holdout: [TRAIN_END, BACKTEST_END]
+    _v2_backtest_end = str((pd.Timestamp(BACKTEST_END) - _BDay(1)).date())
+    _silent_stats = run_backtest_v2(TRAIN_END, _v2_backtest_end, write_events=False)["stats"]
+    print("---")
+    if WRITE_FINAL_OUTPUTS:
+        print_results(_silent_stats, prefix="holdout_")
+    else:
+        print(f"holdout_total_pnl:    {_silent_stats['total_pnl']:.2f}")
+        print(f"holdout_total_trades: {_silent_stats['total_trades']}")
+
+    # Compute per-fold averages for results.tsv (only folds with trades)
+    _active = [s for s in _fold_test_stats_list if s["total_trades"] >= 3]
+    _n_act  = len(_active) or 1
+    _avg_wr  = sum(s["win_rate"]           for s in _active) / _n_act
+    _avg_rr  = sum(s["avg_rr"]             for s in _active) / _n_act
+    _avg_sh  = sum(s["sharpe"]             for s in _active) / _n_act
+    _avg_cal = sum(s["calmar"]             for s in _active) / _n_act
+    _avg_exp = sum(s["avg_pnl_per_trade"]  for s in _active) / _n_act
+    _wl      = _avg_wr / (1 - _avg_wr) if _avg_wr < 1.0 else float("inf")
+    _write_results_tsv({
+        "mean_test_pnl":    f"{mean_test_pnl:.2f}",
+        "min_test_pnl":     f"{min_test_pnl:.2f}",
+        "total_test_trades": sum(t for _, t in fold_test_pnls),
+        "avg_win_rate":     f"{_avg_wr:.4f}",
+        "avg_rr":           f"{_avg_rr:.4f}",
+        "avg_sharpe":       f"{_avg_sh:.4f}",
+        "avg_calmar":       f"{_avg_cal:.4f}",
+        "avg_expectancy":   f"{_avg_exp:.2f}",
+        "wl_ratio":         f"{_wl:.4f}",
+    })

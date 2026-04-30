@@ -6,6 +6,7 @@
 import copy
 from datetime import datetime, timedelta
 
+import numpy as np
 import pandas as pd
 
 CAUTIOUS_SECONDARY_MAX_DIST = 150  # pts — secondary (1m confirmation) max distance
@@ -119,19 +120,19 @@ def _find_last_liquidity(
     best_idx   = -1
     best_name  = ""
 
-    for i in range(len(bars_array) - 1, -1, -1):
-        bar = bars_array.iloc[i]
-        for name, price in level_map.items():
-            touched = False
-            if name in high_names and float(bar["High"]) >= price:
-                touched = True
-            elif name in low_names and float(bar["Low"]) <= price:
-                touched = True
-            if touched and i > best_idx:
-                best_idx = i
+    highs = bars_array["High"].values
+    lows  = bars_array["Low"].values
+
+    for name, price in level_map.items():
+        if name in high_names:
+            idxs = np.where(highs >= price)[0]
+        else:
+            idxs = np.where(lows <= price)[0]
+        if len(idxs) > 0:
+            last_touch = int(idxs[-1])
+            if last_touch > best_idx:
+                best_idx = last_touch
                 best_name = name
-        if best_idx == len(bars_array) - 1:
-            break
 
     if best_idx < 0:
         return "", None
@@ -243,33 +244,15 @@ def _compute_divs(
 
 
 def _find_nearest_bar(combined: pd.DataFrame, target_ts: pd.Timestamp) -> dict | None:
-    """Find the bar nearest to target_ts in combined DataFrame.
-
-    Returns dict with Low and High, or None if DataFrame is empty.
-    """
+    """Find the bar nearest to target_ts in combined DataFrame (must be sorted)."""
     if combined.empty:
         return None
-
-    # Find nearest index position using searchsorted
-    idx_sorted = combined.index.sort_values()
-    combined_sorted = combined.loc[idx_sorted]
-
-    pos = idx_sorted.searchsorted(target_ts)
-    # Clamp to valid range
-    pos = max(0, min(pos, len(idx_sorted) - 1))
-
-    # Check the nearest among pos-1, pos, pos+1
-    candidates = []
-    for p in [pos - 1, pos]:
-        if 0 <= p < len(idx_sorted):
-            candidates.append(p)
-
-    if not candidates:
-        return None
-
-    # Pick the one with smallest absolute time difference
-    best_p = min(candidates, key=lambda p: abs(idx_sorted[p] - target_ts))
-    bar = combined_sorted.iloc[best_p]
+    idx = combined.index
+    pos = idx.searchsorted(target_ts)
+    pos = max(0, min(pos, len(idx) - 1))
+    if pos > 0 and abs(idx[pos - 1] - target_ts) <= abs(idx[pos] - target_ts):
+        pos -= 1
+    bar = combined.iloc[pos]
     return {"Low": float(bar["Low"]), "High": float(bar["High"])}
 
 
@@ -284,11 +267,24 @@ def _named_price(liquidities: list, name: str) -> float | None:
     return None
 
 
-def _detect_fvg_1hr(hist_mnq_1m: pd.DataFrame, session_mnq_1m: pd.DataFrame) -> list:
-    combined = pd.concat([hist_mnq_1m, session_mnq_1m])
-    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-    agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
-    bars = combined.resample("1h").agg(agg).dropna(subset=["Open"])
+def _detect_fvg_1hr(
+    hist_mnq_1m: pd.DataFrame,
+    session_mnq_1m: pd.DataFrame,
+    *,
+    hist_1hr: "pd.DataFrame | None" = None,
+) -> list:
+    _agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    if hist_1hr is not None and not hist_1hr.empty:
+        if not session_mnq_1m.empty:
+            sess_1hr = session_mnq_1m.resample("1h").agg(_agg).dropna(subset=["Open"])
+            bars = pd.concat([hist_1hr, sess_1hr])
+            bars = bars[~bars.index.duplicated(keep="last")].sort_index()
+        else:
+            bars = hist_1hr
+    else:
+        combined = pd.concat([hist_mnq_1m, session_mnq_1m])
+        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+        bars = combined.resample("1h").agg(_agg).dropna(subset=["Open"])
     bars = bars.iloc[-(BOS_LOOKBACK_1HR + 5):]
     n = len(bars)
     fvgs = []
@@ -511,8 +507,11 @@ def _determine_direction(
     liquidities: list,
     global_state: dict,
     divs: list,
+    *,
+    hist_1hr: "pd.DataFrame | None" = None,
+    hist_4hr: "pd.DataFrame | None" = None,
 ) -> tuple:
-    fvg_1hr = _detect_fvg_1hr(hist_mnq_1m, mnq_1m)
+    fvg_1hr = _detect_fvg_1hr(hist_mnq_1m, mnq_1m, hist_1hr=hist_1hr)
     levels  = _build_meaningful_levels(liquidities, fvg_1hr)
     prior   = mnq_1m.iloc[:-1]
     smt_sc  = _compute_smt_score(divs, liquidities)
@@ -664,11 +663,19 @@ def _determine_direction(
 
     # Rules 3+4: multi-TF premium/discount bias + BOS/CHoCH + SMT scoring layer.
     pd_sc = _compute_pd_score(current_close, week_high, week_low, day_high, day_low)
-    combined_bars = pd.concat([hist_mnq_1m, mnq_1m])
-    combined_bars = combined_bars[~combined_bars.index.duplicated(keep="last")].sort_index()
-    agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
-    mnq_1hr = combined_bars.resample("1h").agg(agg).dropna(subset=["Open"])
-    mnq_4hr = combined_bars.resample("4h").agg(agg).dropna(subset=["Open"])
+    _agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    if hist_1hr is not None and hist_4hr is not None:
+        _sess_1hr = mnq_1m.resample("1h").agg(_agg).dropna(subset=["Open"])
+        mnq_1hr = pd.concat([hist_1hr, _sess_1hr])
+        mnq_1hr = mnq_1hr[~mnq_1hr.index.duplicated(keep="last")].sort_index()
+        _sess_4hr = mnq_1m.resample("4h").agg(_agg).dropna(subset=["Open"])
+        mnq_4hr = pd.concat([hist_4hr, _sess_4hr])
+        mnq_4hr = mnq_4hr[~mnq_4hr.index.duplicated(keep="last")].sort_index()
+    else:
+        combined_bars = pd.concat([hist_mnq_1m, mnq_1m])
+        combined_bars = combined_bars[~combined_bars.index.duplicated(keep="last")].sort_index()
+        mnq_1hr = combined_bars.resample("1h").agg(_agg).dropna(subset=["Open"])
+        mnq_4hr = combined_bars.resample("4h").agg(_agg).dropna(subset=["Open"])
     b1hr = _compute_bos_choch_score(mnq_1hr, BOS_SWING_N, BOS_LOOKBACK_1HR)
     b4hr = _compute_bos_choch_score(mnq_4hr, BOS_SWING_N, BOS_LOOKBACK_4HR)
     bos_sc   = 0.35 * b1hr + 0.65 * b4hr
@@ -696,6 +703,9 @@ def run_hypothesis(
     mes_1m: pd.DataFrame,
     hist_mnq_1m: pd.DataFrame,
     hist_mes_1m: pd.DataFrame,
+    *,
+    hist_1hr: "pd.DataFrame | None" = None,
+    hist_4hr: "pd.DataFrame | None" = None,
 ) -> list:
     """Run the hypothesis module for the current 5m boundary.
 
@@ -780,6 +790,8 @@ def run_hypothesis(
         liquidities  = liquidities,
         global_state = global_state,
         divs         = divs,
+        hist_1hr     = hist_1hr,
+        hist_4hr     = hist_4hr,
     )
 
     # Step 7: targets — filter liquidities in direction from current close.
@@ -871,17 +883,14 @@ def run_hypothesis(
             direction = "none"
 
     # Step 9: entry_ranges — 12hr ago and 1week ago same time anchors.
+    # Both anchors fall within hist_mnq_1m (session runs 09:20-17:00 ET; even
+    # at 17:00, 12h prior = 05:00 ET which is pre-session).
     ts_now = pd.Timestamp(now)
     anchor_12hr = ts_now - pd.Timedelta(hours=12)
     anchor_1week = ts_now - pd.Timedelta(weeks=1)
 
-    # Combine historical and current bars for lookup
-    combined_mnq = pd.concat([hist_mnq_1m, mnq_1m]).sort_index()
-    # Drop duplicates (hist may overlap with current)
-    combined_mnq = combined_mnq[~combined_mnq.index.duplicated(keep="last")]
-
     entry_ranges = []
-    bar_12hr = _find_nearest_bar(combined_mnq, anchor_12hr)
+    bar_12hr = _find_nearest_bar(hist_mnq_1m, anchor_12hr)
     if bar_12hr is not None:
         entry_ranges.append({
             "source": "12hr",
@@ -889,7 +898,7 @@ def run_hypothesis(
             "high": bar_12hr["High"],
         })
 
-    bar_1week = _find_nearest_bar(combined_mnq, anchor_1week)
+    bar_1week = _find_nearest_bar(hist_mnq_1m, anchor_1week)
     if bar_1week is not None:
         entry_ranges.append({
             "source": "1week",

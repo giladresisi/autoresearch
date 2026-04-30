@@ -893,11 +893,14 @@ def compute_tdo(mnq_bars: pd.DataFrame, date: datetime.date) -> float | None:
     target_time = pd.Timestamp(f"{date} 09:30:00", tz="America/New_York")
     if target_time in mnq_bars.index:
         return float(mnq_bars.loc[target_time, "Open"])
-    # Proxy: use the first available bar on that date
-    day_bars = mnq_bars[mnq_bars.index.date == date]
-    if day_bars.empty:
+    # Proxy: use the first available bar on that date (searchsorted avoids O(n) .date scan)
+    day_start = pd.Timestamp(date, tz="America/New_York")
+    day_end   = day_start + pd.Timedelta(days=1)
+    pos_s = mnq_bars.index.searchsorted(day_start, side="left")
+    pos_e = mnq_bars.index.searchsorted(day_end,   side="left")
+    if pos_s >= pos_e:
         return None
-    return float(day_bars.iloc[0]["Open"])
+    return float(mnq_bars.iloc[pos_s]["Open"])
 
 
 def compute_midnight_open(mnq_bars: pd.DataFrame, date: datetime.date) -> float | None:
@@ -907,14 +910,17 @@ def compute_midnight_open(mnq_bars: pd.DataFrame, date: datetime.date) -> float 
     that date if no bar exists exactly at midnight (e.g. on 5m resampled data).
     Returns None if no bars exist for the date.
     """
-    day_bars = mnq_bars[mnq_bars.index.date == date]
-    if day_bars.empty:
+    day_start = pd.Timestamp(date, tz="America/New_York")
+    day_end   = day_start + pd.Timedelta(days=1)
+    pos_s = mnq_bars.index.searchsorted(day_start, side="left")
+    pos_e = mnq_bars.index.searchsorted(day_end,   side="left")
+    if pos_s >= pos_e:
         return None
     midnight = pd.Timestamp(f"{date} 00:00:00", tz="America/New_York")
-    after_midnight = day_bars[day_bars.index >= midnight]
-    if not after_midnight.empty:
-        return float(after_midnight.iloc[0]["Open"])
-    return float(day_bars.iloc[0]["Open"])
+    pos_m = mnq_bars.index.searchsorted(midnight, side="left")
+    if pos_m < pos_e:
+        return float(mnq_bars.iloc[pos_m]["Open"])
+    return float(mnq_bars.iloc[pos_s]["Open"])
 
 
 def compute_overnight_range(mnq_bars: pd.DataFrame, date: datetime.date) -> dict:

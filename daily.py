@@ -104,15 +104,8 @@ def _compute_two(hist_mnq_1m: pd.DataFrame, today: datetime.date) -> Optional[fl
         return float(hist_mnq_1m.loc[sunday_1800, "Open"])
 
     # Filter to ISO-week bars for fallback paths
-    def _is_current_week(ts: pd.Timestamp) -> bool:
-        cal = ts.isocalendar()
-        return cal.year == today_iso_year and cal.week == today_iso_week
-
-    mask = pd.Series(
-        [_is_current_week(ts) for ts in hist_mnq_1m.index],
-        index=hist_mnq_1m.index,
-        dtype=bool,
-    )
+    _iso = hist_mnq_1m.index.isocalendar()
+    mask = (_iso["year"] == today_iso_year) & (_iso["week"] == today_iso_week)
     week_bars = hist_mnq_1m[mask]
 
     # Fallback: Monday 00:00 ET
@@ -158,6 +151,14 @@ def _detect_fvgs(
     highs = hourly_bars["High"].values
     lows = hourly_bars["Low"].values
     idx = hourly_bars.index
+
+    # Pre-filter 1m bars to only those after the earliest possible FVG formation.
+    earliest_formation = idx[2]
+    later_1m_all = mnq_1m[mnq_1m.index > earliest_formation]
+    later_high = later_1m_all["High"].values if not later_1m_all.empty else None
+    later_low  = later_1m_all["Low"].values  if not later_1m_all.empty else None
+    later_idx  = later_1m_all.index
+
     result = []
 
     for i in range(len(hourly_bars) - 2):
@@ -171,36 +172,32 @@ def _detect_fvgs(
         side = None
 
         if bar3_l > bar1_h:
-            # Bullish FVG
-            fvg_top = float(bar3_l)
+            fvg_top    = float(bar3_l)
             fvg_bottom = float(bar1_h)
             side = "bull"
         elif bar3_h < bar1_l:
-            # Bearish FVG
-            fvg_top = float(bar1_l)
+            fvg_top    = float(bar1_l)
             fvg_bottom = float(bar3_h)
             side = "bear"
 
         if side is None:
             continue
 
-        # Formation timestamp = timestamp of bar[i+2] (the bar that creates the gap)
         formation_ts = idx[i + 2]
 
-        # Check "unvisited": scan all subsequent 1m bars whose time > formation_ts
-        # A bar "re-enters" if its High >= fvg_bottom AND Low <= fvg_top
-        later_1m = mnq_1m[mnq_1m.index > formation_ts]
-        if not later_1m.empty:
-            filled_mask = (later_1m["High"] >= fvg_bottom) & (later_1m["Low"] <= fvg_top)
-            if filled_mask.any():
+        if later_high is not None:
+            # Slice to bars after this FVG's formation using searchsorted (O(log n))
+            pos = later_idx.searchsorted(formation_ts, side="right")
+            h = later_high[pos:]
+            lo = later_low[pos:]
+            if len(h) > 0 and ((h >= fvg_bottom) & (lo <= fvg_top)).any():
                 continue  # Visited — exclude
 
         ts_str = formation_ts.strftime("%Y%m%d_%H%M")
-        name = f"fvg_{ts_str}_{side}"
         result.append({
-            "name": name,
-            "kind": "fvg",
-            "top": fvg_top,
+            "name":   f"fvg_{ts_str}_{side}",
+            "kind":   "fvg",
+            "top":    fvg_top,
             "bottom": fvg_bottom,
         })
 
@@ -252,15 +249,8 @@ def run_daily(
     # week_high / week_low from hist_mnq_1m filtered to current ISO week
     today_ts = pd.Timestamp(today)
     today_iso = today_ts.isocalendar()
-    week_mask = pd.Series(
-        [
-            (ts.isocalendar().year == today_iso.year and
-             ts.isocalendar().week == today_iso.week)
-            for ts in combined_1m.index
-        ],
-        index=combined_1m.index,
-        dtype=bool,
-    )
+    _iso = combined_1m.index.isocalendar()
+    week_mask = (_iso["year"] == today_iso.year) & (_iso["week"] == today_iso.week)
     week_bars = combined_1m[week_mask]
     if not week_bars.empty:
         liquidities.append({"name": "week_high", "kind": "level",
@@ -287,7 +277,10 @@ def run_daily(
 
     # Prior 2 trading days: high, low, TDO
     for i, prior_date in enumerate(_last_n_trading_dates(today, 2), start=1):
-        prior_bars = combined_1m[combined_1m.index.date == prior_date]
+        _pmid = pd.Timestamp(prior_date, tz="America/New_York")
+        _ps = combined_1m.index.searchsorted(_pmid,                             side="left")
+        _pe = combined_1m.index.searchsorted(_pmid + pd.Timedelta(days=1),      side="left")
+        prior_bars = combined_1m.iloc[_ps:_pe]
         if not prior_bars.empty:
             liquidities.append({"name": f"prev{i}_day_high", "kind": "level",
                                 "price": float(prior_bars["High"].max())})
