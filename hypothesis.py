@@ -20,6 +20,9 @@ BOS_SWING_N                =   2   # bars each side for swing high/low detection
 BOS_LOOKBACK_1HR           =   8   # 1hr bars — recency window for BOS/CHoCH
 BOS_LOOKBACK_4HR           =   3   # 4hr bars — recency window for BOS/CHoCH
 DIRECTION_SCORE_THRESHOLD  =  0.35 # combined Rule 3+4 score required to commit
+RULE2B_ANCHOR_MAX_AGE_HOURS  =  1.0 # hrs — combined with RULE2B_STALE_RECOVERY_PTS
+RULE2B_STALE_RECOVERY_PTS   = 200.0 # pts — anchor is stale only when BOTH age > max_age AND
+                                     #       price has recovered this far from the sweep level
 
 from smt_state import (
     load_global,
@@ -507,6 +510,7 @@ def _determine_direction(
     liquidities: list,
     global_state: dict,
     divs: list,
+    now: "datetime",
     *,
     hist_1hr: "pd.DataFrame | None" = None,
     hist_4hr: "pd.DataFrame | None" = None,
@@ -593,14 +597,33 @@ def _determine_direction(
     if _last_liq and day_high is not None and day_low is not None:
         _daily_mid = (day_high + day_low) / 2.0
         _above_mid = current_close > _daily_mid
+        _liq_price_map = {l["name"]: float(l["price"]) for l in liquidities if l.get("kind") == "level"}
+
+        # Gate: stale anchor — sweep is old AND price has structurally recovered from it.
+        # Requiring both conditions prevents blocking trending days where price is simply
+        # pulling back toward the sweep level (small recovery).
+        # Pre-session touches use session open as the age reference so they're always fresh
+        # at the session start regardless of when overnight they happened.
+        _anchor_age_ok = True
+        if _last_liq_ts is not None:
+            _now_tz = pd.Timestamp(now)
+            if _now_tz.tzinfo is None:
+                _now_tz = _now_tz.tz_localize("America/New_York")
+            _session_open = mnq_1m.index[0] if not mnq_1m.empty else _last_liq_ts
+            _ref_ts = max(_last_liq_ts, _session_open)
+            _age_h = (_now_tz - _ref_ts).total_seconds() / 3600.0
+            _sweep_price = _liq_price_map.get(_last_liq) if _liq_price_map else None
+            if _sweep_price is not None:
+                _recovery = abs(current_close - _sweep_price)
+                _anchor_age_ok = not (_age_h > RULE2B_ANCHOR_MAX_AGE_HOURS and _recovery > RULE2B_STALE_RECOVERY_PTS)
+            else:
+                _anchor_age_ok = _age_h <= RULE2B_ANCHOR_MAX_AGE_HOURS
 
         if _pre_session is not None and not _pre_session.empty:
             _true_day_bars = pd.concat([_pre_session, mnq_1m])
             _true_day_bars = _true_day_bars[~_true_day_bars.index.duplicated(keep="last")].sort_index()
         else:
             _true_day_bars = mnq_1m
-
-        _liq_price_map = {l["name"]: float(l["price"]) for l in liquidities if l.get("kind") == "level"}
 
         def _first_mid_cross(before_ts: "pd.Timestamp | None", upward: bool) -> "pd.Timestamp | None":
             _bars = _true_day_bars[_true_day_bars.index <= before_ts] if before_ts is not None else _true_day_bars
@@ -632,22 +655,30 @@ def _determine_direction(
                     return True
             return False
 
-        if _last_liq in _low_names:
-            if _above_mid:
-                r2b_dir = "up"
-            else:
-                r2b_dir = "down"
-        elif _last_liq in _high_names:
-            if not _above_mid:
-                r2b_dir = "down"
-            else:
-                _cross_ts = _first_mid_cross(_last_liq_ts, upward=True)
-                if _cross_ts is not None and not _opp_level_touched(_cross_ts, _last_liq_ts, _low_names, check_high=False):
+        r2b_dir = None
+        if _anchor_age_ok:
+            if _last_liq in _low_names:
+                if _above_mid:
                     r2b_dir = "up"
                 else:
+                    # Mirror of the _high_names logic: only advance further below the low when
+                    # price made a committed downward run through the mid before the sweep AND
+                    # the opposite (high) level wasn't revisited between that crossing and the sweep.
+                    # Without a committed downward mid-cross, aim for the opposite half (up).
+                    _cross_ts = _first_mid_cross(_last_liq_ts, upward=False)
+                    if _cross_ts is not None and not _opp_level_touched(_cross_ts, _last_liq_ts, _high_names, check_high=True):
+                        r2b_dir = "down"
+                    else:
+                        r2b_dir = "up"
+            elif _last_liq in _high_names:
+                if not _above_mid:
                     r2b_dir = "down"
-        else:
-            r2b_dir = None
+                else:
+                    _cross_ts = _first_mid_cross(_last_liq_ts, upward=True)
+                    if _cross_ts is not None and not _opp_level_touched(_cross_ts, _last_liq_ts, _low_names, check_high=False):
+                        r2b_dir = "up"
+                    else:
+                        r2b_dir = "down"
         if r2b_dir is not None:
             reason["rule"]             = "rule2b"
             reason["last_swept_level"] = _last_liq
@@ -790,6 +821,7 @@ def run_hypothesis(
         liquidities  = liquidities,
         global_state = global_state,
         divs         = divs,
+        now          = now,
         hist_1hr     = hist_1hr,
         hist_4hr     = hist_4hr,
     )
@@ -874,12 +906,15 @@ def run_hypothesis(
     # Step 8b: veto direction when entry conditions are unfavourable.
     # (1) Secondary cautious price is too close — not enough room to run.
     # (2) Up direction but we are already at or above the recorded ATH — price in uncharted territory.
+    # (3) No targets exist in this direction — nothing to trade toward.
     if direction != "none":
         sec_dist = (abs(float(cautious_price_secondary) - current_close)
                     if cautious_price_secondary != "" else 0)
         if cautious_price_secondary != "" and sec_dist < CAUTIOUS_MIN_DIST:
             direction = "none"
         elif direction == "up" and current_close >= ath:
+            direction = "none"
+        elif not targets:
             direction = "none"
 
     # Step 9: entry_ranges — 12hr ago and 1week ago same time anchors.
