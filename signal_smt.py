@@ -254,7 +254,7 @@ def _format_limit_filled_line(ts: pd.Timestamp, evt: dict) -> str:
 
 def _load_hist_mnq() -> pd.DataFrame:
     """Load the Databento 5m historical parquet for hypothesis rule engine."""
-    hist_path = Path("data/historical/MNQ.parquet")
+    hist_path = Path("data/MNQ.parquet")
     if hist_path.exists():
         return pd.read_parquet(hist_path)
     return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])

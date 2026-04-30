@@ -3,12 +3,12 @@
 Usage:
     uv run prepare_futures.py
 
-Downloads from Databento (GLBX.MDP3, MNQ.c.0/MES.c.0) to data/historical/.
+Downloads from Databento (GLBX.MDP3, MNQ.c.0/MES.c.0) to data/.
 Requires DATABENTO_API_KEY in environment (or .env file).
 Running again skips tickers whose file already exists (idempotent).
 
 Lookup priority per ticker:
-  1. data/historical/{ticker}.parquet  — Databento permanent store (2024-01-01 Databento window)
+  1. data/{ticker}.parquet             — Databento permanent store (2024-01-01 Databento window)
   2. {CACHE_DIR}/5m/{ticker}.parquet   — IB ephemeral cache (legacy fallback)
   3. Live Databento download
 """
@@ -38,7 +38,7 @@ _TODAY         = datetime.date.today()
 BACKTEST_END   = _TODAY.isoformat()
 
 # Databento permanent store — survives cache clears
-HISTORICAL_DATA_DIR = Path("data/historical")
+HISTORICAL_DATA_DIR = Path("data")
 
 # Databento continuous front-month symbols (volume-roll, stype_in="continuous")
 DATABENTO_SYMBOLS = {
@@ -69,14 +69,14 @@ def process_ticker(ticker: str) -> bool:
     """Fetch and cache futures bars. Returns True on success.
 
     Priority:
-      1. data/historical/{ticker}.parquet  — Databento permanent store
+      1. data/{ticker}.parquet             — Databento permanent store
       2. {CACHE_DIR}/5m/{ticker}.parquet   — IB ephemeral cache
       3. Live Databento download
     """
     # Level 1: Databento permanent store
     historical_path = HISTORICAL_DATA_DIR / f"{ticker}.parquet"
     if historical_path.exists():
-        print(f"  {ticker}: found in data/historical/, skipping download")
+        print(f"  {ticker}: found in data/, skipping download")
         return True
 
     # Level 2: IB ephemeral cache (legacy data from previous runs)
