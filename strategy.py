@@ -129,9 +129,10 @@ def run_strategy(
         # through to 2.4 to check fill on the existing limit.
         _MARKET_ENTRY_THRESHOLD = 5.0  # pts: switch to market if price is this close
         MIN_STOP_DISTANCE = 5.0
+        MAX_CONFIRMATION_BODY_PTS = 25.0  # reject momentum/reversal bars as confirmation
 
         opp_5m = _find_last_opposite_5m_bar(mnq_1m_recent, now, direction, formed_at)
-        if opp_5m is not None:
+        if opp_5m is not None and (opp_5m["body_high"] - opp_5m["body_low"]) <= MAX_CONFIRMATION_BODY_PTS:
             body_end_price = opp_5m["body_high"] if direction == "up" else opp_5m["body_low"]
             current_conf_time = position.get("confirmation_bar", {}).get("time", "")
             if opp_5m["time"] != current_conf_time or position["limit_entry"] == "":
@@ -154,7 +155,7 @@ def run_strategy(
                 if approach < _MARKET_ENTRY_THRESHOLD:
                     # Price is at or within threshold of the entry — fill immediately at bar mid.
                     bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
-                    stop = opp_5m["low"] if direction == "up" else opp_5m["high"]
+                    stop = opp_5m["body_low"] if direction == "up" else opp_5m["body_high"]
                     if abs(bar_mid - float(stop)) < MIN_STOP_DISTANCE:
                         return None
                     position["active"] = {
@@ -189,11 +190,11 @@ def run_strategy(
             fill_price  = float(limit_entry)
             conf_bar    = position["confirmation_bar"]
 
-            # Stop: confirmation_bar.low for long, confirmation_bar.high for short
+            # Stop: body of confirmation bar (tighter than full wick)
             if direction == "up":
-                stop = conf_bar["low"]
+                stop = conf_bar["body_low"]
             else:
-                stop = conf_bar["high"]
+                stop = conf_bar["body_high"]
 
             if abs(fill_price - float(stop)) < MIN_STOP_DISTANCE:
                 return None
