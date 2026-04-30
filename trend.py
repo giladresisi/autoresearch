@@ -311,48 +311,63 @@ def run_trend(
 
     _HIGH_PRIO_LEVELS = {"week_high", "week_low", "day_high", "day_low"}
 
+    # After trend-broken fires on a level, suppress re-fires on the same level+direction
+    # for this many minutes.  Prevents a whipsaw around a level from repeatedly cancelling
+    # pending limit entries before they can fill.
+    _TREND_BROKEN_COOLDOWN_MINUTES = 10
+
+    _now_ts = pd.Timestamp(now)
+    _cooldowns = position.get("trend_broken_cooldowns", [])
+    _active_cooldown_keys = {
+        (c["level_name"], c["direction"])
+        for c in _cooldowns
+        if pd.Timestamp(c["expires_at"]) > _now_ts
+    }
+
     for level in liquidities:
         if level.get("kind") != "level":
             continue
-        if level.get("name") not in _HIGH_PRIO_LEVELS:
+        level_name = level.get("name", "")
+        if level_name not in _HIGH_PRIO_LEVELS:
+            continue
+        if (level_name, direction) in _active_cooldown_keys:
             continue
 
         level_price = float(level["price"])
 
+        triggered = False
+        extra: dict = {}
         if direction == "up":
             # Opposite-direction levels are those *below* current price.
             if level_price < bar_close and bar_low <= level_price:
-                # A downside support was breached → trend broken.
-                hypothesis["direction"] = "none"
-                position["confirmation_bar"] = {}
-                position["limit_entry"] = ""
-                save_position(position)
-                save_hypothesis(hypothesis)
-                return {
-                    "kind":            "trend-broken",
-                    "time":            now.isoformat(),
-                    "price":           bar_close,
-                    "broken_direction": direction,
-                    "level_name":      level.get("name", ""),
-                    "level_price":     level_price,
-                    "bar_low":         bar_low,
-                }
+                triggered = True
+                extra = {"bar_low": bar_low}
         else:  # direction == "down"
             # Opposite-direction levels are those *above* current price.
             if level_price > bar_close and bar_high >= level_price:
-                hypothesis["direction"] = "none"
-                position["confirmation_bar"] = {}
-                position["limit_entry"] = ""
-                save_position(position)
-                save_hypothesis(hypothesis)
-                return {
-                    "kind":            "trend-broken",
-                    "time":            now.isoformat(),
-                    "price":           bar_close,
-                    "broken_direction": direction,
-                    "level_name":      level.get("name", ""),
-                    "level_price":     level_price,
-                    "bar_high":        bar_high,
-                }
+                triggered = True
+                extra = {"bar_high": bar_high}
+
+        if triggered:
+            expires_at = (_now_ts + pd.Timedelta(minutes=_TREND_BROKEN_COOLDOWN_MINUTES)).isoformat()
+            new_cooldowns = [c for c in _cooldowns
+                             if not (c["level_name"] == level_name and c["direction"] == direction)]
+            new_cooldowns.append({"level_name": level_name, "direction": direction, "expires_at": expires_at})
+            position["trend_broken_cooldowns"] = new_cooldowns
+            hypothesis["direction"] = "none"
+            position["confirmation_bar"] = {}
+            position["limit_entry"] = ""
+            save_position(position)
+            save_hypothesis(hypothesis)
+            sig = {
+                "kind":             "trend-broken",
+                "time":             now.isoformat(),
+                "price":            bar_close,
+                "broken_direction": direction,
+                "level_name":       level_name,
+                "level_price":      level_price,
+            }
+            sig.update(extra)
+            return sig
 
     return None
