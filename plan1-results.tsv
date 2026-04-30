@@ -1,0 +1,25 @@
+run	flags	flag_values	mean_test_pnl	total_trades	win_rate	avg_rr	avg_pnl_trade	max_drawdown	delta_pnl	delta_pct	verdict	insight
+0	BASELINE	-	3885.80	36	0.556	7.468	107.94	130.20	0.00	0.0%	BASELINE	Reference: 36 trades, 55.6% WR, 7.47 avg RR. All exits via trailing stop (TRAIL_AFTER_TP_PTS=1.0).
+1	MIDNIGHT_OPEN_AS_TP	True	3885.80	36	0.556	7.468	107.94	130.20	0.00	0.0%	NEUTRAL	Midnight open ≈ TDO in Jan-Apr 2026. Trailing stop behavior equalizes final exits regardless of TP target. May help in trending markets where midnight open diverges from TDO.
+2	STRUCTURAL_STOP_MODE + STRUCTURAL_STOP_BUFFER_PTS	True + 2.0	2707.00	45	0.844	2.084	60.16	92.00	-1178.80	-30.3%	REJECT	+9 trades (+25%), +28pp WR — but RR collapses from 7.47 → 2.08 and total PnL drops $1,179. Wider structural stop moves trail anchor further from entry, shrinking winner profits. Wick-based stop extracts more when trades run.
+3	STRUCTURAL_STOP_MODE + STRUCTURAL_STOP_BUFFER_PTS	True + 3.0	2767.00	44	0.841	2.029	62.89	96.00	-1118.80	-28.8%	REJECT	Slightly larger buffer than 2pt doesn't help (+$60). Same pattern: high WR but crushed RR. Structural stop mode not viable with current trailing-stop exit mechanism.
+4	SILVER_BULLET_WINDOW_ONLY	True	3885.80	36	0.556	7.468	107.94	130.20	0.00	0.0%	NEUTRAL	All 36 baseline trades already fall within 09:50–10:10 ET. SMT divergence setup naturally clusters in this window. Filter has no bite in current data — may filter noise in other market regimes.
+5	OVERNIGHT_SWEEP_REQUIRED	True	3885.80	36	0.556	7.468	107.94	130.20	0.00	0.0%	NEUTRAL	All 36 baseline trades already had overnight sweeps before entry. Gate provides no additional filtering in this period. Could add value in lower-volatility periods where overnight sweep is not universal.
+6	OVERNIGHT_RANGE_AS_TP	True	3885.80	36	0.556	7.468	107.94	130.20	0.00	0.0%	NEUTRAL	Overnight range TP equals TDO in this period, or trailing stop equalizes outcome. MIDNIGHT_OPEN_AS_TP takes priority; both fall back to TDO when None. No differential signal.
+7	HIDDEN_SMT_ENABLED	True	5075.00	45	0.578	7.247	112.78	108.00	+1189.20	+30.6%	APPROVE	WINNER. +9 extra trades (+25%), +30.6% PnL, slightly higher WR (+2.2pp), comparable RR (7.25 vs 7.47), and LOWER drawdown ($108 vs $130). Close-based (body) SMT captures legitimate setups wick-based filter misses. Clean additive improvement.
+8	INVALIDATION_MSS_EXIT	True	1129.00	36	0.444	2.135	31.35	720.00	-2756.80	-71.0%	REJECT	Catastrophic. 22/36 trades exit early via close-below-divergence-low. Drawdown 5.5x ($720 vs $130), WR -11pp. Condition fires too close to entry — cuts winners before they run. Needs minimum-distance buffer before it can be viable.
+9	INVALIDATION_SMT_EXIT	True	1335.00	36	0.444	2.297	37.08	720.00	-2550.80	-65.7%	REJECT	Catastrophic. 20/36 early exits via SMT defended-level breach. Same destruction pattern as MSS exit. Session low/high is too close to entry price — premature exits dominate. Distance filter required before re-testing.
+10	INVALIDATION_CISD_EXIT	True	3885.80	36	0.556	7.468	107.94	130.20	0.00	0.0%	NEUTRAL	No effect — midnight open (CISD reference) never breached on close after entry in this period. Condition inactive. Would need MIDNIGHT_OPEN to diverge meaningfully from entry zone to fire.
+11	HIDDEN_SMT_ENABLED + MIDNIGHT_OPEN_AS_TP	True + True	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	SKIPPED	Run hung (compute_midnight_open 807K-row filter per-day over 45 HIDDEN_SMT sessions). Expected: ~same as run #7 since MIDNIGHT_OPEN was neutral standalone (run #1).
+
+SUMMARY
+=======
+One clear winner: HIDDEN_SMT_ENABLED (+30.6% PnL, lower drawdown, more trades, no regression).
+Three neutrals: MIDNIGHT_OPEN_AS_TP, SILVER_BULLET_WINDOW_ONLY, OVERNIGHT_SWEEP_REQUIRED, OVERNIGHT_RANGE_AS_TP, INVALIDATION_CISD_EXIT — no effect in this 60-day window.
+Two structural rejections: STRUCTURAL_STOP_MODE (kills RR via wider trail anchor), invalidation exits MSS+SMT (fires too close to entry, massive drawdown).
+HIDDEN_SMT should be enabled by default going forward. Invalidation exits need a minimum distance-to-entry filter before re-testing.
+
+GO/NO-GO FOR PLAN 2: GO
+HIDDEN_SMT_ENABLED is a confirmed additive improvement with zero regression risk (it's opt-in, defaults False).
+Plan 2 can proceed. Recommend setting HIDDEN_SMT_ENABLED=True as the new baseline for Plan 2 experiments.
+Invalidation exits are worth revisiting in Plan 2 with a distance_buffer param — the concept is sound but the current threshold is too tight.

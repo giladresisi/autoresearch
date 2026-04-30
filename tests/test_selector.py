@@ -239,10 +239,6 @@ class TestExtractStrategyBoundary:
 # ── Integration test (real claude CLI call) ───────────────────────────────────
 
 @pytest.mark.integration
-@pytest.mark.skipif(
-    os.environ.get("CLAUDECODE") == "1",
-    reason="claude CLI returns empty stdout when nested inside a Claude Code session",
-)
 def test_select_strategy_real_claude_code():
     """
     Call the real claude CLI and verify the response is structurally valid

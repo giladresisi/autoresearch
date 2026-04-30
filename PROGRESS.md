@@ -1,5 +1,391 @@
 # PROGRESS
 
+
+## Feature: SMT Redesign — JSON-File Architecture + Module Decomposition
+
+**Status**: Complete
+**Plan File**: `.agents/plans/smt-redesign-v2.md`
+**Spec**: `docs/superpowers/specs/2026-04-27-smt-redesign-design.md`
+
+Rebuild the SMT control flow as four small modules (`daily.py`, `hypothesis.py`, `strategy.py`, `trend.py`) communicating via four JSON files (`global.json`, `daily.json`, `hypothesis.json`, `position.json`). New files alongside `strategy_smt.py` / `hypothesis_smt.py` (untouched). Reuses primitives (divergence, FVG, TDO, PDH/PDL, EQH/EQL, confirmation-bar) by import. Adds an additive v2 dispatcher to `signal_smt.py` (env-gated) and a v2 entry to `backtest_smt.py`. Specific-day regression via `regression.md` + event-jsonl + trades.tsv diff. TP / breakeven / trail / secondary-target / Layer-B / MSS / CISD / displacement-invalidation are deliberately removed from the new path.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-redesign-v2.md`
+- 7/7 tasks completed across 4 waves; 90 new tests (planned ~67), all passing; full suite 888/897
+- Two divergences: test file renamed `test_smt_strategy_v2.py` (collision with pre-existing file); regression.md parser uses calendar-day expansion (matches test spec assertion)
+- E2E smoke: `run_backtest_v2('2025-11-14','2025-11-14')` → 4 trades, PnL −$471.00; `regression.py` exits 0
+- Alignment score: 9/10
+
+
+## Feature: SMT Limit Entry Lifecycle & Min-TP Fallback
+
+**Status**: Complete
+**Plan File**: `.agents/plans/smt-limit-entry-lifecycle.md`
+
+Reworked the entry-signal lifecycle so the human trader sees LIMIT_PLACED at divergence time (not only on fill). Introduces five typed lifecycle events (`limit_placed`, `limit_moved`, `limit_cancelled`, `limit_expired`, `limit_filled`) emitted by `process_scan_bar` and dispatched by `signal_smt.py`. Drops the pts-distance `ENTRY_LIMIT_CLASSIFICATION_PTS` heuristic; `signal_type` is now derived from whether the scan path went through a limit stage. Raises `MIN_TARGET_PTS=15.0` / `MIN_RR_FOR_TARGET=1.5` with fallback-to-next-ranked draw when the nearest target fails the floor; divergence is preserved when no draw qualifies.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-limit-entry-lifecycle.md`
+- 51/51 tests pass in test_smt_limit_lifecycle.py; full suite 792 passed / 9 skipped / 5 failed (pre-existing)
+- Three divergences: 51 tests vs ~46 planned (extra MOVE_LIMIT + cancel+replace tests — good); original_limit_price semantics clarified in test assertion; SYMMETRIC_SMT_ENABLED=False added to _patch_base for test isolation
+- Backtest smoke: mean_test_pnl=$5,023.74 (within ±10% of baseline)
+- Alignment score: 9/10
+
+---
+
+## Feature: EQH/EQL Detection Extending Secondary-Target Candidate Pool (Gap 1)
+
+**Status**: Complete
+**Started**: 2026-04-23
+**Plan File**: `.agents/plans/eqh-eql-secondary-target.md`
+
+Adds Equal Highs / Equal Lows detection to the DOL candidate pool used by `_build_draws_and_select`. Computes EQH/EQL levels once per session from prior-day + overnight MNQ bars (swing point clustering with tolerance + staleness invalidation), stores them on `SessionContext`, and feeds them into `_build_draws_and_select` so the existing `secondary_target` mechanism can pick them when they are the closest qualifying liquidity. Purely additive — does NOT change TDO as primary TP, does NOT modify stop/partial/trail mechanics (all locked from prior campaign). Expected lift: +10–20% on total P&L concentrated in the 43 secondary-hit trades. Critical risk: staleness logic must correctly deactivate levels that have been closed through (not just wicked through); adversarial unit tests for staleness must precede integration.
+
+### Reports Generated
+
+**Execution Report:** `.agents/plans/eqh-eql-secondary-target.execution-report.md`
+- All 8 tasks across 3 waves complete; 25 tests added (23 unit + 2 regression smoke); 708/708 non-orchestrator suite green, 0 regressions
+- Three divergences: extra `_build_draws_and_select` integration tests (good), Windows-forced `uv run -- python -m pytest` invocation and missing `pytest-timeout` (environmental), constant placement shifted past Human execution mode block (good)
+- Test results: 25/25 EQH-scoped pass; 5 unrelated orchestrator failures due to Windows Application Control blocking `jiter` DLL
+- Alignment score: 9/10
+
+---
+
+## Feature: Uncap Hold Time — Trail Width + Session Extension
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/uncap_hold_time.md`
+
+Widens `TRAIL_AFTER_TP_PTS` from 1.0 to 50.0 pts with two safeguards: a never-widen rule (`stop = max(current, trail)` for longs) and a delayed activation gate (`TRAIL_ACTIVATION_R` — trail only fires after price travels R multiples of initial stop past TDO). Extends `SESSION_END` to `"15:15"`. Disables partial exit when trail is active (logically contradictory). Adds `initial_stop_pts` to signal dict. Optimizer grid: 4 × 5 = 20 cells (`TRAIL_AFTER_TP_PTS` × `TRAIL_ACTIVATION_R`).
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/uncap_hold_time.md`
+- All 5 tasks completed; 15 new tests passing (+15 from 149 baseline to 164); 0 regressions
+- Three divergences: pre-existing `PARTIAL_EXIT_LEVEL_RATIO` import bug fixed; `test_trail_active_when_no_secondary` updated for new deferred-stop contract; integration tests required deeper monkeypatching for newer feature gates
+- Test results: 164/165 full suite; 1 pre-existing failure unchanged
+- Alignment score: 9/10
+
+---
+
+## Feature: SMT Limit Entry at Anchor Close
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-limit-entry-anchor-close.md`
+
+Replaces market-order entry (bar close) with a limit at `anchor_close ± buffer`. Two modes: same-bar fill (`LIMIT_EXPIRY_SECONDS=None`) and forward-looking limit with new `WAITING_FOR_LIMIT_FILL` state machine state. Bar resolution auto-detected from timestamps — works at 1m (backtest) and 1s (live). Adds `anchor_close_price`, `limit_fill_bars`, `missed_move_pts` diagnostic fields and `limit_expired` exit type to `trades.tsv` so missed big-mover trades are fully visible. Both constants default to `None` (zero behaviour change). Optimizer search space: `LIMIT_ENTRY_BUFFER_PTS ∈ [None, 0.0, 0.25, 0.5, 1.0]`, `LIMIT_EXPIRY_SECONDS ∈ [None, 60.0, 120.0, 300.0]`.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-limit-entry-anchor-close.md`
+- All 6 tasks completed; 19 new tests passing (+19 from 643 baseline to 662); 0 regressions
+- One latent gap: forward-limit fill path does not apply secondary_target / DISPLACEMENT_STOP_MODE adjustments (no impact while LIMIT_EXPIRY_SECONDS=None default)
+- Test results: 662 full suite; 9 pre-existing failures unchanged
+- Alignment score: 9/10
+
+---
+
+## Feature: SMT Solutions A–E — Signal Quality & State Machine Hardening
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-solutions-a-e.md`
+**Prerequisite**: `smt-structural-and-fixes.md` complete. Executes BEFORE `smt-solution-f-draw-on-liquidity.md`.
+
+Implements five signal quality improvements: divergence scoring (A), hypothesis replacement with score decay (B), inverted stop guard (C), hypothesis invalidation threshold (D), early bar skip (E). All new constants default to off/permissive so baseline output is unchanged at defaults.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-solutions-a-e.md`
+- All 4 waves completed; 20 new tests passing (+20 from 603 baseline to 623); 0 regressions
+- One plan divergence: Wave 3 signal_smt.py state machine not verbatim-mirrored (inapplicable — `_process_scanning` is stateless; Solution C inherited via `_build_signal_from_bar`)
+- Test results: 77 passed (unit), 27 passed (integration), 623 full suite; 8 pre-existing failures unchanged
+- Alignment score: 9/10
+
+---
+
+## Feature: SMT Solution F — ICT-Aligned Draw on Liquidity Target Selection
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-solution-f-draw-on-liquidity.md`
+**Prerequisite**: `smt-solutions-a-e.md` complete. Isolated cycle — validate independently before merging with A–E optimisation results.
+
+Replaces TDO-only TP with a 6-level draw-on-liquidity hierarchy (FVG → TDO → Midnight Open → Session High/Low → Overnight H/L → PDH/PDL). Signals with no draw satisfying `MIN_RR_FOR_TARGET` (1.5×) and `MIN_TARGET_PTS` (15 pts) are skipped. Adds secondary target and `exit_secondary` exit type. Supersedes `OVERNIGHT_RANGE_AS_TP` and `MIDNIGHT_OPEN_AS_TP` flags.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-solution-f-draw-on-liquidity.md`
+- All 5 waves completed; 21 new tests passing (9 unit + 12 integration); 125 target-suite passed, 0 regressions
+- Two plan gaps: TP cascade replaced in two locations (plan cited one); `test_smt_structural_fixes.py` monkeypatching required for new filter constants
+- Alignment score: 9/10
+
+**Smoke Backtest (full 6-fold walk-forward):**
+- 516 total trades; mean_test_pnl=$2,458.76; min_test_pnl=$916.84 (no losing folds)
+- fold6 avg_rr=4.12, win_rate=54.9%, Sharpe=4.50, Calmar=14.77
+- `exit_secondary` fired on 7 test trades — two-level exit path confirmed end-to-end
+
+**Post-review fixes (committed with plan):**
+- `backtest_smt.py:439` — `_run_ses_high` init changed from `0.0` to `-float("inf")` (symmetric with `_run_ses_low`)
+- `strategy_smt.py:1432` — added clarifying comment on standalone `tp_breached` setter
+- `tests/test_smt_backtest.py` — fixed `test_signal_with_pdh_draw_placed` assertion (now checks `tp_name`); added `test_exit_secondary_same_bar_primary_and_secondary_crossed`
+- `backtest_smt.py` + `signal_smt.py` — added directional guards to `overnight_high/low`, `pdh`, `pdl` draws (consistent with other draw entries)
+
+---
+
+## Feature: SMT Structural Fixes & Signal Quality
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-structural-and-fixes.md`
+
+Combines findings.md fixes (F1 live reentry guard, F2a/b midnight open TP default, F2c ratio-based invalidation threshold, F3 pessimistic fill prices) with structural_moves.md signal quality improvements (symmetric SMT, expanded reference levels, HTF visibility filter, displacement body size, always-on confirmation candle). All changes behind opt-in flags. Metric baseline captured after this plan AND smt-humanize are both merged.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-structural-and-fixes.md`
+- All 9 tasks completed (F3, F1, F2a/b, F2c, S1, S4, S5, S2, S3); 3 plan divergences, all improvements
+- Three divergences: MIN_DISPLACEMENT_BODY_PTS applied in two locations (plan gap); ALWAYS_REQUIRE_CONFIRMATION checked in backtest WAITING_FOR_ENTRY blocks (plan gap); ratio threshold combined with existing PTS sentinel for backward compatibility
+- Test results: 28 new tests passing (tests/test_smt_structural_fixes.py) + 2 pre-existing tests fixed; full suite 605 passed, 5 pre-existing failures unchanged
+- Alignment score: 9/10
+
+---
+
+## Feature: Declockify — Single-Source Session Config
+
+**Status**: ✅ Planned
+**Started**: 2026-04-23
+**Plan File**: `.agents/plans/declockify-session-config.md`
+
+Moves every session-time constant out of `strategy_smt.py` into a new top-level `session_config.py`. Removes session-time gates from `strategy_smt.py` and `signal_smt.py` entirely — the orchestrator becomes the sole clock owner, starting/stopping the signal engine and triggering graceful shutdown (position close + CLOSE_MARKET emission + IB disconnect) at session boundaries via a sentinel-file protocol. Also adds walk-back fallback to `compute_tdo()` and `_price_at_900()` so hypothesis generation and TDO resolution work at any clock time.
+
+---
+
+## Feature: SMT Humanize — Human-Executable Signal Model
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-humanize.md`
+**Prerequisite**: `smt-structural-and-fixes.md` merged and baseline captured first.
+
+Redesigns signal output (typed ENTRY/MOVE_STOP/CLOSE_MARKET), adds execution delay simulation to 1m backtest, PENDING states, daily limits (8 entries, $100/$150 DD), confidence scoring, and deception detection. All gated by HUMAN_EXECUTION_MODE=False default.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-humanize.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics
+- Team performance analysis (if applicable)
+
+---
+
+## Feature: SMT Strategy — Position Architecture Expansion (Plan 2 of 2)
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-position-architecture-plan2.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-position-architecture-plan2.md`
+- Detailed implementation summary
+- Two divergences: partial-exit integration test assertion weakened (fixture geometry constraint); Level 4 manual backtest deferred (requires Databento parquets)
+- Test results: 20 new tests passing (tests/test_smt_position_arch.py); full suite 551 passed, 2 pre-existing failures
+- All functional acceptance criteria met; all features opt-in and default-off
+
+**Baseline entering Plan 2** (post-plan-1 experiments):
+- `HIDDEN_SMT_ENABLED = True` (approved Round 1 — +30.6% PnL, now default)
+- Effective baseline: 45 trades, pnl=$5,075, wr=57.8%, avg_rr=7.25, appt=$112.78, max_dd=$108
+- All other plan-1 flags remain False/default; see `.agents/experiment-log.md` for re-test conditions
+
+### Flag Experiment Results (2026-04-20)
+
+1-fold fast backtest (2026-01-19 → 2026-04-12). Full data and verdicts in `.agents/experiment-log.md`.
+
+| Run | Config | final_pnl | win_rate | avg_rr | max_dd | Verdict |
+|-----|--------|-----------|----------|--------|--------|---------|
+| Baseline | — | $5,075 | 57.8% | 7.25 | $108 | — |
+| A-1 | SMT_OPTIONAL, MIN_DISP=8pt | $3,844 | 52.0% | 5.78 | $155 | REJECT |
+| A-2 | SMT_OPTIONAL, MIN_DISP=10pt | $3,520 | 52.3% | 6.08 | $102 | REJECT |
+| A-3 | SMT_OPTIONAL, MIN_DISP=15pt | $4,386 | 57.5% | 6.93 | $158 | REJECT |
+| **B-1** | **PARTIAL_EXIT, FRAC=0.33** | **$4,798** | **62.2%** | **6.56** | **$95** | **APPROVE** |
+| B-2 | PARTIAL_EXIT, FRAC=0.5 | $3,229 | 62.2% | 4.75 | $95 | REJECT |
+| C-1–C-4 | TWO_LAYER+FVG (all configs) | $1,258–$2,530 | 57.8% | 6.7–7.1 | $30–$54 | NEUTRAL |
+| D-1 | SMT_FILL_ENABLED | $5,075 | 57.8% | 7.25 | $109 | NEUTRAL |
+
+- **APPROVED (1):** `PARTIAL_EXIT_ENABLED=True, PARTIAL_EXIT_FRACTION=0.33` — −12% max_drawdown ($108→$95), −5.5% P&L ($5,075→$4,798). Best risk-adjusted result. Now set as default.
+- **REJECTED (3):** `SMT_OPTIONAL` all thresholds — displacement entries steal same-session SMT slots, reducing wick SMT count. Needs structural fixes (Plan 3: `DISPLACEMENT_STOP_MODE` + `MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT`) before re-test.
+- **NEUTRAL (4):** `TWO_LAYER+FVG` all configs — `layer_b_triggers=0` in this 60-day momentum window. FVG retracements are regime-dependent. Plan 3 adds `fvg_detected` diagnostic field and `FVG_LAYER_B_REQUIRES_HYPOTHESIS` gate for re-test.
+- **NEUTRAL (1):** `SMT_FILL_ENABLED` — `fill_entries=0`, P&L identical to baseline ($5,075). No fill divergences formed in this 60-day momentum regime. Re-test in Round 3.
+
+**New effective baseline entering Plan 3:** trades=45, pnl=$4,798, wr=62.2%, avg_rr=6.56, max_dd=$95
+
+---
+
+## Feature: SMT Strategy — Reference Level Fix + Signal Quality (Plan 1 of 2)
+
+**Status**: ✅ Complete + Experiments Done
+**Plan File**: `.agents/plans/smt-signal-quality-plan1.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-signal-quality-plan1.md`
+- Detailed implementation summary
+- Two divergences: fewer existing tests needed updating than planned (index-based unpack was already dominant); Level 4 manual backtest deferred (requires Databento parquets)
+- Test results: 22 new tests passing (test_smt_signal_quality.py); full suite 531 passed, 2 pre-existing failures
+- All functional acceptance criteria met; all features opt-in and default-off
+
+### Flag Experiment Results (2026-04-20)
+
+1-fold fast backtest (2026-01-19 → 2026-04-12). Full data in `plan1-results.tsv`, full analysis in `.agents/experiment-log.md`.
+
+- **APPROVED (1):** `HIDDEN_SMT_ENABLED=True` — +30.6% PnL (+$1,189), lower drawdown, +9 extra trades. Now set as default.
+- **REJECTED (2):** `STRUCTURAL_STOP_MODE` — kills RR (7.47→2.08), structurally incompatible with trailing-stop exits.
+- **REJECTED (2):** `INVALIDATION_MSS_EXIT` / `INVALIDATION_SMT_EXIT` — fires too close to entry; need `MIN_FAVORABLE_MOVE_PTS` guard before retesting.
+- **NEUTRAL (5):** `MIDNIGHT_OPEN_AS_TP`, `SILVER_BULLET_WINDOW_ONLY`, `OVERNIGHT_SWEEP_REQUIRED`, `OVERNIGHT_RANGE_AS_TP`, `INVALIDATION_CISD_EXIT` — no effect in this 60-day window; retained for future regime testing.
+
+---
+
+## Feature: SMT Hypothesis Alignment Analysis (Plan 3 of 3)
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-hypothesis-alignment-plan3.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-hypothesis-alignment-plan3.md`
+- All 5 waves completed; 30 new tests passing; no new regressions (4 pre-existing failures unchanged)
+- Three plan divergences, all improvements: `_pending_displacement_bar_extreme` state variable added; Layer B gate moved to IDLE state (equivalent result, cleaner interface); `fvg_detected` set post-gate for accurate diagnostics
+- Manual tests deferred: live backtest TSV column check + `analyze_hypothesis.py` live run (both require Databento parquets)
+- Alignment score: 9/10
+
+### What Plan 3 Builds
+
+Four deliverables enabling evidence-based ICT parameter decisions:
+
+1. **Per-rule hypothesis logging** — expose each ICT rule output (`pd_range_case`, `week_zone`, `day_zone`, `trend_direction`, `hypothesis_score`) as per-trade fields in `trades.tsv`, enabling rule-level decomposition.
+2. **`HYPOTHESIS_FILTER` flag** in `backtest_smt.py` — when True, only aligned signals are taken; enables Outcome B walk-forward validation.
+3. **`analyze_hypothesis.py`** — CLI script that reads `trades.tsv` and prints aligned vs misaligned performance split with per-group win rate, avg P&L, avg RR, and per-fold consistency check.
+4. **Round 2 deferred feature fixes** — opt-in constants that unblock rejected/neutral features:
+   - `DISPLACEMENT_STOP_MODE: bool = False` — correct stop for displacement entries (bar extreme, not SMT structural stop)
+   - `MIN_HYPOTHESIS_SCORE_FOR_DISPLACEMENT: int = 0` — quality gate on displacement entries via hypothesis score
+   - `PARTIAL_EXIT_LEVEL_RATIO: float = 0.5` — configurable partial exit target (0=entry, 1=TP); enables ratio tuning in Round 3
+   - `fvg_detected: bool` — per-trade TSV field; diagnoses whether FVG zones form but don't retrace vs. don't form at all
+   - `FVG_LAYER_B_REQUIRES_HYPOTHESIS: bool = False` — gates Layer B to hypothesis-confirmed reversal sessions
+
+### Entering Baseline
+
+trades=45, pnl=$4,798, wr=62.2%, avg_rr=6.56, max_dd=$95
+(HIDDEN_SMT_ENABLED=True, PARTIAL_EXIT_ENABLED=True, PARTIAL_EXIT_FRACTION=0.33)
+
+### Test Plan
+
+30 automated pytest tests + 2 manual (require Databento parquets). See plan file for full spec.
+
+### Implementation Scope
+
+- `hypothesis_smt.py` — add `compute_hypothesis_context()` + `_count_aligned_rules()` helper
+- `backtest_smt.py` — integrate context call, attach rule fields to trade records, add `HYPOTHESIS_FILTER` gate, add displacement stop/score-gate/FVG-gate logic
+- `strategy_smt.py` — add 4 new constants; update `manage_position()` for `PARTIAL_EXIT_LEVEL_RATIO`
+- `analyze_hypothesis.py` — new script (mirrors `analyze_gaps.py` pattern)
+- `tests/test_hypothesis_analysis.py` — new test file (30 tests)
+
+### Round 3 Experiment Results
+
+1-fold fast backtest (2026-01-19 → 2026-04-12). Full analysis in `.agents/experiment-log.md`.
+
+| Run | Config | Trades | PnL | WR | avg_rr | max_dd | Verdict |
+|-----|--------|--------|-----|----|--------|--------|---------|
+| A-1 | HYPOTHESIS_FILTER=True | 19 | $4,124 | 84.2% | 4.40 | $65 | NEUTRAL — fewer trades, similar WR, loses $1.5K; hypothesis doesn't add signal value |
+| B-1 | SMT_OPTIONAL=True + MIN_DISPLACEMENT_PTS=10 + DISPLACEMENT_STOP_MODE=True | 47 | $7,148 | 76.6% | 5.52 | $120 | APPROVE — +$2K, +7 displacement trades, structurally correct stop |
+| C-1 | PARTIAL_EXIT_LEVEL_RATIO=0.33 | 53 | $5,939 | 81.1% | 5.34 | $65 | APPROVE — tighter partial exit, same WR, lower drawdown |
+| C-2 | PARTIAL_EXIT_LEVEL_RATIO=0.25 | 53 | $5,462 | 81.1% | 4.65 | $65 | REJECT — further tightening degrades RR with no WR benefit |
+| D-1 | FVG_LAYER_B_REQUIRES_HYPOTHESIS=True + score≥2 | 35 | $3,843 | 80.0% | 5.05 | $125 | DEFERRED — layer_b_triggers=0; gating has no effect this regime |
+| Combined | SMT_OPTIONAL + DISPLACEMENT_STOP_MODE + PARTIAL_EXIT_LEVEL_RATIO=0.33 | 40 | $5,513 | 82.5% | 5.36 | $65 | CONFIRMED baseline |
+
+**New approved defaults (set in `strategy_smt.py`):**
+- `SMT_OPTIONAL = True`
+- `DISPLACEMENT_STOP_MODE = True`
+- `PARTIAL_EXIT_LEVEL_RATIO = 0.33`
+
+**New effective baseline entering optimization run:** trades=40, pnl=$5,513, wr=82.5%, avg_rr=5.36, max_dd=$65
+
+---
+
+## Feature: Session Hypothesis System
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/session-hypothesis.md`
+
+### Summary
+Session-planning layer for the realtime SMT workflow. At ~9:00am ET a `HypothesisManager`
+runs 5 deterministic ICT/SMT rules (PDH/PDL case analysis, multi-day trend, deception sweeps,
+session extremes, TDO/TWO premium-discount zones) and calls the Claude API for a narrative
+hypothesis. Evidence is evaluated per 1m bar; 3 contradictions trigger a revision call.
+Session end calls a Claude summary. A `matches_hypothesis` boolean is added to every signal
+dict in both realtime (`signal_smt.py`) and backtest (`backtest_smt.py`), enabling downstream
+alignment analysis without affecting signal generation.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/session-hypothesis.md`
+- Detailed implementation summary
+- Two minor divergences: `_assign_case` helper extracted for testability; 3 trade-record exit sites annotated vs 1 documented in plan
+- Test results: 22 passed (tests/test_hypothesis_smt.py); full suite 510 passed, 9 skipped, 0 failed
+- Baseline was 488 passed; +22 new tests, zero regressions
+- Live smoke test (real MNQ parquets) deferred — requires IB session data on disk
+
+---
+
+## Feature: Session Orchestrator Daemon
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/session-orchestrator.md`
+
+### Summary
+Python daemon (`orchestrator/main.py`) that manages `signal_smt.py` lifecycle:
+starts at 09:00 ET on trading days, relays SIGNAL/EXIT lines to stdout + session log,
+restarts once on unexpected crash, terminates at 13:35 ET, and calls Claude API for
+post-session summary with metrics, narrative, and parameter recommendations.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/session-orchestrator.md`
+- Detailed implementation summary
+- One divergence: psutil import moved to module level (testability improvement)
+- Test results: 53 passed (51 unit + 2 integration); full suite 495 passed, 0 failures
+- Manual-only gap: `python orchestrator/main.py --check` with real key; live IB Gateway session
+
+---
+
+## Feature: IB-Gateway Connection Instability Fix
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/ib-connect-fix.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/ib-connect-fix.md`
+- Detailed implementation summary
+- No divergences from plan (10/10 alignment)
+- Test results: 27 passed, 1 pre-existing failure, 0 regressions
+- Manual-only gap: reconnect validation (requires live IB Gateway)
+
+---
+
+## Feature: SMT Bar-by-Bar State Machine Refactor (Phase 2)
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-bar-by-bar-refactor.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-bar-by-bar-refactor.md`
+- Detailed implementation summary
+- Divergences and resolutions (screen_session shim, _scan_bars_for_exit already absent, sequential execution)
+- Test results and metrics: 417 passing, 1 pre-existing failure, ~23 new tests
+- Level 6 (smoke test with real data) deferred — requires IB-Gateway
+
+---
+
 ## Feature: signal_smt.py — Tick-Based 1s Bar Ingestion
 
 **Status**: ✅ Complete
@@ -871,46 +1257,95 @@ To start an experiment session: open a Claude Code conversation in this repo and
 
 ---
 
+## Feature: Strategy Refactor — Stateful Scanner, Perf, and Cleanup
+
+**Status**: ✅ Complete (Phases 1–5; Phase 0 and RC1–RC6 deferred)
+**Plan File**: `.agents/plans/strategy_refactor.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/strategy_refactor.md`
+- Phases 1–5 complete; `process_scan_bar` is the single source of truth for all scanning logic
+- 709 passed, 9 skipped, 0 regressions; backtest parity verified
+- Phase 0 dead-code cleanup and RC1/RC3 live bar-resolution fixes deferred
+- Alignment score: 7/10
+
+---
+
+## Feature: SMT Strategy Refactor (Bar Globals + exit_market + File Split)
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-strategy-refactor.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-strategy-refactor.md`
+- Detailed implementation summary
+- Divergences and resolutions (MAX_TDO_DISTANCE_PTS patches, MAX_REENTRY_COUNT patches, dual-module patching, test_signal_smt.py patch-target fix)
+- Test results: 434 passed, 10 skipped, 0 failures
+- Manual validation (backtest_smt.py output vs pre-refactor baseline) deferred — requires Databento parquets
+
+---
+
+## Feature: SMT Quality-Focused Parameter Extensions
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/smt-quality-params.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-quality-params.md`
+- Detailed implementation summary
+- Divergences and resolutions (test count discrepancy, test fixture adaptation, TDO geometry fix)
+- Test results and metrics: 79/79 passing (+11 new tests, 3 existing tests fixed)
+- All 9 tasks completed; all acceptance criteria met
+
+---
+
 ## Next: SMT Parameter Optimization Run
 
 **Status**: ✅ Planned
 **Date scoped**: 2026-04-02
 **Plan File**: .agents/plans/smt-optimization-run-setup.md
 
-### Baseline (2-year Databento run, default params)
+### Baseline (post-Plans-1-2-3 defaults, full 6-fold run 2024-09-01 → 2026-03-20)
 
 - **Data**: `data/historical/MNQ.parquet` + `data/historical/MES.parquet`
   - Source: Databento GLBX.MDP3, MNQ.v.0 / MES.v.0 (volume-roll continuous), `stype_in="continuous"`
-  - Range: 2024-01-01 → 2026-04-01 (~158,847 1m bars resampled to 5m)
-- **Walk-forward**: 6 folds × 60 business-day test windows (≈ 3 months each)
-- **Total test trades**: 105
+- **Walk-forward**: 6 folds × 60 business-day test windows
 
-| Fold | Test Trades | Win Rate | Test PnL | Sharpe | avg_rr |
-|------|------------|----------|----------|--------|--------|
-| 1    | 17         | 52.9%    | $806     | 2.75   | 2.24   |
-| 2    | 17         | 52.9%    | $1,225   | 3.41   | 3.50   |
-| 3    | 18         | 55.6%    | $938     | 3.62   | 2.72   |
-| 4    | 18         | 50.0%    | $677     | 2.76   | 2.50   |
-| 5    | 16         | 50.0%    | $640     | 2.22   | 2.05   |
-| 6    | 19         | 52.6%    | $697     | 2.26   | 1.80   |
+| Fold | Test Trades | Win Rate | Test PnL | avg_rr |
+|------|------------|----------|----------|--------|
+| 1    | 92         | 65.2%    | $2,677   | 2.05   |
+| 2    | 111        | 84.7%    | $7,679   | 2.03   |
+| 3    | 100        | 75.0%    | $4,832   | 2.45   |
+| 4    | 119        | 69.8%    | $4,263   | 2.14   |
+| 5    | 77         | 76.6%    | $3,398   | 1.37   |
+| 6    | 70         | 90.0%    | $5,731   | 2.92   |
 
-- **Mean test PnL/fold**: $830
-- **Worst-fold test PnL** (`min_test_pnl`): $640 (fold 5)
-- **W/L ratio**: 55W / 50L = 1.10 across all test folds
-- **Expectation per trade**: ~$41–48 (formula: `W% × avg_rr × R − L% × R`, R=$50)
-- **Stop-hit rate**: ~50% (stops slightly outnumber TPs across all folds)
+- **mean_test_pnl**: $4,763 | **min_test_pnl**: $2,677 | **Total test trades**: 569
+- **Avg WR**: 76.9% | **Avg avg_rr**: 2.17
+
+> **Pre-Plans-1-3 historical reference**: 105 trades, 52% WR, $830/fold.
 
 ### Parameters at baseline
 
 ```python
 SESSION_START          = "09:00"
-SESSION_END            = "10:30"
-MIN_BARS_BEFORE_SIGNAL = 5          # 25 min warm-up at 5m
-TRADE_DIRECTION        = "both"
-TDO_VALIDITY_CHECK     = True
-MIN_STOP_POINTS        = 5.0
-LONG_STOP_RATIO        = 0.45       # → theoretical RR ~2.22
-SHORT_STOP_RATIO       = 0.45
+SESSION_END            = "13:30"
+MAX_TDO_DISTANCE_PTS   = 15.0
+MAX_REENTRY_COUNT      = 1
+SIGNAL_BLACKOUT_START  = "11:00"
+SIGNAL_BLACKOUT_END    = "13:00"
+SHORT_STOP_RATIO       = 0.35
+LONG_STOP_RATIO        = 0.35
+TRAIL_AFTER_TP_PTS     = 1.0
+HIDDEN_SMT_ENABLED     = True       # Plan 1 approved
+PARTIAL_EXIT_ENABLED   = True       # Plan 2 approved
+PARTIAL_EXIT_FRACTION  = 0.33
+SMT_OPTIONAL           = True       # Plan 3 approved
+DISPLACEMENT_STOP_MODE = True       # Plan 3 approved
+PARTIAL_EXIT_LEVEL_RATIO = 0.33     # Plan 3 approved
 ```
 
 ### Proposed tweaks for next run (priority order)

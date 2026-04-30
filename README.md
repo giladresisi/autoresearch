@@ -95,6 +95,43 @@ Have a look at program_smt.md and run 30 iterations of the SMT divergence strate
 
 The agent reads `program_smt.md`, runs the baseline on MNQ1!/MES1! 1m data, and iterates — modifying `train_smt.py` above the boundary. Both strategies are fully isolated; optimizing one never touches the other.
 
+### Session orchestrator daemon
+
+The daemon starts `signal_smt.py` at 09:00 ET on NYSE trading days, relays its output to
+`sessions/YYYY-MM-DD/signals.log`, restarts once on crash, terminates at 13:35 ET, and calls
+the Claude API to write a post-session `summary.md` with metrics, narrative, and parameter
+recommendations.
+
+**Prerequisites:**
+
+1. Add your Anthropic API key to `.env` (copy from `.env.example`):
+   ```
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+
+2. Verify the setup:
+   ```bash
+   # Loads key from .env then runs --check (exits 0 if everything is wired up)
+   set -a && source .env && set +a && uv run python -m orchestrator.main --check
+   ```
+
+**Run the daemon:**
+
+```bash
+set -a && source .env && set +a && uv run python -m orchestrator.main
+```
+
+The `set -a / source .env / set +a` pattern exports variables from `.env` into the shell
+without the key appearing in the command itself (safe in shell history and `ps` output).
+The daemon loops indefinitely — run it in a persistent terminal or tmux session.
+
+**Stop the daemon:**
+
+Press `Ctrl+C`. The daemon catches the interrupt and exits cleanly. If `signal_smt.py` is
+actively running at the time, it is terminated before the daemon exits.
+
+Session files are written to `sessions/YYYY-MM-DD/` (gitignored).
+
 ---
 
 ## Recommended Claude Code skill

@@ -154,6 +154,7 @@ def test_format_signal_line_long():
         "entry_price": 19850.0,
         "take_profit": 19950.0,
         "stop_price":  19805.0,
+        "entry_time":  pd.Timestamp("2025-01-02 09:04:00", tz="America/New_York"),
     }
     line = signal_smt._format_signal_line(ts, signal, 19850.5)
     assert "SIGNAL" in line
@@ -165,10 +166,11 @@ def test_format_exit_line_tp():
     """_format_exit_line output contains 'EXIT', 'tp', and the P&L."""
     import signal_smt
     ts = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
-    line = signal_smt._format_exit_line(ts, "exit_tp", 19890.0, 78.5, 1)
+    line = signal_smt._format_exit_line(ts, "exit_tp", 19890.0, 78.5, 1, "2025-01-02 09:10:00-05:00")
     assert "EXIT" in line
     assert "tp" in line
     assert "78.5" in line
+    assert "20m" in line
 
 
 # ══ SCANNING state tests ══════════════════════════════════════════════════════
@@ -176,11 +178,11 @@ def test_format_exit_line_tp():
 def _setup_scanning_state(monkeypatch, tmp_path):
     """Helper: reset signal_smt module state to a clean SCANNING configuration."""
     import signal_smt
-    import train_smt
+    import strategy_smt
 
-    monkeypatch.setattr(train_smt, "MIN_BARS_BEFORE_SIGNAL", 2)
-    monkeypatch.setattr(train_smt, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(train_smt, "TDO_VALIDITY_CHECK", False)
+    monkeypatch.setattr(strategy_smt, "MIN_BARS_BEFORE_SIGNAL", 2)
+    monkeypatch.setattr(strategy_smt, "MIN_STOP_POINTS", 0.0)
+    monkeypatch.setattr(strategy_smt, "TDO_VALIDITY_CHECK", False)
 
     monkeypatch.setattr(signal_smt, "POSITION_FILE", tmp_path / "position.json")
     monkeypatch.setattr(signal_smt, "_state", "SCANNING")
@@ -200,19 +202,40 @@ def _setup_scanning_state(monkeypatch, tmp_path):
     )
 
     empty = signal_smt._empty_bar_df()
-    monkeypatch.setattr(signal_smt, "_mnq_1s_buf", empty.copy())
-    monkeypatch.setattr(signal_smt, "_mes_1s_buf", empty.copy())
+    _minute_ts = pd.Timestamp("2025-01-02 09:10:00", tz="America/New_York").floor("min")
+    monkeypatch.setattr(signal_smt, "_mnq_partial_1m", {"open": 20000.0, "high": 20005.0, "low": 19995.0, "close": 20000.0, "volume": 100.0, "minute_ts": _minute_ts})
+    monkeypatch.setattr(signal_smt, "_mes_partial_1m", {"open": 20000.0, "high": 20005.0, "low": 19995.0, "close": 20000.0, "volume": 100.0, "minute_ts": _minute_ts})
     monkeypatch.setattr(signal_smt, "_mnq_1m_df", empty.copy())
     monkeypatch.setattr(signal_smt, "_mes_1m_df", empty.copy())
 
+    # Phase 5 stateful scanner state — pre-initialised so session-init block is skipped.
+    _test_date = datetime.date(2025, 1, 2)
+    monkeypatch.setattr(signal_smt, "_session_init_date", _test_date)
+    monkeypatch.setattr(signal_smt, "_scan_state", strategy_smt.ScanState())
+    monkeypatch.setattr(signal_smt, "_session_ctx", strategy_smt.SessionContext(
+        day=_test_date, tdo=19900.0, midnight_open=None, overnight={},
+        pdh=None, pdl=None, hyp_ctx=None, hyp_dir=None, bar_seconds=1.0,
+    ))
+    monkeypatch.setattr(signal_smt, "_session_mnq_rows", [])
+    monkeypatch.setattr(signal_smt, "_session_mes_rows", [])
+    monkeypatch.setattr(signal_smt, "_session_smt_cache", {
+        "mes_h": float("nan"), "mes_l": float("nan"),
+        "mnq_h": float("nan"), "mnq_l": float("nan"),
+        "mes_ch": float("nan"), "mes_cl": float("nan"),
+        "mnq_ch": float("nan"), "mnq_cl": float("nan"),
+    })
+    monkeypatch.setattr(signal_smt, "_session_run_ses_high", -float("inf"))
+    monkeypatch.setattr(signal_smt, "_session_run_ses_low", float("inf"))
+
 
 def test_process_scanning_session_gate_before_start(monkeypatch, tmp_path):
-    """Bar arriving before SESSION_START is silently skipped; screen_session never called."""
+    """Bar arriving before SESSION_START is silently skipped; process_scan_bar never called."""
     import signal_smt
+    import strategy_smt
     _setup_scanning_state(monkeypatch, tmp_path)
 
     called = []
-    monkeypatch.setattr("train_smt.screen_session", lambda *a, **kw: called.append(1) or None)
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: called.append(1) or None)
 
     bar = _make_mock_bar(ts="2025-01-02 08:59:00")
     signal_smt._process_scanning(bar, pd.Timestamp("2025-01-02 08:59:00", tz="America/New_York"), pd.Timestamp("2025-01-02 08:59:00", tz="America/New_York").time())
@@ -224,10 +247,11 @@ def test_process_scanning_session_gate_before_start(monkeypatch, tmp_path):
 def test_process_scanning_session_gate_after_end(monkeypatch, tmp_path):
     """Bar arriving after SESSION_END is silently skipped."""
     import signal_smt
+    import strategy_smt
     _setup_scanning_state(monkeypatch, tmp_path)
 
     called = []
-    monkeypatch.setattr("train_smt.screen_session", lambda *a, **kw: called.append(1) or None)
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: called.append(1) or None)
 
     bar = _make_mock_bar(ts="2025-01-02 13:31:00")
     ts = pd.Timestamp("2025-01-02 13:31:00", tz="America/New_York")
@@ -238,41 +262,44 @@ def test_process_scanning_session_gate_after_end(monkeypatch, tmp_path):
 
 
 def test_process_scanning_alignment_gate(monkeypatch, tmp_path):
-    """MES 1s buffer has a different latest timestamp → screen_session not called."""
+    """MES partial bar is for a different minute than MNQ → process_scan_bar not called."""
     import signal_smt
+    import strategy_smt
     _setup_scanning_state(monkeypatch, tmp_path)
 
-    # MNQ 1s buf has bar at 09:10, MES 1s buf has bar at 09:09 → misaligned
-    mnq_buf = signal_smt._empty_bar_df()
-    mnq_buf.loc[pd.Timestamp("2025-01-02 09:10:00", tz="America/New_York")] = [20000, 20005, 19995, 20000, 100]
-    mes_buf = signal_smt._empty_bar_df()
-    mes_buf.loc[pd.Timestamp("2025-01-02 09:09:00", tz="America/New_York")] = [20000, 20005, 19995, 20000, 100]
-    monkeypatch.setattr(signal_smt, "_mnq_1s_buf", mnq_buf)
-    monkeypatch.setattr(signal_smt, "_mes_1s_buf", mes_buf)
+    # MNQ partial bar at 09:10 minute, MES partial bar at 09:09 minute → misaligned
+    mnq_minute = pd.Timestamp("2025-01-02 09:10:00", tz="America/New_York")
+    mes_minute = pd.Timestamp("2025-01-02 09:09:00", tz="America/New_York")
+    monkeypatch.setattr(signal_smt, "_mnq_partial_1m", {"open": 20000.0, "high": 20005.0, "low": 19995.0, "close": 20000.0, "volume": 100.0, "minute_ts": mnq_minute})
+    monkeypatch.setattr(signal_smt, "_mes_partial_1m", {"open": 20000.0, "high": 20005.0, "low": 19995.0, "close": 20000.0, "volume": 100.0, "minute_ts": mes_minute})
 
     called = []
-    monkeypatch.setattr("train_smt.screen_session", lambda *a, **kw: called.append(1) or None)
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: called.append(1) or None)
 
     bar = _make_mock_bar(ts="2025-01-02 09:10:00")
     ts = pd.Timestamp("2025-01-02 09:10:00", tz="America/New_York")
     signal_smt._process_scanning(bar, ts, ts.time())
 
     assert len(called) == 0
+    # Alignment gate fires before steps 5–6, so session rows must remain unpolluted.
+    assert len(signal_smt._session_mnq_rows) == 0
+    assert len(signal_smt._session_mes_rows) == 0
 
 
 def test_process_scanning_no_signal(monkeypatch, tmp_path):
-    """Valid session bar but screen_session returns None → state stays SCANNING."""
+    """Valid session bar but process_scan_bar returns None → state stays SCANNING."""
     import signal_smt
+    import strategy_smt
     _setup_scanning_state(monkeypatch, tmp_path)
 
     aligned_ts = pd.Timestamp("2025-01-02 09:10:00", tz="America/New_York")
-    buf = signal_smt._empty_bar_df()
-    buf.loc[aligned_ts] = [20000, 20005, 19995, 20000, 100]
-    monkeypatch.setattr(signal_smt, "_mnq_1s_buf", buf.copy())
-    monkeypatch.setattr(signal_smt, "_mes_1s_buf", buf.copy())
+    minute_ts = aligned_ts.floor("min")
+    partial = {"open": 20000.0, "high": 20005.0, "low": 19995.0, "close": 20000.0, "volume": 100.0, "minute_ts": minute_ts}
+    monkeypatch.setattr(signal_smt, "_mnq_partial_1m", partial.copy())
+    monkeypatch.setattr(signal_smt, "_mes_partial_1m", partial.copy())
 
-    monkeypatch.setattr("train_smt.screen_session", lambda *a, **kw: None)
-    monkeypatch.setattr("train_smt.compute_tdo", lambda df, date: 20000.0)
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: None)
+    monkeypatch.setattr("signal_smt.compute_tdo", lambda df, date: 20000.0)
 
     bar = _make_mock_bar(ts="2025-01-02 09:10:00")
     signal_smt._process_scanning(bar, aligned_ts, aligned_ts.time())
@@ -290,20 +317,22 @@ def test_process_scanning_stale_startup_guard(monkeypatch, tmp_path):
     monkeypatch.setattr(signal_smt, "_startup_ts", startup)
 
     aligned_ts = pd.Timestamp("2025-01-02 09:10:00", tz="America/New_York")
-    buf = signal_smt._empty_bar_df()
-    buf.loc[aligned_ts] = [20000, 20005, 19995, 20000, 100]
-    monkeypatch.setattr(signal_smt, "_mnq_1s_buf", buf.copy())
-    monkeypatch.setattr(signal_smt, "_mes_1s_buf", buf.copy())
+    minute_ts = aligned_ts.floor("min")
+    partial = {"open": 20000.0, "high": 20005.0, "low": 19995.0, "close": 20000.0, "volume": 100.0, "minute_ts": minute_ts}
+    monkeypatch.setattr(signal_smt, "_mnq_partial_1m", partial.copy())
+    monkeypatch.setattr(signal_smt, "_mes_partial_1m", partial.copy())
 
     # Signal entry_time is before startup_ts → should be skipped
     fake_signal = {
+        "type": "signal",
         "direction": "short", "entry_price": 19998.0,
         "entry_time": pd.Timestamp("2025-01-02 09:05:00", tz="America/New_York"),
         "take_profit": 19900.0, "stop_price": 19999.0, "tdo": 19900.0,
         "divergence_bar": 4, "entry_bar": 5,
     }
-    monkeypatch.setattr("train_smt.screen_session", lambda *a, **kw: fake_signal)
-    monkeypatch.setattr("train_smt.compute_tdo", lambda df, date: 19900.0)
+    import strategy_smt
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: fake_signal)
+    monkeypatch.setattr("signal_smt.compute_tdo", lambda df, date: 19900.0)
 
     bar = _make_mock_bar(ts="2025-01-02 09:10:00")
     signal_smt._process_scanning(bar, aligned_ts, aligned_ts.time())
@@ -320,20 +349,22 @@ def test_process_scanning_redetection_guard(monkeypatch, tmp_path):
     monkeypatch.setattr(signal_smt, "_last_exit_ts", last_exit)
 
     aligned_ts = pd.Timestamp("2025-01-02 09:25:00", tz="America/New_York")
-    buf = signal_smt._empty_bar_df()
-    buf.loc[aligned_ts] = [20000, 20005, 19995, 20000, 100]
-    monkeypatch.setattr(signal_smt, "_mnq_1s_buf", buf.copy())
-    monkeypatch.setattr(signal_smt, "_mes_1s_buf", buf.copy())
+    minute_ts = aligned_ts.floor("min")
+    partial = {"open": 20000.0, "high": 20005.0, "low": 19995.0, "close": 20000.0, "volume": 100.0, "minute_ts": minute_ts}
+    monkeypatch.setattr(signal_smt, "_mnq_partial_1m", partial.copy())
+    monkeypatch.setattr(signal_smt, "_mes_partial_1m", partial.copy())
 
     # Signal entry_time is before last_exit_ts → should be skipped
     fake_signal = {
+        "type": "signal",
         "direction": "short", "entry_price": 19998.0,
         "entry_time": pd.Timestamp("2025-01-02 09:10:00", tz="America/New_York"),
         "take_profit": 19900.0, "stop_price": 19999.0, "tdo": 19900.0,
         "divergence_bar": 4, "entry_bar": 5,
     }
-    monkeypatch.setattr("train_smt.screen_session", lambda *a, **kw: fake_signal)
-    monkeypatch.setattr("train_smt.compute_tdo", lambda df, date: 19900.0)
+    import strategy_smt
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: fake_signal)
+    monkeypatch.setattr("signal_smt.compute_tdo", lambda df, date: 19900.0)
 
     bar = _make_mock_bar(ts="2025-01-02 09:25:00")
     signal_smt._process_scanning(bar, aligned_ts, aligned_ts.time())
@@ -350,20 +381,21 @@ def test_process_scanning_valid_signal_transitions_to_managing(monkeypatch, tmp_
     monkeypatch.setattr(signal_smt, "POSITION_FILE", pos_file)
 
     aligned_ts = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
-    buf = signal_smt._empty_bar_df()
-    buf.loc[aligned_ts] = [20000, 20005, 19995, 20000, 100]
-    monkeypatch.setattr(signal_smt, "_mnq_1s_buf", buf.copy())
-    monkeypatch.setattr(signal_smt, "_mes_1s_buf", buf.copy())
+    minute_ts = aligned_ts.floor("min")
+    partial = {"open": 20000.0, "high": 20005.0, "low": 19995.0, "close": 20000.0, "volume": 100.0, "minute_ts": minute_ts}
+    monkeypatch.setattr(signal_smt, "_mnq_partial_1m", partial.copy())
+    monkeypatch.setattr(signal_smt, "_mes_partial_1m", partial.copy())
 
     entry_time = pd.Timestamp("2025-01-02 09:25:00", tz="America/New_York")
     fake_signal = {
+        "type": "signal",
         "direction": "short", "entry_price": 19998.0,
         "entry_time": entry_time,
         "take_profit": 19900.0, "stop_price": 19999.0, "tdo": 19900.0,
         "divergence_bar": 4, "entry_bar": 5,
     }
-    # Patch on signal_smt because signal_smt imported them directly via "from train_smt import ..."
-    monkeypatch.setattr(signal_smt, "screen_session", lambda *a, **kw: fake_signal)
+    import strategy_smt
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: fake_signal)
     monkeypatch.setattr(signal_smt, "compute_tdo", lambda df, date: 19900.0)
 
     bar = _make_mock_bar(ts="2025-01-02 09:30:00")
@@ -419,7 +451,7 @@ def test_process_managing_hold(monkeypatch, tmp_path):
     import signal_smt
     _setup_managing_state(monkeypatch, tmp_path)
 
-    monkeypatch.setattr("train_smt.manage_position", lambda pos, bar: "hold")
+    monkeypatch.setattr("signal_smt.manage_position", lambda pos, bar: "hold")
 
     bar = _make_mock_bar(ts="2025-01-02 09:15:00", high=20010.0, low=19990.0, close=20000.0)
     ts = pd.Timestamp("2025-01-02 09:15:00", tz="America/New_York")
@@ -438,7 +470,10 @@ def test_process_managing_exit_tp(monkeypatch, tmp_path):
     pos_file.write_text(json.dumps(pos))
     monkeypatch.setattr(signal_smt, "POSITION_FILE", pos_file)
 
-    monkeypatch.setattr("train_smt.manage_position", lambda p, b: "exit_tp")
+    # Patch where it is used (signal_smt namespace), not where it is defined.
+    # train_smt.manage_position is imported directly, so patching the source module
+    # does not reach signal_smt's local binding.
+    monkeypatch.setattr(signal_smt, "manage_position", lambda p, b: "exit_tp")
 
     bar = _make_mock_bar(ts="2025-01-02 09:30:00", high=20105.0, low=20095.0, close=20100.0)
     ts = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
@@ -460,7 +495,7 @@ def test_process_managing_exit_stop(monkeypatch, tmp_path):
 
     captured_lines = []
     monkeypatch.setattr("builtins.print", lambda *a, **kw: captured_lines.append(a[0]))
-    monkeypatch.setattr("train_smt.manage_position", lambda p, b: "exit_stop")
+    monkeypatch.setattr("signal_smt.manage_position", lambda p, b: "exit_stop")
 
     bar = _make_mock_bar(ts="2025-01-02 09:30:00", high=19960.0, low=19948.0, close=19950.0)
     ts = pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York")
@@ -480,7 +515,7 @@ def test_process_managing_session_end_force_close(monkeypatch, tmp_path):
     pos_file.write_text(json.dumps(pos))
     monkeypatch.setattr(signal_smt, "POSITION_FILE", pos_file)
 
-    monkeypatch.setattr("train_smt.manage_position", lambda p, b: "hold")
+    monkeypatch.setattr("signal_smt.manage_position", lambda p, b: "hold")
 
     # Bar at exactly SESSION_END time triggers force close
     bar = _make_mock_bar(ts="2025-01-02 13:30:00", close=19980.0)
@@ -493,57 +528,53 @@ def test_process_managing_session_end_force_close(monkeypatch, tmp_path):
 
 # ══ Buffer management tests ═══════════════════════════════════════════════════
 
-def test_1s_buf_cleared_on_1m_bar(monkeypatch, tmp_path):
-    """on_mnq_1m_bar with hasNewBar=True resets _mnq_1s_buf to empty."""
+def test_tick_bar_reset_on_1m_bar(monkeypatch, tmp_path):
+    """on_mnq_1m_bar with hasNewBar=True resets _mnq_tick_bar to None."""
     import signal_smt
 
-    monkeypatch.setattr(signal_smt, "REALTIME_DATA_DIR", tmp_path)
+    monkeypatch.setattr(signal_smt, "BAR_DATA_DIR", tmp_path)
 
     empty = signal_smt._empty_bar_df()
-    # Pre-populate buffer with one bar
-    buf = empty.copy()
-    buf.loc[pd.Timestamp("2025-01-02 09:05:00", tz="America/New_York")] = [20000, 20005, 19995, 20000, 100]
-    monkeypatch.setattr(signal_smt, "_mnq_1s_buf", buf)
+    fake_acc = {"open": 20000.0, "high": 20005.0, "low": 19995.0, "close": 20000.0, "volume": 10.0, "second_ts": pd.Timestamp("2025-01-02 09:04:59", tz="America/New_York")}
+    monkeypatch.setattr(signal_smt, "_mnq_tick_bar", fake_acc)
     monkeypatch.setattr(signal_smt, "_mnq_1m_df", empty.copy())
 
     bar = _make_mock_bar(ts="2025-01-02 09:05:00")
-    bars = [None, bar]  # hasNewBar=True checks bars[-1]
+    bars = [None, bar]
 
     signal_smt.on_mnq_1m_bar(bars, hasNewBar=True)
 
-    assert signal_smt._mnq_1s_buf.empty
+    assert signal_smt._mnq_tick_bar is None
 
 
-def test_mes_1s_buf_always_appended(monkeypatch, tmp_path):
-    """on_mes_tick finalizes a bar into _mes_1s_buf when a second boundary is crossed."""
+def test_mes_partial_1m_updated_on_tick(monkeypatch):
+    """on_mes_tick updates _mes_partial_1m accumulator; second boundary does not reset it."""
     import signal_smt
 
-    empty = signal_smt._empty_bar_df()
-    monkeypatch.setattr(signal_smt, "_mes_1s_buf", empty.copy())
-    monkeypatch.setattr(signal_smt, "_mes_tick_bar", None)
-    monkeypatch.setattr(signal_smt, "_state", "MANAGING")
+    monkeypatch.setattr(signal_smt, "_mes_partial_1m", None)
 
-    # Tick 1: establishes accumulator for second S — buffer still empty
+    # Tick 1: establishes partial 1m accumulator for 14:06 minute
     ticker1 = _make_mock_ticker("2025-01-02 14:06:00.100000", price=20001.0)
     signal_smt.on_mes_tick(ticker1)
-    assert len(signal_smt._mes_1s_buf) == 0
+    assert signal_smt._mes_partial_1m is not None
+    assert signal_smt._mes_partial_1m["open"] == 20001.0
 
-    # Tick 2: new second → finalizes tick 1's bar into buffer
-    ticker2 = _make_mock_ticker("2025-01-02 14:06:01.200000", price=20002.0)
+    # Tick 2 (new second, same minute): partial bar updates running OHLCV, not reset
+    ticker2 = _make_mock_ticker("2025-01-02 14:06:01.200000", price=20005.0)
     signal_smt.on_mes_tick(ticker2)
-    assert len(signal_smt._mes_1s_buf) == 1
+    assert signal_smt._mes_partial_1m["open"]  == 20001.0   # open stays from first tick
+    assert signal_smt._mes_partial_1m["high"]  == 20005.0
+    assert signal_smt._mes_partial_1m["close"] == 20005.0
 
 
 # ══ Tick handler tests ════════════════════════════════════════════════════════
 
 def test_tick_accumulator_ohlcv_correct(monkeypatch):
-    """Three ticks in the same second produce correct OHLCV in the accumulator."""
+    """Three ticks in the same second produce correct OHLCV in the per-second accumulator."""
     import signal_smt
 
-    empty = signal_smt._empty_bar_df()
-    monkeypatch.setattr(signal_smt, "_mnq_1s_buf", empty.copy())
     monkeypatch.setattr(signal_smt, "_mnq_tick_bar", None)
-    # Prevent _process() side-effects from a boundary crossing
+    monkeypatch.setattr(signal_smt, "_mnq_partial_1m", None)
     monkeypatch.setattr(signal_smt, "_process", lambda bar: None)
 
     for ts_suffix, price in ((".100000", 20001.0), (".200000", 20005.0), (".300000", 19998.0)):
@@ -555,53 +586,54 @@ def test_tick_accumulator_ohlcv_correct(monkeypatch):
     assert acc["low"]    == 19998.0
     assert acc["close"]  == 19998.0
     assert acc["volume"] == 3.0
-    # No boundary crossed — buffer still empty
-    assert len(signal_smt._mnq_1s_buf) == 0
+    # No boundary crossed — partial bar exists but _process was not called (no finalized second)
 
 
-def test_tick_boundary_finalizes_bar(monkeypatch):
-    """Tick at S+1 causes S's bar to be appended to _mnq_1s_buf with correct OHLCV."""
+def test_tick_boundary_updates_partial_1m(monkeypatch):
+    """Tick at S+1 crosses a second boundary; partial 1m bar reflects OHLCV since minute start."""
     import signal_smt
 
-    empty = signal_smt._empty_bar_df()
-    monkeypatch.setattr(signal_smt, "_mnq_1s_buf", empty.copy())
     monkeypatch.setattr(signal_smt, "_mnq_tick_bar", None)
+    monkeypatch.setattr(signal_smt, "_mnq_partial_1m", None)
     monkeypatch.setattr(signal_smt, "_process", lambda bar: None)
 
     signal_smt.on_mnq_tick(_make_mock_ticker("2025-01-02 14:06:00.100000", price=20001.0))
     signal_smt.on_mnq_tick(_make_mock_ticker("2025-01-02 14:06:01.200000", price=20002.0))
 
-    assert len(signal_smt._mnq_1s_buf) == 1
-    row = signal_smt._mnq_1s_buf.iloc[0]
-    assert row["Open"]  == 20001.0
-    assert row["Close"] == 20001.0
-    assert row["Volume"] == 1.0
+    # After the boundary crossing, partial 1m has been updated with the S+1 tick
+    partial = signal_smt._mnq_partial_1m
+    assert partial["open"]  == 20001.0   # open = first tick of the minute
+    assert partial["high"]  == 20002.0
+    assert partial["close"] == 20002.0
 
 
-def test_tick_boundary_calls_process(monkeypatch):
-    """Boundary crossing in on_mnq_tick triggers exactly one _process() call."""
+def test_tick_boundary_calls_process_with_partial_bar(monkeypatch):
+    """Boundary crossing fires _process() once with a bar whose OHLCV matches the partial 1m state at end of S."""
     import signal_smt
 
-    empty = signal_smt._empty_bar_df()
-    monkeypatch.setattr(signal_smt, "_mnq_1s_buf", empty.copy())
     monkeypatch.setattr(signal_smt, "_mnq_tick_bar", None)
+    monkeypatch.setattr(signal_smt, "_mnq_partial_1m", None)
 
     process_calls = []
     monkeypatch.setattr(signal_smt, "_process", lambda bar: process_calls.append(bar))
 
     signal_smt.on_mnq_tick(_make_mock_ticker("2025-01-02 14:06:00.100000", price=20001.0))
-    signal_smt.on_mnq_tick(_make_mock_ticker("2025-01-02 14:06:01.200000", price=20002.0))
+    # Still within S0 — no boundary yet
+    assert len(process_calls) == 0
 
+    signal_smt.on_mnq_tick(_make_mock_ticker("2025-01-02 14:06:01.200000", price=20002.0))
     assert len(process_calls) == 1
+    # Bar passed to _process reflects end-of-S0 partial state (before S1 tick was applied)
+    bar = process_calls[0]
+    assert bar.Open  == 20001.0
+    assert bar.Close == 20001.0   # close = last price of S0
 
 
 def test_mes_tick_does_not_call_process(monkeypatch):
-    """on_mes_tick never calls _process(); buffer grows on boundary crossing."""
+    """on_mes_tick never calls _process(); _mes_partial_1m is updated."""
     import signal_smt
 
-    empty = signal_smt._empty_bar_df()
-    monkeypatch.setattr(signal_smt, "_mes_1s_buf", empty.copy())
-    monkeypatch.setattr(signal_smt, "_mes_tick_bar", None)
+    monkeypatch.setattr(signal_smt, "_mes_partial_1m", None)
 
     process_calls = []
     monkeypatch.setattr(signal_smt, "_process", lambda bar: process_calls.append(bar))
@@ -610,38 +642,22 @@ def test_mes_tick_does_not_call_process(monkeypatch):
     signal_smt.on_mes_tick(_make_mock_ticker("2025-01-02 14:06:01.200000", price=20002.0))
 
     assert len(process_calls) == 0
-    assert len(signal_smt._mes_1s_buf) == 1
+    assert signal_smt._mes_partial_1m is not None
 
 
 def test_tick_no_tickbyticks_is_noop(monkeypatch):
     """Ticker with empty tickByTicks list causes no state change."""
     import signal_smt
 
-    empty = signal_smt._empty_bar_df()
-    monkeypatch.setattr(signal_smt, "_mnq_1s_buf", empty.copy())
     monkeypatch.setattr(signal_smt, "_mnq_tick_bar", None)
+    monkeypatch.setattr(signal_smt, "_mnq_partial_1m", None)
 
     ticker = mock.MagicMock()
     ticker.tickByTicks = []
     signal_smt.on_mnq_tick(ticker)
 
     assert signal_smt._mnq_tick_bar is None
-    assert len(signal_smt._mnq_1s_buf) == 0
-
-
-def test_acc_to_df_row_schema():
-    """_acc_to_df_row produces correct columns and ET-localized index."""
-    import signal_smt
-
-    acc = {
-        "open": 100.0, "high": 105.0, "low": 99.0, "close": 102.0, "volume": 5.0,
-        "second_ts": pd.Timestamp("2025-01-02 09:01:00", tz="America/New_York"),
-    }
-    row = signal_smt._acc_to_df_row(acc)
-
-    assert list(row.columns) == ["Open", "High", "Low", "Close", "Volume"]
-    assert len(row) == 1
-    assert str(row.index.tz) == "America/New_York"
+    assert signal_smt._mnq_partial_1m is None
 
 
 # ══ Persistence and data loading tests ═══════════════════════════════════════
@@ -649,7 +665,7 @@ def test_acc_to_df_row_schema():
 def test_load_parquets_missing_files(monkeypatch, tmp_path):
     """_load_parquets returns empty DataFrames (not FileNotFoundError) when files absent."""
     import signal_smt
-    monkeypatch.setattr(signal_smt, "REALTIME_DATA_DIR", tmp_path)
+    monkeypatch.setattr(signal_smt, "BAR_DATA_DIR", tmp_path)
 
     mnq_df, mes_df = signal_smt._load_parquets()
 
@@ -664,7 +680,7 @@ def test_30_day_cap_on_gap_fill(monkeypatch, tmp_path):
     """_gap_fill_1m requests no more than 30 days back even when df is empty."""
     import signal_smt
 
-    monkeypatch.setattr(signal_smt, "REALTIME_DATA_DIR", tmp_path)
+    monkeypatch.setattr(signal_smt, "BAR_DATA_DIR", tmp_path)
 
     start_args = []
 

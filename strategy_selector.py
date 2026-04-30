@@ -32,12 +32,15 @@ def _call_claude(prompt: str) -> str:
     """
     Invoke the claude CLI with the given prompt and return the response text.
 
-    Strips CLAUDECODE from the subprocess environment so the child process does
-    not inherit the outer Claude Code session sentinel — this prevents the CLI
-    from detecting it is already inside a Claude Code session and behaving
-    differently (e.g. refusing to spawn or routing to a different model).
+    Strips CLAUDECODE and ANTHROPIC_API_KEY from the subprocess environment.
+    CLAUDECODE: prevents the CLI from detecting it is already inside a Claude
+      Code session and behaving differently (e.g. refusing to spawn).
+    ANTHROPIC_API_KEY: if a .env file loaded this key (e.g. via load_dotenv),
+      the subprocess would use it for API-key auth instead of the CLI's own
+      OAuth session — which can fail if the key lacks CLI-specific permissions.
     """
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    _STRIP = {"CLAUDECODE", "ANTHROPIC_API_KEY"}
+    env = {k: v for k, v in os.environ.items() if k not in _STRIP}
     result = subprocess.run(
         ["claude", "-p", prompt],
         capture_output=True,

@@ -19,8 +19,9 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 
-# Results file
+# Results and trade log files
 results.tsv
+trades.tsv
 
 # Harness upgrade reflections (per-worktree, untracked like results.tsv)
 harness_upgrade.md
@@ -31,5 +32,23 @@ harness_upgrade.md
 # Environment variables
 .env
 
-# Databento permanent parquet store (large, not committed)
+# Live session logs (real trading data, not committed)
+sessions/
+
+# Parquet data files (large, not committed)
+data/*.parquet
 data/historical/*.parquet
+data/realtime/*.parquet
+
+# Agent format-patch archives (stored in .agents/ but not committed)
+.agents/*.patch
+trades.tsv
+
+# SMT v2 regression outputs (baselines are local, not committed)
+data/regression/*/
+
+# SMT v2 runtime state files (ephemeral, not committed)
+data/*.json
+
+# Local regression notes
+regression.md

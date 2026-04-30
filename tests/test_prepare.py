@@ -204,9 +204,13 @@ def test_warn_if_missing_10am_on_backtest_dates(capsys):
 @pytest.mark.integration
 def test_download_ticker_returns_expected_schema():
     """Live yfinance call — requires internet. Verifies schema contract end-to-end."""
-    from prepare import resample_to_daily, HISTORY_START, BACKTEST_END
+    import datetime as _dt
+    from prepare import resample_to_daily
+    # yfinance 1h data is only available for the last 730 days; use a rolling window
+    history_start = (_dt.date.today() - _dt.timedelta(days=700)).isoformat()
+    history_end   = (_dt.date.today() - _dt.timedelta(days=1)).isoformat()
     src = YFinanceSource()
-    df_hourly = src.fetch("AAPL", HISTORY_START, BACKTEST_END, "1h")
+    df_hourly = src.fetch("AAPL", history_start, history_end, "1h")
     if df_hourly is None or df_hourly.empty:
         pytest.skip("yfinance returned empty — network unavailable")
     df_daily = resample_to_daily(df_hourly)
