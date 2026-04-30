@@ -211,11 +211,8 @@ def run_trend(
                     save_position(position)
                     return {"kind": "cautious-armed", "time": now.isoformat(),
                             "price": bar_close, "level": "initial"}
-                else:
-                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
-                    save_position(position)
-                    save_hypothesis(hypothesis)
-                    return _market_close_signal(now, bar_mid, reason="cautious-rejected", close_reason=_cr1)
+                # wick-only reach of initial level: do not arm, do not reject.
+                # The stop already caps downside; let the trade continue toward the secondary.
 
             return None
 
