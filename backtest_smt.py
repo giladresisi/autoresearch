@@ -1185,8 +1185,14 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             if not hist_mnq_1m.empty
             else pd.DataFrame(columns=list(_agg_h))
         )
-        # _detect_fvgs only needs High/Low; hist_1hr_day covers the full history.
-        hist_hourly_mnq = hist_1hr_day
+        # _detect_fvgs only needs the last 14 calendar days of hourly bars.
+        # Older FVGs are too far from current price to be actionable targets.
+        _14d_ago = session_start_ts - pd.Timedelta(days=14)
+        hist_hourly_mnq = (
+            hist_1hr_day[hist_1hr_day.index >= _14d_ago]
+            if not hist_1hr_day.empty
+            else hist_1hr_day
+        )
 
         # ------------------------------------------------------------------ #
         # Run daily module once at 09:20 ET                                    #
