@@ -20,7 +20,7 @@ _POLL_INTERVAL_S = 0.5
 
 
 class ProcessManager:
-    def __init__(self, script_path: Path, relay: SessionRelay, log_channel: OutputChannel) -> None:
+    def __init__(self, script_path: Path | list, relay: SessionRelay, log_channel: OutputChannel) -> None:
         self._script = script_path
         self._relay = relay
         self._log = log_channel
@@ -58,8 +58,12 @@ class ProcessManager:
             raise
 
     def _spawn(self) -> subprocess.Popen:
+        if isinstance(self._script, list):
+            cmd = self._script
+        else:
+            cmd = [sys.executable, str(self._script)]
         return subprocess.Popen(
-            [sys.executable, str(self._script)],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -102,9 +106,12 @@ class ProcessManager:
             time.sleep(30)
 
 
-def _kill_existing_signal_smt(script_path: Path, log: OutputChannel) -> None:
+def _kill_existing_signal_smt(script_path: Path | list, log: OutputChannel) -> None:
     """Terminate any running process whose cmdline contains signal_smt.py."""
-    script_name = script_path.name
+    if isinstance(script_path, list):
+        script_name = script_path[-1]
+    else:
+        script_name = script_path.name
     for proc in psutil.process_iter(["pid", "cmdline"]):
         try:
             cmdline = proc.info.get("cmdline") or []

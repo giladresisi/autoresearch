@@ -14,12 +14,22 @@ Two-stage refactor + new capability. Stage 1 extracts `SimulatedFillExecutor` an
 
 **Status**: Implementation complete, unstaged. 887 passed / 16 pre-existing failures / 15 skipped. No regressions.
 
+### Stage 2 — Complete
+
+**Status**: Implementation complete, unstaged. 936 passed / 9 skipped. No regressions. Pending manual demo validation (requires PickMyTrade + Apex demo credentials).
+
 ### Reports Generated
 
 **Execution Report:** `.agents/execution-reports/stage1-fill-executor-ib-realtime.md`
 - 7/7 tasks completed across 4 waves; 22 new tests (21 passing, 1 integration-skipped by design)
 - One unplanned fix: `tests/test_smt_humanize.py` S-1/S-2 updated to new executor API after `_open_position()` signature change
 - fills.jsonl deferred to Stage 2 per plan scope boundary
+- Alignment score: 9/10
+
+**Execution Report:** `.agents/execution-reports/stage2-pickmytrade-automation.md`
+- 6/6 tasks completed across 3 waves; 26 new tests, all passing; 0 regressions
+- Two additive divergences: PMT_FILLS_URL env var instead of PMT_BASE_URL (plan gap resolved); ProcessManager widened to Path | list (required for module-style subprocess command)
+- Manual demo validation (Level 0 + Level 4) pending — requires live PMT credentials
 - Alignment score: 9/10
 
 
