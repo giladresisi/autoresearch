@@ -1,10 +1,10 @@
 # regression.py
 # Specific-day regression runner for the SMT v2 pipeline.
 # Runs run_backtest_v2 for each date in regression.md, writes events.jsonl + trades.tsv,
-# records baselines, and optionally diffs against them. Also plots a chart per date.
+# and diffs against baselines. Also plots a chart per date.
 #
-# Default: record baseline + plot chart for each date.
-# --skip-record: diff against existing baseline instead of overwriting it.
+# Default: diff against existing baseline.
+# --update-baseline: overwrite baseline with current run output.
 
 import argparse
 import json
@@ -53,7 +53,7 @@ def _write_trades_tsv(path: Path, trades: list[dict]) -> None:
 def run_regression(
     regression_md_path: str = "regression.md",
     *,
-    record: bool = True,
+    record: bool = False,
     update_baseline: "bool | None" = None,
 ) -> dict:
     """Run regression for every date in regression_md_path.
@@ -135,12 +135,12 @@ def main() -> int:
         help="Path to regression.md (default: regression.md)",
     )
     parser.add_argument(
-        "--skip-record", action="store_true",
-        help="Diff against existing baseline instead of recording a new one",
+        "--update-baseline", action="store_true",
+        help="Overwrite baseline with current run output instead of diffing",
     )
     args = parser.parse_args()
 
-    results = run_regression(args.regression_md, record=not args.skip_record)
+    results = run_regression(args.regression_md, record=args.update_baseline)
 
     all_pass = True
     for date, res in results.items():
