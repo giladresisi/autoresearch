@@ -2,6 +2,9 @@
 # JSON load/save for the four SMT v2 state files: global, daily, hypothesis, position.
 # Pure IO utility — no business logic. Atomic writes; returns deep-copied defaults on
 # missing or schema-mismatched files so callers never mutate the default constants.
+#
+# In-memory mode: call set_in_memory_mode(True) to skip all disk I/O and keep state
+# in a process-level dict. Used by run_backtest_v2 to avoid Windows file-locking issues.
 
 import copy
 import json
@@ -45,14 +48,43 @@ DEFAULT_POSITION = {
     "failed_entries": 0,
 }
 
+# ---------------------------------------------------------------------------
+# In-memory mode (used by backtests to skip disk I/O)
+# ---------------------------------------------------------------------------
+_IN_MEMORY = False
+_STORE: dict[str, dict] = {}
+
+
+def set_in_memory_mode(enabled: bool) -> None:
+    global _IN_MEMORY
+    _IN_MEMORY = enabled
+    if not enabled:
+        _STORE.clear()
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _atomic_write(path: Path, payload: dict) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    if _IN_MEMORY:
+        _STORE[str(path)] = copy.deepcopy(payload)
+        return
+    text = json.dumps(payload, indent=2, sort_keys=True)
+    tmp = path.with_suffix(".writing")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        os.replace(tmp, path)
+    except (PermissionError, FileNotFoundError):
+        path.write_text(text, encoding="utf-8")
 
 
 def _load(path: Path, default: dict) -> dict:
+    if _IN_MEMORY:
+        d = _STORE.get(str(path))
+        if d is None:
+            return copy.deepcopy(default)
+        return copy.deepcopy(d)
     if not path.exists():
         return copy.deepcopy(default)
     try:

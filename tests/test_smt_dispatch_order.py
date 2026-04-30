@@ -57,7 +57,7 @@ def test_5m_dispatch_order_is_trend_then_hypothesis_then_strategy(
     def fake_run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly_mnq):
         pass  # no-op
 
-    def fake_run_hypothesis(now, mnq_1m, mes_1m, hist_mnq_1m, hist_mes_1m):
+    def fake_run_hypothesis(now, mnq_1m, mes_1m, hist_mnq_1m, hist_mes_1m, **kwargs):
         call_order.append("hypothesis")
         return None
 
@@ -139,7 +139,7 @@ def test_1m_only_dispatches_trend(tmp_path, monkeypatch, _isolate_state):
     def fake_run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly_mnq):
         calls["daily"] += 1
 
-    def fake_run_hypothesis(now, mnq_1m, mes_1m, hist_mnq_1m, hist_mes_1m):
+    def fake_run_hypothesis(now, mnq_1m, mes_1m, hist_mnq_1m, hist_mes_1m, **kwargs):
         calls["hypothesis"] += 1
         return None
 
