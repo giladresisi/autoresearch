@@ -104,7 +104,7 @@ def _find_last_liquidity(
     highs; prev_close > price AND bar.Low <= price for lows).
     Returns (name, cross_timestamp) of the most recently-crossed level, or ("", None).
     """
-    meaningful_names = {"week_high", "week_low", "day_high", "day_low"}
+    meaningful_names = {"week_high", "week_low", "day_high", "day_low", "TDO", "TWO"}
 
     level_map = {}
     for liq in liquidities:
@@ -599,7 +599,7 @@ def _determine_direction(
     #   last=high + above mid + downward cross AFTER sweep (failed bearish)    => up
     #   last=high + above mid + upward cross BEFORE sweep + low not hit        => up  (continuation)
     #   last=high + above mid + else                                           => down (high grab → drop)
-    _low_names  = {"day_low", "week_low"}
+    _low_names  = {"day_low", "week_low", "TDO", "TWO"}
     _high_names = {"day_high", "week_high"}
     _last_liq, _last_liq_ts = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_pre_session)
     if _last_liq and day_high is not None and day_low is not None:
