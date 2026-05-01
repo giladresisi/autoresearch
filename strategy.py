@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime
+from datetime import datetime, time as _time
 from typing import Optional
 
 import pandas as pd
@@ -134,6 +134,10 @@ def run_strategy(
     # Section 2: No active position                                        #
     # ------------------------------------------------------------------ #
     if not position["active"]:
+        # Block entries before 9:30 ET — pre-open bars are hypothesis-formation only.
+        if now.time() < _time(9, 30):
+            return None
+
         # 2.1 Early-exit conditions
         if direction == "none":
             return None
