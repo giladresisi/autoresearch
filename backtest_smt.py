@@ -1296,7 +1296,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         entry_event: "dict | None" = None
         for evt in day_events:
             kind = evt.get("kind", "")
-            if kind in ("limit-entry-filled", "market-entry"):
+            if kind in ("limit-entry-filled", "market-entry", "bos-entry"):
                 entry_event = evt
             elif kind in ("market-close", "stopped-out", "end-of-session") and entry_event is not None:
                 exit_reason = kind

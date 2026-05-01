@@ -93,14 +93,16 @@ def _find_last_liquidity(
     liquidities: list,
     extra_bars: pd.DataFrame | None = None,
 ) -> tuple[str, "pd.Timestamp | None"]:
-    """Find the most recently-touched meaningful liquidity level.
+    """Find the most recently-crossed meaningful liquidity level.
 
     Scans mnq_1m (session bars) and optionally extra_bars (True Day pre-session bars)
-    so overnight/London-session level touches are captured, not just post-09:20 bars.
+    so overnight/London-session level crosses are captured, not just post-09:20 bars.
 
     Restricted to: {week_high, week_low, day_high, day_low}.
-    A level is "touched" when bar.High >= price (for highs) or bar.Low <= price (for lows).
-    Returns (name, touch_timestamp) of the most recently-touched level, or ("", None).
+    A level is "crossed" when the previous bar closed on the near side and the current
+    bar's extreme reaches the far side (prev_close < price AND bar.High >= price for
+    highs; prev_close > price AND bar.Low <= price for lows).
+    Returns (name, cross_timestamp) of the most recently-crossed level, or ("", None).
     """
     meaningful_names = {"week_high", "week_low", "day_high", "day_low"}
 
@@ -119,22 +121,25 @@ def _find_last_liquidity(
         bars_array = mnq_1m
 
     high_names = {"week_high", "day_high"}
-    low_names  = {"week_low",  "day_low"}
     best_idx   = -1
     best_name  = ""
 
-    highs = bars_array["High"].values
-    lows  = bars_array["Low"].values
+    closes = bars_array["Close"].values
+    highs  = bars_array["High"].values
+    lows   = bars_array["Low"].values
 
     for name, price in level_map.items():
         if name in high_names:
-            idxs = np.where(highs >= price)[0]
+            # upward cross: prev close below level, current bar reaches above
+            crossed = (closes[:-1] < price) & (highs[1:] >= price)
         else:
-            idxs = np.where(lows <= price)[0]
+            # downward cross: prev close above level, current bar reaches below
+            crossed = (closes[:-1] > price) & (lows[1:] <= price)
+        idxs = np.where(crossed)[0] + 1
         if len(idxs) > 0:
-            last_touch = int(idxs[-1])
-            if last_touch > best_idx:
-                best_idx = last_touch
+            last_cross = int(idxs[-1])
+            if last_cross > best_idx:
+                best_idx = last_cross
                 best_name = name
 
     if best_idx < 0:
