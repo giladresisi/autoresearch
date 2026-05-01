@@ -135,7 +135,7 @@ def run_strategy(
         if opp_5m is not None and (opp_5m["body_high"] - opp_5m["body_low"]) <= MAX_CONFIRMATION_BODY_PTS:
             body_end_price = opp_5m["body_high"] if direction == "up" else opp_5m["body_low"]
             current_conf_time = position.get("confirmation_bar", {}).get("time", "")
-            if opp_5m["time"] != current_conf_time or position["limit_entry"] == "":
+            if opp_5m["time"] != current_conf_time:
                 conf_bar_snap = {
                     "time":      opp_5m["time"],
                     "high":      opp_5m["high"],
@@ -243,7 +243,33 @@ def run_strategy(
         exit_price = stop
         position["active"]            = {}
         position["limit_entry"]       = ""
+        # confirmation_bar intentionally preserved: prevents immediate re-entry on the
+        # same bar before the next 5m hypothesis re-evaluation can run.
         position["failed_entries"]    = position.get("failed_entries", 0) + 1
+
+        # Flag for re-evaluation when the stop crossed the daily or weekly mid —
+        # structural signals that the directional thesis has genuinely inverted.
+        # Stops on the same side of both mids are noise and skip the re-run.
+        _daily = smt_state.load_daily()
+        _liq_map = {l["name"]: l["price"] for l in _daily.get("liquidities", [])
+                    if l.get("kind") == "level"}
+        _dh = _liq_map.get("day_high")
+        _dl = _liq_map.get("day_low")
+        _daily_mid = (_dh + _dl) / 2.0 if _dh is not None and _dl is not None else None
+        _wh = _liq_map.get("week_high")
+        _wl = _liq_map.get("week_low")
+        _weekly_mid = (_wh + _wl) / 2.0 if _wh is not None and _wl is not None else None
+        _stop_crossed_daily = _daily_mid is not None and (
+            (active_dir == "up"   and float(exit_price) < _daily_mid) or
+            (active_dir == "down" and float(exit_price) > _daily_mid)
+        )
+        _stop_crossed_weekly = _weekly_mid is not None and (
+            (active_dir == "up"   and float(exit_price) < _weekly_mid) or
+            (active_dir == "down" and float(exit_price) > _weekly_mid)
+        )
+        if _stop_crossed_daily or _stop_crossed_weekly:
+            position["reeval_after_stop"] = True
+
         smt_state.save_position(position)
         return _make_signal("stopped-out", now, exit_price)
 

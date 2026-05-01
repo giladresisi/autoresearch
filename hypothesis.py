@@ -93,16 +93,18 @@ def _find_last_liquidity(
     liquidities: list,
     extra_bars: pd.DataFrame | None = None,
 ) -> tuple[str, "pd.Timestamp | None"]:
-    """Find the most recently-touched meaningful liquidity level.
+    """Find the most recently-crossed meaningful liquidity level.
 
     Scans mnq_1m (session bars) and optionally extra_bars (True Day pre-session bars)
-    so overnight/London-session level touches are captured, not just post-09:20 bars.
+    so overnight/London-session level crosses are captured, not just post-09:20 bars.
 
     Restricted to: {week_high, week_low, day_high, day_low}.
-    A level is "touched" when bar.High >= price (for highs) or bar.Low <= price (for lows).
-    Returns (name, touch_timestamp) of the most recently-touched level, or ("", None).
+    A level is "crossed" when the previous bar closed on the near side and the current
+    bar's extreme reaches the far side (prev_close < price AND bar.High >= price for
+    highs; prev_close > price AND bar.Low <= price for lows).
+    Returns (name, cross_timestamp) of the most recently-crossed level, or ("", None).
     """
-    meaningful_names = {"week_high", "week_low", "day_high", "day_low"}
+    meaningful_names = {"week_high", "week_low", "day_high", "day_low", "TDO", "TWO"}
 
     level_map = {}
     for liq in liquidities:
@@ -119,22 +121,25 @@ def _find_last_liquidity(
         bars_array = mnq_1m
 
     high_names = {"week_high", "day_high"}
-    low_names  = {"week_low",  "day_low"}
     best_idx   = -1
     best_name  = ""
 
-    highs = bars_array["High"].values
-    lows  = bars_array["Low"].values
+    closes = bars_array["Close"].values
+    highs  = bars_array["High"].values
+    lows   = bars_array["Low"].values
 
     for name, price in level_map.items():
         if name in high_names:
-            idxs = np.where(highs >= price)[0]
+            # upward cross: prev close below level, current bar reaches above
+            crossed = (closes[:-1] < price) & (highs[1:] >= price)
         else:
-            idxs = np.where(lows <= price)[0]
+            # downward cross: prev close above level, current bar reaches below
+            crossed = (closes[:-1] > price) & (lows[1:] <= price)
+        idxs = np.where(crossed)[0] + 1
         if len(idxs) > 0:
-            last_touch = int(idxs[-1])
-            if last_touch > best_idx:
-                best_idx = last_touch
+            last_cross = int(idxs[-1])
+            if last_cross > best_idx:
+                best_idx = last_cross
                 best_name = name
 
     if best_idx < 0:
@@ -579,19 +584,22 @@ def _determine_direction(
     # Scans the full True Day (pre-session + session) so overnight/London level touches are
     # visible at NY open.
     #
-    # For the "same-side" cases (last=high + above_mid, last=low + below_mid):
-    # the exception "advance further beyond the sweep" applies only when price crossed the
-    # mid toward the sweep level AND did NOT revisit the opposite meaningful level between
-    # that mid crossing and the sweep.  If the opposite level was revisited, the market
-    # did not make a committed directional move — aim for the other half instead.
+    # Same-side cases (last=low+below_mid, last=high+above_mid) use a two-layer check:
+    #   Layer 1 (post-sweep): did price cross the mid after the sweep, then fail back?
+    #     A failed attempt is the strongest signal — override everything else.
+    #   Layer 2 (pre-sweep fallback): was there a committed directional mid-cross before
+    #     the sweep, with no opposite-level revisit?  That marks a continuation sweep.
+    #     If neither layer fires, treat as a liquidity grab → expect reversal.
     #
-    #   last=low  + above mid                                       => up  (bounce confirmed)
-    #   last=low  + below mid + mid crossed down + opp high not hit => down (advance below low)
-    #   last=low  + below mid + no mid cross or opp high was hit    => up  (target opposite half)
-    #   last=high + below mid                                       => down (drop confirmed)
-    #   last=high + above mid + mid crossed up   + opp low not hit  => up  (advance above high)
-    #   last=high + above mid + no mid cross or opp low was hit     => down (target opposite half)
-    _low_names  = {"day_low", "week_low"}
+    #   last=low  + above mid                                                  => up  (bounce confirmed)
+    #   last=low  + below mid + upward cross AFTER sweep (failed bullish)      => down
+    #   last=low  + below mid + downward cross BEFORE sweep + high not hit     => down (continuation)
+    #   last=low  + below mid + else                                           => up  (low grab → bounce)
+    #   last=high + below mid                                                  => down (drop confirmed)
+    #   last=high + above mid + downward cross AFTER sweep (failed bearish)    => up
+    #   last=high + above mid + upward cross BEFORE sweep + low not hit        => up  (continuation)
+    #   last=high + above mid + else                                           => down (high grab → drop)
+    _low_names  = {"day_low", "week_low", "TDO", "TWO"}
     _high_names = {"day_high", "week_high"}
     _last_liq, _last_liq_ts = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_pre_session)
     if _last_liq and day_high is not None and day_low is not None:
@@ -625,7 +633,19 @@ def _determine_direction(
         else:
             _true_day_bars = mnq_1m
 
-        def _first_mid_cross(before_ts: "pd.Timestamp | None", upward: bool) -> "pd.Timestamp | None":
+        def _last_mid_cross_after(after_ts: "pd.Timestamp | None", upward: bool) -> "pd.Timestamp | None":
+            _bars = _true_day_bars[_true_day_bars.index > after_ts] if after_ts is not None else _true_day_bars
+            result = None
+            for i in range(1, len(_bars)):
+                c_now  = float(_bars["Close"].iloc[i])
+                c_prev = float(_bars["Close"].iloc[i - 1])
+                if upward     and c_now > _daily_mid and c_prev <= _daily_mid:
+                    result = _bars.index[i]
+                if not upward and c_now < _daily_mid and c_prev >= _daily_mid:
+                    result = _bars.index[i]
+            return result
+
+        def _first_mid_cross_before(before_ts: "pd.Timestamp | None", upward: bool) -> "pd.Timestamp | None":
             _bars = _true_day_bars[_true_day_bars.index <= before_ts] if before_ts is not None else _true_day_bars
             for i in range(1, len(_bars)):
                 c_now  = float(_bars["Close"].iloc[i])
@@ -649,9 +669,9 @@ def _determine_direction(
                 _lp = _liq_price_map.get(_n)
                 if _lp is None:
                     continue
-                if check_high and bool((_w["High"] >= _lp).any()):
+                if check_high and (_w["High"] >= _lp).any():
                     return True
-                if not check_high and bool((_w["Low"] <= _lp).any()):
+                if not check_high and (_w["Low"] <= _lp).any():
                     return True
             return False
 
@@ -661,24 +681,34 @@ def _determine_direction(
                 if _above_mid:
                     r2b_dir = "up"
                 else:
-                    # Mirror of the _high_names logic: only advance further below the low when
-                    # price made a committed downward run through the mid before the sweep AND
-                    # the opposite (high) level wasn't revisited between that crossing and the sweep.
-                    # Without a committed downward mid-cross, aim for the opposite half (up).
-                    _cross_ts = _first_mid_cross(_last_liq_ts, upward=False)
-                    if _cross_ts is not None and not _opp_level_touched(_cross_ts, _last_liq_ts, _high_names, check_high=True):
+                    # Layer 1: post-sweep upward cross that subsequently failed → bearish
+                    _last_up_ts = _last_mid_cross_after(_last_liq_ts, upward=True)
+                    if _last_up_ts is not None:
                         r2b_dir = "down"
                     else:
-                        r2b_dir = "up"
+                        # Layer 2: pre-sweep committed bearish cross (continuation sweep)
+                        _pre_cross_ts = _first_mid_cross_before(_last_liq_ts, upward=False)
+                        if _pre_cross_ts is not None and not _opp_level_touched(
+                                _pre_cross_ts, _last_liq_ts, _high_names, check_high=True):
+                            r2b_dir = "down"
+                        else:
+                            r2b_dir = "up"  # liquidity grab → expect bounce
             elif _last_liq in _high_names:
                 if not _above_mid:
                     r2b_dir = "down"
                 else:
-                    _cross_ts = _first_mid_cross(_last_liq_ts, upward=True)
-                    if _cross_ts is not None and not _opp_level_touched(_cross_ts, _last_liq_ts, _low_names, check_high=False):
+                    # Layer 1: post-sweep downward cross that subsequently failed → bullish
+                    _last_down_ts = _last_mid_cross_after(_last_liq_ts, upward=False)
+                    if _last_down_ts is not None:
                         r2b_dir = "up"
                     else:
-                        r2b_dir = "down"
+                        # Layer 2: pre-sweep committed bullish cross (continuation sweep)
+                        _pre_cross_ts = _first_mid_cross_before(_last_liq_ts, upward=True)
+                        if _pre_cross_ts is not None and not _opp_level_touched(
+                                _pre_cross_ts, _last_liq_ts, _low_names, check_high=False):
+                            r2b_dir = "up"
+                        else:
+                            r2b_dir = "down"  # liquidity grab → expect drop
         if r2b_dir is not None:
             reason["rule"]             = "rule2b"
             reason["last_swept_level"] = _last_liq

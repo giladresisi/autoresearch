@@ -133,6 +133,9 @@ def run_trend(
     _dh = _liq_map.get("day_high")
     _dl = _liq_map.get("day_low")
     daily_mid_price = (_dh + _dl) / 2.0 if _dh is not None and _dl is not None else None
+    _wh = _liq_map.get("week_high")
+    _wl = _liq_map.get("week_low")
+    weekly_mid_price = (_wh + _wl) / 2.0 if _wh is not None and _wl is not None else None
 
     # Guard: only apply mid-crossing invalidation when the hypothesis was formed
     # with price on the side consistent with the direction.  If direction=down was
@@ -142,6 +145,11 @@ def run_trend(
     _mid_cross_guard = (
         (direction == "up"   and _hyp_daily_mid in ("above", "mid")) or
         (direction == "down" and _hyp_daily_mid in ("below", "mid"))
+    )
+    _hyp_weekly_mid = hypothesis.get("weekly_mid", "")
+    _weekly_mid_cross_guard = (
+        (direction == "up"   and _hyp_weekly_mid in ("above", "mid")) or
+        (direction == "down" and _hyp_weekly_mid in ("below", "mid"))
     )
 
     # ------------------------------------------------------------------
@@ -188,6 +196,16 @@ def run_trend(
                     save_position(position)
                     save_hypothesis(hypothesis)
                     return _market_close_signal(now, bar_mid, reason="daily_mid_cross", close_reason="daily-mid-cross")
+
+            # Weekly-mid invalidation: same logic applied to the broader weekly range.
+            if weekly_mid_price is not None and _weekly_mid_cross_guard:
+                _wm_broken = (direction == "up"   and bar_close < weekly_mid_price) or \
+                             (direction == "down" and bar_close > weekly_mid_price)
+                if _wm_broken:
+                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                    save_position(position)
+                    save_hypothesis(hypothesis)
+                    return _market_close_signal(now, bar_mid, reason="weekly_mid_cross", close_reason="weekly-mid-cross")
 
             if cautious_secondary is None and cautious_initial is None:
                 return None
@@ -311,48 +329,63 @@ def run_trend(
 
     _HIGH_PRIO_LEVELS = {"week_high", "week_low", "day_high", "day_low"}
 
+    # After trend-broken fires on a level, suppress re-fires on the same level+direction
+    # for this many minutes.  Prevents a whipsaw around a level from repeatedly cancelling
+    # pending limit entries before they can fill.
+    _TREND_BROKEN_COOLDOWN_MINUTES = 10
+
+    _now_ts = pd.Timestamp(now)
+    _cooldowns = position.get("trend_broken_cooldowns", [])
+    _active_cooldown_keys = {
+        (c["level_name"], c["direction"])
+        for c in _cooldowns
+        if pd.Timestamp(c["expires_at"]) > _now_ts
+    }
+
     for level in liquidities:
         if level.get("kind") != "level":
             continue
-        if level.get("name") not in _HIGH_PRIO_LEVELS:
+        level_name = level.get("name", "")
+        if level_name not in _HIGH_PRIO_LEVELS:
+            continue
+        if (level_name, direction) in _active_cooldown_keys:
             continue
 
         level_price = float(level["price"])
 
+        triggered = False
+        extra: dict = {}
         if direction == "up":
             # Opposite-direction levels are those *below* current price.
             if level_price < bar_close and bar_low <= level_price:
-                # A downside support was breached → trend broken.
-                hypothesis["direction"] = "none"
-                position["confirmation_bar"] = {}
-                position["limit_entry"] = ""
-                save_position(position)
-                save_hypothesis(hypothesis)
-                return {
-                    "kind":            "trend-broken",
-                    "time":            now.isoformat(),
-                    "price":           bar_close,
-                    "broken_direction": direction,
-                    "level_name":      level.get("name", ""),
-                    "level_price":     level_price,
-                    "bar_low":         bar_low,
-                }
+                triggered = True
+                extra = {"bar_low": bar_low}
         else:  # direction == "down"
             # Opposite-direction levels are those *above* current price.
             if level_price > bar_close and bar_high >= level_price:
-                hypothesis["direction"] = "none"
-                position["confirmation_bar"] = {}
-                position["limit_entry"] = ""
-                save_position(position)
-                save_hypothesis(hypothesis)
-                return {
-                    "kind":            "trend-broken",
-                    "time":            now.isoformat(),
-                    "price":           bar_close,
-                    "broken_direction": direction,
-                    "level_name":      level.get("name", ""),
-                    "level_price":     level_price,
-                    "bar_high":        bar_high,
-                }
+                triggered = True
+                extra = {"bar_high": bar_high}
+
+        if triggered:
+            expires_at = (_now_ts + pd.Timedelta(minutes=_TREND_BROKEN_COOLDOWN_MINUTES)).isoformat()
+            new_cooldowns = [c for c in _cooldowns
+                             if not (c["level_name"] == level_name and c["direction"] == direction)]
+            new_cooldowns.append({"level_name": level_name, "direction": direction, "expires_at": expires_at})
+            position["trend_broken_cooldowns"] = new_cooldowns
+            hypothesis["direction"] = "none"
+            position["confirmation_bar"] = {}
+            position["limit_entry"] = ""
+            save_position(position)
+            save_hypothesis(hypothesis)
+            sig = {
+                "kind":             "trend-broken",
+                "time":             now.isoformat(),
+                "price":            bar_close,
+                "broken_direction": direction,
+                "level_name":       level_name,
+                "level_price":      level_price,
+            }
+            sig.update(extra)
+            return sig
 
     return None
