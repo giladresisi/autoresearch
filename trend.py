@@ -133,6 +133,9 @@ def run_trend(
     _dh = _liq_map.get("day_high")
     _dl = _liq_map.get("day_low")
     daily_mid_price = (_dh + _dl) / 2.0 if _dh is not None and _dl is not None else None
+    _wh = _liq_map.get("week_high")
+    _wl = _liq_map.get("week_low")
+    weekly_mid_price = (_wh + _wl) / 2.0 if _wh is not None and _wl is not None else None
 
     # Guard: only apply mid-crossing invalidation when the hypothesis was formed
     # with price on the side consistent with the direction.  If direction=down was
@@ -142,6 +145,11 @@ def run_trend(
     _mid_cross_guard = (
         (direction == "up"   and _hyp_daily_mid in ("above", "mid")) or
         (direction == "down" and _hyp_daily_mid in ("below", "mid"))
+    )
+    _hyp_weekly_mid = hypothesis.get("weekly_mid", "")
+    _weekly_mid_cross_guard = (
+        (direction == "up"   and _hyp_weekly_mid in ("above", "mid")) or
+        (direction == "down" and _hyp_weekly_mid in ("below", "mid"))
     )
 
     # ------------------------------------------------------------------
@@ -188,6 +196,16 @@ def run_trend(
                     save_position(position)
                     save_hypothesis(hypothesis)
                     return _market_close_signal(now, bar_mid, reason="daily_mid_cross", close_reason="daily-mid-cross")
+
+            # Weekly-mid invalidation: same logic applied to the broader weekly range.
+            if weekly_mid_price is not None and _weekly_mid_cross_guard:
+                _wm_broken = (direction == "up"   and bar_close < weekly_mid_price) or \
+                             (direction == "down" and bar_close > weekly_mid_price)
+                if _wm_broken:
+                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                    save_position(position)
+                    save_hypothesis(hypothesis)
+                    return _market_close_signal(now, bar_mid, reason="weekly_mid_cross", close_reason="weekly-mid-cross")
 
             if cautious_secondary is None and cautious_initial is None:
                 return None
