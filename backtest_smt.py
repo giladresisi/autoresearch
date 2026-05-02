@@ -1065,6 +1065,22 @@ def _write_results_tsv(row: dict) -> None:
         w.writerow(row)
 
 
+def _write_trades_tsv_v2(trades: list[dict], path: str = "trades.tsv") -> None:
+    """Overwrite trades.tsv with v2 SMT test-fold trade records."""
+    import csv
+
+    if not trades:
+        return
+    fieldnames = [
+        "fold", "entry_time", "entry_price", "direction", "contracts",
+        "exit_time", "exit_price", "exit_reason", "pnl_points", "pnl_dollars",
+    ]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")
+        w.writeheader()
+        w.writerows(trades)
+
+
 def _write_trades_tsv(trades: list[dict]) -> None:
     """Write all test-fold trade records to trades.tsv (tab-separated). Overwrites each run."""
     import csv
@@ -1477,7 +1493,10 @@ if __name__ == "__main__":
 
         fold_test_pnls.append((_fold_test_stats["total_pnl"], _fold_test_stats["total_trades"]))
         _fold_test_stats_list.append(_fold_test_stats)
-        _all_test_trades.extend(_fold_test_stats.get("trade_records", []))
+        for _tr in _fold_test_stats.get("trade_records", []):
+            _all_test_trades.append({**_tr, "fold": _fold_n})
+
+    _write_trades_tsv_v2(_all_test_trades)
 
     # R2: Exclude folds with < 3 test trades — sparse folds are noise-dominated
     _qualified = [(p, t) for p, t in fold_test_pnls if t >= 3]
