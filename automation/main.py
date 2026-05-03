@@ -600,16 +600,36 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         return
     evt_type = result["type"]
     if evt_type == "lifecycle_batch":
-        for _sub in result["events"]:
+        evts = result["events"]
+        has_limit_placed = any(e["type"] == "limit_placed" for e in evts)
+        has_limit_filled  = any(e["type"] == "limit_filled"  for e in evts)
+        for _sub in evts:
             _dispatch_event(bar_ts, _sub)
-        # Extract signal from batch for downstream handling
-        _signal_evts = [e for e in result["events"] if e["type"] == "signal"]
+        _bar_row_for_fill = strategy_smt._BarRow(
+            float(bar.Open), float(bar.High), float(bar.Low), float(bar.Close),
+            float(bar.Volume), bar_ts,
+        )
+        # If limit_placed and limit_filled are in the same batch the limit filled
+        # on the same bar it was placed — skip placing it (handled via signal path below)
+        if has_limit_placed and not has_limit_filled:
+            _lp = next(e for e in evts if e["type"] == "limit_placed")
+            _executor.place_entry(_lp["signal"], _bar_row_for_fill)
+        _signal_evts = [e for e in evts if e["type"] == "signal"]
         if not _signal_evts:
             return
         result = _signal_evts[0]
         evt_type = "signal"
+        result["_from_limit_fill"] = has_limit_filled
     if evt_type != "signal":
         _dispatch_event(bar_ts, result)
+        _bar_row_for_evt = strategy_smt._BarRow(
+            float(bar.Open), float(bar.High), float(bar.Low), float(bar.Close),
+            float(bar.Volume), bar_ts,
+        )
+        if evt_type == "limit_placed":
+            _executor.place_entry(result["signal"], _bar_row_for_evt)
+        elif evt_type == "limit_moved":
+            _executor.modify_limit_entry(result["old_signal"], result["new_signal"], _bar_row_for_evt)
         return
     signal = result
 
@@ -657,18 +677,31 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         float(bar.Open), float(bar.High), float(bar.Low), float(bar.Close),
         float(bar.Volume), bar_ts,
     )
-    _entry_fill = _executor.place_entry(signal, _bar_row_for_fill)
-    # PickMyTradeExecutor returns None (async fill); fall back to signal price for display
-    assumed_entry = _entry_fill.fill_price if _entry_fill else float(signal["entry_price"])
-    _position = {
-        **signal,
-        "assumed_entry": assumed_entry,
-        "contracts": 1,
-        "instrument": "MNQ1!",
-        "entry_time": str(signal["entry_time"]),
-        "tp_breached": False,
-    }
-    POSITION_FILE.write_text(json.dumps(_position, indent=2))
+    if signal.get("_from_limit_fill"):
+        assumed_entry = float(signal["entry_price"])
+        _position = {
+            **signal,
+            "assumed_entry": assumed_entry,
+            "contracts": 1,
+            "instrument": "MNQ1!",
+            "entry_time": str(signal["entry_time"]),
+            "tp_breached": False,
+        }
+        POSITION_FILE.write_text(json.dumps(_position, indent=2))
+        _executor.place_stop_after_limit_fill(_position, _bar_row_for_fill)
+    else:
+        _entry_fill = _executor.place_entry(signal, _bar_row_for_fill)
+        # PickMyTradeExecutor returns None (async fill); fall back to signal price for display
+        assumed_entry = _entry_fill.fill_price if _entry_fill else float(signal["entry_price"])
+        _position = {
+            **signal,
+            "assumed_entry": assumed_entry,
+            "contracts": 1,
+            "instrument": "MNQ1!",
+            "entry_time": str(signal["entry_time"]),
+            "tp_breached": False,
+        }
+        POSITION_FILE.write_text(json.dumps(_position, indent=2))
     print(_format_signal_line(bar_ts, signal, assumed_entry), flush=True)
     if strategy_smt.HUMAN_EXECUTION_MODE:
         # Emit the typed human-trader payload alongside the legacy log line.

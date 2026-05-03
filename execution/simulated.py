@@ -125,3 +125,9 @@ class SimulatedFillExecutor:
 
     def stop(self) -> None:
         pass
+
+    def place_close(self, label: str = "close") -> None:
+        pass
+
+    def modify_limit_entry(self, old_signal: dict, new_signal: dict, bar: BarRow) -> None:
+        pass

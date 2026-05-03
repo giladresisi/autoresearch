@@ -1,6 +1,22 @@
 # PROGRESS
 
 
+## Feature: Fix & Extend PickMyTrade Executor
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/update_pickmytrade.md`
+
+Bug fix + enhancement: correct all PMT payload field names/values (`data`/`buy`/`sell`/`close`, `order_type`/`MKT`/`LMT`), add `multiple_accounts`, `token`, `risk_percentage`, `sl`; add `place_stop_after_limit_fill`, `place_close`, `modify_limit_entry` methods; fix `automation/main.py` limit-order wiring so `place_entry` fires at `limit_placed` time and SL-attach fires at `limit_filled` time.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/update-pickmytrade.md`
+- 5/5 tasks completed across 3 waves; 13 new tests + 5 updated, all passing; 0 new failures (940 passed full suite)
+- One minor plan wording divergence: plan summary said "6 updated tests" but detail table correctly marked test_is_automated_flag_set for deletion; deletion was implemented as the detail table specified
+- Manual live-order smoke test (Manual Test 1) pending — requires live PMT credentials and Tradovate demo account
+- Alignment score: 10/10
+
+
 ## Feature: Tradovate Live Trading via PickMyTrade
 
 **Status**: ✅ Planned

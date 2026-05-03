@@ -80,22 +80,37 @@ class PickMyTradeExecutor:
         if self._fill_thread is not None:
             self._fill_thread.join(timeout=5)
 
+    def _build_payload(self, data: str, **extra) -> dict:
+        payload = {
+            "symbol":          self._symbol,
+            "data":            data,
+            "quantity":        self._contracts,
+            "risk_percentage": 0,
+            "token":           self._api_key,
+            "multiple_accounts": [{
+                "token":               self._api_key,
+                "account_id":          self._account_id,
+                "risk_percentage":     0,
+                "quantity_multiplier": 1,
+            }],
+        }
+        payload.update(extra)
+        return payload
+
     def place_entry(self, signal: dict, bar: BarRow) -> None:
         order_id = f"pmt-{uuid.uuid4().hex[:8]}"
-        action = "BUY" if signal["direction"] == "long" else "SELL"
+        direction = signal["direction"]
+        data = "buy" if direction == "long" else "sell"
+        entry_price = float(signal["entry_price"])
+        stop_price = float(signal["stop_price"]) if signal.get("stop_price") is not None else 0.0
         is_limit = signal.get("limit_fill_bars") is not None
-        payload = {
-            "action": action,
-            "qty": self._contracts,
-            "symbol": self._symbol,
-            "orderType": "Limit" if is_limit else "Market",
-            "isAutomated": True,
-        }
         if is_limit:
-            payload["price"] = float(signal["entry_price"])
+            payload = self._build_payload(data, order_type="LMT", price=entry_price, gtd_in_second=0)
+        else:
+            payload = self._build_payload(data, order_type="MKT", price=entry_price, sl=stop_price)
         ctx = {
-            "direction": signal["direction"],
-            "requested_price": float(signal["entry_price"]),
+            "direction": direction,
+            "requested_price": entry_price,
             "order_type": "limit" if is_limit else "market",
             "session_date": str(bar.name.date()) if hasattr(bar, "name") and bar.name is not None else "",
         }
@@ -103,28 +118,58 @@ class PickMyTradeExecutor:
         self._order_pool.submit(self._post_order, order_id, payload, ctx)
         return None
 
-    def place_exit(self, position: dict, exit_type: str, bar: BarRow) -> None:
+    def place_stop_after_limit_fill(self, position: dict, bar: BarRow) -> None:
         order_id = f"pmt-{uuid.uuid4().hex[:8]}"
-        close_action = "SELL" if position["direction"] == "long" else "BUY"
-        payload = {
-            "action": close_action,
-            "qty": self._contracts,
-            "symbol": self._symbol,
-            "orderType": "Market",
-            "isAutomated": True,
-        }
+        direction = position["direction"]
+        data = "buy" if direction == "long" else "sell"
+        payload = self._build_payload(
+            data,
+            quantity=0,
+            sl=float(position["stop_price"]),
+            update_sl=True,
+            pyramid=False,
+            same_direction_ignore=True,
+        )
         ctx = {
-            "direction": position["direction"],
-            "requested_price": float(bar.Close),
-            "order_type": "market",
+            "direction": direction,
             "session_date": str(bar.name.date()) if hasattr(bar, "name") and bar.name is not None else "",
         }
         self._order_pool.submit(self._post_order, order_id, payload, ctx)
+
+    def place_close(self, label: str = "close") -> None:
+        order_id = f"pmt-{uuid.uuid4().hex[:8]}"
+        payload = self._build_payload("close")
+        ctx = {"label": label}
+        # Synchronous — callers can sequence follow-up requests after this returns.
+        # Remove from _pending immediately: PMT does not return a queryable fill for
+        # close orders, so the poll loop would spin on this order_id forever otherwise.
+        self._post_order(order_id, payload, ctx)
+        with self._lock:
+            self._pending.pop(order_id, None)
+
+    def place_exit(self, position: dict, exit_type: str, bar: BarRow) -> None:
+        self.place_close(label=exit_type)
         return None
+
+    def modify_limit_entry(self, old_signal: dict, new_signal: dict, bar: BarRow) -> None:
+        # Step 1: synchronously cancel the unfilled limit
+        self.place_close(label="modify_cancel")
+        # Step 2: fire new LMT order via thread pool
+        order_id = f"pmt-{uuid.uuid4().hex[:8]}"
+        direction = new_signal["direction"]
+        data = "buy" if direction == "long" else "sell"
+        entry_price = float(new_signal["entry_price"])
+        payload = self._build_payload(data, order_type="LMT", price=entry_price, gtd_in_second=0)
+        ctx = {
+            "direction": direction,
+            "requested_price": entry_price,
+            "order_type": "limit",
+            "session_date": str(bar.name.date()) if hasattr(bar, "name") and bar.name is not None else "",
+        }
+        self._order_pool.submit(self._post_order, order_id, payload, ctx)
 
     def _post_order(self, order_id: str, payload: dict, ctx: dict) -> None:
         headers = {
-            "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
         last_exc = None
