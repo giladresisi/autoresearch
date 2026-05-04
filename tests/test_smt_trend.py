@@ -123,7 +123,7 @@ class TestCautiousArming:
     def _setup_active_cautious_no(self, direction="up", cautious_price=110.0):
         hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
         hyp["direction"] = direction
-        hyp["cautious_price"] = str(cautious_price)
+        hyp["cautious_price_initial"] = str(cautious_price)
         save_hypothesis(hyp)
 
         pos = copy.deepcopy(DEFAULT_POSITION)
@@ -147,7 +147,7 @@ class TestCautiousArming:
         assert result is None
 
     def test_cautious_arming_long_close_beyond(self):
-        """direction=up, bar.high>=cautious_price AND close>cautious_price → cautious-armed."""
+        """direction=up, bar.high>=cautious_price AND close>cautious_price → cautious-armed (initial)."""
         from trend import run_trend
         from smt_state import load_position
 
@@ -158,29 +158,21 @@ class TestCautiousArming:
         assert result is not None
         assert result["kind"] == "cautious-armed"
         pos = load_position()
-        assert pos["active"]["cautious"] == "yes"
+        assert pos["active"]["cautious"] == "initial"
 
     def test_cautious_rejected_long_close_below(self):
-        """direction=up, bar.high>=cautious_price BUT close<cautious_price → cautious-rejected."""
+        """direction=up, bar.high>=cautious_price_initial BUT close<cautious_price_initial
+        → wick-only reach of initial level: no rejection, returns None."""
         from trend import run_trend
-        from smt_state import load_hypothesis, load_position
 
         self._setup_active_cautious_no(direction="up", cautious_price=110.0)
         bar = make_1m_bar(open_=100, high=112, low=98, close=109)
         recent = make_recent_bars(closes=[100, 109], opens=[99, 100])
         result = run_trend(NOW, bar, recent)
-        assert result is not None
-        assert result["kind"] == "market-close"
-        assert result["reason"] == "cautious-rejected"
-        hyp = load_hypothesis()
-        assert hyp["direction"] == "none"
-        pos = load_position()
-        assert pos["active"] == {}
-        assert pos["limit_entry"] == ""
-        assert pos["confirmation_bar"] == {}
+        assert result is None
 
     def test_cautious_arming_short_close_beyond(self):
-        """direction=down, bar.low<=cautious_price AND close<cautious_price → cautious-armed."""
+        """direction=down, bar.low<=cautious_price AND close<cautious_price → cautious-armed (initial)."""
         from trend import run_trend
         from smt_state import load_position
 
@@ -191,7 +183,7 @@ class TestCautiousArming:
         assert result is not None
         assert result["kind"] == "cautious-armed"
         pos = load_position()
-        assert pos["active"]["cautious"] == "yes"
+        assert pos["active"]["cautious"] == "initial"
 
     def test_cautious_price_empty_string_skips_arming(self):
         """cautious_price="" → arming step skipped regardless of price action."""
@@ -219,7 +211,7 @@ class TestCautiousYes:
     def _setup_cautious_yes(self, direction="up", cautious_price=110.0):
         hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
         hyp["direction"] = direction
-        hyp["cautious_price"] = str(cautious_price)
+        hyp["cautious_price_secondary"] = str(cautious_price)
         save_hypothesis(hyp)
 
         pos = copy.deepcopy(DEFAULT_POSITION)
@@ -382,7 +374,7 @@ class TestSignalShape:
 
         hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
         hyp["direction"] = "up"
-        hyp["cautious_price"] = "110"
+        hyp["cautious_price_initial"] = "110"
         save_hypothesis(hyp)
 
         pos = copy.deepcopy(DEFAULT_POSITION)

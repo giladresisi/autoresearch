@@ -456,10 +456,10 @@ def test_move_limit_rate_limited_suppresses_event_but_updates_state(monkeypatch)
 
     # Mock detect_smt_divergence so bar 6 looks like a new same-dir divergence
     real_detect = strat.detect_smt_divergence
-    def _patched_detect(mes_df, mnq_df, bar_idx, offset, _cached=None):
+    def _patched_detect(mes_df, mnq_df, bar_idx, offset, _cached=None, **kwargs):
         if bar_idx == 6:
             return ("short", 1.5, 0.5, "wick", B + 2.0)
-        return real_detect(mes_df, mnq_df, bar_idx, offset, _cached=_cached)
+        return real_detect(mes_df, mnq_df, bar_idx, offset, _cached=_cached, **kwargs)
     monkeypatch.setattr(strat, "detect_smt_divergence", _patched_detect)
     monkeypatch.setattr(strat, "find_anchor_close", lambda *a, **kw: B + 0.5)
 
@@ -488,10 +488,10 @@ def test_move_limit_emitted_on_same_direction_replacement(monkeypatch):
 
     # bar 6: force a new SHORT divergence with a different anchor (→ different entry_price)
     real_detect = strat.detect_smt_divergence
-    def _patched_detect(mes_df, mnq_df, bar_idx, offset, _cached=None):
+    def _patched_detect(mes_df, mnq_df, bar_idx, offset, _cached=None, **kwargs):
         if bar_idx == 6:
             return ("short", 2.0, 1.0, "wick", B + 3.0)
-        return real_detect(mes_df, mnq_df, bar_idx, offset, _cached=_cached)
+        return real_detect(mes_df, mnq_df, bar_idx, offset, _cached=_cached, **kwargs)
     monkeypatch.setattr(strat, "detect_smt_divergence", _patched_detect)
     # New anchor at B+3.0 → new entry B+3.0 - BUFFER = different from old_entry
     monkeypatch.setattr(strat, "find_anchor_close", lambda *a, **kw: B + 3.0)
@@ -518,10 +518,10 @@ def test_move_limit_not_emitted_when_entry_unchanged(monkeypatch):
 
     # bar 6: same-direction SHORT divergence but with the SAME anchor (B+1.0) → identical entry
     real_detect = strat.detect_smt_divergence
-    def _patched_detect(mes_df, mnq_df, bar_idx, offset, _cached=None):
+    def _patched_detect(mes_df, mnq_df, bar_idx, offset, _cached=None, **kwargs):
         if bar_idx == 6:
             return ("short", 2.0, 1.0, "wick", B + 1.0)
-        return real_detect(mes_df, mnq_df, bar_idx, offset, _cached=_cached)
+        return real_detect(mes_df, mnq_df, bar_idx, offset, _cached=_cached, **kwargs)
     monkeypatch.setattr(strat, "detect_smt_divergence", _patched_detect)
     monkeypatch.setattr(strat, "find_anchor_close", lambda *a, **kw: B + 1.0)
     # Bullish close so bar 6 is not a confirmation bar
@@ -547,10 +547,10 @@ def test_cancel_and_place_on_opposite_direction_replacement(monkeypatch):
 
     # Force a LONG divergence at bar 6 that beats the existing short score
     real_detect = strat.detect_smt_divergence
-    def _patched_detect(mes_df, mnq_df, bar_idx, offset, _cached=None):
+    def _patched_detect(mes_df, mnq_df, bar_idx, offset, _cached=None, **kwargs):
         if bar_idx == 6:
             return ("long", 5.0, 5.0, "wick", B - 3.0)
-        return real_detect(mes_df, mnq_df, bar_idx, offset, _cached=_cached)
+        return real_detect(mes_df, mnq_df, bar_idx, offset, _cached=_cached, **kwargs)
     monkeypatch.setattr(strat, "detect_smt_divergence", _patched_detect)
     monkeypatch.setattr(strat, "find_anchor_close", lambda *a, **kw: B - 3.0)
     monkeypatch.setattr(strat, "REPLACE_THRESHOLD", 0.0)  # allow any opposite-dir replacement

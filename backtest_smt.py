@@ -11,6 +11,7 @@ import pandas as pd
 
 from hypothesis_smt import compute_hypothesis_context
 import strategy_smt
+from execution.simulated import SimulatedBrokerExecutor
 from strategy_smt import (
     _BarRow,
     init_bar_data, append_bar_data, load_futures_data, compute_tdo, find_anchor_close,
@@ -123,8 +124,23 @@ MAX_CONTRACTS = 4
 MARKET_ORDER_SLIPPAGE_PTS: float = 5.0
 
 # Slippage applied to v2 market-close exits. 2 pts covers typical automated-trading
-# latency (network + exchange queue) for MNQ in RTH. Will move to simulated-fill module.
+# latency (network + exchange queue) for MNQ in RTH. Passed as v2_market_slip_pts to
+# SimulatedBrokerExecutor; v2 pipeline slippage (lines ~1257–1340) is out of Stage 1 scope.
 V2_MARKET_CLOSE_SLIPPAGE_PTS: float = 2.0
+
+
+_HYP_FIELDS = (
+    "hypothesis_direction", "pd_range_case", "pd_range_bias",
+    "week_zone", "day_zone", "trend_direction", "hypothesis_score",
+    "fvg_detected",
+)
+
+
+def _stamp_hypothesis_fields(trade: dict, position: dict) -> None:
+    """Copy hypothesis annotation fields from position dict to trade dict in-place."""
+    trade["matches_hypothesis"] = position.get("matches_hypothesis")
+    for _f in _HYP_FIELDS:
+        trade[_f] = position.get(_f)
 
 
 def print_direction_breakdown(stats: dict, prefix: str = "") -> None:
@@ -166,6 +182,7 @@ def _size_contracts(entry_price: float, stop_price: float) -> "tuple[int, int]":
 
 def _open_position(
     signal_dict: dict, day, contracts: int, total_contracts_target: int, bar_idx: int,
+    fill_price: float,
 ) -> dict:
     position = {
         **signal_dict, "entry_date": day, "contracts": contracts,
@@ -175,14 +192,7 @@ def _open_position(
     }
     position["tp_breached"] = False
     position["entry_bar"]   = bar_idx
-    # Human-mode additive fill slippage (direction-correct): long pays more, short receives less.
-    # Read via module attribute so monkeypatching strategy_smt in tests takes effect.
-    if strategy_smt.HUMAN_EXECUTION_MODE and strategy_smt.HUMAN_ENTRY_SLIPPAGE_PTS > 0:
-        slip = strategy_smt.HUMAN_ENTRY_SLIPPAGE_PTS
-        if position["direction"] == "long":
-            position["entry_price"] = round(position["entry_price"] + slip, 4)
-        else:
-            position["entry_price"] = round(position["entry_price"] - slip, 4)
+    position["entry_price"] = fill_price
     return position
 
 
@@ -191,28 +201,11 @@ def _build_trade_record(
     exit_result: str,
     exit_bar: "pd.Series | _BarRow",
     pnl_per_point: float,
+    fill_price: float,
 ) -> "tuple[dict, float]":
     """Build the trade dict and compute PnL from a closed position."""
     direction_sign = 1 if position["direction"] == "long" else -1
-    if exit_result == "exit_tp":
-        # Limit order — fills at the defined take-profit price; no slippage on liquid NQ
-        exit_price = position["take_profit"]
-    elif exit_result == "exit_secondary":
-        # Limit order hit at secondary target — fills at defined price, identical semantics to exit_tp
-        exit_price = position["secondary_target"]
-    elif exit_result == "exit_stop":
-        # Stop-limit order — fills at the defined stop price; no slippage on liquid NQ
-        exit_price = position["stop_price"]
-    else:
-        # Market orders (exit_time, session_close, exit_market, end_of_backtest,
-        # exit_invalidation_*) — simulate with bar mid +/- slippage
-        mid = (float(exit_bar["High"]) + float(exit_bar["Low"])) / 2.0
-        if PESSIMISTIC_FILLS:
-            slip = MARKET_ORDER_SLIPPAGE_PTS
-            direction_sign = 1 if position["direction"] == "long" else -1
-            exit_price = mid - direction_sign * slip
-        else:
-            exit_price = mid
+    exit_price = fill_price
 
     pnl = (
         direction_sign
@@ -405,6 +398,13 @@ def run_backtest(
     Returns a stats dict with all performance metrics.
     """
     init_bar_data()
+    executor = SimulatedBrokerExecutor(
+        pessimistic=PESSIMISTIC_FILLS,
+        market_slip_pts=MARKET_ORDER_SLIPPAGE_PTS,
+        v2_market_slip_pts=V2_MARKET_CLOSE_SLIPPAGE_PTS,
+        human_mode=strategy_smt.HUMAN_EXECUTION_MODE,
+        human_slip_pts=getattr(strategy_smt, "HUMAN_ENTRY_SLIPPAGE_PTS", 0.0),
+    )
     start_dt = pd.Timestamp(start or BACKTEST_START).date()
     end_dt   = pd.Timestamp(end   or BACKTEST_END).date()
 
@@ -425,7 +425,7 @@ def run_backtest(
     _position_id          = 0    # monotonic counter; shared by partial + final records of same position
 
     # Load 5m historical for hypothesis direction (deterministic, no API calls)
-    _hist_mnq_path = Path("data/historical/MNQ.parquet")
+    _hist_mnq_path = Path("data/MNQ.parquet")
     _hist_mnq_df = pd.read_parquet(_hist_mnq_path) if _hist_mnq_path.exists() else pd.DataFrame(
         columns=["Open", "High", "Low", "Close", "Volume"]
     )
@@ -702,14 +702,12 @@ def run_backtest(
                             else (position["entry_price"] - partial_exit_price)
                         )
                         partial_pnl = pnl_per_contract * partial_contracts * MNQ_PNL_PER_POINT
+                        _partial_fill = executor.place_exit(position, "partial_exit", bar)
                         partial_trade, _ = _build_trade_record(
-                            {**position, "contracts": partial_contracts}, "partial_exit", bar, MNQ_PNL_PER_POINT
+                            {**position, "contracts": partial_contracts}, "partial_exit", bar, MNQ_PNL_PER_POINT,
+                            fill_price=_partial_fill.fill_price,
                         )
-                        partial_trade["matches_hypothesis"] = position.get("matches_hypothesis")
-                        for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
-                                   "week_zone", "day_zone", "trend_direction", "hypothesis_score",
-                                   "fvg_detected"):
-                            partial_trade[_f] = position.get(_f)
+                        _stamp_hypothesis_fields(partial_trade, position)
                         partial_trade["exit_type"] = "partial_exit"
                         partial_trade["pnl"] = round(partial_pnl, 2)
                         partial_trade["exit_price"] = round(partial_exit_price, 4)
@@ -729,14 +727,12 @@ def run_backtest(
                     continue
 
                 if result != "hold":
+                    _exit_fill = executor.place_exit(position, result, bar)
                     trade, day_pnl_delta = _build_trade_record(
-                        position, result, bar, MNQ_PNL_PER_POINT
+                        position, result, bar, MNQ_PNL_PER_POINT,
+                        fill_price=_exit_fill.fill_price,
                     )
-                    trade["matches_hypothesis"] = position.get("matches_hypothesis")
-                    for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
-                               "week_zone", "day_zone", "trend_direction", "hypothesis_score",
-                               "fvg_detected"):
-                        trade[_f] = position.get(_f)
+                    _stamp_hypothesis_fields(trade, position)
                     trades.append(trade)
                     day_pnl += day_pnl_delta
                     prior_trade_bars_held = entry_bar_count  # capture before reset
@@ -808,7 +804,9 @@ def run_backtest(
                     contracts, total_contracts_target = _size_contracts(
                         signal["entry_price"], signal["stop_price"]
                     )
-                    position = _open_position(signal, day, contracts, total_contracts_target, bar_idx)
+                    _entry_fill = executor.place_entry(signal, bar)
+                    position = _open_position(signal, day, contracts, total_contracts_target, bar_idx,
+                                              fill_price=_entry_fill.fill_price)
                     _position_id += 1
                     position["position_id"] = _position_id
                     state = "IN_TRADE"
@@ -838,14 +836,16 @@ def run_backtest(
         # End of session: force-close any position still open at session boundary.
         if state == "IN_TRADE" and position is not None:
             last_bar = mnq_session.iloc[-1]
-            trade, day_pnl_delta = _build_trade_record(
-                position, "session_close", last_bar, MNQ_PNL_PER_POINT
+            _last_bar_row = _BarRow(
+                float(last_bar["Open"]), float(last_bar["High"]), float(last_bar["Low"]),
+                float(last_bar["Close"]), float(last_bar.get("Volume", 0.0)), last_bar.name,
             )
-            trade["matches_hypothesis"] = position.get("matches_hypothesis")
-            for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
-                       "week_zone", "day_zone", "trend_direction", "hypothesis_score",
-                       "fvg_detected"):
-                trade[_f] = position.get(_f)
+            _exit_fill = executor.place_exit(position, "session_close", _last_bar_row)
+            trade, day_pnl_delta = _build_trade_record(
+                position, "session_close", last_bar, MNQ_PNL_PER_POINT,
+                fill_price=_exit_fill.fill_price,
+            )
+            _stamp_hypothesis_fields(trade, position)
             trades.append(trade)
             day_pnl += day_pnl_delta
             position = None
@@ -861,15 +861,17 @@ def run_backtest(
         last_bars = mnq_df[mnq_df.index.date < end_dt]
         if not last_bars.empty:
             last_bar = last_bars.iloc[-1]
+            _last_bar_row = _BarRow(
+                float(last_bar["Open"]), float(last_bar["High"]), float(last_bar["Low"]),
+                float(last_bar["Close"]), float(last_bar.get("Volume", 0.0)), last_bar.name,
+            )
+            _exit_fill = executor.place_exit(position, "end_of_backtest", _last_bar_row)
             trade, pnl = _build_trade_record(
-                position, "end_of_backtest", last_bar, MNQ_PNL_PER_POINT
+                position, "end_of_backtest", last_bar, MNQ_PNL_PER_POINT,
+                fill_price=_exit_fill.fill_price,
             )
             trade["exit_time"] = ""   # no meaningful bar time at backtest end
-            trade["matches_hypothesis"] = position.get("matches_hypothesis")
-            for _f in ("hypothesis_direction", "pd_range_case", "pd_range_bias",
-                       "week_zone", "day_zone", "trend_direction", "hypothesis_score",
-                       "fvg_detected"):
-                trade[_f] = position.get(_f)
+            _stamp_hypothesis_fields(trade, position)
             trades.append(trade)
             equity_curve.append(equity_curve[-1] + pnl)
 
@@ -877,16 +879,39 @@ def run_backtest(
 
 
 def _compute_metrics(trades: list[dict], equity_curve: list[float]) -> dict:
-    """Compute all performance metrics from trade list and equity curve."""
-    total_pnl    = sum(t["pnl"] for t in trades)
-    total_trades = len(trades)
-    winners      = [t for t in trades if t["pnl"] > 0]
-    losers       = [t for t in trades if t["pnl"] <= 0]
-    win_rate     = len(winners) / total_trades if total_trades > 0 else 0.0
-    avg_pnl      = total_pnl / total_trades if total_trades > 0 else 0.0
+    """Compute all performance metrics from trade list and equity curve.
 
-    long_pnl  = sum(t["pnl"] for t in trades if t["direction"] == "long")
-    short_pnl = sum(t["pnl"] for t in trades if t["direction"] == "short")
+    Single-pass over trades to avoid iterating 6+ times over the same list.
+    """
+    total_pnl  = 0.0
+    long_pnl   = 0.0
+    short_pnl  = 0.0
+    n_wins     = 0
+    win_pnl    = 0.0
+    loss_pnl   = 0.0
+    exit_types: dict[str, int] = {}
+
+    for t in trades:
+        p = t["pnl"]
+        total_pnl += p
+        if t["direction"] == "long":
+            long_pnl += p
+        else:
+            short_pnl += p
+        if p > 0:
+            n_wins  += 1
+            win_pnl += p
+        else:
+            loss_pnl += p
+        exit_types[t["exit_type"]] = exit_types.get(t["exit_type"], 0) + 1
+
+    total_trades = len(trades)
+    win_rate = n_wins / total_trades if total_trades > 0 else 0.0
+    avg_pnl  = total_pnl / total_trades if total_trades > 0 else 0.0
+    n_losers = total_trades - n_wins
+    avg_win  = win_pnl  / n_wins   if n_wins   > 0 else 0.0
+    avg_loss = loss_pnl / n_losers if n_losers > 0 else 0.0
+    avg_rr   = avg_win / abs(avg_loss) if avg_loss != 0 else 0.0
 
     # Annualized Sharpe from daily equity changes
     daily_changes = [equity_curve[i] - equity_curve[i - 1] for i in range(1, len(equity_curve))]
@@ -908,14 +933,6 @@ def _compute_metrics(trades: list[dict], equity_curve: list[float]) -> dict:
 
     calmar = total_pnl / max_dd if max_dd > 0 else 0.0
 
-    exit_types: dict[str, int] = {}
-    for t in trades:
-        exit_types[t["exit_type"]] = exit_types.get(t["exit_type"], 0) + 1
-
-    avg_win  = sum(t["pnl"] for t in winners) / len(winners) if winners else 0.0
-    avg_loss = sum(t["pnl"] for t in losers)  / len(losers)  if losers  else 0.0
-    avg_rr   = avg_win / abs(avg_loss) if avg_loss != 0 else 0.0
-
     return {
         "total_pnl":           round(total_pnl, 2),
         "total_trades":        total_trades,
@@ -933,16 +950,39 @@ def _compute_metrics(trades: list[dict], equity_curve: list[float]) -> dict:
 
 
 def _compute_metrics_v2(trades: list[dict], equity_curve: list[float]) -> dict:
-    """Compute performance metrics from v2 trade list (pnl_dollars, direction up/down, exit_reason)."""
-    total_pnl    = sum(t["pnl_dollars"] for t in trades)
-    total_trades = len(trades)
-    winners      = [t for t in trades if t["pnl_dollars"] > 0]
-    losers       = [t for t in trades if t["pnl_dollars"] <= 0]
-    win_rate     = len(winners) / total_trades if total_trades > 0 else 0.0
-    avg_pnl      = total_pnl / total_trades if total_trades > 0 else 0.0
+    """Compute performance metrics from v2 trade list (pnl_dollars, direction up/down, exit_reason).
 
-    long_pnl  = sum(t["pnl_dollars"] for t in trades if t["direction"] == "up")
-    short_pnl = sum(t["pnl_dollars"] for t in trades if t["direction"] == "down")
+    Single-pass over trades to avoid iterating 6+ times over the same list.
+    """
+    total_pnl  = 0.0
+    long_pnl   = 0.0
+    short_pnl  = 0.0
+    n_wins     = 0
+    win_pnl    = 0.0
+    loss_pnl   = 0.0
+    exit_types: dict[str, int] = {}
+
+    for t in trades:
+        p = t["pnl_dollars"]
+        total_pnl += p
+        if t["direction"] == "up":
+            long_pnl += p
+        else:
+            short_pnl += p
+        if p > 0:
+            n_wins  += 1
+            win_pnl += p
+        else:
+            loss_pnl += p
+        exit_types[t["exit_reason"]] = exit_types.get(t["exit_reason"], 0) + 1
+
+    total_trades = len(trades)
+    win_rate = n_wins / total_trades if total_trades > 0 else 0.0
+    avg_pnl  = total_pnl / total_trades if total_trades > 0 else 0.0
+    n_losers = total_trades - n_wins
+    avg_win  = win_pnl  / n_wins   if n_wins   > 0 else 0.0
+    avg_loss = loss_pnl / n_losers if n_losers > 0 else 0.0
+    avg_rr   = avg_win / abs(avg_loss) if avg_loss != 0 else 0.0
 
     daily_changes = [equity_curve[i] - equity_curve[i - 1] for i in range(1, len(equity_curve))]
     if len(daily_changes) > 1:
@@ -961,14 +1001,6 @@ def _compute_metrics_v2(trades: list[dict], equity_curve: list[float]) -> dict:
             max_dd = dd
 
     calmar = total_pnl / max_dd if max_dd > 0 else 0.0
-
-    exit_types: dict[str, int] = {}
-    for t in trades:
-        exit_types[t["exit_reason"]] = exit_types.get(t["exit_reason"], 0) + 1
-
-    avg_win  = sum(t["pnl_dollars"] for t in winners) / len(winners) if winners else 0.0
-    avg_loss = sum(t["pnl_dollars"] for t in losers)  / len(losers)  if losers  else 0.0
-    avg_rr   = avg_win / abs(avg_loss) if avg_loss != 0 else 0.0
 
     return {
         "total_pnl":           round(total_pnl, 2),
@@ -1031,6 +1063,22 @@ def _write_results_tsv(row: dict) -> None:
         if write_header:
             w.writeheader()
         w.writerow(row)
+
+
+def _write_trades_tsv_v2(trades: list[dict], path: str = "trades.tsv") -> None:
+    """Overwrite trades.tsv with v2 SMT test-fold trade records."""
+    import csv
+
+    if not trades:
+        return
+    fieldnames = [
+        "fold", "entry_time", "entry_price", "direction", "contracts",
+        "exit_time", "exit_price", "exit_reason", "pnl_points", "pnl_dollars",
+    ]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")
+        w.writeheader()
+        w.writerows(trades)
 
 
 def _write_trades_tsv(trades: list[dict]) -> None:
@@ -1229,24 +1277,39 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         day_events: list[dict] = []
 
         # ------------------------------------------------------------------ #
+        # Pre-extract numpy arrays once for the session (avoids per-bar       #
+        # DataFrame label lookups and slice copies in the hot loop)            #
+        # ------------------------------------------------------------------ #
+        _sess_idx    = mnq_session_bars.index
+        _sess_opens  = mnq_session_bars["Open"].values
+        _sess_highs  = mnq_session_bars["High"].values
+        _sess_lows   = mnq_session_bars["Low"].values
+        _sess_closes = mnq_session_bars["Close"].values
+        _n_sess      = len(_sess_idx)
+
+        # ------------------------------------------------------------------ #
         # Per-bar loop                                                          #
         # ------------------------------------------------------------------ #
-        for bar_ts in mnq_session_bars.index:
-            now = bar_ts
+        for _bar_i in range(_n_sess):
+            bar_ts = _sess_idx[_bar_i]
+            now    = bar_ts
 
-            bar = mnq_session_bars.loc[bar_ts]
-            _o = float(bar["Open"]); _c = float(bar["Close"])
+            _o = float(_sess_opens[_bar_i])
+            _h = float(_sess_highs[_bar_i])
+            _l = float(_sess_lows[_bar_i])
+            _c = float(_sess_closes[_bar_i])
             mnq_1m_bar = {
                 "time":      bar_ts.isoformat(),
                 "open":      _o,
-                "high":      float(bar["High"]),
-                "low":       float(bar["Low"]),
+                "high":      _h,
+                "low":       _l,
                 "close":     _c,
                 "body_high": max(_o, _c),
                 "body_low":  min(_o, _c),
             }
 
-            mnq_1m_recent = mnq_session_bars.loc[:bar_ts]
+            # iloc slice is O(1) view, avoids label-based loc search
+            mnq_1m_recent = mnq_session_bars.iloc[: _bar_i + 1]
 
             is_5m_boundary = (bar_ts.minute % 5 == 0)
 
@@ -1260,7 +1323,9 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             # Hypothesis runs on every 5m boundary, after trend has had a chance to clear state.
             if is_5m_boundary:
                 hyp_divs = _hyp_mod.run_hypothesis(
-                    now, mnq_session_bars.loc[:now], mes_session_bars.loc[:now],
+                    now,
+                    mnq_session_bars.iloc[: _bar_i + 1],
+                    mes_session_bars.iloc[: mes_session_bars.index.searchsorted(bar_ts, side="right")],
                     hist_mnq_1m, hist_mes_1m,
                     hist_1hr=hist_1hr_day, hist_4hr=hist_4hr_day,
                 )
@@ -1428,7 +1493,10 @@ if __name__ == "__main__":
 
         fold_test_pnls.append((_fold_test_stats["total_pnl"], _fold_test_stats["total_trades"]))
         _fold_test_stats_list.append(_fold_test_stats)
-        _all_test_trades.extend(_fold_test_stats.get("trade_records", []))
+        for _tr in _fold_test_stats.get("trade_records", []):
+            _all_test_trades.append({**_tr, "fold": _fold_n})
+
+    _write_trades_tsv_v2(_all_test_trades)
 
     # R2: Exclude folds with < 3 test trades — sparse folds are noise-dominated
     _qualified = [(p, t) for p, t in fold_test_pnls if t >= 3]

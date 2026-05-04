@@ -1,6 +1,54 @@
 # PROGRESS
 
 
+## Feature: Fix & Extend PickMyTrade Executor
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/update_pickmytrade.md`
+
+Bug fix + enhancement: correct all PMT payload field names/values (`data`/`buy`/`sell`/`close`, `order_type`/`MKT`/`LMT`), add `multiple_accounts`, `token`, `risk_percentage`, `sl`; add `place_stop_after_limit_fill`, `place_close`, `modify_limit_entry` methods; fix `automation/main.py` limit-order wiring so `place_entry` fires at `limit_placed` time and SL-attach fires at `limit_filled` time.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/update-pickmytrade.md`
+- 5/5 tasks completed across 3 waves; 13 new tests + 5 updated, all passing; 0 new failures (940 passed full suite)
+- One minor plan wording divergence: plan summary said "6 updated tests" but detail table correctly marked test_is_automated_flag_set for deletion; deletion was implemented as the detail table specified
+- Manual live-order smoke test (Manual Test 1) pending — requires live PMT credentials and Tradovate demo account
+- Alignment score: 10/10
+
+
+## Feature: Tradovate Live Trading via PickMyTrade
+
+**Status**: ✅ Planned
+**Spec**: `docs/superpowers/specs/2026-04-30-tradovate-live-trading-design.md`
+**Plan File (Stage 1)**: `.agents/plans/stage1-fill-executor-ib-realtime.md`
+**Plan File (Stage 2)**: `.agents/plans/stage2-pickmytrade-automation.md`
+
+Two-stage refactor + new capability. Stage 1 extracts `SimulatedFillExecutor` and `IbRealtimeSource` from `backtest_smt.py` / `signal_smt.py` into shared modules; both existing consumers refactored to use them. Stage 2 adds `PickMyTradeExecutor` and `automation/main.py` for live automated trading on the Apex funded account via PickMyTrade as the authorised intermediary.
+
+### Stage 1 — Complete
+
+**Status**: Implementation complete, unstaged. 887 passed / 16 pre-existing failures / 15 skipped. No regressions.
+
+### Stage 2 — Complete
+
+**Status**: Implementation complete, unstaged. 936 passed / 9 skipped. No regressions. Pending manual demo validation (requires PickMyTrade + Apex demo credentials).
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/stage1-fill-executor-ib-realtime.md`
+- 7/7 tasks completed across 4 waves; 22 new tests (21 passing, 1 integration-skipped by design)
+- One unplanned fix: `tests/test_smt_humanize.py` S-1/S-2 updated to new executor API after `_open_position()` signature change
+- fills.jsonl deferred to Stage 2 per plan scope boundary
+- Alignment score: 9/10
+
+**Execution Report:** `.agents/execution-reports/stage2-pickmytrade-automation.md`
+- 6/6 tasks completed across 3 waves; 26 new tests, all passing; 0 regressions
+- Two additive divergences: PMT_FILLS_URL env var instead of PMT_BASE_URL (plan gap resolved); ProcessManager widened to Path | list (required for module-style subprocess command)
+- Manual demo validation (Level 0 + Level 4) pending — requires live PMT credentials
+- Alignment score: 9/10
+
+
 ## Feature: SMT Redesign — JSON-File Architecture + Module Decomposition
 
 **Status**: Complete

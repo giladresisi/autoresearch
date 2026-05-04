@@ -1,13 +1,16 @@
-# signal_smt.py
-# Realtime SMT divergence signal generator for MNQ1!/MES1!.
-# Subscribes to dual 1m IB streams + reqTickByTickData("AllLast") per instrument; detects signals on each 1s bar
-# via process_scan_bar, then manages the position through the session using manage_position.
+# automation/main.py
+# Live automation session process: realtime SMT divergence trading for MNQ1!/MES1!
+# via PickMyTrade order routing.
+# Mirrors signal_smt.py's state machine and IB realtime ingestion, but routes
+# fills through PickMyTradeExecutor instead of SimulatedBrokerExecutor.
 """
-Usage: python signal_smt.py
+Usage: python -m automation.main
 
-Requires IB Gateway (or TWS) running at IB_HOST:IB_PORT with API enabled.
+Requires IB Gateway (or TWS) running at IB_HOST:IB_PORT with API enabled and
+PickMyTrade webhook credentials in environment (PMT_WEBHOOK_URL, PMT_API_KEY).
 State machine: SCANNING → MANAGING, one trade per session.
 """
+import os
 from pathlib import Path
 import json
 import math as _math
@@ -29,16 +32,17 @@ from strategy_smt import (
     EQH_ENABLED, EQH_SWING_BARS, EQH_TOLERANCE_PTS, EQH_MIN_TOUCHES, EQH_LOOKBACK_BARS,
 )
 # Human-mode flags read lazily via strategy_smt.<NAME> so monkeypatching
-# strategy_smt attributes in tests affects signal_smt without a re-import.
+# strategy_smt attributes in tests affects this module without a re-import.
 import strategy_smt
 from hypothesis_smt import HypothesisManager
 from data.ib_realtime import IbRealtimeSource
-from execution.simulated import SimulatedBrokerExecutor
+from execution.pickmytrade import PickMyTradeExecutor
 
 # ── Connection constants ──────────────────────────────────────────────────────
 IB_HOST      = "127.0.0.1"
 IB_PORT      = 4002
-IB_CLIENT_ID = 15
+# Use a different client ID to avoid conflicting with signal_smt.py (which uses 15)
+IB_CLIENT_ID = int(os.environ.get("AUTOMATION_IB_CLIENT_ID", "20"))
 
 # ── Contract identifiers (quarterly; update after rollover) ───────────────────
 # MNQM6/MESM6 expire 2026-06-18; next: MNQU6=793356225, MESU6=793356217
@@ -63,10 +67,11 @@ RETRY_DELAY_S = 15
 # ── Data paths ───────────────────────────────────────────────────────────────
 BAR_DATA_DIR = Path("data")
 POSITION_FILE = BAR_DATA_DIR / "live_position.json"
+SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", "sessions"))
 
 # ── Module-level state (set in main()) ───────────────────────────────────────
 _ib_source: IbRealtimeSource | None = None
-_executor: SimulatedBrokerExecutor | None = None
+_executor: PickMyTradeExecutor | None = None
 
 # Partial 1m MES bar accumulator — updated by the IbRealtimeSource via _on_bar callback
 _mes_partial_1m: dict | None = None
@@ -595,16 +600,36 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         return
     evt_type = result["type"]
     if evt_type == "lifecycle_batch":
-        for _sub in result["events"]:
+        evts = result["events"]
+        has_limit_placed = any(e["type"] == "limit_placed" for e in evts)
+        has_limit_filled  = any(e["type"] == "limit_filled"  for e in evts)
+        for _sub in evts:
             _dispatch_event(bar_ts, _sub)
-        # Extract signal from batch for downstream handling
-        _signal_evts = [e for e in result["events"] if e["type"] == "signal"]
+        _bar_row_for_fill = strategy_smt._BarRow(
+            float(bar.Open), float(bar.High), float(bar.Low), float(bar.Close),
+            float(bar.Volume), bar_ts,
+        )
+        # If limit_placed and limit_filled are in the same batch the limit filled
+        # on the same bar it was placed — skip placing it (handled via signal path below)
+        if has_limit_placed and not has_limit_filled:
+            _lp = next(e for e in evts if e["type"] == "limit_placed")
+            _executor.place_entry(_lp["signal"], _bar_row_for_fill)
+        _signal_evts = [e for e in evts if e["type"] == "signal"]
         if not _signal_evts:
             return
         result = _signal_evts[0]
         evt_type = "signal"
+        result["_from_limit_fill"] = has_limit_filled
     if evt_type != "signal":
         _dispatch_event(bar_ts, result)
+        _bar_row_for_evt = strategy_smt._BarRow(
+            float(bar.Open), float(bar.High), float(bar.Low), float(bar.Close),
+            float(bar.Volume), bar_ts,
+        )
+        if evt_type == "limit_placed":
+            _executor.place_entry(result["signal"], _bar_row_for_evt)
+        elif evt_type == "limit_moved":
+            _executor.modify_limit_entry(result["old_signal"], result["new_signal"], _bar_row_for_evt)
         return
     signal = result
 
@@ -652,17 +677,31 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         float(bar.Open), float(bar.High), float(bar.Low), float(bar.Close),
         float(bar.Volume), bar_ts,
     )
-    _entry_fill = _executor.place_entry(signal, _bar_row_for_fill)
-    assumed_entry = _entry_fill.fill_price
-    _position = {
-        **signal,
-        "assumed_entry": assumed_entry,
-        "contracts": 1,
-        "instrument": "MNQ1!",
-        "entry_time": str(signal["entry_time"]),
-        "tp_breached": False,
-    }
-    POSITION_FILE.write_text(json.dumps(_position, indent=2))
+    if signal.get("_from_limit_fill"):
+        assumed_entry = float(signal["entry_price"])
+        _position = {
+            **signal,
+            "assumed_entry": assumed_entry,
+            "contracts": 1,
+            "instrument": "MNQ1!",
+            "entry_time": str(signal["entry_time"]),
+            "tp_breached": False,
+        }
+        POSITION_FILE.write_text(json.dumps(_position, indent=2))
+        _executor.place_stop_after_limit_fill(_position, _bar_row_for_fill)
+    else:
+        _entry_fill = _executor.place_entry(signal, _bar_row_for_fill)
+        # PickMyTradeExecutor returns None (async fill); fall back to signal price for display
+        assumed_entry = _entry_fill.fill_price if _entry_fill else float(signal["entry_price"])
+        _position = {
+            **signal,
+            "assumed_entry": assumed_entry,
+            "contracts": 1,
+            "instrument": "MNQ1!",
+            "entry_time": str(signal["entry_time"]),
+            "tp_breached": False,
+        }
+        POSITION_FILE.write_text(json.dumps(_position, indent=2))
     print(_format_signal_line(bar_ts, signal, assumed_entry), flush=True)
     if strategy_smt.HUMAN_EXECUTION_MODE:
         # Emit the typed human-trader payload alongside the legacy log line.
@@ -745,7 +784,8 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
 
     if result == "partial_exit":
         _exit_fill = _executor.place_exit(_position, "partial_exit", bar_row)
-        partial_price = _exit_fill.fill_price
+        # PickMyTradeExecutor returns None (async fill); fall back to bar close for display
+        partial_price = _exit_fill.fill_price if _exit_fill else float(bar.Close)
         pnl = _compute_pnl(_position, partial_price)
         print(json.dumps({
             "signal_type": "PARTIAL_EXIT",
@@ -765,7 +805,8 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         "exit_invalidation_smt", "exit_invalidation_opposing_disp",
     ):
         _exit_fill = _executor.place_exit(_position, result, bar_row)
-        exit_price = _exit_fill.fill_price
+        # PickMyTradeExecutor returns None (async fill); fall back to bar close for display
+        exit_price = _exit_fill.fill_price if _exit_fill else float(bar.Close)
     else:
         # Unknown exit type — log and bail rather than corrupt state with unbound exit_price
         return
@@ -907,10 +948,6 @@ def main() -> None:
 
     BAR_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # This module is only used for signalling to a human trader, so human-mode
-    # classification/emission is always on when signal_smt is the entry point.
-    strategy_smt.HUMAN_EXECUTION_MODE = True
-
     # Parse session window into time objects used by callbacks
     _session_start_time = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
     _session_end_time   = pd.Timestamp(f"2000-01-01 {SIGNAL_SESSION_END}").time()
@@ -925,8 +962,7 @@ def main() -> None:
     _hypothesis_generated = False
 
     # v2 pipeline env gate (dispatcher wiring deferred per spec § "Out of Scope")
-    import os as _os
-    _smtv2_pipeline = _os.environ.get("SMT_PIPELINE", "v1")
+    _smtv2_pipeline = os.environ.get("SMT_PIPELINE", "v1")
 
     # Restore open position from disk if the process was restarted mid-trade
     if POSITION_FILE.exists():
@@ -938,10 +974,21 @@ def main() -> None:
         # Startup guard timestamp: any signal entry_time <= this is considered stale
         _startup_ts = pd.Timestamp.now(tz="America/New_York")
 
-    _executor = SimulatedBrokerExecutor(
-        human_mode=True,
-        human_slip_pts=getattr(strategy_smt, "HUMAN_ENTRY_SLIPPAGE_PTS", 0.0),
-        entry_slip_ticks=ENTRY_SLIPPAGE_TICKS,
+    # Validate required env vars before connecting to IB
+    required = ["PMT_WEBHOOK_URL", "PMT_API_KEY"]
+    missing = [v for v in required if not os.environ.get(v)]
+    if missing:
+        raise RuntimeError(f"Missing required env vars: {missing}")
+
+    today_str = pd.Timestamp.now(tz="America/New_York").strftime("%Y-%m-%d")
+    (SESSIONS_DIR / today_str).mkdir(parents=True, exist_ok=True)
+    _executor = PickMyTradeExecutor(
+        webhook_url=os.environ["PMT_WEBHOOK_URL"],
+        api_key=os.environ["PMT_API_KEY"],
+        symbol=os.environ.get("TRADING_SYMBOL", "MNQ1!"),
+        account_id=os.environ.get("TRADING_ACCOUNT_ID", ""),
+        contracts=int(os.environ.get("TRADING_CONTRACTS", "1")),
+        entry_slip_ticks=int(os.environ.get("PMT_ENTRY_SLIP_TICKS", "2")),
     )
 
     def _on_bar_1m_complete(bars) -> None:
@@ -972,7 +1019,11 @@ def main() -> None:
         on_bar_1m_complete=_on_bar_1m_complete,
     )
 
-    _ib_source.start()  # blocks; retry loop is inside IbRealtimeSource
+    _executor.start()
+    try:
+        _ib_source.start()  # blocks; retry loop is inside IbRealtimeSource
+    finally:
+        _executor.stop()
 
 
 if __name__ == "__main__":

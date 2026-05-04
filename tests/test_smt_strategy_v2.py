@@ -47,6 +47,32 @@ def make_empty_1m_recent() -> pd.DataFrame:
     return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
 
+def make_opp_1m_recent(
+    direction: str = "up",
+    open_: float = 105.0,
+    close_: float = 95.0,
+    high: float = 110.0,
+    low: float = 90.0,
+) -> pd.DataFrame:
+    """Build 5 1m bars at 10:00–10:04 UTC forming a completed 5m bar opposite to direction.
+
+    strategy._find_last_opposite_5m_bar uses first-bar Open and last-bar Close to decide
+    body direction, so all bars share the same O/H/L/C values here for simplicity.
+    NOW = 10:05 UTC, so the last completed 5m period is 10:00–10:04 UTC.
+    """
+    start = pd.Timestamp("2026-04-27 10:00:00", tz="UTC")
+    idx = pd.date_range(start, periods=5, freq="1min")
+    return pd.DataFrame(
+        {
+            "Open":  [open_]  * 5,
+            "High":  [high]   * 5,
+            "Low":   [low]    * 5,
+            "Close": [close_] * 5,
+        },
+        index=idx,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     """Redirect all four smt_state paths into a fresh tmp_path for each test."""
@@ -110,14 +136,13 @@ class TestEarlyExits:
     def test_failed_entries_exactly_two_still_allowed(self):
         """failed_entries=2 is NOT above 2 (gate is > 2) — must not early-exit.
 
-        We set up a bearish bar (direction=up) to guarantee a non-None return
-        when the gate passes.
+        We supply a bearish 1m recent so _find_last_opposite_5m_bar returns an
+        opposite bar and a signal is emitted.
         """
         write_hypothesis(direction="up")
         write_position(failed_entries=2)
-        # Bearish bar → should emit new-limit-entry
         bar = make_5m_bar(open_=105.0, close=95.0, high=110.0, low=90.0)
-        result = run_strategy(NOW, bar, make_empty_1m_recent())
+        result = run_strategy(NOW, bar, make_opp_1m_recent("up"))
 
         assert result is not None
 
@@ -125,17 +150,18 @@ class TestEarlyExits:
 class TestNoPositionOppositeBar:
 
     def test_new_opposite_5m_emits_new_limit_entry(self):
-        """Empty position, direction=up, bearish bar → new-limit-entry at body_high."""
+        """Empty position, direction=up, bearish 1m bars → new-limit-entry at body_high."""
         write_hypothesis(direction="up")
         write_position()
-        # Bearish: close < open
-        bar = make_5m_bar(open_=105.0, high=110.0, low=90.0, close=95.0)
-        result = run_strategy(NOW, bar, make_empty_1m_recent())
+        # 1m bars: open=105, close=95 → body_high=105 (bearish for up direction)
+        # bar_open=99 so approach = 105-99 = 6 ≥ 5 → limit entry (not market)
+        bar = make_5m_bar(open_=99.0, high=110.0, low=90.0, close=95.0)
+        recent = make_opp_1m_recent("up", open_=105.0, close_=95.0, high=110.0, low=90.0)
+        result = run_strategy(NOW, bar, recent)
 
         assert result is not None
         assert result["kind"] == "new-limit-entry"
-        # For direction=up entry is at body_high of the bearish confirmation bar
-        assert result["price"] == pytest.approx(max(105.0, 95.0))  # body_high = 105.0
+        assert result["price"] == pytest.approx(105.0)  # body_high of bearish 5m bar
 
         pos = smt_state.load_position()
         assert pos["limit_entry"] == pytest.approx(105.0)
@@ -143,7 +169,7 @@ class TestNoPositionOppositeBar:
         assert pos["confirmation_bar"]["body_high"] == pytest.approx(105.0)
 
     def test_second_opposite_5m_emits_move_limit_entry(self):
-        """Existing limit_entry + new opposite bar → move-limit-entry, limit updated."""
+        """Existing limit_entry + new opposite 1m bars → move-limit-entry, limit updated."""
         write_hypothesis(direction="up")
         write_position(
             limit_entry=105.0,
@@ -153,13 +179,15 @@ class TestNoPositionOppositeBar:
                 "body_high": 105.0, "body_low": 102.0,
             },
         )
-        # New bearish bar with a different body_high
-        bar = make_5m_bar(open_=107.0, high=112.0, low=88.0, close=97.0)
-        result = run_strategy(NOW, bar, make_empty_1m_recent())
+        # 1m bars: open=107, close=97 → body_high=107 (new opposite bar)
+        # bar_open=101 so approach = 107-101 = 6 ≥ 5 → limit entry
+        bar = make_5m_bar(open_=101.0, high=112.0, low=88.0, close=97.0)
+        recent = make_opp_1m_recent("up", open_=107.0, close_=97.0, high=112.0, low=88.0)
+        result = run_strategy(NOW, bar, recent)
 
         assert result is not None
         assert result["kind"] == "move-limit-entry"
-        assert result["price"] == pytest.approx(107.0)  # body_high of new bar
+        assert result["price"] == pytest.approx(107.0)  # body_high of new 1m-based 5m bar
 
         pos = smt_state.load_position()
         assert pos["limit_entry"] == pytest.approx(107.0)
@@ -181,12 +209,15 @@ class TestNoPositionOppositeBar:
 class TestFill:
 
     def test_5m_bar_crossing_limit_emits_filled_and_writes_active(self):
-        """Bar low<=limit_entry<=high with no new opposite bar → limit-entry-filled."""
+        """Bar range spans limit_entry with no new opposite bar → limit-entry-filled.
+
+        body_low=94 so stop distance = |100-94| = 6 ≥ MIN_STOP_DISTANCE(5).
+        """
         write_hypothesis(direction="up")
         conf = {
             "time": "2026-04-27T09:55:00-04:00",
             "high": 105.0, "low": 95.0,
-            "body_high": 103.0, "body_low": 98.0,
+            "body_high": 103.0, "body_low": 94.0,
         }
         write_position(limit_entry=100.0, confirmation_bar=conf)
         # Bullish bar (non-opposite for direction=up) whose range spans 100
@@ -207,7 +238,10 @@ class TestFill:
         assert pos["confirmation_bar"] == {}
 
     def test_stop_side_short(self):
-        """SHORT fill: stop = confirmation_bar.high."""
+        """SHORT fill: stop = confirmation_bar body_high (not wick high).
+
+        body_high=105, stop distance = |100-105| = 5, NOT < 5 → fills.
+        """
         write_hypothesis(direction="down")
         conf = {
             "time": "2026-04-27T09:55:00-04:00",
@@ -215,9 +249,6 @@ class TestFill:
             "body_high": 105.0, "body_low": 98.0,
         }
         write_position(limit_entry=100.0, confirmation_bar=conf)
-        # Bullish bar (opposite for direction=down) — but we need it to be non-opposite
-        # so fill is checked. For direction=down, "opposite" is bullish (close > open).
-        # A bearish bar (close < open) is non-opposite → fill checked.
         bar = make_5m_bar(open_=101.0, high=103.0, low=98.0, close=99.0)
         result = run_strategy(NOW, bar, make_empty_1m_recent())
 
@@ -225,18 +256,20 @@ class TestFill:
         assert result["kind"] == "limit-entry-filled"
 
         pos = smt_state.load_position()
-        assert pos["active"]["stop"] == pytest.approx(110.0)  # confirmation_bar.high for short
+        assert pos["active"]["stop"] == pytest.approx(105.0)  # confirmation_bar body_high for short
 
     def test_stop_side_long(self):
-        """LONG fill: stop = confirmation_bar.low."""
+        """LONG fill: stop = confirmation_bar body_low (not wick low).
+
+        body_low=94, stop distance = |100-94| = 6 ≥ MIN_STOP_DISTANCE(5) → fills.
+        """
         write_hypothesis(direction="up")
         conf = {
             "time": "2026-04-27T09:55:00-04:00",
             "high": 110.0, "low": 95.0,
-            "body_high": 105.0, "body_low": 98.0,
+            "body_high": 105.0, "body_low": 94.0,
         }
         write_position(limit_entry=100.0, confirmation_bar=conf)
-        # Bearish bar is opposite for up → won't fill. Use bullish bar (non-opposite).
         bar = make_5m_bar(open_=99.0, high=102.0, low=98.0, close=101.0)
         result = run_strategy(NOW, bar, make_empty_1m_recent())
 
@@ -244,7 +277,7 @@ class TestFill:
         assert result["kind"] == "limit-entry-filled"
 
         pos = smt_state.load_position()
-        assert pos["active"]["stop"] == pytest.approx(95.0)  # confirmation_bar.low for long
+        assert pos["active"]["stop"] == pytest.approx(94.0)  # confirmation_bar body_low for long
 
 
 class TestActivePosition:
@@ -309,8 +342,13 @@ class TestActivePosition:
 class TestSameBarOverride:
 
     def test_same_bar_new_confirmation_and_fill_emits_only_move(self):
-        """A bar that is both a new opposite confirmation AND crosses limit_entry
-        must emit move-limit-entry (override semantics), not limit-entry-filled.
+        """New opposite 1m bars take priority over an existing limit crossing:
+        must emit move-limit-entry, not limit-entry-filled.
+
+        1m bars: open=112, close=102 → body_high=112.
+        bar_open=105, approach=7 ≥ 5 → limit entry at 112 (not market).
+        The bar's range [90, 110] spans old limit 100, but the new-opposite
+        code path fires first and returns before the fill check.
         """
         write_hypothesis(direction="up")
         conf = {
@@ -319,21 +357,16 @@ class TestSameBarOverride:
             "body_high": 105.0, "body_low": 98.0,
         }
         write_position(limit_entry=100.0, confirmation_bar=conf)
-        # Bearish bar (opposite for direction=up) whose range also spans 100
-        # open_=105 > close_=95  → bearish (body_high=105, body_low=95)
-        # high=110, low=90       → spans 100
         bar = make_5m_bar(open_=105.0, high=110.0, low=90.0, close=95.0)
-        result = run_strategy(NOW, bar, make_empty_1m_recent())
+        recent = make_opp_1m_recent("up", open_=112.0, close_=102.0, high=115.0, low=88.0)
+        result = run_strategy(NOW, bar, recent)
 
-        # Must be move-limit-entry (new opposite takes priority over fill)
         assert result is not None
         assert result["kind"] == "move-limit-entry"
 
         pos = smt_state.load_position()
-        # Active must NOT be set (no fill)
         assert pos["active"] == {}
-        # limit_entry updated to new body_high
-        assert pos["limit_entry"] == pytest.approx(105.0)
+        assert pos["limit_entry"] == pytest.approx(112.0)
 
 
 class TestSignalShape:
@@ -342,9 +375,9 @@ class TestSignalShape:
         """Any returned signal must have kind, time, price keys and be JSON-serialisable."""
         write_hypothesis(direction="up")
         write_position()
-        # Bearish bar → new-limit-entry
         bar = make_5m_bar(open_=105.0, high=110.0, low=90.0, close=95.0)
-        result = run_strategy(NOW, bar, make_empty_1m_recent())
+        # Bearish 1m bars so _find_last_opposite_5m_bar returns an opposite bar → signal emitted.
+        result = run_strategy(NOW, bar, make_opp_1m_recent("up"))
 
         assert result is not None
         assert "kind" in result

@@ -1,6 +1,7 @@
 # orchestrator/main.py
 # Daemon entry point: waits for trading sessions, runs signal_smt.py, and triggers post-session summarization.
 import datetime
+import os as _os
 import sys
 import time
 from pathlib import Path
@@ -11,6 +12,8 @@ from orchestrator.process import ProcessManager
 from orchestrator.relay import SessionRelay
 from orchestrator.scheduler import get_et_now, is_trading_day, next_session_open
 from orchestrator.summarizer import Summarizer
+
+LIVE_TRADING = _os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
 _ET = ZoneInfo("America/New_York")
 _SIGNAL_SMT = Path(__file__).parent.parent / "signal_smt.py"
@@ -45,9 +48,9 @@ def _sleep_until(target: datetime.datetime, label: str) -> None:
         time.sleep(delay)
 
 
-def run(summarizer: Summarizer | None = None) -> None:
+def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> None:
     """Main daemon loop. Ctrl+C exits cleanly; signal_smt.py is terminated if active."""
-    if summarizer is None:
+    if not skip_summary and summarizer is None:
         summarizer = Summarizer()
     try:
         while True:
@@ -72,9 +75,15 @@ def run(summarizer: Summarizer | None = None) -> None:
             # Run session
             signal_ch, orch_ch = _make_session_channels(today)
             relay = SessionRelay(signal_ch)
-            ProcessManager(_SIGNAL_SMT, relay, orch_ch).run_session(today)
+            if LIVE_TRADING:
+                signal_cmd = ["uv", "run", "python", "-m", "automation.main"]
+            else:
+                signal_cmd = _SIGNAL_SMT
+            print(f"[orchestrator] mode={'LIVE_TRADING' if LIVE_TRADING else 'signal'}", flush=True)
+            ProcessManager(signal_cmd, relay, orch_ch).run_session(today)
             relay.write_trades_tsv(_SESSIONS_DIR / today.isoformat() / "trades.tsv", today)
-            summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)
+            if summarizer is not None:
+                summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)
             _sleep_until(next_session_open(get_et_now()), "next trading session")
     except KeyboardInterrupt:
         print("\n[ORCH] Shutting down.", flush=True)
@@ -101,4 +110,4 @@ if __name__ == "__main__":
     if "--check" in sys.argv:
         _check_setup()
     else:
-        run()
+        run(skip_summary="--no-summary" in sys.argv)

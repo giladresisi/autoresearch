@@ -28,7 +28,7 @@ def main():
     mnq_df = dfs["MNQ"]
     mes_df = dfs["MES"]
 
-    hist_mnq_path = Path("data/historical/MNQ.parquet")
+    hist_mnq_path = Path("data/MNQ.parquet")
     hist_mnq_df = pd.read_parquet(hist_mnq_path) if hist_mnq_path.exists() else pd.DataFrame(
         columns=["Open", "High", "Low", "Close", "Volume"]
     )

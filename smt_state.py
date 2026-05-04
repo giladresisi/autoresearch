@@ -27,18 +27,14 @@ DEFAULT_DAILY = {
 }
 
 DEFAULT_HYPOTHESIS = {
-    "direction": "none",
-    "formed_at": "",
-    "weekly_mid": "",
-    "daily_mid": "",
+    "direction":     "none",
+    "weekly_mid":    "",
+    "daily_mid":     "",
     "last_liquidity": "",
-    "divs": [],
-    "targets": [],
-    "cautious_price_initial":         "",
-    "cautious_price_initial_level":   "",
-    "cautious_price_secondary":       "",
-    "cautious_price_secondary_level": "",
-    "entry_ranges": [],
+    "divs":          [],
+    "targets":       [],
+    "cautious_price": "",
+    "entry_ranges":  [],
 }
 
 DEFAULT_POSITION = {

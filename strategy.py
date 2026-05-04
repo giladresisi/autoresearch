@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime
+from datetime import datetime, time as _time
 from typing import Optional
 
 import pandas as pd
@@ -78,6 +78,22 @@ def _bar_crosses(bar: dict, price: float) -> bool:
     return bar["low"] <= price <= bar["high"]
 
 
+# Minimum fraction of the bar range that must be on the favourable side of the
+# close before an entry is accepted.  A long entry on a bar that closed in the
+# bottom 40 % of its range (shooting-star shape) is likely a wick-triggered
+# false signal; the same logic applies symmetrically for shorts.
+_CPR_MIN = 0.40
+
+def _entry_bar_cpr_ok(bar: dict, direction: str) -> bool:
+    """Return True if the entry bar's close position meets the quality threshold."""
+    rng = bar["high"] - bar["low"]
+    if rng < 0.25:
+        return True  # near-doji — no meaningful signal either way
+    if direction == "up":
+        return (bar["close"] - bar["low"]) / rng >= _CPR_MIN
+    return (bar["high"] - bar["close"]) / rng >= _CPR_MIN
+
+
 def _make_signal(kind: str, now: datetime, price: float, **kwargs) -> dict:
     """Build a JSON-serialisable signal dict."""
     sig: dict = {
@@ -118,6 +134,10 @@ def run_strategy(
     # Section 2: No active position                                        #
     # ------------------------------------------------------------------ #
     if not position["active"]:
+        # Block entries before 9:30 ET — pre-open bars are hypothesis-formation only.
+        if now.time() < _time(9, 30):
+            return None
+
         # 2.1 Early-exit conditions
         if direction == "none":
             return None
@@ -158,6 +178,8 @@ def run_strategy(
                     stop = opp_5m["body_low"] if direction == "up" else opp_5m["body_high"]
                     if abs(bar_mid - float(stop)) < MIN_STOP_DISTANCE:
                         return None
+                    if not _entry_bar_cpr_ok(mnq_bar, direction):
+                        return None
                     position["active"] = {
                         "time":       mnq_bar["time"],
                         "fill_price": bar_mid,
@@ -197,6 +219,8 @@ def run_strategy(
                 stop = conf_bar["body_high"]
 
             if abs(fill_price - float(stop)) < MIN_STOP_DISTANCE:
+                return None
+            if not _entry_bar_cpr_ok(mnq_bar, direction):
                 return None
 
             position["active"] = {
