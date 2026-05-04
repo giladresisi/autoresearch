@@ -1,6 +1,28 @@
 # PROGRESS
 
 
+## Feature: Session Pipeline Unification
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/session-pipeline-unification.md`
+
+Extracted the shared daily→trend→hypothesis→strategy dispatch sequence into a new `session_pipeline.py` (`SessionPipeline` class). Fixed all 8 live/backtest behavioral divergences (ATH seeding, hist_1hr/4hr to hypothesis, run_strategy every 1m bar, bar_dict body fields, unified hourly resample, today_bars ≤09:20 to run_daily, all-day `recent` scope, all-day MNQ/MES to run_hypothesis). Three callers refactored: `backtest_smt.run_backtest_v2`, `signal_smt.SmtV2Dispatcher`, `automation/main.SmtV2Dispatcher`.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/session-pipeline-unification.md`
+- 7/7 tasks completed across 3 waves; 15 new tests (15/15 passing); 89/89 integration tests passing; 0 regressions
+- One plan inconsistency: two acceptance criteria (shared emit function, shared slippage utility) contradict plan NOTES section; deferred per NOTES as intentionally out of scope
+- No before/after backtest PnL comparison run; behavioral change (#4) was user-confirmed as correct direction
+- Alignment score: 9/10
+
+**Execution Report (Task 4 — V2 Live Dispatcher Wiring):** `.agents/execution-reports/session-pipeline-v2-dispatcher-wiring.md`
+- All Task 4 acceptance criteria met; 16 new tests (16/16 passing) for both signal_smt and automation.main; 0 regressions (994 passed full suite)
+- Key design change: SmtV2Dispatcher redesigned to accept DFs at call time (not at init) due to IbRealtimeSource pd.concat replacement semantics causing stale refs
+- live_emit.py created to deduplicate stdout emit function across both live modules
+- Alignment score: 9/10
+
+
 ## Feature: Fix & Extend PickMyTrade Executor
 
 **Status**: ✅ Complete
