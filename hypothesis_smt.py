@@ -37,7 +37,11 @@ def _index_dates(df: pd.DataFrame):
     k = id(df)
     if k not in _df_dates_cache:
         idx = df.index
-        _df_dates_cache[k] = idx.date if (hasattr(idx, "tz") and idx.tz is not None) else idx.normalize().date
+        if isinstance(idx, pd.DatetimeIndex):
+            _df_dates_cache[k] = idx.date if idx.tz is not None else idx.normalize().date
+        else:
+            import numpy as np
+            _df_dates_cache[k] = np.full(len(idx), None, dtype=object)
     return _df_dates_cache[k]
 
 
