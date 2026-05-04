@@ -56,6 +56,7 @@ class PickMyTradeExecutor:
             "data":            data,
             "quantity":        self._contracts,
             "risk_percentage": 0,
+            "gtd_in_second":   0,
             "token":           self._api_key,
             "multiple_accounts": [{
                 "token":               self._api_key,
@@ -75,10 +76,11 @@ class PickMyTradeExecutor:
         stop_price = float(signal["stop_price"]) if signal.get("stop_price") is not None else 0.0
         is_limit = signal.get("limit_fill_bars") is not None
         if is_limit:
-            payload = self._build_payload(data, order_type="LMT", price=entry_price, gtd_in_second=0)
+            payload = self._build_payload(data, order_type="LMT", price=entry_price)
             order_type = "limit"
         else:
-            payload = self._build_payload(data, order_type="MKT", price=entry_price, sl=stop_price)
+            # No price field: PMT uses the latest close price as the market price
+            payload = self._build_payload(data, order_type="MKT", sl=stop_price)
             order_type = "market"
         # Fire-and-forget: bar callback returns immediately; HTTP runs in background thread
         self._order_pool.submit(self._post_order, order_id, payload)
@@ -130,7 +132,7 @@ class PickMyTradeExecutor:
         direction = new_signal["direction"]
         data = "buy" if direction == "long" else "sell"
         entry_price = float(new_signal["entry_price"])
-        payload = self._build_payload(data, order_type="LMT", price=entry_price, gtd_in_second=0)
+        payload = self._build_payload(data, order_type="LMT", price=entry_price)
         self._order_pool.submit(self._post_order, order_id, payload)
 
     def _post_order(self, order_id: str, payload: dict) -> None:

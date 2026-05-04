@@ -76,6 +76,7 @@ def test_place_entry_long_posts_buy_market_order():
     payload = ex._http.post.call_args.kwargs["json"]
     assert payload["data"] == "buy"
     assert payload["order_type"] == "MKT"
+    assert "price" not in payload  # PMT uses latest close; sending price adds unwanted slippage
 
 
 def test_place_entry_short_posts_sell_market_order():
@@ -86,6 +87,7 @@ def test_place_entry_short_posts_sell_market_order():
     payload = ex._http.post.call_args.kwargs["json"]
     assert payload["data"] == "sell"
     assert payload["order_type"] == "MKT"
+    assert "price" not in payload
 
 
 def test_place_entry_limit_posts_limit_order():
@@ -98,6 +100,15 @@ def test_place_entry_limit_posts_limit_order():
     assert payload["order_type"] == "LMT"
     assert payload["gtd_in_second"] == 0
     assert payload["price"] == sig["entry_price"]
+
+
+def test_gtd_in_second_present_on_market_order():
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    ex.place_entry(_signal("long"), _bar())
+    _drain(ex)
+    payload = ex._http.post.call_args.kwargs["json"]
+    assert payload["gtd_in_second"] == 0
 
 
 def test_place_entry_returns_fill_record():
