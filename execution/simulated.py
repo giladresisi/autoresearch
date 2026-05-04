@@ -1,12 +1,12 @@
 # execution/simulated.py
-# SimulatedFillExecutor: fills orders synchronously using bar OHLCV data.
+# SimulatedBrokerExecutor: fills orders synchronously using bar OHLCV data.
 # Extracts fill-price logic from backtest_smt._open_position() and _build_trade_record()
 # so both the backtest harness and signal_smt share identical fill semantics.
 from __future__ import annotations
 import datetime
 import uuid
 
-from execution.protocol import FillRecord, BarRow
+from execution.protocol import FillRecord, BarRow, assumed_fill_price
 
 # All exit_type values that produce a market fill (bar mid ± slippage).
 # Any value not in this set or the four exact-price types raises ValueError.
@@ -18,7 +18,7 @@ _MARKET_EXIT_TYPES = frozenset({
 })
 
 
-class SimulatedFillExecutor:
+class SimulatedBrokerExecutor:
     """Synchronous fill executor for backtests and live signal display.
 
     Computes fill prices from bar data without any async delay.
@@ -52,11 +52,10 @@ class SimulatedFillExecutor:
             fill_price = float(signal["entry_price"])
             order_type = "limit"
         else:
-            slip = self._entry_slip_ticks * 0.25
-            if signal["direction"] == "long":
-                fill_price = float(signal["entry_price"]) + slip
-            else:
-                fill_price = float(signal["entry_price"]) - slip
+            fill_price = assumed_fill_price(
+                signal["direction"], "market", float(signal["entry_price"]),
+                self._entry_slip_ticks,
+            )
             order_type = "market"
         # Human-mode: additive slippage on top of tick slippage (long pays more, short receives less)
         if self._human_mode and self._human_slip_pts > 0:

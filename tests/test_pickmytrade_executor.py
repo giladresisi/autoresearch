@@ -1,8 +1,5 @@
 # tests/test_pickmytrade_executor.py
 # Unit tests for PickMyTradeExecutor — HTTP calls mocked on the executor's _http instance.
-import json
-import time
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -13,17 +10,14 @@ from execution.protocol import FillRecord
 from strategy_smt import _BarRow
 
 
-def _make_executor(tmp_path: Path, fill_mode: str = "poll") -> PickMyTradeExecutor:
+def _make_executor(entry_slip_ticks: int = 2) -> PickMyTradeExecutor:
     return PickMyTradeExecutor(
         webhook_url="https://pmt.example.com/signal",
         api_key="test-key",
         symbol="MNQ1!",
         account_id="ACC123",
         contracts=1,
-        fill_mode=fill_mode,
-        fill_poll_interval_s=999,
-        fills_path=tmp_path / "fills.jsonl",
-        fills_url="https://pmt.example.com/fills",
+        entry_slip_ticks=entry_slip_ticks,
     )
 
 
@@ -73,8 +67,8 @@ def _drain(ex: PickMyTradeExecutor) -> None:
     ex._order_pool.shutdown(wait=True, cancel_futures=False)
 
 
-def test_place_entry_long_posts_buy_market_order(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_place_entry_long_posts_buy_market_order():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(_signal("long"), _bar())
     _drain(ex)
@@ -84,8 +78,8 @@ def test_place_entry_long_posts_buy_market_order(tmp_path):
     assert payload["order_type"] == "MKT"
 
 
-def test_place_entry_short_posts_sell_market_order(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_place_entry_short_posts_sell_market_order():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(_signal("short"), _bar())
     _drain(ex)
@@ -94,8 +88,8 @@ def test_place_entry_short_posts_sell_market_order(tmp_path):
     assert payload["order_type"] == "MKT"
 
 
-def test_place_entry_limit_posts_limit_order(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_place_entry_limit_posts_limit_order():
+    ex = _make_executor()
     sig = _signal("long", limit=True)
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(sig, _bar())
@@ -106,16 +100,50 @@ def test_place_entry_limit_posts_limit_order(tmp_path):
     assert payload["price"] == sig["entry_price"]
 
 
-def test_place_entry_returns_none(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_place_entry_returns_fill_record():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     result = ex.place_entry(_signal("long"), _bar())
     _drain(ex)
-    assert result is None
+    assert isinstance(result, FillRecord)
+    assert result.status == "filled"
+    assert result.direction == "long"
 
 
-def test_place_exit_long_posts_sell_close(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_pmt_market_entry_long_slippage():
+    ex = _make_executor(entry_slip_ticks=2)
+    ex._http.post = MagicMock(return_value=_ok_response())
+    rec = ex.place_entry(_signal("long"), _bar())
+    _drain(ex)
+    assert rec.fill_price == pytest.approx(20000.0 + 2 * 0.25)
+
+
+def test_pmt_market_entry_short_slippage():
+    ex = _make_executor(entry_slip_ticks=2)
+    ex._http.post = MagicMock(return_value=_ok_response())
+    rec = ex.place_entry(_signal("short"), _bar())
+    _drain(ex)
+    assert rec.fill_price == pytest.approx(20000.0 - 2 * 0.25)
+
+
+def test_pmt_limit_entry_no_slippage():
+    ex = _make_executor(entry_slip_ticks=2)
+    ex._http.post = MagicMock(return_value=_ok_response())
+    rec = ex.place_entry(_signal("long", limit=True), _bar())
+    _drain(ex)
+    assert rec.fill_price == pytest.approx(20000.0)
+
+
+def test_pmt_zero_slip_ticks_fill_at_signal_price():
+    ex = _make_executor(entry_slip_ticks=0)
+    ex._http.post = MagicMock(return_value=_ok_response())
+    rec = ex.place_entry(_signal("long"), _bar())
+    _drain(ex)
+    assert rec.fill_price == pytest.approx(20000.0)
+
+
+def test_place_exit_long_posts_sell_close():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_exit(_position("long"), "exit_tp", _bar())
     _drain(ex)
@@ -123,8 +151,8 @@ def test_place_exit_long_posts_sell_close(tmp_path):
     assert payload["data"] == "close"
 
 
-def test_place_exit_short_posts_buy_close(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_place_exit_short_posts_buy_close():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_exit(_position("short"), "exit_tp", _bar())
     _drain(ex)
@@ -132,18 +160,17 @@ def test_place_exit_short_posts_buy_close(tmp_path):
     assert payload["data"] == "close"
 
 
-def test_place_exit_returns_none(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_place_exit_returns_none():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     result = ex.place_exit(_position("long"), "exit_tp", _bar())
     _drain(ex)
     assert result is None
 
 
-def test_order_retries_on_500(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_order_retries_on_500():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_server_error_response())
-    # Patch sleep on the module so retries don't wait
     import execution.pickmytrade as _mod
     orig_sleep = _mod.time.sleep
     _mod.time.sleep = lambda _: None
@@ -155,10 +182,10 @@ def test_order_retries_on_500(tmp_path):
     assert ex._http.post.call_count == ex._max_retries
 
 
-def test_order_does_not_raise_on_failure(tmp_path):
+def test_order_does_not_raise_on_failure():
     import httpx as _httpx
     import execution.pickmytrade as _mod
-    ex = _make_executor(tmp_path)
+    ex = _make_executor()
     ex._http.post = MagicMock(side_effect=_httpx.ConnectError("unreachable"))
     orig_sleep = _mod.time.sleep
     _mod.time.sleep = lambda _: None
@@ -169,122 +196,28 @@ def test_order_does_not_raise_on_failure(tmp_path):
         _mod.time.sleep = orig_sleep
 
 
-def test_fill_polling_writes_filled_record_to_jsonl(tmp_path):
-    ex = _make_executor(tmp_path)
-    order_id = "pmt-test123"
-    ctx = {
-        "direction": "long",
-        "requested_price": 20000.0,
-        "order_type": "market",
-        "session_date": "2026-04-30",
-    }
-    with ex._lock:
-        ex._pending[order_id] = ctx
-
-    fake_resp = MagicMock()
-    fake_resp.status_code = 200
-    fake_resp.json.return_value = {
-        "status": "filled",
-        "fill_price": 20005.0,
-        "fill_time": "2026-04-30T14:00:00+00:00",
-    }
-    ex._http.get = MagicMock(return_value=fake_resp)
-
-    rec = ex._query_fill(order_id, ctx)
-    assert rec is not None
-    assert rec.fill_price == 20005.0
-    ex._record_fill(rec)
-
-    fills_path = tmp_path / "fills.jsonl"
-    assert fills_path.exists()
-    lines = fills_path.read_text().strip().splitlines()
-    assert len(lines) == 1
-    parsed = json.loads(lines[0])
-    assert parsed["fill_price"] == 20005.0
-
-
-def test_fill_jsonl_format(tmp_path):
-    ex = _make_executor(tmp_path)
-    rec = FillRecord(
-        order_id="pmt-fmt001",
-        symbol="MNQ1!",
-        direction="long",
-        order_type="market",
-        requested_price=20000.0,
-        fill_price=20005.5,
-        fill_time="2026-04-30T14:00:00+00:00",
-        contracts=1,
-        status="filled",
-        session_date="2026-04-30",
-    )
-    ex._record_fill(rec)
-
-    lines = (tmp_path / "fills.jsonl").read_text().strip().splitlines()
-    parsed = json.loads(lines[0])
-
-    for field in ("order_id", "symbol", "direction", "fill_price", "status", "session_date"):
-        assert field in parsed
-    assert parsed["order_id"] == "pmt-fmt001"
-    assert parsed["fill_price"] == 20005.5
-    assert parsed["status"] == "filled"
-
-
-def test_pending_order_cleared_after_fill(tmp_path):
-    ex = _make_executor(tmp_path)
-    order_id = "pmt-clear001"
-    ctx = {
-        "direction": "long",
-        "requested_price": 20000.0,
-        "order_type": "market",
-        "session_date": "2026-04-30",
-    }
-    with ex._lock:
-        ex._pending[order_id] = ctx
-
-    fake_resp = MagicMock()
-    fake_resp.status_code = 200
-    fake_resp.json.return_value = {"status": "filled", "fill_price": 20005.0}
-    ex._http.get = MagicMock(return_value=fake_resp)
-
-    rec = ex._query_fill(order_id, ctx)
-    assert rec is not None
-    ex._record_fill(rec)
-    with ex._lock:
-        ex._pending.pop(order_id, None)
-    assert order_id not in ex._pending
-
-
-def test_start_raises_if_env_missing(tmp_path):
+def test_start_raises_if_env_missing():
     ex = PickMyTradeExecutor(
         webhook_url="",
         api_key="",
         symbol="MNQ1!",
         account_id="ACC123",
         contracts=1,
-        fill_mode="poll",
-        fill_poll_interval_s=999,
-        fills_path=tmp_path / "fills.jsonl",
-        fills_url="",
     )
     with pytest.raises(RuntimeError):
         ex.start()
 
 
-def test_stop_joins_fill_thread(tmp_path):
-    ex = _make_executor(tmp_path)
-    ex._fill_poll_interval_s = 0.05
+def test_stop_shuts_down_cleanly():
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
     ex.start()
-    assert ex._fill_thread is not None
-    assert ex._fill_thread.is_alive()
-    t0 = time.time()
     ex.stop()
-    elapsed = time.time() - t0
-    assert elapsed < 6.0
-    assert not ex._fill_thread.is_alive()
+    # After stop, the pool is shut down — no threads alive, no exception raised
 
 
-def test_market_entry_includes_sl(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_market_entry_includes_sl():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(_signal("long"), _bar())
     _drain(ex)
@@ -292,8 +225,8 @@ def test_market_entry_includes_sl(tmp_path):
     assert payload["sl"] == 19980.0
 
 
-def test_limit_entry_excludes_sl(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_limit_entry_excludes_sl():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(_signal("long", limit=True), _bar())
     _drain(ex)
@@ -301,8 +234,8 @@ def test_limit_entry_excludes_sl(tmp_path):
     assert "sl" not in payload
 
 
-def test_market_entry_includes_multiple_accounts(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_market_entry_includes_multiple_accounts():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(_signal("long"), _bar())
     _drain(ex)
@@ -310,8 +243,8 @@ def test_market_entry_includes_multiple_accounts(tmp_path):
     assert payload["multiple_accounts"][0]["account_id"] == "ACC123"
 
 
-def test_token_in_payload_toplevel(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_token_in_payload_toplevel():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(_signal("long"), _bar())
     _drain(ex)
@@ -319,8 +252,8 @@ def test_token_in_payload_toplevel(tmp_path):
     assert payload["token"] == "test-key"
 
 
-def test_no_bearer_header(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_no_bearer_header():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(_signal("long"), _bar())
     _drain(ex)
@@ -328,8 +261,8 @@ def test_no_bearer_header(tmp_path):
     assert "Authorization" not in headers
 
 
-def test_risk_percentage_zero_in_all_payloads(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_risk_percentage_zero_in_all_payloads():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(_signal("long"), _bar())
     _drain(ex)
@@ -338,8 +271,8 @@ def test_risk_percentage_zero_in_all_payloads(tmp_path):
     assert payload["multiple_accounts"][0]["risk_percentage"] == 0
 
 
-def test_place_stop_after_limit_fill_long(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_place_stop_after_limit_fill_long():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     pos = _position("long")
     ex.place_stop_after_limit_fill(pos, _bar())
@@ -353,8 +286,8 @@ def test_place_stop_after_limit_fill_long(tmp_path):
     assert payload["sl"] == 19980.0
 
 
-def test_place_stop_after_limit_fill_short(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_place_stop_after_limit_fill_short():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     pos = _position("short")
     ex.place_stop_after_limit_fill(pos, _bar())
@@ -364,16 +297,16 @@ def test_place_stop_after_limit_fill_short(tmp_path):
     assert payload["sl"] == 19980.0
 
 
-def test_place_close_sends_data_close(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_place_close_sends_data_close():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_close()
     payload = ex._http.post.call_args.kwargs["json"]
     assert payload["data"] == "close"
 
 
-def test_place_exit_delegates_to_close(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_place_exit_delegates_to_close():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     for exit_type in ("exit_tp", "exit_stop", "exit_market"):
         ex._http.post.reset_mock()
@@ -383,8 +316,8 @@ def test_place_exit_delegates_to_close(tmp_path):
         assert payload["data"] == "close"
 
 
-def test_modify_limit_entry_sends_close_then_limit(tmp_path):
-    ex = _make_executor(tmp_path)
+def test_modify_limit_entry_sends_close_then_limit():
+    ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     old_sig = _signal("long", limit=True)
     new_sig = {**_signal("long", limit=True), "entry_price": 20010.0}
@@ -398,16 +331,15 @@ def test_modify_limit_entry_sends_close_then_limit(tmp_path):
     assert second_payload["price"] == 20010.0
 
 
-def test_modify_limit_entry_close_is_synchronous(tmp_path):
+def test_modify_limit_entry_close_is_synchronous():
     """Close step in modify_limit_entry must run synchronously, not via thread pool."""
-    import execution.pickmytrade as _mod
-    ex = _make_executor(tmp_path)
+    ex = _make_executor()
     call_order = []
 
     original_post = ex._post_order
-    def tracked_post(order_id, payload, ctx):
+    def tracked_post(order_id, payload):
         call_order.append(("direct", payload["data"]))
-        return original_post(order_id, payload, ctx)
+        return original_post(order_id, payload)
 
     original_submit = ex._order_pool.submit
     def tracked_submit(fn, *args, **kwargs):
@@ -428,10 +360,10 @@ def test_modify_limit_entry_close_is_synchronous(tmp_path):
     assert call_order[1][0] == "pool"
 
 
-def test_modify_limit_entry_replaces_even_if_close_fails(tmp_path):
+def test_modify_limit_entry_replaces_even_if_close_fails():
     import httpx as _httpx
     import execution.pickmytrade as _mod
-    ex = _make_executor(tmp_path)
+    ex = _make_executor()
     orig_sleep = _mod.time.sleep
     _mod.time.sleep = lambda _: None
     post_calls = []
@@ -452,6 +384,5 @@ def test_modify_limit_entry_replaces_even_if_close_fails(tmp_path):
         _drain(ex)
     finally:
         _mod.time.sleep = orig_sleep
-    # Both close and re-place should have been attempted
     assert "close" in post_calls
     assert "buy" in post_calls

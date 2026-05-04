@@ -117,7 +117,7 @@ def _make_stub_ib_source(mnq_df: pd.DataFrame | None = None,
 
 
 class _StubExecutor:
-    """Minimal SimulatedFillExecutor stub: returns a FillRecord-like object using the
+    """Minimal SimulatedBrokerExecutor stub: returns a FillRecord-like object using the
     pre-refactor inline slippage formula so existing assertions about fill prices hold."""
 
     def __init__(self, entry_slip_ticks: int = 2):
@@ -435,7 +435,7 @@ def test_process_scanning_valid_signal_transitions_to_managing(monkeypatch, tmp_
 
     assert signal_smt._state == "MANAGING"
     assert signal_smt._position is not None
-    # Slippage applied via SimulatedFillExecutor: short → entry - ticks * 0.25
+    # Slippage applied via SimulatedBrokerExecutor: short → entry - ticks * 0.25
     expected_entry = 19998.0 - signal_smt.ENTRY_SLIPPAGE_TICKS * 0.25
     assert signal_smt._position["assumed_entry"] == pytest.approx(expected_entry)
     # position.json written

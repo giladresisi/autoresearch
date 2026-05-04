@@ -33,7 +33,7 @@ from strategy_smt import (
 import strategy_smt
 from hypothesis_smt import HypothesisManager
 from data.ib_realtime import IbRealtimeSource
-from execution.simulated import SimulatedFillExecutor
+from execution.simulated import SimulatedBrokerExecutor
 
 # ── Connection constants ──────────────────────────────────────────────────────
 IB_HOST      = "127.0.0.1"
@@ -66,7 +66,7 @@ POSITION_FILE = BAR_DATA_DIR / "live_position.json"
 
 # ── Module-level state (set in main()) ───────────────────────────────────────
 _ib_source: IbRealtimeSource | None = None
-_executor: SimulatedFillExecutor | None = None
+_executor: SimulatedBrokerExecutor | None = None
 
 # Partial 1m MES bar accumulator — updated by the IbRealtimeSource via _on_bar callback
 _mes_partial_1m: dict | None = None
@@ -938,7 +938,7 @@ def main() -> None:
         # Startup guard timestamp: any signal entry_time <= this is considered stale
         _startup_ts = pd.Timestamp.now(tz="America/New_York")
 
-    _executor = SimulatedFillExecutor(
+    _executor = SimulatedBrokerExecutor(
         human_mode=True,
         human_slip_pts=getattr(strategy_smt, "HUMAN_ENTRY_SLIPPAGE_PTS", 0.0),
         entry_slip_ticks=ENTRY_SLIPPAGE_TICKS,

@@ -11,7 +11,7 @@ import pandas as pd
 
 from hypothesis_smt import compute_hypothesis_context
 import strategy_smt
-from execution.simulated import SimulatedFillExecutor
+from execution.simulated import SimulatedBrokerExecutor
 from strategy_smt import (
     _BarRow,
     init_bar_data, append_bar_data, load_futures_data, compute_tdo, find_anchor_close,
@@ -125,7 +125,7 @@ MARKET_ORDER_SLIPPAGE_PTS: float = 5.0
 
 # Slippage applied to v2 market-close exits. 2 pts covers typical automated-trading
 # latency (network + exchange queue) for MNQ in RTH. Passed as v2_market_slip_pts to
-# SimulatedFillExecutor; v2 pipeline slippage (lines ~1257–1340) is out of Stage 1 scope.
+# SimulatedBrokerExecutor; v2 pipeline slippage (lines ~1257–1340) is out of Stage 1 scope.
 V2_MARKET_CLOSE_SLIPPAGE_PTS: float = 2.0
 
 
@@ -398,7 +398,7 @@ def run_backtest(
     Returns a stats dict with all performance metrics.
     """
     init_bar_data()
-    executor = SimulatedFillExecutor(
+    executor = SimulatedBrokerExecutor(
         pessimistic=PESSIMISTIC_FILLS,
         market_slip_pts=MARKET_ORDER_SLIPPAGE_PTS,
         v2_market_slip_pts=V2_MARKET_CLOSE_SLIPPAGE_PTS,

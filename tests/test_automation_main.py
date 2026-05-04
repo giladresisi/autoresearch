@@ -14,6 +14,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from execution.protocol import FillRecord
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -122,9 +124,14 @@ def _setup_managing_state(monkeypatch, tmp_path, direction="long"):
 
 def test_main_validates_env_vars_before_start(monkeypatch, tmp_path):
     """main() raises RuntimeError when PMT_WEBHOOK_URL or PMT_API_KEY is missing."""
+    monkeypatch.chdir(tmp_path)
+
+    # Reload first so load_dotenv() runs (it searches up from the module's own file
+    # and may re-add vars from the project .env). Delete the vars AFTER the reload.
+    import automation.main as am
+    am = importlib.reload(am)
     monkeypatch.delenv("PMT_WEBHOOK_URL", raising=False)
     monkeypatch.delenv("PMT_API_KEY", raising=False)
-    monkeypatch.chdir(tmp_path)
 
     with patch("automation.main.IbRealtimeSource") as MockIb, \
          patch("automation.main.PickMyTradeExecutor") as MockPMT, \
@@ -133,7 +140,6 @@ def test_main_validates_env_vars_before_start(monkeypatch, tmp_path):
         MockIb.return_value = MagicMock()
         MockPMT.return_value = MagicMock()
 
-        import automation.main as am
         with pytest.raises(RuntimeError, match="Missing required env vars"):
             am.main()
 
@@ -249,6 +255,47 @@ def test_place_exit_called_on_managing_exit(monkeypatch, tmp_path, capsys):
     # Second positional arg is exit_type
     assert args[0][1] == "exit_tp"
     assert am._state == "SCANNING"
+    capsys.readouterr()
+
+
+def test_assumed_entry_uses_fill_record_price(monkeypatch, tmp_path, capsys):
+    """When place_entry returns a FillRecord, assumed_entry uses fill_record.fill_price."""
+    import datetime as _dt
+    import automation.main as am
+    import strategy_smt
+    _setup_scanning_state(monkeypatch, tmp_path)
+
+    fill_rec = FillRecord(
+        order_id="sim-test01",
+        symbol="MNQ1!",
+        direction="long",
+        order_type="market",
+        requested_price=20000.0,
+        fill_price=20000.5,
+        fill_time=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+        contracts=1,
+        status="filled",
+        session_date="2026-04-30",
+    )
+
+    mock_executor = MagicMock()
+    mock_executor.place_entry.return_value = fill_rec
+    monkeypatch.setattr(am, "_executor", mock_executor)
+
+    test_ts = pd.Timestamp("2026-04-30 10:05:00", tz="America/New_York")
+    fake_signal = {
+        "type": "signal", "direction": "long", "entry_price": 20000.0,
+        "stop_price": 19980.0, "take_profit": 20040.0,
+        "entry_time": test_ts, "smt_type": "wick",
+    }
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: fake_signal)
+    monkeypatch.setattr(am, "compute_tdo", lambda df, date: 19900.0)
+
+    bar = strategy_smt._BarRow(20000.0, 20005.0, 19995.0, 20000.0, 100.0, test_ts)
+    am._process_scanning(bar, test_ts, test_ts.time())
+
+    assert am._position is not None
+    assert am._position["assumed_entry"] == pytest.approx(20000.5)
     capsys.readouterr()
 
 
@@ -447,44 +494,3 @@ def test_exit_json_line_emitted_to_stdout(monkeypatch, tmp_path, capsys):
     assert found_exit, f"No EXIT JSON line found in stdout: {captured.out!r}"
 
 
-def test_fills_path_in_session_directory(monkeypatch, tmp_path):
-    """fills.jsonl path passed to PickMyTradeExecutor lives under sessions/YYYY-MM-DD/."""
-    monkeypatch.setenv("PMT_WEBHOOK_URL", "https://example.com")
-    monkeypatch.setenv("PMT_API_KEY", "test-key")
-    sessions_root = tmp_path / "sessions_root"
-    monkeypatch.setenv("SESSIONS_DIR", str(sessions_root))
-    monkeypatch.chdir(tmp_path)
-
-    captured_kwargs: list[dict] = []
-
-    def mock_pmt_init(**kwargs):
-        captured_kwargs.append(kwargs)
-        return MagicMock()
-
-    # Reload BEFORE applying patches so module-level SESSIONS_DIR picks up env var.
-    # (patch() patches the existing module attribute; a subsequent reload would
-    # rebind it to the real import and silently bypass the patch.)
-    import automation.main as am
-    am = importlib.reload(am)
-
-    with patch("automation.main.IbRealtimeSource") as MockIb, \
-         patch("automation.main.HypothesisManager"), \
-         patch("automation.main._load_hist_mnq", return_value=pd.DataFrame()), \
-         patch("automation.main.PickMyTradeExecutor", side_effect=mock_pmt_init):
-        MockIb.return_value = MagicMock()
-        monkeypatch.setattr(am, "POSITION_FILE", tmp_path / "live_position.json")
-        am.main()
-
-    assert len(captured_kwargs) == 1
-    fills_path = captured_kwargs[0].get("fills_path")
-    assert fills_path is not None
-    fills_path = Path(fills_path)
-    assert fills_path.name == "fills.jsonl"
-    # Parent dir should be sessions_root/YYYY-MM-DD/
-    assert fills_path.parent.parent == sessions_root, (
-        f"fills_path={fills_path} sessions_root={sessions_root}"
-    )
-    # Date dir name should be parseable as YYYY-MM-DD
-    datetime.datetime.strptime(fills_path.parent.name, "%Y-%m-%d")
-    # Parent dir should have been created
-    assert fills_path.parent.exists()

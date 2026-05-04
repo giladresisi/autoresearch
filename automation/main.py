@@ -2,7 +2,7 @@
 # Live automation session process: realtime SMT divergence trading for MNQ1!/MES1!
 # via PickMyTrade order routing.
 # Mirrors signal_smt.py's state machine and IB realtime ingestion, but routes
-# fills through PickMyTradeExecutor (async fills) instead of SimulatedFillExecutor.
+# fills through PickMyTradeExecutor instead of SimulatedBrokerExecutor.
 """
 Usage: python -m automation.main
 
@@ -981,19 +981,14 @@ def main() -> None:
         raise RuntimeError(f"Missing required env vars: {missing}")
 
     today_str = pd.Timestamp.now(tz="America/New_York").strftime("%Y-%m-%d")
-    fills_path = SESSIONS_DIR / today_str / "fills.jsonl"
-    fills_path.parent.mkdir(parents=True, exist_ok=True)
+    (SESSIONS_DIR / today_str).mkdir(parents=True, exist_ok=True)
     _executor = PickMyTradeExecutor(
         webhook_url=os.environ["PMT_WEBHOOK_URL"],
         api_key=os.environ["PMT_API_KEY"],
         symbol=os.environ.get("TRADING_SYMBOL", "MNQ1!"),
         account_id=os.environ.get("TRADING_ACCOUNT_ID", ""),
         contracts=int(os.environ.get("TRADING_CONTRACTS", "1")),
-        fill_mode=os.environ.get("PMT_FILL_MODE", "poll"),
-        fill_poll_interval_s=int(os.environ.get("PMT_FILL_POLL_INTERVAL_S", "30")),
-        fill_webhook_port=int(os.environ.get("PMT_FILL_WEBHOOK_PORT", "8765")),
-        fills_path=fills_path,
-        fills_url=os.environ.get("PMT_FILLS_URL", ""),
+        entry_slip_ticks=int(os.environ.get("PMT_ENTRY_SLIP_TICKS", "2")),
     )
 
     def _on_bar_1m_complete(bars) -> None:
