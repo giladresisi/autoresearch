@@ -141,7 +141,8 @@ class TestEarlyExits:
         """
         write_hypothesis(direction="up")
         write_position(failed_entries=2)
-        bar = make_5m_bar(open_=105.0, close=95.0, high=110.0, low=90.0)
+        # close=100 so CPR=(100-90)/20=0.5>=0.40 passes the entry quality filter.
+        bar = make_5m_bar(open_=105.0, close=100.0, high=110.0, low=90.0)
         result = run_strategy(NOW, bar, make_opp_1m_recent("up"))
 
         assert result is not None
@@ -375,7 +376,8 @@ class TestSignalShape:
         """Any returned signal must have kind, time, price keys and be JSON-serialisable."""
         write_hypothesis(direction="up")
         write_position()
-        bar = make_5m_bar(open_=105.0, high=110.0, low=90.0, close=95.0)
+        # close=100 so CPR=(100-90)/20=0.5>=0.40 passes the entry quality filter.
+        bar = make_5m_bar(open_=105.0, high=110.0, low=90.0, close=100.0)
         # Bearish 1m bars so _find_last_opposite_5m_bar returns an opposite bar → signal emitted.
         result = run_strategy(NOW, bar, make_opp_1m_recent("up"))
 

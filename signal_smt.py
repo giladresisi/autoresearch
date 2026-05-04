@@ -123,6 +123,9 @@ _move_stop_bar_counter: int  = 0
 _smtv2_pipeline: str = "v1"
 _smtv2_dispatcher: "SmtV2Dispatcher | None" = None
 
+# Session start time for V2 pipeline daily trigger (09:20 ET, matches backtest)
+_SESSION_DAILY_TRIGGER_TIME = pd.Timestamp("2000-01-01 09:20").time()
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -807,92 +810,53 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
 
 # ── v2 pipeline dispatcher ───────────────────────────────────────────────────
 
-def _emit_v2_signal(sig: dict) -> None:
-    """Print a v2 signal dict as a JSON line to stdout (mirrors _dispatch_event for v2)."""
-    print(json.dumps(sig, sort_keys=True), flush=True)
+from live_emit import emit_v2_signal as _emit_v2_signal
 
 
 class SmtV2Dispatcher:
-    """Routes IB bar callbacks through the v2 per-bar module pipeline.
+    """Thin wrapper: wires IB bar callbacks into SessionPipeline.
 
-    Selected when SMT_PIPELINE=v2. Accumulates 1m bars to build 5m bars at round
-    boundaries and invokes hypothesis → trend → strategy in order per spec.
+    DFs are passed at call time (not stored at init) because IbRealtimeSource
+    replaces its internal DataFrame reference on each bar via pd.concat, so any
+    reference captured at construction would go stale after the first bar.
     """
 
-    def __init__(self, mnq_1m_df: pd.DataFrame, mes_1m_df: pd.DataFrame,
-                 hist_mnq_1m: pd.DataFrame, hist_mes_1m: pd.DataFrame) -> None:
-        import daily as _daily_mod
-        import hypothesis as _hyp_mod
-        import strategy as _strat_mod
-        import trend as _trend_mod
-        self._daily = _daily_mod
-        self._hyp = _hyp_mod
-        self._strat = _strat_mod
-        self._trend = _trend_mod
-        self._mnq_1m_df = mnq_1m_df
-        self._mes_1m_df = mes_1m_df
-        self._hist_mnq_1m = hist_mnq_1m
-        self._hist_mes_1m = hist_mes_1m
-        self._daily_triggered = False
+    def __init__(self) -> None:
+        self._pipeline = None
         self._session_date = None
 
-    def on_session_start(self, now: pd.Timestamp) -> None:
-        """Call once at 09:20 ET each session to run daily computations."""
-        from smt_state import save_global, save_daily, save_hypothesis, save_position
-        from smt_state import DEFAULT_GLOBAL, DEFAULT_DAILY, DEFAULT_HYPOTHESIS, DEFAULT_POSITION
-        import copy
-        save_global(copy.deepcopy(DEFAULT_GLOBAL))
-        save_daily(copy.deepcopy(DEFAULT_DAILY))
-        save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
-        save_position(copy.deepcopy(DEFAULT_POSITION))
-        hist_hourly = self._hist_mnq_1m.resample("1h", label="left").agg(
-            {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
-        ).dropna()
-        today_bars = self._mnq_1m_df[self._mnq_1m_df.index.date == now.date()]
-        self._daily.run_daily(now, today_bars, self._hist_mnq_1m, hist_hourly)
-        self._daily_triggered = True
-        self._session_date = now.date()
+    def on_session_start(self, now: pd.Timestamp, mnq_1m_df: pd.DataFrame, mes_1m_df: pd.DataFrame) -> None:
+        """Initialize pipeline with current history snapshot and seed session state.
 
-    def on_1m_bar(self, now: pd.Timestamp, mnq_bar_row: pd.Series, mes_bar_row: pd.Series) -> None:
-        """Process one completed 1m bar."""
-        if not self._daily_triggered:
+        Idempotent per trading day: repeated calls on the same date are ignored so
+        the caller can safely call this on every bar at/after 09:20.
+        """
+        today = now.date()
+        if today == self._session_date:
             return
-        bar_dict = {
-            "time":  now.isoformat(),
-            "open":  float(mnq_bar_row["Open"]),
-            "high":  float(mnq_bar_row["High"]),
-            "low":   float(mnq_bar_row["Low"]),
-            "close": float(mnq_bar_row["Close"]),
-        }
-        today_mnq = self._mnq_1m_df[self._mnq_1m_df.index.date == now.date()]
-        recent = today_mnq[today_mnq.index <= now]
-        is_5m = now.minute % 5 == 0
+        from session_pipeline import SessionPipeline
+        self._pipeline = SessionPipeline(mnq_1m_df, mes_1m_df, _emit_v2_signal)
+        today_at_open = mnq_1m_df[
+            (mnq_1m_df.index.date == today) & (mnq_1m_df.index <= now)
+        ]
+        self._pipeline.on_session_start(now, today_at_open)
+        self._session_date = today
 
-        # Trend always runs first: validates existing hypothesis before a new one may form.
-        trend_sig = self._trend.run_trend(now, bar_dict, recent)
-        if trend_sig is not None:
-            _emit_v2_signal(trend_sig)
-
-        if is_5m:
-            today_mes = self._mes_1m_df[self._mes_1m_df.index.date == now.date()]
-            self._hyp.run_hypothesis(
-                now, today_mnq, today_mes, self._hist_mnq_1m, self._hist_mes_1m
-            )
-            start_5m = now - pd.Timedelta(minutes=4)
-            window = today_mnq.loc[start_5m:now]
-            if not window.empty:
-                mnq_5m_bar = {
-                    "time":      now.isoformat(),
-                    "open":      float(window.iloc[0]["Open"]),
-                    "high":      float(window["High"].max()),
-                    "low":       float(window["Low"].min()),
-                    "close":     float(window.iloc[-1]["Close"]),
-                    "body_high": max(float(window.iloc[0]["Open"]), float(window.iloc[-1]["Close"])),
-                    "body_low":  min(float(window.iloc[0]["Open"]), float(window.iloc[-1]["Close"])),
-                }
-                strat_sig = self._strat.run_strategy(now, mnq_5m_bar, recent)
-                if strat_sig is not None:
-                    _emit_v2_signal(strat_sig)
+    def on_1m_bar(
+        self,
+        now: pd.Timestamp,
+        mnq_bar_row: pd.Series,
+        mes_bar_row: pd.Series,
+        mnq_1m_df: pd.DataFrame,
+        mes_1m_df: pd.DataFrame,
+    ) -> None:
+        if self._pipeline is None:
+            return
+        # today_mnq is all bars received so far today; in live execution this equals ≤ now
+        # since future bars don't exist yet.
+        today_mnq = mnq_1m_df[mnq_1m_df.index.date == now.date()]
+        today_mes = mes_1m_df[mes_1m_df.index.date == now.date()]
+        self._pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -924,9 +888,10 @@ def main() -> None:
     _hist_daily_df = _hist_mnq_df  # reuse 5m hist; compute_pdh_pdl uses index.date
     _hypothesis_generated = False
 
-    # v2 pipeline env gate (dispatcher wiring deferred per spec § "Out of Scope")
     import os as _os
     _smtv2_pipeline = _os.environ.get("SMT_PIPELINE", "v1")
+    if _smtv2_pipeline == "v2":
+        _smtv2_dispatcher = SmtV2Dispatcher()
 
     # Restore open position from disk if the process was restarted mid-trade
     if POSITION_FILE.exists():
@@ -949,19 +914,36 @@ def main() -> None:
 
         Drives the hypothesis rule engine: generate at the first 1m bar at/after
         SESSION_START, then evaluate every subsequent bar.
+        Also drives the V2 SessionPipeline when SMT_PIPELINE=v2.
         """
         global _hypothesis_generated
         if _hypothesis_manager is None:
             return
-        bar_time = pd.Timestamp(getattr(bars[-1], "date", None) or bars[-1].name)
-        if bar_time.tz is None:
-            bar_time = bar_time.tz_localize("America/New_York")
-        bar_time = bar_time.tz_convert("America/New_York").time()
+        _bar = bars[-1]
+        _bar_ts_v2 = pd.Timestamp(getattr(_bar, "date", None) or _bar.name)
+        if _bar_ts_v2.tz is None:
+            _bar_ts_v2 = _bar_ts_v2.tz_localize("America/New_York")
+        else:
+            _bar_ts_v2 = _bar_ts_v2.tz_convert("America/New_York")
+        bar_time = _bar_ts_v2.time()
         _session_start_time_local = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
         if not _hypothesis_generated and bar_time >= _session_start_time_local:
-            _hypothesis_manager.generate()
-            _hypothesis_generated = True
-        _hypothesis_manager.evaluate_bar(bars[-1])
+            if _ib_source is not None:
+                _hypothesis_manager._mnq_1m_df = _ib_source.mnq_1m_df
+            try:
+                _hypothesis_manager.generate()
+            finally:
+                _hypothesis_generated = True
+        _hypothesis_manager.evaluate_bar(_bar)
+
+        if _smtv2_dispatcher is not None:
+            _mnq_df = _ib_source.mnq_1m_df
+            _mes_df = _ib_source.mes_1m_df
+            if bar_time >= _SESSION_DAILY_TRIGGER_TIME:
+                _smtv2_dispatcher.on_session_start(_bar_ts_v2, _mnq_df, _mes_df)
+            _mnq_bar = _mnq_df.iloc[-1] if not _mnq_df.empty else pd.Series(dtype=float)
+            _mes_bar = _mes_df.iloc[-1] if not _mes_df.empty else pd.Series(dtype=float)
+            _smtv2_dispatcher.on_1m_bar(_bar_ts_v2, _mnq_bar, _mes_bar, _mnq_df, _mes_df)
 
     _ib_source = IbRealtimeSource(
         host=IB_HOST, port=IB_PORT, client_id=IB_CLIENT_ID,

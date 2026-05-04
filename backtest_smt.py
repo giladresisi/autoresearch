@@ -129,6 +129,13 @@ MARKET_ORDER_SLIPPAGE_PTS: float = 5.0
 V2_MARKET_CLOSE_SLIPPAGE_PTS: float = 2.0
 
 
+def _annotate_slippage(events: list[dict], pts: float) -> None:
+    """Annotate market-close and market-entry events with simulated slippage (backtest only)."""
+    for evt in events:
+        if evt.get("kind") in ("market-close", "market-entry"):
+            evt["slippage"] = pts
+
+
 _HYP_FIELDS = (
     "hypothesis_direction", "pd_range_case", "pd_range_bias",
     "week_zone", "day_zone", "trend_direction", "hypothesis_score",
@@ -1151,18 +1158,10 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
     Returns a dict with keys: trades, events, metrics.
     """
-    import copy
     import json as _json
 
-    import daily as _daily_mod
-    import hypothesis as _hyp_mod
-    import strategy as _strat_mod
-    import trend as _trend_mod
     import smt_state as _smt_state
-    from smt_state import (
-        DEFAULT_DAILY, DEFAULT_GLOBAL, DEFAULT_HYPOTHESIS, DEFAULT_POSITION,
-        save_daily, save_global, save_hypothesis, save_position,
-    )
+    from session_pipeline import SessionPipeline
     from strategy_smt import load_futures_data
 
     _smt_state.set_in_memory_mode(True)
@@ -1195,20 +1194,6 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         _mes_pos_sess = mes_all.index.searchsorted(session_start_ts,  side="left")
 
         # ------------------------------------------------------------------ #
-        # Reset all four state files at the start of each day                 #
-        # ------------------------------------------------------------------ #
-        # Seed ATH from all historical bars so the hypothesis gate uses a real
-        # cumulative high, not the default 0.0 which would be exceeded immediately.
-        hist_for_ath = mnq_all.iloc[:_mnq_pos_day]
-        seeded_global = copy.deepcopy(DEFAULT_GLOBAL)
-        if not hist_for_ath.empty:
-            seeded_global["all_time_high"] = float(hist_for_ath["High"].max())
-        save_global(seeded_global)
-        save_daily(copy.deepcopy(DEFAULT_DAILY))
-        save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
-        save_position(copy.deepcopy(DEFAULT_POSITION))
-
-        # ------------------------------------------------------------------ #
         # Build per-day slices                                                 #
         # ------------------------------------------------------------------ #
         mnq_1m_today = mnq_all.iloc[_mnq_pos_day:_mnq_pos_next]
@@ -1220,33 +1205,11 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         hist_mnq_1m = mnq_all.iloc[:_mnq_pos_sess]
         hist_mes_1m = mes_all.iloc[:_mes_pos_sess]
 
-        # Precompute hourly/4hr resamples of full hist once per day.
-        # hist_1hr_day is reused for both daily FVG detection and hypothesis.
-        _agg_h = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
-        hist_1hr_day = (
-            hist_mnq_1m.resample("1h").agg(_agg_h).dropna(subset=["Open"])
-            if not hist_mnq_1m.empty
-            else pd.DataFrame(columns=list(_agg_h))
-        )
-        hist_4hr_day = (
-            hist_mnq_1m.resample("4h").agg(_agg_h).dropna(subset=["Open"])
-            if not hist_mnq_1m.empty
-            else pd.DataFrame(columns=list(_agg_h))
-        )
-        # _detect_fvgs only needs the last 14 calendar days of hourly bars.
-        # Older FVGs are too far from current price to be actionable targets.
-        _14d_ago = session_start_ts - pd.Timedelta(days=14)
-        hist_hourly_mnq = (
-            hist_1hr_day[hist_1hr_day.index >= _14d_ago]
-            if not hist_1hr_day.empty
-            else hist_1hr_day
-        )
-
-        # ------------------------------------------------------------------ #
-        # Run daily module once at 09:20 ET                                    #
-        # ------------------------------------------------------------------ #
-        now_daily = session_start_ts
-        _daily_mod.run_daily(now_daily, mnq_1m_today[mnq_1m_today.index <= now_daily], hist_mnq_1m, hist_hourly_mnq)
+        # Pipeline handles state reset, ATH seeding, resamples, and run_daily.
+        day_events: list[dict] = []
+        pipeline = SessionPipeline(hist_mnq_1m, hist_mes_1m, day_events.append)
+        today_at_open = mnq_1m_today[mnq_1m_today.index <= session_start_ts]
+        pipeline.on_session_start(session_start_ts, today_at_open)
 
         # Save levels snapshot for chart visualisation (after run_daily populates state)
         if write_events:
@@ -1274,69 +1237,25 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         if mnq_session_bars.empty:
             continue
 
-        day_events: list[dict] = []
-
-        # ------------------------------------------------------------------ #
-        # Pre-extract numpy arrays once for the session (avoids per-bar       #
-        # DataFrame label lookups and slice copies in the hot loop)            #
-        # ------------------------------------------------------------------ #
-        _sess_idx    = mnq_session_bars.index
-        _sess_opens  = mnq_session_bars["Open"].values
-        _sess_highs  = mnq_session_bars["High"].values
-        _sess_lows   = mnq_session_bars["Low"].values
-        _sess_closes = mnq_session_bars["Close"].values
-        _n_sess      = len(_sess_idx)
+        _sess_idx = mnq_session_bars.index
+        _n_sess   = len(_sess_idx)
 
         # ------------------------------------------------------------------ #
         # Per-bar loop                                                          #
         # ------------------------------------------------------------------ #
         for _bar_i in range(_n_sess):
-            bar_ts = _sess_idx[_bar_i]
-            now    = bar_ts
+            bar_ts      = _sess_idx[_bar_i]
+            now         = bar_ts
+            mnq_bar_row = mnq_session_bars.iloc[_bar_i]
+            mes_pos     = mes_session_bars.index.searchsorted(bar_ts, side="right")
+            mes_bar_row = mes_session_bars.iloc[mes_pos - 1] if mes_pos > 0 else mes_session_bars.iloc[0]
 
-            _o = float(_sess_opens[_bar_i])
-            _h = float(_sess_highs[_bar_i])
-            _l = float(_sess_lows[_bar_i])
-            _c = float(_sess_closes[_bar_i])
-            mnq_1m_bar = {
-                "time":      bar_ts.isoformat(),
-                "open":      _o,
-                "high":      _h,
-                "low":       _l,
-                "close":     _c,
-                "body_high": max(_o, _c),
-                "body_low":  min(_o, _c),
-            }
+            today_mnq = mnq_1m_today[mnq_1m_today.index <= bar_ts]
+            today_mes = mes_1m_today[mes_1m_today.index <= bar_ts]
 
-            # iloc slice is O(1) view, avoids label-based loc search
-            mnq_1m_recent = mnq_session_bars.iloc[: _bar_i + 1]
-
-            is_5m_boundary = (bar_ts.minute % 5 == 0)
-
-            # Trend runs first: validates existing hypothesis before a new one may form.
-            trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, mnq_1m_recent)
-            if trend_sig is not None:
-                if trend_sig.get("kind") == "market-close":
-                    trend_sig["slippage"] = V2_MARKET_CLOSE_SLIPPAGE_PTS
-                day_events.append(trend_sig)
-
-            # Hypothesis runs on every 5m boundary, after trend has had a chance to clear state.
-            if is_5m_boundary:
-                hyp_divs = _hyp_mod.run_hypothesis(
-                    now,
-                    mnq_session_bars.iloc[: _bar_i + 1],
-                    mes_session_bars.iloc[: mes_session_bars.index.searchsorted(bar_ts, side="right")],
-                    hist_mnq_1m, hist_mes_1m,
-                    hist_1hr=hist_1hr_day, hist_4hr=hist_4hr_day,
-                )
-                if hyp_divs:
-                    day_events.extend(hyp_divs)
-
-            strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, mnq_1m_recent)
-            if strat_sig is not None:
-                if strat_sig.get("kind") in ("market-close", "market-entry"):
-                    strat_sig["slippage"] = V2_MARKET_CLOSE_SLIPPAGE_PTS
-                day_events.append(strat_sig)
+            _before = len(day_events)
+            pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
+            _annotate_slippage(day_events[_before:], V2_MARKET_CLOSE_SLIPPAGE_PTS)
 
         # ------------------------------------------------------------------ #
         # Emit end-of-session event if a position is still open               #

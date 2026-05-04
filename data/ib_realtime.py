@@ -67,16 +67,27 @@ class IbRealtimeSource:
         MAX_LOOKBACK_DAYS = 30
         GAP_FILL_MAX_DAYS = 14
         now = pd.Timestamp.now(tz="America/New_York")
+        today_midnight = now.normalize()  # 00:00 ET today — ensures TDO bar is always fetchable
         def _start_ts_for(df):
             gap_days = MAX_LOOKBACK_DAYS if df.empty else GAP_FILL_MAX_DAYS
             floor = now - pd.Timedelta(days=gap_days)
-            return max(df.index[-1], floor) if not df.empty else floor
-        mnq_start_str = _start_ts_for(self._mnq_1m_df).isoformat()
-        mes_start_str = _start_ts_for(self._mes_1m_df).isoformat()
+            if df.empty:
+                return floor
+            # Go back to the earlier of: last bar or today's midnight, so overnight bars
+            # needed for TDO computation are always included in the fetch range.
+            return max(min(df.index[-1], today_midnight), floor)
+        mnq_start = _start_ts_for(self._mnq_1m_df)
+        mes_start = _start_ts_for(self._mes_1m_df)
+        mnq_start_str = mnq_start.isoformat()
+        mes_start_str = mes_start.isoformat()
         end_str = now.isoformat()
         source = IBGatewaySource(host=self._host, port=self._port, client_id=self._client_id + 1)
         mnq_new = source.fetch(self._mnq_conid, mnq_start_str, end_str, interval="1m", contract_type="future_by_conid")
         mes_new = source.fetch(self._mes_conid, mes_start_str, end_str, interval="1m", contract_type="future_by_conid")
+        if mnq_new is None or mnq_new.empty:
+            print(f"[gap_fill] MNQ: 0 bars returned for {mnq_start_str} -> {end_str}", flush=True)
+        if mes_new is None or mes_new.empty:
+            print(f"[gap_fill] MES: 0 bars returned for {mes_start_str} -> {end_str}", flush=True)
         if mnq_new is not None and not mnq_new.empty:
             self._mnq_1m_df = pd.concat([self._mnq_1m_df, mnq_new]).sort_index()
             self._mnq_1m_df = self._mnq_1m_df[~self._mnq_1m_df.index.duplicated(keep="last")]
@@ -124,8 +135,38 @@ class IbRealtimeSource:
         import strategy_smt
         return strategy_smt._BarRow(acc["open"], acc["high"], acc["low"], acc["close"], acc["volume"], ts)
 
+    def _seed_from_history(self, bars, instrument: str) -> None:
+        """Bulk-populate df from IB's initial historical batch (hasNewBar=False)."""
+        rows = []
+        timestamps = []
+        for bar in bars:
+            try:
+                ts = self._bar_timestamp(bar)
+                rows.append([float(bar.open), float(bar.high), float(bar.low), float(bar.close), float(bar.volume)])
+                timestamps.append(ts)
+            except Exception:
+                continue
+        if not rows:
+            return
+        new_df = pd.DataFrame(
+            rows,
+            columns=["Open", "High", "Low", "Close", "Volume"],
+            index=pd.DatetimeIndex(timestamps),
+        )
+        if instrument == "MNQ":
+            combined = pd.concat([self._mnq_1m_df, new_df]).sort_index()
+            combined = combined[~combined.index.duplicated(keep="last")]
+            self._mnq_1m_df = combined
+            self._mnq_1m_df.to_parquet(self._bar_data_dir / "MNQ_1m.parquet")
+        else:
+            combined = pd.concat([self._mes_1m_df, new_df]).sort_index()
+            combined = combined[~combined.index.duplicated(keep="last")]
+            self._mes_1m_df = combined
+            self._mes_1m_df.to_parquet(self._bar_data_dir / "MES_1m.parquet")
+
     def _on_mnq_1m_bar(self, bars, hasNewBar) -> None:
         if not hasNewBar:
+            self._seed_from_history(bars, "MNQ")
             return
         bar = bars[-1]
         bar_ts = self._bar_timestamp(bar)
@@ -146,6 +187,7 @@ class IbRealtimeSource:
 
     def _on_mes_1m_bar(self, bars, hasNewBar) -> None:
         if not hasNewBar:
+            self._seed_from_history(bars, "MES")
             return
         bar = bars[-1]
         bar_ts = self._bar_timestamp(bar)
@@ -184,12 +226,12 @@ class IbRealtimeSource:
 
     def _setup_subscriptions(self, mnq_contract, mes_contract) -> None:
         mnq_1m = self._ib.reqHistoricalData(
-            mnq_contract, endDateTime="", durationStr="1 D",
+            mnq_contract, endDateTime="", durationStr="3 D",
             barSizeSetting="1 min", whatToShow="TRADES",
             useRTH=False, formatDate=2, keepUpToDate=True,
         )
         mes_1m = self._ib.reqHistoricalData(
-            mes_contract, endDateTime="", durationStr="1 D",
+            mes_contract, endDateTime="", durationStr="3 D",
             barSizeSetting="1 min", whatToShow="TRADES",
             useRTH=False, formatDate=2, keepUpToDate=True,
         )
