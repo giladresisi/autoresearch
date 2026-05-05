@@ -336,6 +336,8 @@ for kind, style in EXIT_MARKER_STYLE.items():
         parts = [f"<b>{e['kind']}</b>", f"price: {e['price']}", f"time: {e['ts'].strftime('%H:%M')}"]
         if pair:
             parts.append(f"pnl: {label}")
+        if "close_reason" in e:
+            parts.append(f"reason: {e['close_reason']}")
         hover.append("<br>".join(parts))
 
     fig.add_trace(go.Scatter(
