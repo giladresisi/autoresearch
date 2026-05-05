@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 CAUTIOUS_SECONDARY_MAX_DIST = 150  # pts — secondary (1m confirmation) max distance
-CAUTIOUS_INITIAL_MAX_DIST   = 100  # pts — initial (5m confirmation) max distance
+CAUTIOUS_INITIAL_MAX_DIST   = 110  # pts — initial (5m confirmation) max distance
 CAUTIOUS_MIN_DIST           =  40  # pts — below this secondary distance, skip the entry
 
 LIQUIDITY_APPROACH_DIST    = 100   # pts — Rule 2: "nearly approaching" radius
@@ -636,12 +636,10 @@ def _determine_direction(
         def _last_mid_cross_after(after_ts: "pd.Timestamp | None", upward: bool) -> "pd.Timestamp | None":
             _bars = _true_day_bars[_true_day_bars.index > after_ts] if after_ts is not None else _true_day_bars
             result = None
-            for i in range(1, len(_bars)):
-                c_now  = float(_bars["Close"].iloc[i])
-                c_prev = float(_bars["Close"].iloc[i - 1])
-                if upward     and c_now > _daily_mid and c_prev <= _daily_mid:
+            for i in range(len(_bars)):
+                if upward     and float(_bars["High"].iloc[i]) > _daily_mid:
                     result = _bars.index[i]
-                if not upward and c_now < _daily_mid and c_prev >= _daily_mid:
+                if not upward and float(_bars["Low"].iloc[i])  < _daily_mid:
                     result = _bars.index[i]
             return result
 
@@ -758,6 +756,56 @@ def _determine_direction(
     return global_state.get("trend", "up"), reason
 
 
+def compute_live_hl_mid(
+    combined_1m: pd.DataFrame,
+    now: "pd.Timestamp",
+) -> dict:
+    """Compute live day / week high, low, mid from bar data.
+
+    Returns a dict containing day_high, day_low, day_mid, week_high, week_low, week_mid.
+    Only keys where sufficient bar data exists are included.
+
+    Parameters
+    ----------
+    combined_1m : deduplicated, sorted 1m bars covering the current futures day and week
+    now         : current tz-aware ET timestamp
+    """
+    today  = now.date()
+    result: dict = {}
+
+    # Day: prior calendar day 18:00 ET → now
+    _prior_cal = today - timedelta(days=1)
+    _day_start = pd.Timestamp(
+        datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 18, 0, 0),
+        tz="America/New_York",
+    )
+    _day_bars = combined_1m[combined_1m.index >= _day_start]
+    if not _day_bars.empty:
+        dh = float(_day_bars["High"].max())
+        dl = float(_day_bars["Low"].min())
+        result["day_high"] = dh
+        result["day_low"]  = dl
+        result["day_mid"]  = (dh + dl) / 2.0
+
+    # Week: Sunday 18:00 ET (futures week open)
+    _today_wd  = now.isocalendar().weekday          # 1=Mon … 7=Sun
+    _monday    = today - timedelta(days=_today_wd - 1)
+    _sunday    = today if _today_wd == 7 else _monday - timedelta(days=1)
+    _week_start = pd.Timestamp(
+        datetime(_sunday.year, _sunday.month, _sunday.day, 18, 0, 0),
+        tz="America/New_York",
+    )
+    _week_bars = combined_1m[combined_1m.index >= _week_start]
+    if not _week_bars.empty:
+        wh = float(_week_bars["High"].max())
+        wl = float(_week_bars["Low"].min())
+        result["week_high"] = wh
+        result["week_low"]  = wl
+        result["week_mid"]  = (wh + wl) / 2.0
+
+    return result
+
+
 def run_hypothesis(
     now: datetime,
     mnq_1m: pd.DataFrame,
@@ -795,9 +843,26 @@ def run_hypothesis(
 
     current_close = bar["Close"]
 
+    # Resolve _ts_now early — needed for live bar recomputation below.
+    _ts_now = pd.Timestamp(now)
+    if _ts_now.tzinfo is None:
+        _ts_now = _ts_now.tz_localize("America/New_York")
+    else:
+        _ts_now = _ts_now.tz_convert("America/New_York")
+
     # Step 3: Compute weekly_mid and daily_mid.
     daily = load_daily()
     liquidities = daily.get("liquidities", [])
+
+    # Refresh day/week high, low, mid from live bars.
+    # daily.json is frozen at 09:20; the NY-session open sets new extremes that
+    # must be reflected in the mid calculation used for hypothesis direction.
+    _combined_live = pd.concat([hist_mnq_1m, mnq_1m])
+    _combined_live = _combined_live[~_combined_live.index.duplicated(keep="last")].sort_index()
+    _live_hl = compute_live_hl_mid(_combined_live, _ts_now)
+    for _liq in liquidities:
+        if _liq.get("kind") == "level" and _liq["name"] in _live_hl:
+            _liq["price"] = _live_hl[_liq["name"]]
 
     week_high_price = None
     week_low_price = None
@@ -824,11 +889,6 @@ def run_hypothesis(
         daily_mid = _compute_mid_label(current_close, day_high_price, day_low_price)
 
     # Step 4: last_liquidity — most recently touched meaningful level (True Day scope).
-    _ts_now = pd.Timestamp(now)
-    if _ts_now.tzinfo is None:
-        _ts_now = _ts_now.tz_localize("America/New_York")
-    else:
-        _ts_now = _ts_now.tz_convert("America/New_York")
     _prior_cal = _ts_now.date() - timedelta(days=1)
     _true_day_start_hyp = pd.Timestamp(
         datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 18, 0, 0),
