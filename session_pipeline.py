@@ -10,6 +10,7 @@ import pandas as pd
 
 import daily as _daily_mod
 import hypothesis as _hyp_mod
+import smt_state as _smt_state
 import strategy as _strat_mod
 import trend as _trend_mod
 
@@ -108,9 +109,14 @@ class SessionPipeline:
 
         events: list[dict] = []
 
+        # Snapshot direction before any module can mutate hypothesis state — ensures
+        # terminal output and executor receive the same direction for every signal this bar.
+        _hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
+
         # Trend runs first: validates existing hypothesis before a new one may form.
         trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, recent)
         if trend_sig is not None:
+            trend_sig.setdefault("direction", _hyp_dir)
             self._emit(trend_sig)
             events.append(trend_sig)
 
@@ -132,10 +138,13 @@ class SessionPipeline:
                 for d in hyp_divs:
                     self._emit(d)
                 events.extend(hyp_divs)
+            # Reload direction so strategy sees the updated bias on the same bar.
+            _hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
 
-        # Fix #1: run_strategy on every 1m bar (not just 5m boundaries).
-        strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent)
+        # Fix #1: run_strategy on every 1m bar; full entry logic only at 5m boundaries.
+        strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent, fill_check_only=not is_5m)
         if strat_sig is not None:
+            strat_sig.setdefault("direction", _hyp_dir)
             self._emit(strat_sig)
             events.append(strat_sig)
 
