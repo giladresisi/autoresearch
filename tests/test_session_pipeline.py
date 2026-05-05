@@ -218,7 +218,7 @@ def test_on_1m_bar_calls_strategy_every_bar(_isolate_state, monkeypatch):
     monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
     monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
     monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
-    monkeypatch.setattr(_strat_mod, "run_strategy", lambda now, bar, recent: strat_calls.append(now) or None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda now, bar, recent, **kw: strat_calls.append(now) or None)
 
     hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
     hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)

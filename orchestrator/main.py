@@ -7,6 +7,9 @@ import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from orchestrator.output import FileSink, JsonlFileSink, OutputChannel, StdoutSink
 from orchestrator.process import ProcessManager
 from orchestrator.relay import SessionRelay
