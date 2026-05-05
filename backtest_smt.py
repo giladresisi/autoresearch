@@ -1043,7 +1043,7 @@ def _write_results_tsv(row: dict) -> None:
 
     fieldnames = [
         "iter", "commit", "mean_test_pnl", "min_test_pnl", "total_test_trades",
-        "avg_win_rate", "avg_rr", "avg_sharpe", "avg_calmar",
+        "avg_win_rate", "avg_rr", "avg_sharpe", "avg_calmar", "avg_max_drawdown",
         "avg_expectancy", "wl_ratio", "status", "description",
     ]
     path = "results.tsv"
@@ -1452,16 +1452,18 @@ if __name__ == "__main__":
     _avg_rr  = sum(s["avg_rr"]             for s in _active) / _n_act
     _avg_sh  = sum(s["sharpe"]             for s in _active) / _n_act
     _avg_cal = sum(s["calmar"]             for s in _active) / _n_act
+    _avg_dd  = sum(s["max_drawdown"]       for s in _active) / _n_act
     _avg_exp = sum(s["avg_pnl_per_trade"]  for s in _active) / _n_act
     _wl      = _avg_wr / (1 - _avg_wr) if _avg_wr < 1.0 else float("inf")
     _write_results_tsv({
-        "mean_test_pnl":    f"{mean_test_pnl:.2f}",
-        "min_test_pnl":     f"{min_test_pnl:.2f}",
-        "total_test_trades": sum(t for _, t in fold_test_pnls),
-        "avg_win_rate":     f"{_avg_wr:.4f}",
-        "avg_rr":           f"{_avg_rr:.4f}",
-        "avg_sharpe":       f"{_avg_sh:.4f}",
-        "avg_calmar":       f"{_avg_cal:.4f}",
-        "avg_expectancy":   f"{_avg_exp:.2f}",
-        "wl_ratio":         f"{_wl:.4f}",
+        "mean_test_pnl":     f"{mean_test_pnl:.2f}",
+        "min_test_pnl":      f"{min_test_pnl:.2f}",
+        "total_test_trades":  sum(t for _, t in fold_test_pnls),
+        "avg_win_rate":      f"{_avg_wr:.4f}",
+        "avg_rr":            f"{_avg_rr:.4f}",
+        "avg_sharpe":        f"{_avg_sh:.4f}",
+        "avg_calmar":        f"{_avg_cal:.4f}",
+        "avg_max_drawdown":  f"{_avg_dd:.2f}",
+        "avg_expectancy":    f"{_avg_exp:.2f}",
+        "wl_ratio":          f"{_wl:.4f}",
     })

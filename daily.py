@@ -16,6 +16,7 @@ from smt_state import (
     load_position, save_position,
 )
 from strategy_smt import compute_tdo
+from hypothesis import compute_live_hl_mid
 
 # ---------------------------------------------------------------------------
 # Session time windows (ET local times, naive — compared against .time())
@@ -246,34 +247,24 @@ def run_daily(
     if two_price is not None:
         liquidities.append({"name": "TWO", "kind": "level", "price": float(two_price)})
 
-    # week_high / week_low from hist_mnq_1m filtered to current ISO week
-    today_ts = pd.Timestamp(today)
-    today_iso = today_ts.isocalendar()
-    _iso = combined_1m.index.isocalendar()
-    week_mask = (_iso["year"] == today_iso.year) & (_iso["week"] == today_iso.week)
-    week_bars = combined_1m[week_mask]
-    if not week_bars.empty:
-        liquidities.append({"name": "week_high", "kind": "level",
-                            "price": float(week_bars["High"].max())})
-        liquidities.append({"name": "week_low",  "kind": "level",
-                            "price": float(week_bars["Low"].min())})
+    # week / day high, low, mid — delegated to compute_live_hl_mid (shared with hypothesis.py).
+    _now_ts = pd.Timestamp(now)
+    if _now_ts.tzinfo is None:
+        _now_ts = _now_ts.tz_localize("America/New_York")
+    else:
+        _now_ts = _now_ts.tz_convert("America/New_York")
+    _live_hl = compute_live_hl_mid(combined_1m, _now_ts)
 
-    # day_high / day_low: full futures trading day = prior calendar day 18:00 ET → now.
-    # Overnight session bars (18:00–23:59 prior day) carry date == prior day in the
-    # DatetimeIndex, so a plain .date == today filter misses them.
-    _prior_cal = today - datetime.timedelta(days=1)
-    _overnight_start = pd.Timestamp(
-        datetime.datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 18, 0, 0),
-        tz="America/New_York",
-    )
-    today_bars = combined_1m[combined_1m.index >= _overnight_start]
-    if today_bars.empty:
-        today_bars = combined_1m[combined_1m.index.date == today]
-    if not today_bars.empty:
-        liquidities.append({"name": "day_high", "kind": "level",
-                            "price": float(today_bars["High"].max())})
-        liquidities.append({"name": "day_low",  "kind": "level",
-                            "price": float(today_bars["Low"].min())})
+    # Fallback for day: if no bars from overnight start, try the calendar-date filter.
+    if "day_high" not in _live_hl:
+        _fb = combined_1m[combined_1m.index.date == today]
+        if not _fb.empty:
+            _dh, _dl = float(_fb["High"].max()), float(_fb["Low"].min())
+            _live_hl.update({"day_high": _dh, "day_low": _dl, "day_mid": (_dh + _dl) / 2.0})
+
+    for _name in ("week_high", "week_low", "week_mid", "day_high", "day_low", "day_mid"):
+        if _name in _live_hl:
+            liquidities.append({"name": _name, "kind": "level", "price": _live_hl[_name]})
 
     # Prior 2 trading days: high, low, TDO
     for i, prior_date in enumerate(_last_n_trading_dates(today, 2), start=1):
@@ -314,11 +305,9 @@ def run_daily(
     # Step 3: update global.json all_time_high if today's high exceeds it #
     # ------------------------------------------------------------------ #
     global_state = load_global()
-    if not today_bars.empty:
-        today_max_high = float(today_bars["High"].max())
-        if today_max_high > global_state["all_time_high"]:
-            global_state["all_time_high"] = today_max_high
-            save_global(global_state)
+    if "day_high" in _live_hl and _live_hl["day_high"] > global_state["all_time_high"]:
+        global_state["all_time_high"] = _live_hl["day_high"]
+        save_global(global_state)
 
     # ------------------------------------------------------------------ #
     # Step 4 + 5: estimated_dir and opposite_premove (TBD hardcoded)      #

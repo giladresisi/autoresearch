@@ -3,7 +3,8 @@
 # Runs run_backtest_v2 for each date in regression.md, writes events.jsonl + trades.tsv,
 # and diffs against baselines. Also plots a chart per date.
 #
-# Default: diff against existing baseline.
+# Default: diff against existing baseline; auto-lock (LOCK) when none exists.
+# --skip-lock: when no baseline exists, skip locking and return SKIP.
 # --update-baseline: overwrite baseline with current run output.
 
 import argparse
@@ -55,14 +56,16 @@ def run_regression(
     *,
     record: bool = False,
     update_baseline: "bool | None" = None,
+    skip_lock: bool = False,
 ) -> dict:
     """Run regression for every date in regression_md_path.
 
     update_baseline (alias for record) takes precedence when supplied.
     record=True / update_baseline=True: write baseline for each date.
     record=False / update_baseline=False: diff against existing baseline.
+    skip_lock=True: when no baseline exists, skip locking (SKIP); default locks (LOCK).
 
-    Returns {date: {events_match, trades_match, n_trades, pnl, updated, locked}}.
+    Returns {date: {events_match, trades_match, n_trades, pnl, updated, locked, skipped}}.
     """
     from backtest_smt import run_backtest_v2
 
@@ -98,15 +101,24 @@ def run_regression(
                 "updated":      True,
             }
         elif not bl_events.exists() or not bl_trades.exists():
-            shutil.copy2(events_path, bl_events)
-            shutil.copy2(trades_path, bl_trades)
-            res = {
-                "events_match": True,
-                "trades_match": True,
-                "n_trades":     metrics.get("n_trades", 0),
-                "pnl":          metrics.get("total_pnl", 0.0),
-                "locked":       True,
-            }
+            if skip_lock:
+                res = {
+                    "events_match": False,
+                    "trades_match": False,
+                    "n_trades":     metrics.get("n_trades", 0),
+                    "pnl":          metrics.get("total_pnl", 0.0),
+                    "skipped":      True,
+                }
+            else:
+                shutil.copy2(events_path, bl_events)
+                shutil.copy2(trades_path, bl_trades)
+                res = {
+                    "events_match": True,
+                    "trades_match": True,
+                    "n_trades":     metrics.get("n_trades", 0),
+                    "pnl":          metrics.get("total_pnl", 0.0),
+                    "locked":       True,
+                }
         else:
             res = {
                 "events_match": (events_path.read_text(encoding="utf-8").splitlines()
@@ -138,9 +150,13 @@ def main() -> int:
         "--update-baseline", action="store_true",
         help="Overwrite baseline with current run output instead of diffing",
     )
+    parser.add_argument(
+        "--skip-lock", action="store_true",
+        help="When no baseline exists, skip locking and return SKIP instead of LOCK",
+    )
     args = parser.parse_args()
 
-    results = run_regression(args.regression_md, record=args.update_baseline)
+    results = run_regression(args.regression_md, record=args.update_baseline, skip_lock=args.skip_lock)
 
     all_pass = True
     for date, res in results.items():
@@ -150,6 +166,8 @@ def main() -> int:
             print(f"{date}: updated   n_trades={n} pnl={pnl:.2f}")
         elif res.get("locked"):
             print(f"{date}: events=LOCKED trades=LOCKED n_trades={n} pnl={pnl:.2f}")
+        elif res.get("skipped"):
+            print(f"{date}: events=SKIP trades=SKIP n_trades={n} pnl={pnl:.2f}")
         else:
             status_e = "PASS" if res["events_match"] else "FAIL"
             status_t = "PASS" if res["trades_match"] else "FAIL"

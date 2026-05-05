@@ -160,6 +160,7 @@ def run_trend(
 
     bar_high = float(mnq_1m_bar["high"])
     bar_low = float(mnq_1m_bar["low"])
+    bar_open = float(mnq_1m_bar["open"])
     bar_close = float(mnq_1m_bar["close"])
     bar_mid = (bar_high + bar_low) / 2.0
     bar_time_str = str(mnq_1m_bar.get("time", now.isoformat()))
@@ -218,10 +219,10 @@ def run_trend(
                     return {"kind": "cautious-armed", "time": now.isoformat(),
                             "price": bar_close, "level": "secondary"}
                 else:
-                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                    # wick-only reach of secondary: wait for 1m arm-confirm bar
+                    position["active"]["cautious"] = "secondary_surpassed"
                     save_position(position)
-                    save_hypothesis(hypothesis)
-                    return _market_close_signal(now, bar_mid, reason="cautious-rejected", close_reason=_cr2)
+                    return None
 
             if cautious_initial is not None and _surpassed(cautious_initial):
                 if _close_beyond(cautious_initial):
@@ -229,8 +230,35 @@ def run_trend(
                     save_position(position)
                     return {"kind": "cautious-armed", "time": now.isoformat(),
                             "price": bar_close, "level": "initial"}
-                # wick-only reach of initial level: do not arm, do not reject.
-                # The stop already caps downside; let the trade continue toward the secondary.
+                else:
+                    # wick-only reach of initial: wait for 1m arm-confirm bar
+                    position["active"]["cautious"] = "initial_surpassed"
+                    save_position(position)
+                    return None
+
+            return None
+
+        # ---- 3a2: initial surpassed — wait for 1m arm-confirm bar ----------
+        if cautious_state == "initial_surpassed":
+            # If secondary was reached this bar, upgrade immediately.
+            if cautious_secondary is not None and _surpassed(cautious_secondary):
+                if _close_beyond(cautious_secondary):
+                    position["active"]["cautious"] = "secondary"
+                    save_position(position)
+                    return {"kind": "cautious-armed", "time": now.isoformat(),
+                            "price": bar_close, "level": "secondary"}
+                else:
+                    position["active"]["cautious"] = "secondary_surpassed"
+                    save_position(position)
+                    return None
+
+            if cautious_initial is not None:
+                _opp_close = (bar_close < bar_open) if direction == "up" else (bar_close > bar_open)
+                if _opp_close and not _close_beyond(cautious_initial):
+                    position["active"]["cautious"] = "initial"
+                    save_position(position)
+                    return {"kind": "cautious-armed", "time": now.isoformat(),
+                            "price": bar_close, "level": "initial"}
 
             return None
 
@@ -252,10 +280,10 @@ def run_trend(
                     return {"kind": "cautious-armed", "time": now.isoformat(),
                             "price": bar_close, "level": "secondary"}
                 else:
-                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                    # wick-only reach of secondary: wait for 1m arm-confirm bar
+                    position["active"]["cautious"] = "secondary_surpassed"
                     save_position(position)
-                    save_hypothesis(hypothesis)
-                    return _market_close_signal(now, bar_mid, reason="cautious-rejected", close_reason=_cr2)
+                    return None
 
             # 5m confirmation: on a 5m boundary, check if the completed 5m bar body
             # is opposite to direction → exit.
@@ -274,6 +302,17 @@ def run_trend(
                         save_hypothesis(hypothesis)
                         return _market_close_signal(now, bar_mid, reason="cautious-5m-break", close_reason=_cr1)
 
+            return None
+
+        # ---- 3b2: secondary surpassed — wait for 1m arm-confirm bar --------
+        if cautious_state == "secondary_surpassed":
+            if cautious_secondary is not None:
+                _opp_close = (bar_close < bar_open) if direction == "up" else (bar_close > bar_open)
+                if (_opp_close and not _close_beyond(cautious_secondary)) or _close_beyond(cautious_secondary):
+                    position["active"]["cautious"] = "secondary"
+                    save_position(position)
+                    return {"kind": "cautious-armed", "time": now.isoformat(),
+                            "price": bar_close, "level": "secondary"}
             return None
 
         # ---- 3c: secondary cautious — 1m confirmation ----------------------
@@ -325,6 +364,25 @@ def run_trend(
                 "broken_direction": direction,
                 "level_name":       "daily_mid",
                 "level_price":      daily_mid_price,
+            }
+
+    # Weekly-mid invalidation: same logic applied to the broader weekly range.
+    if weekly_mid_price is not None and _weekly_mid_cross_guard:
+        _wm_broken = (direction == "up"   and bar_close < weekly_mid_price) or \
+                     (direction == "down" and bar_close > weekly_mid_price)
+        if _wm_broken:
+            hypothesis["direction"] = "none"
+            position["confirmation_bar"] = {}
+            position["limit_entry"] = ""
+            save_position(position)
+            save_hypothesis(hypothesis)
+            return {
+                "kind":             "trend-broken",
+                "time":             now.isoformat(),
+                "price":            bar_close,
+                "broken_direction": direction,
+                "level_name":       "weekly_mid",
+                "level_price":      weekly_mid_price,
             }
 
     _HIGH_PRIO_LEVELS = {"week_high", "week_low", "day_high", "day_low"}
