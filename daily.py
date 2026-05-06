@@ -305,9 +305,10 @@ def run_daily(
     # Step 3: update global.json all_time_high if today's high exceeds it #
     # ------------------------------------------------------------------ #
     global_state = load_global()
-    if "day_high" in _live_hl and _live_hl["day_high"] > global_state["all_time_high"]:
-        global_state["all_time_high"] = _live_hl["day_high"]
-        save_global(global_state)
+    _hist_ath = float(hist_mnq_1m["High"].max()) if not hist_mnq_1m.empty else 0.0
+    _today_ath = float(mnq_1m["High"].max()) if not mnq_1m.empty else 0.0
+    global_state["all_time_high"] = max(_hist_ath, _today_ath, float(global_state.get("all_time_high", 0.0)))
+    save_global(global_state)
 
     # ------------------------------------------------------------------ #
     # Step 4 + 5: estimated_dir and opposite_premove (TBD hardcoded)      #

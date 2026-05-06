@@ -45,14 +45,12 @@ class SessionPipeline:
         # method, so importing at module level would capture the un-patched paths too early.
         from smt_state import (
             DEFAULT_DAILY, DEFAULT_GLOBAL, DEFAULT_HYPOTHESIS, DEFAULT_POSITION,
-            load_daily, save_daily, save_global, save_hypothesis, save_position,
+            load_daily, load_global, save_daily, save_global, save_hypothesis, save_position,
         )
 
-        # Fix #2: Seed ATH from full history before resetting state.
-        seeded_global = copy.deepcopy(DEFAULT_GLOBAL)
-        if not self._hist_mnq_1m.empty:
-            seeded_global["all_time_high"] = float(self._hist_mnq_1m["High"].max())
-        save_global(seeded_global)
+        # Ensure global.json exists; create with defaults if missing.
+        # Preserves existing confidence/trend — ATH is recomputed by run_daily.
+        save_global(load_global())
         save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
         save_position(copy.deepcopy(DEFAULT_POSITION))
 
