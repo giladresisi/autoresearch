@@ -962,6 +962,11 @@ class SmtV2Dispatcher:
             self._executor.place_close("v2-direction-mismatch")
             self._pending_limit = None
 
+        elif kind == "cancel-limit-entry":
+            if self._pending_limit is not None:
+                self._executor.place_close("cancel-limit")
+                self._pending_limit = None
+
         elif kind == "stopped-out":
             # IB stop order already executed — just clear pending state
             self._pending_limit = None

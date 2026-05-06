@@ -40,6 +40,7 @@ DEFAULT_HYPOTHESIS = {
 DEFAULT_POSITION = {
     "active": {},
     "limit_entry": "",
+    "limit_direction": "",
     "confirmation_bar": {},
     "failed_entries": 0,
 }

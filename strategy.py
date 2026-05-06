@@ -144,7 +144,20 @@ def run_strategy(
         if _global.get("confidence") == "high":
             return None
 
-        # 2.1 Early-exit conditions
+        # 2.1 Early-exit conditions — cancel any pending limit if direction changed.
+        limit_entry = position["limit_entry"]
+        limit_direction = position.get("limit_direction", "")
+        if limit_entry != "" and limit_direction != "" and (
+            direction == "none" or direction != limit_direction
+        ):
+            _cancel_price = float(limit_entry)
+            position["limit_entry"]      = ""
+            position["limit_direction"]  = ""
+            position["confirmation_bar"] = {}
+            smt_state.save_position(position)
+            _reason = "direction-none" if direction == "none" else "direction-changed"
+            return _make_signal("cancel-limit-entry", now, _cancel_price, reason=_reason)
+
         if direction == "none":
             return None
         if position["failed_entries"] > 2:
@@ -184,6 +197,7 @@ def run_strategy(
                     "cautious":   "no",
                 }
                 position["limit_entry"]      = ""
+                position["limit_direction"]  = ""
                 position["confirmation_bar"] = {}
                 smt_state.save_position(position)
                 return _make_signal("limit-entry-filled", now, fill_price, direction=direction, stop=stop)
@@ -229,12 +243,14 @@ def run_strategy(
                     }
                     position["confirmation_bar"] = conf_bar_snap
                     position["limit_entry"]      = ""
+                    position["limit_direction"]  = ""
                     smt_state.save_position(position)
                     return _make_signal("market-entry", now, bar_mid, direction=direction, stop=stop)
 
                 position["confirmation_bar"] = conf_bar_snap
                 kind = "new-limit-entry" if position["limit_entry"] == "" else "move-limit-entry"
-                position["limit_entry"] = body_end_price
+                position["limit_entry"]     = body_end_price
+                position["limit_direction"] = direction
                 smt_state.save_position(position)
                 return _make_signal(kind, now, body_end_price)
 
