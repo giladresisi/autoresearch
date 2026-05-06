@@ -64,11 +64,11 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
                 _sleep_until(next_session_open(now), "next trading session")
                 continue
 
-            session_open_dt = datetime.datetime(today.year, today.month, today.day, 9, 0, tzinfo=_ET)
+            session_open_dt = datetime.datetime(today.year, today.month, today.day, 9, 20, tzinfo=_ET)
             grace_end_dt = datetime.datetime(today.year, today.month, today.day, 13, 35, tzinfo=_ET)
 
             if now < session_open_dt:
-                _sleep_until(session_open_dt, "session open 09:00 ET")
+                _sleep_until(session_open_dt, "session open 09:20 ET")
                 continue
 
             if now >= grace_end_dt:

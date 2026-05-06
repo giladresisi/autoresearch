@@ -142,7 +142,8 @@ def _on_bar(bar, mes_partial) -> None:
     """
     global _mes_partial_1m
     _mes_partial_1m = mes_partial
-    _process(bar)
+    if _smtv2_pipeline != "v2":
+        _process(bar)
 
 
 def _bar_timestamp(bar) -> pd.Timestamp:
@@ -862,9 +863,11 @@ class SmtV2Dispatcher:
     reference captured at construction would go stale after the first bar.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, executor) -> None:
         self._pipeline = None
         self._session_date = None
+        self._executor = executor
+        self._pending_limit = None  # last pmt_signal sent as a limit
 
     def on_session_start(self, now: pd.Timestamp, mnq_1m_df: pd.DataFrame, mes_1m_df: pd.DataFrame) -> None:
         """Initialize pipeline with current history snapshot and seed session state.
@@ -876,7 +879,7 @@ class SmtV2Dispatcher:
         if today == self._session_date:
             return
         from session_pipeline import SessionPipeline
-        self._pipeline = SessionPipeline(mnq_1m_df, mes_1m_df, _emit_v2_signal)
+        self._pipeline = SessionPipeline(mnq_1m_df, mes_1m_df, self._emit)
         today_at_open = mnq_1m_df[
             (mnq_1m_df.index.date == today) & (mnq_1m_df.index <= now)
         ]
@@ -898,6 +901,70 @@ class SmtV2Dispatcher:
         today_mnq = mnq_1m_df[mnq_1m_df.index.date == now.date()]
         today_mes = mes_1m_df[mes_1m_df.index.date == now.date()]
         self._pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
+
+    def _emit(self, sig: dict) -> None:
+        """Log signal and route strategy signals to the PMT executor."""
+        import smt_state as _st
+        _emit_v2_signal(sig)
+        kind = sig.get("kind")
+
+        if kind in ("new-limit-entry", "move-limit-entry"):
+            direction_v2 = sig.get("direction", "none")
+            if direction_v2 == "none":
+                return
+            direction = "long" if direction_v2 == "up" else "short"
+            position = _st.load_position()
+            conf_bar = position.get("confirmation_bar", {})
+            stop = conf_bar.get("body_low") if direction_v2 == "up" else conf_bar.get("body_high")
+            if stop is None:
+                return
+            pmt_signal = {
+                "direction": direction,
+                "entry_price": float(sig["price"]),
+                "stop_price": float(stop),
+                "limit_fill_bars": 1,
+            }
+            if kind == "new-limit-entry":
+                self._pending_limit = pmt_signal
+                self._executor.place_entry(pmt_signal, None)
+            else:
+                self._executor.modify_limit_entry(
+                    self._pending_limit or pmt_signal, pmt_signal, None
+                )
+                self._pending_limit = pmt_signal
+
+        elif kind == "limit-entry-filled":
+            direction_v2 = sig.get("direction", "none")
+            direction = "long" if direction_v2 == "up" else "short"
+            stop = sig.get("stop")
+            if stop is None:
+                return
+            self._pending_limit = None
+            self._executor.place_stop_after_limit_fill(
+                {"direction": direction, "stop_price": float(stop)}, None
+            )
+
+        elif kind == "market-entry":
+            direction_v2 = sig.get("direction", "none")
+            direction = "long" if direction_v2 == "up" else "short"
+            stop = sig.get("stop")
+            if stop is None:
+                return
+            pmt_signal = {
+                "direction": direction,
+                "entry_price": float(sig["price"]),
+                "stop_price": float(stop),
+            }
+            self._pending_limit = None
+            self._executor.place_entry(pmt_signal, None)
+
+        elif kind == "market-close":
+            self._executor.place_close("v2-direction-mismatch")
+            self._pending_limit = None
+
+        elif kind == "stopped-out":
+            # IB stop order already executed — just clear pending state
+            self._pending_limit = None
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -926,8 +993,6 @@ def main() -> None:
     _hypothesis_generated = False
 
     _smtv2_pipeline = os.environ.get("SMT_PIPELINE", "v1")
-    if _smtv2_pipeline == "v2":
-        _smtv2_dispatcher = SmtV2Dispatcher()
 
     # Restore open position from disk if the process was restarted mid-trade
     if POSITION_FILE.exists():
@@ -955,6 +1020,8 @@ def main() -> None:
         contracts=int(os.environ.get("TRADING_CONTRACTS", "1")),
         entry_slip_ticks=int(os.environ.get("PMT_ENTRY_SLIP_TICKS", "2")),
     )
+    if _smtv2_pipeline == "v2":
+        _smtv2_dispatcher = SmtV2Dispatcher(_executor)
 
     def _on_bar_1m_complete(bars) -> None:
         """Called by IbRealtimeSource after each completed 1m bar.
