@@ -77,7 +77,7 @@ class TestLoadReturnsDefaultWhenSchemaMismatch:
 
 class TestSaveThenLoadRoundtrip:
     def test_global_roundtrip(self):
-        data = {"all_time_high": 21500.0, "trend": "down"}
+        data = {"all_time_high": 21500.0, "confidence": "medium", "trend": "down"}
         save_global(data)
         assert load_global() == data
 
@@ -118,7 +118,7 @@ class TestSaveThenLoadRoundtrip:
 
 class TestSaveIsAtomic:
     def test_crash_in_os_replace_preserves_original(self, tmp_path):
-        original = {"all_time_high": 100.0, "trend": "up"}
+        original = {"all_time_high": 100.0, "confidence": "high", "trend": "up"}
         save_global(original)
 
         with patch("os.replace", side_effect=OSError("simulated crash")):

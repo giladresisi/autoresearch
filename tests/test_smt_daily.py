@@ -262,7 +262,7 @@ class TestAllTimeHighUpdate:
         return now, mnq_1m, hist_mnq_1m, hist_hourly
 
     def test_all_time_high_updates_when_today_higher(self):
-        save_global({"all_time_high": 100.0, "trend": "up"})
+        save_global({"all_time_high": 100.0, "confidence": "medium", "trend": "up"})
         now, mnq_1m, hist_mnq_1m, hist_hourly = self._make_minimal(
             base_price=200.0, high_offset=5.0
         )  # day_high = 205
@@ -271,7 +271,7 @@ class TestAllTimeHighUpdate:
         assert g["all_time_high"] == 205.0
 
     def test_all_time_high_unchanged_when_today_lower(self):
-        save_global({"all_time_high": 100.0, "trend": "up"})
+        save_global({"all_time_high": 100.0, "confidence": "medium", "trend": "up"})
         now, mnq_1m, hist_mnq_1m, hist_hourly = self._make_minimal(
             base_price=45.0, high_offset=5.0
         )  # day_high = 50
@@ -282,7 +282,7 @@ class TestAllTimeHighUpdate:
 
 class TestEstimatedDirAndOppositePremove:
     def _run_with_global_trend(self, trend: str):
-        save_global({"all_time_high": 0.0, "trend": trend})
+        save_global({"all_time_high": 0.0, "confidence": "medium", "trend": trend})
         now = _now("2026-04-27", 9, 20)
         mnq_1m = make_bars("2026-04-27 09:00:00", periods=60)
         hist_mnq_1m = make_bars("2026-04-27 00:00:00", periods=60)

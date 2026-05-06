@@ -78,6 +78,12 @@ def _isolate(tmp_path, monkeypatch):
     """Redirect all four smt_state paths into a fresh tmp_path for each test."""
     monkeypatch.setattr(smt_state, "DATA_DIR",        tmp_path)
     monkeypatch.setattr(smt_state, "GLOBAL_PATH",     tmp_path / "global.json")
+    # Write global.json with confidence="medium" so existing tests are unaffected
+    # by the new confidence="high" entry-blocking branch in strategy.py.
+    (tmp_path / "global.json").write_text(
+        '{"all_time_high": 0.0, "confidence": "medium", "trend": "up"}',
+        encoding="utf-8",
+    )
     monkeypatch.setattr(smt_state, "DAILY_PATH",      tmp_path / "daily.json")
     monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
     monkeypatch.setattr(smt_state, "POSITION_PATH",   tmp_path / "position.json")
@@ -387,3 +393,44 @@ class TestSignalShape:
         assert "price" in result
         # Must be JSON-serialisable
         json.dumps(result)
+
+
+class TestConfidenceHighBlocksEntry:
+
+    def _write_confidence_high(self, tmp_path_fixture=None):
+        """Overwrite global.json with confidence='high' for this test."""
+        smt_state.save_global({"all_time_high": 0.0, "confidence": "high", "trend": "up"})
+
+    def test_confidence_high_blocks_limit_entry(self, tmp_path):
+        """confidence='high' → no new-limit-entry signal even with a valid opposite 5m bar."""
+        self._write_confidence_high()
+        write_hypothesis(direction="up")
+        write_position()
+        bar = make_5m_bar(open_=99.0, high=110.0, low=90.0, close=95.0)
+        recent = make_opp_1m_recent("up", open_=105.0, close_=95.0, high=110.0, low=90.0)
+        result = run_strategy(NOW, bar, recent)
+        assert result is None, (
+            f"confidence='high' must block new limit entries, got {result}"
+        )
+
+    def test_confidence_high_blocks_market_entry(self, tmp_path):
+        """confidence='high' → no market-entry signal even when price is at the limit."""
+        self._write_confidence_high()
+        write_hypothesis(direction="up")
+        # approach < threshold triggers market entry normally
+        bar = make_5m_bar(open_=104.0, high=110.0, low=90.0, close=100.0)
+        recent = make_opp_1m_recent("up", open_=105.0, close_=95.0, high=110.0, low=90.0)
+        result = run_strategy(NOW, bar, recent)
+        assert result is None, (
+            f"confidence='high' must block market entries, got {result}"
+        )
+
+    def test_confidence_medium_allows_entry(self, tmp_path):
+        """confidence='medium' (default fixture) → entry proceeds normally."""
+        # global.json already has confidence="medium" from the _isolate fixture.
+        write_hypothesis(direction="up")
+        write_position()
+        bar = make_5m_bar(open_=99.0, high=110.0, low=90.0, close=95.0)
+        recent = make_opp_1m_recent("up", open_=105.0, close_=95.0, high=110.0, low=90.0)
+        result = run_strategy(NOW, bar, recent)
+        assert result is not None, "confidence='medium' must not block entries"

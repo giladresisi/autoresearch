@@ -139,6 +139,11 @@ def run_strategy(
         if now.time() < _time(9, 30):
             return None
 
+        # confidence=high: global conviction active — no automatic entries (limit or market).
+        _global = smt_state.load_global()
+        if _global.get("confidence") == "high":
+            return None
+
         # 2.1 Early-exit conditions
         if direction == "none":
             return None
