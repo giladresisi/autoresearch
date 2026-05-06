@@ -215,7 +215,11 @@ def run_strategy(
                 if approach < _MARKET_ENTRY_THRESHOLD:
                     bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
                     stop = opp_5m["body_low"] if direction == "up" else opp_5m["body_high"]
-                    if abs(bar_mid - float(stop)) < MIN_STOP_DISTANCE:
+                    # Directional stop check: stop must be on the protective side of entry.
+                    # abs() alone passes when the bar moved past the conf bar during the candle.
+                    if direction == "up"   and (bar_mid - float(stop)) < MIN_STOP_DISTANCE:
+                        return None
+                    if direction == "down" and (float(stop) - bar_mid) < MIN_STOP_DISTANCE:
                         return None
                     if not _entry_bar_cpr_ok(mnq_bar, direction):
                         return None
