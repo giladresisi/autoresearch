@@ -65,7 +65,7 @@ def test_5m_dispatch_order_is_trend_then_hypothesis_then_strategy(
         call_order.append("trend")
         return None
 
-    def fake_run_strategy(now, mnq_5m_bar, mnq_1m_recent):
+    def fake_run_strategy(now, mnq_5m_bar, mnq_1m_recent, fill_check_only=False):
         call_order.append("strategy")
         return None
 
@@ -147,7 +147,7 @@ def test_1m_only_dispatches_trend(tmp_path, monkeypatch, _isolate_state):
         calls["trend"] += 1
         return None
 
-    def fake_run_strategy(now, mnq_5m_bar, mnq_1m_recent):
+    def fake_run_strategy(now, mnq_5m_bar, mnq_1m_recent, fill_check_only=False):
         calls["strategy"] += 1
         return None
 
