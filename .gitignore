@@ -49,6 +49,7 @@ data/regression/*/
 
 # SMT v2 runtime state files (ephemeral, not committed)
 data/*.json
+!data/global.json
 
 # Local regression notes
 regression.md

@@ -17,7 +17,7 @@ DAILY_PATH      = DATA_DIR / "daily.json"
 HYPOTHESIS_PATH = DATA_DIR / "hypothesis.json"
 POSITION_PATH   = DATA_DIR / "position.json"
 
-DEFAULT_GLOBAL = {"all_time_high": 0.0, "trend": "up"}
+DEFAULT_GLOBAL = {"all_time_high": 0.0, "confidence": "medium", "trend": "up"}
 
 DEFAULT_DAILY = {
     "date": "",

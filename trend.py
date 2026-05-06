@@ -13,6 +13,7 @@ import pandas as pd
 
 from smt_state import (
     load_daily,
+    load_global,
     load_hypothesis,
     load_position,
     save_hypothesis,
@@ -157,6 +158,24 @@ def run_trend(
     # ------------------------------------------------------------------
     if direction == "none":
         return None
+
+    # Global trend invalidation: when confidence=high, cancel any hypothesis opposing global_trend.
+    _global_state = load_global()
+    _global_trend = _global_state.get("trend", "up")
+    if _global_state.get("confidence") == "high" and direction != _global_trend:
+        hypothesis["direction"] = "none"
+        position["confirmation_bar"] = {}
+        position["limit_entry"] = ""
+        save_position(position)
+        save_hypothesis(hypothesis)
+        return {
+            "kind":             "trend-broken",
+            "time":             now.isoformat(),
+            "price":            float(mnq_1m_bar.get("close", 0)),
+            "broken_direction": direction,
+            "level_name":       "global_trend",
+            "level_price":      None,
+        }
 
     bar_high = float(mnq_1m_bar["high"])
     bar_low = float(mnq_1m_bar["low"])

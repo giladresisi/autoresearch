@@ -18,6 +18,7 @@ from smt_state import (
     DEFAULT_HYPOTHESIS,
     DEFAULT_POSITION,
     save_daily,
+    save_global,
     save_hypothesis,
     save_position,
 )
@@ -93,11 +94,16 @@ def redirect_paths(tmp_path, monkeypatch):
     # trend.py imports these at the top of each call; we must also patch the
     # names that trend.py imported directly.
     import trend
+    monkeypatch.setattr(trend, "load_global",    smt_state.load_global)
     monkeypatch.setattr(trend, "load_hypothesis", smt_state.load_hypothesis)
     monkeypatch.setattr(trend, "save_hypothesis", smt_state.save_hypothesis)
     monkeypatch.setattr(trend, "load_position", smt_state.load_position)
     monkeypatch.setattr(trend, "save_position", smt_state.save_position)
     monkeypatch.setattr(trend, "load_daily", smt_state.load_daily)
+
+    # Default global: confidence="medium" so existing tests are unaffected by the
+    # new global-trend invalidation branch (which only fires on confidence="high").
+    save_global({"all_time_high": 0.0, "confidence": "medium", "trend": "up"})
 
 
 # ---------------------------------------------------------------------------
@@ -394,3 +400,81 @@ class TestSignalShape:
         # Must be JSON-serializable
         serialized = json.dumps(signal)
         assert isinstance(serialized, str)
+
+
+class TestGlobalTrendInvalidation:
+    """confidence='high' + direction opposing global trend → trend-broken, direction reset."""
+
+    def _setup(self, direction: str, global_trend: str, confidence: str = "high"):
+        hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
+        hyp["direction"] = direction
+        save_hypothesis(hyp)
+
+        save_position(copy.deepcopy(DEFAULT_POSITION))
+        save_daily(_daily_with_levels([]))
+        save_global({"all_time_high": 0.0, "confidence": confidence, "trend": global_trend})
+
+    def test_confidence_high_opposing_direction_returns_trend_broken(self):
+        """direction='down', global trend='up', confidence='high' → trend-broken signal."""
+        from trend import run_trend
+        from smt_state import load_hypothesis
+
+        self._setup(direction="down", global_trend="up", confidence="high")
+        bar = make_1m_bar(open_=100, high=105, low=95, close=102)
+        recent = make_recent_bars(closes=[100, 102], opens=[99, 100])
+        result = run_trend(NOW, bar, recent)
+
+        assert result is not None
+        assert result["kind"] == "trend-broken"
+        assert result["level_name"] == "global_trend"
+        assert result["broken_direction"] == "down"
+        hyp = load_hypothesis()
+        assert hyp["direction"] == "none"
+
+    def test_confidence_high_aligned_direction_no_invalidation(self):
+        """direction='up', global trend='up', confidence='high' → no invalidation."""
+        from trend import run_trend
+
+        self._setup(direction="up", global_trend="up", confidence="high")
+        bar = make_1m_bar(open_=100, high=105, low=95, close=102)
+        recent = make_recent_bars(closes=[100, 102], opens=[99, 100])
+        result = run_trend(NOW, bar, recent)
+
+        # The bar doesn't trigger any existing rules (no cautious, no level breach),
+        # so result must be None — the global-trend check must not have fired.
+        assert result is None
+
+    def test_confidence_medium_opposing_direction_no_invalidation(self):
+        """direction='down', global trend='up', confidence='medium' → no invalidation."""
+        from trend import run_trend
+        from smt_state import load_hypothesis
+
+        self._setup(direction="down", global_trend="up", confidence="medium")
+        bar = make_1m_bar(open_=100, high=105, low=95, close=102)
+        recent = make_recent_bars(closes=[100, 102], opens=[99, 100])
+        run_trend(NOW, bar, recent)
+
+        hyp = load_hypothesis()
+        assert hyp["direction"] == "down", (
+            "confidence='medium' must not trigger global-trend invalidation"
+        )
+
+    def test_global_trend_invalidation_clears_limit_and_conf_bar(self):
+        """On invalidation, limit_entry and confirmation_bar must be cleared."""
+        from trend import run_trend
+        from smt_state import load_position
+
+        self._setup(direction="down", global_trend="up", confidence="high")
+        pos = copy.deepcopy(DEFAULT_POSITION)
+        pos["limit_entry"] = 95.0
+        pos["confirmation_bar"] = {"time": "T", "high": 100.0, "low": 90.0,
+                                   "body_high": 98.0, "body_low": 92.0}
+        save_position(pos)
+
+        bar = make_1m_bar(open_=100, high=105, low=95, close=102)
+        recent = make_recent_bars(closes=[100, 102], opens=[99, 100])
+        run_trend(NOW, bar, recent)
+
+        p = load_position()
+        assert p["limit_entry"] == ""
+        assert p["confirmation_bar"] == {}

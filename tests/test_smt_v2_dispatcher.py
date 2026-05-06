@@ -194,7 +194,7 @@ def test_on_1m_bar_passes_fresh_dfs_not_stale(_isolate_state, DispatcherCls, mon
     monkeypatch.setattr(_trend_mod, "run_trend",      lambda *a, **kw: None)
 
     captured_recent: list = []
-    def _capture_strategy(now, bar, recent):
+    def _capture_strategy(now, bar, recent, fill_check_only=False):
         captured_recent.append(recent)
         return None
     monkeypatch.setattr(_strat_mod, "run_strategy", _capture_strategy)
@@ -232,7 +232,7 @@ def test_on_1m_bar_slices_today_bars(_isolate_state, DispatcherCls, monkeypatch)
     monkeypatch.setattr(_hyp_mod,   "run_hypothesis", lambda *a, **kw: [])
 
     captured: list = []
-    def _capture(now, bar, recent):
+    def _capture(now, bar, recent, fill_check_only=False):
         captured.append(recent)
         return None
     monkeypatch.setattr(_strat_mod, "run_strategy", _capture)

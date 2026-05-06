@@ -904,17 +904,22 @@ def run_hypothesis(
     divs = _compute_divs(mnq_1m, mes_1m)
 
     # Step 6: direction — determined by ICT rules (see direction.md).
-    direction, direction_reason = _determine_direction(
-        current_bar  = bar,
-        mnq_1m       = mnq_1m,
-        hist_mnq_1m  = hist_mnq_1m,
-        liquidities  = liquidities,
-        global_state = global_state,
-        divs         = divs,
-        now          = now,
-        hist_1hr     = hist_1hr,
-        hist_4hr     = hist_4hr,
-    )
+    # confidence=high overrides all rules: direction follows the global trend unconditionally.
+    if global_state.get("confidence") == "high":
+        direction = global_state.get("trend", "up")
+        direction_reason = {"rule": "global_confidence_high"}
+    else:
+        direction, direction_reason = _determine_direction(
+            current_bar  = bar,
+            mnq_1m       = mnq_1m,
+            hist_mnq_1m  = hist_mnq_1m,
+            liquidities  = liquidities,
+            global_state = global_state,
+            divs         = divs,
+            now          = now,
+            hist_1hr     = hist_1hr,
+            hist_4hr     = hist_4hr,
+        )
 
     # Step 7: targets — filter liquidities in direction from current close.
     targets = []
