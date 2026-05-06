@@ -815,6 +815,7 @@ def run_hypothesis(
     *,
     hist_1hr: "pd.DataFrame | None" = None,
     hist_4hr: "pd.DataFrame | None" = None,
+    skip_position_reset: bool = False,
 ) -> list:
     """Run the hypothesis module for the current 5m boundary.
 
@@ -1062,11 +1063,17 @@ def run_hypothesis(
     save_hypothesis(new_hypothesis)
 
     # Step 10: On none -> up/down transition, reset position state.
+    # skip_position_reset=True is passed by the pipeline when it temporarily cleared
+    # direction to "none" for an unbiased level-swept re-evaluation.  In that case the
+    # transition is artificial: failed_entries still resets (level sweep is a fresh
+    # context) but limit_entry and confirmation_bar are preserved so a pending limit
+    # that was set before the sweep survives.
     if old_direction == "none" and direction != "none":
         position = load_position()
         position["failed_entries"] = 0
-        position["confirmation_bar"] = {}
-        position["limit_entry"] = ""
+        if not skip_position_reset:
+            position["confirmation_bar"] = {}
+            position["limit_entry"] = ""
         save_position(position)
 
     hyp_event = {

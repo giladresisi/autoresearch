@@ -433,12 +433,10 @@ def run_trend(
         triggered = False
         extra: dict = {}
         if direction == "up":
-            # Opposite-direction levels are those *below* current price.
             if level_price < bar_close and bar_low <= level_price:
                 triggered = True
                 extra = {"bar_low": bar_low}
         else:  # direction == "down"
-            # Opposite-direction levels are those *above* current price.
             if level_price > bar_close and bar_high >= level_price:
                 triggered = True
                 extra = {"bar_high": bar_high}
@@ -449,18 +447,18 @@ def run_trend(
                              if not (c["level_name"] == level_name and c["direction"] == direction)]
             new_cooldowns.append({"level_name": level_name, "direction": direction, "expires_at": expires_at})
             position["trend_broken_cooldowns"] = new_cooldowns
-            hypothesis["direction"] = "none"
-            position["confirmation_bar"] = {}
-            position["limit_entry"] = ""
+            # Only record the cooldown — do NOT clear hypothesis or limits here.
+            # The pipeline will re-evaluate hypothesis immediately and decide:
+            #   direction changed → emit trend-broken + clear limits
+            #   direction same    → emit new-hypothesis only, limits survive
             save_position(position)
-            save_hypothesis(hypothesis)
             sig = {
-                "kind":             "trend-broken",
-                "time":             now.isoformat(),
-                "price":            bar_close,
-                "broken_direction": direction,
-                "level_name":       level_name,
-                "level_price":      level_price,
+                "kind":        "level-swept",
+                "time":        now.isoformat(),
+                "price":       bar_close,
+                "direction":   direction,
+                "level_name":  level_name,
+                "level_price": level_price,
             }
             sig.update(extra)
             return sig
