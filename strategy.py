@@ -200,13 +200,26 @@ def run_strategy(
         if direction == "up" and _above_session_ath:
             return None
 
-        # 2.1 Early-exit conditions
+        # 2.1 Early-exit conditions — cancel any pending limit if direction changed.
+        limit_entry = position["limit_entry"]
+        limit_direction = position.get("limit_direction", "")
+        if limit_entry != "" and limit_direction != "" and (
+            direction == "none" or direction != limit_direction
+        ):
+            _cancel_price = float(limit_entry)
+            position["limit_entry"]      = ""
+            position["limit_direction"]  = ""
+            position["confirmation_bar"] = {}
+            smt_state.save_position(position)
+            _reason = "direction-none" if direction == "none" else "direction-changed"
+            return _make_signal("cancel-limit-entry", now, _cancel_price, reason=_reason)
+
         if direction == "none":
             return None
         if position["failed_entries"] > 2:
             return None
 
-        _MARKET_ENTRY_THRESHOLD = 5.0  # pts: switch to market if price is this close
+        _MARKET_ENTRY_THRESHOLD = 15.0  # pts: switch to market if price is this close
         MIN_STOP_DISTANCE = 5.0
         MAX_CONFIRMATION_BODY_PTS = 25.0  # reject momentum/reversal bars as confirmation
 
@@ -227,11 +240,10 @@ def run_strategy(
                 stop = max(float(conf_bar["low"]), float(conf_bar["body_low"]) - _STOP_WICK_CAP)
             else:
                 stop = min(float(conf_bar["high"]), float(conf_bar["body_high"]) + _STOP_WICK_CAP)
-            # Only fill if stop distance and bar quality are acceptable.
-            # If not, fall through to section 2.3: a new confirmation bar may offer
-            # a better entry price and stop, so the limit should be moved rather than
-            # filled at the stale price.
-            if abs(fill_price - float(stop)) >= MIN_STOP_DISTANCE and _entry_bar_cpr_ok(mnq_bar, direction):
+            # Fill as soon as price reaches the limit — bar close quality is irrelevant
+            # for fill confirmation (the broker fills a limit order the instant price
+            # touches it, regardless of where the bar closes).
+            if abs(fill_price - float(stop)) >= MIN_STOP_DISTANCE:
                 position["active"] = {
                     "time":       mnq_bar["time"],
                     "fill_price": fill_price,
@@ -241,6 +253,7 @@ def run_strategy(
                     "cautious":   "no",
                 }
                 position["limit_entry"]      = ""
+                position["limit_direction"]  = ""
                 position["confirmation_bar"] = {}
                 smt_state.save_position(position)
                 return _make_signal("limit-entry-filled", now, fill_price, direction=direction, stop=stop)
@@ -298,12 +311,14 @@ def run_strategy(
                     }
                     position["confirmation_bar"] = conf_bar_snap
                     position["limit_entry"]      = ""
+                    position["limit_direction"]  = ""
                     smt_state.save_position(position)
                     return _make_signal("market-entry", now, bar_mid, direction=direction, stop=stop)
 
                 position["confirmation_bar"] = conf_bar_snap
                 kind = "new-limit-entry" if position["limit_entry"] == "" else "move-limit-entry"
-                position["limit_entry"] = body_end_price
+                position["limit_entry"]     = body_end_price
+                position["limit_direction"] = direction
                 smt_state.save_position(position)
                 return _make_signal(kind, now, body_end_price)
 
@@ -369,3 +384,36 @@ def run_strategy(
 
     # 3.3 Position active, no event
     return None
+
+
+# ---------------------------------------------------------------------------
+# Position reset helpers — called by daily.py and hypothesis.py so that all
+# position.json writes go through the strategy module, not around it.
+# ---------------------------------------------------------------------------
+
+def reset_position_for_session() -> None:
+    """Clear all active-trade and pending-limit fields at session open.
+
+    Called by daily.run_daily once per session (09:20 ET).
+    """
+    pos = smt_state.load_position()
+    pos["active"] = {}
+    pos["limit_entry"] = ""
+    pos["limit_direction"] = ""
+    pos["confirmation_bar"] = {}
+    pos["failed_entries"] = 0
+    smt_state.save_position(pos)
+
+
+def reset_position_for_new_hypothesis() -> None:
+    """Clear entry-state fields on a none→up/down hypothesis transition.
+
+    Called by hypothesis.run_hypothesis when a directional bias is established.
+    Leaves 'active' untouched: a filled trade persists across hypothesis changes.
+    """
+    pos = smt_state.load_position()
+    pos["failed_entries"] = 0
+    pos["confirmation_bar"] = {}
+    pos["limit_entry"] = ""
+    pos["limit_direction"] = ""
+    smt_state.save_position(pos)

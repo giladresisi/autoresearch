@@ -25,8 +25,11 @@ class ProcessManager:
         self._relay = relay
         self._log = log_channel
 
-    def run_session(self, date: datetime.date) -> None:
-        """Kill any running signal_smt.py, then spawn fresh; relay output; restart once on unexpected exit; stop at 13:35 ET."""
+    def run_session(self, date: datetime.date) -> str | None:
+        """Kill any running signal_smt.py, then spawn fresh; relay output; restart once on unexpected exit; stop at 13:35 ET.
+
+        Returns "ib_disconnected" if automation exited with code 2; None otherwise.
+        """
         _kill_existing_signal_smt(self._script, self._log)
         restarted = False
         proc = None
@@ -38,7 +41,12 @@ class ProcessManager:
                 if exit_reason == "scheduled_stop":
                     self._log.writeln("[ORCH] Session ended — sending terminate signal")
                     self._terminate(proc)
-                    return
+                    return None
+                if exit_reason == "ib_disconnected":
+                    self._log.writeln(
+                        "[ORCH] *** IB Gateway disconnected (exit code 2) — not restarting ***"
+                    )
+                    return "ib_disconnected"
                 # Unexpected exit
                 if not restarted:
                     self._log.writeln(
@@ -50,7 +58,7 @@ class ProcessManager:
                         f"[ORCH] *** signal_smt.py exited again (code={proc.returncode}) — NOT restarting; waiting for session end ***"
                     )
                     self._wait_until_grace_end()
-                    return
+                    return None
         except KeyboardInterrupt:
             if proc is not None and proc.poll() is None:
                 self._log.writeln("[ORCH] Interrupt received — terminating signal_smt.py")
@@ -73,7 +81,7 @@ class ProcessManager:
     def _monitor(self, proc: subprocess.Popen) -> str:
         """Read stdout in a thread; poll for exit or 13:35 ET in main thread.
 
-        Returns "scheduled_stop" or "unexpected_exit".
+        Returns "scheduled_stop", "ib_disconnected" (exit code 2), or "unexpected_exit".
         """
         reader = threading.Thread(target=self._read_stdout, args=(proc,), daemon=True)
         reader.start()
@@ -83,6 +91,8 @@ class ProcessManager:
                 if hasattr(proc.stdout, "close"):
                     proc.stdout.close()
                 reader.join(timeout=2)
+                if proc.returncode == 2:
+                    return "ib_disconnected"
                 return "unexpected_exit"
             now = datetime.datetime.now(tz=_ET)
             if now.time() >= _SESSION_GRACE_END:

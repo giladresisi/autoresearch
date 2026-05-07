@@ -11,6 +11,7 @@ import pandas as pd
 
 from hypothesis_smt import compute_hypothesis_context
 import strategy_smt
+from session_times import SESSION_OPEN as _SESSION_OPEN_V2
 from execution.simulated import SimulatedBrokerExecutor
 from strategy_smt import (
     _BarRow,
@@ -1184,7 +1185,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         # ------------------------------------------------------------------ #
         day_midnight  = pd.Timestamp(date, tz="America/New_York")
         next_midnight = day_midnight + pd.Timedelta(days=1)
-        session_start_ts = pd.Timestamp(f"{date} 09:20:00", tz="America/New_York")
+        session_start_ts = pd.Timestamp(f"{date} {_SESSION_OPEN_V2}", tz="America/New_York")
 
         _mnq_pos_day  = mnq_all.index.searchsorted(day_midnight,      side="left")
         _mnq_pos_next = mnq_all.index.searchsorted(next_midnight,     side="left")

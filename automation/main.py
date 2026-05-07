@@ -35,7 +35,7 @@ from strategy_smt import (
 # strategy_smt attributes in tests affects this module without a re-import.
 import strategy_smt
 from hypothesis_smt import HypothesisManager
-from data.ib_realtime import IbRealtimeSource
+from data.ib_realtime import IbGatewayDisconnectedError, IbRealtimeSource
 from execution.pickmytrade import PickMyTradeExecutor
 
 # ── Connection constants ──────────────────────────────────────────────────────
@@ -51,7 +51,8 @@ MES_CONID = "770561194"
 
 # ── Session window ───────────────────────────────────────────────────────────
 SESSION_START      = "09:00"   # ET
-SIGNAL_SESSION_END = "13:30"   # ET  (named to avoid shadowing strategy_smt.SESSION_END)
+from session_times import SESSION_OPEN, SESSION_CLOSE  # noqa: E402
+SIGNAL_SESSION_END = SESSION_CLOSE   # ET: no new signals / force-close after this time
 
 # ── Trade configuration ───────────────────────────────────────────────────────
 # 2-tick adverse fill; 1 tick = 0.25 MNQ points
@@ -128,8 +129,8 @@ _move_stop_bar_counter: int  = 0
 _smtv2_pipeline: str = "v1"
 _smtv2_dispatcher: "SmtV2Dispatcher | None" = None
 
-# Session start time for V2 pipeline daily trigger (09:20 ET, matches backtest)
-_SESSION_DAILY_TRIGGER_TIME = pd.Timestamp("2000-01-01 09:20").time()
+# Session start time for V2 pipeline daily trigger — imported from session_times
+_SESSION_DAILY_TRIGGER_TIME = SESSION_OPEN
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -142,7 +143,8 @@ def _on_bar(bar, mes_partial) -> None:
     """
     global _mes_partial_1m
     _mes_partial_1m = mes_partial
-    _process(bar)
+    if _smtv2_pipeline != "v2":
+        _process(bar)
 
 
 def _bar_timestamp(bar) -> pd.Timestamp:
@@ -860,6 +862,7 @@ class SmtV2Dispatcher:
     DFs are passed at call time (not stored at init) because IbRealtimeSource
     replaces its internal DataFrame reference on each bar via pd.concat, so any
     reference captured at construction would go stale after the first bar.
+    Order dispatch and pending-limit tracking are delegated to live_orders.
     """
 
     def __init__(self) -> None:
@@ -876,7 +879,7 @@ class SmtV2Dispatcher:
         if today == self._session_date:
             return
         from session_pipeline import SessionPipeline
-        self._pipeline = SessionPipeline(mnq_1m_df, mes_1m_df, _emit_v2_signal)
+        self._pipeline = SessionPipeline(mnq_1m_df, mes_1m_df, self._emit)
         today_at_open = mnq_1m_df[
             (mnq_1m_df.index.date == today) & (mnq_1m_df.index <= now)
         ]
@@ -898,6 +901,64 @@ class SmtV2Dispatcher:
         today_mnq = mnq_1m_df[mnq_1m_df.index.date == now.date()]
         today_mes = mes_1m_df[mes_1m_df.index.date == now.date()]
         self._pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
+
+    def _emit(self, sig: dict) -> None:
+        """Log signal to stdout + events.jsonl, then route to live_orders for order dispatch."""
+        import smt_state as _st
+        import live_orders as _lo
+        _emit_v2_signal(sig)
+        _lo._log(dict(sig, source="strategy"))
+
+        kind = sig.get("kind")
+        direction_v2 = sig.get("direction", "none")
+
+        if kind in ("new-limit-entry", "move-limit-entry"):
+            if direction_v2 == "none":
+                return
+            direction = "long" if direction_v2 == "up" else "short"
+            position = _st.load_position()
+            conf_bar = position.get("confirmation_bar", {})
+            stop = conf_bar.get("body_low") if direction_v2 == "up" else conf_bar.get("body_high")
+            if stop is None:
+                return
+            pmt_signal = {
+                "direction": direction,
+                "entry_price": float(sig["price"]),
+                "stop_price": float(stop),
+                "limit_fill_bars": 1,
+            }
+            if kind == "new-limit-entry":
+                _lo.place_entry(pmt_signal)
+            else:
+                _lo.modify_limit(_lo._pending_limit or pmt_signal, pmt_signal)
+
+        elif kind == "limit-entry-filled":
+            direction = "long" if direction_v2 == "up" else "short"
+            stop = sig.get("stop")
+            if stop is None:
+                return
+            _lo.place_stop_after_fill({"direction": direction, "stop_price": float(stop)})
+
+        elif kind == "market-entry":
+            direction = "long" if direction_v2 == "up" else "short"
+            stop = sig.get("stop")
+            if stop is None:
+                return
+            _lo.place_entry({
+                "direction": direction,
+                "entry_price": float(sig["price"]),
+                "stop_price": float(stop),
+            })
+
+        elif kind == "market-close":
+            _lo.close("v2-direction-mismatch")
+
+        elif kind == "cancel-limit-entry":
+            _lo.cancel_limit("cancel-limit")
+
+        elif kind == "stopped-out":
+            # IB stop order already executed — just clear pending state
+            _lo._pending_limit = None
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -926,8 +987,6 @@ def main() -> None:
     _hypothesis_generated = False
 
     _smtv2_pipeline = os.environ.get("SMT_PIPELINE", "v1")
-    if _smtv2_pipeline == "v2":
-        _smtv2_dispatcher = SmtV2Dispatcher()
 
     # Restore open position from disk if the process was restarted mid-trade
     if POSITION_FILE.exists():
@@ -955,6 +1014,8 @@ def main() -> None:
         contracts=int(os.environ.get("TRADING_CONTRACTS", "1")),
         entry_slip_ticks=int(os.environ.get("PMT_ENTRY_SLIP_TICKS", "2")),
     )
+    if _smtv2_pipeline == "v2":
+        _smtv2_dispatcher = SmtV2Dispatcher()
 
     def _on_bar_1m_complete(bars) -> None:
         """Called by IbRealtimeSource after each completed 1m bar.
@@ -1004,6 +1065,10 @@ def main() -> None:
     _executor.start()
     try:
         _ib_source.start()  # blocks; retry loop is inside IbRealtimeSource
+    except IbGatewayDisconnectedError:
+        # Gateway shut down — executor.stop() runs in finally; exit code 2 signals orchestrator
+        print("[automation] IB Gateway disconnected — exiting with code 2", flush=True)
+        sys.exit(2)
     finally:
         _executor.stop()
 

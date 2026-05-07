@@ -109,6 +109,7 @@ class TestSaveThenLoadRoundtrip:
         data = {
             "active": {"fill_price": 21400.0, "direction": "up"},
             "limit_entry": 21395.0,
+            "limit_direction": "long",
             "confirmation_bar": {"high": 21402.0, "low": 21390.0},
             "failed_entries": 1,
         }

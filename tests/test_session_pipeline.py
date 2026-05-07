@@ -492,3 +492,65 @@ def test_hourly_resample_label_left(_isolate_state, monkeypatch):
         f"label='left' should produce hour=9 timestamp; got hour={first_ts.hour}. "
         "If hour=10, label='right' is being used instead."
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 16: on_session_start writes levels.json
+# ---------------------------------------------------------------------------
+
+def test_on_session_start_writes_levels_json(_isolate_state, monkeypatch, tmp_path):
+    """on_session_start creates sessions/{date}/levels.json with liquidities and all_time_high."""
+    import daily as _daily_mod
+    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.chdir(tmp_path)
+
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5, base=21000.0)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    now = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+    pipeline.on_session_start(now, _make_1m_bars("2025-11-14 09:20", n=1))
+
+    import json
+    levels_path = tmp_path / "sessions" / "2025-11-14" / "levels.json"
+    assert levels_path.exists(), "levels.json must be written by on_session_start"
+    data = json.loads(levels_path.read_text(encoding="utf-8"))
+    assert "liquidities" in data, "levels.json must contain 'liquidities' key"
+    assert isinstance(data["liquidities"], list)
+    assert "all_time_high" in data, "levels.json must contain 'all_time_high' key"
+
+
+# ---------------------------------------------------------------------------
+# Test 17: on_session_start does not overwrite levels.json on restart
+# ---------------------------------------------------------------------------
+
+def test_on_session_start_levels_json_not_overwritten_on_restart(_isolate_state, monkeypatch, tmp_path):
+    """levels.json is written on first call; mtime unchanged on second call same day."""
+    import daily as _daily_mod
+    import json
+    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.chdir(tmp_path)
+
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+
+    now = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+
+    # First call
+    pipeline1 = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    pipeline1.on_session_start(now, _make_1m_bars("2025-11-14 09:20", n=1))
+
+    levels_path = tmp_path / "sessions" / "2025-11-14" / "levels.json"
+    assert levels_path.exists()
+    mtime_first = levels_path.stat().st_mtime
+
+    # Second call (simulates mid-session restart on same date)
+    # daily.json now has today's date so run_daily is skipped (Option A path),
+    # but levels.json should also be skipped since it already exists.
+    pipeline2 = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    pipeline2.on_session_start(now, _make_1m_bars("2025-11-14 09:20", n=1))
+
+    mtime_second = levels_path.stat().st_mtime
+    assert mtime_second == mtime_first, (
+        "levels.json must not be overwritten when it already exists (mid-session restart)"
+    )

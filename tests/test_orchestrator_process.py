@@ -280,3 +280,89 @@ def test_kill_existing_skips_non_matching_process():
         _kill_existing_signal_smt(SCRIPT_PATH, log)
 
     mock_proc.terminate.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 10. test_monitor_returns_ib_disconnected_on_exit_code_2
+# ---------------------------------------------------------------------------
+def test_monitor_returns_ib_disconnected_on_exit_code_2():
+    relay = make_relay()
+    log, _lines = make_log_channel()
+    pm = ProcessManager(SCRIPT_PATH, relay, log)
+
+    proc = make_mock_proc(poll_sequence=[2], returncode=2)
+    result = pm._monitor(proc)
+    assert result == "ib_disconnected"
+
+
+# ---------------------------------------------------------------------------
+# 11. test_monitor_returns_unexpected_exit_for_other_codes
+# ---------------------------------------------------------------------------
+def test_monitor_returns_unexpected_exit_for_other_codes():
+    relay = make_relay()
+    log, _lines = make_log_channel()
+    pm = ProcessManager(SCRIPT_PATH, relay, log)
+
+    for code in [1, 3, -1]:
+        proc = make_mock_proc(poll_sequence=[code], returncode=code)
+        result = pm._monitor(proc)
+        assert result == "unexpected_exit", f"Expected unexpected_exit for code {code}"
+
+
+# ---------------------------------------------------------------------------
+# 12. test_run_session_returns_ib_disconnected
+# ---------------------------------------------------------------------------
+def test_run_session_returns_ib_disconnected():
+    relay = make_relay()
+    log, lines = make_log_channel()
+    pm = ProcessManager(SCRIPT_PATH, relay, log)
+
+    proc = make_mock_proc(poll_sequence=[2], returncode=2)
+    with patch("orchestrator.process.subprocess.Popen", return_value=proc), \
+         patch("orchestrator.process._kill_existing_signal_smt"), \
+         patch("orchestrator.process.time.sleep"):
+        result = pm.run_session(datetime.date(2026, 4, 19))
+
+    assert result == "ib_disconnected"
+
+
+# ---------------------------------------------------------------------------
+# 13. test_run_session_does_not_restart_on_ib_disconnect
+# ---------------------------------------------------------------------------
+def test_run_session_does_not_restart_on_ib_disconnect():
+    relay = make_relay()
+    log, _lines = make_log_channel()
+    pm = ProcessManager(SCRIPT_PATH, relay, log)
+
+    proc = make_mock_proc(poll_sequence=[2], returncode=2)
+    with patch("orchestrator.process.subprocess.Popen", return_value=proc) as mock_popen, \
+         patch("orchestrator.process._kill_existing_signal_smt"), \
+         patch("orchestrator.process.time.sleep"):
+        pm.run_session(datetime.date(2026, 4, 19))
+
+    # Must only spawn once — no restart on IB disconnect
+    assert mock_popen.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# 14. test_run_session_returns_none_on_scheduled_stop (regression)
+# ---------------------------------------------------------------------------
+def test_run_session_returns_none_on_scheduled_stop():
+    relay = make_relay()
+    log, _lines = make_log_channel()
+    pm = ProcessManager(SCRIPT_PATH, relay, log)
+
+    proc = MagicMock()
+    proc.pid = 555
+    proc.returncode = 0
+    proc.poll.return_value = None
+    proc.stdout = iter([])
+    proc.wait.return_value = 0
+
+    with patch("orchestrator.process.subprocess.Popen", return_value=proc), \
+         patch("orchestrator.process._kill_existing_signal_smt"), \
+         patch("orchestrator.process.time.sleep"), \
+         _patch_datetime_at(13, 36):
+        result = pm.run_session(datetime.date(2026, 4, 19))
+
+    assert result is None

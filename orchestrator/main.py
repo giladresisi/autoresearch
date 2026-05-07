@@ -15,14 +15,13 @@ from orchestrator.process import ProcessManager
 from orchestrator.relay import SessionRelay
 from orchestrator.scheduler import get_et_now, is_trading_day, next_session_open
 from orchestrator.summarizer import Summarizer
+from session_times import SESSION_OPEN as _SESSION_OPEN_V2, SESSION_CLOSE as _SESSION_CLOSE_V2
 
 LIVE_TRADING = _os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
 _ET = ZoneInfo("America/New_York")
 _SIGNAL_SMT = Path(__file__).parent.parent / "signal_smt.py"
 _SESSIONS_DIR = Path(__file__).parent.parent / "sessions"
-_SESSION_OPEN = datetime.time(9, 0)
-_SESSION_GRACE_END = datetime.time(13, 35)
 
 
 def _make_session_channels(date: datetime.date) -> tuple[OutputChannel, OutputChannel]:
@@ -42,6 +41,52 @@ def _make_session_channels(date: datetime.date) -> tuple[OutputChannel, OutputCh
     return signal_ch, orch_ch
 
 
+def _close_session_position(log_ch: OutputChannel) -> None:
+    """Send a market close if position.json shows an active V2 position at session end."""
+    try:
+        import smt_state as _smt
+        _pos = _smt.load_position()
+        if not _pos.get("active"):
+            return
+        import live_orders as _lo
+        _fill_price = float(_pos["active"].get("fill_price", 0.0))
+        log_ch.writeln(
+            f"[ORCH] Active position at session end (fill {_fill_price:.2f}) — sending market close"
+        )
+        _lo.manual_close(_fill_price, reason="session-end")
+        log_ch.writeln("[ORCH] Session-end close sent")
+    except Exception as _exc:
+        log_ch.writeln(f"[ORCH] WARNING: session-end close failed: {_exc}")
+
+
+def _pre_session_init() -> None:
+    """Run at orchestrator startup: Databento rolling backfill for historical bars.
+
+    Gracefully skips if DATABENTO_API_KEY is absent or if the fetch fails — the
+    IB seed (3-day keepUpToDate) will cover recent bars when the strategy connects.
+    """
+    import os
+    from pathlib import Path as _Path
+    bar_data_dir = _Path(__file__).resolve().parent.parent / "data"
+    if not os.environ.get("DATABENTO_API_KEY"):
+        print(
+            "[ORCH] DATABENTO_API_KEY not set — skipping Databento pre-session backfill",
+            flush=True,
+        )
+        return
+    try:
+        from data.databento_backfill import backfill_parquets
+        print("[ORCH] Running Databento pre-session backfill ...", flush=True)
+        backfill_parquets(bar_data_dir)
+        print("[ORCH] Databento pre-session backfill complete", flush=True)
+    except Exception as exc:
+        print(
+            f"[ORCH] WARNING: Databento backfill failed: {exc} — "
+            "IB seed will cover recent bars at session start",
+            flush=True,
+        )
+
+
 def _sleep_until(target: datetime.datetime, label: str) -> None:
     now = get_et_now()
     delay = (target - now).total_seconds()
@@ -55,6 +100,7 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
     """Main daemon loop. Ctrl+C exits cleanly; signal_smt.py is terminated if active."""
     if not skip_summary and summarizer is None:
         summarizer = Summarizer()
+    _pre_session_init()
     try:
         while True:
             now = get_et_now()
@@ -64,11 +110,11 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
                 _sleep_until(next_session_open(now), "next trading session")
                 continue
 
-            session_open_dt = datetime.datetime(today.year, today.month, today.day, 9, 0, tzinfo=_ET)
-            grace_end_dt = datetime.datetime(today.year, today.month, today.day, 13, 35, tzinfo=_ET)
+            session_open_dt = datetime.datetime.combine(today, _SESSION_OPEN_V2).replace(tzinfo=_ET)
+            grace_end_dt = datetime.datetime.combine(today, _SESSION_CLOSE_V2).replace(tzinfo=_ET)
 
             if now < session_open_dt:
-                _sleep_until(session_open_dt, "session open 09:00 ET")
+                _sleep_until(session_open_dt, f"session open {_SESSION_OPEN_V2.strftime('%H:%M')} ET")
                 continue
 
             if now >= grace_end_dt:
@@ -83,10 +129,17 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
             else:
                 signal_cmd = _SIGNAL_SMT
             print(f"[orchestrator] mode={'LIVE_TRADING' if LIVE_TRADING else 'signal'}", flush=True)
-            ProcessManager(signal_cmd, relay, orch_ch).run_session(today)
+            result = ProcessManager(signal_cmd, relay, orch_ch).run_session(today)
+            _close_session_position(orch_ch)
             relay.write_trades_tsv(_SESSIONS_DIR / today.isoformat() / "trades.tsv", today)
             if summarizer is not None:
                 summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)
+            if result == "ib_disconnected":
+                orch_ch.writeln(
+                    "[ORCH] *** IB Gateway disconnected. Restart IB Gateway, then relaunch "
+                    "the orchestrator. All positions have been closed. ***"
+                )
+                sys.exit(3)
             _sleep_until(next_session_open(get_et_now()), "next trading session")
     except KeyboardInterrupt:
         print("\n[ORCH] Shutting down.", flush=True)

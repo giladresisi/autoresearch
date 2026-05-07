@@ -28,10 +28,11 @@ from smt_state import (
     load_global,
     load_daily,
     load_hypothesis,
-    save_hypothesis,
     load_position,
+    save_hypothesis,
     save_position,
 )
+import strategy as _strategy
 from strategy_smt import detect_smt_divergence, detect_smt_fill
 
 
@@ -1069,12 +1070,12 @@ def run_hypothesis(
     # context) but limit_entry and confirmation_bar are preserved so a pending limit
     # that was set before the sweep survives.
     if old_direction == "none" and direction != "none":
-        position = load_position()
-        position["failed_entries"] = 0
-        if not skip_position_reset:
-            position["confirmation_bar"] = {}
-            position["limit_entry"] = ""
-        save_position(position)
+        if skip_position_reset:
+            position = load_position()
+            position["failed_entries"] = 0
+            save_position(position)
+        else:
+            _strategy.reset_position_for_new_hypothesis()
 
     hyp_event = {
         "kind":          "new-hypothesis",

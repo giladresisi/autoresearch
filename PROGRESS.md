@@ -1,6 +1,22 @@
 # PROGRESS
 
 
+## Feature: IB Gap-Fill + Orchestrator Disconnect Handling
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/ib-gap-fill-orchestrator.md`
+
+Pre-session Databento rolling-window parquet backfill (`data/databento_backfill.py`) added and called at orchestrator startup. `_gap_fill()` call removed from `IbRealtimeSource.start()`. IB Gateway disconnect detection via `ib.disconnectedEvent` → `IbGatewayDisconnectedError` → subprocess exit code 2 → orchestrator closes position and exits code 3. 24 new tests added; 1042 passed / 4 pre-existing failures / 1 skipped (live IB integration) in full suite.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/ib-gap-fill-orchestrator.md`
+- 9/9 tasks completed; 24 new tests (24/24 passing); 0 regressions
+- Two implementation divergences: DatabentSource import moved to module level for testability; no-retry test simplified to direct raise (MagicMock __iadd__ limitation)
+- Manual IB integration tests (Tests 1–4) pending — require live IB Gateway hardware
+- Alignment score: 9/10
+
+
 ## Feature: Session Pipeline Unification
 
 **Status**: ✅ Complete
