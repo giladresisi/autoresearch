@@ -1,12 +1,12 @@
 # tests/test_ib_realtime.py
 # Unit tests for IbRealtimeSource helpers. All IB/network calls are mocked.
 # Tests cover: tick accumulator logic, partial-1m bar resets, gap-fill skip logic,
-# on_bar callback firing, and parquet property access.
+# on_bar callback firing, parquet property access, and IbGatewayDisconnectedError behaviour.
 import pytest
 import pandas as pd
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
-from data.ib_realtime import IbRealtimeSource
+from data.ib_realtime import IbGatewayDisconnectedError, IbRealtimeSource
 
 
 def _make_source(tmp_path, on_bar=None):
@@ -139,7 +139,123 @@ def test_mnq_1m_df_property_returns_loaded_frames(tmp_path):
     assert len(src.mnq_1m_df) == 1
 
 
-@pytest.mark.integration
-def test_start_connects_and_calls_util_run(tmp_path):
-    """Integration test - skipped unless IB Gateway is running."""
-    pytest.skip("Requires live IB Gateway on port 4002")
+# ── IbGatewayDisconnectedError ──────────────────────────────────────────────
+
+def test_gap_fill_not_called_from_start(tmp_path):
+    """start() must NOT call _gap_fill() — regression guard for the removal."""
+    src = _make_source(tmp_path)
+    ib_mock = MagicMock()
+    ib_mock.isConnected.return_value = True
+    # ib_insync imports are lazy inside start(); patch at the ib_insync module level
+    with patch("ib_insync.IB", return_value=ib_mock), \
+         patch("ib_insync.Future"), \
+         patch("ib_insync.util") as util_mock, \
+         patch.object(src, "_gap_fill") as mock_gap_fill, \
+         patch.object(src, "_setup_subscriptions"):
+        # Simulate a deliberate stop() — sets _stopping=True so start() exits cleanly.
+        def _fake_run():
+            src._stopping = True
+        util_mock.run.side_effect = _fake_run
+        util_mock.getLoop.return_value = MagicMock()
+        src.start()
+
+    mock_gap_fill.assert_not_called()
+
+
+def test_gateway_disconnect_raises_ibgateway_disconnected_error(tmp_path):
+    """When ib.disconnectedEvent fires (gateway-initiated), start() must raise IbGatewayDisconnectedError."""
+    src = _make_source(tmp_path)
+
+    disconnect_callbacks = []
+
+    class FakeIB:
+        def __init__(self):
+            self.disconnectedEvent = MagicMock()
+            self.disconnectedEvent.__iadd__ = lambda self_, cb: disconnect_callbacks.append(cb)
+            self.isConnected = MagicMock(return_value=True)
+
+        def connect(self, *a, **kw):
+            pass
+
+        def disconnect(self):
+            pass
+
+    fake_ib = FakeIB()
+
+    def fake_util_run():
+        # Simulate the gateway closing the connection by calling the registered callback
+        for cb in disconnect_callbacks:
+            cb()
+
+    # ib_insync imports are lazy inside start(); patch at the ib_insync module level
+    with patch("ib_insync.IB", return_value=fake_ib), \
+         patch("ib_insync.Future"), \
+         patch("ib_insync.util") as util_mock, \
+         patch.object(src, "_setup_subscriptions"):
+        util_mock.run.side_effect = fake_util_run
+        util_mock.stop = MagicMock()
+        with pytest.raises(IbGatewayDisconnectedError):
+            src.start()
+
+
+def test_stop_does_not_trigger_gateway_disconnect_flag(tmp_path):
+    """After stop() sets _stopping=True, disconnectedEvent must NOT set _disconnected_by_gateway."""
+    src = _make_source(tmp_path)
+    src._stopping = True
+    src._disconnected_by_gateway = False
+    src._event_loop = MagicMock()
+
+    src._on_gateway_disconnect()  # call the ACTUAL method, not a hand-written copy
+
+    assert src._disconnected_by_gateway is False
+    src._event_loop.stop.assert_not_called()
+
+
+def test_gateway_disconnect_sets_flag_when_not_stopping(tmp_path):
+    """When _stopping=False, disconnectedEvent fires: flag set and loop stopped."""
+    src = _make_source(tmp_path)
+    src._stopping = False
+    src._disconnected_by_gateway = False
+    src._event_loop = MagicMock()
+
+    src._on_gateway_disconnect()
+
+    assert src._disconnected_by_gateway is True
+    src._event_loop.stop.assert_called_once()
+
+
+def test_ibgateway_disconnected_error_not_retried(tmp_path):
+    """IbGatewayDisconnectedError must propagate without triggering the retry loop.
+
+    Test strategy: raise IbGatewayDisconnectedError from util.run() directly (the error
+    originates in the try block whether from the gateway-disconnect check or from a direct
+    raise). The except IbGatewayDisconnectedError guard must re-raise immediately.
+    """
+    src = _make_source(tmp_path)
+    src._max_retries = 3
+    connect_calls = [0]
+
+    class FakeIB:
+        def __init__(self):
+            self.disconnectedEvent = MagicMock()
+            self.isConnected = MagicMock(return_value=False)
+
+        def connect(self, *a, **kw):
+            connect_calls[0] += 1
+
+        def disconnect(self):
+            pass
+
+    # ib_insync imports are lazy inside start(); patch at the ib_insync module level
+    with patch("ib_insync.IB", return_value=FakeIB()), \
+         patch("ib_insync.Future"), \
+         patch("ib_insync.util") as util_mock, \
+         patch.object(src, "_setup_subscriptions"):
+        # Raise IbGatewayDisconnectedError from util.run() — simulates the check
+        # "if self._disconnected_by_gateway: raise IbGatewayDisconnectedError(...)"
+        util_mock.run.side_effect = IbGatewayDisconnectedError("gateway closed")
+        with pytest.raises(IbGatewayDisconnectedError):
+            src.start()
+
+    # connect() should only be called once — no retries after IbGatewayDisconnectedError
+    assert connect_calls[0] == 1
