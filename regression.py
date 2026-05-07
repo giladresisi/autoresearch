@@ -17,22 +17,32 @@ from pathlib import Path
 import pandas as pd
 
 
+def _parse_date_tokens(tokens: list[str]) -> list[str]:
+    """Expand a list of date strings and YYYY-MM-DD:YYYY-MM-DD ranges into a flat date list."""
+    dates: list[str] = []
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+        if ":" in token:
+            start_str, end_str = token.split(":", 1)
+            date_range = pd.date_range(start_str.strip(), end_str.strip(), freq="D")
+            for d in date_range:
+                dates.append(d.strftime("%Y-%m-%d"))
+        else:
+            dates.append(token)
+    return dates
+
+
 def _parse_regression_md(path: str) -> list[str]:
     """Parse regression.md into a flat list of date strings (YYYY-MM-DD)."""
-    dates: list[str] = []
+    tokens: list[str] = []
     with open(path, encoding="utf-8") as f:
         for raw_line in f:
-            line = raw_line.split("#")[0].strip()
-            if not line:
-                continue
-            if ":" in line:
-                start_str, end_str = line.split(":", 1)
-                date_range = pd.date_range(start_str.strip(), end_str.strip(), freq="D")
-                for d in date_range:
-                    dates.append(d.strftime("%Y-%m-%d"))
-            else:
-                dates.append(line)
-    return dates
+            token = raw_line.split("#")[0].strip()
+            if token:
+                tokens.append(token)
+    return _parse_date_tokens(tokens)
 
 
 def _write_events_jsonl(path: Path, events: list[dict]) -> None:
@@ -54,12 +64,14 @@ def _write_trades_tsv(path: Path, trades: list[dict]) -> None:
 def run_regression(
     regression_md_path: str = "regression.md",
     *,
+    dates: "list[str] | None" = None,
     record: bool = False,
     update_baseline: "bool | None" = None,
     skip_lock: bool = False,
 ) -> dict:
-    """Run regression for every date in regression_md_path.
+    """Run regression for every date in regression_md_path (or dates if provided).
 
+    dates: explicit list of date strings / range tokens; overrides regression_md_path when set.
     update_baseline (alias for record) takes precedence when supplied.
     record=True / update_baseline=True: write baseline for each date.
     record=False / update_baseline=False: diff against existing baseline.
@@ -72,7 +84,10 @@ def run_regression(
     if update_baseline is not None:
         record = update_baseline
 
-    dates = _parse_regression_md(regression_md_path)
+    if dates is not None:
+        dates = _parse_date_tokens(dates)
+    else:
+        dates = _parse_regression_md(regression_md_path)
     results: dict[str, dict] = {}
 
     for date in dates:
@@ -147,6 +162,11 @@ def main() -> int:
         help="Path to regression.md (default: regression.md)",
     )
     parser.add_argument(
+        "--dates", nargs="+", metavar="DATE_OR_RANGE",
+        help="One or more dates (YYYY-MM-DD) or ranges (YYYY-MM-DD:YYYY-MM-DD); "
+             "overrides regression.md when specified",
+    )
+    parser.add_argument(
         "--update-baseline", action="store_true",
         help="Overwrite baseline with current run output instead of diffing",
     )
@@ -156,7 +176,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    results = run_regression(args.regression_md, record=args.update_baseline, skip_lock=args.skip_lock)
+    results = run_regression(
+        args.regression_md,
+        dates=args.dates,
+        record=args.update_baseline,
+        skip_lock=args.skip_lock,
+    )
 
     all_pass = True
     for date, res in results.items():
