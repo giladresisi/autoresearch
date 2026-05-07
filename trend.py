@@ -16,6 +16,7 @@ from smt_state import (
     load_global,
     load_hypothesis,
     load_position,
+    save_global,
     save_hypothesis,
     save_position,
 )
@@ -154,6 +155,37 @@ def run_trend(
     )
 
     # ------------------------------------------------------------------
+    # ATH maintenance: update dynamic all_time_high; detect two straddle types.
+    # Runs on every bar regardless of direction so ATH stays current.
+    # session_ath is seeded at 09:20 and never updated — it's the "original ATH"
+    # that separates normal territory (below) from uncharted territory (above).
+    # ------------------------------------------------------------------
+    bar_high = float(mnq_1m_bar["high"])
+    bar_low  = float(mnq_1m_bar["low"])
+    _global_pre  = load_global()
+    _session_ath = float(_global_pre.get("session_ath") or 0)
+    _old_ath     = float(_global_pre.get("all_time_high") or _session_ath)
+    # session_ath straddle: bar crossed the fixed 09:20 ATH — only relevant when
+    # direction is not already "down" (we'd be crossing into uncharted territory).
+    _session_ath_straddle = (
+        _session_ath > 0
+        and bar_high >= _session_ath
+        and bar_low  <= _session_ath
+        and direction not in ("down", "none")
+    )
+    # Dynamic ATH straddle: above session_ath and price crossed the running high.
+    # Triggers a lightweight hypothesis re-evaluation (no trend-broken).
+    _dynamic_ath_straddle = (
+        _old_ath > 0
+        and bar_high >= _old_ath
+        and bar_low  <= _old_ath
+        and direction == "down"
+    )
+    if bar_high > _old_ath:
+        _global_pre["all_time_high"] = bar_high
+        save_global(_global_pre)
+
+    # ------------------------------------------------------------------
     # Step 2: early exit when no active direction.
     # ------------------------------------------------------------------
     if direction == "none":
@@ -177,11 +209,10 @@ def run_trend(
             "level_price":      None,
         }
 
-    bar_high = float(mnq_1m_bar["high"])
-    bar_low = float(mnq_1m_bar["low"])
-    bar_open = float(mnq_1m_bar["open"])
+    # bar_high / bar_low already extracted in ATH block above.
+    bar_open  = float(mnq_1m_bar["open"])
     bar_close = float(mnq_1m_bar["close"])
-    bar_mid = (bar_high + bar_low) / 2.0
+    bar_mid   = (bar_high + bar_low) / 2.0
     bar_time_str = str(mnq_1m_bar.get("time", now.isoformat()))
 
     active = position.get("active", {})
@@ -403,6 +434,36 @@ def run_trend(
                 "level_name":       "weekly_mid",
                 "level_price":      weekly_mid_price,
             }
+
+    # Session ATH straddle: bar crossed the fixed 09:20 ATH with direction not "down".
+    # This is the first time into uncharted territory — invalidate the "up" thesis.
+    if _session_ath_straddle:
+        hypothesis["direction"] = "none"
+        position["confirmation_bar"] = {}
+        position["limit_entry"] = ""
+        save_position(position)
+        save_hypothesis(hypothesis)
+        return {
+            "kind":          "ath-crossed",
+            "time":          now.isoformat(),
+            "price":         bar_close,
+            "bar_high":      bar_high,
+            "bar_low":       bar_low,
+            "all_time_high": _session_ath,
+        }
+
+    # Dynamic ATH straddle: already in "down" territory above session_ath and the
+    # running high was straddled. Hypothesis may need updating (cautious prices drift
+    # as new highs form). No trend-broken — direction is already "down".
+    if _dynamic_ath_straddle:
+        return {
+            "kind":          "dynamic-ath-crossed",
+            "time":          now.isoformat(),
+            "price":         bar_close,
+            "bar_high":      bar_high,
+            "bar_low":       bar_low,
+            "all_time_high": _old_ath,
+        }
 
     _HIGH_PRIO_LEVELS = {"week_high", "week_low", "day_high", "day_low"}
 
