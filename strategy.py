@@ -73,6 +73,53 @@ def _find_last_opposite_5m_bar(
     return None
 
 
+def _find_last_opposite_15m_bar(
+    mnq_1m_recent: pd.DataFrame,
+    now: datetime,
+    direction: str,
+    hypothesis_formed_at: str,
+) -> Optional[dict]:
+    """Same as _find_last_opposite_5m_bar but using a 15m window."""
+    if mnq_1m_recent is None or mnq_1m_recent.empty:
+        return None
+
+    current_15m_start = pd.Timestamp(now).floor("15min")
+    last_15m_start = current_15m_start - pd.Timedelta(minutes=15)
+
+    if hypothesis_formed_at:
+        formed_ts = pd.Timestamp(hypothesis_formed_at)
+        cutoff = formed_ts - pd.Timedelta(minutes=15)
+        if last_15m_start < cutoff:
+            return None
+
+    _idx = mnq_1m_recent.index
+    _sp = _idx.searchsorted(last_15m_start,     side="left")
+    _ep = _idx.searchsorted(current_15m_start,  side="left")
+    window = mnq_1m_recent.iloc[_sp:_ep]
+    if window.empty:
+        return None
+
+    o = float(window.iloc[0]["Open"])
+    c = float(window.iloc[-1]["Close"])
+    if direction == "up" and c < o:
+        return {
+            "time":      last_15m_start.isoformat(),
+            "high":      float(window["High"].max()),
+            "low":       float(window["Low"].min()),
+            "body_high": max(o, c),
+            "body_low":  min(o, c),
+        }
+    if direction == "down" and c > o:
+        return {
+            "time":      last_15m_start.isoformat(),
+            "high":      float(window["High"].max()),
+            "low":       float(window["Low"].min()),
+            "body_high": max(o, c),
+            "body_low":  min(o, c),
+        }
+    return None
+
+
 def _bar_crosses(bar: dict, price: float) -> bool:
     """Return True if the bar's H/L range spans *price* (inclusive)."""
     return bar["low"] <= price <= bar["high"]
@@ -144,6 +191,15 @@ def run_strategy(
         if _global.get("confidence") == "high":
             return None
 
+        # Block long entries when price is at or above the session ATH (fixed 09:20 high).
+        # Short entries above session ATH are valid — that's precisely the expected direction.
+        _session_ath = _global.get("session_ath")
+        _above_session_ath = (
+            _session_ath is not None and float(mnq_bar["high"]) >= float(_session_ath)
+        )
+        if direction == "up" and _above_session_ath:
+            return None
+
         # 2.1 Early-exit conditions — cancel any pending limit if direction changed.
         limit_entry = position["limit_entry"]
         limit_direction = position.get("limit_direction", "")
@@ -157,6 +213,7 @@ def run_strategy(
             smt_state.save_position(position)
             _reason = "direction-none" if direction == "none" else "direction-changed"
             return _make_signal("cancel-limit-entry", now, _cancel_price, reason=_reason)
+
 
         if direction == "none":
             return None
@@ -179,10 +236,11 @@ def run_strategy(
         if limit_entry != "" and _limit_reached:
             fill_price = float(limit_entry)
             conf_bar   = position["confirmation_bar"]
+            _STOP_WICK_CAP = 10.0
             if direction == "up":
-                stop = conf_bar["body_low"]
+                stop = max(float(conf_bar["low"]), float(conf_bar["body_low"]) - _STOP_WICK_CAP)
             else:
-                stop = conf_bar["body_high"]
+                stop = min(float(conf_bar["high"]), float(conf_bar["body_high"]) + _STOP_WICK_CAP)
             # Only fill if stop distance and bar quality are acceptable.
             # If not, fall through to section 2.3: a new confirmation bar may offer
             # a better entry price and stop, so the limit should be moved rather than
@@ -205,9 +263,13 @@ def run_strategy(
         if fill_check_only:
             return None
 
-        # 2.3 Find the most recent completed opposite 5m bar and set/update limit.
+        # 2.3 Find the most recent completed opposite bar and set/update limit.
+        # Above session ATH, require a 15m confirmation bar (more restrictive).
         # Only emits a signal when the reference bar changes.
-        opp_5m = _find_last_opposite_5m_bar(mnq_1m_recent, now, direction, formed_at)
+        if _above_session_ath:
+            opp_5m = _find_last_opposite_15m_bar(mnq_1m_recent, now, direction, formed_at)
+        else:
+            opp_5m = _find_last_opposite_5m_bar(mnq_1m_recent, now, direction, formed_at)
         if opp_5m is not None and (opp_5m["body_high"] - opp_5m["body_low"]) <= MAX_CONFIRMATION_BODY_PTS:
             body_end_price = opp_5m["body_high"] if direction == "up" else opp_5m["body_low"]
             current_conf_time = position.get("confirmation_bar", {}).get("time", "")
@@ -228,8 +290,16 @@ def run_strategy(
 
                 if approach < _MARKET_ENTRY_THRESHOLD:
                     bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
-                    stop = opp_5m["body_low"] if direction == "up" else opp_5m["body_high"]
-                    if abs(bar_mid - float(stop)) < MIN_STOP_DISTANCE:
+                    _STOP_WICK_CAP = 10.0
+                    if direction == "up":
+                        stop = max(float(opp_5m["low"]), float(opp_5m["body_low"]) - _STOP_WICK_CAP)
+                    else:
+                        stop = min(float(opp_5m["high"]), float(opp_5m["body_high"]) + _STOP_WICK_CAP)
+                    # Directional stop check: stop must be on the protective side of entry.
+                    # abs() alone passes when the bar moved past the conf bar during the candle.
+                    if direction == "up"   and (bar_mid - float(stop)) < MIN_STOP_DISTANCE:
+                        return None
+                    if direction == "down" and (float(stop) - bar_mid) < MIN_STOP_DISTANCE:
                         return None
                     if not _entry_bar_cpr_ok(mnq_bar, direction):
                         return None

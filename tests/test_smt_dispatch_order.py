@@ -192,7 +192,12 @@ def test_1m_only_dispatches_trend(tmp_path, monkeypatch, _isolate_state):
 # ---------------------------------------------------------------------------
 
 def test_trend_invalidation_blocks_same_bar_fill(tmp_path, monkeypatch, _isolate_state):
-    """If trend breaks the hypothesis direction, run_strategy returns None (direction='none')."""
+    """A bar that sweeps a high-priority level returns level-swept from run_trend.
+
+    Direction is NOT cleared by run_trend itself — the pipeline (session_pipeline.py)
+    handles that by re-evaluating hypothesis after level-swept and emitting trend-broken
+    only if the direction changes. This tests the run_trend unit contract.
+    """
     import smt_state as _ss
 
     # Set up state: limit entry pending, direction = "up", day_low below current price.
@@ -223,7 +228,7 @@ def test_trend_invalidation_blocks_same_bar_fill(tmp_path, monkeypatch, _isolate
         "failed_entries": 0,
     })
 
-    # daily.json: day_low = 21050.0 (above current close so a bar dipping below it breaks trend)
+    # daily.json: day_low = 21050.0 (above current close so a bar dipping below it sweeps it)
     _ss.save_daily({
         "date": "2025-11-14",
         "liquidities": [
@@ -233,9 +238,8 @@ def test_trend_invalidation_blocks_same_bar_fill(tmp_path, monkeypatch, _isolate
         "opposite_premove": "no",
     })
 
-    # Bar whose low breaches day_low (21050) while bar is above day_low in close
-    # trend.py checks: if direction=="up" and level_price < bar_close and bar_low <= level_price
-    # So: bar_close=21060, bar_low=21040 → 21050 < 21060 and 21040 <= 21050 → trend-broken
+    # Bar whose low breaches day_low (21050):
+    # direction=="up", level_price=21050 < bar_close=21060, bar_low=21040 <= 21050 → level-swept
     now_ts = pd.Timestamp("2025-11-14 09:25:00", tz="America/New_York")
     bar_dict = {
         "time":  now_ts.isoformat(),
@@ -257,26 +261,13 @@ def test_trend_invalidation_blocks_same_bar_fill(tmp_path, monkeypatch, _isolate
     from trend import run_trend
     sig = run_trend(now_ts, bar_dict, recent_bars)
 
-    assert sig is not None, "run_trend should return a trend-broken signal"
-    assert sig["kind"] == "trend-broken", f"expected 'trend-broken', got {sig['kind']}"
-    assert _ss.load_hypothesis()["direction"] == "none", (
-        "hypothesis direction should be 'none' after trend-broken"
-    )
-
-    # Now run_strategy should return None because direction is "none"
-    from strategy import run_strategy
-    bar_5m = {
-        "time":      now_ts.isoformat(),
-        "open":      21070.0,
-        "high":      21080.0,
-        "low":       21040.0,
-        "close":     21060.0,
-        "body_high": 21070.0,
-        "body_low":  21060.0,
-    }
-    sig2 = run_strategy(now_ts, bar_5m, recent_bars)
-    assert sig2 is None, (
-        f"run_strategy should return None when direction is 'none', got {sig2}"
+    # run_trend returns level-swept; pipeline converts to trend-broken after hypothesis re-eval.
+    assert sig is not None, "run_trend should return a signal"
+    assert sig["kind"] == "level-swept", f"expected 'level-swept', got {sig['kind']}"
+    assert sig["level_name"] == "day_low"
+    # Hypothesis direction is unchanged by run_trend — pipeline owns that transition.
+    assert _ss.load_hypothesis()["direction"] == "up", (
+        "run_trend must not clear hypothesis direction; only session_pipeline does that"
     )
 
 

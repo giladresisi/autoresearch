@@ -28,7 +28,9 @@ from smt_state import (
     load_global,
     load_daily,
     load_hypothesis,
+    load_position,
     save_hypothesis,
+    save_position,
 )
 import strategy as _strategy
 from strategy_smt import detect_smt_divergence, detect_smt_fill
@@ -814,6 +816,7 @@ def run_hypothesis(
     *,
     hist_1hr: "pd.DataFrame | None" = None,
     hist_4hr: "pd.DataFrame | None" = None,
+    skip_position_reset: bool = False,
 ) -> list:
     """Run the hypothesis module for the current 5m boundary.
 
@@ -1061,8 +1064,18 @@ def run_hypothesis(
     save_hypothesis(new_hypothesis)
 
     # Step 10: On none -> up/down transition, reset position state.
+    # skip_position_reset=True is passed by the pipeline when it temporarily cleared
+    # direction to "none" for an unbiased level-swept re-evaluation.  In that case the
+    # transition is artificial: failed_entries still resets (level sweep is a fresh
+    # context) but limit_entry and confirmation_bar are preserved so a pending limit
+    # that was set before the sweep survives.
     if old_direction == "none" and direction != "none":
-        _strategy.reset_position_for_new_hypothesis()
+        if skip_position_reset:
+            position = load_position()
+            position["failed_entries"] = 0
+            save_position(position)
+        else:
+            _strategy.reset_position_for_new_hypothesis()
 
     hyp_event = {
         "kind":          "new-hypothesis",
