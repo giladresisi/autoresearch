@@ -1,11 +1,11 @@
 import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from orchestrator.main import _check_setup, _close_session_position, run
+from orchestrator.main import _check_setup, _close_session_position, _pre_session_init, run
 
 _ET = ZoneInfo("America/New_York")
 
@@ -147,3 +147,107 @@ def test_check_setup_exits_1_without_key(monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         _check_setup()
     assert exc_info.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# _pre_session_init tests
+# ---------------------------------------------------------------------------
+
+def test_pre_session_init_skips_when_no_api_key(monkeypatch, capsys):
+    monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
+    _pre_session_init()  # must not raise
+    out = capsys.readouterr().out
+    # The guard must print the skip message and must NOT start the backfill.
+    assert "DATABENTO_API_KEY not set" in out
+    assert "Running Databento" not in out
+
+
+def test_pre_session_init_calls_backfill_when_key_set(monkeypatch):
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    # backfill_parquets is imported locally inside _pre_session_init via
+    # "from data.databento_backfill import backfill_parquets"; patch at source module
+    with patch("data.databento_backfill.backfill_parquets") as mock_bp:
+        _pre_session_init()
+    mock_bp.assert_called_once()
+
+
+def test_pre_session_init_does_not_raise_on_backfill_exception(monkeypatch):
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    with patch("data.databento_backfill.backfill_parquets", side_effect=RuntimeError("network")):
+        _pre_session_init()  # must not raise despite the exception
+
+
+def test_pre_session_init_called_before_session_loop(tmp_path):
+    """_pre_session_init() must be called before the first iteration of the session loop."""
+    mock_summarizer = MagicMock()
+    call_order = []
+
+    def record_pre_session():
+        call_order.append("pre_session_init")
+
+    def record_is_trading_day(d):
+        call_order.append("is_trading_day")
+        return False
+
+    next_open = _dt(9, 0, date=datetime.date(2026, 4, 22))
+    with patch("orchestrator.main._pre_session_init", side_effect=record_pre_session), \
+         patch("orchestrator.main.get_et_now", return_value=_dt(10, 0)), \
+         patch("orchestrator.main.is_trading_day", side_effect=record_is_trading_day), \
+         patch("orchestrator.main.next_session_open", return_value=next_open), \
+         patch("orchestrator.main.time.sleep", side_effect=StopIteration):
+        with pytest.raises(StopIteration):
+            run(summarizer=mock_summarizer)
+
+    assert call_order[0] == "pre_session_init"
+    assert "is_trading_day" in call_order
+
+
+# ---------------------------------------------------------------------------
+# ib_disconnected handling tests
+# ---------------------------------------------------------------------------
+
+def test_run_exits_3_on_ib_disconnected(tmp_path):
+    mock_summarizer = MagicMock()
+    mock_pm_instance = MagicMock()
+    mock_pm_instance.run_session.return_value = "ib_disconnected"
+    next_open = _dt(9, 20, date=datetime.date(2026, 4, 22))
+
+    with patch("orchestrator.main._SESSIONS_DIR", tmp_path / "sessions"), \
+         patch("orchestrator.main.get_et_now", return_value=_dt(9, 25)), \
+         patch("orchestrator.main.is_trading_day", return_value=True), \
+         patch("orchestrator.main.next_session_open", return_value=next_open), \
+         patch("orchestrator.main.ProcessManager", return_value=mock_pm_instance), \
+         patch("orchestrator.main._pre_session_init"), \
+         patch("orchestrator.main._close_session_position"):
+        with pytest.raises(SystemExit) as exc_info:
+            run(summarizer=mock_summarizer)
+
+    assert exc_info.value.code == 3
+
+
+def test_run_closes_position_before_ib_disconnect_exit(tmp_path):
+    mock_summarizer = MagicMock()
+    mock_pm_instance = MagicMock()
+    mock_pm_instance.run_session.return_value = "ib_disconnected"
+    next_open = _dt(9, 20, date=datetime.date(2026, 4, 22))
+    call_order = []
+
+    def record_close(_):
+        call_order.append("close")
+
+    def record_exit(code):
+        call_order.append(f"exit_{code}")
+        raise SystemExit(code)
+
+    with patch("orchestrator.main._SESSIONS_DIR", tmp_path / "sessions"), \
+         patch("orchestrator.main.get_et_now", return_value=_dt(9, 25)), \
+         patch("orchestrator.main.is_trading_day", return_value=True), \
+         patch("orchestrator.main.next_session_open", return_value=next_open), \
+         patch("orchestrator.main.ProcessManager", return_value=mock_pm_instance), \
+         patch("orchestrator.main._pre_session_init"), \
+         patch("orchestrator.main._close_session_position", side_effect=record_close), \
+         patch("orchestrator.main.sys.exit", side_effect=record_exit):
+        with pytest.raises(SystemExit):
+            run(summarizer=mock_summarizer)
+
+    assert call_order == ["close", "exit_3"]

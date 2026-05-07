@@ -10,6 +10,10 @@ from typing import Callable
 import pandas as pd
 
 
+class IbGatewayDisconnectedError(Exception):
+    """Raised when IB Gateway closes the connection (not a transient network error)."""
+
+
 class IbRealtimeSource:
     def __init__(
         self,
@@ -35,6 +39,8 @@ class IbRealtimeSource:
         self._retry_delay_s  = retry_delay_s
         self._on_bar_1m_complete = on_bar_1m_complete
         self._ib             = None
+        self._stopping       = False
+        self._event_loop     = None
         self._mnq_1m_df      = self._empty_bar_df()
         self._mes_1m_df      = self._empty_bar_df()
         self._mnq_partial_1m = None
@@ -246,18 +252,26 @@ class IbRealtimeSource:
         import time
         from ib_insync import IB, Future, util
         self._load_parquets()
-        self._gap_fill()
         mnq_contract = Future(conId=int(self._mnq_conid), exchange="CME")
         mes_contract = Future(conId=int(self._mes_conid), exchange="CME")
         for attempt in range(self._max_retries):
             try:
                 self._ib = IB()
+                self._disconnected_by_gateway = False
+                self._event_loop = util.getLoop()
+
+                # Detect gateway-initiated disconnects (not our own stop() call).
+                self._ib.disconnectedEvent += self._on_gateway_disconnect
                 self._ib.connect(self._host, self._port, clientId=self._client_id)
                 self._setup_subscriptions(mnq_contract, mes_contract)
                 util.run()
-                if self._ib.isConnected():
-                    break
+                if self._stopping:
+                    break  # deliberate stop() call — exit retry loop without error
+                if self._disconnected_by_gateway:
+                    raise IbGatewayDisconnectedError("IB Gateway closed the connection")
                 raise ConnectionError("IB disconnected unexpectedly")
+            except IbGatewayDisconnectedError:
+                raise  # propagate immediately — do not retry
             except Exception as exc:
                 print(
                     f"[{attempt + 1}/{self._max_retries}] IB error: {exc}. "
@@ -279,7 +293,25 @@ class IbRealtimeSource:
         except Exception:
             pass
 
+    def _on_gateway_disconnect(self) -> None:
+        """Callback wired to ib.disconnectedEvent — fires when the gateway closes the connection.
+
+        Ignored when _stopping=True because that means we called stop() ourselves.
+        Runs inside the ib_insync event loop thread, so loop.stop() is safe here.
+        """
+        if not self._stopping:
+            self._disconnected_by_gateway = True
+            self._event_loop.stop()
+
     def stop(self) -> None:
+        self._stopping = True
+        # Stop the asyncio event loop from any thread — loop.call_soon_threadsafe is the
+        # correct cross-thread API; loop.stop() alone is only safe from inside the loop.
+        try:
+            if self._event_loop and self._event_loop.is_running():
+                self._event_loop.call_soon_threadsafe(self._event_loop.stop)
+        except Exception:
+            pass
         try:
             if self._ib and self._ib.isConnected():
                 self._ib.disconnect()

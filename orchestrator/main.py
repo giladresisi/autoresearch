@@ -59,6 +59,34 @@ def _close_session_position(log_ch: OutputChannel) -> None:
         log_ch.writeln(f"[ORCH] WARNING: session-end close failed: {_exc}")
 
 
+def _pre_session_init() -> None:
+    """Run at orchestrator startup: Databento rolling backfill for historical bars.
+
+    Gracefully skips if DATABENTO_API_KEY is absent or if the fetch fails — the
+    IB seed (3-day keepUpToDate) will cover recent bars when the strategy connects.
+    """
+    import os
+    from pathlib import Path as _Path
+    bar_data_dir = _Path(__file__).resolve().parent.parent / "data"
+    if not os.environ.get("DATABENTO_API_KEY"):
+        print(
+            "[ORCH] DATABENTO_API_KEY not set — skipping Databento pre-session backfill",
+            flush=True,
+        )
+        return
+    try:
+        from data.databento_backfill import backfill_parquets
+        print("[ORCH] Running Databento pre-session backfill ...", flush=True)
+        backfill_parquets(bar_data_dir)
+        print("[ORCH] Databento pre-session backfill complete", flush=True)
+    except Exception as exc:
+        print(
+            f"[ORCH] WARNING: Databento backfill failed: {exc} — "
+            "IB seed will cover recent bars at session start",
+            flush=True,
+        )
+
+
 def _sleep_until(target: datetime.datetime, label: str) -> None:
     now = get_et_now()
     delay = (target - now).total_seconds()
@@ -72,6 +100,7 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
     """Main daemon loop. Ctrl+C exits cleanly; signal_smt.py is terminated if active."""
     if not skip_summary and summarizer is None:
         summarizer = Summarizer()
+    _pre_session_init()
     try:
         while True:
             now = get_et_now()
@@ -100,11 +129,17 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
             else:
                 signal_cmd = _SIGNAL_SMT
             print(f"[orchestrator] mode={'LIVE_TRADING' if LIVE_TRADING else 'signal'}", flush=True)
-            ProcessManager(signal_cmd, relay, orch_ch).run_session(today)
+            result = ProcessManager(signal_cmd, relay, orch_ch).run_session(today)
             _close_session_position(orch_ch)
             relay.write_trades_tsv(_SESSIONS_DIR / today.isoformat() / "trades.tsv", today)
             if summarizer is not None:
                 summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)
+            if result == "ib_disconnected":
+                orch_ch.writeln(
+                    "[ORCH] *** IB Gateway disconnected. Restart IB Gateway, then relaunch "
+                    "the orchestrator. All positions have been closed. ***"
+                )
+                sys.exit(3)
             _sleep_until(next_session_open(get_et_now()), "next trading session")
     except KeyboardInterrupt:
         print("\n[ORCH] Shutting down.", flush=True)

@@ -161,8 +161,8 @@ class TestNoPositionOppositeBar:
         write_hypothesis(direction="up")
         write_position()
         # 1m bars: open=105, close=95 → body_high=105 (bearish for up direction)
-        # bar_open=99 so approach = 105-99 = 6 ≥ 5 → limit entry (not market)
-        bar = make_5m_bar(open_=99.0, high=110.0, low=90.0, close=95.0)
+        # bar_open=88 so approach = 105-88 = 17 ≥ 15 → limit entry (not market)
+        bar = make_5m_bar(open_=88.0, high=110.0, low=75.0, close=95.0)
         recent = make_opp_1m_recent("up", open_=105.0, close_=95.0, high=110.0, low=90.0)
         result = run_strategy(NOW, bar, recent)
 
@@ -176,7 +176,11 @@ class TestNoPositionOppositeBar:
         assert pos["confirmation_bar"]["body_high"] == pytest.approx(105.0)
 
     def test_second_opposite_5m_emits_move_limit_entry(self):
-        """Existing limit_entry + new opposite 1m bars → move-limit-entry, limit updated."""
+        """Existing limit_entry + new opposite 1m bars → move-limit-entry, limit updated.
+
+        bar_high=104 < existing limit 105 so the fill check does NOT fire.
+        New opp bar body_high=122; approach = 122-101 = 21 ≥ 15 → limit entry path.
+        """
         write_hypothesis(direction="up")
         write_position(
             limit_entry=105.0,
@@ -186,18 +190,18 @@ class TestNoPositionOppositeBar:
                 "body_high": 105.0, "body_low": 102.0,
             },
         )
-        # 1m bars: open=107, close=97 → body_high=107 (new opposite bar)
-        # bar_open=101 so approach = 107-101 = 6 ≥ 5 → limit entry
-        bar = make_5m_bar(open_=101.0, high=112.0, low=88.0, close=97.0)
-        recent = make_opp_1m_recent("up", open_=107.0, close_=97.0, high=112.0, low=88.0)
+        # bar_high=104 keeps bar below existing limit=105 → fill check skipped.
+        # New opp bar body_high=122; approach = 122-101 = 21 ≥ 15 → limit path.
+        bar = make_5m_bar(open_=101.0, high=104.0, low=88.0, close=97.0)
+        recent = make_opp_1m_recent("up", open_=122.0, close_=102.0, high=125.0, low=85.0)
         result = run_strategy(NOW, bar, recent)
 
         assert result is not None
         assert result["kind"] == "move-limit-entry"
-        assert result["price"] == pytest.approx(107.0)  # body_high of new 1m-based 5m bar
+        assert result["price"] == pytest.approx(122.0)
 
         pos = smt_state.load_position()
-        assert pos["limit_entry"] == pytest.approx(107.0)
+        assert pos["limit_entry"] == pytest.approx(122.0)
 
     def test_non_opposite_5m_no_signal_no_mutation(self):
         """direction=up, bullish bar (close > open) → None, no JSON changes."""
@@ -348,14 +352,12 @@ class TestActivePosition:
 
 class TestSameBarOverride:
 
-    def test_same_bar_new_confirmation_and_fill_emits_only_move(self):
-        """New opposite 1m bars take priority over an existing limit crossing:
-        must emit move-limit-entry, not limit-entry-filled.
+    def test_fill_beats_new_opposite_bar_on_same_bar(self):
+        """Fill check runs before opposite-bar check: when bar spans existing limit AND
+        a new opposite bar exists, the fill is detected and limit-entry-filled is returned.
 
-        1m bars: open=112, close=102 → body_high=112.
-        bar_open=105, approach=7 ≥ 5 → limit entry at 112 (not market).
-        The bar's range [90, 110] spans old limit 100, but the new-opposite
-        code path fires first and returns before the fill check.
+        1m bars: open=112, close=102 → body_high=112 (new opposite bar).
+        Bar range [90, 110] spans old limit 100 → fill fires first (code section 2.4).
         """
         write_hypothesis(direction="up")
         conf = {
@@ -369,11 +371,12 @@ class TestSameBarOverride:
         result = run_strategy(NOW, bar, recent)
 
         assert result is not None
-        assert result["kind"] == "move-limit-entry"
+        assert result["kind"] == "limit-entry-filled"
+        assert result["price"] == pytest.approx(100.0)
 
         pos = smt_state.load_position()
-        assert pos["active"] == {}
-        assert pos["limit_entry"] == pytest.approx(112.0)
+        assert pos["active"] != {}
+        assert pos["limit_entry"] == ""
 
 
 class TestSignalShape:
@@ -430,7 +433,8 @@ class TestConfidenceHighBlocksEntry:
         # global.json already has confidence="medium" from the _isolate fixture.
         write_hypothesis(direction="up")
         write_position()
-        bar = make_5m_bar(open_=99.0, high=110.0, low=90.0, close=95.0)
+        # close=100 → CPR=(100-90)/20=0.50 ≥ 0.40 passes the entry quality filter.
+        bar = make_5m_bar(open_=99.0, high=110.0, low=90.0, close=100.0)
         recent = make_opp_1m_recent("up", open_=105.0, close_=95.0, high=110.0, low=90.0)
         result = run_strategy(NOW, bar, recent)
         assert result is not None, "confidence='medium' must not block entries"

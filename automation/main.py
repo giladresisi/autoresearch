@@ -35,7 +35,7 @@ from strategy_smt import (
 # strategy_smt attributes in tests affects this module without a re-import.
 import strategy_smt
 from hypothesis_smt import HypothesisManager
-from data.ib_realtime import IbRealtimeSource
+from data.ib_realtime import IbGatewayDisconnectedError, IbRealtimeSource
 from execution.pickmytrade import PickMyTradeExecutor
 
 # ── Connection constants ──────────────────────────────────────────────────────
@@ -1065,6 +1065,10 @@ def main() -> None:
     _executor.start()
     try:
         _ib_source.start()  # blocks; retry loop is inside IbRealtimeSource
+    except IbGatewayDisconnectedError:
+        # Gateway shut down — executor.stop() runs in finally; exit code 2 signals orchestrator
+        print("[automation] IB Gateway disconnected — exiting with code 2", flush=True)
+        sys.exit(2)
     finally:
         _executor.stop()
 
