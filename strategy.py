@@ -166,10 +166,11 @@ def run_strategy(
         if limit_entry != "" and _limit_reached:
             fill_price = float(limit_entry)
             conf_bar   = position["confirmation_bar"]
+            _STOP_WICK_CAP = 10.0
             if direction == "up":
-                stop = conf_bar["body_low"]
+                stop = max(float(conf_bar["low"]), float(conf_bar["body_low"]) - _STOP_WICK_CAP)
             else:
-                stop = conf_bar["body_high"]
+                stop = min(float(conf_bar["high"]), float(conf_bar["body_high"]) + _STOP_WICK_CAP)
             # Only fill if stop distance and bar quality are acceptable.
             # If not, fall through to section 2.3: a new confirmation bar may offer
             # a better entry price and stop, so the limit should be moved rather than
@@ -214,7 +215,11 @@ def run_strategy(
 
                 if approach < _MARKET_ENTRY_THRESHOLD:
                     bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
-                    stop = opp_5m["body_low"] if direction == "up" else opp_5m["body_high"]
+                    _STOP_WICK_CAP = 10.0
+                    if direction == "up":
+                        stop = max(float(opp_5m["low"]), float(opp_5m["body_low"]) - _STOP_WICK_CAP)
+                    else:
+                        stop = min(float(opp_5m["high"]), float(opp_5m["body_high"]) + _STOP_WICK_CAP)
                     # Directional stop check: stop must be on the protective side of entry.
                     # abs() alone passes when the bar moved past the conf bar during the candle.
                     if direction == "up"   and (bar_mid - float(stop)) < MIN_STOP_DISTANCE:
