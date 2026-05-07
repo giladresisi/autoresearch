@@ -15,14 +15,13 @@ from orchestrator.process import ProcessManager
 from orchestrator.relay import SessionRelay
 from orchestrator.scheduler import get_et_now, is_trading_day, next_session_open
 from orchestrator.summarizer import Summarizer
+from session_times import SESSION_OPEN as _SESSION_OPEN_V2, SESSION_CLOSE as _SESSION_CLOSE_V2
 
 LIVE_TRADING = _os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
 _ET = ZoneInfo("America/New_York")
 _SIGNAL_SMT = Path(__file__).parent.parent / "signal_smt.py"
 _SESSIONS_DIR = Path(__file__).parent.parent / "sessions"
-_SESSION_OPEN = datetime.time(9, 0)
-_SESSION_GRACE_END = datetime.time(13, 35)
 
 
 def _make_session_channels(date: datetime.date) -> tuple[OutputChannel, OutputChannel]:
@@ -82,11 +81,11 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
                 _sleep_until(next_session_open(now), "next trading session")
                 continue
 
-            session_open_dt = datetime.datetime(today.year, today.month, today.day, 9, 20, tzinfo=_ET)
-            grace_end_dt = datetime.datetime(today.year, today.month, today.day, 13, 35, tzinfo=_ET)
+            session_open_dt = datetime.datetime.combine(today, _SESSION_OPEN_V2).replace(tzinfo=_ET)
+            grace_end_dt = datetime.datetime.combine(today, _SESSION_CLOSE_V2).replace(tzinfo=_ET)
 
             if now < session_open_dt:
-                _sleep_until(session_open_dt, "session open 09:20 ET")
+                _sleep_until(session_open_dt, f"session open {_SESSION_OPEN_V2.strftime('%H:%M')} ET")
                 continue
 
             if now >= grace_end_dt:

@@ -51,7 +51,8 @@ MES_CONID = "770561194"
 
 # ── Session window ───────────────────────────────────────────────────────────
 SESSION_START      = "09:00"   # ET
-SIGNAL_SESSION_END = "13:30"   # ET  (named to avoid shadowing strategy_smt.SESSION_END)
+from session_times import SESSION_OPEN, SESSION_CLOSE  # noqa: E402
+SIGNAL_SESSION_END = SESSION_CLOSE   # ET: no new signals / force-close after this time
 
 # ── Trade configuration ───────────────────────────────────────────────────────
 # 2-tick adverse fill; 1 tick = 0.25 MNQ points
@@ -128,8 +129,8 @@ _move_stop_bar_counter: int  = 0
 _smtv2_pipeline: str = "v1"
 _smtv2_dispatcher: "SmtV2Dispatcher | None" = None
 
-# Session start time for V2 pipeline daily trigger (09:20 ET, matches backtest)
-_SESSION_DAILY_TRIGGER_TIME = pd.Timestamp("2000-01-01 09:20").time()
+# Session start time for V2 pipeline daily trigger — imported from session_times
+_SESSION_DAILY_TRIGGER_TIME = SESSION_OPEN
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

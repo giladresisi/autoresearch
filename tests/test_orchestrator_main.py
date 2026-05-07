@@ -51,7 +51,7 @@ def test_main_before_session_open_sleeps_to_open():
 def test_main_after_grace_end_skips_to_next_day():
     mock_summarizer = MagicMock()
     next_open = _dt(9, 0, date=datetime.date(2026, 4, 22))
-    with patch("orchestrator.main.get_et_now", return_value=_dt(14, 0)), \
+    with patch("orchestrator.main.get_et_now", return_value=_dt(17, 0)), \
          patch("orchestrator.main.is_trading_day", return_value=True), \
          patch("orchestrator.main.next_session_open", return_value=next_open) as mock_next_open, \
          patch("orchestrator.main.ProcessManager") as mock_pm, \

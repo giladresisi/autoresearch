@@ -316,3 +316,36 @@ def run_strategy(
 
     # 3.3 Position active, no event
     return None
+
+
+# ---------------------------------------------------------------------------
+# Position reset helpers — called by daily.py and hypothesis.py so that all
+# position.json writes go through the strategy module, not around it.
+# ---------------------------------------------------------------------------
+
+def reset_position_for_session() -> None:
+    """Clear all active-trade and pending-limit fields at session open.
+
+    Called by daily.run_daily once per session (09:20 ET).
+    """
+    pos = smt_state.load_position()
+    pos["active"] = {}
+    pos["limit_entry"] = ""
+    pos["limit_direction"] = ""
+    pos["confirmation_bar"] = {}
+    pos["failed_entries"] = 0
+    smt_state.save_position(pos)
+
+
+def reset_position_for_new_hypothesis() -> None:
+    """Clear entry-state fields on a none→up/down hypothesis transition.
+
+    Called by hypothesis.run_hypothesis when a directional bias is established.
+    Leaves 'active' untouched: a filled trade persists across hypothesis changes.
+    """
+    pos = smt_state.load_position()
+    pos["failed_entries"] = 0
+    pos["confirmation_bar"] = {}
+    pos["limit_entry"] = ""
+    pos["limit_direction"] = ""
+    smt_state.save_position(pos)
