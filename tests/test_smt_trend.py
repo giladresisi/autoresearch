@@ -350,10 +350,15 @@ class TestNoPosition:
         result = run_trend(NOW, bar, recent)
         assert result is None
 
-    def test_no_position_opposite_liquidity_break_emits_trend_broken(self):
-        """direction=up, day_low level at 50 below current close=60, bar.low=48 → trend-broken."""
+    def test_no_position_opposite_liquidity_break_emits_level_swept(self):
+        """direction=up, day_low level at 50 below current close=60, bar.low=48 → level-swept.
+
+        run_trend returns level-swept for high-priority level crossings; the pipeline
+        (session_pipeline.py) translates this to trend-broken after hypothesis re-evaluation.
+        run_trend does NOT clear hypothesis direction — that is the pipeline's responsibility.
+        """
         from trend import run_trend
-        from smt_state import load_hypothesis, load_position
+        from smt_state import load_hypothesis
 
         levels = [
             {"name": "day_low", "kind": "level", "price": 50.0},
@@ -364,12 +369,11 @@ class TestNoPosition:
         recent = make_recent_bars(closes=[58, 60], opens=[55, 55])
         result = run_trend(NOW, bar, recent)
         assert result is not None
-        assert result["kind"] == "trend-broken"
+        assert result["kind"] == "level-swept", f"expected level-swept, got {result['kind']}"
+        assert result["level_name"] == "day_low"
+        # run_trend must not clear hypothesis direction for level-swept — pipeline owns that.
         hyp = load_hypothesis()
-        assert hyp["direction"] == "none"
-        pos = load_position()
-        assert pos["confirmation_bar"] == {}
-        assert pos["limit_entry"] == ""
+        assert hyp["direction"] == "up"
 
 
 class TestSignalShape:
