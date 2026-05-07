@@ -245,9 +245,9 @@ class TestFill:
         assert pos["confirmation_bar"] == {}
 
     def test_stop_side_short(self):
-        """SHORT fill: stop = confirmation_bar body_high (not wick high).
+        """SHORT fill: stop = min(conf.high, body_high + 10pt cap).
 
-        body_high=105, stop distance = |100-105| = 5, NOT < 5 → fills.
+        conf.high=110, body_high=105 → stop=min(110, 115)=110; distance=|100-110|=10 → fills.
         """
         write_hypothesis(direction="down")
         conf = {
@@ -263,12 +263,12 @@ class TestFill:
         assert result["kind"] == "limit-entry-filled"
 
         pos = smt_state.load_position()
-        assert pos["active"]["stop"] == pytest.approx(105.0)  # confirmation_bar body_high for short
+        assert pos["active"]["stop"] == pytest.approx(110.0)  # wick end capped at body_high+10
 
     def test_stop_side_long(self):
-        """LONG fill: stop = confirmation_bar body_low (not wick low).
+        """LONG fill: stop = max(conf.low, body_low - 10pt cap).
 
-        body_low=94, stop distance = |100-94| = 6 ≥ MIN_STOP_DISTANCE(5) → fills.
+        conf.low=95, body_low=94 → stop=max(95, 84)=95; distance=|100-95|=5 → fills.
         """
         write_hypothesis(direction="up")
         conf = {
@@ -284,7 +284,7 @@ class TestFill:
         assert result["kind"] == "limit-entry-filled"
 
         pos = smt_state.load_position()
-        assert pos["active"]["stop"] == pytest.approx(94.0)  # confirmation_bar body_low for long
+        assert pos["active"]["stop"] == pytest.approx(95.0)  # wick end capped at body_low-10
 
 
 class TestActivePosition:
