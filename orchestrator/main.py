@@ -42,6 +42,24 @@ def _make_session_channels(date: datetime.date) -> tuple[OutputChannel, OutputCh
     return signal_ch, orch_ch
 
 
+def _close_session_position(log_ch: OutputChannel) -> None:
+    """Send a market close if position.json shows an active V2 position at session end."""
+    try:
+        import smt_state as _smt
+        _pos = _smt.load_position()
+        if not _pos.get("active"):
+            return
+        import live_orders as _lo
+        _fill_price = float(_pos["active"].get("fill_price", 0.0))
+        log_ch.writeln(
+            f"[ORCH] Active position at session end (fill {_fill_price:.2f}) — sending market close"
+        )
+        _lo.manual_close(_fill_price, reason="session-end")
+        log_ch.writeln("[ORCH] Session-end close sent")
+    except Exception as _exc:
+        log_ch.writeln(f"[ORCH] WARNING: session-end close failed: {_exc}")
+
+
 def _sleep_until(target: datetime.datetime, label: str) -> None:
     now = get_et_now()
     delay = (target - now).total_seconds()
@@ -84,6 +102,7 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
                 signal_cmd = _SIGNAL_SMT
             print(f"[orchestrator] mode={'LIVE_TRADING' if LIVE_TRADING else 'signal'}", flush=True)
             ProcessManager(signal_cmd, relay, orch_ch).run_session(today)
+            _close_session_position(orch_ch)
             relay.write_trades_tsv(_SESSIONS_DIR / today.isoformat() / "trades.tsv", today)
             if summarizer is not None:
                 summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)

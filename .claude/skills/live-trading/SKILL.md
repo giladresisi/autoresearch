@@ -6,10 +6,95 @@ description: >
   "plot the session", "plot the session so far", "show the chart", "chart today",
   "close the position", "close manually", "get out now", "exit the trade",
   "cancel the limit", "remove the limit order", "cancel pending order",
-  "what's in the session log", "show session events", "what happened today".
+  "what's in the session log", "show session events", "what happened today",
+  "do we have an open position", "what's our position".
 ---
 
 # live-trading
+
+## ALWAYS CHECK POSITION STATE FIRST
+
+Before acting on ANY trade order request (close, cancel, entry), read `position.json`:
+
+```python
+import live_orders
+pos = live_orders.get_position()
+active    = pos.get("active", {})       # non-empty dict = filled trade open
+limit     = pos.get("limit_entry", "")  # non-empty string = unfilled limit pending
+```
+
+**Decision rules:**
+
+| User request | `active` | `limit_entry` | Action |
+|---|---|---|---|
+| "close the position" | non-empty | any | Call `manual_close` |
+| "close the position" | empty | any | Tell user: no active position |
+| "cancel the limit" | any | non-empty | Call `manual_cancel_limit` |
+| "cancel the limit" | any | empty | Tell user: no pending limit |
+| "what's our position?" | any | any | Report state (see below) |
+
+Never call `manual_close` or `manual_cancel_limit` without first confirming the relevant state exists. These functions check themselves but an explicit user-facing message is clearer.
+
+---
+
+## Report current position state
+
+```python
+import live_orders
+pos = live_orders.get_position()
+active = pos.get("active", {})
+limit  = pos.get("limit_entry", "")
+
+if active:
+    direction = active.get("direction", "?")
+    fill      = active.get("fill_price", "?")
+    stop      = active.get("stop", "?")
+    print(f"Active {direction} position — filled at {fill}, stop {stop}")
+elif limit:
+    limit_dir = pos.get("limit_direction", "?")
+    print(f"Pending {limit_dir} limit at {limit}")
+else:
+    print("No active position or pending limit.")
+```
+
+---
+
+## Close a position manually
+
+First verify there is an active position (see above). Then:
+
+```python
+import live_orders
+live_orders.manual_close(price=<current_price>)
+```
+
+Replace `<current_price>` with the approximate current MNQ price (used for the log entry; PMT determines the actual fill).
+
+This:
+1. Appends a `market-close` event to `sessions/{today}/events.jsonl` with `source: "manual"`
+2. Sends a market close order to the executor (PMT in live mode, simulated in paper mode)
+3. Clears `position.json` — sets `active = {}`, clears `limit_entry`, `limit_direction`, `confirmation_bar`
+
+---
+
+## Cancel a pending limit manually
+
+First verify there is a pending limit (see above). Then:
+
+```python
+import live_orders
+live_orders.manual_cancel_limit()
+```
+
+This:
+1. Reads `position.json` to find the limit price
+2. Appends a `cancel-limit-entry` event to `sessions/{today}/events.jsonl`
+3. Sends a cancel/close order to the executor
+4. Clears limit fields in `position.json`
+
+No-op (with no error) if no limit is currently pending in either `position.json` or in-memory state.
+
+---
 
 ## Plot the session
 
@@ -25,52 +110,18 @@ Or for a specific date:
 python plot_session.py 2026-05-06
 ```
 
-This generates `sessions/{date}/chart.html` and opens it in the browser. The chart shows:
-- MNQ 1m candlesticks for the visible window
+Generates `sessions/{date}/chart.html` and opens it in the browser. Shows:
+- MNQ 1m candlesticks
 - All price levels from the daily computation (TDO, TWO, week/day H/L/mid, session highs/lows, FVGs)
-- All automated strategy events: limit placements, moves, fills, entries, stops, closes, SMT divergences, hypothesis formations
-- All manual/ad-hoc events (marked `source: "manual"`)
+- All events: limit placements, fills, entries, stops, closes, SMT divergences, hypotheses
+- Manual/ad-hoc events (marked `source: "manual"`)
 - P&L annotations on exit markers
 
-Works mid-session with no events yet — shows bars and levels with "No events yet" title.
-
----
-
-## Close a position manually
-
-```python
-import live_orders
-live_orders.manual_close(price=<current_price>)
-```
-
-Replace `<current_price>` with the approximate current MNQ price (used for the log entry only — the actual fill price is determined by PMT).
-
-This:
-1. Appends a `market-close` event to `sessions/{today}/events.jsonl` with `source: "manual"`
-2. Sends a market close order to the executor (PMT in live mode, simulated in paper mode)
-3. Clears internal `_pending_limit` state
-
----
-
-## Cancel a pending limit manually
-
-```python
-import live_orders
-live_orders.manual_cancel_limit()
-```
-
-No-op if no limit is currently pending. Otherwise:
-1. Appends a `cancel-limit-entry` event to `sessions/{today}/events.jsonl` with `source: "manual"`
-2. Sends a cancel/close order to the executor
+Works mid-session with no events yet — shows bars and levels only.
 
 ---
 
 ## Inspect today's events
-
-The structured event log lives at `sessions/{today}/events.jsonl`.
-Each line is a JSON object. Minimum fields: `time`, `kind`, `price`, `source`.
-
-To print a summary:
 
 ```python
 import json, datetime
@@ -91,22 +142,23 @@ else:
 
 ```
 sessions/{date}/
-├── signals.log    # Raw stdout from automation process (orchestrator-captured)
-├── events.jsonl   # Structured events, append-mode, survives orchestrator restarts
-├── levels.json    # Liquidities + ATH snapshot written at session open (09:20 ET)
-└── chart.html     # Generated by plot_session.py
+├── signals.log      # Raw stdout from automation process
+├── events.jsonl     # Structured events, append-mode, survives orchestrator restarts
+├── levels.json      # Liquidities + ATH snapshot written at session open (09:20 ET)
+└── chart.html       # Generated by plot_session.py
 ```
 
-`events.jsonl` is append-mode: restarting the orchestrator mid-session does not truncate it.
-All automated signals AND ad-hoc manual orders appear in the same file.
+`events.jsonl` contains both automated strategy events (`source: "strategy"`) and
+ad-hoc manual events (`source: "manual"`), including session-end closes sent by the
+orchestrator (`reason: "session-end"`).
 
 ---
 
 ## Known event kinds
 
 | kind | source | description |
-|------|--------|-------------|
-| `new-limit-entry` | strategy | new limit order placed |
+|---|---|---|
+| `new-limit-entry` | strategy | limit order placed |
 | `move-limit-entry` | strategy | limit moved (cancel + replace) |
 | `cancel-limit-entry` | strategy / manual | limit cancelled before fill |
 | `limit-entry-filled` | strategy | limit order filled |

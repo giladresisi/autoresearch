@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from orchestrator.main import _check_setup, run
+from orchestrator.main import _check_setup, _close_session_position, run
 
 _ET = ZoneInfo("America/New_York")
 
@@ -110,6 +110,26 @@ def test_main_session_dirs_created(tmp_path):
             run(summarizer=mock_summarizer)
 
     assert (sessions_dir / "2026-04-21").exists()
+
+
+def test_close_session_position_closes_active_position():
+    """Sends manual_close when position.json shows an active trade."""
+    log_ch = MagicMock()
+    pos = {"active": {"fill_price": 19850.0}, "limit_entry": "", "limit_direction": ""}
+    with patch("smt_state.load_position", return_value=pos), \
+         patch("live_orders.manual_close") as mock_close:
+        _close_session_position(log_ch)
+    mock_close.assert_called_once_with(19850.0, reason="session-end")
+
+
+def test_close_session_position_noop_when_no_active():
+    """Does nothing when no active position in position.json."""
+    log_ch = MagicMock()
+    pos = {"active": {}, "limit_entry": "", "limit_direction": ""}
+    with patch("smt_state.load_position", return_value=pos), \
+         patch("live_orders.manual_close") as mock_close:
+        _close_session_position(log_ch)
+    mock_close.assert_not_called()
 
 
 def test_check_setup_exits_0_with_valid_key(monkeypatch, tmp_path):

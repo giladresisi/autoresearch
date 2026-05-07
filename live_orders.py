@@ -98,23 +98,64 @@ def cancel_limit(label: str = "cancel-limit") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ad-hoc convenience functions — log AND execute; for skill / manual use
+# Position state helpers — read position.json; usable by skill and orchestrator
+# ---------------------------------------------------------------------------
+
+def _load_pos() -> dict:
+    from smt_state import load_position
+    return load_position()
+
+
+def _save_pos(pos: dict) -> None:
+    from smt_state import save_position
+    save_position(pos)
+
+
+def get_position() -> dict:
+    """Return current position.json state."""
+    return _load_pos()
+
+
+def has_active_position() -> bool:
+    """True if position.json shows an active (filled) trade."""
+    return bool(_load_pos().get("active"))
+
+
+def has_pending_limit() -> bool:
+    """True if position.json shows an unfilled limit order."""
+    return bool(_load_pos().get("limit_entry"))
+
+
+# ---------------------------------------------------------------------------
+# Ad-hoc convenience functions — log AND execute AND sync position.json
 # ---------------------------------------------------------------------------
 
 def manual_close(price: float, reason: str = "user-requested") -> None:
-    """Manually close the active position. Logs the event and sends close order."""
+    """Manually close the active position. Logs, sends close order, clears position.json."""
     now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
     _log({"time": now, "kind": "market-close", "price": float(price),
           "source": "manual", "reason": reason})
     close("manual")
+    pos = _load_pos()
+    pos["active"] = {}
+    pos["limit_entry"] = ""
+    pos["limit_direction"] = ""
+    pos["confirmation_bar"] = {}
+    _save_pos(pos)
 
 
 def manual_cancel_limit(reason: str = "user-requested") -> None:
-    """Manually cancel a pending limit order. No-op if no limit is currently pending."""
-    if _pending_limit is None:
+    """Manually cancel a pending limit. Checks position.json — no-op if no limit pending."""
+    pos = _load_pos()
+    limit = pos.get("limit_entry", "")
+    if not limit and _pending_limit is None:
         return
     now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
-    price = float(_pending_limit.get("entry_price", 0))
+    price = float(limit) if limit else float((_pending_limit or {}).get("entry_price", 0))
     _log({"time": now, "kind": "cancel-limit-entry", "price": price,
           "source": "manual", "reason": reason})
     cancel_limit("manual")
+    pos["limit_entry"] = ""
+    pos["limit_direction"] = ""
+    pos["confirmation_bar"] = {}
+    _save_pos(pos)
