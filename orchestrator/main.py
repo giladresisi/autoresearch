@@ -15,14 +15,13 @@ from orchestrator.process import ProcessManager
 from orchestrator.relay import SessionRelay
 from orchestrator.scheduler import get_et_now, is_trading_day, next_session_open
 from orchestrator.summarizer import Summarizer
+from session_times import SESSION_OPEN as _SESSION_OPEN_V2, SESSION_CLOSE as _SESSION_CLOSE_V2
 
 LIVE_TRADING = _os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
 _ET = ZoneInfo("America/New_York")
 _SIGNAL_SMT = Path(__file__).parent.parent / "signal_smt.py"
 _SESSIONS_DIR = Path(__file__).parent.parent / "sessions"
-_SESSION_OPEN = datetime.time(9, 0)
-_SESSION_GRACE_END = datetime.time(13, 35)
 
 
 def _make_session_channels(date: datetime.date) -> tuple[OutputChannel, OutputChannel]:
@@ -40,6 +39,24 @@ def _make_session_channels(date: datetime.date) -> tuple[OutputChannel, OutputCh
     orch_ch.add_sink(FileSink(session_dir / "orchestrator.log"))
 
     return signal_ch, orch_ch
+
+
+def _close_session_position(log_ch: OutputChannel) -> None:
+    """Send a market close if position.json shows an active V2 position at session end."""
+    try:
+        import smt_state as _smt
+        _pos = _smt.load_position()
+        if not _pos.get("active"):
+            return
+        import live_orders as _lo
+        _fill_price = float(_pos["active"].get("fill_price", 0.0))
+        log_ch.writeln(
+            f"[ORCH] Active position at session end (fill {_fill_price:.2f}) — sending market close"
+        )
+        _lo.manual_close(_fill_price, reason="session-end")
+        log_ch.writeln("[ORCH] Session-end close sent")
+    except Exception as _exc:
+        log_ch.writeln(f"[ORCH] WARNING: session-end close failed: {_exc}")
 
 
 def _sleep_until(target: datetime.datetime, label: str) -> None:
@@ -64,11 +81,11 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
                 _sleep_until(next_session_open(now), "next trading session")
                 continue
 
-            session_open_dt = datetime.datetime(today.year, today.month, today.day, 9, 0, tzinfo=_ET)
-            grace_end_dt = datetime.datetime(today.year, today.month, today.day, 13, 35, tzinfo=_ET)
+            session_open_dt = datetime.datetime.combine(today, _SESSION_OPEN_V2).replace(tzinfo=_ET)
+            grace_end_dt = datetime.datetime.combine(today, _SESSION_CLOSE_V2).replace(tzinfo=_ET)
 
             if now < session_open_dt:
-                _sleep_until(session_open_dt, "session open 09:00 ET")
+                _sleep_until(session_open_dt, f"session open {_SESSION_OPEN_V2.strftime('%H:%M')} ET")
                 continue
 
             if now >= grace_end_dt:
@@ -84,6 +101,7 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
                 signal_cmd = _SIGNAL_SMT
             print(f"[orchestrator] mode={'LIVE_TRADING' if LIVE_TRADING else 'signal'}", flush=True)
             ProcessManager(signal_cmd, relay, orch_ch).run_session(today)
+            _close_session_position(orch_ch)
             relay.write_trades_tsv(_SESSIONS_DIR / today.isoformat() / "trades.tsv", today)
             if summarizer is not None:
                 summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)

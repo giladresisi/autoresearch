@@ -13,8 +13,8 @@ from smt_state import (
     load_global, save_global,
     load_daily, save_daily,
     load_hypothesis, save_hypothesis,
-    load_position, save_position,
 )
+import strategy as _strategy
 from strategy_smt import compute_tdo
 from hypothesis import compute_live_hl_mid
 
@@ -305,9 +305,10 @@ def run_daily(
     # Step 3: update global.json all_time_high if today's high exceeds it #
     # ------------------------------------------------------------------ #
     global_state = load_global()
-    if "day_high" in _live_hl and _live_hl["day_high"] > global_state["all_time_high"]:
-        global_state["all_time_high"] = _live_hl["day_high"]
-        save_global(global_state)
+    _hist_ath = float(hist_mnq_1m["High"].max()) if not hist_mnq_1m.empty else 0.0
+    _today_ath = float(mnq_1m["High"].max()) if not mnq_1m.empty else 0.0
+    global_state["all_time_high"] = max(_hist_ath, _today_ath, float(global_state.get("all_time_high", 0.0)))
+    save_global(global_state)
 
     # ------------------------------------------------------------------ #
     # Step 4 + 5: estimated_dir and opposite_premove (TBD hardcoded)      #
@@ -336,9 +337,4 @@ def run_daily(
     # ------------------------------------------------------------------ #
     # Step 7: reset position.json per-session fields                      #
     # ------------------------------------------------------------------ #
-    pos = load_position()
-    pos["active"] = {}
-    pos["limit_entry"] = ""
-    pos["confirmation_bar"] = {}
-    pos["failed_entries"] = 0
-    save_position(pos)
+    _strategy.reset_position_for_session()

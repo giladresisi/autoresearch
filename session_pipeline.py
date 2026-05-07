@@ -45,15 +45,18 @@ class SessionPipeline:
         # method, so importing at module level would capture the un-patched paths too early.
         from smt_state import (
             DEFAULT_DAILY, DEFAULT_GLOBAL, DEFAULT_HYPOTHESIS, DEFAULT_POSITION,
-            save_daily, save_global, save_hypothesis, save_position,
+            load_daily, load_global, save_daily, save_global, save_hypothesis, save_position,
         )
 
-        # Fix #2: Seed ATH from full history before resetting state.
-        seeded_global = copy.deepcopy(DEFAULT_GLOBAL)
+        # Ensure global.json exists; create with defaults if missing.
+        # Fix #2: Seed all_time_high from full historical high so downstream
+        # code (ATH gate, strategy) never sees the DEFAULT 0.0 on the first run.
+        # run_daily will raise it further if today's bars exceed history.
+        _global = load_global()
         if not self._hist_mnq_1m.empty:
-            seeded_global["all_time_high"] = float(self._hist_mnq_1m["High"].max())
-        save_global(seeded_global)
-        save_daily(copy.deepcopy(DEFAULT_DAILY))
+            _hist_ath = float(self._hist_mnq_1m["High"].max())
+            _global["all_time_high"] = max(_global["all_time_high"], _hist_ath)
+        save_global(_global)
         save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
         save_position(copy.deepcopy(DEFAULT_POSITION))
 
@@ -76,9 +79,32 @@ class SessionPipeline:
             self._hist_1hr = pd.DataFrame(columns=list(_agg))
             self._hist_4hr = pd.DataFrame(columns=list(_agg))
 
-        # Fix #6: Pass only bars up to now (≤ 09:20) to run_daily.
-        _daily_mod.run_daily(now, today_mnq_at_open, self._hist_mnq_1m, self._hist_1hr)
+        # Option A: if daily.json is already from today (e.g. orchestrator pre-seeded it,
+        # or this is a mid-session restart), preserve it and skip the recompute.
+        # Fix #6: otherwise pass only bars up to now (≤ 09:20) to run_daily.
+        if load_daily().get("date") != str(now.date()):
+            save_daily(copy.deepcopy(DEFAULT_DAILY))
+            _daily_mod.run_daily(now, today_mnq_at_open, self._hist_mnq_1m, self._hist_1hr)
         self._daily_triggered = True
+
+        # Write levels.json snapshot for plot_session.py — created once per day,
+        # preserved across mid-session orchestrator restarts.
+        import json as _json
+        from pathlib import Path as _Path
+        _session_dir = _Path("sessions") / str(now.date())
+        _session_dir.mkdir(parents=True, exist_ok=True)
+        _levels_path = _session_dir / "levels.json"
+        if not _levels_path.exists():
+            from smt_state import load_global as _load_global
+            _daily_state = load_daily()
+            _global_state = _load_global()
+            _levels_path.write_text(
+                _json.dumps({
+                    "liquidities": _daily_state.get("liquidities", []),
+                    "all_time_high": _global_state.get("all_time_high"),
+                }, indent=2),
+                encoding="utf-8",
+            )
 
     def on_1m_bar(
         self,

@@ -29,9 +29,8 @@ from smt_state import (
     load_daily,
     load_hypothesis,
     save_hypothesis,
-    load_position,
-    save_position,
 )
+import strategy as _strategy
 from strategy_smt import detect_smt_divergence, detect_smt_fill
 
 
@@ -1063,11 +1062,7 @@ def run_hypothesis(
 
     # Step 10: On none -> up/down transition, reset position state.
     if old_direction == "none" and direction != "none":
-        position = load_position()
-        position["failed_entries"] = 0
-        position["confirmation_bar"] = {}
-        position["limit_entry"] = ""
-        save_position(position)
+        _strategy.reset_position_for_new_hypothesis()
 
     hyp_event = {
         "kind":          "new-hypothesis",

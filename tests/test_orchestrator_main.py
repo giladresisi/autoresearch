@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from orchestrator.main import _check_setup, run
+from orchestrator.main import _check_setup, _close_session_position, run
 
 _ET = ZoneInfo("America/New_York")
 
@@ -33,16 +33,16 @@ def test_main_non_trading_day_sleeps_to_next_open():
 
 def test_main_before_session_open_sleeps_to_open():
     mock_summarizer = MagicMock()
-    with patch("orchestrator.main.get_et_now", return_value=_dt(8, 0)), \
+    with patch("orchestrator.main.get_et_now", return_value=_dt(8, 20)), \
          patch("orchestrator.main.is_trading_day", return_value=True), \
-         patch("orchestrator.main.next_session_open", return_value=_dt(9, 0)), \
+         patch("orchestrator.main.next_session_open", return_value=_dt(9, 20)), \
          patch("orchestrator.main.ProcessManager") as mock_pm, \
          patch("orchestrator.main.time.sleep", side_effect=StopIteration) as mock_sleep:
         with pytest.raises(StopIteration):
             run(summarizer=mock_summarizer)
     mock_pm.assert_not_called()
     mock_summarizer.run.assert_not_called()
-    # time.sleep was called with a positive delay (session open is 1h away)
+    # time.sleep was called with a positive delay (session open 09:20 is 1h away from 08:20)
     assert mock_sleep.call_count == 1
     delay_arg = mock_sleep.call_args.args[0]
     assert delay_arg == pytest.approx(3600, abs=1)
@@ -51,7 +51,7 @@ def test_main_before_session_open_sleeps_to_open():
 def test_main_after_grace_end_skips_to_next_day():
     mock_summarizer = MagicMock()
     next_open = _dt(9, 0, date=datetime.date(2026, 4, 22))
-    with patch("orchestrator.main.get_et_now", return_value=_dt(14, 0)), \
+    with patch("orchestrator.main.get_et_now", return_value=_dt(17, 0)), \
          patch("orchestrator.main.is_trading_day", return_value=True), \
          patch("orchestrator.main.next_session_open", return_value=next_open) as mock_next_open, \
          patch("orchestrator.main.ProcessManager") as mock_pm, \
@@ -66,14 +66,14 @@ def test_main_after_grace_end_skips_to_next_day():
 def test_main_in_session_runs_session_then_summarizes(tmp_path):
     mock_summarizer = MagicMock()
     mock_pm_instance = MagicMock()
-    next_open = _dt(9, 0, date=datetime.date(2026, 4, 22))
+    next_open = _dt(9, 20, date=datetime.date(2026, 4, 22))
 
     call_order = []
     mock_pm_instance.run_session.side_effect = lambda d: call_order.append(("run_session", d))
     mock_summarizer.run.side_effect = lambda *a, **kw: call_order.append(("summarize", a[0]))
 
     with patch("orchestrator.main._SESSIONS_DIR", tmp_path / "sessions"), \
-         patch("orchestrator.main.get_et_now", return_value=_dt(9, 15)), \
+         patch("orchestrator.main.get_et_now", return_value=_dt(9, 25)), \
          patch("orchestrator.main.is_trading_day", return_value=True), \
          patch("orchestrator.main.next_session_open", return_value=next_open), \
          patch("orchestrator.main.ProcessManager", return_value=mock_pm_instance), \
@@ -99,9 +99,9 @@ def test_main_session_dirs_created(tmp_path):
         assert (sessions_dir / "2026-04-21").exists()
     mock_pm_instance.run_session.side_effect = assert_dir_exists
 
-    next_open = _dt(9, 0, date=datetime.date(2026, 4, 22))
+    next_open = _dt(9, 20, date=datetime.date(2026, 4, 22))
     with patch("orchestrator.main._SESSIONS_DIR", sessions_dir), \
-         patch("orchestrator.main.get_et_now", return_value=_dt(9, 15)), \
+         patch("orchestrator.main.get_et_now", return_value=_dt(9, 25)), \
          patch("orchestrator.main.is_trading_day", return_value=True), \
          patch("orchestrator.main.next_session_open", return_value=next_open), \
          patch("orchestrator.main.ProcessManager", return_value=mock_pm_instance), \
@@ -110,6 +110,26 @@ def test_main_session_dirs_created(tmp_path):
             run(summarizer=mock_summarizer)
 
     assert (sessions_dir / "2026-04-21").exists()
+
+
+def test_close_session_position_closes_active_position():
+    """Sends manual_close when position.json shows an active trade."""
+    log_ch = MagicMock()
+    pos = {"active": {"fill_price": 19850.0}, "limit_entry": "", "limit_direction": ""}
+    with patch("smt_state.load_position", return_value=pos), \
+         patch("live_orders.manual_close") as mock_close:
+        _close_session_position(log_ch)
+    mock_close.assert_called_once_with(19850.0, reason="session-end")
+
+
+def test_close_session_position_noop_when_no_active():
+    """Does nothing when no active position in position.json."""
+    log_ch = MagicMock()
+    pos = {"active": {}, "limit_entry": "", "limit_direction": ""}
+    with patch("smt_state.load_position", return_value=pos), \
+         patch("live_orders.manual_close") as mock_close:
+        _close_session_position(log_ch)
+    mock_close.assert_not_called()
 
 
 def test_check_setup_exits_0_with_valid_key(monkeypatch, tmp_path):

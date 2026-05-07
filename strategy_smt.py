@@ -17,7 +17,7 @@ FUTURES_CACHE_DIR = os.environ.get(
 # ══ STRATEGY TUNING ══════════════════════════════════════════════════════════
 # Kill zone: NY open session window (America/New_York).
 SESSION_START = "09:00"
-SESSION_END   = "13:30"
+from session_times import SESSION_CLOSE as SESSION_END  # noqa: E402
 
 # Minimum wall-clock minutes before a divergence signal can fire after session open.
 # Used as a timedelta in screen_session, so it is interval-agnostic.
