@@ -28,7 +28,9 @@ from smt_state import (
     load_global,
     load_daily,
     load_hypothesis,
+    load_position,
     save_hypothesis,
+    save_position,
 )
 import strategy as _strategy
 from strategy_smt import detect_smt_divergence, detect_smt_fill
