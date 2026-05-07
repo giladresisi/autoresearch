@@ -49,8 +49,14 @@ class SessionPipeline:
         )
 
         # Ensure global.json exists; create with defaults if missing.
-        # Preserves existing confidence/trend — ATH is recomputed by run_daily.
-        save_global(load_global())
+        # Fix #2: Seed all_time_high from full historical high so downstream
+        # code (ATH gate, strategy) never sees the DEFAULT 0.0 on the first run.
+        # run_daily will raise it further if today's bars exceed history.
+        _global = load_global()
+        if not self._hist_mnq_1m.empty:
+            _hist_ath = float(self._hist_mnq_1m["High"].max())
+            _global["all_time_high"] = max(_global["all_time_high"], _hist_ath)
+        save_global(_global)
         save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
         save_position(copy.deepcopy(DEFAULT_POSITION))
 
@@ -80,6 +86,25 @@ class SessionPipeline:
             save_daily(copy.deepcopy(DEFAULT_DAILY))
             _daily_mod.run_daily(now, today_mnq_at_open, self._hist_mnq_1m, self._hist_1hr)
         self._daily_triggered = True
+
+        # Write levels.json snapshot for plot_session.py — created once per day,
+        # preserved across mid-session orchestrator restarts.
+        import json as _json
+        from pathlib import Path as _Path
+        _session_dir = _Path("sessions") / str(now.date())
+        _session_dir.mkdir(parents=True, exist_ok=True)
+        _levels_path = _session_dir / "levels.json"
+        if not _levels_path.exists():
+            from smt_state import load_global as _load_global
+            _daily_state = load_daily()
+            _global_state = _load_global()
+            _levels_path.write_text(
+                _json.dumps({
+                    "liquidities": _daily_state.get("liquidities", []),
+                    "all_time_high": _global_state.get("all_time_high"),
+                }, indent=2),
+                encoding="utf-8",
+            )
 
     def on_1m_bar(
         self,

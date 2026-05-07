@@ -861,13 +861,12 @@ class SmtV2Dispatcher:
     DFs are passed at call time (not stored at init) because IbRealtimeSource
     replaces its internal DataFrame reference on each bar via pd.concat, so any
     reference captured at construction would go stale after the first bar.
+    Order dispatch and pending-limit tracking are delegated to live_orders.
     """
 
-    def __init__(self, executor) -> None:
+    def __init__(self) -> None:
         self._pipeline = None
         self._session_date = None
-        self._executor = executor
-        self._pending_limit = None  # last pmt_signal sent as a limit
 
     def on_session_start(self, now: pd.Timestamp, mnq_1m_df: pd.DataFrame, mes_1m_df: pd.DataFrame) -> None:
         """Initialize pipeline with current history snapshot and seed session state.
@@ -903,13 +902,16 @@ class SmtV2Dispatcher:
         self._pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
 
     def _emit(self, sig: dict) -> None:
-        """Log signal and route strategy signals to the PMT executor."""
+        """Log signal to stdout + events.jsonl, then route to live_orders for order dispatch."""
         import smt_state as _st
+        import live_orders as _lo
         _emit_v2_signal(sig)
+        _lo._log(dict(sig, source="strategy"))
+
         kind = sig.get("kind")
+        direction_v2 = sig.get("direction", "none")
 
         if kind in ("new-limit-entry", "move-limit-entry"):
-            direction_v2 = sig.get("direction", "none")
             if direction_v2 == "none":
                 return
             direction = "long" if direction_v2 == "up" else "short"
@@ -925,51 +927,37 @@ class SmtV2Dispatcher:
                 "limit_fill_bars": 1,
             }
             if kind == "new-limit-entry":
-                self._pending_limit = pmt_signal
-                self._executor.place_entry(pmt_signal, None)
+                _lo.place_entry(pmt_signal)
             else:
-                self._executor.modify_limit_entry(
-                    self._pending_limit or pmt_signal, pmt_signal, None
-                )
-                self._pending_limit = pmt_signal
+                _lo.modify_limit(_lo._pending_limit or pmt_signal, pmt_signal)
 
         elif kind == "limit-entry-filled":
-            direction_v2 = sig.get("direction", "none")
             direction = "long" if direction_v2 == "up" else "short"
             stop = sig.get("stop")
             if stop is None:
                 return
-            self._pending_limit = None
-            self._executor.place_stop_after_limit_fill(
-                {"direction": direction, "stop_price": float(stop)}, None
-            )
+            _lo.place_stop_after_fill({"direction": direction, "stop_price": float(stop)})
 
         elif kind == "market-entry":
-            direction_v2 = sig.get("direction", "none")
             direction = "long" if direction_v2 == "up" else "short"
             stop = sig.get("stop")
             if stop is None:
                 return
-            pmt_signal = {
+            _lo.place_entry({
                 "direction": direction,
                 "entry_price": float(sig["price"]),
                 "stop_price": float(stop),
-            }
-            self._pending_limit = None
-            self._executor.place_entry(pmt_signal, None)
+            })
 
         elif kind == "market-close":
-            self._executor.place_close("v2-direction-mismatch")
-            self._pending_limit = None
+            _lo.close("v2-direction-mismatch")
 
         elif kind == "cancel-limit-entry":
-            if self._pending_limit is not None:
-                self._executor.place_close("cancel-limit")
-                self._pending_limit = None
+            _lo.cancel_limit("cancel-limit")
 
         elif kind == "stopped-out":
             # IB stop order already executed — just clear pending state
-            self._pending_limit = None
+            _lo._pending_limit = None
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -1026,7 +1014,7 @@ def main() -> None:
         entry_slip_ticks=int(os.environ.get("PMT_ENTRY_SLIP_TICKS", "2")),
     )
     if _smtv2_pipeline == "v2":
-        _smtv2_dispatcher = SmtV2Dispatcher(_executor)
+        _smtv2_dispatcher = SmtV2Dispatcher()
 
     def _on_bar_1m_complete(bars) -> None:
         """Called by IbRealtimeSource after each completed 1m bar.

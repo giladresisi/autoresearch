@@ -781,6 +781,7 @@ def test_failed_entries_not_reset_when_direction_stays_set():
     position = {
         "active": {},
         "limit_entry": "",
+        "limit_direction": "",
         "confirmation_bar": {},
         "failed_entries": 3,
     }
