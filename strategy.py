@@ -241,11 +241,10 @@ def run_strategy(
                 stop = max(float(conf_bar["low"]), float(conf_bar["body_low"]) - _STOP_WICK_CAP)
             else:
                 stop = min(float(conf_bar["high"]), float(conf_bar["body_high"]) + _STOP_WICK_CAP)
-            # Only fill if stop distance and bar quality are acceptable.
-            # If not, fall through to section 2.3: a new confirmation bar may offer
-            # a better entry price and stop, so the limit should be moved rather than
-            # filled at the stale price.
-            if abs(fill_price - float(stop)) >= MIN_STOP_DISTANCE and _entry_bar_cpr_ok(mnq_bar, direction):
+            # Fill as soon as price reaches the limit — bar close quality is irrelevant
+            # for fill confirmation (the broker fills a limit order the instant price
+            # touches it, regardless of where the bar closes).
+            if abs(fill_price - float(stop)) >= MIN_STOP_DISTANCE:
                 position["active"] = {
                     "time":       mnq_bar["time"],
                     "fill_price": fill_price,
