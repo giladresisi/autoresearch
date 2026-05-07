@@ -73,6 +73,53 @@ def _find_last_opposite_5m_bar(
     return None
 
 
+def _find_last_opposite_15m_bar(
+    mnq_1m_recent: pd.DataFrame,
+    now: datetime,
+    direction: str,
+    hypothesis_formed_at: str,
+) -> Optional[dict]:
+    """Same as _find_last_opposite_5m_bar but using a 15m window."""
+    if mnq_1m_recent is None or mnq_1m_recent.empty:
+        return None
+
+    current_15m_start = pd.Timestamp(now).floor("15min")
+    last_15m_start = current_15m_start - pd.Timedelta(minutes=15)
+
+    if hypothesis_formed_at:
+        formed_ts = pd.Timestamp(hypothesis_formed_at)
+        cutoff = formed_ts - pd.Timedelta(minutes=15)
+        if last_15m_start < cutoff:
+            return None
+
+    _idx = mnq_1m_recent.index
+    _sp = _idx.searchsorted(last_15m_start,     side="left")
+    _ep = _idx.searchsorted(current_15m_start,  side="left")
+    window = mnq_1m_recent.iloc[_sp:_ep]
+    if window.empty:
+        return None
+
+    o = float(window.iloc[0]["Open"])
+    c = float(window.iloc[-1]["Close"])
+    if direction == "up" and c < o:
+        return {
+            "time":      last_15m_start.isoformat(),
+            "high":      float(window["High"].max()),
+            "low":       float(window["Low"].min()),
+            "body_high": max(o, c),
+            "body_low":  min(o, c),
+        }
+    if direction == "down" and c > o:
+        return {
+            "time":      last_15m_start.isoformat(),
+            "high":      float(window["High"].max()),
+            "low":       float(window["Low"].min()),
+            "body_high": max(o, c),
+            "body_low":  min(o, c),
+        }
+    return None
+
+
 def _bar_crosses(bar: dict, price: float) -> bool:
     """Return True if the bar's H/L range spans *price* (inclusive)."""
     return bar["low"] <= price <= bar["high"]
@@ -144,6 +191,15 @@ def run_strategy(
         if _global.get("confidence") == "high":
             return None
 
+        # Block long entries when price is at or above the session ATH (fixed 09:20 high).
+        # Short entries above session ATH are valid — that's precisely the expected direction.
+        _session_ath = _global.get("session_ath")
+        _above_session_ath = (
+            _session_ath is not None and float(mnq_bar["high"]) >= float(_session_ath)
+        )
+        if direction == "up" and _above_session_ath:
+            return None
+
         # 2.1 Early-exit conditions
         if direction == "none":
             return None
@@ -192,9 +248,13 @@ def run_strategy(
         if fill_check_only:
             return None
 
-        # 2.3 Find the most recent completed opposite 5m bar and set/update limit.
+        # 2.3 Find the most recent completed opposite bar and set/update limit.
+        # Above session ATH, require a 15m confirmation bar (more restrictive).
         # Only emits a signal when the reference bar changes.
-        opp_5m = _find_last_opposite_5m_bar(mnq_1m_recent, now, direction, formed_at)
+        if _above_session_ath:
+            opp_5m = _find_last_opposite_15m_bar(mnq_1m_recent, now, direction, formed_at)
+        else:
+            opp_5m = _find_last_opposite_5m_bar(mnq_1m_recent, now, direction, formed_at)
         if opp_5m is not None and (opp_5m["body_high"] - opp_5m["body_low"]) <= MAX_CONFIRMATION_BODY_PTS:
             body_end_price = opp_5m["body_high"] if direction == "up" else opp_5m["body_low"]
             current_conf_time = position.get("confirmation_bar", {}).get("time", "")
