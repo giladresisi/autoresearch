@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -116,3 +116,120 @@ class TestBackfillMergesAndDeduplicates:
             backfill_parquets(bar_dir)
         result = pd.read_parquet(bar_dir / "MNQ_1m.parquet")
         assert len(result) == 2  # deduplicated: old + new, not old + old + new
+
+
+class TestBackfill1sParquets:
+    def test_backfill_1s_creates_mnq_1s_parquet(self, bar_dir):
+        new_df = _make_df("2026-05-01 10:00:00")
+        with patch("data.databento_backfill.DatabentSource", autospec=False) as MockSource:
+            MockSource.return_value.fetch.return_value = new_df
+            from data.databento_backfill import backfill_1s_parquets
+            backfill_1s_parquets(bar_dir)
+        assert (bar_dir / "MNQ_1s.parquet").exists()
+
+    def test_backfill_1s_creates_mes_1s_parquet(self, bar_dir):
+        new_df = _make_df("2026-05-01 10:00:00")
+        with patch("data.databento_backfill.DatabentSource", autospec=False) as MockSource:
+            MockSource.return_value.fetch.return_value = new_df
+            from data.databento_backfill import backfill_1s_parquets
+            backfill_1s_parquets(bar_dir)
+        assert (bar_dir / "MES_1s.parquet").exists()
+
+    def test_backfill_1s_no_cutoff_calls_with_end_near_now(self, bar_dir):
+        """end argument must be within 60s of now — no artificial cutoff."""
+        from data.databento_backfill import backfill_1s_parquets
+        new_df = _make_df("2026-05-01 10:00:00")
+        with patch("data.databento_backfill.DatabentSource", autospec=False) as MockSource:
+            MockSource.return_value.fetch.return_value = new_df
+            backfill_1s_parquets(bar_dir)
+        now_utc = pd.Timestamp.now(tz="UTC")
+        for call in MockSource.return_value.fetch.call_args_list:
+            end_arg = call.args[2] if len(call.args) > 2 else call.kwargs.get("end")
+            end_ts = pd.Timestamp(end_arg)
+            if end_ts.tzinfo is None:
+                end_ts = end_ts.tz_localize("UTC")
+            delta = (now_utc - end_ts).total_seconds()
+            assert abs(delta) < 60, f"end is {delta:.0f}s from now — expected ≤60s"
+
+    def test_backfill_1s_calls_interval_1s(self, bar_dir):
+        """fetch() must be called with interval='1s'."""
+        from data.databento_backfill import backfill_1s_parquets
+        new_df = _make_df("2026-05-01 10:00:00")
+        with patch("data.databento_backfill.DatabentSource", autospec=False) as MockSource:
+            MockSource.return_value.fetch.return_value = new_df
+            backfill_1s_parquets(bar_dir)
+        for call in MockSource.return_value.fetch.call_args_list:
+            interval = call.kwargs.get("interval") or (call.args[3] if len(call.args) > 3 else None)
+            assert interval == "1s"
+
+
+class TestMergeSession1sParquets:
+    def _make_ib_mock(self, bars=None):
+        mock_ib = MagicMock()
+        mock_ib.isConnected.return_value = True
+        mock_ib.reqHistoricalData.return_value = bars or []
+        return mock_ib
+
+    def test_merge_session_integrates_into_main(self, bar_dir):
+        """Session parquet rows must be appended to main and session file deleted."""
+        old_df = _make_df("2026-05-08 09:30:00")
+        old_df.to_parquet(bar_dir / "MNQ_1s.parquet")
+        new_df = _make_df("2026-05-08 10:00:00")
+        new_df.to_parquet(bar_dir / "MNQ_1s_session_20260508.parquet")
+
+        mock_ib = self._make_ib_mock()
+        with patch("ib_insync.IB", return_value=mock_ib):
+            from data.databento_backfill import merge_session_1s_parquets
+            merge_session_1s_parquets(bar_dir)
+
+        result = pd.read_parquet(bar_dir / "MNQ_1s.parquet")
+        assert len(result) == 2
+        assert not (bar_dir / "MNQ_1s_session_20260508.parquet").exists()
+
+    def test_merge_session_noop_when_no_session_files(self, bar_dir):
+        """No IB connection opened when there are no session files."""
+        with patch("ib_insync.IB") as mock_ib_cls:
+            from data.databento_backfill import merge_session_1s_parquets
+            merge_session_1s_parquets(bar_dir)  # must not raise
+        mock_ib_cls.assert_not_called()
+
+    def test_merge_session_deduplicates_overlapping_rows(self, bar_dir):
+        """Duplicate timestamps across main and session parquets must be removed."""
+        shared_ts = "2026-05-08 09:30:00"
+        old_df = _make_df(shared_ts)
+        old_df.to_parquet(bar_dir / "MNQ_1s.parquet")
+        session_df = pd.concat([_make_df(shared_ts), _make_df("2026-05-08 09:30:01")])
+        session_df.to_parquet(bar_dir / "MNQ_1s_session_20260508.parquet")
+
+        mock_ib = self._make_ib_mock()
+        with patch("ib_insync.IB", return_value=mock_ib):
+            from data.databento_backfill import merge_session_1s_parquets
+            merge_session_1s_parquets(bar_dir)
+
+        result = pd.read_parquet(bar_dir / "MNQ_1s.parquet")
+        assert result.index.duplicated().sum() == 0
+        assert len(result) == 2  # shared_ts once + new ts
+
+    def test_merge_session_gap_fill_called_with_correct_duration(self, bar_dir):
+        """reqHistoricalData must be called with durationStr matching the gap size."""
+        t_main = pd.Timestamp("2026-05-08 09:18:00", tz="America/New_York")
+        t_session = pd.Timestamp("2026-05-08 09:20:00", tz="America/New_York")  # 120s gap
+        main_df = pd.DataFrame(
+            {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0]},
+            index=pd.DatetimeIndex([t_main]),
+        )
+        session_df = pd.DataFrame(
+            {"Open": [2.0], "High": [2.0], "Low": [2.0], "Close": [2.0], "Volume": [2.0]},
+            index=pd.DatetimeIndex([t_session]),
+        )
+        main_df.to_parquet(bar_dir / "MNQ_1s.parquet")
+        session_df.to_parquet(bar_dir / "MNQ_1s_session_20260508.parquet")
+
+        mock_ib = self._make_ib_mock()
+        with patch("ib_insync.IB", return_value=mock_ib):
+            from data.databento_backfill import merge_session_1s_parquets
+            merge_session_1s_parquets(bar_dir)
+
+        call_kwargs = mock_ib.reqHistoricalData.call_args.kwargs
+        assert call_kwargs.get("durationStr") == "119 S"
+        assert call_kwargs.get("barSizeSetting") == "1 secs"

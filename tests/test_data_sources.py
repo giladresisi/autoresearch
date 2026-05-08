@@ -557,7 +557,7 @@ class TestDatabentSourceFetch:
     def test_raises_value_error_on_unsupported_interval(self, src, monkeypatch):
         """fetch() raises ValueError for intervals other than 1m/5m."""
         monkeypatch.setenv("DATABENTO_API_KEY", "test-key-123")
-        with pytest.raises(ValueError, match="only supports 1m and 5m"):
+        with pytest.raises(ValueError, match="only supports"):
             src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "1h")
 
     def test_1m_interval_skips_resampling(self, src, monkeypatch):
