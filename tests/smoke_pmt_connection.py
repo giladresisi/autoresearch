@@ -32,11 +32,12 @@ def _requires_smoke_env():
 
 def _make_executor():
     from execution.pickmytrade import PickMyTradeExecutor
+    account_ids = [s.strip() for s in os.environ.get("TRADING_ACCOUNT_IDS", "").split(",") if s.strip()]
     return PickMyTradeExecutor(
         webhook_url=os.environ["PMT_WEBHOOK_URL"],
         api_key=os.environ["PMT_API_KEY"],
         symbol=os.environ.get("TRADING_SYMBOL", "MNQ1!"),
-        account_id=os.environ.get("TRADING_ACCOUNT_ID", ""),
+        account_ids=account_ids,
         contracts=int(os.environ.get("TRADING_CONTRACTS", "1")),
         entry_slip_ticks=0,
     )

@@ -17,7 +17,7 @@ class PickMyTradeExecutor:
                  webhook_url: str,
                  api_key: str,
                  symbol: str,
-                 account_id: str,
+                 account_ids: list,
                  contracts: int,
                  request_timeout_s: float = 10.0,
                  max_retries: int = 3,
@@ -26,7 +26,7 @@ class PickMyTradeExecutor:
         self._webhook_url       = webhook_url
         self._api_key           = api_key
         self._symbol            = symbol
-        self._account_id        = account_id
+        self._account_ids       = account_ids
         self._contracts         = contracts
         self._request_timeout_s = request_timeout_s
         self._max_retries       = max_retries
@@ -58,12 +58,15 @@ class PickMyTradeExecutor:
             "risk_percentage": 0,
             "gtd_in_second":   0,
             "token":           self._api_key,
-            "multiple_accounts": [{
-                "token":               self._api_key,
-                "account_id":          self._account_id,
-                "risk_percentage":     0,
-                "quantity_multiplier": 1,
-            }],
+            "multiple_accounts": [
+                {
+                    "token":               self._api_key,
+                    "account_id":          account_id,
+                    "risk_percentage":     0,
+                    "quantity_multiplier": 1,
+                }
+                for account_id in self._account_ids
+            ],
         }
         payload.update(extra)
         return payload

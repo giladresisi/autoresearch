@@ -22,11 +22,12 @@ _LIVE = os.getenv("LIVE_TRADING", "false").lower() == "true"
 
 if _LIVE:
     from execution.pickmytrade import PickMyTradeExecutor
+    _account_ids = [s.strip() for s in os.environ.get("TRADING_ACCOUNT_IDS", "").split(",") if s.strip()]
     _executor = PickMyTradeExecutor(
         webhook_url=os.environ["PMT_WEBHOOK_URL"],
         api_key=os.environ["PMT_API_KEY"],
         symbol=os.environ.get("TRADING_SYMBOL", "MNQ1!"),
-        account_id=os.environ.get("TRADING_ACCOUNT_ID", ""),
+        account_ids=_account_ids,
         contracts=int(os.environ.get("TRADING_CONTRACTS", "2")),
         entry_slip_ticks=int(os.environ.get("PMT_ENTRY_SLIP_TICKS", "2")),
     )

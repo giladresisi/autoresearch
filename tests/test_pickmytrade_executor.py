@@ -10,12 +10,12 @@ from execution.protocol import FillRecord
 from strategy_smt import _BarRow
 
 
-def _make_executor(entry_slip_ticks: int = 2) -> PickMyTradeExecutor:
+def _make_executor(entry_slip_ticks: int = 2, account_ids: list = None) -> PickMyTradeExecutor:
     return PickMyTradeExecutor(
         webhook_url="https://pmt.example.com/signal",
         api_key="test-key",
         symbol="MNQ1!",
-        account_id="ACC123",
+        account_ids=account_ids if account_ids is not None else ["ACC123"],
         contracts=1,
         entry_slip_ticks=entry_slip_ticks,
     )
@@ -212,7 +212,7 @@ def test_start_raises_if_env_missing():
         webhook_url="",
         api_key="",
         symbol="MNQ1!",
-        account_id="ACC123",
+        account_ids=["ACC123"],
         contracts=1,
     )
     with pytest.raises(RuntimeError):
@@ -252,6 +252,19 @@ def test_market_entry_includes_multiple_accounts():
     _drain(ex)
     payload = ex._http.post.call_args.kwargs["json"]
     assert payload["multiple_accounts"][0]["account_id"] == "ACC123"
+
+
+def test_multiple_account_ids_all_appear_in_payload():
+    ex = _make_executor(account_ids=["ACC111", "ACC222", "ACC333"])
+    ex._http.post = MagicMock(return_value=_ok_response())
+    ex.place_entry(_signal("long"), _bar())
+    _drain(ex)
+    payload = ex._http.post.call_args.kwargs["json"]
+    ids = [a["account_id"] for a in payload["multiple_accounts"]]
+    assert ids == ["ACC111", "ACC222", "ACC333"]
+    assert all(a["token"] == "test-key" for a in payload["multiple_accounts"])
+    assert all(a["risk_percentage"] == 0 for a in payload["multiple_accounts"])
+    assert all(a["quantity_multiplier"] == 1 for a in payload["multiple_accounts"])
 
 
 def test_token_in_payload_toplevel():
