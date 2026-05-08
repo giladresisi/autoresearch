@@ -5,8 +5,8 @@
 #   LIVE_TRADING=false → SimulatedBrokerExecutor (no-op / paper mode)
 #
 # Two tiers of functions:
-#   - Executor functions (place_entry, modify_limit, etc.) — no logging; called by SmtV2Dispatcher._emit
-#   - Ad-hoc functions (manual_close, manual_cancel_limit) — log + execute; called by skill / user
+#   - Executor functions (place_entry, modify_stop_entry, etc.) — no logging; called by SmtV2Dispatcher._emit
+#   - Ad-hoc functions (manual_close, manual_cancel_entry) — log + execute; called by skill / user
 from __future__ import annotations
 
 import datetime
@@ -35,7 +35,7 @@ else:
     from execution.simulated import SimulatedBrokerExecutor
     _executor = SimulatedBrokerExecutor(human_mode=True)
 
-_pending_limit: Optional[dict] = None  # last pmt_signal sent as a limit (PMT shape)
+_pending_entry: Optional[dict] = None  # last pmt_signal sent as a stop entry (PMT shape)
 
 
 # ---------------------------------------------------------------------------
@@ -56,46 +56,46 @@ def _log(event: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def place_entry(pmt_signal: dict) -> None:
-    """Place a new limit or market entry.
+    """Place a new stop or market entry.
 
     pmt_signal keys: direction ("long"/"short"), entry_price, stop_price,
-    optionally limit_fill_bars (present = LMT, absent = MKT).
+    optionally stop_fill_bars (present = STP, absent = MKT).
     """
-    global _pending_limit
+    global _pending_entry
     _executor.place_entry(pmt_signal, None)
-    if pmt_signal.get("limit_fill_bars") is not None:
-        _pending_limit = pmt_signal
+    if pmt_signal.get("stop_fill_bars") is not None or pmt_signal.get("limit_fill_bars") is not None:
+        _pending_entry = pmt_signal
     else:
-        _pending_limit = None
+        _pending_entry = None
 
 
-def modify_limit(old_pmt: dict, new_pmt: dict) -> None:
-    """Cancel existing limit and replace with a new one."""
-    global _pending_limit
-    _executor.modify_limit_entry(old_pmt, new_pmt, None)
-    _pending_limit = new_pmt
+def modify_stop_entry(old_pmt: dict, new_pmt: dict) -> None:
+    """Cancel existing stop entry and replace with a new one."""
+    global _pending_entry
+    _executor.modify_stop_entry(old_pmt, new_pmt, None)
+    _pending_entry = new_pmt
 
 
 def place_stop_after_fill(position: dict) -> None:
     """Send stop placement after a limit fill. position: {direction, stop_price}."""
-    global _pending_limit
+    global _pending_entry
     _executor.place_stop_after_limit_fill(position, None)
-    _pending_limit = None
+    _pending_entry = None
 
 
 def close(label: str = "close") -> None:
     """Send a market close order."""
-    global _pending_limit
+    global _pending_entry
     _executor.place_close(label)
-    _pending_limit = None
+    _pending_entry = None
 
 
-def cancel_limit(label: str = "cancel-limit") -> None:
-    """Cancel a pending limit if one exists. No-op if nothing is pending."""
-    global _pending_limit
-    if _pending_limit is not None:
+def cancel_entry(label: str = "cancel-stop") -> None:
+    """Cancel a pending stop entry if one exists. No-op if nothing is pending."""
+    global _pending_entry
+    if _pending_entry is not None:
         _executor.place_close(label)
-        _pending_limit = None
+        _pending_entry = None
 
 
 # ---------------------------------------------------------------------------
@@ -122,9 +122,9 @@ def has_active_position() -> bool:
     return bool(_load_pos().get("active"))
 
 
-def has_pending_limit() -> bool:
-    """True if position.json shows an unfilled limit order."""
-    return bool(_load_pos().get("limit_entry"))
+def has_pending_entry() -> bool:
+    """True if position.json shows an unfilled stop entry order."""
+    return bool(_load_pos().get("stop_entry"))
 
 
 # ---------------------------------------------------------------------------
@@ -139,24 +139,24 @@ def manual_close(price: float, reason: str = "user-requested") -> None:
     close("manual")
     pos = _load_pos()
     pos["active"] = {}
-    pos["limit_entry"] = ""
-    pos["limit_direction"] = ""
+    pos["stop_entry"] = ""
+    pos["stop_direction"] = ""
     pos["confirmation_bar"] = {}
     _save_pos(pos)
 
 
-def manual_cancel_limit(reason: str = "user-requested") -> None:
-    """Manually cancel a pending limit. Checks position.json — no-op if no limit pending."""
+def manual_cancel_entry(reason: str = "user-requested") -> None:
+    """Manually cancel a pending stop entry. Checks position.json — no-op if nothing pending."""
     pos = _load_pos()
-    limit = pos.get("limit_entry", "")
-    if not limit and _pending_limit is None:
+    stop = pos.get("stop_entry", "")
+    if not stop and _pending_entry is None:
         return
     now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
-    price = float(limit) if limit else float((_pending_limit or {}).get("entry_price", 0))
-    _log({"time": now, "kind": "cancel-limit-entry", "price": price,
+    price = float(stop) if stop else float((_pending_entry or {}).get("entry_price", 0))
+    _log({"time": now, "kind": "cancel-stop-entry", "price": price,
           "source": "manual", "reason": reason})
-    cancel_limit("manual")
-    pos["limit_entry"] = ""
-    pos["limit_direction"] = ""
+    cancel_entry("manual")
+    pos["stop_entry"] = ""
+    pos["stop_direction"] = ""
     pos["confirmation_bar"] = {}
     _save_pos(pos)

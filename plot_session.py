@@ -85,7 +85,7 @@ LEVEL_PRIORITY = list(LEVEL_STYLE.keys())
 pairs = []
 pending_fill = None
 for e in events:
-    if e["kind"] in ("limit-entry-filled", "market-entry"):
+    if e["kind"] in ("stop-entry-filled", "market-entry"):
         pending_fill = e
     elif e["kind"] in EXIT_KINDS and pending_fill is not None:
         direction_sign = 1 if pending_fill.get("direction", "up") == "up" else -1
@@ -175,12 +175,12 @@ for liq in liquidities:
 limit_x, limit_y = [], []
 pending_t = pending_p = None
 for e in events:
-    if e["kind"] in ("new-limit-entry", "move-limit-entry"):
+    if e["kind"] in ("new-stop-entry", "move-stop-entry"):
         if pending_t is not None:
             limit_x += [pending_t, e["ts"], None]
             limit_y += [pending_p, pending_p, None]
         pending_t, pending_p = e["ts"], e["price"]
-    elif e["kind"] in ("limit-entry-filled", "cancel-limit-entry", "market-entry"):
+    elif e["kind"] in ("stop-entry-filled", "cancel-stop-entry", "market-entry"):
         if pending_t is not None:
             limit_x += [pending_t, e["ts"], None]
             limit_y += [pending_p, pending_p, None]
@@ -314,10 +314,10 @@ EXIT_MARKER_STYLE = {
     "end-of-session": dict(symbol="square",  color="#BDBDBD", size=11),
 }
 OTHER_MARKER_STYLE = {
-    "new-limit-entry":    dict(symbol="triangle-right",      color="#2196F3", size=13),
-    "move-limit-entry":   dict(symbol="triangle-right-open", color="#9C27B0", size=13),
-    "cancel-limit-entry": dict(symbol="x-open",              color="#FF9800", size=13),
-    "limit-entry-filled": dict(symbol="star",                color="#4CAF50", size=17),
+    "new-stop-entry":    dict(symbol="triangle-right",      color="#2196F3", size=13),
+    "move-stop-entry":   dict(symbol="triangle-right-open", color="#9C27B0", size=13),
+    "cancel-stop-entry": dict(symbol="x-open",              color="#FF9800", size=13),
+    "stop-entry-filled": dict(symbol="star",                color="#4CAF50", size=17),
     "market-entry":       dict(symbol="circle",              color="#FF9800", size=15),
     "trend-broken":       dict(symbol="diamond-open",        color="#FF9800", size=13),
     "new-hypothesis":     dict(symbol="pentagon",            color="#E040FB", size=15),
@@ -375,7 +375,7 @@ for kind, style in OTHER_MARKER_STYLE.items():
             parts.append(f"direction: {e['direction']}")
         if "stop" in e:
             stop = e["stop"]
-            if kind == "limit-entry-filled":
+            if kind == "stop-entry-filled":
                 dist = abs(e["price"] - stop)
                 parts.append(f"stop: {stop} ({dist:.2f} pts)")
             else:

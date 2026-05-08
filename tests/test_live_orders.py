@@ -28,11 +28,11 @@ def _read_events(sessions_dir: Path, date: str) -> list[dict]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_pending_limit():
-    """Reset _pending_limit to None before each test."""
-    live_orders._pending_limit = None
+def _reset_pending_entry():
+    """Reset _pending_entry to None before each test."""
+    live_orders._pending_entry = None
     yield
-    live_orders._pending_limit = None
+    live_orders._pending_entry = None
 
 
 @pytest.fixture()
@@ -62,7 +62,7 @@ def _mock_today(monkeypatch):
 
 def test_manual_close_writes_events_jsonl(_in_tmp, _mock_today):
     mock_executor = MagicMock()
-    empty_pos = {"active": {}, "limit_entry": "", "limit_direction": "", "confirmation_bar": {}}
+    empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {}}
     with patch.object(live_orders, "_executor", mock_executor), \
          patch("smt_state.load_position", return_value=empty_pos), \
          patch("smt_state.save_position"):
@@ -78,16 +78,16 @@ def test_manual_close_writes_events_jsonl(_in_tmp, _mock_today):
 
 
 # ---------------------------------------------------------------------------
-# Test 2: manual_cancel_limit is a no-op when _pending_limit is None
+# Test 2: manual_cancel_entry is a no-op when _pending_entry is None
 # ---------------------------------------------------------------------------
 
-def test_manual_cancel_limit_noop_when_no_pending(_in_tmp, _mock_today):
-    assert live_orders._pending_limit is None  # ensure reset
-    empty_pos = {"active": {}, "limit_entry": "", "limit_direction": "", "confirmation_bar": {}}
+def test_manual_cancel_entry_noop_when_no_pending(_in_tmp, _mock_today):
+    assert live_orders._pending_entry is None  # ensure reset
+    empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {}}
     mock_executor = MagicMock()
     with patch.object(live_orders, "_executor", mock_executor), \
          patch("smt_state.load_position", return_value=empty_pos):
-        live_orders.manual_cancel_limit()
+        live_orders.manual_cancel_entry()
 
     # No events file written, no executor call
     events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
@@ -96,66 +96,66 @@ def test_manual_cancel_limit_noop_when_no_pending(_in_tmp, _mock_today):
 
 
 # ---------------------------------------------------------------------------
-# Test 3: manual_cancel_limit logs and clears _pending_limit
+# Test 3: manual_cancel_entry logs and clears _pending_entry
 # ---------------------------------------------------------------------------
 
-def test_manual_cancel_limit_logs_and_clears(_in_tmp, _mock_today):
-    live_orders._pending_limit = {"entry_price": 19900.0, "direction": "long"}
-    empty_pos = {"active": {}, "limit_entry": "", "limit_direction": "", "confirmation_bar": {}}
+def test_manual_cancel_entry_logs_and_clears(_in_tmp, _mock_today):
+    live_orders._pending_entry = {"entry_price": 19900.0, "direction": "long"}
+    empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {}}
     mock_executor = MagicMock()
     with patch.object(live_orders, "_executor", mock_executor), \
          patch("smt_state.load_position", return_value=empty_pos), \
          patch("smt_state.save_position"):
-        live_orders.manual_cancel_limit()
+        live_orders.manual_cancel_entry()
 
     events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
     assert len(events) == 1
     e = events[0]
-    assert e["kind"] == "cancel-limit-entry"
+    assert e["kind"] == "cancel-stop-entry"
     assert e["source"] == "manual"
-    assert live_orders._pending_limit is None
+    assert live_orders._pending_entry is None
 
 
 # ---------------------------------------------------------------------------
-# Test 4: place_entry with limit_fill_bars sets _pending_limit
+# Test 4: place_entry with limit_fill_bars sets _pending_entry
 # ---------------------------------------------------------------------------
 
 def test_place_entry_limit_sets_pending():
     signal = {"direction": "long", "entry_price": 19850.0,
-               "stop_price": 19820.0, "limit_fill_bars": 1}
+               "stop_price": 19820.0, "stop_fill_bars": 1}
     mock_executor = MagicMock()
     with patch.object(live_orders, "_executor", mock_executor):
         live_orders.place_entry(signal)
 
-    assert live_orders._pending_limit == signal
+    assert live_orders._pending_entry == signal
     mock_executor.place_entry.assert_called_once_with(signal, None)
 
 
 # ---------------------------------------------------------------------------
-# Test 5: place_entry without limit_fill_bars clears _pending_limit
+# Test 5: place_entry without limit_fill_bars clears _pending_entry
 # ---------------------------------------------------------------------------
 
 def test_place_entry_market_clears_pending():
-    live_orders._pending_limit = {"entry_price": 19900.0}
+    live_orders._pending_entry = {"entry_price": 19900.0}
     signal = {"direction": "short", "entry_price": 19950.0, "stop_price": 19980.0}
     mock_executor = MagicMock()
     with patch.object(live_orders, "_executor", mock_executor):
         live_orders.place_entry(signal)
 
-    assert live_orders._pending_limit is None
+    assert live_orders._pending_entry is None
 
 
 # ---------------------------------------------------------------------------
-# Test 6: close clears _pending_limit and calls executor
+# Test 6: close clears _pending_entry and calls executor
 # ---------------------------------------------------------------------------
 
 def test_close_clears_pending():
-    live_orders._pending_limit = {"entry_price": 19900.0}
+    live_orders._pending_entry = {"entry_price": 19900.0}
     mock_executor = MagicMock()
     with patch.object(live_orders, "_executor", mock_executor):
         live_orders.close()
 
-    assert live_orders._pending_limit is None
+    assert live_orders._pending_entry is None
     mock_executor.place_close.assert_called_once()
 
 
@@ -180,8 +180,8 @@ def test_log_appends_not_overwrites(_in_tmp, _mock_today):
 def test_manual_close_clears_position_json(_in_tmp, _mock_today):
     pos = {
         "active": {"direction": "long", "fill_price": 19850.0, "stop": 19820.0},
-        "limit_entry": "19850.0",
-        "limit_direction": "long",
+        "stop_entry": "19850.0",
+        "stop_direction": "long",
         "confirmation_bar": {"open": 19845.0},
         "failed_entries": 1,
     }
@@ -194,37 +194,37 @@ def test_manual_close_clears_position_json(_in_tmp, _mock_today):
     mock_save.assert_called_once()
     saved = mock_save.call_args.args[0]
     assert saved["active"] == {}
-    assert saved["limit_entry"] == ""
-    assert saved["limit_direction"] == ""
+    assert saved["stop_entry"] == ""
+    assert saved["stop_direction"] == ""
     assert saved["confirmation_bar"] == {}
 
 
 # ---------------------------------------------------------------------------
-# Test 9: manual_cancel_limit reads position.json limit_entry when _pending_limit is None
+# Test 9: manual_cancel_entry reads position.json limit_entry when _pending_entry is None
 # ---------------------------------------------------------------------------
 
-def test_manual_cancel_limit_uses_position_json_limit_entry(_in_tmp, _mock_today):
-    """Cancel should fire from position.json limit_entry even if _pending_limit is None."""
-    assert live_orders._pending_limit is None
+def test_manual_cancel_entry_uses_position_json_limit_entry(_in_tmp, _mock_today):
+    """Cancel should fire from position.json limit_entry even if _pending_entry is None."""
+    assert live_orders._pending_entry is None
     pos = {
         "active": {},
-        "limit_entry": "19900.0",
-        "limit_direction": "long",
+        "stop_entry": "19900.0",
+        "stop_direction": "long",
         "confirmation_bar": {},
     }
     mock_executor = MagicMock()
     with patch.object(live_orders, "_executor", mock_executor), \
          patch("smt_state.load_position", return_value=pos), \
          patch("smt_state.save_position") as mock_save:
-        live_orders.manual_cancel_limit()
+        live_orders.manual_cancel_entry()
 
     events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
     assert len(events) == 1
-    assert events[0]["kind"] == "cancel-limit-entry"
+    assert events[0]["kind"] == "cancel-stop-entry"
     assert events[0]["price"] == pytest.approx(19900.0)
     saved = mock_save.call_args.args[0]
-    assert saved["limit_entry"] == ""
-    assert saved["limit_direction"] == ""
+    assert saved["stop_entry"] == ""
+    assert saved["stop_direction"] == ""
     assert saved["confirmation_bar"] == {}
 
 
@@ -233,7 +233,7 @@ def test_manual_cancel_limit_uses_position_json_limit_entry(_in_tmp, _mock_today
 # ---------------------------------------------------------------------------
 
 def test_get_position_returns_position():
-    pos = {"active": {"direction": "long"}, "limit_entry": "", "limit_direction": ""}
+    pos = {"active": {"direction": "long"}, "stop_entry": "", "stop_direction": ""}
     with patch("smt_state.load_position", return_value=pos):
         assert live_orders.get_position() == pos
 
@@ -250,11 +250,11 @@ def test_has_active_position():
 
 
 # ---------------------------------------------------------------------------
-# Test 12: has_pending_limit returns True/False
+# Test 12: has_pending_entry returns True/False
 # ---------------------------------------------------------------------------
 
-def test_has_pending_limit():
-    with patch("smt_state.load_position", return_value={"limit_entry": "19900.0"}):
-        assert live_orders.has_pending_limit() is True
-    with patch("smt_state.load_position", return_value={"limit_entry": ""}):
-        assert live_orders.has_pending_limit() is False
+def test_has_pending_entry():
+    with patch("smt_state.load_position", return_value={"stop_entry": "19900.0"}):
+        assert live_orders.has_pending_entry() is True
+    with patch("smt_state.load_position", return_value={"stop_entry": ""}):
+        assert live_orders.has_pending_entry() is False

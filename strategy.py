@@ -155,18 +155,18 @@ def run_strategy(
             return None
 
         # 2.1 Early-exit conditions — cancel any pending limit if direction changed.
-        limit_entry = position["limit_entry"]
-        limit_direction = position.get("limit_direction", "")
-        if limit_entry != "" and limit_direction != "" and (
-            direction == "none" or direction != limit_direction
+        stop_entry = position["stop_entry"]
+        stop_direction = position.get("stop_direction", "")
+        if stop_entry != "" and stop_direction != "" and (
+            direction == "none" or direction != stop_direction
         ):
-            _cancel_price = float(limit_entry)
-            position["limit_entry"]      = ""
-            position["limit_direction"]  = ""
+            _cancel_price = float(stop_entry)
+            position["stop_entry"]      = ""
+            position["stop_direction"]  = ""
             position["confirmation_bar"] = {}
             smt_state.save_position(position)
             _reason = "direction-none" if direction == "none" else "direction-changed"
-            return _make_signal("cancel-limit-entry", now, _cancel_price, reason=_reason)
+            return _make_signal("cancel-stop-entry", now, _cancel_price, reason=_reason)
 
         if direction == "none":
             return None
@@ -180,14 +180,14 @@ def run_strategy(
         # 2.4 Fill check runs FIRST so a limit that fills on the same bar as a new
         # confirmation bar is detected rather than overwritten by a move-limit signal.
         # Long fills when bar_high >= limit; short fills when bar_low <= limit.
-        limit_entry = position["limit_entry"]
-        _limit_f = float(limit_entry) if limit_entry != "" else None
-        _limit_reached = _limit_f is not None and (
-            (direction == _DIR_UP   and float(mnq_bar["high"]) >= _limit_f) or
-            (direction == _DIR_DOWN and float(mnq_bar["low"])  <= _limit_f)
+        stop_entry = position["stop_entry"]
+        _entry_f = float(stop_entry) if stop_entry != "" else None
+        _entry_reached = _entry_f is not None and (
+            (direction == _DIR_UP   and float(mnq_bar["high"]) >= _entry_f) or
+            (direction == _DIR_DOWN and float(mnq_bar["low"])  <= _entry_f)
         )
-        if limit_entry != "" and _limit_reached:
-            fill_price = float(limit_entry)
+        if stop_entry != "" and _entry_reached:
+            fill_price = float(stop_entry)
             conf_bar   = position["confirmation_bar"]
             _STOP_WICK_CAP = 10.0
             if direction == _DIR_UP:
@@ -206,11 +206,11 @@ def run_strategy(
                     "contracts":  2,
                     "cautious":   "no",
                 }
-                position["limit_entry"]      = ""
-                position["limit_direction"]  = ""
+                position["stop_entry"]      = ""
+                position["stop_direction"]  = ""
                 position["confirmation_bar"] = {}
                 smt_state.save_position(position)
-                return _make_signal("limit-entry-filled", now, fill_price, direction=direction, stop=stop)
+                return _make_signal("stop-entry-filled", now, fill_price, direction=direction, stop=stop)
 
         if fill_check_only:
             return None
@@ -263,15 +263,15 @@ def run_strategy(
                         "cautious":   "no",
                     }
                     position["confirmation_bar"] = conf_bar_snap
-                    position["limit_entry"]      = ""
-                    position["limit_direction"]  = ""
+                    position["stop_entry"]      = ""
+                    position["stop_direction"]  = ""
                     smt_state.save_position(position)
                     return _make_signal("market-entry", now, bar_mid, direction=direction, stop=stop)
 
                 position["confirmation_bar"] = conf_bar_snap
-                kind = "new-limit-entry" if position["limit_entry"] == "" else "move-limit-entry"
-                position["limit_entry"]     = body_end_price
-                position["limit_direction"] = direction
+                kind = "new-stop-entry" if position["stop_entry"] == "" else "move-stop-entry"
+                position["stop_entry"]     = body_end_price
+                position["stop_direction"] = direction
                 smt_state.save_position(position)
                 return _make_signal(kind, now, body_end_price)
 
@@ -286,7 +286,7 @@ def run_strategy(
     # 3.1 Direction mismatch (includes direction == "none")
     if direction == "none" or direction != active.get("direction"):
         position["active"]            = {}
-        position["limit_entry"]       = ""
+        position["stop_entry"]       = ""
         position["confirmation_bar"]  = {}
         smt_state.save_position(position)
         _bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
@@ -304,7 +304,7 @@ def run_strategy(
     if stopped:
         exit_price = stop
         position["active"]            = {}
-        position["limit_entry"]       = ""
+        position["stop_entry"]       = ""
         # confirmation_bar intentionally preserved: prevents immediate re-entry on the
         # same bar before the next 5m hypothesis re-evaluation can run.
         position["failed_entries"]    = position.get("failed_entries", 0) + 1
@@ -351,7 +351,7 @@ def run_strategy(
                 and float(mnq_bar["high"]) > float(_last_15m_down["body_high"])
             ):
                 position["active"]           = {}
-                position["limit_entry"]      = ""
+                position["stop_entry"]      = ""
                 position["confirmation_bar"] = {}
                 smt_state.save_position(position)
                 _close_price = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
@@ -377,8 +377,8 @@ def reset_position_for_session() -> None:
     """
     pos = smt_state.load_position()
     pos["active"] = {}
-    pos["limit_entry"] = ""
-    pos["limit_direction"] = ""
+    pos["stop_entry"] = ""
+    pos["stop_direction"] = ""
     pos["confirmation_bar"] = {}
     pos["failed_entries"] = 0
     smt_state.save_position(pos)
@@ -393,6 +393,6 @@ def reset_position_for_new_hypothesis() -> None:
     pos = smt_state.load_position()
     pos["failed_entries"] = 0
     pos["confirmation_bar"] = {}
-    pos["limit_entry"] = ""
-    pos["limit_direction"] = ""
+    pos["stop_entry"] = ""
+    pos["stop_direction"] = ""
     smt_state.save_position(pos)

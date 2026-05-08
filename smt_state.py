@@ -39,8 +39,8 @@ DEFAULT_HYPOTHESIS = {
 
 DEFAULT_POSITION = {
     "active": {},
-    "limit_entry": "",
-    "limit_direction": "",
+    "stop_entry": "",
+    "stop_direction": "",
     "confirmation_bar": {},
     "failed_entries": 0,
 }

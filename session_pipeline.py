@@ -149,8 +149,8 @@ class SessionPipeline:
         # terminal output and executor receive the same direction for every signal this bar.
         _hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
 
-        # Snapshot limit_entry before trend runs so we can detect silent cancellations.
-        _prev_limit = _smt_state.load_position().get("limit_entry", "")
+        # Snapshot stop_entry before trend runs so we can detect silent cancellations.
+        _prev_stop = _smt_state.load_position().get("stop_entry", "")
 
         # Trend runs first: validates existing hypothesis before a new one may form.
         trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, recent)
@@ -205,7 +205,7 @@ class SessionPipeline:
                     # trend-broken so the automation path can cancel the PMT order.
                     _pos = _smt_state.load_position()
                     _pos["confirmation_bar"] = {}
-                    _pos["limit_entry"] = ""
+                    _pos["stop_entry"] = ""
                     _smt_state.save_position(_pos)
                     _tb_sig: dict = {
                         "kind":             "trend-broken",
@@ -221,11 +221,11 @@ class SessionPipeline:
                             _tb_sig[_k] = trend_sig[_k]
                     self._emit(_tb_sig)
                     events.append(_tb_sig)
-                    if _prev_limit != "":
+                    if _prev_stop != "":
                         _cancel_sig = {
-                            "kind":      "limit-entry-cancelled",
+                            "kind":      "stop-entry-cancelled",
                             "time":      now.isoformat(),
-                            "price":     float(_prev_limit),
+                            "price":     float(_prev_stop),
                             "reason":    "trend-broken",
                             "direction": _hyp_dir,
                         }
@@ -288,11 +288,11 @@ class SessionPipeline:
                 }
                 self._emit(_tb_sig)
                 events.append(_tb_sig)
-                if _prev_limit != "":
+                if _prev_stop != "":
                     _cancel_sig = {
-                        "kind":      "limit-entry-cancelled",
+                        "kind":      "stop-entry-cancelled",
                         "time":      now.isoformat(),
-                        "price":     float(_prev_limit),
+                        "price":     float(_prev_stop),
                         "reason":    "trend-broken",
                         "direction": _hyp_dir,
                     }
@@ -337,11 +337,11 @@ class SessionPipeline:
                 self._emit(trend_sig)
                 events.append(trend_sig)
                 # Emit a dedicated cancel signal if trend cleared a pending limit without one.
-                if _prev_limit != "" and _smt_state.load_position().get("limit_entry", "") == "":
+                if _prev_stop != "" and _smt_state.load_position().get("stop_entry", "") == "":
                     _cancel_sig = {
-                        "kind":      "limit-entry-cancelled",
+                        "kind":      "stop-entry-cancelled",
                         "time":      now.isoformat(),
-                        "price":     float(_prev_limit),
+                        "price":     float(_prev_stop),
                         "reason":    trend_sig.get("kind", "trend-broken"),
                         "direction": _hyp_dir,
                     }
@@ -387,11 +387,11 @@ class SessionPipeline:
             strat_sig.setdefault("direction", _hyp_dir)
             # Emit cancel when strategy's market-entry overwrites a pending limit that
             # was never explicitly cancelled by trend (trend cancel path handled above).
-            if strat_sig["kind"] == "market-entry" and _prev_limit != "":
+            if strat_sig["kind"] == "market-entry" and _prev_stop != "":
                 _cancel_sig = {
-                    "kind":      "limit-entry-cancelled",
+                    "kind":      "stop-entry-cancelled",
                     "time":      now.isoformat(),
-                    "price":     float(_prev_limit),
+                    "price":     float(_prev_stop),
                     "reason":    "market-entry",
                     "direction": _hyp_dir,
                 }

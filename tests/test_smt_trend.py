@@ -464,13 +464,13 @@ class TestGlobalTrendInvalidation:
         )
 
     def test_global_trend_invalidation_clears_limit_and_conf_bar(self):
-        """On invalidation, limit_entry and confirmation_bar must be cleared."""
+        """On invalidation, stop_entry and confirmation_bar must be cleared."""
         from trend import run_trend
         from smt_state import load_position
 
         self._setup(direction="down", global_trend="up", confidence="high")
         pos = copy.deepcopy(DEFAULT_POSITION)
-        pos["limit_entry"] = 95.0
+        pos["stop_entry"] = 95.0
         pos["confirmation_bar"] = {"time": "T", "high": 100.0, "low": 90.0,
                                    "body_high": 98.0, "body_low": 92.0}
         save_position(pos)
@@ -480,5 +480,5 @@ class TestGlobalTrendInvalidation:
         run_trend(NOW, bar, recent)
 
         p = load_position()
-        assert p["limit_entry"] == ""
+        assert p["stop_entry"] == ""
         assert p["confirmation_bar"] == {}

@@ -56,11 +56,11 @@ def test_market_entry_short_applies_slippage():
     assert rec.fill_price == 20000.0 - 2 * 0.25
 
 
-def test_limit_entry_exact_price():
+def test_stop_entry_exact_price():
     ex = SimulatedBrokerExecutor()
     rec = ex.place_entry(_signal("long", 20000.0, limit=True), _bar())
     assert rec.fill_price == 20000.0
-    assert rec.order_type == "limit"
+    assert rec.order_type == "stop"
 
 
 def test_human_mode_additive_slippage_long():
