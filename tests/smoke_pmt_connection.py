@@ -1,8 +1,13 @@
 # tests/smoke_pmt_connection.py
 # Manual smoke test for PickMyTrade connectivity.
-# Sends a limit buy far below the current market price (so it cannot be filled),
-# moves it to a second unrealistic price via modify_limit_entry,
+# Sends a stop sell far below the current market price (so it cannot be filled),
+# moves it to a second unrealistic price via modify_stop_entry,
 # pauses for user verification at each step, then cancels it via a close order.
+#
+# STP order geometry:
+#   SELL STOP must be placed BELOW current market (triggers when price falls to it).
+#   BUY  STOP must be placed ABOVE current market (triggers when price rises to it).
+#   This test uses direction="short" so the entry 500 pts below market is valid.
 #
 # Usage:
 #   python -m pytest tests/smoke_pmt_connection.py -v -s
@@ -21,8 +26,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 SMOKE_GUARD = "SMOKE_PMT"
-LIMIT_OFFSET_PTS = 500.0    # place buy limit this many points below current price
-LIMIT_MOVE_PTS   = 100.0    # move the limit by this many additional points for the modify step
+LIMIT_OFFSET_PTS = 500.0    # place sell stop this many points below current price
+LIMIT_MOVE_PTS   = 100.0    # move the stop by this many additional points for the modify step
 
 
 def _requires_smoke_env():
@@ -32,11 +37,12 @@ def _requires_smoke_env():
 
 def _make_executor():
     from execution.pickmytrade import PickMyTradeExecutor
+    account_ids = [s.strip() for s in os.environ.get("TRADING_ACCOUNT_IDS", "").split(",") if s.strip()]
     return PickMyTradeExecutor(
         webhook_url=os.environ["PMT_WEBHOOK_URL"],
         api_key=os.environ["PMT_API_KEY"],
         symbol=os.environ.get("TRADING_SYMBOL", "MNQ1!"),
-        account_id=os.environ.get("TRADING_ACCOUNT_ID", ""),
+        account_ids=account_ids,
         contracts=int(os.environ.get("TRADING_CONTRACTS", "1")),
         entry_slip_ticks=0,
     )
@@ -61,7 +67,7 @@ def _fake_bar(limit_price: float):
 
 def test_pmt_limit_order_place_and_cancel(capsys):
     """
-    Smoke test: place a limit BUY 500 pts below market, verify in Tradovate, then cancel.
+    Smoke test: place a STP SELL 500 pts below market, verify in Tradovate, then cancel.
     Requires SMOKE_PMT=1 and valid PMT credentials in the environment.
     """
     _requires_smoke_env()
@@ -79,18 +85,20 @@ def test_pmt_limit_order_place_and_cancel(capsys):
         # Default: 500 pts below a conservative floor — this will never fill in normal conditions
         limit_price = 15000.0
 
+    # direction="short": SELL STOP at limit_price (below market) is a valid pending order.
+    # A BUY STOP must be placed ABOVE market — never below — so long would be rejected here.
     signal = {
-        "direction": "long",
+        "direction": "short",
         "entry_price": limit_price,
-        "stop_price": limit_price - 50.0,
-        "take_profit": limit_price + 100.0,
-        "limit_fill_bars": 999,   # marks this as a limit order
+        "stop_price": limit_price + 50.0,
+        "take_profit": limit_price - 100.0,
+        "stop_fill_bars": 999,   # marks this as a stop entry order
     }
 
     bar = _fake_bar(limit_price)
 
     with capsys.disabled():
-        print(f"\n[SMOKE] Sending LMT BUY @ {limit_price:.2f} to PickMyTrade...")
+        print(f"\n[SMOKE] Sending STP SELL @ {limit_price:.2f} to PickMyTrade...")
 
     rec = ex.place_entry(signal, bar)
     time.sleep(3)  # give the pool thread time to dispatch the HTTP request
@@ -100,7 +108,7 @@ def test_pmt_limit_order_place_and_cancel(capsys):
               f"fill_price={rec.fill_price}, status={rec.status}")
         print()
         print(">>> CHECK YOUR TRADOVATE ACCOUNT NOW <<<")
-        print(f"    You should see a pending LMT BUY order for {signal['entry_price']:.2f}.")
+        print(f"    You should see a pending STP SELL order for {signal['entry_price']:.2f}.")
         print("    ENTER = order visible (pass)  |  'fail' = order not visible  |  'skip' = skip check")
         response = input("    > ").strip().lower()
 
@@ -109,22 +117,22 @@ def test_pmt_limit_order_place_and_cancel(capsys):
     elif response not in ("", "skip"):
         pytest.fail(f"Unrecognised input: {response!r}")
 
-    # Move the limit to a second unrealistic price via modify_limit_entry
+    # Move the stop to a second unrealistic price via modify_stop_entry
     moved_price = limit_price - LIMIT_MOVE_PTS
     new_signal = {**signal, "entry_price": moved_price}
 
     with capsys.disabled():
         print()
-        print(f"[SMOKE] Moving limit from {limit_price:.2f} → {moved_price:.2f} via modify_limit_entry...")
+        print(f"[SMOKE] Moving stop entry from {limit_price:.2f} → {moved_price:.2f} via modify_stop_entry...")
 
-    ex.modify_limit_entry(signal, new_signal, bar)
+    ex.modify_stop_entry(signal, new_signal, bar)
     time.sleep(3)  # close is synchronous; give pool time to dispatch the re-place
 
     with capsys.disabled():
         print(f"[SMOKE] Modify dispatched.")
         print()
         print(">>> CHECK YOUR TRADOVATE ACCOUNT NOW <<<")
-        print(f"    The LMT BUY order should now show price {moved_price:.2f} (was {limit_price:.2f}).")
+        print(f"    The STP SELL order should now show price {moved_price:.2f} (was {limit_price:.2f}).")
         print("    ENTER = price updated (pass)  |  'fail' = price unchanged or order missing  |  'skip' = skip check")
         response_move = input("    > ").strip().lower()
 
@@ -144,7 +152,7 @@ def test_pmt_limit_order_place_and_cancel(capsys):
         print("[SMOKE] Close order sent.")
         print()
         print(">>> CHECK YOUR TRADOVATE ACCOUNT AGAIN <<<")
-        print("    The pending LMT BUY order should now be gone.")
+        print("    The pending STP SELL order should now be gone.")
         print("    ENTER = order gone (pass)  |  'fail' = order still visible  |  'skip' = skip check")
         response2 = input("    > ").strip().lower()
 

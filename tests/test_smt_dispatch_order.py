@@ -223,7 +223,7 @@ def test_trend_invalidation_blocks_same_bar_fill(tmp_path, monkeypatch, _isolate
     }
     _ss.save_position({
         "active": {},
-        "limit_entry": 21000.0,
+        "stop_entry": 21000.0,
         "confirmation_bar": conf_bar,
         "failed_entries": 0,
     })

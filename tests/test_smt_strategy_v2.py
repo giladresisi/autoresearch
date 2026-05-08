@@ -99,13 +99,13 @@ def write_hypothesis(direction="none", **kwargs):
 
 def write_position(
     active=None,
-    limit_entry="",
+    stop_entry="",
     confirmation_bar=None,
     failed_entries=0,
 ):
     p = copy.deepcopy(smt_state.DEFAULT_POSITION)
     p["active"]            = active if active is not None else {}
-    p["limit_entry"]       = limit_entry
+    p["stop_entry"]        = stop_entry
     p["confirmation_bar"]  = confirmation_bar if confirmation_bar is not None else {}
     p["failed_entries"]    = failed_entries
     smt_state.save_position(p)
@@ -167,11 +167,11 @@ class TestNoPositionOppositeBar:
         result = run_strategy(NOW, bar, recent)
 
         assert result is not None
-        assert result["kind"] == "new-limit-entry"
+        assert result["kind"] == "new-stop-entry"
         assert result["price"] == pytest.approx(105.0)  # body_high of bearish 5m bar
 
         pos = smt_state.load_position()
-        assert pos["limit_entry"] == pytest.approx(105.0)
+        assert pos["stop_entry"] == pytest.approx(105.0)
         assert pos["confirmation_bar"] != {}
         assert pos["confirmation_bar"]["body_high"] == pytest.approx(105.0)
 
@@ -183,7 +183,7 @@ class TestNoPositionOppositeBar:
         """
         write_hypothesis(direction="up")
         write_position(
-            limit_entry=105.0,
+            stop_entry=105.0,
             confirmation_bar={
                 "time": "2026-04-27T09:55:00-04:00",
                 "high": 108.0, "low": 92.0,
@@ -197,11 +197,11 @@ class TestNoPositionOppositeBar:
         result = run_strategy(NOW, bar, recent)
 
         assert result is not None
-        assert result["kind"] == "move-limit-entry"
+        assert result["kind"] == "move-stop-entry"
         assert result["price"] == pytest.approx(122.0)
 
         pos = smt_state.load_position()
-        assert pos["limit_entry"] == pytest.approx(122.0)
+        assert pos["stop_entry"] == pytest.approx(122.0)
 
     def test_non_opposite_5m_no_signal_no_mutation(self):
         """direction=up, bullish bar (close > open) → None, no JSON changes."""
@@ -213,7 +213,7 @@ class TestNoPositionOppositeBar:
 
         assert result is None
         pos = smt_state.load_position()
-        assert pos["limit_entry"] == ""
+        assert pos["stop_entry"] == ""
         assert pos["confirmation_bar"] == {}
 
 
@@ -230,13 +230,13 @@ class TestFill:
             "high": 105.0, "low": 95.0,
             "body_high": 103.0, "body_low": 94.0,
         }
-        write_position(limit_entry=100.0, confirmation_bar=conf)
+        write_position(stop_entry=100.0, confirmation_bar=conf)
         # Bullish bar (non-opposite for direction=up) whose range spans 100
         bar = make_5m_bar(open_=99.0, high=102.0, low=98.0, close=101.0)
         result = run_strategy(NOW, bar, make_empty_1m_recent())
 
         assert result is not None
-        assert result["kind"] == "limit-entry-filled"
+        assert result["kind"] == "stop-entry-filled"
         assert result["price"] == pytest.approx(100.0)
 
         pos = smt_state.load_position()
@@ -245,7 +245,7 @@ class TestFill:
         assert pos["active"]["direction"] == "up"
         assert pos["active"]["contracts"] == 2
         assert pos["active"]["cautious"] == "no"
-        assert pos["limit_entry"] == ""
+        assert pos["stop_entry"] == ""
         assert pos["confirmation_bar"] == {}
 
     def test_stop_side_short(self):
@@ -259,12 +259,12 @@ class TestFill:
             "high": 110.0, "low": 90.0,
             "body_high": 105.0, "body_low": 98.0,
         }
-        write_position(limit_entry=100.0, confirmation_bar=conf)
+        write_position(stop_entry=100.0, confirmation_bar=conf)
         bar = make_5m_bar(open_=101.0, high=103.0, low=98.0, close=99.0)
         result = run_strategy(NOW, bar, make_empty_1m_recent())
 
         assert result is not None
-        assert result["kind"] == "limit-entry-filled"
+        assert result["kind"] == "stop-entry-filled"
 
         pos = smt_state.load_position()
         assert pos["active"]["stop"] == pytest.approx(110.0)  # wick end capped at body_high+10
@@ -280,12 +280,12 @@ class TestFill:
             "high": 110.0, "low": 95.0,
             "body_high": 105.0, "body_low": 94.0,
         }
-        write_position(limit_entry=100.0, confirmation_bar=conf)
+        write_position(stop_entry=100.0, confirmation_bar=conf)
         bar = make_5m_bar(open_=99.0, high=102.0, low=98.0, close=101.0)
         result = run_strategy(NOW, bar, make_empty_1m_recent())
 
         assert result is not None
-        assert result["kind"] == "limit-entry-filled"
+        assert result["kind"] == "stop-entry-filled"
 
         pos = smt_state.load_position()
         assert pos["active"]["stop"] == pytest.approx(95.0)  # wick end capped at body_low-10
@@ -309,7 +309,7 @@ class TestActivePosition:
 
         pos = smt_state.load_position()
         assert pos["active"] == {}
-        assert pos["limit_entry"] == ""
+        assert pos["stop_entry"] == ""
 
     def test_in_position_direction_none_emits_market_close(self):
         """active.direction=up, hypothesis.direction=none → market-close."""
@@ -365,18 +365,18 @@ class TestSameBarOverride:
             "high": 108.0, "low": 92.0,
             "body_high": 105.0, "body_low": 98.0,
         }
-        write_position(limit_entry=100.0, confirmation_bar=conf)
+        write_position(stop_entry=100.0, confirmation_bar=conf)
         bar = make_5m_bar(open_=105.0, high=110.0, low=90.0, close=95.0)
         recent = make_opp_1m_recent("up", open_=112.0, close_=102.0, high=115.0, low=88.0)
         result = run_strategy(NOW, bar, recent)
 
         assert result is not None
-        assert result["kind"] == "limit-entry-filled"
+        assert result["kind"] == "stop-entry-filled"
         assert result["price"] == pytest.approx(100.0)
 
         pos = smt_state.load_position()
         assert pos["active"] != {}
-        assert pos["limit_entry"] == ""
+        assert pos["stop_entry"] == ""
 
 
 class TestSignalShape:

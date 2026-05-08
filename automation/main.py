@@ -633,7 +633,7 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         if evt_type == "limit_placed":
             _executor.place_entry(result["signal"], _bar_row_for_evt)
         elif evt_type == "limit_moved":
-            _executor.modify_limit_entry(result["old_signal"], result["new_signal"], _bar_row_for_evt)
+            _executor.modify_stop_entry(result["old_signal"], result["new_signal"], _bar_row_for_evt)
         return
     signal = result
 
@@ -911,7 +911,7 @@ class SmtV2Dispatcher:
         kind = sig.get("kind")
         direction_v2 = sig.get("direction", "none")
 
-        if kind in ("new-limit-entry", "move-limit-entry"):
+        if kind in ("new-stop-entry", "move-stop-entry"):
             if direction_v2 == "none":
                 return
             direction = "long" if direction_v2 == "up" else "short"
@@ -924,14 +924,14 @@ class SmtV2Dispatcher:
                 "direction": direction,
                 "entry_price": float(sig["price"]),
                 "stop_price": float(stop),
-                "limit_fill_bars": 1,
+                "stop_fill_bars": 1,
             }
-            if kind == "new-limit-entry":
+            if kind == "new-stop-entry":
                 _lo.place_entry(pmt_signal)
             else:
-                _lo.modify_limit(_lo._pending_limit or pmt_signal, pmt_signal)
+                _lo.modify_stop_entry(_lo._pending_entry or pmt_signal, pmt_signal)
 
-        elif kind == "limit-entry-filled":
+        elif kind == "stop-entry-filled":
             direction = "long" if direction_v2 == "up" else "short"
             stop = sig.get("stop")
             if stop is None:
@@ -952,12 +952,12 @@ class SmtV2Dispatcher:
         elif kind == "market-close":
             _lo.close("v2-direction-mismatch")
 
-        elif kind == "cancel-limit-entry":
-            _lo.cancel_limit("cancel-limit")
+        elif kind == "cancel-stop-entry":
+            _lo.cancel_entry("cancel-stop")
 
         elif kind == "stopped-out":
             # IB stop order already executed — just clear pending state
-            _lo._pending_limit = None
+            _lo._pending_entry = None
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -1008,11 +1008,12 @@ def main() -> None:
 
     today_str = pd.Timestamp.now(tz="America/New_York").strftime("%Y-%m-%d")
     (SESSIONS_DIR / today_str).mkdir(parents=True, exist_ok=True)
+    _account_ids = [s.strip() for s in os.environ.get("TRADING_ACCOUNT_IDS", "").split(",") if s.strip()]
     _executor = PickMyTradeExecutor(
         webhook_url=os.environ["PMT_WEBHOOK_URL"],
         api_key=os.environ["PMT_API_KEY"],
         symbol=os.environ.get("TRADING_SYMBOL", "MNQ1!"),
-        account_id=os.environ.get("TRADING_ACCOUNT_ID", ""),
+        account_ids=_account_ids,
         contracts=int(os.environ.get("TRADING_CONTRACTS", "1")),
         entry_slip_ticks=int(os.environ.get("PMT_ENTRY_SLIP_TICKS", "2")),
     )

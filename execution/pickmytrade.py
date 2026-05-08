@@ -17,7 +17,7 @@ class PickMyTradeExecutor:
                  webhook_url: str,
                  api_key: str,
                  symbol: str,
-                 account_id: str,
+                 account_ids: list,
                  contracts: int,
                  request_timeout_s: float = 10.0,
                  max_retries: int = 3,
@@ -26,7 +26,7 @@ class PickMyTradeExecutor:
         self._webhook_url       = webhook_url
         self._api_key           = api_key
         self._symbol            = symbol
-        self._account_id        = account_id
+        self._account_ids       = account_ids
         self._contracts         = contracts
         self._request_timeout_s = request_timeout_s
         self._max_retries       = max_retries
@@ -58,12 +58,15 @@ class PickMyTradeExecutor:
             "risk_percentage": 0,
             "gtd_in_second":   0,
             "token":           self._api_key,
-            "multiple_accounts": [{
-                "token":               self._api_key,
-                "account_id":          self._account_id,
-                "risk_percentage":     0,
-                "quantity_multiplier": 1,
-            }],
+            "multiple_accounts": [
+                {
+                    "token":               self._api_key,
+                    "account_id":          account_id,
+                    "risk_percentage":     0,
+                    "quantity_multiplier": 1,
+                }
+                for account_id in self._account_ids
+            ],
         }
         payload.update(extra)
         return payload
@@ -74,10 +77,10 @@ class PickMyTradeExecutor:
         data = "buy" if direction == "long" else "sell"
         entry_price = float(signal["entry_price"])
         stop_price = float(signal["stop_price"]) if signal.get("stop_price") is not None else 0.0
-        is_limit = signal.get("limit_fill_bars") is not None
-        if is_limit:
-            payload = self._build_payload(data, order_type="LMT", price=entry_price)
-            order_type = "limit"
+        is_stop = signal.get("stop_fill_bars") is not None or signal.get("limit_fill_bars") is not None
+        if is_stop:
+            payload = self._build_payload(data, order_type="STP", price=entry_price)
+            order_type = "stop"
         else:
             # No price field: PMT uses the latest close price as the market price
             payload = self._build_payload(data, order_type="MKT", sl=stop_price)
@@ -124,15 +127,15 @@ class PickMyTradeExecutor:
         self.place_close(label=exit_type)
         return None
 
-    def modify_limit_entry(self, old_signal: dict, new_signal: dict, bar: BarRow) -> None:
-        # Step 1: synchronously cancel the unfilled limit
+    def modify_stop_entry(self, old_signal: dict, new_signal: dict, bar: BarRow) -> None:
+        # Step 1: synchronously cancel the unfilled stop entry
         self.place_close(label="modify_cancel")
-        # Step 2: fire new LMT order via thread pool
+        # Step 2: fire new STP order via thread pool
         order_id = f"pmt-{uuid.uuid4().hex[:8]}"
         direction = new_signal["direction"]
         data = "buy" if direction == "long" else "sell"
         entry_price = float(new_signal["entry_price"])
-        payload = self._build_payload(data, order_type="LMT", price=entry_price)
+        payload = self._build_payload(data, order_type="STP", price=entry_price)
         self._order_pool.submit(self._post_order, order_id, payload)
 
     def _post_order(self, order_id: str, payload: dict) -> None:

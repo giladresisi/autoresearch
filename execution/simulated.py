@@ -47,10 +47,10 @@ class SimulatedBrokerExecutor:
         self._fills_sink         = fills_sink
 
     def place_entry(self, signal: dict, bar: BarRow) -> FillRecord:
-        is_limit = signal.get("limit_fill_bars") is not None
-        if is_limit:
+        is_stop = signal.get("stop_fill_bars") is not None or signal.get("limit_fill_bars") is not None
+        if is_stop:
             fill_price = float(signal["entry_price"])
-            order_type = "limit"
+            order_type = "stop"
         else:
             fill_price = assumed_fill_price(
                 signal["direction"], "market", float(signal["entry_price"]),
@@ -128,5 +128,5 @@ class SimulatedBrokerExecutor:
     def place_close(self, label: str = "close") -> None:
         pass
 
-    def modify_limit_entry(self, old_signal: dict, new_signal: dict, bar: BarRow) -> None:
+    def modify_stop_entry(self, old_signal: dict, new_signal: dict, bar: BarRow) -> None:
         pass

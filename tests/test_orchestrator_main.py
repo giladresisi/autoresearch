@@ -130,7 +130,7 @@ def test_main_session_dirs_created(tmp_path):
 def test_close_session_position_closes_active_position():
     """Sends manual_close when position.json shows an active trade."""
     log_ch = MagicMock()
-    pos = {"active": {"fill_price": 19850.0}, "limit_entry": "", "limit_direction": ""}
+    pos = {"active": {"fill_price": 19850.0}, "stop_entry": "", "stop_direction": ""}
     with patch("smt_state.load_position", return_value=pos), \
          patch("live_orders.manual_close") as mock_close:
         _close_session_position(log_ch)
@@ -140,7 +140,7 @@ def test_close_session_position_closes_active_position():
 def test_close_session_position_noop_when_no_active():
     """Does nothing when no active position in position.json."""
     log_ch = MagicMock()
-    pos = {"active": {}, "limit_entry": "", "limit_direction": ""}
+    pos = {"active": {}, "stop_entry": "", "stop_direction": ""}
     with patch("smt_state.load_position", return_value=pos), \
          patch("live_orders.manual_close") as mock_close:
         _close_session_position(log_ch)

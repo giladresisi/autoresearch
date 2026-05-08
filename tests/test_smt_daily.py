@@ -310,7 +310,7 @@ class TestPositionReset:
         # Preset position.json with non-default values
         save_position({
             "active": {"fill_price": 21400.0, "direction": "up"},
-            "limit_entry": 21000.0,
+            "stop_entry": 21000.0,
             "confirmation_bar": {"high": 21410.0, "low": 21390.0},
             "failed_entries": 2,
         })
@@ -320,7 +320,7 @@ class TestPositionReset:
 
         pos = load_position()
         assert pos["active"] == {}
-        assert pos["limit_entry"] == ""
+        assert pos["stop_entry"] == ""
         assert pos["confirmation_bar"] == {}
         assert pos["failed_entries"] == 0
 

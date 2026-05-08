@@ -650,7 +650,7 @@ def test_failed_entries_reset_on_direction_transition_from_none():
     # Pre-set position with non-zero failed_entries and a confirmation_bar
     position = {
         "active": {},
-        "limit_entry": "",
+        "stop_entry": "",
         "confirmation_bar": {"high": 155.0, "low": 145.0},
         "failed_entries": 2,
     }
@@ -780,8 +780,8 @@ def test_failed_entries_not_reset_when_direction_stays_set():
 
     position = {
         "active": {},
-        "limit_entry": "",
-        "limit_direction": "",
+        "stop_entry": "",
+        "stop_direction": "",
         "confirmation_bar": {},
         "failed_entries": 3,
     }

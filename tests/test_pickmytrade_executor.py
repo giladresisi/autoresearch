@@ -10,12 +10,12 @@ from execution.protocol import FillRecord
 from strategy_smt import _BarRow
 
 
-def _make_executor(entry_slip_ticks: int = 2) -> PickMyTradeExecutor:
+def _make_executor(entry_slip_ticks: int = 2, account_ids: list = None) -> PickMyTradeExecutor:
     return PickMyTradeExecutor(
         webhook_url="https://pmt.example.com/signal",
         api_key="test-key",
         symbol="MNQ1!",
-        account_id="ACC123",
+        account_ids=account_ids if account_ids is not None else ["ACC123"],
         contracts=1,
         entry_slip_ticks=entry_slip_ticks,
     )
@@ -34,7 +34,7 @@ def _signal(direction: str = "long", limit: bool = False) -> dict:
         "take_profit": 20040.0,
     }
     if limit:
-        sig["limit_fill_bars"] = 3
+        sig["stop_fill_bars"] = 3
     return sig
 
 
@@ -90,14 +90,14 @@ def test_place_entry_short_posts_sell_market_order():
     assert "price" not in payload
 
 
-def test_place_entry_limit_posts_limit_order():
+def test_place_entry_stop_posts_stop_order():
     ex = _make_executor()
     sig = _signal("long", limit=True)
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(sig, _bar())
     _drain(ex)
     payload = ex._http.post.call_args.kwargs["json"]
-    assert payload["order_type"] == "LMT"
+    assert payload["order_type"] == "STP"
     assert payload["gtd_in_second"] == 0
     assert payload["price"] == sig["entry_price"]
 
@@ -137,7 +137,7 @@ def test_pmt_market_entry_short_slippage():
     assert rec.fill_price == pytest.approx(20000.0 - 2 * 0.25)
 
 
-def test_pmt_limit_entry_no_slippage():
+def test_pmt_stop_entry_no_slippage():
     ex = _make_executor(entry_slip_ticks=2)
     ex._http.post = MagicMock(return_value=_ok_response())
     rec = ex.place_entry(_signal("long", limit=True), _bar())
@@ -212,7 +212,7 @@ def test_start_raises_if_env_missing():
         webhook_url="",
         api_key="",
         symbol="MNQ1!",
-        account_id="ACC123",
+        account_ids=["ACC123"],
         contracts=1,
     )
     with pytest.raises(RuntimeError):
@@ -236,7 +236,7 @@ def test_market_entry_includes_sl():
     assert payload["sl"] == 19980.0
 
 
-def test_limit_entry_excludes_sl():
+def test_stop_entry_excludes_sl():
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(_signal("long", limit=True), _bar())
@@ -252,6 +252,19 @@ def test_market_entry_includes_multiple_accounts():
     _drain(ex)
     payload = ex._http.post.call_args.kwargs["json"]
     assert payload["multiple_accounts"][0]["account_id"] == "ACC123"
+
+
+def test_multiple_account_ids_all_appear_in_payload():
+    ex = _make_executor(account_ids=["ACC111", "ACC222", "ACC333"])
+    ex._http.post = MagicMock(return_value=_ok_response())
+    ex.place_entry(_signal("long"), _bar())
+    _drain(ex)
+    payload = ex._http.post.call_args.kwargs["json"]
+    ids = [a["account_id"] for a in payload["multiple_accounts"]]
+    assert ids == ["ACC111", "ACC222", "ACC333"]
+    assert all(a["token"] == "test-key" for a in payload["multiple_accounts"])
+    assert all(a["risk_percentage"] == 0 for a in payload["multiple_accounts"])
+    assert all(a["quantity_multiplier"] == 1 for a in payload["multiple_accounts"])
 
 
 def test_token_in_payload_toplevel():
@@ -327,23 +340,24 @@ def test_place_exit_delegates_to_close():
         assert payload["data"] == "close"
 
 
-def test_modify_limit_entry_sends_close_then_limit():
+def test_modify_stop_entry_sends_close_then_stop():
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     old_sig = _signal("long", limit=True)
     new_sig = {**_signal("long", limit=True), "entry_price": 20010.0}
-    ex.modify_limit_entry(old_sig, new_sig, _bar())
+    ex.modify_stop_entry(old_sig, new_sig, _bar())
     _drain(ex)
     assert ex._http.post.call_count == 2
     first_payload = ex._http.post.call_args_list[0].kwargs["json"]
     second_payload = ex._http.post.call_args_list[1].kwargs["json"]
     assert first_payload["data"] == "close"
     assert second_payload["data"] == "buy"
+    assert second_payload["order_type"] == "STP"
     assert second_payload["price"] == 20010.0
 
 
-def test_modify_limit_entry_close_is_synchronous():
-    """Close step in modify_limit_entry must run synchronously, not via thread pool."""
+def test_modify_stop_entry_close_is_synchronous():
+    """Close step in modify_stop_entry must run synchronously, not via thread pool."""
     ex = _make_executor()
     call_order = []
 
@@ -363,7 +377,7 @@ def test_modify_limit_entry_close_is_synchronous():
 
     old_sig = _signal("long", limit=True)
     new_sig = {**_signal("long", limit=True), "entry_price": 20010.0}
-    ex.modify_limit_entry(old_sig, new_sig, _bar())
+    ex.modify_stop_entry(old_sig, new_sig, _bar())
     _drain(ex)
 
     # First call must be direct (synchronous close), second via pool (async re-place)
@@ -371,7 +385,7 @@ def test_modify_limit_entry_close_is_synchronous():
     assert call_order[1][0] == "pool"
 
 
-def test_modify_limit_entry_replaces_even_if_close_fails():
+def test_modify_stop_entry_replaces_even_if_close_fails():
     import httpx as _httpx
     import execution.pickmytrade as _mod
     ex = _make_executor()
@@ -391,7 +405,7 @@ def test_modify_limit_entry_replaces_even_if_close_fails():
     try:
         old_sig = _signal("long", limit=True)
         new_sig = {**_signal("long", limit=True), "entry_price": 20010.0}
-        ex.modify_limit_entry(old_sig, new_sig, _bar())
+        ex.modify_stop_entry(old_sig, new_sig, _bar())
         _drain(ex)
     finally:
         _mod.time.sleep = orig_sleep

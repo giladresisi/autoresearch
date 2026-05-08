@@ -1,4 +1,6 @@
-# Run as: python -m orchestrator.main
+# Run as: uv run python -m orchestrator.main [--no-summary] [--check-parquets] [--create-empty-parquets]
+# IMPORTANT: always use 'uv run python' (not bare 'python') so the command resolves to the
+# project venv. Bare 'python' may resolve to system Python which lacks project dependencies.
 # orchestrator/main.py
 # Daemon entry point: waits for trading sessions, runs signal_smt.py, and triggers post-session summarization.
 import datetime

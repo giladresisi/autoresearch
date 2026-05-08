@@ -44,7 +44,7 @@ def _clear_position_and_hypothesis(
     """Mutate position and hypothesis dicts in place — common cleanup for every market-close path."""
     if clear_active:
         position["active"] = {}
-    position["limit_entry"] = ""
+    position["stop_entry"] = ""
     position["confirmation_bar"] = {}
     hypothesis["direction"] = "none"
 
@@ -197,7 +197,7 @@ def run_trend(
     if _global_state.get("confidence") == "high" and direction != _global_trend:
         hypothesis["direction"] = "none"
         position["confirmation_bar"] = {}
-        position["limit_entry"] = ""
+        position["stop_entry"] = ""
         save_position(position)
         save_hypothesis(hypothesis)
         return {
@@ -404,7 +404,7 @@ def run_trend(
         if _mid_broken:
             hypothesis["direction"] = "none"
             position["confirmation_bar"] = {}
-            position["limit_entry"] = ""
+            position["stop_entry"] = ""
             save_position(position)
             save_hypothesis(hypothesis)
             return {
@@ -423,7 +423,7 @@ def run_trend(
         if _wm_broken:
             hypothesis["direction"] = "none"
             position["confirmation_bar"] = {}
-            position["limit_entry"] = ""
+            position["stop_entry"] = ""
             save_position(position)
             save_hypothesis(hypothesis)
             return {
@@ -440,7 +440,7 @@ def run_trend(
     if _session_ath_straddle:
         hypothesis["direction"] = "none"
         position["confirmation_bar"] = {}
-        position["limit_entry"] = ""
+        position["stop_entry"] = ""
         save_position(position)
         save_hypothesis(hypothesis)
         return {
