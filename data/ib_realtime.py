@@ -4,6 +4,11 @@
 # IB connection (ib_insync is imported lazily inside start()).
 from __future__ import annotations
 
+# IB max duration per reqHistoricalData call for 1s bars (seconds)
+_IB_1S_CHUNK_SECONDS = 1800
+# Earliest timestamp for 1s gap-fill — prevents requesting unbounded historical data
+_1S_EARLIEST = "2026-05-01"
+
 from pathlib import Path
 from typing import Callable
 
@@ -46,6 +51,14 @@ class IbRealtimeSource:
         self._mnq_partial_1m = None
         self._mes_partial_1m = None
         self._mnq_tick_bar   = None
+        self._mes_tick_bar        = None
+        self._mnq_1s_df           = self._empty_bar_df()   # historical, loaded from MNQ_1s.parquet
+        self._mes_1s_df           = self._empty_bar_df()   # historical, loaded from MES_1s.parquet
+        self._mnq_1s_pending: list[dict] = []               # tick bars buffered until next 1m boundary
+        self._mes_1s_pending: list[dict] = []
+        self._session_date        = pd.Timestamp.now(tz="America/New_York").strftime("%Y%m%d")
+        self._mnq_1s_session_df   = self._empty_bar_df()   # session bars (NOT written to main parquet)
+        self._mes_1s_session_df   = self._empty_bar_df()   # session bars (NOT written to main parquet)
 
     @property
     def mnq_1m_df(self) -> pd.DataFrame:
@@ -54,6 +67,14 @@ class IbRealtimeSource:
     @property
     def mes_1m_df(self) -> pd.DataFrame:
         return self._mes_1m_df
+
+    @property
+    def mnq_1s_df(self) -> pd.DataFrame:
+        return self._mnq_1s_df
+
+    @property
+    def mes_1s_df(self) -> pd.DataFrame:
+        return self._mes_1s_df
 
     def _empty_bar_df(self) -> pd.DataFrame:
         return pd.DataFrame(
@@ -67,6 +88,10 @@ class IbRealtimeSource:
         mes_path  = self._bar_data_dir / "MES_1m.parquet"
         self._mnq_1m_df = pd.read_parquet(mnq_path) if mnq_path.exists() else self._empty_bar_df()
         self._mes_1m_df = pd.read_parquet(mes_path) if mes_path.exists() else self._empty_bar_df()
+        mnq_1s_path = self._bar_data_dir / "MNQ_1s.parquet"
+        mes_1s_path  = self._bar_data_dir / "MES_1s.parquet"
+        self._mnq_1s_df = pd.read_parquet(mnq_1s_path) if mnq_1s_path.exists() else self._empty_bar_df()
+        self._mes_1s_df = pd.read_parquet(mes_1s_path)  if mes_1s_path.exists()  else self._empty_bar_df()
 
     def _gap_fill(self) -> None:
         from data.sources import IBGatewaySource
@@ -103,6 +128,91 @@ class IbRealtimeSource:
         self._bar_data_dir.mkdir(parents=True, exist_ok=True)
         self._mnq_1m_df.to_parquet(self._bar_data_dir / "MNQ_1m.parquet")
         self._mes_1m_df.to_parquet(self._bar_data_dir / "MES_1m.parquet")
+
+    def _gap_fill_1s_ib(self) -> None:
+        """Fill recent 1s bars from IB: covers what Databento can't serve (last few hours).
+
+        Uses a separate IB connection (client_id + 1) so it doesn't interfere with the
+        main session connection. Called in start() after _load_parquets(), before the
+        main retry loop. Skips instruments with an empty parquet — run seed script first.
+        """
+        from ib_insync import IB, Contract as _IBContract, util as _util
+        now = pd.Timestamp.now(tz="America/New_York")
+        end_dt = now - pd.Timedelta(minutes=2)  # avoid requesting in-progress bars
+
+        pairs = [
+            ("MNQ", "_mnq_1s_df", "MNQ_1s.parquet", self._mnq_conid),
+            ("MES", "_mes_1s_df", "MES_1s.parquet", self._mes_conid),
+        ]
+        # Check if any fill is needed before opening an IB connection
+        needs_fill = any(
+            not getattr(self, df_attr).empty and
+            (end_dt - getattr(self, df_attr).index[-1]).total_seconds() > 60
+            for _, df_attr, _, _ in pairs
+        )
+        if not needs_fill:
+            return
+
+        ib = IB()
+        try:
+            ib.connect(self._host, self._port, clientId=self._client_id + 1)
+            for instrument, df_attr, parquet_name, conid in pairs:
+                try:
+                    df = getattr(self, df_attr)
+                    if df.empty:
+                        print(f"[gap_fill_1s_ib] {instrument}: no seed data — skipping", flush=True)
+                        continue
+                    earliest = pd.Timestamp(_1S_EARLIEST, tz="America/New_York")
+                    start_dt = max(df.index[-1], earliest)
+                    if (end_dt - start_dt).total_seconds() <= 60:
+                        continue
+                    contract = _IBContract(conId=int(conid), exchange="CME")
+                    all_bars: list = []
+                    chunk_end = end_dt
+                    while chunk_end > start_dt:
+                        if self._stopping:
+                            break
+                        chunk_start = max(start_dt, chunk_end - pd.Timedelta(seconds=_IB_1S_CHUNK_SECONDS))
+                        chunk_s = max(1, int((chunk_end - chunk_start).total_seconds()))
+                        bars = ib.reqHistoricalData(
+                            contract,
+                            endDateTime=chunk_end.strftime("%Y%m%d %H:%M:%S"),
+                            durationStr=f"{chunk_s} S",
+                            barSizeSetting="1 secs",
+                            whatToShow="TRADES",
+                            useRTH=False,
+                            formatDate=2,
+                        )
+                        if bars:
+                            all_bars.extend(bars)
+                        chunk_end = chunk_start
+                    if not all_bars:
+                        print(f"[gap_fill_1s_ib] {instrument}: 0 bars returned", flush=True)
+                        continue
+                    new_df = _util.df(all_bars).rename(columns={
+                        "date": "datetime", "open": "Open", "high": "High",
+                        "low": "Low", "close": "Close", "volume": "Volume",
+                    }).set_index("datetime")
+                    if new_df.index.tzinfo is None:
+                        new_df.index = new_df.index.tz_localize("America/New_York")
+                    else:
+                        new_df.index = new_df.index.tz_convert("America/New_York")
+                    combined = pd.concat([df, new_df[["Open", "High", "Low", "Close", "Volume"]]]).sort_index()
+                    combined = combined[~combined.index.duplicated(keep="last")]
+                    setattr(self, df_attr, combined)
+                    self._bar_data_dir.mkdir(parents=True, exist_ok=True)
+                    combined.to_parquet(self._bar_data_dir / parquet_name)
+                    print(f"[gap_fill_1s_ib] {instrument}: +{len(new_df)} 1s bars", flush=True)
+                except Exception as exc:
+                    print(f"[gap_fill_1s_ib] {instrument}: error: {exc}", flush=True)
+        except Exception as exc:
+            print(f"[gap_fill_1s_ib] connect error: {exc}", flush=True)
+        finally:
+            try:
+                if ib.isConnected():
+                    ib.disconnect()
+            except Exception:
+                pass
 
     def _bar_timestamp(self, bar) -> pd.Timestamp:
         ts = pd.Timestamp(getattr(bar, "date", None) or bar.name)
@@ -184,6 +294,22 @@ class IbRealtimeSource:
         self._mnq_1m_df = pd.concat([self._mnq_1m_df, row])
         self._mnq_1m_df = self._mnq_1m_df[~self._mnq_1m_df.index.duplicated(keep="last")]
         self._mnq_1m_df.to_parquet(self._bar_data_dir / "MNQ_1m.parquet")
+        if self._mnq_1s_pending:
+            rows = [[p["open"], p["high"], p["low"], p["close"], p["volume"]]
+                    for p in self._mnq_1s_pending]
+            ts_list = [p["second_ts"] for p in self._mnq_1s_pending]
+            new_1s = pd.DataFrame(
+                rows, columns=["Open", "High", "Low", "Close", "Volume"],
+                index=pd.DatetimeIndex(ts_list),
+            )
+            self._mnq_1s_session_df = pd.concat([self._mnq_1s_session_df, new_1s]).sort_index()
+            self._mnq_1s_session_df = self._mnq_1s_session_df[
+                ~self._mnq_1s_session_df.index.duplicated(keep="last")
+            ]
+            session_path = self._bar_data_dir / f"MNQ_1s_session_{self._session_date}.parquet"
+            self._mnq_1s_session_df.to_parquet(session_path)
+            self._mnq_1s_pending.clear()
+        self._mes_tick_bar = None  # reset alongside _mnq_tick_bar (same minute boundary)
         # Reset second accumulator so last second of expiring minute does not bleed into the next
         self._mnq_tick_bar = None
         from strategy_smt import set_bar_data
@@ -205,6 +331,21 @@ class IbRealtimeSource:
         self._mes_1m_df = pd.concat([self._mes_1m_df, row])
         self._mes_1m_df = self._mes_1m_df[~self._mes_1m_df.index.duplicated(keep="last")]
         self._mes_1m_df.to_parquet(self._bar_data_dir / "MES_1m.parquet")
+        if self._mes_1s_pending:
+            rows = [[p["open"], p["high"], p["low"], p["close"], p["volume"]]
+                    for p in self._mes_1s_pending]
+            ts_list = [p["second_ts"] for p in self._mes_1s_pending]
+            new_1s = pd.DataFrame(
+                rows, columns=["Open", "High", "Low", "Close", "Volume"],
+                index=pd.DatetimeIndex(ts_list),
+            )
+            self._mes_1s_session_df = pd.concat([self._mes_1s_session_df, new_1s]).sort_index()
+            self._mes_1s_session_df = self._mes_1s_session_df[
+                ~self._mes_1s_session_df.index.duplicated(keep="last")
+            ]
+            session_path = self._bar_data_dir / f"MES_1s_session_{self._session_date}.parquet"
+            self._mes_1s_session_df.to_parquet(session_path)
+            self._mes_1s_pending.clear()
         from strategy_smt import set_bar_data
         set_bar_data(self._mnq_1m_df, self._mes_1m_df)
 
@@ -214,7 +355,14 @@ class IbRealtimeSource:
         t = ticker.tickByTicks[-1]
         second_ts = self._tick_second_ts(t)
         minute_ts = second_ts.floor("min")
-        self._mes_partial_1m = self._update_partial_1m(self._mes_partial_1m, t.price, t.size, minute_ts)
+        self._mes_tick_bar, mes_finalized = self._update_tick_accumulator(
+            self._mes_tick_bar, t.price, t.size, second_ts
+        )
+        if mes_finalized is not None:
+            self._mes_1s_pending.append(mes_finalized)
+        self._mes_partial_1m = self._update_partial_1m(
+            self._mes_partial_1m, t.price, t.size, minute_ts
+        )
 
     def _on_mnq_tick(self, ticker) -> None:
         if not ticker.tickByTicks:
@@ -228,6 +376,8 @@ class IbRealtimeSource:
         if finalized is not None and self._mnq_partial_1m is not None:
             bar_row = self._partial_1m_to_bar_row(self._mnq_partial_1m, finalized["second_ts"])
             self._on_bar(bar_row, self._mes_partial_1m)
+        if finalized is not None:
+            self._mnq_1s_pending.append(finalized)
         self._mnq_partial_1m = self._update_partial_1m(self._mnq_partial_1m, t.price, t.size, minute_ts)
 
     def _setup_subscriptions(self, mnq_contract, mes_contract) -> None:
@@ -249,9 +399,13 @@ class IbRealtimeSource:
         mes_tick.updateEvent += self._on_mes_tick
 
     def start(self) -> None:
-        import time
+        import asyncio, time
         from ib_insync import IB, Future, util
+        # ib_insync requires an asyncio event loop in the calling thread.
+        # Daemon threads have none — create one before any IB calls.
+        asyncio.set_event_loop(asyncio.new_event_loop())
         self._load_parquets()
+        self._gap_fill_1s_ib()
         mnq_contract = Future(conId=int(self._mnq_conid), exchange="CME")
         mes_contract = Future(conId=int(self._mes_conid), exchange="CME")
         for attempt in range(self._max_retries):

@@ -55,6 +55,23 @@ Bug fix + enhancement: correct all PMT payload field names/values (`data`/`buy`/
 - Alignment score: 10/10
 
 
+## Feature: 1s Bar Accumulation + Pre-session IB Startup
+
+**Status**: ✅ Complete
+**Plan File**: `.agents/plans/1s-bar-accumulation.md`
+
+1s OHLCV bar accumulation and persistence for MNQ/MES; Databento + IB gap-fill pipeline; run-as-module comment on orchestrator/main.py; pre-session IB accumulator started at orchestrator boot so 1m bars accumulate pre-market and the 3-day historical seed fills immediately on startup. 31 new tests added; 1054 passed / 2 pre-existing integration failures (require live IB Gateway) in full suite.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/1s-bar-accumulation.md`
+- 14/14 tasks completed; 31 new tests (31/31 passing); 0 regressions
+- Two minor divergences: existing test regex loosened for expanded error message; sleep assertion updated for pre-session IB stop timing
+- Manual tests (live Databento API + live IB Gateway) pending — environment constraint, not a code gap
+- Alignment score: 9/10
+
+---
+
 ## Feature: Tradovate Live Trading via PickMyTrade
 
 **Status**: ✅ Planned
@@ -1495,3 +1512,12 @@ Secondary: **`min_test_pnl` > 0** (all qualified folds profitable), **Sharpe ≥
 - Detailed implementation summary
 - Divergences and resolutions
 - Test results and metrics
+
+---
+
+## Feature: 1s Bar Accumulation and Persistence (IB Realtime + Databento Gap-Fill)
+
+### Planning Phase
+**Status**: ✅ Planned
+**Started**: 2026-05-07
+**Plan File**: `.agents/plans/1s-bar-accumulation.md`

@@ -18,6 +18,8 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
 
 import pandas as pd
 
@@ -26,11 +28,10 @@ from data.sources import IBGatewaySource, DatabentSource
 # ── USER CONFIGURATION ──────────────────────────────────────────────────────
 TICKERS = ["MNQ", "MES"]
 
-# IB conIds for the active quarterly contracts.
-# MNQM6/MESM6 expire 2026-06-18 — update to MNQU6/MESU6 (793356225/793356217) after rollover.
+# IB conIds for the active quarterly contracts — set MNQ_CONID / MES_CONID in .env.
 CONIDS = {
-    "MNQ": "770561201",   # MNQM6 (Jun 2026)
-    "MES": "770561194",   # MESM6 (Jun 2026)
+    "MNQ": os.environ.get("MNQ_CONID", ""),
+    "MES": os.environ.get("MES_CONID", ""),
 }
 
 BACKTEST_START = "2024-01-01"

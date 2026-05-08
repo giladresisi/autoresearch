@@ -44,10 +44,9 @@ IB_PORT      = 4002
 # Use a different client ID to avoid conflicting with signal_smt.py (which uses 15)
 IB_CLIENT_ID = int(os.environ.get("AUTOMATION_IB_CLIENT_ID", "20"))
 
-# ── Contract identifiers (quarterly; update after rollover) ───────────────────
-# MNQM6/MESM6 expire 2026-06-18; next: MNQU6=793356225, MESU6=793356217
-MNQ_CONID = "770561201"
-MES_CONID = "770561194"
+# ── Contract identifiers (quarterly; set MNQ_CONID / MES_CONID in .env) ──────
+MNQ_CONID = os.environ.get("MNQ_CONID", "")
+MES_CONID = os.environ.get("MES_CONID", "")
 
 # ── Session window ───────────────────────────────────────────────────────────
 SESSION_START      = "09:00"   # ET
@@ -970,6 +969,9 @@ def main() -> None:
     global _hypothesis_manager, _hypothesis_generated
     global _hist_daily_df
     global _smtv2_pipeline, _smtv2_dispatcher
+
+    if not MNQ_CONID or not MES_CONID:
+        raise RuntimeError("MNQ_CONID and MES_CONID must be set in .env")
 
     BAR_DATA_DIR.mkdir(parents=True, exist_ok=True)
 

@@ -259,3 +259,256 @@ def test_ibgateway_disconnected_error_not_retried(tmp_path):
 
     # connect() should only be called once — no retries after IbGatewayDisconnectedError
     assert connect_calls[0] == 1
+
+
+# ── 1s accumulation tests ────────────────────────────────────────────────────
+
+def _make_bar_mock(ts_str: str) -> MagicMock:
+    """Return a mock 1m bar for use with _on_mnq_1m_bar / _on_mes_1m_bar."""
+    bar = MagicMock()
+    bar.date = pd.Timestamp(ts_str, tz="America/New_York")
+    bar.open = 20000.0
+    bar.high = 20010.0
+    bar.low = 19990.0
+    bar.close = 20005.0
+    bar.volume = 100.0
+    return bar
+
+
+def test_mes_tick_bar_finalizes_on_second_boundary(tmp_path):
+    """Two MES ticks at different seconds: first tick bar finalizes when second tick arrives."""
+    src = _make_source(tmp_path)
+    ts1 = pd.Timestamp("2026-05-01 09:30:00", tz="UTC")
+    ts2 = pd.Timestamp("2026-05-01 09:30:01", tz="UTC")
+
+    def _make_ticker(ts, price):
+        tick = MagicMock()
+        tick.time = ts
+        tick.price = price
+        tick.size = 1.0
+        t = MagicMock()
+        t.tickByTicks = [tick]
+        return t
+
+    src._on_mes_tick(_make_ticker(ts1, 20000.0))
+    assert len(src._mes_1s_pending) == 0
+    src._on_mes_tick(_make_ticker(ts2, 20005.0))
+    assert len(src._mes_1s_pending) == 1
+    bar = src._mes_1s_pending[0]
+    assert bar["open"] == 20000.0
+    assert bar["close"] == 20000.0
+    assert bar["volume"] == 1.0
+
+
+def test_mes_tick_bar_same_second_accumulates(tmp_path):
+    """Two MES ticks in same second: _mes_1s_pending stays empty, accumulator volume=2."""
+    src = _make_source(tmp_path)
+    ts = pd.Timestamp("2026-05-01 09:30:00", tz="UTC")
+
+    def _make_ticker(price):
+        tick = MagicMock()
+        tick.time = ts
+        tick.price = price
+        tick.size = 1.0
+        t = MagicMock()
+        t.tickByTicks = [tick]
+        return t
+
+    src._on_mes_tick(_make_ticker(20000.0))
+    src._on_mes_tick(_make_ticker(20005.0))
+    assert len(src._mes_1s_pending) == 0
+    assert src._mes_tick_bar["volume"] == 2.0
+
+
+def test_mnq_on_tick_appends_to_1s_pending(tmp_path):
+    """Crossing a second boundary for MNQ must append to _mnq_1s_pending."""
+    src = _make_source(tmp_path)
+    ts1 = pd.Timestamp("2026-05-01 09:30:00", tz="UTC")
+    ts2 = pd.Timestamp("2026-05-01 09:30:01", tz="UTC")
+
+    def _make_ticker(ts, price):
+        tick = MagicMock()
+        tick.time = ts
+        tick.price = price
+        tick.size = 1.0
+        t = MagicMock()
+        t.tickByTicks = [tick]
+        return t
+
+    # Seed partial 1m so _on_bar fires (not required for 1s pending)
+    src._mnq_partial_1m = {
+        "open": 20000.0, "high": 20000.0, "low": 20000.0, "close": 20000.0,
+        "volume": 1.0, "minute_ts": pd.Timestamp("2026-05-01 09:30:00", tz="America/New_York"),
+    }
+    src._on_mnq_tick(_make_ticker(ts1, 20000.0))
+    assert len(src._mnq_1s_pending) == 0  # first tick initialises bar, nothing finalized yet
+    with patch("strategy_smt.set_bar_data"):
+        src._on_mnq_tick(_make_ticker(ts2, 20005.0))
+    assert len(src._mnq_1s_pending) == 1
+
+
+def test_on_mnq_1m_bar_flushes_1s_pending_to_session_parquet(tmp_path):
+    """When _mnq_1s_pending has bars, _on_mnq_1m_bar must write a session parquet and clear pending."""
+    src = _make_source(tmp_path)
+    ts1 = _second_ts("2026-05-08 09:30:00")
+    ts2 = _second_ts("2026-05-08 09:30:01")
+    src._mnq_1s_pending = [
+        {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0, "second_ts": ts1},
+        {"open": 2.0, "high": 2.0, "low": 2.0, "close": 2.0, "volume": 1.0, "second_ts": ts2},
+    ]
+
+    bar = _make_bar_mock("2026-05-08 09:31:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._on_mnq_1m_bar([bar], True)
+
+    assert len(src._mnq_1s_pending) == 0
+    assert len(src._mnq_1s_session_df) == 2
+    # Session parquet written; main MNQ_1s.parquet NOT written
+    session_files = list(tmp_path.glob("MNQ_1s_session_*.parquet"))
+    assert len(session_files) == 1
+    assert not (tmp_path / "MNQ_1s.parquet").exists()
+
+
+def test_on_mes_1m_bar_flushes_1s_pending_to_session_parquet(tmp_path):
+    """Symmetric test for MES: _on_mes_1m_bar must flush _mes_1s_pending to session parquet."""
+    src = _make_source(tmp_path)
+    ts1 = _second_ts("2026-05-08 09:30:00")
+    ts2 = _second_ts("2026-05-08 09:30:01")
+    src._mes_1s_pending = [
+        {"open": 3.0, "high": 3.0, "low": 3.0, "close": 3.0, "volume": 2.0, "second_ts": ts1},
+        {"open": 4.0, "high": 4.0, "low": 4.0, "close": 4.0, "volume": 2.0, "second_ts": ts2},
+    ]
+
+    bar = _make_bar_mock("2026-05-08 09:31:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._on_mes_1m_bar([bar], True)
+
+    assert len(src._mes_1s_pending) == 0
+    assert len(src._mes_1s_session_df) == 2
+    session_files = list(tmp_path.glob("MES_1s_session_*.parquet"))
+    assert len(session_files) == 1
+    assert not (tmp_path / "MES_1s.parquet").exists()
+
+
+def test_on_mnq_1m_bar_resets_mes_tick_bar(tmp_path):
+    """_on_mnq_1m_bar must reset _mes_tick_bar to None at the 1m boundary."""
+    src = _make_source(tmp_path)
+    src._mes_tick_bar = {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+                         "second_ts": _second_ts("2026-05-08 09:30:59")}
+
+    bar = _make_bar_mock("2026-05-08 09:31:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._on_mnq_1m_bar([bar], True)
+
+    assert src._mes_tick_bar is None
+
+
+def test_load_parquets_loads_1s_files(tmp_path):
+    """_load_parquets() must load MNQ_1s.parquet and MES_1s.parquet when they exist."""
+    src = _make_source(tmp_path)
+    ts = pd.Timestamp("2026-05-01 09:30:00", tz="America/New_York")
+    df = pd.DataFrame(
+        {"Open": [100.0], "High": [101.0], "Low": [99.0], "Close": [100.5], "Volume": [500.0]},
+        index=pd.DatetimeIndex([ts]),
+    )
+    df.to_parquet(tmp_path / "MNQ_1s.parquet")
+    df.to_parquet(tmp_path / "MES_1s.parquet")
+    src._load_parquets()
+    assert not src._mnq_1s_df.empty
+    assert not src._mes_1s_df.empty
+    assert len(src._mnq_1s_df) == 1
+
+
+def test_mnq_1s_df_property_returns_loaded_df(tmp_path):
+    """mnq_1s_df property must return the dataframe loaded by _load_parquets."""
+    src = _make_source(tmp_path)
+    ts = pd.Timestamp("2026-05-01 09:30:00", tz="America/New_York")
+    df = pd.DataFrame(
+        {"Open": [100.0], "High": [101.0], "Low": [99.0], "Close": [100.5], "Volume": [500.0]},
+        index=pd.DatetimeIndex([ts]),
+    )
+    df.to_parquet(tmp_path / "MNQ_1s.parquet")
+    src._load_parquets()
+    assert len(src.mnq_1s_df) == 1
+    assert src.mnq_1s_df is src._mnq_1s_df
+
+
+def test_1s_pending_empty_does_not_write_session_parquet(tmp_path):
+    """When _mnq_1s_pending is empty, no session parquet should be written."""
+    src = _make_source(tmp_path)
+    assert len(src._mnq_1s_pending) == 0
+
+    bar = _make_bar_mock("2026-05-08 09:31:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._on_mnq_1m_bar([bar], True)
+
+    session_files = list(tmp_path.glob("MNQ_1s_session_*.parquet"))
+    assert len(session_files) == 0
+
+
+# ── _gap_fill_1s_ib tests ────────────────────────────────────────────────────
+
+def test_gap_fill_1s_ib_skips_when_empty_parquet(tmp_path):
+    """_gap_fill_1s_ib must not open an IB connection when both parquets are empty."""
+    src = _make_source(tmp_path)
+    # _mnq_1s_df and _mes_1s_df are already empty from __init__
+
+    with patch("ib_insync.IB") as mock_ib_cls:
+        src._gap_fill_1s_ib()
+
+    mock_ib_cls.assert_not_called()
+
+
+def test_gap_fill_1s_ib_skips_when_already_current(tmp_path):
+    """_gap_fill_1s_ib must not open an IB connection when parquets are already current."""
+    src = _make_source(tmp_path)
+    # Set last bar to 1 minute ago (within the 2-minute buffer → already current)
+    recent_ts = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(minutes=1)
+    src._mnq_1s_df = pd.DataFrame(
+        {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0]},
+        index=pd.DatetimeIndex([recent_ts]),
+    )
+    src._mes_1s_df = pd.DataFrame(
+        {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0]},
+        index=pd.DatetimeIndex([recent_ts]),
+    )
+
+    with patch("ib_insync.IB") as mock_ib_cls:
+        src._gap_fill_1s_ib()
+
+    mock_ib_cls.assert_not_called()
+
+
+def test_gap_fill_1s_ib_paginates_in_1800s_chunks(tmp_path):
+    """_gap_fill_1s_ib must call reqHistoricalData with barSizeSetting="1 secs" and chunk ≤ 1800s."""
+    src = _make_source(tmp_path)
+    # Set last bar to 1 hour ago so a fill is needed
+    old_ts = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(hours=1)
+    src._mnq_1s_df = pd.DataFrame(
+        {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0]},
+        index=pd.DatetimeIndex([old_ts]),
+    )
+    # MES stays empty so only MNQ triggers the fill
+
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+    mock_ib.reqHistoricalData.return_value = []
+
+    with patch("ib_insync.IB", return_value=mock_ib), \
+         patch("ib_insync.Contract"):
+        src._gap_fill_1s_ib()
+
+    assert mock_ib.connect.called
+    calls = mock_ib.reqHistoricalData.call_args_list
+    assert len(calls) >= 1
+    for c in calls:
+        kw = c.kwargs if c.kwargs else {}
+        args = c.args if c.args else ()
+        # barSizeSetting may be positional or keyword
+        bar_size = kw.get("barSizeSetting") or (args[2] if len(args) > 2 else None)
+        assert bar_size == "1 secs", f"Expected '1 secs', got {bar_size!r}"
+        duration_str = kw.get("durationStr") or (args[1] if len(args) > 1 else None)
+        assert duration_str is not None and duration_str.endswith(" S"), \
+            f"Expected duration ending in ' S', got {duration_str!r}"
+        seconds = int(duration_str.replace(" S", ""))
+        assert seconds <= 1800, f"Chunk {seconds}s exceeds 1800s limit"

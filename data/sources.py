@@ -183,26 +183,70 @@ class DatabentSource:
         interval: str = "5m",
         **kwargs,
     ) -> pd.DataFrame | None:
-        if interval not in ("1m", "5m"):
+        if interval not in ("1m", "5m", "1s"):
             raise ValueError(
-                f"DatabentSource only supports 1m and 5m intervals, got {interval!r}"
+                f"DatabentSource only supports 1m, 5m, and 1s intervals, got {interval!r}"
             )
         import databento as db
+        schema = "ohlcv-1s" if interval == "1s" else "ohlcv-1m"
         try:
             client = db.Historical(key=self._api_key)
             data = client.timeseries.get_range(
                 dataset="GLBX.MDP3",
                 symbols=[ticker],
-                schema="ohlcv-1m",
+                schema=schema,
                 start=start,
                 end=end,
                 stype_in="continuous",
             )
             df = data.to_df()
         except Exception as exc:
-            import sys
-            print(f"DatabentSource: error fetching {ticker}: {exc}", file=sys.stderr)
-            return None
+            import re, sys
+            exc_str = str(exc)
+            # Databento returns 422 when `end` exceeds the available or licensed range.
+            # Both error codes embed a suggested cutoff — retry once with it.
+            # data_end_after_available_end: calendar limit
+            # dataset_unavailable_range:    subscription/license limit
+            _needs_retry = (
+                "data_end_after_available_end" in exc_str
+                or "dataset_unavailable_range" in exc_str
+            )
+            if _needs_retry:
+                # Pattern 1: "data available up to 'YYYY-MM-DD[T ]HH:MM:SS...'"
+                # (Databento sometimes omits the T/space separator: '2026-05-0808:30:00+00:00')
+                m = re.search(
+                    r"data available up to '(\d{4}-\d{2}-\d{2})[T ]?(\d{2}:\d{2}:\d{2}[^']*)'",
+                    exc_str,
+                )
+                # Pattern 2: "Try again with an end time before YYYY-MM-DDTHH:MM:SS..."
+                if not m:
+                    m2 = re.search(
+                        r"end time before (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^\s]*)",
+                        exc_str,
+                    )
+                    available_end = m2.group(1) if m2 else None
+                else:
+                    available_end = f"{m.group(1)}T{m.group(2)}"
+                if available_end:
+                    try:
+                        data = client.timeseries.get_range(
+                            dataset="GLBX.MDP3",
+                            symbols=[ticker],
+                            schema=schema,
+                            start=start,
+                            end=available_end,
+                            stype_in="continuous",
+                        )
+                        df = data.to_df()
+                    except Exception as retry_exc:
+                        print(f"DatabentSource: retry failed for {ticker}: {retry_exc}", file=sys.stderr)
+                        return None
+                else:
+                    print(f"DatabentSource: error fetching {ticker}: {exc}", file=sys.stderr)
+                    return None
+            else:
+                print(f"DatabentSource: error fetching {ticker}: {exc}", file=sys.stderr)
+                return None
 
         if df.empty:
             return None
