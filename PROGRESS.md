@@ -1515,6 +1515,15 @@ Secondary: **`min_test_pnl` > 0** (all qualified folds profitable), **Sharpe ≥
 
 ---
 
+## Feature: Session Indexing System
+
+### Planning Phase
+**Status**: ✅ Planned
+**Started**: 2026-05-11
+**Plan File**: `.agents/plans/session-indexing.md`
+
+---
+
 ## Feature: 1s Bar Accumulation and Persistence (IB Realtime + Databento Gap-Fill)
 
 ### Planning Phase
