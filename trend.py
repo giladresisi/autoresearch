@@ -357,25 +357,29 @@ def run_trend(
                             "price": bar_close, "level": "secondary"}
             return None
 
-        # ---- 3c: secondary cautious — 5m confirmation for ATH levels, else 1m ----
+        # ---- 3c: secondary cautious — 10m/20m confirmation for ATH levels, else 1m ----
         if cautious_state in ("secondary", "yes"):
             _ath_names = {"day_high", "week_high"}
             if _lv2 in _ath_names:
-                # ATH-equivalent secondary level: require 10m bar confirmation
+                # ATH-equivalent secondary level: 10m confirmation normally, 20m when
+                # the position has already gained >100 pts (trend continuation signal).
+                _fill_price = float(position.get("active", {}).get("fill_price", 0.0))
+                _gain = (bar_mid - _fill_price) if direction == "up" else (_fill_price - bar_mid)
+                _conf_minutes = 20 if _gain > 100 else 10
                 ts = pd.Timestamp(now)
-                if ts.minute % 10 == 0:
-                    ten_start = ts - pd.Timedelta(minutes=10)
-                    ten_bars = mnq_1m_recent[mnq_1m_recent.index >= ten_start]
-                    if not ten_bars.empty:
-                        ten_open  = float(ten_bars["Open"].iloc[0])
-                        ten_close = float(ten_bars["Close"].iloc[-1])
-                        opposite_body = (ten_close < ten_open) if direction == "up" \
-                                        else (ten_close > ten_open)
+                if ts.minute % _conf_minutes == 0:
+                    conf_start = ts - pd.Timedelta(minutes=_conf_minutes)
+                    conf_bars = mnq_1m_recent[mnq_1m_recent.index >= conf_start]
+                    if not conf_bars.empty:
+                        conf_open  = float(conf_bars["Open"].iloc[0])
+                        conf_close = float(conf_bars["Close"].iloc[-1])
+                        opposite_body = (conf_close < conf_open) if direction == "up" \
+                                        else (conf_close > conf_open)
                         if opposite_body:
                             _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                             save_position(position)
                             save_hypothesis(hypothesis)
-                            return _market_close_signal(now, bar_mid, reason="cautious-10m-break", close_reason=_cr2)
+                            return _market_close_signal(now, bar_mid, reason=f"cautious-{_conf_minutes}m-break", close_reason=_cr2)
             else:
                 last_opp = _last_opposite_bar(mnq_1m_recent, bar_time_str, direction)
                 if last_opp is not None:
