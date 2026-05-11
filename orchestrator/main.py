@@ -198,11 +198,12 @@ _PRE_SESSION_IB_STOP_EARLY_SECS = 30  # release client slot before session subpr
 
 def _start_pre_session_ib(
     bar_data_dir: Path,
-) -> "tuple[object, _threading.Thread] | tuple[None, None]":
+) -> "tuple[object, _threading.Thread, list] | tuple[None, None, list]":
     """Start IbRealtimeSource in a daemon thread for pre-market 1m bar accumulation.
 
-    Returns (None, None) when MNQ_CONID or MES_CONID is absent from the environment
-    (signal-only / Databento-only mode — graceful degradation).
+    Returns (source, thread, thread_exc) where thread_exc is a one-element list that
+    is populated with the exception if the thread exits with an error.
+    Returns (None, None, [None]) when MNQ_CONID or MES_CONID is absent.
     """
     import os as _os2
     mnq_conid = _os2.environ.get("MNQ_CONID")
@@ -212,7 +213,7 @@ def _start_pre_session_ib(
             "[ORCH] MNQ_CONID/MES_CONID not set — skipping pre-session IB accumulator",
             flush=True,
         )
-        return None, None
+        return None, None, [None]
     from data.ib_realtime import IbRealtimeSource
     source = IbRealtimeSource(
         host=_os2.environ.get("IB_HOST", "127.0.0.1"),
@@ -223,11 +224,20 @@ def _start_pre_session_ib(
         bar_data_dir=bar_data_dir,
         on_bar=lambda bar, mes: None,   # accumulate only; strategy runs in session subprocess
     )
-    thread = _threading.Thread(target=source.start, daemon=True, name="pre-session-ib")
+    thread_exc: list = [None]
+
+    def _run() -> None:
+        try:
+            source.start()
+        except Exception as exc:
+            if not source._stopping:
+                thread_exc[0] = exc
+
+    thread = _threading.Thread(target=_run, daemon=True, name="pre-session-ib")
     thread.start()
     print("[ORCH] Pre-session IB accumulator started (client_id="
           f"{_os2.environ.get('PRE_SESSION_IB_CLIENT_ID', '10')})", flush=True)
-    return source, thread
+    return source, thread, thread_exc
 
 
 def _stop_pre_session_ib(source, thread: "_threading.Thread | None") -> None:
@@ -240,13 +250,34 @@ def _stop_pre_session_ib(source, thread: "_threading.Thread | None") -> None:
     print("[ORCH] Pre-session IB accumulator stopped", flush=True)
 
 
-def _sleep_until(target: datetime.datetime, label: str) -> None:
+def _sleep_until(target: datetime.datetime, label: str, ib_health_check=None) -> None:
     now = get_et_now()
     delay = (target - now).total_seconds()
     if delay > 0:
         hours = delay / 3600
         print(f"[ORCH] Sleeping {hours:.1f}h until {label}", flush=True)
-        time.sleep(delay)
+        while True:
+            now = get_et_now()
+            remaining = (target - now).total_seconds()
+            if remaining <= 0:
+                break
+            time.sleep(min(30.0, remaining))
+            if ib_health_check is not None:
+                ib_health_check()
+
+
+def _make_ib_health_check(thread: _threading.Thread, thread_exc: list):
+    """Return a callable that terminates the orchestrator if the IB thread died with an error."""
+    def check() -> None:
+        if not thread.is_alive() and thread_exc[0] is not None:
+            print(
+                f"\n[ORCH] *** CRITICAL: Pre-session IB connection failed: {thread_exc[0]}\n"
+                "[ORCH] *** The strategy cannot run until IB Gateway is active and reachable.\n"
+                "[ORCH] *** Fix IB Gateway and restart the orchestrator. Terminating now. ***",
+                flush=True,
+            )
+            sys.exit(4)
+    return check
 
 
 def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> None:
@@ -262,8 +293,9 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
             today = now.date()
 
             if not is_trading_day(today):
-                _pre_src, _pre_thr = _start_pre_session_ib(bar_data_dir)
-                _sleep_until(next_session_open(now), "next trading session")
+                _pre_src, _pre_thr, _pre_err = _start_pre_session_ib(bar_data_dir)
+                _sleep_until(next_session_open(now), "next trading session",
+                             ib_health_check=_make_ib_health_check(_pre_thr, _pre_err))
                 _stop_pre_session_ib(_pre_src, _pre_thr)
                 continue
 
@@ -271,17 +303,19 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
             grace_end_dt    = datetime.datetime.combine(today, _SESSION_CLOSE_V2).replace(tzinfo=_ET)
 
             if now < session_open_dt:
-                _pre_src, _pre_thr = _start_pre_session_ib(bar_data_dir)
+                _pre_src, _pre_thr, _pre_err = _start_pre_session_ib(bar_data_dir)
+                _ib_check = _make_ib_health_check(_pre_thr, _pre_err)
                 _stop_ts = session_open_dt - datetime.timedelta(seconds=_PRE_SESSION_IB_STOP_EARLY_SECS)
                 if now < _stop_ts:
-                    _sleep_until(_stop_ts, "pre-session IB shutdown")
+                    _sleep_until(_stop_ts, "pre-session IB shutdown", ib_health_check=_ib_check)
                 _stop_pre_session_ib(_pre_src, _pre_thr)
                 _sleep_until(session_open_dt, f"session open {_SESSION_OPEN_V2.strftime('%H:%M')} ET")
                 continue
 
             if now >= grace_end_dt:
-                _pre_src, _pre_thr = _start_pre_session_ib(bar_data_dir)
-                _sleep_until(next_session_open(now), "next trading session")
+                _pre_src, _pre_thr, _pre_err = _start_pre_session_ib(bar_data_dir)
+                _sleep_until(next_session_open(now), "next trading session",
+                             ib_health_check=_make_ib_health_check(_pre_thr, _pre_err))
                 _stop_pre_session_ib(_pre_src, _pre_thr)
                 continue
 
@@ -314,8 +348,9 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
                 )
                 sys.exit(3)
             # Post-session: accumulate overnight bars while sleeping until next session
-            _pre_src, _pre_thr = _start_pre_session_ib(bar_data_dir)
-            _sleep_until(next_session_open(get_et_now()), "next trading session")
+            _pre_src, _pre_thr, _pre_err = _start_pre_session_ib(bar_data_dir)
+            _sleep_until(next_session_open(get_et_now()), "next trading session",
+                         ib_health_check=_make_ib_health_check(_pre_thr, _pre_err))
             _stop_pre_session_ib(_pre_src, _pre_thr)
     except KeyboardInterrupt:
         print("\n[ORCH] Shutting down.", flush=True)

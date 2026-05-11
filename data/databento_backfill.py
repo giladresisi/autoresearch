@@ -29,7 +29,7 @@ def backfill_parquets(
 
     for ticker, fname in [(MNQ_TICKER, "MNQ_1m.parquet"), (MES_TICKER, "MES_1m.parquet")]:
         path     = bar_data_dir / fname
-        existing = pd.read_parquet(path) if path.exists() else _empty_df()
+        existing = _safe_read_parquet(path)
         last_bar = existing.index[-1] if not existing.empty else None
         start_ts = max(last_bar + pd.Timedelta(minutes=1), floor) if last_bar is not None else floor
         if start_ts >= cutoff:
@@ -56,6 +56,25 @@ def _empty_df() -> pd.DataFrame:
     )
 
 
+def _safe_read_parquet(path: Path) -> pd.DataFrame:
+    """Read a parquet file, returning an empty DF if missing or corrupted.
+
+    On corruption: recreates the file as empty so the next read succeeds.
+    """
+    if not path.exists():
+        return _empty_df()
+    try:
+        return pd.read_parquet(path)
+    except Exception as exc:
+        print(f"[databento_backfill] WARNING: {path.name} corrupted ({exc}); recreating empty", flush=True)
+        empty = _empty_df()
+        try:
+            empty.to_parquet(path)
+        except Exception:
+            pass
+        return empty
+
+
 MNQ_1S_SEED_START = pd.Timestamp("2026-05-01", tz="America/New_York")
 
 
@@ -78,7 +97,7 @@ def backfill_1s_parquets(
 
     for ticker, fname in [(MNQ_TICKER, "MNQ_1s.parquet"), (MES_TICKER, "MES_1s.parquet")]:
         path     = bar_data_dir / fname
-        existing = pd.read_parquet(path) if path.exists() else _empty_df()
+        existing = _safe_read_parquet(path)
         last_bar = existing.index[-1] if not existing.empty else None
         start_ts = max(last_bar + pd.Timedelta(seconds=1), floor) if last_bar is not None else floor
         # Skip if parquet is already within Databento's data lag window (~10 min)
@@ -143,10 +162,10 @@ def merge_session_1s_parquets(bar_data_dir: Path) -> None:
     try:
         for instrument, main_name, session_files, conid in merges_needed:
             main_path = bar_data_dir / main_name
-            existing  = pd.read_parquet(main_path) if main_path.exists() else _empty_df()
+            existing  = _safe_read_parquet(main_path)
 
             for session_path in session_files:
-                session_df = pd.read_parquet(session_path)
+                session_df = _safe_read_parquet(session_path)
                 if session_df.empty:
                     session_path.unlink()
                     continue

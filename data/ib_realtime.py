@@ -84,14 +84,29 @@ class IbRealtimeSource:
         )
 
     def _load_parquets(self) -> None:
-        mnq_path = self._bar_data_dir / "MNQ_1m.parquet"
-        mes_path  = self._bar_data_dir / "MES_1m.parquet"
-        self._mnq_1m_df = pd.read_parquet(mnq_path) if mnq_path.exists() else self._empty_bar_df()
-        self._mes_1m_df = pd.read_parquet(mes_path) if mes_path.exists() else self._empty_bar_df()
-        mnq_1s_path = self._bar_data_dir / "MNQ_1s.parquet"
-        mes_1s_path  = self._bar_data_dir / "MES_1s.parquet"
-        self._mnq_1s_df = pd.read_parquet(mnq_1s_path) if mnq_1s_path.exists() else self._empty_bar_df()
-        self._mes_1s_df = pd.read_parquet(mes_1s_path)  if mes_1s_path.exists()  else self._empty_bar_df()
+        for attr, filename in [
+            ("_mnq_1m_df", "MNQ_1m.parquet"),
+            ("_mes_1m_df", "MES_1m.parquet"),
+            ("_mnq_1s_df", "MNQ_1s.parquet"),
+            ("_mes_1s_df", "MES_1s.parquet"),
+        ]:
+            path = self._bar_data_dir / filename
+            if not path.exists():
+                setattr(self, attr, self._empty_bar_df())
+                continue
+            try:
+                setattr(self, attr, pd.read_parquet(path))
+            except Exception as exc:
+                print(
+                    f"[IbRealtimeSource] WARNING: {filename} corrupted ({exc}); recreating empty",
+                    flush=True,
+                )
+                empty = self._empty_bar_df()
+                try:
+                    empty.to_parquet(path)
+                except Exception:
+                    pass
+                setattr(self, attr, empty)
 
     def _gap_fill(self) -> None:
         from data.sources import IBGatewaySource
