@@ -68,6 +68,7 @@ def run_regression(
     record: bool = False,
     update_baseline: "bool | None" = None,
     skip_lock: bool = False,
+    no_plot: bool = False,
 ) -> dict:
     """Run regression for every date in regression_md_path (or dates if provided).
 
@@ -145,10 +146,11 @@ def run_regression(
             }
 
         # Plot chart for this date regardless of record/skip-record mode.
-        subprocess.run(
-            [sys.executable, "data/regression/plot_regression.py", date],
-            check=False,
-        )
+        if not no_plot:
+            subprocess.run(
+                [sys.executable, "data/regression/plot_regression.py", date],
+                check=False,
+            )
 
         results[date] = res
 
@@ -174,6 +176,10 @@ def main() -> int:
         "--skip-lock", action="store_true",
         help="When no baseline exists, skip locking and return SKIP instead of LOCK",
     )
+    parser.add_argument(
+        "--no-plot", action="store_true",
+        help="Skip chart generation",
+    )
     args = parser.parse_args()
 
     results = run_regression(
@@ -181,6 +187,7 @@ def main() -> int:
         dates=args.dates,
         record=args.update_baseline,
         skip_lock=args.skip_lock,
+        no_plot=args.no_plot,
     )
 
     all_pass = True
