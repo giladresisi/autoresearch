@@ -777,16 +777,22 @@ def compute_live_hl_mid(
     today  = now.date()
     result: dict = {}
 
-    # Day: prior calendar day 18:00 ET → now
+    # Day: day_high from prior calendar day 18:00 ET; day_low from 19:30 ET (skips
+    # the opening 1.5h which often produces outlier lows detached from the active range).
     _prior_cal = today - timedelta(days=1)
-    _day_start = pd.Timestamp(
+    _day_high_start = pd.Timestamp(
         datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 18, 0, 0),
         tz="America/New_York",
     )
-    _day_bars = combined_1m[combined_1m.index >= _day_start]
-    if not _day_bars.empty:
-        dh = float(_day_bars["High"].max())
-        dl = float(_day_bars["Low"].min())
+    _day_low_start = pd.Timestamp(
+        datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 19, 30, 0),
+        tz="America/New_York",
+    )
+    _day_high_bars = combined_1m[combined_1m.index >= _day_high_start]
+    _day_low_bars  = combined_1m[combined_1m.index >= _day_low_start]
+    if not _day_high_bars.empty:
+        dh = float(_day_high_bars["High"].max())
+        dl = float(_day_low_bars["Low"].min()) if not _day_low_bars.empty else float(_day_high_bars["Low"].min())
         result["day_high"] = dh
         result["day_low"]  = dl
         result["day_mid"]  = (dh + dl) / 2.0
