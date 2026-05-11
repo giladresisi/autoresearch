@@ -314,14 +314,6 @@ def run_trend(
 
         # ---- 3b: initial cautious — wait for 5m bar opposite body ----------
         if cautious_state == "initial":
-            armed_price = cautious_initial if cautious_initial is not None else 0.0
-
-            if _reversal(armed_price):
-                _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
-                save_position(position)
-                save_hypothesis(hypothesis)
-                return _market_close_signal(now, bar_mid, reason="cautious-reversal", close_reason=_cr1)
-
             # Upgrade to secondary if secondary level is now reached.
             if cautious_secondary is not None and _surpassed(cautious_secondary):
                 if _close_beyond(cautious_secondary):
@@ -365,28 +357,38 @@ def run_trend(
                             "price": bar_close, "level": "secondary"}
             return None
 
-        # ---- 3c: secondary cautious — 1m confirmation ----------------------
+        # ---- 3c: secondary cautious — 5m confirmation for ATH levels, else 1m ----
         if cautious_state in ("secondary", "yes"):
-            armed_price = cautious_secondary if cautious_secondary is not None else 0.0
+            _ath_names = {"day_high", "week_high"}
+            if _lv2 in _ath_names:
+                # ATH-equivalent secondary level: require 10m bar confirmation
+                ts = pd.Timestamp(now)
+                if ts.minute % 10 == 0:
+                    ten_start = ts - pd.Timedelta(minutes=10)
+                    ten_bars = mnq_1m_recent[mnq_1m_recent.index >= ten_start]
+                    if not ten_bars.empty:
+                        ten_open  = float(ten_bars["Open"].iloc[0])
+                        ten_close = float(ten_bars["Close"].iloc[-1])
+                        opposite_body = (ten_close < ten_open) if direction == "up" \
+                                        else (ten_close > ten_open)
+                        if opposite_body:
+                            _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                            save_position(position)
+                            save_hypothesis(hypothesis)
+                            return _market_close_signal(now, bar_mid, reason="cautious-10m-break", close_reason=_cr2)
+            else:
+                last_opp = _last_opposite_bar(mnq_1m_recent, bar_time_str, direction)
+                if last_opp is not None:
+                    if direction == "up":
+                        broke = bar_low <= float(last_opp["Low"])
+                    else:
+                        broke = bar_high >= float(last_opp["High"])
 
-            if _reversal(armed_price):
-                _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
-                save_position(position)
-                save_hypothesis(hypothesis)
-                return _market_close_signal(now, bar_mid, reason="cautious-reversal", close_reason=_cr2)
-
-            last_opp = _last_opposite_bar(mnq_1m_recent, bar_time_str, direction)
-            if last_opp is not None:
-                if direction == "up":
-                    broke = bar_low <= float(last_opp["Low"])
-                else:
-                    broke = bar_high >= float(last_opp["High"])
-
-                if broke:
-                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
-                    save_position(position)
-                    save_hypothesis(hypothesis)
-                    return _market_close_signal(now, bar_mid, reason="cautious-1m-break", close_reason=_cr2)
+                    if broke:
+                        _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                        save_position(position)
+                        save_hypothesis(hypothesis)
+                        return _market_close_signal(now, bar_mid, reason="cautious-1m-break", close_reason=_cr2)
 
         return None
 
