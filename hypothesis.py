@@ -699,18 +699,10 @@ def _determine_direction(
                 if not _above_mid:
                     r2b_dir = "down"
                 else:
-                    # Layer 1: post-sweep downward cross that subsequently failed → bullish
-                    _last_down_ts = _last_mid_cross_after(_last_liq_ts, upward=False)
-                    if _last_down_ts is not None:
-                        r2b_dir = "up"
-                    else:
-                        # Layer 2: pre-sweep committed bullish cross (continuation sweep)
-                        _pre_cross_ts = _first_mid_cross_before(_last_liq_ts, upward=True)
-                        if _pre_cross_ts is not None and not _opp_level_touched(
-                                _pre_cross_ts, _last_liq_ts, _low_names, check_high=False):
-                            r2b_dir = "up"
-                        else:
-                            r2b_dir = "down"  # liquidity grab → expect drop
+                    # Symmetric to the low rule: high swept + still above mid → up.
+                    # "High grab → drop" only applies when price confirms by crossing below mid,
+                    # which is already covered by the not _above_mid branch above.
+                    r2b_dir = "up"
         if r2b_dir is not None:
             reason["rule"]             = "rule2b"
             reason["last_swept_level"] = _last_liq
