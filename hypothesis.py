@@ -1001,13 +1001,54 @@ def run_hypothesis(
                 cautious_price_initial       = ""
                 cautious_price_initial_level = ""
         else:
-            cautious_price_initial       = ""
-            cautious_price_initial_level = ""
+            # No natural initial candidate: place a synthetic one at 85% of the
+            # distance to secondary so a near-target reversal still triggers an exit.
+            _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
+            if _syn_dist >= CAUTIOUS_MIN_DIST:
+                cautious_price_initial = (
+                    current_close - _syn_dist if direction == "down"
+                    else current_close + _syn_dist
+                )
+                cautious_price_initial_level = "synthetic_85pct"
+            else:
+                cautious_price_initial       = ""
+                cautious_price_initial_level = ""
     else:
-        cautious_price_secondary       = ""
-        cautious_price_secondary_level = ""
-        cautious_price_initial         = ""
-        cautious_price_initial_level   = ""
+        # Fallback: when no level sits within CAUTIOUS_SECONDARY_MAX_DIST, use the
+        # nearest terminal session level (day_low/week_low for DOWN; day_high/week_high
+        # for UP) as the secondary cautious anchor. These mark the session's ultimate
+        # liquidity boundary and are always meaningful regardless of distance.
+        _terminal_names = {"day_low", "week_low"} if direction == "down" else {"day_high", "week_high"}
+        _terminal_candidates = []
+        for liq in liquidities:
+            if liq.get("name") in _terminal_names and liq.get("kind") == "level":
+                p = liq.get("price")
+                if p is None:
+                    continue
+                if direction == "down" and p < current_close:
+                    _terminal_candidates.append((p, liq["name"]))
+                elif direction == "up" and p > current_close:
+                    _terminal_candidates.append((p, liq["name"]))
+        if _terminal_candidates:
+            _sec = max(_terminal_candidates, key=lambda x: x[0]) if direction == "down" \
+                   else min(_terminal_candidates, key=lambda x: x[0])
+            cautious_price_secondary       = _sec[0]
+            cautious_price_secondary_level = _sec[1]
+            _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
+            if _syn_dist >= CAUTIOUS_MIN_DIST:
+                cautious_price_initial = (
+                    current_close - _syn_dist if direction == "down"
+                    else current_close + _syn_dist
+                )
+                cautious_price_initial_level = "synthetic_85pct"
+            else:
+                cautious_price_initial       = ""
+                cautious_price_initial_level = ""
+        else:
+            cautious_price_secondary       = ""
+            cautious_price_secondary_level = ""
+            cautious_price_initial         = ""
+            cautious_price_initial_level   = ""
 
     # Step 8b: veto direction when entry conditions are unfavourable.
     # (1) Secondary cautious price is too close — not enough room to run.
