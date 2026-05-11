@@ -314,14 +314,6 @@ def run_trend(
 
         # ---- 3b: initial cautious — wait for 5m bar opposite body ----------
         if cautious_state == "initial":
-            armed_price = cautious_initial if cautious_initial is not None else 0.0
-
-            if _reversal(armed_price):
-                _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
-                save_position(position)
-                save_hypothesis(hypothesis)
-                return _market_close_signal(now, bar_mid, reason="cautious-reversal", close_reason=_cr1)
-
             # Upgrade to secondary if secondary level is now reached.
             if cautious_secondary is not None and _surpassed(cautious_secondary):
                 if _close_beyond(cautious_secondary):
@@ -365,28 +357,42 @@ def run_trend(
                             "price": bar_close, "level": "secondary"}
             return None
 
-        # ---- 3c: secondary cautious — 1m confirmation ----------------------
+        # ---- 3c: secondary cautious — 10m/20m confirmation for ATH levels, else 1m ----
         if cautious_state in ("secondary", "yes"):
-            armed_price = cautious_secondary if cautious_secondary is not None else 0.0
+            _ath_names = {"day_high", "week_high"}
+            if _lv2 in _ath_names:
+                # ATH-equivalent secondary level: 10m confirmation normally, 20m when
+                # the position has already gained >100 pts (trend continuation signal).
+                _fill_price = float(position.get("active", {}).get("fill_price", 0.0))
+                _gain = (bar_mid - _fill_price) if direction == "up" else (_fill_price - bar_mid)
+                _conf_minutes = 20 if _gain > 100 else 10
+                ts = pd.Timestamp(now)
+                if ts.minute % _conf_minutes == 0:
+                    conf_start = ts - pd.Timedelta(minutes=_conf_minutes)
+                    conf_bars = mnq_1m_recent[mnq_1m_recent.index >= conf_start]
+                    if not conf_bars.empty:
+                        conf_open  = float(conf_bars["Open"].iloc[0])
+                        conf_close = float(conf_bars["Close"].iloc[-1])
+                        opposite_body = (conf_close < conf_open) if direction == "up" \
+                                        else (conf_close > conf_open)
+                        if opposite_body:
+                            _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                            save_position(position)
+                            save_hypothesis(hypothesis)
+                            return _market_close_signal(now, bar_mid, reason=f"cautious-{_conf_minutes}m-break", close_reason=_cr2)
+            else:
+                last_opp = _last_opposite_bar(mnq_1m_recent, bar_time_str, direction)
+                if last_opp is not None:
+                    if direction == "up":
+                        broke = bar_low <= float(last_opp["Low"])
+                    else:
+                        broke = bar_high >= float(last_opp["High"])
 
-            if _reversal(armed_price):
-                _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
-                save_position(position)
-                save_hypothesis(hypothesis)
-                return _market_close_signal(now, bar_mid, reason="cautious-reversal", close_reason=_cr2)
-
-            last_opp = _last_opposite_bar(mnq_1m_recent, bar_time_str, direction)
-            if last_opp is not None:
-                if direction == "up":
-                    broke = bar_low <= float(last_opp["Low"])
-                else:
-                    broke = bar_high >= float(last_opp["High"])
-
-                if broke:
-                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
-                    save_position(position)
-                    save_hypothesis(hypothesis)
-                    return _market_close_signal(now, bar_mid, reason="cautious-1m-break", close_reason=_cr2)
+                    if broke:
+                        _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                        save_position(position)
+                        save_hypothesis(hypothesis)
+                        return _market_close_signal(now, bar_mid, reason="cautious-1m-break", close_reason=_cr2)
 
         return None
 

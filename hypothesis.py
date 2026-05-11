@@ -105,7 +105,10 @@ def _find_last_liquidity(
     highs; prev_close > price AND bar.Low <= price for lows).
     Returns (name, cross_timestamp) of the most recently-crossed level, or ("", None).
     """
-    meaningful_names = {"week_high", "week_low", "day_high", "day_low", "TDO", "TWO"}
+    meaningful_names = {
+        "week_high", "week_low", "day_high", "day_low", "TDO", "TWO",
+        "ny_morning_high", "ny_morning_low",
+    }
 
     level_map = {}
     for liq in liquidities:
@@ -121,7 +124,7 @@ def _find_last_liquidity(
     else:
         bars_array = mnq_1m
 
-    high_names = {"week_high", "day_high"}
+    high_names = {"week_high", "day_high", "ny_morning_high"}
     best_idx   = -1
     best_name  = ""
 
@@ -600,8 +603,8 @@ def _determine_direction(
     #   last=high + above mid + downward cross AFTER sweep (failed bearish)    => up
     #   last=high + above mid + upward cross BEFORE sweep + low not hit        => up  (continuation)
     #   last=high + above mid + else                                           => down (high grab → drop)
-    _low_names  = {"day_low", "week_low", "TDO", "TWO"}
-    _high_names = {"day_high", "week_high"}
+    _low_names  = {"day_low", "week_low", "TDO", "TWO", "ny_morning_low"}
+    _high_names = {"day_high", "week_high", "ny_morning_high"}
     _last_liq, _last_liq_ts = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_pre_session)
     if _last_liq and day_high is not None and day_low is not None:
         _daily_mid = (day_high + day_low) / 2.0
@@ -696,18 +699,10 @@ def _determine_direction(
                 if not _above_mid:
                     r2b_dir = "down"
                 else:
-                    # Layer 1: post-sweep downward cross that subsequently failed → bullish
-                    _last_down_ts = _last_mid_cross_after(_last_liq_ts, upward=False)
-                    if _last_down_ts is not None:
-                        r2b_dir = "up"
-                    else:
-                        # Layer 2: pre-sweep committed bullish cross (continuation sweep)
-                        _pre_cross_ts = _first_mid_cross_before(_last_liq_ts, upward=True)
-                        if _pre_cross_ts is not None and not _opp_level_touched(
-                                _pre_cross_ts, _last_liq_ts, _low_names, check_high=False):
-                            r2b_dir = "up"
-                        else:
-                            r2b_dir = "down"  # liquidity grab → expect drop
+                    # Symmetric to the low rule: high swept + still above mid → up.
+                    # "High grab → drop" only applies when price confirms by crossing below mid,
+                    # which is already covered by the not _above_mid branch above.
+                    r2b_dir = "up"
         if r2b_dir is not None:
             reason["rule"]             = "rule2b"
             reason["last_swept_level"] = _last_liq
@@ -774,16 +769,22 @@ def compute_live_hl_mid(
     today  = now.date()
     result: dict = {}
 
-    # Day: prior calendar day 18:00 ET → now
+    # Day: day_high from prior calendar day 18:00 ET; day_low from 19:30 ET (skips
+    # the opening 1.5h which often produces outlier lows detached from the active range).
     _prior_cal = today - timedelta(days=1)
-    _day_start = pd.Timestamp(
+    _day_high_start = pd.Timestamp(
         datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 18, 0, 0),
         tz="America/New_York",
     )
-    _day_bars = combined_1m[combined_1m.index >= _day_start]
-    if not _day_bars.empty:
-        dh = float(_day_bars["High"].max())
-        dl = float(_day_bars["Low"].min())
+    _day_low_start = pd.Timestamp(
+        datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 19, 30, 0),
+        tz="America/New_York",
+    )
+    _day_high_bars = combined_1m[combined_1m.index >= _day_high_start]
+    _day_low_bars  = combined_1m[combined_1m.index >= _day_low_start]
+    if not _day_high_bars.empty:
+        dh = float(_day_high_bars["High"].max())
+        dl = float(_day_low_bars["Low"].min()) if not _day_low_bars.empty else float(_day_high_bars["Low"].min())
         result["day_high"] = dh
         result["day_low"]  = dl
         result["day_mid"]  = (dh + dl) / 2.0
@@ -992,13 +993,54 @@ def run_hypothesis(
                 cautious_price_initial       = ""
                 cautious_price_initial_level = ""
         else:
-            cautious_price_initial       = ""
-            cautious_price_initial_level = ""
+            # No natural initial candidate: place a synthetic one at 85% of the
+            # distance to secondary so a near-target reversal still triggers an exit.
+            _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
+            if _syn_dist >= CAUTIOUS_MIN_DIST:
+                cautious_price_initial = (
+                    current_close - _syn_dist if direction == "down"
+                    else current_close + _syn_dist
+                )
+                cautious_price_initial_level = "synthetic_85pct"
+            else:
+                cautious_price_initial       = ""
+                cautious_price_initial_level = ""
     else:
-        cautious_price_secondary       = ""
-        cautious_price_secondary_level = ""
-        cautious_price_initial         = ""
-        cautious_price_initial_level   = ""
+        # Fallback: when no level sits within CAUTIOUS_SECONDARY_MAX_DIST, use the
+        # nearest terminal session level (day_low/week_low for DOWN; day_high/week_high
+        # for UP) as the secondary cautious anchor. These mark the session's ultimate
+        # liquidity boundary and are always meaningful regardless of distance.
+        _terminal_names = {"day_low", "week_low"} if direction == "down" else {"day_high", "week_high"}
+        _terminal_candidates = []
+        for liq in liquidities:
+            if liq.get("name") in _terminal_names and liq.get("kind") == "level":
+                p = liq.get("price")
+                if p is None:
+                    continue
+                if direction == "down" and p < current_close:
+                    _terminal_candidates.append((p, liq["name"]))
+                elif direction == "up" and p > current_close:
+                    _terminal_candidates.append((p, liq["name"]))
+        if _terminal_candidates:
+            _sec = max(_terminal_candidates, key=lambda x: x[0]) if direction == "down" \
+                   else min(_terminal_candidates, key=lambda x: x[0])
+            cautious_price_secondary       = _sec[0]
+            cautious_price_secondary_level = _sec[1]
+            _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
+            if _syn_dist >= CAUTIOUS_MIN_DIST:
+                cautious_price_initial = (
+                    current_close - _syn_dist if direction == "down"
+                    else current_close + _syn_dist
+                )
+                cautious_price_initial_level = "synthetic_85pct"
+            else:
+                cautious_price_initial       = ""
+                cautious_price_initial_level = ""
+        else:
+            cautious_price_secondary       = ""
+            cautious_price_secondary_level = ""
+            cautious_price_initial         = ""
+            cautious_price_initial_level   = ""
 
     # Step 8b: veto direction when entry conditions are unfavourable.
     # (1) Secondary cautious price is too close — not enough room to run.

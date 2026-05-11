@@ -18,6 +18,7 @@ _DIR_UP            = "up"
 _DIR_DOWN          = "down"
 _CONF_BAR_MINS     = 5   # default confirmation bar window
 _CONF_BAR_MINS_ATH = 15  # confirmation bar window when above session ATH
+_STOP_WICK_CAP     = 15.0  # max pts a conf-bar wick can extend the stop beyond the body
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -189,7 +190,6 @@ def run_strategy(
         if stop_entry != "" and _entry_reached:
             fill_price = float(stop_entry)
             conf_bar   = position["confirmation_bar"]
-            _STOP_WICK_CAP = 10.0
             if direction == _DIR_UP:
                 stop = max(float(conf_bar["low"]), float(conf_bar["body_low"]) - _STOP_WICK_CAP)
             else:
@@ -241,7 +241,6 @@ def run_strategy(
 
                 if approach < _MARKET_ENTRY_THRESHOLD:
                     bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
-                    _STOP_WICK_CAP = 10.0
                     if direction == _DIR_UP:
                         stop = max(float(opp_5m["low"]), float(opp_5m["body_low"]) - _STOP_WICK_CAP)
                     else:
