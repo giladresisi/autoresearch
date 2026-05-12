@@ -62,7 +62,11 @@ class JsonlFileSink:
             except (ValueError, _json.JSONDecodeError):
                 continue
             obj.pop("time", None)
-            stamped = {"logged_at": _et_now()}
+            kind = obj.pop("kind", None)
+            stamped = {}
+            if kind is not None:
+                stamped["kind"] = kind
+            stamped["logged_at"] = _et_now()
             stamped.update(obj)
             with open(self._path, "a", encoding="utf-8") as f:
                 f.write(_json.dumps(stamped) + "\n")
