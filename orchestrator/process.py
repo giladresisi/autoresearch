@@ -83,6 +83,7 @@ class ProcessManager:
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
+            errors="replace",
         )
 
     def _monitor(self, proc: subprocess.Popen) -> str:

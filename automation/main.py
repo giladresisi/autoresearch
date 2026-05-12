@@ -49,7 +49,6 @@ MNQ_CONID = os.environ.get("MNQ_CONID", "")
 MES_CONID = os.environ.get("MES_CONID", "")
 
 # ── Session window ───────────────────────────────────────────────────────────
-SESSION_START      = "09:00"   # ET
 from session_times import SESSION_OPEN, SESSION_CLOSE  # noqa: E402
 SIGNAL_SESSION_END = SESSION_CLOSE   # ET: no new signals / force-close after this time
 
@@ -99,7 +98,7 @@ _day_pdh: "float | None" = None
 _day_pdl: "float | None" = None
 _pdh_pdl_date = None  # tracks which date PDH/PDL was last computed
 
-# Derived time objects (set from SESSION_START/SIGNAL_SESSION_END strings in main())
+# Derived time objects (set from session_times in main())
 _session_start_time = None
 _session_end_time   = None
 
@@ -127,9 +126,6 @@ _move_stop_bar_counter: int  = 0
 # ── v2 pipeline env gate (set in main()) ─────────────────────────────────────
 _smtv2_pipeline: str = "v1"
 _smtv2_dispatcher: "SmtV2Dispatcher | None" = None
-
-# Session start time for V2 pipeline daily trigger — imported from session_times
-_SESSION_DAILY_TRIGGER_TIME = SESSION_OPEN
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -407,7 +403,7 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         _eqh_levels: list = []
         _eql_levels: list = []
         if EQH_ENABLED and _mnq_1m_df is not None and not _mnq_1m_df.empty:
-            _session_start_dt = pd.Timestamp(f"{today} {SESSION_START}", tz="America/New_York")
+            _session_start_dt = pd.Timestamp(datetime.datetime.combine(today, SESSION_OPEN), tz="America/New_York")
             _eqh_window_start = _session_start_dt - pd.Timedelta(days=2)
             _eqh_bars = _mnq_1m_df[
                 (_mnq_1m_df.index >= _eqh_window_start) & (_mnq_1m_df.index < _session_start_dt)
@@ -981,8 +977,8 @@ def main() -> None:
     BAR_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # Parse session window into time objects used by callbacks
-    _session_start_time = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
-    _session_end_time   = pd.Timestamp(f"2000-01-01 {SIGNAL_SESSION_END}").time()
+    _session_start_time = SESSION_OPEN
+    _session_end_time   = SIGNAL_SESSION_END
 
     _mes_partial_1m = None
 
@@ -1028,9 +1024,15 @@ def main() -> None:
     def _on_bar_1m_complete(bars) -> None:
         """Called by IbRealtimeSource after each completed 1m bar.
 
-        Drives the hypothesis rule engine: generate at the first 1m bar at/after
-        SESSION_START, then evaluate every subsequent bar.
-        Also drives the V2 SessionPipeline when SMT_PIPELINE=v2.
+        Order per bar at/after SESSION_OPEN:
+          1. V2 dispatcher on_session_start (first bar only) — runs run_daily,
+             which refreshes liquidities in daily.json and resets hypothesis.
+          2. V2 dispatcher on_1m_bar — signal evaluation.
+          3. Hypothesis generate (first bar only) — reads fresh liquidities.
+          4. Hypothesis evaluate_bar — ongoing evaluation.
+
+        run_daily must precede hypothesis.generate so the hypothesis is built
+        from today's liquidities, not yesterday's stale data.
         """
         global _hypothesis_generated
         if _hypothesis_manager is None:
@@ -1042,8 +1044,19 @@ def main() -> None:
         else:
             _bar_ts_v2 = _bar_ts_v2.tz_convert("America/New_York")
         bar_time = _bar_ts_v2.time()
-        _session_start_time_local = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
-        if not _hypothesis_generated and bar_time >= _session_start_time_local:
+
+        # Step 1 & 2: V2 dispatcher first — run_daily fires inside on_session_start.
+        if _smtv2_dispatcher is not None:
+            _mnq_df = _ib_source.mnq_1m_df
+            _mes_df = _ib_source.mes_1m_df
+            if bar_time >= SESSION_OPEN:
+                _smtv2_dispatcher.on_session_start(_bar_ts_v2, _mnq_df, _mes_df)
+            _mnq_bar = _mnq_df.iloc[-1] if not _mnq_df.empty else pd.Series(dtype=float)
+            _mes_bar = _mes_df.iloc[-1] if not _mes_df.empty else pd.Series(dtype=float)
+            _smtv2_dispatcher.on_1m_bar(_bar_ts_v2, _mnq_bar, _mes_bar, _mnq_df, _mes_df)
+
+        # Step 3 & 4: Hypothesis after run_daily has refreshed liquidities.
+        if not _hypothesis_generated and bar_time >= SESSION_OPEN:
             if _ib_source is not None:
                 _hypothesis_manager._mnq_1m_df = _ib_source.mnq_1m_df
             try:
@@ -1051,15 +1064,6 @@ def main() -> None:
             finally:
                 _hypothesis_generated = True
         _hypothesis_manager.evaluate_bar(_bar)
-
-        if _smtv2_dispatcher is not None:
-            _mnq_df = _ib_source.mnq_1m_df
-            _mes_df = _ib_source.mes_1m_df
-            if bar_time >= _SESSION_DAILY_TRIGGER_TIME:
-                _smtv2_dispatcher.on_session_start(_bar_ts_v2, _mnq_df, _mes_df)
-            _mnq_bar = _mnq_df.iloc[-1] if not _mnq_df.empty else pd.Series(dtype=float)
-            _mes_bar = _mes_df.iloc[-1] if not _mes_df.empty else pd.Series(dtype=float)
-            _smtv2_dispatcher.on_1m_bar(_bar_ts_v2, _mnq_bar, _mes_bar, _mnq_df, _mes_df)
 
     _ib_source = IbRealtimeSource(
         host=IB_HOST, port=IB_PORT, client_id=IB_CLIENT_ID,

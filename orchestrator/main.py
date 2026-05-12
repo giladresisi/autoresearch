@@ -318,29 +318,37 @@ _PIDFILE = Path(__file__).resolve().parent.parent / "orchestrator.pid"
 
 
 def _kill_stale_orchestrator() -> None:
-    """Kill the PID recorded in orchestrator.pid (if any), then write our own PID.
+    """Kill any stale orchestrator.main Python process, then record our own PID.
 
-    Uses a PID file instead of process-name scanning to avoid killing wrapper
-    processes (e.g. PowerShell or Python background-task helpers) that also have
-    'orchestrator.main' in their command line.
+    Scans all Python processes for 'orchestrator.main' in their command line,
+    excluding our own process and its direct parent (the background-task wrapper
+    whose cmdline also contains 'orchestrator.main').  PID file is written last
+    so that a competing zombie that races us here will overwrite it — we detect
+    that case on the scan instead.
     """
     import psutil
     current_pid = _os.getpid()
-    if _PIDFILE.exists():
+    try:
+        parent_pid = psutil.Process(current_pid).ppid()
+    except psutil.NoSuchProcess:
+        parent_pid = None
+    protected = {current_pid, parent_pid} if parent_pid else {current_pid}
+
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
-            stale_pid = int(_PIDFILE.read_text().strip())
-            if stale_pid != current_pid:
+            if proc.info.get("name", "").lower() not in ("python.exe", "python"):
+                continue
+            if proc.pid in protected:
+                continue
+            cmdline = proc.info.get("cmdline") or []
+            if any("orchestrator.main" in arg for arg in cmdline):
+                print(f"[orchestrator] Killing stale orchestrator (pid={proc.pid})", flush=True)
+                proc.terminate()
                 try:
-                    proc = psutil.Process(stale_pid)
-                    print(f"[orchestrator] Killing stale orchestrator (pid={stale_pid})", flush=True)
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except psutil.TimeoutExpired:
-                        proc.kill()
-                except psutil.NoSuchProcess:
-                    pass  # already dead — fine
-        except (ValueError, OSError):
+                    proc.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     _PIDFILE.write_text(str(current_pid))
 
