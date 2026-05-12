@@ -314,8 +314,40 @@ def _make_ib_health_check(thread: _threading.Thread, thread_exc: list):
     return check
 
 
+_PIDFILE = Path(__file__).resolve().parent.parent / "orchestrator.pid"
+
+
+def _kill_stale_orchestrator() -> None:
+    """Kill the PID recorded in orchestrator.pid (if any), then write our own PID.
+
+    Uses a PID file instead of process-name scanning to avoid killing wrapper
+    processes (e.g. PowerShell or Python background-task helpers) that also have
+    'orchestrator.main' in their command line.
+    """
+    import psutil
+    current_pid = _os.getpid()
+    if _PIDFILE.exists():
+        try:
+            stale_pid = int(_PIDFILE.read_text().strip())
+            if stale_pid != current_pid:
+                try:
+                    proc = psutil.Process(stale_pid)
+                    print(f"[orchestrator] Killing stale orchestrator (pid={stale_pid})", flush=True)
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except psutil.TimeoutExpired:
+                        proc.kill()
+                except psutil.NoSuchProcess:
+                    pass  # already dead — fine
+        except (ValueError, OSError):
+            pass
+    _PIDFILE.write_text(str(current_pid))
+
+
 def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> None:
-    """Main daemon loop. Ctrl+C exits cleanly; signal_smt.py is terminated if active."""
+    """Main daemon loop. Ctrl+C exits cleanly; subprocess is terminated if active."""
+    _kill_stale_orchestrator()
     if not skip_summary and summarizer is None:
         summarizer = Summarizer()
     bar_data_dir = Path(__file__).resolve().parent.parent / "data"
@@ -389,6 +421,12 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
     except KeyboardInterrupt:
         print("\n[ORCH] Shutting down.", flush=True)
         sys.exit(0)
+    finally:
+        try:
+            if _PIDFILE.exists() and _PIDFILE.read_text().strip() == str(_os.getpid()):
+                _PIDFILE.unlink()
+        except OSError:
+            pass
 
 
 def _check_setup() -> None:

@@ -26,18 +26,24 @@ class ProcessManager:
         self._relay = relay
         self._log = log_channel
 
+    def _process_name(self) -> str:
+        if isinstance(self._script, list):
+            return self._script[-1]
+        return self._script.name
+
     def run_session(self, date: datetime.date) -> str | None:
-        """Kill any running signal_smt.py, then spawn fresh; relay output; restart once on unexpected exit; stop at 13:35 ET.
+        """Kill any stale instance of this subprocess, spawn fresh, relay output, restart once on unexpected exit.
 
         Returns "ib_disconnected" if automation exited with code 2; None otherwise.
         """
+        name = self._process_name()
         _kill_existing_signal_smt(self._script, self._log)
         restarted = False
         proc = None
         try:
             while True:
                 proc = self._spawn()
-                self._log.writeln(f"[ORCH] signal_smt.py started (pid={proc.pid})")
+                self._log.writeln(f"[ORCH] {name} started (pid={proc.pid})")
                 exit_reason = self._monitor(proc)
                 if exit_reason == "scheduled_stop":
                     self._log.writeln("[ORCH] Session ended — sending terminate signal")
@@ -45,24 +51,24 @@ class ProcessManager:
                     return None
                 if exit_reason == "ib_disconnected":
                     self._log.writeln(
-                        "[ORCH] *** IB Gateway disconnected (exit code 2) — not restarting ***"
+                        f"[ORCH] *** IB Gateway disconnected (exit code 2) — not restarting ***"
                     )
                     return "ib_disconnected"
                 # Unexpected exit
                 if not restarted:
                     self._log.writeln(
-                        f"[ORCH] *** signal_smt.py exited unexpectedly (code={proc.returncode}) — restarting once ***"
+                        f"[ORCH] *** {name} exited unexpectedly (code={proc.returncode}) — restarting once ***"
                     )
                     restarted = True
                 else:
                     self._log.writeln(
-                        f"[ORCH] *** signal_smt.py exited again (code={proc.returncode}) — NOT restarting; waiting for session end ***"
+                        f"[ORCH] *** {name} exited again (code={proc.returncode}) — NOT restarting; waiting for session end ***"
                     )
                     self._wait_until_grace_end()
                     return None
         except KeyboardInterrupt:
             if proc is not None and proc.poll() is None:
-                self._log.writeln("[ORCH] Interrupt received — terminating signal_smt.py")
+                self._log.writeln(f"[ORCH] Interrupt received — terminating {name}")
                 self._terminate(proc)
             raise
 
