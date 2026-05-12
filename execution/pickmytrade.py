@@ -148,6 +148,7 @@ class PickMyTradeExecutor:
                     timeout=self._request_timeout_s,
                 )
                 if resp.status_code in (200, 201):
+                    print(f"[PMT] Order {order_id} sent OK ({resp.status_code}): {payload.get('data')} {payload.get('order_type','MKT')} @ {payload.get('price', 'mkt')}", flush=True)
                     return
                 last_exc = RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
             except Exception as exc:

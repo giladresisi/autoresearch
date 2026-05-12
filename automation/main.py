@@ -913,12 +913,14 @@ class SmtV2Dispatcher:
 
         if kind in ("new-stop-entry", "move-stop-entry"):
             if direction_v2 == "none":
+                print(f"[EMIT] {kind}: skipped — direction=none", flush=True)
                 return
             direction = "long" if direction_v2 == "up" else "short"
             position = _st.load_position()
             conf_bar = position.get("confirmation_bar", {})
             stop = conf_bar.get("body_low") if direction_v2 == "up" else conf_bar.get("body_high")
             if stop is None:
+                print(f"[EMIT] {kind}: skipped — confirmation_bar empty or missing body_low/body_high (conf_bar={conf_bar})", flush=True)
                 return
             pmt_signal = {
                 "direction": direction,
@@ -926,6 +928,7 @@ class SmtV2Dispatcher:
                 "stop_price": float(stop),
                 "stop_fill_bars": 1,
             }
+            print(f"[EMIT] {kind}: sending PMT signal {pmt_signal}", flush=True)
             if kind == "new-stop-entry":
                 _lo.place_entry(pmt_signal)
             else:
@@ -935,7 +938,9 @@ class SmtV2Dispatcher:
             direction = "long" if direction_v2 == "up" else "short"
             stop = sig.get("stop")
             if stop is None:
+                print(f"[EMIT] stop-entry-filled: skipped — no stop in signal", flush=True)
                 return
+            print(f"[EMIT] stop-entry-filled: sending place_stop_after_fill direction={direction} stop={stop}", flush=True)
             _lo.place_stop_after_fill({"direction": direction, "stop_price": float(stop)})
 
         elif kind == "market-entry":
