@@ -103,6 +103,13 @@ def _pre_session_init() -> None:
             f"[ORCH] WARNING: Databento 1s backfill failed: {exc}",
             flush=True,
         )
+    try:
+        from data.ib_realtime import gap_fill_1m_ib
+        print("[ORCH] Running IB 1m gap fill ...", flush=True)
+        gap_fill_1m_ib(bar_data_dir)
+        print("[ORCH] IB 1m gap fill complete", flush=True)
+    except Exception as exc:
+        print(f"[ORCH] WARNING: IB 1m gap fill failed: {exc}", flush=True)
 
 
 def _check_parquet_files(bar_data_dir: Path) -> None:

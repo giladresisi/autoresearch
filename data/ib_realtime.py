@@ -486,3 +486,70 @@ class IbRealtimeSource:
                 self._ib.disconnect()
         except Exception:
             pass
+
+
+def gap_fill_1m_ib(bar_data_dir: Path) -> None:
+    """Standalone 1m bar gap-fill from IB: called at orchestrator startup.
+
+    Reads IB_HOST, IB_PORT, MNQ_CONID, MES_CONID from environment.
+    Uses client_id=17 (distinct from all other IB clients in the system).
+    Skips gracefully if required env vars are absent or IB is unreachable.
+    """
+    import os
+    from data.sources import IBGatewaySource
+
+    host = os.environ.get("IB_HOST", "127.0.0.1")
+    port_str = os.environ.get("IB_PORT")
+    mnq_conid = os.environ.get("MNQ_CONID")
+    mes_conid = os.environ.get("MES_CONID")
+    if not port_str or not mnq_conid or not mes_conid:
+        print("[gap_fill_1m_ib] IB_PORT/MNQ_CONID/MES_CONID not set — skipping", flush=True)
+        return
+    port = int(port_str)
+
+    MAX_LOOKBACK_DAYS = 30
+    GAP_FILL_MAX_DAYS = 14
+
+    now = pd.Timestamp.now(tz="America/New_York")
+    today_midnight = now.normalize()
+
+    def _safe_read(path: Path) -> pd.DataFrame:
+        if not path.exists():
+            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        try:
+            return pd.read_parquet(path)
+        except Exception:
+            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+
+    def _start_ts_for(df: pd.DataFrame) -> pd.Timestamp:
+        gap_days = MAX_LOOKBACK_DAYS if df.empty else GAP_FILL_MAX_DAYS
+        floor = now - pd.Timedelta(days=gap_days)
+        if df.empty:
+            return floor
+        return max(min(df.index[-1], today_midnight), floor)
+
+    mnq_df = _safe_read(bar_data_dir / "MNQ_1m.parquet")
+    mes_df = _safe_read(bar_data_dir / "MES_1m.parquet")
+    mnq_start = _start_ts_for(mnq_df)
+    mes_start = _start_ts_for(mes_df)
+    end_str = now.isoformat()
+
+    print(f"[gap_fill_1m_ib] MNQ: gap-filling from {mnq_start.isoformat()} ...", flush=True)
+    print(f"[gap_fill_1m_ib] MES: gap-filling from {mes_start.isoformat()} ...", flush=True)
+
+    source = IBGatewaySource(host=host, port=port, client_id=17)
+    mnq_new = source.fetch(mnq_conid, mnq_start.isoformat(), end_str, interval="1m", contract_type="future_by_conid")
+    mes_new = source.fetch(mes_conid, mes_start.isoformat(), end_str, interval="1m", contract_type="future_by_conid")
+
+    bar_data_dir.mkdir(parents=True, exist_ok=True)
+    for instrument, df, new_df, fname in [
+        ("MNQ", mnq_df, mnq_new, "MNQ_1m.parquet"),
+        ("MES", mes_df, mes_new, "MES_1m.parquet"),
+    ]:
+        if new_df is None or new_df.empty:
+            print(f"[gap_fill_1m_ib] {instrument}: 0 new bars", flush=True)
+            continue
+        combined = pd.concat([df, new_df]).sort_index()
+        combined = combined[~combined.index.duplicated(keep="last")]
+        combined.to_parquet(bar_data_dir / fname)
+        print(f"[gap_fill_1m_ib] {instrument}: +{len(new_df)} bars", flush=True)
