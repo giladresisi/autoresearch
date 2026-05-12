@@ -983,14 +983,15 @@ def main() -> None:
 
     _mes_partial_1m = None
 
-    # Load historical 5m data for hypothesis rule engine
+    _smtv2_pipeline = os.environ.get("SMT_PIPELINE", "v1")
+
+    # Load historical 5m data for hypothesis rule engine (V1 only)
     _hist_mnq_df = _load_hist_mnq()
     today = pd.Timestamp.now(tz="America/New_York").date()
-    _hypothesis_manager = HypothesisManager(pd.DataFrame(), _hist_mnq_df, today)
+    if _smtv2_pipeline != "v2":
+        _hypothesis_manager = HypothesisManager(pd.DataFrame(), _hist_mnq_df, today)
     _hist_daily_df = _hist_mnq_df  # reuse 5m hist; compute_pdh_pdl uses index.date
     _hypothesis_generated = False
-
-    _smtv2_pipeline = os.environ.get("SMT_PIPELINE", "v1")
 
     # Restore open position from disk if the process was restarted mid-trade
     if POSITION_FILE.exists():
@@ -1025,18 +1026,15 @@ def main() -> None:
     def _on_bar_1m_complete(bars) -> None:
         """Called by IbRealtimeSource after each completed 1m bar.
 
-        Order per bar at/after SESSION_OPEN:
-          1. V2 dispatcher on_session_start (first bar only) — runs run_daily,
-             which refreshes liquidities in daily.json and resets hypothesis.
-          2. V2 dispatcher on_1m_bar — signal evaluation.
-          3. Hypothesis generate (first bar only) — reads fresh liquidities.
-          4. Hypothesis evaluate_bar — ongoing evaluation.
+        V2 order per bar at/after SESSION_OPEN:
+          1. V2 dispatcher on_session_start (first bar only) — runs run_daily.
+          2. V2 dispatcher on_1m_bar — emits new-hypothesis and signals.
+        V1 additionally runs HypothesisManager.generate (first bar) and evaluate_bar.
 
-        run_daily must precede hypothesis.generate so the hypothesis is built
-        from today's liquidities, not yesterday's stale data.
+        Skips entirely if IB bar data is not yet seeded (mnq_1m_df empty).
         """
         global _hypothesis_generated
-        if _hypothesis_manager is None:
+        if _hypothesis_manager is None and _smtv2_dispatcher is None:
             return
         _bar = bars[-1]
         _bar_ts_v2 = pd.Timestamp(getattr(_bar, "date", None) or _bar.name)
@@ -1046,25 +1044,36 @@ def main() -> None:
             _bar_ts_v2 = _bar_ts_v2.tz_convert("America/New_York")
         bar_time = _bar_ts_v2.time()
 
-        # Step 1 & 2: V2 dispatcher first — run_daily fires inside on_session_start.
-        if _smtv2_dispatcher is not None:
-            _mnq_df = _ib_source.mnq_1m_df
-            _mes_df = _ib_source.mes_1m_df
-            if bar_time >= SESSION_OPEN:
-                _smtv2_dispatcher.on_session_start(_bar_ts_v2, _mnq_df, _mes_df)
-            _mnq_bar = _mnq_df.iloc[-1] if not _mnq_df.empty else pd.Series(dtype=float)
-            _mes_bar = _mes_df.iloc[-1] if not _mes_df.empty else pd.Series(dtype=float)
-            _smtv2_dispatcher.on_1m_bar(_bar_ts_v2, _mnq_bar, _mes_bar, _mnq_df, _mes_df)
+        _mnq_df = _ib_source.mnq_1m_df if _ib_source is not None else pd.DataFrame()
+        _mes_df = _ib_source.mes_1m_df if _ib_source is not None else pd.DataFrame()
 
-        # Step 3 & 4: Hypothesis after run_daily has refreshed liquidities.
-        if not _hypothesis_generated and bar_time >= SESSION_OPEN:
-            if _ib_source is not None:
-                _hypothesis_manager._mnq_1m_df = _ib_source.mnq_1m_df
+        # Guard: don't run any hypothesis or daily logic until IB has seeded bar data.
+        if _mnq_df.empty:
+            return
+
+        # Step 1: V2 dispatcher session init — run_daily fires inside on_session_start.
+        # Must precede generate() so liquidities in daily.json are fresh.
+        if _smtv2_dispatcher is not None and bar_time >= SESSION_OPEN:
+            _smtv2_dispatcher.on_session_start(_bar_ts_v2, _mnq_df, _mes_df)
+
+        # Step 2: V1 only — HypothesisManager.generate writes data/sessions/{date}/hypothesis.json.
+        if _hypothesis_manager is not None and not _hypothesis_generated and bar_time >= SESSION_OPEN:
+            _hypothesis_manager._mnq_1m_df = _mnq_df
+            _hypothesis_manager._hist_mnq_df = _mnq_df
             try:
                 _hypothesis_manager.generate()
             finally:
                 _hypothesis_generated = True
-        _hypothesis_manager.evaluate_bar(_bar)
+
+        # Step 3: V2 dispatcher bar dispatch — emits new-hypothesis and signals.
+        if _smtv2_dispatcher is not None:
+            _mnq_bar = _mnq_df.iloc[-1] if not _mnq_df.empty else pd.Series(dtype=float)
+            _mes_bar = _mes_df.iloc[-1] if not _mes_df.empty else pd.Series(dtype=float)
+            _smtv2_dispatcher.on_1m_bar(_bar_ts_v2, _mnq_bar, _mes_bar, _mnq_df, _mes_df)
+
+        # Step 4: V1 only — ongoing hypothesis evaluation.
+        if _hypothesis_manager is not None:
+            _hypothesis_manager.evaluate_bar(_bar)
 
     _ib_source = IbRealtimeSource(
         host=IB_HOST, port=IB_PORT, client_id=IB_CLIENT_ID,
