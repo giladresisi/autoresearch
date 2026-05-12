@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
-from orchestrator.output import FileSink, JsonlFileSink, OutputChannel, StdoutSink
+from orchestrator.output import FileSink, JsonlFileSink, OutputChannel, StdoutSink, TimestampedFileSink
 from orchestrator.process import ProcessManager
 from orchestrator.relay import SessionRelay
 from orchestrator.scheduler import get_et_now, is_trading_day, next_session_open
@@ -41,7 +41,7 @@ def _make_session_channels(date: datetime.date) -> tuple[OutputChannel, OutputCh
 
     signal_ch = OutputChannel()
     signal_ch.add_sink(StdoutSink())
-    signal_ch.add_sink(FileSink(session_dir / "signals.log"))
+    signal_ch.add_sink(TimestampedFileSink(session_dir / "signals.log"))
     signal_ch.add_sink(JsonlFileSink(session_dir / "events.jsonl"))
 
     orch_ch = OutputChannel()

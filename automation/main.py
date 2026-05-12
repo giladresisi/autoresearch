@@ -165,7 +165,7 @@ def _format_signal_line(ts: pd.Timestamp, signal: dict, assumed_entry: float) ->
     entry_time = pd.Timestamp(signal["entry_time"])
     signal_type = signal.get("signal_type", "UNKNOWN")
     return (
-        f"[{ts.strftime('%H:%M:%S')}] SIGNAL    {signal['direction']:<5} | "
+        f"SIGNAL    {signal['direction']:<5} | "
         f"entry_time {entry_time.strftime('%H:%M:%S')} | "
         f"entry ~{assumed_entry:.2f} ({slip_label}) | "
         f"stop {signal['stop_price']:.2f} | "
@@ -188,7 +188,8 @@ def _format_exit_line(
     dur_secs = int((ts - entry_ts).total_seconds())
     dur_str = f"{dur_secs // 60}m {dur_secs % 60}s"
     return (
-        f"[{ts.strftime('%H:%M:%S')}] EXIT      {label:<6} | "
+        f"EXIT      {label:<6} | "
+        f"bar_time {ts.strftime('%H:%M:%S')} | "
         f"filled {exit_price:.2f} | "
         f"P&L {pnl_str} | "
         f"duration {dur_str} | "
@@ -200,7 +201,7 @@ def _format_stop_moved_line(ts: pd.Timestamp, reason: str, new_stop: float, old_
     """Human-readable stop-mutation log line."""
     direction = "->" if new_stop != old_stop else "="
     return (
-        f"[{ts.strftime('%H:%M:%S')}] STOP_MOVE {reason:<10} | "
+        f"STOP_MOVE {reason:<10} | "
         f"stop {old_stop:.2f} {direction} {new_stop:.2f}"
     )
 
@@ -211,7 +212,7 @@ def _format_limit_placed_line(ts: pd.Timestamp, signal: dict) -> str:
     stop_dist = abs(signal["entry_price"] - signal["stop_price"])
     rr = dist / stop_dist if stop_dist > 0 else 0.0
     return (
-        f"[{ts.strftime('%H:%M:%S')}] LIMIT_PLACED  {signal['direction']:<5} | "
+        f"LIMIT_PLACED  {signal['direction']:<5} | "
         f"entry {signal['entry_price']:.2f} | "
         f"stop {signal['stop_price']:.2f} | "
         f"TP {signal['take_profit']:.2f} | "
@@ -222,7 +223,7 @@ def _format_limit_placed_line(ts: pd.Timestamp, signal: dict) -> str:
 def _format_limit_moved_line(ts: pd.Timestamp, old: dict, new: dict) -> str:
     """Human-readable LIMIT_MOVED log line."""
     return (
-        f"[{ts.strftime('%H:%M:%S')}] LIMIT_MOVED   {new['direction']:<5} | "
+        f"LIMIT_MOVED   {new['direction']:<5} | "
         f"entry {old['entry_price']:.2f} -> {new['entry_price']:.2f} | "
         f"stop {old['stop_price']:.2f} -> {new['stop_price']:.2f} | "
         f"TP {old['take_profit']:.2f} -> {new['take_profit']:.2f}"
@@ -232,7 +233,7 @@ def _format_limit_moved_line(ts: pd.Timestamp, old: dict, new: dict) -> str:
 def _format_limit_cancelled_line(ts: pd.Timestamp, signal: dict, reason: str) -> str:
     """Human-readable LIMIT_CANCELLED log line."""
     return (
-        f"[{ts.strftime('%H:%M:%S')}] LIMIT_CANCELLED {signal['direction']:<5} | "
+        f"LIMIT_CANCELLED {signal['direction']:<5} | "
         f"entry {signal['entry_price']:.2f} | "
         f"reason {reason}"
     )
@@ -241,7 +242,7 @@ def _format_limit_cancelled_line(ts: pd.Timestamp, signal: dict, reason: str) ->
 def _format_limit_expired_line(ts: pd.Timestamp, signal: dict, missed_move: float) -> str:
     """Human-readable LIMIT_EXPIRED log line."""
     return (
-        f"[{ts.strftime('%H:%M:%S')}] LIMIT_EXPIRED  {signal['direction']:<5} | "
+        f"LIMIT_EXPIRED  {signal['direction']:<5} | "
         f"entry {signal['entry_price']:.2f} | "
         f"missed {missed_move:.1f} pts"
     )
@@ -250,7 +251,7 @@ def _format_limit_expired_line(ts: pd.Timestamp, signal: dict, missed_move: floa
 def _format_limit_filled_line(ts: pd.Timestamp, evt: dict) -> str:
     """Human-readable LIMIT_FILLED log line."""
     return (
-        f"[{ts.strftime('%H:%M:%S')}] LIMIT_FILLED  {evt['direction']:<5} | "
+        f"LIMIT_FILLED  {evt['direction']:<5} | "
         f"filled {evt['filled_price']:.2f} | "
         f"orig {evt['original_limit_price']:.2f} | "
         f"queue_s {evt['time_in_queue_secs']:.0f}"

@@ -6,14 +6,14 @@ from pathlib import Path
 
 from orchestrator.output import OutputChannel
 
-# entry_time group is optional so lines without it (e.g. legacy test fixtures) still parse.
 _SIGNAL_RE = re.compile(
-    r'\[(\d{2}:\d{2}:\d{2})\] SIGNAL\s+(long|short)\s*\|'
+    r'SIGNAL\s+(long|short)\s*\|'
     r'(?:\s*entry_time (\d{2}:\d{2}:\d{2})\s*\|)?'
     r'\s*entry ~([\d.]+).*?\|\s*stop ([\d.]+)\s*\|\s*TP ([\d.]+)\s*\|\s*RR ~([\d.]+)x'
 )
 _EXIT_RE = re.compile(
-    r'\[(\d{2}:\d{2}:\d{2})\] EXIT\s+(\S+)\s*\|'
+    r'EXIT\s+(\S+)\s*\|'
+    r'\s*bar_time (\d{2}:\d{2}:\d{2})\s*\|'
     r'\s*filled ([\d.]+)\s*\|\s*P&L ([+\-])\$([\d.]+)\s*\|\s*(\d+) MNQ'
 )
 
@@ -41,23 +41,23 @@ class SessionRelay:
         if m:
             evt: dict = {
                 "type": "SIGNAL",
-                "time": m.group(1),
-                "direction": m.group(2),
-                "entry": float(m.group(4)),
-                "stop": float(m.group(5)),
-                "tp": float(m.group(6)),
-                "rr": float(m.group(7)),
+                "time": m.group(2) or "",
+                "direction": m.group(1),
+                "entry": float(m.group(3)),
+                "stop": float(m.group(4)),
+                "tp": float(m.group(5)),
+                "rr": float(m.group(6)),
             }
-            if m.group(3):
-                evt["entry_time"] = m.group(3)
+            if m.group(2):
+                evt["entry_time"] = m.group(2)
             self._events.append(evt)
             return
         m = _EXIT_RE.search(line)
         if m:
             self._events.append({
                 "type": "EXIT",
-                "time": m.group(1),
-                "exit_kind": m.group(2),
+                "time": m.group(2),
+                "exit_kind": m.group(1),
                 "filled": float(m.group(3)),
                 "pnl": float(m.group(4) + m.group(5)),
                 "contracts": int(m.group(6)),
