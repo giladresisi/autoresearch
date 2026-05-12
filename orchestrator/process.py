@@ -13,8 +13,9 @@ import psutil
 from orchestrator.output import OutputChannel
 from orchestrator.relay import SessionRelay
 
+from session_times import SESSION_CLOSE as _SESSION_GRACE_END
+
 _ET = ZoneInfo("America/New_York")
-_SESSION_GRACE_END = datetime.time(13, 35)
 _SIGTERM_WAIT_S = 10
 _POLL_INTERVAL_S = 0.5
 
