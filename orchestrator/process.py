@@ -134,7 +134,7 @@ def _kill_existing_signal_smt(script_path: Path | list, log: OutputChannel) -> N
         try:
             cmdline = proc.info.get("cmdline") or []
             if any(script_name in arg for arg in cmdline):
-                log.writeln(f"[ORCH] Killing existing signal_smt.py (pid={proc.pid})")
+                log.writeln(f"[ORCH] Killing existing {script_name} (pid={proc.pid})")
                 proc.terminate()
                 proc.wait(timeout=5)
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
