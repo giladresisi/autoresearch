@@ -1078,6 +1078,14 @@ def main() -> None:
         print("[automation] IB Gateway disconnected — exiting with code 2", flush=True)
         sys.exit(2)
     finally:
+        # Disconnect IB before executor cleanup so the client ID is released immediately.
+        # Without this, SIGTERM raises SystemExit which bypasses IbRealtimeSource's except
+        # block and IB Gateway holds the client ID until its own keepalive timeout (~30s).
+        if _ib_source is not None:
+            try:
+                _ib_source.stop()
+            except Exception:
+                pass
         _executor.stop()
 
 

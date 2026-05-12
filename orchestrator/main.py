@@ -373,8 +373,8 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
                 orch_ch.writeln(f"[ORCH] WARNING: 1s session merge failed: {_exc}")
             _close_session_position(orch_ch)
             relay.write_trades_tsv(_SESSIONS_DIR / today.isoformat() / "trades.tsv", today)
-            if summarizer is not None:
-                summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)
+            # if summarizer is not None:
+            #     summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)
             if result == "ib_disconnected":
                 orch_ch.writeln(
                     "[ORCH] *** IB Gateway disconnected. Restart IB Gateway, then relaunch "
