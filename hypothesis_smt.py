@@ -11,6 +11,7 @@ from typing import Optional
 
 import pandas as pd
 
+from session_times import SESSION_OPEN
 from strategy_smt import compute_tdo  # only this function — no other strategy imports
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -22,6 +23,14 @@ EXTREME_CONTRADICTION_PTS = 20.0
 FVG_LOOKBACK_BARS       = 20
 
 _ET = "America/New_York"
+_SESSION_REF_TIME = (
+    datetime.datetime.combine(datetime.date.today(), SESSION_OPEN)
+    - datetime.timedelta(minutes=20)
+).time()
+_SESSION_PREMARKET_START = (
+    datetime.datetime.combine(datetime.date.today(), SESSION_OPEN)
+    - datetime.timedelta(minutes=140)
+).time()
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -70,12 +79,12 @@ def _get_two_map(df: pd.DataFrame) -> dict:
 
 
 def _price_at_900(mnq_1m_df: pd.DataFrame, date: datetime.date) -> Optional[float]:
-    """Return the Open of the 09:00 ET 1m bar for date, or None if absent."""
-    target = pd.Timestamp(f"{date} 09:00:00", tz=_ET)
+    """Return the Open of the 1m bar 20 minutes before session open, or None if absent."""
+    target = pd.Timestamp(datetime.datetime.combine(date, _SESSION_REF_TIME), tz=_ET)
     if target in mnq_1m_df.index:
         return float(mnq_1m_df.loc[target, "Open"])
-    # Fallback: first bar on that date at or after 09:00
-    session_bars = mnq_1m_df[(_index_dates(mnq_1m_df) == date) & (_index_times(mnq_1m_df) >= time(9, 0))]
+    # Fallback: first bar on that date at or after the reference time
+    session_bars = mnq_1m_df[(_index_dates(mnq_1m_df) == date) & (_index_times(mnq_1m_df) >= _SESSION_REF_TIME)]
     return float(session_bars.iloc[0]["Open"]) if not session_bars.empty else None
 
 
@@ -139,7 +148,7 @@ def _compute_rule1(mnq_1m_df: pd.DataFrame, date: datetime.date) -> dict:
     # Case 1.5: price_at_900 outside [pdl, pdh] — re-analyse on today's overnight range
     if not price_in_pd_range:
         _times = _index_times(mnq_1m_df)
-        overnight = mnq_1m_df[(dates == date) & (_times < time(9, 0))]
+        overnight = mnq_1m_df[(dates == date) & (_times < _SESSION_REF_TIME)]
         if not overnight.empty:
             pdh = float(overnight["High"].max())
             pdl = float(overnight["Low"].min())
@@ -155,7 +164,7 @@ def _compute_rule1(mnq_1m_df: pd.DataFrame, date: datetime.date) -> dict:
         return {"pdh": pdh, "pdl": pdl, "pd_midpoint": pd_midpoint,
                 "pd_range_case": "1.5", "pd_range_bias": "neutral", "price_in_pd_range": False}
 
-    overnight = mnq_1m_df[(dates == date) & (_index_times(mnq_1m_df) < time(9, 0))]
+    overnight = mnq_1m_df[(dates == date) & (_index_times(mnq_1m_df) < _SESSION_REF_TIME)]
     case, bias = _assign_case(overnight, pdh, pdl, pd_midpoint, p900)
     return {
         "pdh": pdh, "pdl": pdl, "pd_midpoint": pd_midpoint,
@@ -338,7 +347,7 @@ def _compute_rule4(mnq_1m_df: pd.DataFrame, hist_mnq_df: pd.DataFrame,
     london_mask = (dates == date) & (mnq_1m_df.index.time >= time(2, 0)) & (mnq_1m_df.index.time < time(5, 0))
     london_high, london_low = _hi_lo(london_mask)
 
-    pm_mask = (dates == date) & (mnq_1m_df.index.time >= time(7, 0)) & (mnq_1m_df.index.time < time(9, 0))
+    pm_mask = (dates == date) & (mnq_1m_df.index.time >= _SESSION_PREMARKET_START) & (mnq_1m_df.index.time < _SESSION_REF_TIME)
     ny_premarket_high, ny_premarket_low = _hi_lo(pm_mask)
 
     # Prior week H/L from hist_mnq_df
@@ -358,7 +367,7 @@ def _compute_rule4(mnq_1m_df: pd.DataFrame, hist_mnq_df: pd.DataFrame,
             prior_week_low  = float(pw_bars["Low"].min())
 
     # Overnight bars for last_extreme_visited
-    overnight_mask = (dates == date) & (mnq_1m_df.index.time < time(9, 0))
+    overnight_mask = (dates == date) & (mnq_1m_df.index.time < _SESSION_REF_TIME)
     overnight_bars = mnq_1m_df[overnight_mask]
 
     extremes = {
@@ -416,9 +425,9 @@ def _compute_rule4(mnq_1m_df: pd.DataFrame, hist_mnq_df: pd.DataFrame,
 
 
 def _compute_overnight(mnq_1m_df: pd.DataFrame, date: datetime.date) -> dict:
-    """Overnight high/low: bars where index.date == date and time < 09:00."""
+    """Overnight high/low: bars where index.date == date and time < session ref time."""
     dates = _index_dates(mnq_1m_df)
-    mask = (dates == date) & (mnq_1m_df.index.time < time(9, 0))
+    mask = (dates == date) & (mnq_1m_df.index.time < _SESSION_REF_TIME)
     bars = mnq_1m_df[mask]
     if bars.empty:
         return {"overnight_high": None, "overnight_low": None}
@@ -430,12 +439,12 @@ def _compute_overnight(mnq_1m_df: pd.DataFrame, date: datetime.date) -> dict:
 
 def _compute_fvgs(mnq_1m_df: pd.DataFrame, date: datetime.date,
                   price_at_900: float, tdo: float) -> list:
-    """Find Fair Value Gaps in the last FVG_LOOKBACK_BARS before 09:00 that lie between price and TDO."""
+    """Find Fair Value Gaps in the last FVG_LOOKBACK_BARS before session ref time that lie between price and TDO."""
     if price_at_900 is None or tdo is None:
         return []
 
     dates = _index_dates(mnq_1m_df)
-    pre_session = mnq_1m_df[(dates == date) & (mnq_1m_df.index.time < time(9, 0))]
+    pre_session = mnq_1m_df[(dates == date) & (mnq_1m_df.index.time < _SESSION_REF_TIME)]
     bars = pre_session.tail(FVG_LOOKBACK_BARS + 2).reset_index(drop=True)
 
     if len(bars) < 3:
