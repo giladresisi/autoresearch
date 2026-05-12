@@ -880,6 +880,7 @@ class SmtV2Dispatcher:
             (mnq_1m_df.index.date == today) & (mnq_1m_df.index <= now)
         ]
         self._pipeline.on_session_start(now, today_at_open)
+        print(f"[EMIT] daily complete date={today}", flush=True)
         self._session_date = today
 
     def on_1m_bar(
@@ -899,11 +900,10 @@ class SmtV2Dispatcher:
         self._pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
 
     def _emit(self, sig: dict) -> None:
-        """Log signal to stdout + events.jsonl, then route to live_orders for order dispatch."""
+        """Print signal to stdout (relay captures it to events.jsonl), then route to live_orders."""
         import smt_state as _st
         import live_orders as _lo
         _emit_v2_signal(sig)
-        _lo._log(dict(sig, source="strategy"))
 
         kind = sig.get("kind")
         direction_v2 = sig.get("direction", "none")
