@@ -499,13 +499,12 @@ def gap_fill_1m_ib(bar_data_dir: Path) -> None:
     from data.sources import IBGatewaySource
 
     host = os.environ.get("IB_HOST", "127.0.0.1")
-    port_str = os.environ.get("IB_PORT")
+    port = int(os.environ.get("IB_PORT", "4002"))
     mnq_conid = os.environ.get("MNQ_CONID")
     mes_conid = os.environ.get("MES_CONID")
-    if not port_str or not mnq_conid or not mes_conid:
-        print("[gap_fill_1m_ib] IB_PORT/MNQ_CONID/MES_CONID not set — skipping", flush=True)
+    if not mnq_conid or not mes_conid:
+        print("[gap_fill_1m_ib] MNQ_CONID/MES_CONID not set — skipping", flush=True)
         return
-    port = int(port_str)
 
     MAX_LOOKBACK_DAYS = 30
     GAP_FILL_MAX_DAYS = 14

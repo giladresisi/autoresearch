@@ -1,6 +1,13 @@
 # Run as: uv run python -m orchestrator.main [--no-summary] [--check-parquets] [--create-empty-parquets]
 # IMPORTANT: always use 'uv run python' (not bare 'python') so the command resolves to the
 # project venv. Bare 'python' may resolve to system Python which lacks project dependencies.
+#
+# Agent (Claude Code / Bash tool) usage:
+#   The .env file is loaded automatically via load_dotenv() below using an explicit path
+#   relative to this file, so no manual sourcing is needed. If env vars are still missing
+#   (e.g. IB_PORT), run:  set -a && source .env && set +a
+#   before invoking uv, or verify that .env exists in the project root.
+#
 # orchestrator/main.py
 # Daemon entry point: waits for trading sessions, runs signal_smt.py, and triggers post-session summarization.
 import datetime
@@ -11,7 +18,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 from orchestrator.output import FileSink, JsonlFileSink, OutputChannel, StdoutSink
 from orchestrator.process import ProcessManager
@@ -62,6 +69,25 @@ def _close_session_position(log_ch: OutputChannel) -> None:
         log_ch.writeln(f"[ORCH] WARNING: session-end close failed: {_exc}")
 
 
+def _check_ib_reachable() -> None:
+    """TCP-probe IB Gateway. Prints an alert and exits if unreachable."""
+    import os
+    import socket
+    import sys
+    host = os.environ.get("IB_HOST", "127.0.0.1")
+    port = int(os.environ.get("IB_PORT", "4002"))
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            pass
+    except OSError:
+        print(
+            f"[ORCH] FATAL: IB Gateway not reachable at {host}:{port} — "
+            "open TWS / IB Gateway and restart the orchestrator. Exiting.",
+            flush=True,
+        )
+        sys.exit(1)
+
+
 def _pre_session_init() -> None:
     """Run at orchestrator startup: Databento rolling backfill for historical bars.
 
@@ -70,6 +96,7 @@ def _pre_session_init() -> None:
     """
     import os
     from pathlib import Path as _Path
+    _check_ib_reachable()
     bar_data_dir = _Path(__file__).resolve().parent.parent / "data"
     try:
         from data.databento_backfill import merge_session_1s_parquets
