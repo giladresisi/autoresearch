@@ -117,18 +117,29 @@ recommendations.
 
 **Run the daemon:**
 
+*macOS / Linux (foreground terminal or tmux):*
 ```bash
 set -a && source .env && set +a && uv run python -m orchestrator.main
 ```
 
-The `set -a / source .env / set +a` pattern exports variables from `.env` into the shell
-without the key appearing in the command itself (safe in shell history and `ps` output).
-The daemon loops indefinitely — run it in a persistent terminal or tmux session.
+*Windows — run hidden in the background (no terminal window):*
+```powershell
+$proc = Start-Process -FilePath "uv" `
+    -ArgumentList "run", "python", "-m", "orchestrator.main" `
+    -WorkingDirectory $PWD -WindowStyle Hidden -PassThru
+Write-Host "Orchestrator PID: $($proc.Id)"
+```
+`.env` is loaded automatically by the orchestrator at startup — no need to source it first.
+Save the PID so you can stop it later.
 
 **Stop the daemon:**
 
-Press `Ctrl+C`. The daemon catches the interrupt and exits cleanly. If `signal_smt.py` is
-actively running at the time, it is terminated before the daemon exits.
+*macOS / Linux:* Press `Ctrl+C`. The daemon catches the interrupt and exits cleanly.
+
+*Windows:*
+```powershell
+Stop-Process -Id <PID> -Force
+```
 
 Session files are written to `sessions/YYYY-MM-DD/` (gitignored).
 
