@@ -46,7 +46,7 @@ def _make_session_channels(date: datetime.date) -> tuple[OutputChannel, OutputCh
 
     orch_ch = OutputChannel()
     orch_ch.add_sink(StdoutSink())
-    orch_ch.add_sink(FileSink(session_dir / "orchestrator.log"))
+    orch_ch.add_sink(TimestampedFileSink(session_dir / "orchestrator.log"))
 
     return signal_ch, orch_ch
 
