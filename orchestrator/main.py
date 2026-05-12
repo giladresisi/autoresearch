@@ -1,6 +1,13 @@
 # Run as: uv run python -m orchestrator.main [--no-summary] [--check-parquets] [--create-empty-parquets]
 # IMPORTANT: always use 'uv run python' (not bare 'python') so the command resolves to the
 # project venv. Bare 'python' may resolve to system Python which lacks project dependencies.
+#
+# Agent (Claude Code / Bash tool) usage:
+#   The .env file is loaded automatically via load_dotenv() below using an explicit path
+#   relative to this file, so no manual sourcing is needed. If env vars are still missing
+#   (e.g. IB_PORT), run:  set -a && source .env && set +a
+#   before invoking uv, or verify that .env exists in the project root.
+#
 # orchestrator/main.py
 # Daemon entry point: waits for trading sessions, runs signal_smt.py, and triggers post-session summarization.
 import datetime
@@ -11,9 +18,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
-from orchestrator.output import FileSink, JsonlFileSink, OutputChannel, StdoutSink
+from orchestrator.output import FileSink, JsonlFileSink, OutputChannel, StdoutSink, TimestampedFileSink
 from orchestrator.process import ProcessManager
 from orchestrator.relay import SessionRelay
 from orchestrator.scheduler import get_et_now, is_trading_day, next_session_open
@@ -34,12 +41,12 @@ def _make_session_channels(date: datetime.date) -> tuple[OutputChannel, OutputCh
 
     signal_ch = OutputChannel()
     signal_ch.add_sink(StdoutSink())
-    signal_ch.add_sink(FileSink(session_dir / "signals.log"))
+    signal_ch.add_sink(TimestampedFileSink(session_dir / "signals.log"))
     signal_ch.add_sink(JsonlFileSink(session_dir / "events.jsonl"))
 
     orch_ch = OutputChannel()
     orch_ch.add_sink(StdoutSink())
-    orch_ch.add_sink(FileSink(session_dir / "orchestrator.log"))
+    orch_ch.add_sink(TimestampedFileSink(session_dir / "orchestrator.log"))
 
     return signal_ch, orch_ch
 
@@ -62,6 +69,25 @@ def _close_session_position(log_ch: OutputChannel) -> None:
         log_ch.writeln(f"[ORCH] WARNING: session-end close failed: {_exc}")
 
 
+def _check_ib_reachable() -> None:
+    """TCP-probe IB Gateway. Prints an alert and exits if unreachable."""
+    import os
+    import socket
+    import sys
+    host = os.environ.get("IB_HOST", "127.0.0.1")
+    port = int(os.environ.get("IB_PORT", "4002"))
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            pass
+    except OSError:
+        print(
+            f"[ORCH] FATAL: IB Gateway not reachable at {host}:{port} — "
+            "open TWS / IB Gateway and restart the orchestrator. Exiting.",
+            flush=True,
+        )
+        sys.exit(1)
+
+
 def _pre_session_init() -> None:
     """Run at orchestrator startup: Databento rolling backfill for historical bars.
 
@@ -70,6 +96,7 @@ def _pre_session_init() -> None:
     """
     import os
     from pathlib import Path as _Path
+    _check_ib_reachable()
     bar_data_dir = _Path(__file__).resolve().parent.parent / "data"
     try:
         from data.databento_backfill import merge_session_1s_parquets
@@ -103,6 +130,13 @@ def _pre_session_init() -> None:
             f"[ORCH] WARNING: Databento 1s backfill failed: {exc}",
             flush=True,
         )
+    try:
+        from data.ib_realtime import gap_fill_1m_ib
+        print("[ORCH] Running IB 1m gap fill ...", flush=True)
+        gap_fill_1m_ib(bar_data_dir)
+        print("[ORCH] IB 1m gap fill complete", flush=True)
+    except Exception as exc:
+        print(f"[ORCH] WARNING: IB 1m gap fill failed: {exc}", flush=True)
 
 
 def _check_parquet_files(bar_data_dir: Path) -> None:
@@ -280,8 +314,48 @@ def _make_ib_health_check(thread: _threading.Thread, thread_exc: list):
     return check
 
 
+_PIDFILE = Path(__file__).resolve().parent.parent / "orchestrator.pid"
+
+
+def _kill_stale_orchestrator() -> None:
+    """Kill any stale orchestrator.main Python process, then record our own PID.
+
+    Scans all Python processes for 'orchestrator.main' in their command line,
+    excluding our own process and its direct parent (the background-task wrapper
+    whose cmdline also contains 'orchestrator.main').  PID file is written last
+    so that a competing zombie that races us here will overwrite it — we detect
+    that case on the scan instead.
+    """
+    import psutil
+    current_pid = _os.getpid()
+    try:
+        parent_pid = psutil.Process(current_pid).ppid()
+    except psutil.NoSuchProcess:
+        parent_pid = None
+    protected = {current_pid, parent_pid} if parent_pid else {current_pid}
+
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if proc.info.get("name", "").lower() not in ("python.exe", "python"):
+                continue
+            if proc.pid in protected:
+                continue
+            cmdline = proc.info.get("cmdline") or []
+            if any("orchestrator.main" in arg for arg in cmdline):
+                print(f"[orchestrator] Killing stale orchestrator (pid={proc.pid})", flush=True)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    _PIDFILE.write_text(str(current_pid))
+
+
 def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> None:
-    """Main daemon loop. Ctrl+C exits cleanly; signal_smt.py is terminated if active."""
+    """Main daemon loop. Ctrl+C exits cleanly; subprocess is terminated if active."""
+    _kill_stale_orchestrator()
     if not skip_summary and summarizer is None:
         summarizer = Summarizer()
     bar_data_dir = Path(__file__).resolve().parent.parent / "data"
@@ -339,8 +413,8 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
                 orch_ch.writeln(f"[ORCH] WARNING: 1s session merge failed: {_exc}")
             _close_session_position(orch_ch)
             relay.write_trades_tsv(_SESSIONS_DIR / today.isoformat() / "trades.tsv", today)
-            if summarizer is not None:
-                summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)
+            # if summarizer is not None:
+            #     summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)
             if result == "ib_disconnected":
                 orch_ch.writeln(
                     "[ORCH] *** IB Gateway disconnected. Restart IB Gateway, then relaunch "
@@ -355,6 +429,12 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
     except KeyboardInterrupt:
         print("\n[ORCH] Shutting down.", flush=True)
         sys.exit(0)
+    finally:
+        try:
+            if _PIDFILE.exists() and _PIDFILE.read_text().strip() == str(_os.getpid()):
+                _PIDFILE.unlink()
+        except OSError:
+            pass
 
 
 def _check_setup() -> None:

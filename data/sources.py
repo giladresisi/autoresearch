@@ -353,21 +353,21 @@ class IBGatewaySource:
                 if bars:
                     all_bars.extend(bars)
             elif contract_type == "future_by_conid":
-                # Fetch a specific futures contract by conId with explicit endDateTime
-                # pagination. Avoids error 10339 that blocks ContFuture from using
-                # explicit endDateTime — only works for non-ContFuture specific contracts.
+                # Fetch a specific futures contract by conId.
                 # `ticker` carries the conId string; exchange is always CME for MNQ/MES.
                 from ib_insync import Contract as _IBContract
                 contract = _IBContract(conId=int(ticker), exchange="CME")
                 # No qualifyContracts: conId uniquely identifies the contract;
                 # qualification is unnecessary and fails for expired contracts.
-                chunk_end = end_dt
-                while chunk_end > start_dt:
-                    chunk_start = max(start_dt, chunk_end - pd.Timedelta(days=chunk_days))
-                    duration_days = max(1, (chunk_end - chunk_start).days)
+                if interval == "1m":
+                    # IB rejects explicit endDateTime for CME equity-index futures 1m bars
+                    # (error 162) — same restriction as ContFuture (error 10339).
+                    # Must use endDateTime='' and cap duration to avoid timeouts.
+                    requested_days = max(1, (end_dt - start_dt).days)
+                    duration_days = min(requested_days, _IB_CONTFUTURE_MAX_DAYS)
                     bars = ib.reqHistoricalData(
                         contract,
-                        endDateTime=chunk_end.strftime("%Y%m%d %H:%M:%S"),
+                        endDateTime="",
                         durationStr=f"{duration_days} D",
                         barSizeSetting=bar_size,
                         whatToShow="TRADES",
@@ -376,7 +376,24 @@ class IBGatewaySource:
                     )
                     if bars:
                         all_bars.extend(bars)
-                    chunk_end = chunk_start
+                else:
+                    # Other intervals support explicit endDateTime pagination.
+                    chunk_end = end_dt
+                    while chunk_end > start_dt:
+                        chunk_start = max(start_dt, chunk_end - pd.Timedelta(days=chunk_days))
+                        duration_days = max(1, (chunk_end - chunk_start).days)
+                        bars = ib.reqHistoricalData(
+                            contract,
+                            endDateTime=chunk_end.strftime("%Y%m%d %H:%M:%S"),
+                            durationStr=f"{duration_days} D",
+                            barSizeSetting=bar_size,
+                            whatToShow="TRADES",
+                            useRTH=False,
+                            formatDate=2,
+                        )
+                        if bars:
+                            all_bars.extend(bars)
+                        chunk_end = chunk_start
             else:
                 contract = Stock(ticker, "SMART", "USD")
                 ib.qualifyContracts(contract)

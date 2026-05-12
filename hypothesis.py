@@ -833,6 +833,27 @@ def run_hypothesis(
     if old_direction != "none":
         return []
 
+    # Fresh session start: DEFAULT_HYPOTHESIS has no formed_at. After trend-broken clears
+    # direction to "none", formed_at remains from today — so absence of formed_at (or a
+    # formed_at from a prior day) means this is the first hypothesis of the session.
+    _formed_at_str = hypothesis.get("formed_at", "")
+    _is_fresh_start = True
+    if _formed_at_str:
+        try:
+            _formed_ts = pd.Timestamp(_formed_at_str)
+            _now_pd = pd.Timestamp(now)
+            if _now_pd.tzinfo is None:
+                _now_pd = _now_pd.tz_localize("America/New_York")
+            else:
+                _now_pd = _now_pd.tz_convert("America/New_York")
+            if _formed_ts.tzinfo is None:
+                _formed_ts = _formed_ts.tz_localize("America/New_York")
+            else:
+                _formed_ts = _formed_ts.tz_convert("America/New_York")
+            _is_fresh_start = _formed_ts.date() != _now_pd.date()
+        except Exception:
+            pass
+
     # Step 2: Read global.json ATH; build current 5m bar; check ATH gate.
     global_state = load_global()
     all_time_high = global_state["all_time_high"]
@@ -1044,12 +1065,15 @@ def run_hypothesis(
 
     # Step 8b: veto direction when entry conditions are unfavourable.
     # (1) Secondary cautious price is too close — not enough room to run.
+    #     Skipped on the first hypothesis of the session (_is_fresh_start): the first
+    #     hypothesis must always have a direction so the pipeline has a bias to work with.
+    #     direction="none" is only valid after a trend-broken re-evaluation.
     # (2) Up direction but we are already at or above the recorded ATH — price in uncharted territory.
     # (3) No targets exist in this direction — nothing to trade toward.
     if direction != "none":
         sec_dist = (abs(float(cautious_price_secondary) - current_close)
                     if cautious_price_secondary != "" else 0)
-        if cautious_price_secondary != "" and sec_dist < CAUTIOUS_MIN_DIST:
+        if not _is_fresh_start and cautious_price_secondary != "" and sec_dist < CAUTIOUS_MIN_DIST:
             direction = "none"
         elif direction == "up" and current_close >= ath:
             direction = "none"
@@ -1081,12 +1105,10 @@ def run_hypothesis(
         })
 
     # Write hypothesis.json
-    if direction != "none" and direction != old_direction:
+    if direction != old_direction:
         formed_at = pd.Timestamp(now).isoformat()
-    elif direction != "none":
-        formed_at = hypothesis.get("formed_at", pd.Timestamp(now).isoformat())
     else:
-        formed_at = ""
+        formed_at = hypothesis.get("formed_at", pd.Timestamp(now).isoformat())
 
     new_hypothesis = {
         "direction":                     direction,

@@ -1,13 +1,27 @@
 # orchestrator/output.py
 # Output channel abstraction: stdout sink, file sink, and fan-out channel.
 # Separates output routing from business logic so tests can inject mock sinks.
+import datetime
 import json as _json
+import sys
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _et_now() -> str:
+    return datetime.datetime.now(tz=_ET).strftime("%H:%M:%S")
 
 
 class StdoutSink:
     def write(self, text: str) -> None:
-        print(text, end="", flush=True)
+        try:
+            print(text, end="", flush=True)
+        except UnicodeEncodeError:
+            enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+            safe = text.encode(enc, errors="replace").decode(enc)
+            print(safe, end="", flush=True)
 
 
 class FileSink:
@@ -17,6 +31,19 @@ class FileSink:
     def write(self, text: str) -> None:
         with open(self._path, "a", encoding="utf-8") as f:
             f.write(text)
+            f.flush()
+
+
+class TimestampedFileSink:
+    """Like FileSink but prepends [HH:MM:SS ET] to each line."""
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def write(self, text: str) -> None:
+        ts = _et_now()
+        with open(self._path, "a", encoding="utf-8") as f:
+            for line in text.splitlines(keepends=True):
+                f.write(f"[{ts}] {line}")
             f.flush()
 
 
@@ -31,11 +58,18 @@ class JsonlFileSink:
             if not stripped.startswith("{"):
                 continue
             try:
-                _json.loads(stripped)
+                obj = _json.loads(stripped)
             except (ValueError, _json.JSONDecodeError):
                 continue
+            obj.pop("time", None)
+            kind = obj.pop("kind", None)
+            stamped = {}
+            if kind is not None:
+                stamped["kind"] = kind
+            stamped["logged_at"] = _et_now()
+            stamped.update(obj)
             with open(self._path, "a", encoding="utf-8") as f:
-                f.write(stripped + "\n")
+                f.write(_json.dumps(stamped) + "\n")
                 f.flush()
 
 

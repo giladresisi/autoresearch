@@ -49,7 +49,6 @@ MNQ_CONID = os.environ.get("MNQ_CONID", "")
 MES_CONID = os.environ.get("MES_CONID", "")
 
 # ── Session window ───────────────────────────────────────────────────────────
-SESSION_START      = "09:00"   # ET
 from session_times import SESSION_OPEN, SESSION_CLOSE  # noqa: E402
 SIGNAL_SESSION_END = SESSION_CLOSE   # ET: no new signals / force-close after this time
 
@@ -99,7 +98,7 @@ _day_pdh: "float | None" = None
 _day_pdl: "float | None" = None
 _pdh_pdl_date = None  # tracks which date PDH/PDL was last computed
 
-# Derived time objects (set from SESSION_START/SIGNAL_SESSION_END strings in main())
+# Derived time objects (set from session_times in main())
 _session_start_time = None
 _session_end_time   = None
 
@@ -127,9 +126,6 @@ _move_stop_bar_counter: int  = 0
 # ── v2 pipeline env gate (set in main()) ─────────────────────────────────────
 _smtv2_pipeline: str = "v1"
 _smtv2_dispatcher: "SmtV2Dispatcher | None" = None
-
-# Session start time for V2 pipeline daily trigger — imported from session_times
-_SESSION_DAILY_TRIGGER_TIME = SESSION_OPEN
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -169,7 +165,7 @@ def _format_signal_line(ts: pd.Timestamp, signal: dict, assumed_entry: float) ->
     entry_time = pd.Timestamp(signal["entry_time"])
     signal_type = signal.get("signal_type", "UNKNOWN")
     return (
-        f"[{ts.strftime('%H:%M:%S')}] SIGNAL    {signal['direction']:<5} | "
+        f"SIGNAL    {signal['direction']:<5} | "
         f"entry_time {entry_time.strftime('%H:%M:%S')} | "
         f"entry ~{assumed_entry:.2f} ({slip_label}) | "
         f"stop {signal['stop_price']:.2f} | "
@@ -192,7 +188,8 @@ def _format_exit_line(
     dur_secs = int((ts - entry_ts).total_seconds())
     dur_str = f"{dur_secs // 60}m {dur_secs % 60}s"
     return (
-        f"[{ts.strftime('%H:%M:%S')}] EXIT      {label:<6} | "
+        f"EXIT      {label:<6} | "
+        f"bar_time {ts.strftime('%H:%M:%S')} | "
         f"filled {exit_price:.2f} | "
         f"P&L {pnl_str} | "
         f"duration {dur_str} | "
@@ -204,7 +201,7 @@ def _format_stop_moved_line(ts: pd.Timestamp, reason: str, new_stop: float, old_
     """Human-readable stop-mutation log line."""
     direction = "->" if new_stop != old_stop else "="
     return (
-        f"[{ts.strftime('%H:%M:%S')}] STOP_MOVE {reason:<10} | "
+        f"STOP_MOVE {reason:<10} | "
         f"stop {old_stop:.2f} {direction} {new_stop:.2f}"
     )
 
@@ -215,7 +212,7 @@ def _format_limit_placed_line(ts: pd.Timestamp, signal: dict) -> str:
     stop_dist = abs(signal["entry_price"] - signal["stop_price"])
     rr = dist / stop_dist if stop_dist > 0 else 0.0
     return (
-        f"[{ts.strftime('%H:%M:%S')}] LIMIT_PLACED  {signal['direction']:<5} | "
+        f"LIMIT_PLACED  {signal['direction']:<5} | "
         f"entry {signal['entry_price']:.2f} | "
         f"stop {signal['stop_price']:.2f} | "
         f"TP {signal['take_profit']:.2f} | "
@@ -226,7 +223,7 @@ def _format_limit_placed_line(ts: pd.Timestamp, signal: dict) -> str:
 def _format_limit_moved_line(ts: pd.Timestamp, old: dict, new: dict) -> str:
     """Human-readable LIMIT_MOVED log line."""
     return (
-        f"[{ts.strftime('%H:%M:%S')}] LIMIT_MOVED   {new['direction']:<5} | "
+        f"LIMIT_MOVED   {new['direction']:<5} | "
         f"entry {old['entry_price']:.2f} -> {new['entry_price']:.2f} | "
         f"stop {old['stop_price']:.2f} -> {new['stop_price']:.2f} | "
         f"TP {old['take_profit']:.2f} -> {new['take_profit']:.2f}"
@@ -236,7 +233,7 @@ def _format_limit_moved_line(ts: pd.Timestamp, old: dict, new: dict) -> str:
 def _format_limit_cancelled_line(ts: pd.Timestamp, signal: dict, reason: str) -> str:
     """Human-readable LIMIT_CANCELLED log line."""
     return (
-        f"[{ts.strftime('%H:%M:%S')}] LIMIT_CANCELLED {signal['direction']:<5} | "
+        f"LIMIT_CANCELLED {signal['direction']:<5} | "
         f"entry {signal['entry_price']:.2f} | "
         f"reason {reason}"
     )
@@ -245,7 +242,7 @@ def _format_limit_cancelled_line(ts: pd.Timestamp, signal: dict, reason: str) ->
 def _format_limit_expired_line(ts: pd.Timestamp, signal: dict, missed_move: float) -> str:
     """Human-readable LIMIT_EXPIRED log line."""
     return (
-        f"[{ts.strftime('%H:%M:%S')}] LIMIT_EXPIRED  {signal['direction']:<5} | "
+        f"LIMIT_EXPIRED  {signal['direction']:<5} | "
         f"entry {signal['entry_price']:.2f} | "
         f"missed {missed_move:.1f} pts"
     )
@@ -254,7 +251,7 @@ def _format_limit_expired_line(ts: pd.Timestamp, signal: dict, missed_move: floa
 def _format_limit_filled_line(ts: pd.Timestamp, evt: dict) -> str:
     """Human-readable LIMIT_FILLED log line."""
     return (
-        f"[{ts.strftime('%H:%M:%S')}] LIMIT_FILLED  {evt['direction']:<5} | "
+        f"LIMIT_FILLED  {evt['direction']:<5} | "
         f"filled {evt['filled_price']:.2f} | "
         f"orig {evt['original_limit_price']:.2f} | "
         f"queue_s {evt['time_in_queue_secs']:.0f}"
@@ -407,7 +404,7 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         _eqh_levels: list = []
         _eql_levels: list = []
         if EQH_ENABLED and _mnq_1m_df is not None and not _mnq_1m_df.empty:
-            _session_start_dt = pd.Timestamp(f"{today} {SESSION_START}", tz="America/New_York")
+            _session_start_dt = pd.Timestamp(datetime.datetime.combine(today, SESSION_OPEN), tz="America/New_York")
             _eqh_window_start = _session_start_dt - pd.Timedelta(days=2)
             _eqh_bars = _mnq_1m_df[
                 (_mnq_1m_df.index >= _eqh_window_start) & (_mnq_1m_df.index < _session_start_dt)
@@ -883,6 +880,7 @@ class SmtV2Dispatcher:
             (mnq_1m_df.index.date == today) & (mnq_1m_df.index <= now)
         ]
         self._pipeline.on_session_start(now, today_at_open)
+        print(f"[EMIT] daily complete date={today}", flush=True)
         self._session_date = today
 
     def on_1m_bar(
@@ -902,23 +900,24 @@ class SmtV2Dispatcher:
         self._pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
 
     def _emit(self, sig: dict) -> None:
-        """Log signal to stdout + events.jsonl, then route to live_orders for order dispatch."""
+        """Print signal to stdout (relay captures it to events.jsonl), then route to live_orders."""
         import smt_state as _st
         import live_orders as _lo
         _emit_v2_signal(sig)
-        _lo._log(dict(sig, source="strategy"))
 
         kind = sig.get("kind")
         direction_v2 = sig.get("direction", "none")
 
         if kind in ("new-stop-entry", "move-stop-entry"):
             if direction_v2 == "none":
+                print(f"[EMIT] {kind}: skipped — direction=none", flush=True)
                 return
             direction = "long" if direction_v2 == "up" else "short"
             position = _st.load_position()
             conf_bar = position.get("confirmation_bar", {})
             stop = conf_bar.get("body_low") if direction_v2 == "up" else conf_bar.get("body_high")
             if stop is None:
+                print(f"[EMIT] {kind}: skipped — confirmation_bar empty or missing body_low/body_high (conf_bar={conf_bar})", flush=True)
                 return
             pmt_signal = {
                 "direction": direction,
@@ -926,6 +925,7 @@ class SmtV2Dispatcher:
                 "stop_price": float(stop),
                 "stop_fill_bars": 1,
             }
+            print(f"[EMIT] {kind}: sending PMT signal {pmt_signal}", flush=True)
             if kind == "new-stop-entry":
                 _lo.place_entry(pmt_signal)
             else:
@@ -935,7 +935,9 @@ class SmtV2Dispatcher:
             direction = "long" if direction_v2 == "up" else "short"
             stop = sig.get("stop")
             if stop is None:
+                print(f"[EMIT] stop-entry-filled: skipped — no stop in signal", flush=True)
                 return
+            print(f"[EMIT] stop-entry-filled: sending place_stop_after_fill direction={direction} stop={stop}", flush=True)
             _lo.place_stop_after_fill({"direction": direction, "stop_price": float(stop)})
 
         elif kind == "market-entry":
@@ -976,19 +978,20 @@ def main() -> None:
     BAR_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # Parse session window into time objects used by callbacks
-    _session_start_time = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
-    _session_end_time   = pd.Timestamp(f"2000-01-01 {SIGNAL_SESSION_END}").time()
+    _session_start_time = SESSION_OPEN
+    _session_end_time   = SIGNAL_SESSION_END
 
     _mes_partial_1m = None
 
-    # Load historical 5m data for hypothesis rule engine
+    _smtv2_pipeline = os.environ.get("SMT_PIPELINE", "v1")
+
+    # Load historical 5m data for hypothesis rule engine (V1 only)
     _hist_mnq_df = _load_hist_mnq()
     today = pd.Timestamp.now(tz="America/New_York").date()
-    _hypothesis_manager = HypothesisManager(pd.DataFrame(), _hist_mnq_df, today)
+    if _smtv2_pipeline != "v2":
+        _hypothesis_manager = HypothesisManager(pd.DataFrame(), _hist_mnq_df, today)
     _hist_daily_df = _hist_mnq_df  # reuse 5m hist; compute_pdh_pdl uses index.date
     _hypothesis_generated = False
-
-    _smtv2_pipeline = os.environ.get("SMT_PIPELINE", "v1")
 
     # Restore open position from disk if the process was restarted mid-trade
     if POSITION_FILE.exists():
@@ -1023,12 +1026,15 @@ def main() -> None:
     def _on_bar_1m_complete(bars) -> None:
         """Called by IbRealtimeSource after each completed 1m bar.
 
-        Drives the hypothesis rule engine: generate at the first 1m bar at/after
-        SESSION_START, then evaluate every subsequent bar.
-        Also drives the V2 SessionPipeline when SMT_PIPELINE=v2.
+        V2 order per bar at/after SESSION_OPEN:
+          1. V2 dispatcher on_session_start (first bar only) — runs run_daily.
+          2. V2 dispatcher on_1m_bar — emits new-hypothesis and signals.
+        V1 additionally runs HypothesisManager.generate (first bar) and evaluate_bar.
+
+        Skips entirely if IB bar data is not yet seeded (mnq_1m_df empty).
         """
         global _hypothesis_generated
-        if _hypothesis_manager is None:
+        if _hypothesis_manager is None and _smtv2_dispatcher is None:
             return
         _bar = bars[-1]
         _bar_ts_v2 = pd.Timestamp(getattr(_bar, "date", None) or _bar.name)
@@ -1037,24 +1043,37 @@ def main() -> None:
         else:
             _bar_ts_v2 = _bar_ts_v2.tz_convert("America/New_York")
         bar_time = _bar_ts_v2.time()
-        _session_start_time_local = pd.Timestamp(f"2000-01-01 {SESSION_START}").time()
-        if not _hypothesis_generated and bar_time >= _session_start_time_local:
-            if _ib_source is not None:
-                _hypothesis_manager._mnq_1m_df = _ib_source.mnq_1m_df
+
+        _mnq_df = _ib_source.mnq_1m_df if _ib_source is not None else pd.DataFrame()
+        _mes_df = _ib_source.mes_1m_df if _ib_source is not None else pd.DataFrame()
+
+        # Guard: don't run any hypothesis or daily logic until IB has seeded bar data.
+        if _mnq_df.empty:
+            return
+
+        # Step 1: V2 dispatcher session init — run_daily fires inside on_session_start.
+        # Must precede generate() so liquidities in daily.json are fresh.
+        if _smtv2_dispatcher is not None and bar_time >= SESSION_OPEN:
+            _smtv2_dispatcher.on_session_start(_bar_ts_v2, _mnq_df, _mes_df)
+
+        # Step 2: V1 only — HypothesisManager.generate writes data/sessions/{date}/hypothesis.json.
+        if _hypothesis_manager is not None and not _hypothesis_generated and bar_time >= SESSION_OPEN:
+            _hypothesis_manager._mnq_1m_df = _mnq_df
+            _hypothesis_manager._hist_mnq_df = _mnq_df
             try:
                 _hypothesis_manager.generate()
             finally:
                 _hypothesis_generated = True
-        _hypothesis_manager.evaluate_bar(_bar)
 
+        # Step 3: V2 dispatcher bar dispatch — emits new-hypothesis and signals.
         if _smtv2_dispatcher is not None:
-            _mnq_df = _ib_source.mnq_1m_df
-            _mes_df = _ib_source.mes_1m_df
-            if bar_time >= _SESSION_DAILY_TRIGGER_TIME:
-                _smtv2_dispatcher.on_session_start(_bar_ts_v2, _mnq_df, _mes_df)
             _mnq_bar = _mnq_df.iloc[-1] if not _mnq_df.empty else pd.Series(dtype=float)
             _mes_bar = _mes_df.iloc[-1] if not _mes_df.empty else pd.Series(dtype=float)
             _smtv2_dispatcher.on_1m_bar(_bar_ts_v2, _mnq_bar, _mes_bar, _mnq_df, _mes_df)
+
+        # Step 4: V1 only — ongoing hypothesis evaluation.
+        if _hypothesis_manager is not None:
+            _hypothesis_manager.evaluate_bar(_bar)
 
     _ib_source = IbRealtimeSource(
         host=IB_HOST, port=IB_PORT, client_id=IB_CLIENT_ID,
@@ -1073,6 +1092,14 @@ def main() -> None:
         print("[automation] IB Gateway disconnected — exiting with code 2", flush=True)
         sys.exit(2)
     finally:
+        # Disconnect IB before executor cleanup so the client ID is released immediately.
+        # Without this, SIGTERM raises SystemExit which bypasses IbRealtimeSource's except
+        # block and IB Gateway holds the client ID until its own keepalive timeout (~30s).
+        if _ib_source is not None:
+            try:
+                _ib_source.stop()
+            except Exception:
+                pass
         _executor.stop()
 
 
