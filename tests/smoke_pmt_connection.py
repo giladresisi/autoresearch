@@ -6,6 +6,11 @@
 #   moves it to a second unrealistic price via modify_stop_entry,
 #   pauses for user verification at each step, then cancels it via a close order.
 #
+# test_pmt_update_sl_after_stop_fill
+#   Verifies the post-fill SL-attach flow using a pending STP SELL far below
+#   market (safe, never fills). Places STP with no SL, calls update_stop_loss
+#   to observe the effect on the unfilled order, then cancels.
+#
 # test_pmt_stop_entry_via_strategy_pipeline
 #   Runs SessionPipeline with synthetic bars crafted to produce a new-stop-entry
 #   (SELL STOP far below current market → safe pending order), then market-closes.
@@ -216,6 +221,167 @@ def test_pmt_limit_order_place_and_cancel(capsys):
     with capsys.disabled():
         print()
         print("[SMOKE] Test complete. Connection to PickMyTrade is working.")
+
+
+def test_pmt_update_sl_after_stop_fill(capsys):
+    """
+    Smoke test: verify the update_stop_loss flow triggered when a stop entry fills.
+
+    The test uses a pending STP SELL far below market to avoid any real fill.
+
+    Flow:
+      1. Place a STP SELL far below market (no SL in the payload) — stays pending.
+      2. User confirms the pending STP SELL is visible in Tradovate with NO stop loss.
+      3. Call update_stop_loss — observe whether the unfilled order is affected.
+      4. User reports what (if anything) changed in Tradovate.
+      5. Cancel via close order.
+
+    Requires SMOKE_PMT=1. No SMOKE_MARKET_PRICE needed — the STP is at a fixed
+    floor price that cannot fill under normal conditions.
+    """
+    _requires_smoke_env()
+
+    ex = _make_executor()
+    ex.start()
+
+    entry_price = 15000.0   # ~6000+ pts below live MNQ; safe, will never fill
+    sl_price    = entry_price + 50.0   # SL above entry (short position)
+    bar = _fake_bar(entry_price)
+
+    def cancel_and_fail(msg: str) -> None:
+        ex.place_close(label="smoke_cleanup")
+        time.sleep(2)
+        pytest.fail(msg)
+
+    # Step 1: place STP SELL with no SL — mirrors automation/main.py new-stop-entry path
+    with capsys.disabled():
+        print(f"\n[SMOKE] Sending STP SELL @ {entry_price:.2f} (no SL) to PickMyTrade...")
+
+    ex.place_entry({"direction": "short", "entry_price": entry_price, "stop_fill_bars": 1}, bar)
+    time.sleep(3)
+
+    with capsys.disabled():
+        print("[SMOKE] STP order dispatched.")
+        print()
+        print(">>> CHECK YOUR TRADOVATE ACCOUNT NOW <<<")
+        print(f"    You should see a pending STP SELL at {entry_price:.2f} with NO stop loss.")
+        print("    ENTER = pending STP visible, no SL (pass)  |  'fail' = wrong  |  'skip' = skip check")
+        resp1 = input("    > ").strip().lower()
+
+    if resp1 == "fail":
+        cancel_and_fail(f"STP SELL not visible or has unexpected SL at {entry_price:.2f}")
+    elif resp1 not in ("", "skip"):
+        cancel_and_fail(f"Unrecognised input: {resp1!r}")
+
+    # Step 2: call update_stop_loss — the order is still pending (not filled)
+    position = {"direction": "short", "stop_price": sl_price}
+
+    with capsys.disabled():
+        print()
+        print(f"[SMOKE] Calling update_stop_loss with SL={sl_price:.2f} on the UNFILLED STP...")
+
+    status, body = ex.update_stop_loss(position, bar)
+
+    with capsys.disabled():
+        print(f"[SMOKE] PMT response: HTTP {status} — {body[:300]}")
+        print()
+        print(">>> CHECK YOUR TRADOVATE ACCOUNT NOW <<<")
+        print(f"    Did anything change on the pending STP SELL at {entry_price:.2f}?")
+        print(f"    (e.g. an SL at {sl_price:.2f} appeared, or a new order was created)")
+        print("    ENTER = no change (expected — unfilled)  |  'changed' = something changed  |  'fail' = error  |  'skip' = skip check")
+        resp2 = input("    > ").strip().lower()
+
+    if resp2 == "fail":
+        cancel_and_fail(f"update_stop_loss error on unfilled STP (HTTP {status}): {body[:200]}")
+    elif resp2 not in ("", "changed", "skip"):
+        cancel_and_fail(f"Unrecognised input: {resp2!r}")
+
+    with capsys.disabled():
+        if resp2 == "changed":
+            print("[SMOKE] NOTE: update_stop_loss modified the unfilled STP order.")
+        else:
+            print("[SMOKE] NOTE: update_stop_loss had no visible effect on the unfilled STP (expected).")
+
+    # Step 3: cancel the pending STP
+    with capsys.disabled():
+        print()
+        print("[SMOKE] Sending close order to cancel the pending STP...")
+
+    ex.place_close(label="smoke_sl_cancel")
+    time.sleep(2)
+
+    with capsys.disabled():
+        print("[SMOKE] Close sent.")
+        print()
+        print(">>> CHECK YOUR TRADOVATE ACCOUNT NOW <<<")
+        print("    The pending STP SELL should be gone.")
+        print("    ENTER = order cancelled (pass)  |  'fail' = still visible  |  'skip' = skip check")
+        resp3 = input("    > ").strip().lower()
+
+    if resp3 == "fail":
+        pytest.fail("Pending STP SELL still visible after cancel")
+    elif resp3 not in ("", "skip"):
+        pytest.fail(f"Unrecognised input: {resp3!r}")
+
+    # Step 4: MKT BUY → update_stop_loss → MKT close (no interactive pause between them)
+    market_price_env = os.environ.get("SMOKE_MARKET_PRICE")
+    if not market_price_env:
+        pytest.skip("Set SMOKE_MARKET_PRICE to the current MNQ price to run the MKT entry step")
+    market_price = float(market_price_env)
+    sl_price     = market_price - 100.0
+    mkt_bar      = _fake_bar(market_price)
+
+    mkt_signal = {
+        "direction":   "long",
+        "entry_price": market_price,
+        "stop_price":  sl_price,
+        "take_profit": market_price + 200.0,
+        # no stop_fill_bars → MKT order
+    }
+
+    with capsys.disabled():
+        print(f"\n[SMOKE] Sending MKT BUY @ ~{market_price:.2f}...")
+
+    ex.place_entry(mkt_signal, mkt_bar)
+    time.sleep(1)   # let entry HTTP request clear before updating SL
+
+    sl_position = {"direction": "long", "stop_price": sl_price}
+
+    with capsys.disabled():
+        print(f"[SMOKE] Calling update_stop_loss SL={sl_price:.2f}...")
+
+    status, body = ex.update_stop_loss(sl_position, mkt_bar)
+
+    with capsys.disabled():
+        print(f"[SMOKE] PMT response: HTTP {status} — {body[:300]}")
+
+    time.sleep(1)   # let SL update settle before closing
+
+    with capsys.disabled():
+        print("[SMOKE] Sending MKT close...")
+
+    ex.place_close(label="smoke_mkt_close")
+    time.sleep(2)
+
+    with capsys.disabled():
+        print("[SMOKE] All three orders dispatched.")
+        print()
+        print(">>> CHECK YOUR TRADOVATE ACCOUNT NOW <<<")
+        print("    You should see: MKT BUY filled, SL attached, then closed.")
+        print(f"    (SL should have been {sl_price:.2f} while open)")
+        print("    ENTER = SL was visible before close (pass)  |  'fail' = SL missing  |  'skip' = skip check")
+        resp4 = input("    > ").strip().lower()
+
+    if resp4 == "fail":
+        pytest.fail(f"update_stop_loss: SL={sl_price:.2f} not visible on open MKT position")
+    elif resp4 not in ("", "skip"):
+        pytest.fail(f"Unrecognised input: {resp4!r}")
+
+    ex.stop()
+
+    with capsys.disabled():
+        print()
+        print("[SMOKE] Test complete.")
 
 
 def test_pmt_stop_entry_via_strategy_pipeline(tmp_path, monkeypatch, capsys):

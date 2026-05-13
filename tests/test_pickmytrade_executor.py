@@ -295,12 +295,11 @@ def test_risk_percentage_zero_in_all_payloads():
     assert payload["multiple_accounts"][0]["risk_percentage"] == 0
 
 
-def test_place_stop_after_limit_fill_long():
+def test_update_stop_loss_long():
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     pos = _position("long")
-    ex.place_stop_after_limit_fill(pos, _bar())
-    _drain(ex)
+    status, body = ex.update_stop_loss(pos, _bar())
     payload = ex._http.post.call_args.kwargs["json"]
     assert payload["data"] == "buy"
     assert payload["quantity"] == 0
@@ -308,17 +307,21 @@ def test_place_stop_after_limit_fill_long():
     assert payload["pyramid"] is False
     assert payload["same_direction_ignore"] is True
     assert payload["sl"] == 19980.0
+    assert status == 200
+    assert body == "OK"
 
 
-def test_place_stop_after_limit_fill_short():
+def test_update_stop_loss_short():
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     pos = _position("short")
-    ex.place_stop_after_limit_fill(pos, _bar())
-    _drain(ex)
+    status, body = ex.update_stop_loss(pos, _bar())
     payload = ex._http.post.call_args.kwargs["json"]
     assert payload["data"] == "sell"
+    assert payload["quantity"] == 0
+    assert payload["update_sl"] is True
     assert payload["sl"] == 19980.0
+    assert status == 200
 
 
 def test_place_close_sends_data_close():

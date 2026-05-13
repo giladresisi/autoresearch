@@ -689,7 +689,7 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
             "tp_breached": False,
         }
         POSITION_FILE.write_text(json.dumps(_position, indent=2))
-        _executor.place_stop_after_limit_fill(_position, _bar_row_for_fill)
+        _executor.update_stop_loss(_position, _bar_row_for_fill)
     else:
         _entry_fill = _executor.place_entry(signal, _bar_row_for_fill)
         # PickMyTradeExecutor returns None (async fill); fall back to signal price for display

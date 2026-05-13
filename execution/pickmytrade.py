@@ -103,7 +103,8 @@ class PickMyTradeExecutor:
             session_date=str(bar.name.date()) if hasattr(bar, "name") and bar.name is not None else "",
         )
 
-    def place_stop_after_limit_fill(self, position: dict, bar: BarRow) -> None:
+    def update_stop_loss(self, position: dict, bar: BarRow) -> tuple:
+        """Update the SL on the currently open position. Returns (status_code, response_body)."""
         order_id = f"pmt-{uuid.uuid4().hex[:8]}"
         direction = position["direction"]
         data = "buy" if direction == "long" else "sell"
@@ -115,7 +116,7 @@ class PickMyTradeExecutor:
             pyramid=False,
             same_direction_ignore=True,
         )
-        self._order_pool.submit(self._post_order, order_id, payload)
+        return self._post_order(order_id, payload)
 
     def place_close(self, label: str = "close") -> None:
         order_id = f"pmt-{uuid.uuid4().hex[:8]}"
@@ -138,7 +139,7 @@ class PickMyTradeExecutor:
         payload = self._build_payload(data, order_type="STP", price=entry_price)
         self._order_pool.submit(self._post_order, order_id, payload)
 
-    def _post_order(self, order_id: str, payload: dict) -> None:
+    def _post_order(self, order_id: str, payload: dict) -> tuple:
         headers = {"Content-Type": "application/json"}
         last_exc = None
         for attempt in range(self._max_retries):
@@ -148,11 +149,16 @@ class PickMyTradeExecutor:
                     timeout=self._request_timeout_s,
                 )
                 if resp.status_code in (200, 201):
-                    print(f"[PMT] Order {order_id} sent OK ({resp.status_code}): {payload.get('data')} {payload.get('order_type','MKT')} @ {payload.get('price', 'mkt')}", flush=True)
-                    return
+                    if payload.get("update_sl") or payload.get("update_tp"):
+                        action = f"update_sl={payload.get('sl')} update_tp={payload.get('tp')}"
+                    else:
+                        action = f"{payload.get('data')} {payload.get('order_type', 'MKT')} @ {payload.get('price', 'mkt')}"
+                    print(f"[PMT] Order {order_id} sent OK ({resp.status_code}): {action}", flush=True)
+                    return resp.status_code, resp.text
                 last_exc = RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
             except Exception as exc:
                 last_exc = exc
             if attempt < self._max_retries - 1:
                 time.sleep(2 ** attempt)
         print(f"[FILL-WARN] Order {order_id} placement failed: {last_exc}", flush=True)
+        return -1, str(last_exc)
