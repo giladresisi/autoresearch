@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime, time as _time
+from datetime import datetime
 from typing import Optional
 
 import pandas as pd
 
+import session_times
 import smt_state
 
 _DIR_UP            = "up"
@@ -137,8 +138,8 @@ def run_strategy(
     # Section 2: No active position                                        #
     # ------------------------------------------------------------------ #
     if not position["active"]:
-        # Block entries before 9:30 ET — pre-open bars are hypothesis-formation only.
-        if now.time() < _time(9, 30):
+        # Block entries before session open — pre-open bars are hypothesis-formation only.
+        if now.time() < session_times.SESSION_OPEN:
             return None
 
         # confidence=high: global conviction active — no automatic entries (limit or market).
