@@ -174,7 +174,7 @@ def run_strategy(
         if position["failed_entries"] > 2:
             return None
 
-        _MARKET_ENTRY_THRESHOLD = 15.0  # pts: switch to market if price is this close
+        _MARKET_ENTRY_THRESHOLD = 0.0  # only market-enter when bar opened past the entry level (gapped through)
         MIN_STOP_DISTANCE = 5.0
         MAX_CONFIRMATION_BODY_PTS = 25.0  # reject momentum/reversal bars as confirmation
 
