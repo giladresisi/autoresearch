@@ -23,11 +23,13 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "pytest-timeout>=0.5",
 ]
 
 [tool.pytest.ini_options]
 # Exclude live integration tests from standard runs; use -m integration to opt in explicitly.
-addopts = "-m 'not integration'"
+# 60 s ceiling prevents any single test from hanging the suite indefinitely.
+addopts = "--timeout=60 -m 'not integration'"
 markers = [
     "integration: marks tests as integration tests requiring live network access (deselect with '-m not integration')",
 ]
