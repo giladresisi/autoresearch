@@ -9,10 +9,13 @@ _IB_1S_CHUNK_SECONDS = 1800
 # Earliest timestamp for 1s gap-fill — prevents requesting unbounded historical data
 _1S_EARLIEST = "2026-05-01"
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
 import pandas as pd
+
+from strategy_smt import set_bar_data as _set_bar_data
 
 
 class IbGatewayDisconnectedError(Exception):
@@ -59,6 +62,10 @@ class IbRealtimeSource:
         self._session_date        = pd.Timestamp.now(tz="America/New_York").strftime("%Y%m%d")
         self._mnq_1s_session_df   = self._empty_bar_df()   # session bars (NOT written to main parquet)
         self._mes_1s_session_df   = self._empty_bar_df()   # session bars (NOT written to main parquet)
+        # Single-worker executor serializes all parquet writes off the IB event loop thread.
+        # max_workers=1 prevents concurrent writes to the same file.
+        self._parquet_executor    = ThreadPoolExecutor(max_workers=1, thread_name_prefix="parq")
+        self._last_seed_count: dict[str, int] = {"MNQ": 0, "MES": 0}
 
     @property
     def mnq_1m_df(self) -> pd.DataFrame:
@@ -141,8 +148,10 @@ class IbRealtimeSource:
             self._mes_1m_df = pd.concat([self._mes_1m_df, mes_new]).sort_index()
             self._mes_1m_df = self._mes_1m_df[~self._mes_1m_df.index.duplicated(keep="last")]
         self._bar_data_dir.mkdir(parents=True, exist_ok=True)
-        self._mnq_1m_df.to_parquet(self._bar_data_dir / "MNQ_1m.parquet")
-        self._mes_1m_df.to_parquet(self._bar_data_dir / "MES_1m.parquet")
+        _mnq_snap = self._mnq_1m_df
+        _mes_snap = self._mes_1m_df
+        self._parquet_executor.submit(_mnq_snap.to_parquet, self._bar_data_dir / "MNQ_1m.parquet")
+        self._parquet_executor.submit(_mes_snap.to_parquet, self._bar_data_dir / "MES_1m.parquet")
 
     def _gap_fill_1s_ib(self) -> None:
         """Fill recent 1s bars from IB: covers what Databento can't serve (last few hours).
@@ -216,7 +225,8 @@ class IbRealtimeSource:
                     combined = combined[~combined.index.duplicated(keep="last")]
                     setattr(self, df_attr, combined)
                     self._bar_data_dir.mkdir(parents=True, exist_ok=True)
-                    combined.to_parquet(self._bar_data_dir / parquet_name)
+                    _snap = combined
+                    self._parquet_executor.submit(_snap.to_parquet, self._bar_data_dir / parquet_name)
                     print(f"[gap_fill_1s_ib] {instrument}: +{len(new_df)} 1s bars", flush=True)
                 except Exception as exc:
                     print(f"[gap_fill_1s_ib] {instrument}: error: {exc}", flush=True)
@@ -268,6 +278,9 @@ class IbRealtimeSource:
 
     def _seed_from_history(self, bars, instrument: str) -> None:
         """Bulk-populate df from IB's initial historical batch (hasNewBar=False)."""
+        if len(bars) == self._last_seed_count[instrument]:
+            return  # callback fired with no new bars — skip redundant dedup work
+        self._last_seed_count[instrument] = len(bars)
         rows = []
         timestamps = []
         for bar in bars:
@@ -288,12 +301,14 @@ class IbRealtimeSource:
             combined = pd.concat([self._mnq_1m_df, new_df]).sort_index()
             combined = combined[~combined.index.duplicated(keep="last")]
             self._mnq_1m_df = combined
-            self._mnq_1m_df.to_parquet(self._bar_data_dir / "MNQ_1m.parquet")
+            _snap = self._mnq_1m_df.copy()
+            self._parquet_executor.submit(_snap.to_parquet, self._bar_data_dir / "MNQ_1m.parquet")
         else:
             combined = pd.concat([self._mes_1m_df, new_df]).sort_index()
             combined = combined[~combined.index.duplicated(keep="last")]
             self._mes_1m_df = combined
-            self._mes_1m_df.to_parquet(self._bar_data_dir / "MES_1m.parquet")
+            _snap = self._mes_1m_df.copy()
+            self._parquet_executor.submit(_snap.to_parquet, self._bar_data_dir / "MES_1m.parquet")
 
     def _on_mnq_1m_bar(self, bars, hasNewBar) -> None:
         if not hasNewBar:
@@ -308,7 +323,15 @@ class IbRealtimeSource:
         )
         self._mnq_1m_df = pd.concat([self._mnq_1m_df, row])
         self._mnq_1m_df = self._mnq_1m_df[~self._mnq_1m_df.index.duplicated(keep="last")]
-        self._mnq_1m_df.to_parquet(self._bar_data_dir / "MNQ_1m.parquet")
+        _mnq_snap = self._mnq_1m_df  # capture reference before possible trim
+        _mnq_path = self._bar_data_dir / "MNQ_1m.parquet"
+        self._parquet_executor.submit(_mnq_snap.to_parquet, _mnq_path)
+        # Trim to 14-day window after write is submitted; full history preserved on disk via _mnq_snap
+        _cutoff = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=14)
+        if (not self._mnq_1m_df.empty
+                and self._mnq_1m_df.index.tz is not None
+                and self._mnq_1m_df.index[0] < _cutoff):
+            self._mnq_1m_df = self._mnq_1m_df[self._mnq_1m_df.index >= _cutoff].copy()
         if self._mnq_1s_pending:
             rows = [[p["open"], p["high"], p["low"], p["close"], p["volume"]]
                     for p in self._mnq_1s_pending]
@@ -322,13 +345,14 @@ class IbRealtimeSource:
                 ~self._mnq_1s_session_df.index.duplicated(keep="last")
             ]
             session_path = self._bar_data_dir / f"MNQ_1s_session_{self._session_date}.parquet"
-            self._mnq_1s_session_df.to_parquet(session_path)
+            _ses_snap = self._mnq_1s_session_df  # capture before clear
+            self._parquet_executor.submit(_ses_snap.to_parquet, session_path)
+            self._mnq_1s_session_df = self._empty_bar_df()  # clear after submission; parquet is durable record
             self._mnq_1s_pending.clear()
         self._mes_tick_bar = None  # reset alongside _mnq_tick_bar (same minute boundary)
         # Reset second accumulator so last second of expiring minute does not bleed into the next
         self._mnq_tick_bar = None
-        from strategy_smt import set_bar_data
-        set_bar_data(self._mnq_1m_df, self._mes_1m_df)
+        _set_bar_data(self._mnq_1m_df, self._mes_1m_df)
         if self._on_bar_1m_complete is not None:
             self._on_bar_1m_complete(bars)
 
@@ -345,7 +369,15 @@ class IbRealtimeSource:
         )
         self._mes_1m_df = pd.concat([self._mes_1m_df, row])
         self._mes_1m_df = self._mes_1m_df[~self._mes_1m_df.index.duplicated(keep="last")]
-        self._mes_1m_df.to_parquet(self._bar_data_dir / "MES_1m.parquet")
+        _mes_snap = self._mes_1m_df  # capture reference before possible trim
+        _mes_path = self._bar_data_dir / "MES_1m.parquet"
+        self._parquet_executor.submit(_mes_snap.to_parquet, _mes_path)
+        # Trim to 14-day window after write is submitted; .copy() breaks view chain so old array is GC'd
+        _cutoff = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=14)
+        if (not self._mes_1m_df.empty
+                and self._mes_1m_df.index.tz is not None
+                and self._mes_1m_df.index[0] < _cutoff):
+            self._mes_1m_df = self._mes_1m_df[self._mes_1m_df.index >= _cutoff].copy()
         if self._mes_1s_pending:
             rows = [[p["open"], p["high"], p["low"], p["close"], p["volume"]]
                     for p in self._mes_1s_pending]
@@ -359,10 +391,11 @@ class IbRealtimeSource:
                 ~self._mes_1s_session_df.index.duplicated(keep="last")
             ]
             session_path = self._bar_data_dir / f"MES_1s_session_{self._session_date}.parquet"
-            self._mes_1s_session_df.to_parquet(session_path)
+            _ses_snap = self._mes_1s_session_df  # capture before clear
+            self._parquet_executor.submit(_ses_snap.to_parquet, session_path)
+            self._mes_1s_session_df = self._empty_bar_df()  # clear after submission; parquet is durable record
             self._mes_1s_pending.clear()
-        from strategy_smt import set_bar_data
-        set_bar_data(self._mnq_1m_df, self._mes_1m_df)
+        _set_bar_data(self._mnq_1m_df, self._mes_1m_df)
 
     def _on_mes_tick(self, ticker) -> None:
         if not ticker.tickByTicks:
@@ -421,6 +454,9 @@ class IbRealtimeSource:
         asyncio.set_event_loop(asyncio.new_event_loop())
         self._load_parquets()
         self._gap_fill_1s_ib()
+        # Release ~70 MB: history only needed by _gap_fill_1s_ib; live signal path reads parquet
+        self._mnq_1s_df = self._empty_bar_df()
+        self._mes_1s_df = self._empty_bar_df()
         mnq_contract = Future(conId=int(self._mnq_conid), exchange="CME")
         mes_contract = Future(conId=int(self._mes_conid), exchange="CME")
         for attempt in range(self._max_retries):
@@ -486,6 +522,11 @@ class IbRealtimeSource:
                 self._ib.disconnect()
         except Exception:
             pass
+        # Drain pending parquet writes before exit so no data is lost on shutdown.
+        try:
+            self._parquet_executor.shutdown(wait=True)
+        except Exception:
+            pass
 
 
 def gap_fill_1m_ib(bar_data_dir: Path) -> None:
@@ -494,6 +535,10 @@ def gap_fill_1m_ib(bar_data_dir: Path) -> None:
     Reads IB_HOST, IB_PORT, MNQ_CONID, MES_CONID from environment.
     Uses client_id=17 (distinct from all other IB clients in the system).
     Skips gracefully if required env vars are absent or IB is unreachable.
+
+    Must be called before IbRealtimeSource.start() — writes directly to the same
+    parquet files the instance's executor will later manage; calling it after start()
+    would bypass the executor's serialization guarantee.
     """
     import os
     from data.sources import IBGatewaySource

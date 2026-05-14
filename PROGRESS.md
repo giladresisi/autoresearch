@@ -19,6 +19,17 @@ Unified live_orders.py (single-tier: log+dispatch+sync), stop price moved from p
 
 ---
 
+## Feature: Live Session RAM Reduction (CRITICAL)
+
+**Status**: ✅ Planned
+**Plan File**: `.agents/plans/live-session-ram-reduction.md`
+
+
+## Feature: Latency and I/O Optimization (HIGH/MEDIUM)
+
+**Status**: ✅ Planned
+**Plan File**: `.agents/plans/latency-and-io-optimization.md`
+
 ## Feature: IB Gap-Fill + Orchestrator Disconnect Handling
 
 **Status**: ✅ Complete

@@ -1,9 +1,26 @@
 """tests/test_data_sources.py — Unit tests for data/sources.py."""
+import sys
+import types
 import unittest.mock as mock
 import pytest
 import pandas as pd
 import numpy as np
 from data.sources import YFinanceSource, IBGatewaySource, DataSource, _IB_BAR_SIZE, _quarterly_future_ranges, _third_friday
+
+
+def _ensure_databento_stub():
+    """Insert a minimal stub for ``databento`` into sys.modules when the real package is absent.
+
+    DatabentSource now does ``import databento as db`` inside __init__, so any
+    instantiation in tests requires the module to be importable.  The stub is
+    marked with ``_is_stub = True`` so integration tests can detect and skip it.
+    The stub is inserted only once; subsequent calls are no-ops.
+    """
+    if "databento" not in sys.modules:
+        stub = types.ModuleType("databento")
+        stub.Historical = mock.MagicMock()
+        stub._is_stub = True
+        sys.modules["databento"] = stub
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -462,8 +479,10 @@ class TestDatabentSourceInit:
     def test_init_succeeds_when_api_key_present(self, monkeypatch):
         """DatabentSource.__init__ succeeds with DATABENTO_API_KEY set."""
         monkeypatch.setenv("DATABENTO_API_KEY", "test-key-123")
+        _ensure_databento_stub()
         from data.sources import DatabentSource
-        src = DatabentSource()  # should not raise
+        with mock.patch("databento.Historical"):
+            src = DatabentSource()  # should not raise
         assert src is not None
 
 
@@ -471,8 +490,10 @@ class TestDatabentSourceFetch:
     @pytest.fixture
     def src(self, monkeypatch):
         monkeypatch.setenv("DATABENTO_API_KEY", "test-key-123")
-        from data.sources import DatabentSource
-        return DatabentSource()
+        _ensure_databento_stub()
+        with mock.patch("databento.Historical"):
+            from data.sources import DatabentSource
+            return DatabentSource()
 
     def test_calls_get_range_with_correct_args(self, src, monkeypatch):
         """fetch() must call timeseries.get_range with GLBX.MDP3, ohlcv-1m, correct symbols."""
@@ -480,9 +501,7 @@ class TestDatabentSourceFetch:
         mock_data.to_df.return_value = _make_1m_ohlcv(10)
         mock_client = mock.MagicMock()
         mock_client.timeseries.get_range.return_value = mock_data
-        mock_db = mock.MagicMock()
-        mock_db.Historical.return_value = mock_client
-        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        src._client = mock_client
         src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "5m")
         mock_client.timeseries.get_range.assert_called_once_with(
             dataset="GLBX.MDP3",
@@ -499,9 +518,7 @@ class TestDatabentSourceFetch:
         mock_data.to_df.return_value = _make_1m_ohlcv(60)  # 60 x 1m bars -> 12 x 5m bars
         mock_client = mock.MagicMock()
         mock_client.timeseries.get_range.return_value = mock_data
-        mock_db = mock.MagicMock()
-        mock_db.Historical.return_value = mock_client
-        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        src._client = mock_client
         df = src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "5m")
         assert df is not None
         assert len(df) == 12  # 60 1m bars -> 12 5m bars
@@ -512,9 +529,7 @@ class TestDatabentSourceFetch:
         mock_data.to_df.return_value = _make_1m_ohlcv(5)
         mock_client = mock.MagicMock()
         mock_client.timeseries.get_range.return_value = mock_data
-        mock_db = mock.MagicMock()
-        mock_db.Historical.return_value = mock_client
-        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        src._client = mock_client
         df = src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "5m")
         assert df is not None
         assert set(df.columns) == {"Open", "High", "Low", "Close", "Volume"}
@@ -525,9 +540,7 @@ class TestDatabentSourceFetch:
         mock_data.to_df.return_value = _make_1m_ohlcv(5)
         mock_client = mock.MagicMock()
         mock_client.timeseries.get_range.return_value = mock_data
-        mock_db = mock.MagicMock()
-        mock_db.Historical.return_value = mock_client
-        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        src._client = mock_client
         df = src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "5m")
         assert df is not None
         assert str(df.index.tzinfo) == "America/New_York"
@@ -536,9 +549,7 @@ class TestDatabentSourceFetch:
         """fetch() returns None (no raise) when BentoError occurs."""
         mock_client = mock.MagicMock()
         mock_client.timeseries.get_range.side_effect = Exception("BentoError: unauthorized")
-        mock_db = mock.MagicMock()
-        mock_db.Historical.return_value = mock_client
-        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        src._client = mock_client
         result = src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "5m")
         assert result is None
 
@@ -548,9 +559,7 @@ class TestDatabentSourceFetch:
         mock_data.to_df.return_value = pd.DataFrame()
         mock_client = mock.MagicMock()
         mock_client.timeseries.get_range.return_value = mock_data
-        mock_db = mock.MagicMock()
-        mock_db.Historical.return_value = mock_client
-        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        src._client = mock_client
         result = src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "5m")
         assert result is None
 
@@ -566,9 +575,7 @@ class TestDatabentSourceFetch:
         mock_data.to_df.return_value = _make_1m_ohlcv(10)
         mock_client = mock.MagicMock()
         mock_client.timeseries.get_range.return_value = mock_data
-        mock_db = mock.MagicMock()
-        mock_db.Historical.return_value = mock_client
-        monkeypatch.setitem(__import__("sys").modules, "databento", mock_db)
+        src._client = mock_client
         df = src.fetch("MNQ.c.0", "2024-01-01", "2024-01-31", "1m")
         assert df is not None
         assert len(df) == 10  # unchanged
@@ -576,8 +583,10 @@ class TestDatabentSourceFetch:
     def test_conforms_to_protocol(self, monkeypatch):
         """DatabentSource satisfies the DataSource protocol."""
         monkeypatch.setenv("DATABENTO_API_KEY", "test-key-123")
-        from data.sources import DatabentSource
-        assert isinstance(DatabentSource(), DataSource)
+        _ensure_databento_stub()
+        with mock.patch("databento.Historical"):
+            from data.sources import DatabentSource
+            assert isinstance(DatabentSource(), DataSource)
 
 
 @pytest.mark.integration
@@ -591,6 +600,8 @@ class TestDatabentSourceIntegration:
             pytest.skip("DATABENTO_API_KEY not set -- skipping live Databento test")
         try:
             import databento  # noqa: F401
+            if getattr(databento, "_is_stub", False):
+                pytest.skip("databento stub active — skipping live Databento test")
         except ImportError:
             pytest.skip("databento package not installed -- skipping live Databento test")
 

@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import json
 import math as _math
+import numpy as _np
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -106,8 +107,15 @@ _session_end_time   = None
 _scan_state: "strategy_smt.ScanState | None" = None
 _session_ctx: "strategy_smt.SessionContext | None" = None
 _session_init_date = None   # date of last session init; triggers re-init on day change
-_session_mnq_rows: list = []   # accumulated MNQ bar dicts for the current session
-_session_mes_rows: list = []   # accumulated MES bar dicts for the current session
+# Per-column session bar accumulators (column-major; faster DF/array construction than list-of-dicts)
+_mnq_o_vals: list = []
+_mnq_h_vals: list = []
+_mnq_l_vals: list = []
+_mnq_c_vals: list = []
+_mnq_v_vals: list = []
+_mes_h_vals: list = []
+_mes_l_vals: list = []
+_mes_c_vals: list = []
 # Running session extremes used for smt_cache and run_ses_high/low
 _session_smt_cache: dict = {
     "mes_h": float("nan"), "mes_l": float("nan"),
@@ -350,7 +358,8 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     global _current_session_date, _current_divergence_level, _divergence_reentry_count
     global _day_pdh, _day_pdl, _pdh_pdl_date
     global _scan_state, _session_ctx, _session_init_date
-    global _session_mnq_rows, _session_mes_rows
+    global _mnq_o_vals, _mnq_h_vals, _mnq_l_vals, _mnq_c_vals, _mnq_v_vals
+    global _mes_h_vals, _mes_l_vals, _mes_c_vals
     global _session_smt_cache, _session_run_ses_high, _session_run_ses_low
 
     # 1. Session gate
@@ -428,8 +437,9 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
             eqh_levels=_eqh_levels,
             eql_levels=_eql_levels,
         )
-        _session_mnq_rows = []
-        _session_mes_rows = []
+        _mnq_o_vals = []; _mnq_h_vals = []; _mnq_l_vals = []
+        _mnq_c_vals = []; _mnq_v_vals = []
+        _mes_h_vals = []; _mes_l_vals = []; _mes_c_vals = []
         _session_smt_cache = {
             "mes_h": float("nan"), "mes_l": float("nan"),
             "mnq_h": float("nan"), "mnq_l": float("nan"),
@@ -445,11 +455,11 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
                 & (_mnq_1m_df.index.time >= _session_start_time)
             )
             for _ts_h, _row_h in _mnq_1m_df[_hist_mask].iterrows():
-                _session_mnq_rows.append({
-                    "Open": float(_row_h["Open"]), "High": float(_row_h["High"]),
-                    "Low": float(_row_h["Low"]), "Close": float(_row_h["Close"]),
-                    "Volume": float(_row_h.get("Volume", 0.0)),
-                })
+                _mnq_o_vals.append(float(_row_h["Open"]))
+                _mnq_h_vals.append(float(_row_h["High"]))
+                _mnq_l_vals.append(float(_row_h["Low"]))
+                _mnq_c_vals.append(float(_row_h["Close"]))
+                _mnq_v_vals.append(float(_row_h.get("Volume", 0.0)))
                 _v = float(_row_h["High"])
                 _session_smt_cache["mnq_h"] = (
                     _v if _math.isnan(_session_smt_cache["mnq_h"])
@@ -477,11 +487,9 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
                 & (_mes_1m_df.index.time >= _session_start_time)
             )
             for _ts_h, _row_h in _mes_1m_df[_mes_hist_mask].iterrows():
-                _session_mes_rows.append({
-                    "Open": float(_row_h["Open"]), "High": float(_row_h["High"]),
-                    "Low": float(_row_h["Low"]), "Close": float(_row_h["Close"]),
-                    "Volume": float(_row_h.get("Volume", 0.0)),
-                })
+                _mes_h_vals.append(float(_row_h["High"]))
+                _mes_l_vals.append(float(_row_h["Low"]))
+                _mes_c_vals.append(float(_row_h["Close"]))
                 _v = float(_row_h["High"])
                 _session_smt_cache["mes_h"] = (
                     _v if _math.isnan(_session_smt_cache["mes_h"])
@@ -506,21 +514,20 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
     # 5. Update running extremes from previous bar (before appending current bar).
     # Skipped on session init: the init block already folded all historical bars into the
     # cache; re-reading the last row here would double-count its extremes.
-    if not _session_just_inited and _session_mnq_rows:
-        _prev = _session_mnq_rows[-1]
-        _v = float(_prev["High"])
+    if not _session_just_inited and _mnq_h_vals:
+        _v = _mnq_h_vals[-1]
         _session_smt_cache["mnq_h"] = (
             _v if _math.isnan(_session_smt_cache["mnq_h"])
             else max(_session_smt_cache["mnq_h"], _v)
         )
         _session_run_ses_high = max(_session_run_ses_high, _v)
-        _v = float(_prev["Low"])
+        _v = _mnq_l_vals[-1]
         _session_smt_cache["mnq_l"] = (
             _v if _math.isnan(_session_smt_cache["mnq_l"])
             else min(_session_smt_cache["mnq_l"], _v)
         )
         _session_run_ses_low = min(_session_run_ses_low, _v)
-        _v = float(_prev["Close"])
+        _v = _mnq_c_vals[-1]
         _session_smt_cache["mnq_ch"] = (
             _v if _math.isnan(_session_smt_cache["mnq_ch"])
             else max(_session_smt_cache["mnq_ch"], _v)
@@ -529,19 +536,18 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
             _v if _math.isnan(_session_smt_cache["mnq_cl"])
             else min(_session_smt_cache["mnq_cl"], _v)
         )
-    if not _session_just_inited and _session_mes_rows:
-        _prev_m = _session_mes_rows[-1]
-        _v = float(_prev_m["High"])
+    if not _session_just_inited and _mes_h_vals:
+        _v = _mes_h_vals[-1]
         _session_smt_cache["mes_h"] = (
             _v if _math.isnan(_session_smt_cache["mes_h"])
             else max(_session_smt_cache["mes_h"], _v)
         )
-        _v = float(_prev_m["Low"])
+        _v = _mes_l_vals[-1]
         _session_smt_cache["mes_l"] = (
             _v if _math.isnan(_session_smt_cache["mes_l"])
             else min(_session_smt_cache["mes_l"], _v)
         )
-        _v = float(_prev_m["Close"])
+        _v = _mes_c_vals[-1]
         _session_smt_cache["mes_ch"] = (
             _v if _math.isnan(_session_smt_cache["mes_ch"])
             else max(_session_smt_cache["mes_ch"], _v)
@@ -551,34 +557,39 @@ def _process_scanning(bar, bar_ts: pd.Timestamp, bar_time) -> None:
             else min(_session_smt_cache["mes_cl"], _v)
         )
 
-    # 6. Append current MNQ and MES bars to session rows
-    _session_mnq_rows.append({
-        "Open": float(bar.Open), "High": float(bar.High),
-        "Low": float(bar.Low), "Close": float(bar.Close), "Volume": float(bar.Volume),
-    })
-    _session_mes_rows.append({
-        "Open": float(_mes_partial_1m["open"]), "High": float(_mes_partial_1m["high"]),
-        "Low": float(_mes_partial_1m["low"]), "Close": float(_mes_partial_1m["close"]),
-        "Volume": float(_mes_partial_1m["volume"]),
-    })
-    bar_idx = len(_session_mnq_rows) - 1
+    # 6. Append current MNQ and MES bars to per-column accumulators
+    _mnq_o_vals.append(float(bar.Open))
+    _mnq_h_vals.append(float(bar.High))
+    _mnq_l_vals.append(float(bar.Low))
+    _mnq_c_vals.append(float(bar.Close))
+    _mnq_v_vals.append(float(bar.Volume))
+    _mes_h_vals.append(float(_mes_partial_1m["high"]))
+    _mes_l_vals.append(float(_mes_partial_1m["low"]))
+    _mes_c_vals.append(float(_mes_partial_1m["close"]))
+    bar_idx = len(_mnq_o_vals) - 1
 
-    # 7. Build DataFrames from accumulated rows
-    mnq_reset = pd.DataFrame(_session_mnq_rows)
-    mes_reset = pd.DataFrame(_session_mes_rows)
-    _min_n = min(len(mnq_reset), len(mes_reset))
-    mnq_reset = mnq_reset.iloc[:_min_n].reset_index(drop=True)
-    mes_reset  = mes_reset.iloc[:_min_n].reset_index(drop=True)
+    # 7+8. Build numpy arrays from per-column lists (no dict-key inference overhead)
+    _min_n = min(len(_mnq_o_vals), len(_mes_h_vals))
+    bar_idx = min(bar_idx, _min_n - 1) if _min_n > 0 else 0
+    _mnq_o = _np.asarray(_mnq_o_vals[:_min_n], dtype=_np.float64)
+    _mnq_h = _np.asarray(_mnq_h_vals[:_min_n], dtype=_np.float64)
+    _mnq_l = _np.asarray(_mnq_l_vals[:_min_n], dtype=_np.float64)
+    _mnq_c = _np.asarray(_mnq_c_vals[:_min_n], dtype=_np.float64)
+    _mnq_v = _np.asarray(_mnq_v_vals[:_min_n], dtype=_np.float64)
+    _mes_h = _np.asarray(_mes_h_vals[:_min_n], dtype=_np.float64)
+    _mes_l = _np.asarray(_mes_l_vals[:_min_n], dtype=_np.float64)
+    _mes_c = _np.asarray(_mes_c_vals[:_min_n], dtype=_np.float64)
 
-    # 8. Extract numpy arrays for process_scan_bar
-    _mnq_o = mnq_reset["Open"].values
-    _mnq_h = mnq_reset["High"].values
-    _mnq_l = mnq_reset["Low"].values
-    _mnq_c = mnq_reset["Close"].values
-    _mnq_v = mnq_reset["Volume"].values
-    _mes_h = mes_reset["High"].values
-    _mes_l = mes_reset["Low"].values
-    _mes_c = mes_reset["Close"].values
+    # Build DataFrames from column-major dict (no list-of-dicts key inference)
+    mnq_reset = pd.DataFrame({
+        "Open": _mnq_o, "High": _mnq_h, "Low": _mnq_l,
+        "Close": _mnq_c, "Volume": _mnq_v,
+    })
+    mes_reset = pd.DataFrame({
+        "Open": _np.zeros(_min_n),   # MES Open not consumed by process_scan_bar
+        "High": _mes_h, "Low": _mes_l, "Close": _mes_c,
+        "Volume": _np.zeros(_min_n),
+    })
 
     _bar_row = strategy_smt._BarRow(
         float(bar.Open), float(bar.High), float(bar.Low), float(bar.Close),

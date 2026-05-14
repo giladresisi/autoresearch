@@ -233,3 +233,64 @@ class TestMergeSession1sParquets:
         call_kwargs = mock_ib.reqHistoricalData.call_args.kwargs
         assert call_kwargs.get("durationStr") == "119 S"
         assert call_kwargs.get("barSizeSetting") == "1 secs"
+
+
+class TestSafeReadLastTs:
+    def test_safe_read_last_ts_returns_last_index(self, tmp_path):
+        """_safe_read_last_ts returns the last index value without reading OHLCV columns."""
+        from data.databento_backfill import _safe_read_last_ts
+
+        ts0 = pd.Timestamp("2026-04-01 09:30:00", tz="America/New_York")
+        ts1 = pd.Timestamp("2026-04-01 09:31:00", tz="America/New_York")
+        df = pd.DataFrame(
+            [[100.0, 101.0, 99.0, 100.5, 500.0],
+             [101.0, 102.0, 100.0, 101.5, 600.0]],
+            columns=["Open", "High", "Low", "Close", "Volume"],
+            index=pd.DatetimeIndex([ts0, ts1]),
+        )
+        path = tmp_path / "test.parquet"
+        df.to_parquet(path)
+
+        result = _safe_read_last_ts(path)
+        assert result == df.index[-1]
+
+    def test_safe_read_last_ts_returns_none_for_missing_file(self, tmp_path):
+        """_safe_read_last_ts returns None when the file does not exist."""
+        from data.databento_backfill import _safe_read_last_ts
+
+        result = _safe_read_last_ts(tmp_path / "nonexistent.parquet")
+        assert result is None
+
+
+class TestBackfillParquetsReadOptimization:
+    def test_backfill_parquets_skips_full_read_when_current(self, tmp_path):
+        """When the parquet is already current, _safe_read_parquet must NOT be called."""
+        from data.databento_backfill import backfill_parquets
+
+        # Return a timestamp well within the cutoff window (1 hour ago = current)
+        now = pd.Timestamp.now(tz="America/New_York")
+        recent_ts = now - pd.Timedelta(hours=1)
+
+        full_read_mock = MagicMock(side_effect=AssertionError("full read should not happen"))
+
+        with patch("data.databento_backfill._safe_read_last_ts", return_value=recent_ts), \
+             patch("data.databento_backfill._safe_read_parquet", full_read_mock), \
+             patch("data.databento_backfill.DatabentSource", autospec=False):
+            backfill_parquets(tmp_path, ib_cutoff_days=2)
+
+        full_read_mock.assert_not_called()
+
+    def test_backfill_parquets_reads_full_parquet_when_stale(self, tmp_path):
+        """When the parquet is stale, _safe_read_parquet MUST be called to load existing data."""
+        from data.databento_backfill import backfill_parquets, _empty_df
+
+        old_ts = pd.Timestamp("2020-01-01", tz="America/New_York")
+        full_read_mock = MagicMock(return_value=_empty_df())
+
+        with patch("data.databento_backfill._safe_read_last_ts", return_value=old_ts), \
+             patch("data.databento_backfill._safe_read_parquet", full_read_mock), \
+             patch("data.databento_backfill.DatabentSource", autospec=False) as MockSource:
+            MockSource.return_value.fetch.return_value = None
+            backfill_parquets(tmp_path)
+
+        assert full_read_mock.called

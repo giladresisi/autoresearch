@@ -6,9 +6,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 import regression
+
+# Parquet slices are cached here (gitignored). Generated once per machine from the full
+# data/ parquets so the fixture always copies a small window instead of the full history.
+_FIXTURES_DIR = Path(__file__).parent / "fixtures"
+_SLICE_START  = pd.Timestamp("2025-11-07", tz="America/New_York")  # 5 trading days before test date
+_SLICE_END    = pd.Timestamp("2025-11-16", tz="America/New_York")  # 1 day after test date
 
 
 # ── Parser tests ──────────────────────────────────────────────────────────────
@@ -57,16 +64,44 @@ def _md_with_date(tmp_path: Path, date: str = "2025-11-14") -> Path:
     return md
 
 
+@pytest.fixture(scope="session")
+def _parquet_slices():
+    """Return {filename: Path} for 7-day slices around the regression test date.
+
+    Slices are written to tests/fixtures/ (gitignored) on first run and reused
+    on subsequent runs, so each machine pays the slice cost at most once.
+    Returns None when the full parquets are absent and no cached slice exists.
+    """
+    _NAMES = ("MNQ_1m.parquet", "MES_1m.parquet")
+    real_data = Path(__file__).parent.parent / "data"
+    slice_paths = {n: _FIXTURES_DIR / n.replace(".parquet", "_slice.parquet") for n in _NAMES}
+
+    # If all slices already exist, use them directly (no source parquet needed).
+    if all(p.exists() for p in slice_paths.values()):
+        return slice_paths
+
+    # Need to (re)build — require the source parquets.
+    if not all((real_data / n).exists() for n in _NAMES):
+        return None
+
+    _FIXTURES_DIR.mkdir(exist_ok=True)
+    for name, slice_path in slice_paths.items():
+        if not slice_path.exists():
+            full = pd.read_parquet(real_data / name)
+            window = full[(full.index >= _SLICE_START) & (full.index < _SLICE_END)]
+            window.to_parquet(slice_path)
+    return slice_paths
+
+
 @pytest.fixture()
-def real_parquet_available():
-    """Skip test if real parquet data is not present."""
-    from pathlib import Path as _P
-    if not _P("data/MNQ_1m.parquet").exists() or not _P("data/MES_1m.parquet").exists():
+def real_parquet_available(_parquet_slices):
+    """Skip test if parquet slices are not available."""
+    if _parquet_slices is None:
         pytest.skip("Real parquet data not available")
 
 
 @pytest.fixture(autouse=True)
-def _redirect_state(tmp_path, monkeypatch):
+def _redirect_state(tmp_path, monkeypatch, _parquet_slices):
     """Redirect smt_state paths so regression writes go to tmp_path."""
     import smt_state
     monkeypatch.setattr(smt_state, "DATA_DIR",        tmp_path)
@@ -74,28 +109,14 @@ def _redirect_state(tmp_path, monkeypatch):
     monkeypatch.setattr(smt_state, "DAILY_PATH",      tmp_path / "daily.json")
     monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
     monkeypatch.setattr(smt_state, "POSITION_PATH",   tmp_path / "position.json")
-    # Also redirect regression output dir by monkeypatching Path("data") references inside regression.py
-    # We do this by patching run_regression's internal data dir reference via a fixture that
-    # sets the working data path. Since regression.py uses Path("data") directly, we need to
-    # patch it at the module level.
+    # regression.py uses Path("data") relative to cwd; redirect via chdir.
     monkeypatch.chdir(tmp_path)
-    # Copy real parquets into tmp_path/data if they exist
-    real_data = Path(__file__).parent.parent / "data"
     tmp_data = tmp_path / "data"
     tmp_data.mkdir(exist_ok=True)
-    for parquet in ["MNQ_1m.parquet", "MES_1m.parquet"]:
-        src = real_data / parquet
-        if src.exists():
-            import shutil
-            shutil.copy2(src, tmp_data / parquet)
-    # Copy futures_manifest.json
-    import os
-    futures_cache = os.path.join(
-        os.path.expanduser("~"), ".cache", "autoresearch", "futures_data"
-    )
-    manifest_src = Path(futures_cache) / "futures_manifest.json"
-    if manifest_src.exists():
-        pass  # conftest.py bootstrap already handles this
+    if _parquet_slices:
+        import shutil
+        for name, slice_path in _parquet_slices.items():
+            shutil.copy2(slice_path, tmp_data / name)
 
 
 def test_run_regression_pass_when_baselines_match(tmp_path, real_parquet_available):

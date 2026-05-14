@@ -26,6 +26,8 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+# Exclude live integration tests from standard runs; use -m integration to opt in explicitly.
+addopts = "-m 'not integration'"
 markers = [
     "integration: marks tests as integration tests requiring live network access (deselect with '-m not integration')",
 ]

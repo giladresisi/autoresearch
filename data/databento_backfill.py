@@ -29,11 +29,12 @@ def backfill_parquets(
 
     for ticker, fname in [(MNQ_TICKER, "MNQ_1m.parquet"), (MES_TICKER, "MES_1m.parquet")]:
         path     = bar_data_dir / fname
-        existing = _safe_read_parquet(path)
-        last_bar = existing.index[-1] if not existing.empty else None
+        last_bar = _safe_read_last_ts(path)
         start_ts = max(last_bar + pd.Timedelta(minutes=1), floor) if last_bar is not None else floor
         if start_ts >= cutoff:
             continue  # parquet already current up to cutoff — nothing to fetch
+        # Only read the full parquet when we actually need to concat new data
+        existing = _safe_read_parquet(path)
         # Convert to UTC so Databento range boundaries are unambiguous at DST transitions
         df_new = source.fetch(
             ticker,
@@ -75,6 +76,22 @@ def _safe_read_parquet(path: Path) -> pd.DataFrame:
         return empty
 
 
+def _safe_read_last_ts(path: Path) -> "pd.Timestamp | None":
+    """Return the last index value of a parquet without loading OHLCV columns.
+
+    Returns None if the file is missing, empty, or corrupted.
+    Does NOT recreate the file on corruption (read-only operation).
+    """
+    if not path.exists():
+        return None
+    try:
+        idx_only = pd.read_parquet(path, columns=[])
+        # Use len() not .empty — a zero-column DataFrame is "empty" even if rows exist
+        return idx_only.index[-1] if len(idx_only.index) > 0 else None
+    except Exception:
+        return None
+
+
 MNQ_1S_SEED_START = pd.Timestamp("2026-05-01", tz="America/New_York")
 
 
@@ -97,12 +114,13 @@ def backfill_1s_parquets(
 
     for ticker, fname in [(MNQ_TICKER, "MNQ_1s.parquet"), (MES_TICKER, "MES_1s.parquet")]:
         path     = bar_data_dir / fname
-        existing = _safe_read_parquet(path)
-        last_bar = existing.index[-1] if not existing.empty else None
+        last_bar = _safe_read_last_ts(path)
         start_ts = max(last_bar + pd.Timedelta(seconds=1), floor) if last_bar is not None else floor
         # Skip if parquet is already within Databento's data lag window (~10 min)
         if last_bar is not None and start_ts >= now - pd.Timedelta(minutes=10):
             continue
+        # Only read the full parquet when we actually need to concat new data
+        existing = _safe_read_parquet(path)
         df_new = source.fetch(
             ticker,
             start_ts.tz_convert("UTC").isoformat(),

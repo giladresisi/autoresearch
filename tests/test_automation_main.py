@@ -71,8 +71,14 @@ def _setup_scanning_state(monkeypatch, tmp_path):
         day=_test_date, tdo=19900.0, midnight_open=None, overnight={},
         pdh=None, pdl=None, hyp_ctx=None, hyp_dir=None, bar_seconds=1.0,
     ))
-    monkeypatch.setattr(am, "_session_mnq_rows", [])
-    monkeypatch.setattr(am, "_session_mes_rows", [])
+    monkeypatch.setattr(am, "_mnq_o_vals", [])
+    monkeypatch.setattr(am, "_mnq_h_vals", [])
+    monkeypatch.setattr(am, "_mnq_l_vals", [])
+    monkeypatch.setattr(am, "_mnq_c_vals", [])
+    monkeypatch.setattr(am, "_mnq_v_vals", [])
+    monkeypatch.setattr(am, "_mes_h_vals", [])
+    monkeypatch.setattr(am, "_mes_l_vals", [])
+    monkeypatch.setattr(am, "_mes_c_vals", [])
     monkeypatch.setattr(am, "_session_smt_cache", {
         "mes_h": float("nan"), "mes_l": float("nan"),
         "mnq_h": float("nan"), "mnq_l": float("nan"),
@@ -494,3 +500,73 @@ def test_exit_json_line_emitted_to_stdout(monkeypatch, tmp_path, capsys):
     assert found_exit, f"No EXIT JSON line found in stdout: {captured.out!r}"
 
 
+# ── RAM reduction tests (Task 2.1) ────────────────────────────────────────────
+
+def test_session_accumulators_use_per_column_lists():
+    """Per-column list accumulators must exist; old list-of-dicts vars must not."""
+    import automation.main as am
+
+    expected_attrs = [
+        "_mnq_o_vals", "_mnq_h_vals", "_mnq_l_vals", "_mnq_c_vals", "_mnq_v_vals",
+        "_mes_h_vals", "_mes_l_vals", "_mes_c_vals",
+    ]
+    for attr in expected_attrs:
+        assert hasattr(am, attr), f"Missing attribute: {attr}"
+        assert isinstance(getattr(am, attr), list), f"{attr} must be a list"
+
+    assert not hasattr(am, "_session_mnq_rows"), "_session_mnq_rows must be removed"
+    assert not hasattr(am, "_session_mes_rows"), "_session_mes_rows must be removed"
+
+
+def test_process_scanning_appends_to_column_lists(monkeypatch, tmp_path, capsys):
+    """_process_scanning appends one float per column per bar call."""
+    import automation.main as am
+    import strategy_smt
+    _setup_scanning_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: None)
+    monkeypatch.setattr(am, "compute_tdo", lambda df, date: 19900.0)
+
+    test_ts = pd.Timestamp("2026-04-30 10:05:00", tz="America/New_York")
+    bar = strategy_smt._BarRow(20001.0, 20006.0, 19996.0, 20002.0, 50.0, test_ts)
+    am._process_scanning(bar, test_ts, test_ts.time())
+    capsys.readouterr()
+
+    assert len(am._mnq_o_vals) == 1
+    assert am._mnq_o_vals[0] == pytest.approx(20001.0)
+    assert am._mnq_h_vals[0] == pytest.approx(20006.0)
+    assert am._mnq_l_vals[0] == pytest.approx(19996.0)
+    assert am._mnq_c_vals[0] == pytest.approx(20002.0)
+    assert am._mnq_v_vals[0] == pytest.approx(50.0)
+
+
+def test_numpy_arrays_match_column_list_values(monkeypatch, tmp_path, capsys):
+    """numpy arrays passed to process_scan_bar match the per-column list contents."""
+    import numpy as np
+    import automation.main as am
+    import strategy_smt
+
+    _setup_scanning_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(am, "compute_tdo", lambda df, date: 19900.0)
+
+    captured_args: list = []
+
+    def _capture(*args, **kwargs):
+        captured_args.append(args)
+        return None
+
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", _capture)
+
+    test_ts = pd.Timestamp("2026-04-30 10:05:00", tz="America/New_York")
+    bar = strategy_smt._BarRow(20003.0, 20008.0, 19998.0, 20004.0, 75.0, test_ts)
+    am._process_scanning(bar, test_ts, test_ts.time())
+    capsys.readouterr()
+
+    assert captured_args, "process_scan_bar was never called"
+    call_args = captured_args[0]
+    # numpy arrays are positional args after the DataFrames — find them by type
+    arrays = [a for a in call_args if isinstance(a, np.ndarray)]
+    assert len(arrays) >= 5, f"Expected at least 5 numpy arrays, got {len(arrays)}"
+
+    # _mnq_o is the first array; its last value must match bar.Open
+    mnq_o_arr = arrays[0]
+    assert mnq_o_arr[-1] == pytest.approx(20003.0)
