@@ -29,6 +29,9 @@ harness_upgrade.md
 # Test logs
 *.log
 
+# Cached parquet slices for regression tests (generated locally from full parquets)
+tests/fixtures/*.parquet
+
 # Environment variables
 .env
 
