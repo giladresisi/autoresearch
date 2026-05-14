@@ -157,13 +157,13 @@ def stop_entry_filled(direction: str, stop_price: float) -> None:
     _log({"time": now, "kind": "stop-entry-filled", "direction": direction, "stop_price": stop_price})
 
 
-def cancel_stop_entry(reason: str = "user-requested") -> None:
-    """Cancel pending stop entry. No-op if stop_entry is empty. Logs, dispatches close, clears position.json."""
+def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> None:
+    """Cancel pending stop entry. No-op if stop_entry is empty (unless force=True). Logs, dispatches close, clears position.json."""
     pos = _load_pos()
-    if not pos.get("stop_entry"):
+    if not force and not pos.get("stop_entry"):
         return
     now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
-    entry_price = float(pos["stop_entry"])
+    entry_price = float(pos["stop_entry"]) if pos.get("stop_entry") else 0.0
     _executor.place_close("cancel-stop")
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
@@ -185,12 +185,15 @@ def close_position(price: float, reason: str = "user-requested") -> None:
     _log({"time": now, "kind": "market-close", "price": float(price), "reason": reason})
 
 
-def update_stop_loss(stop_price: float, reason: str = "user-requested") -> None:
-    """Update protective stop on active position (trade.py close <price>). Logs, dispatches update_sl, updates active.stop."""
+def update_stop_loss(stop_price: float, reason: str = "user-requested", direction: str | None = None) -> None:
+    """Update protective stop on active position. Logs, dispatches update_sl, updates active.stop.
+
+    direction: override the direction read from position.json (used with --force when active is empty).
+    """
     now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
     pos = _load_pos()
-    direction = pos.get("active", {}).get("direction", "")
-    _executor.update_stop_loss({"direction": direction, "stop_price": stop_price}, None)
+    resolved = direction if direction is not None else pos.get("active", {}).get("direction", "")
+    _executor.update_stop_loss({"direction": resolved, "stop_price": stop_price}, None)
     if pos.get("active"):
         pos["active"]["stop"] = stop_price
         _save_pos(pos)
