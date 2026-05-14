@@ -489,3 +489,64 @@ class TestConfidenceHighBlocksEntry:
         recent = make_opp_1m_recent("up", open_=105.0, close_=95.0, high=110.0, low=90.0)
         result = run_strategy(NOW, bar, recent)
         assert result is not None, "confidence='medium' must not block entries"
+
+
+class TestStopEntryMinApproach:
+    """Stop entry price is pushed forward when the natural level is too close to bar open.
+
+    If the confirmation bar body_end_price is within MIN_APPROACH_PTS (10 pts) of the
+    current bar's open, the strategy must push the entry further in the trade direction
+    so Tradovate does not reject the order due to market price already being at/past
+    the trigger level by the time the order reaches the exchange.
+    """
+
+    def test_up_direction_pushes_entry_when_too_close(self):
+        """UP: body_high only 6 pts above bar_open → entry pushed to bar_open + 10."""
+        write_hypothesis(direction="up")
+        write_position()
+        # bar_open=100; opp bar body_high=106 → approach=6 < MIN_APPROACH_PTS(10)
+        # Expected: entry_price = max(106, 100+10) = 110
+        bar = make_5m_bar(open_=100.0, high=120.0, low=80.0, close=115.0)
+        # Bearish opp bar: open=106 > close=102 → body_high=106
+        recent = make_opp_1m_recent("up", open_=106.0, close_=102.0, high=110.0, low=98.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is not None
+        assert result["kind"] in ("new-stop-entry", "move-stop-entry")
+        assert result["price"] == pytest.approx(110.0), (
+            f"entry should be pushed to bar_open+10=110, got {result['price']}"
+        )
+        assert smt_state.load_position()["stop_entry"] == pytest.approx(110.0)
+
+    def test_up_direction_no_push_when_already_far_enough(self):
+        """UP: body_high 17 pts above bar_open → natural level kept, no push."""
+        write_hypothesis(direction="up")
+        write_position()
+        # bar_open=88; opp bar body_high=105 → approach=17 ≥ MIN_APPROACH_PTS(10)
+        # Expected: entry_price = max(105, 88+10) = 105 (no push)
+        bar = make_5m_bar(open_=88.0, high=110.0, low=75.0, close=95.0)
+        recent = make_opp_1m_recent("up", open_=105.0, close_=95.0, high=110.0, low=90.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is not None
+        assert result["kind"] in ("new-stop-entry", "move-stop-entry")
+        assert result["price"] == pytest.approx(105.0), (
+            f"natural entry 105 is already ≥10 pts away from open 88, got {result['price']}"
+        )
+
+    def test_down_direction_pushes_entry_when_too_close(self):
+        """DOWN: body_low only 6 pts below bar_open → entry pushed to bar_open - 10."""
+        write_hypothesis(direction="down")
+        write_position()
+        # bar_open=200; opp bar body_low=194 → approach=6 < MIN_APPROACH_PTS(10)
+        # Expected: entry_price = min(194, 200-10) = 190
+        bar = make_5m_bar(open_=200.0, high=220.0, low=180.0, close=185.0)
+        # Bullish opp bar: open=194 < close=198 → body_low=194
+        recent = make_opp_1m_recent("down", open_=194.0, close_=198.0, high=202.0, low=190.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is not None
+        assert result["kind"] in ("new-stop-entry", "move-stop-entry")
+        assert result["price"] == pytest.approx(190.0), (
+            f"entry should be pushed to bar_open-10=190, got {result['price']}"
+        )
