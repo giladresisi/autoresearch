@@ -8,8 +8,9 @@ Usage:
   python trade.py down 27000             # Stop entry SHORT at 27000
   python trade.py cancel                 # Cancel unfilled stop entry
   python trade.py move 28000             # Move unfilled stop entry to 28000
-  python trade.py stop 19700             # Move stop-loss on active position to 19700
+  python trade.py update-sl 19700        # Move stop-loss on active position to 19700
   python trade.py close                  # Market close active position
+  python trade.py terminate              # Kill orchestrator and automation.main
 
 Add --force / -f to bypass position.json state checks and override broker state:
   python trade.py close --force
@@ -18,8 +19,8 @@ Add --force / -f to bypass position.json state checks and override broker state:
   python trade.py up 27000 --force
   python trade.py move 28000 --force     # Direction inferred from position.json
   python trade.py move 28000 --force up  # Direction explicit (up=long, down=short)
-  python trade.py stop 19700 --force     # Direction inferred from position.json
-  python trade.py stop 19700 --force down
+  python trade.py update-sl 19700 --force     # Direction inferred from position.json
+  python trade.py update-sl 19700 --force down
 """
 from __future__ import annotations
 
@@ -101,9 +102,9 @@ def main() -> None:
         print(f"Moving stop entry -> {new_price} | direction: {direction}")
         live_orders.move_stop_entry(new_price, 0.0, direction)
 
-    elif cmd == "stop":
+    elif cmd == "update-sl":
         if len(args) < 2:
-            print("ERROR: stop requires a price argument (e.g. python trade.py stop 19700)")
+            print("ERROR: update-sl requires a price argument (e.g. python trade.py update-sl 19700)")
             sys.exit(1)
         pos = live_orders.get_position()
         if not force and not pos.get("active"):
@@ -123,6 +124,68 @@ def main() -> None:
         direction = pos.get("active", {}).get("direction", "unknown")
         print(f"Market close | direction: {direction}")
         live_orders.close_position(0.0, "user-requested")
+
+    elif cmd == "terminate":
+        import psutil
+        from pathlib import Path
+
+        killed = []
+
+        # Kill orchestrator from PID file
+        pid_file = Path("orchestrator.pid")
+        if pid_file.exists():
+            try:
+                orch_pid = int(pid_file.read_text().strip())
+                try:
+                    p = psutil.Process(orch_pid)
+                    p.terminate()
+                    try:
+                        p.wait(timeout=5)
+                    except psutil.TimeoutExpired:
+                        p.kill()
+                    killed.append(f"orchestrator pid={orch_pid}")
+                except psutil.NoSuchProcess:
+                    killed.append(f"orchestrator pid={orch_pid} (already dead)")
+            except (ValueError, OSError):
+                pass
+
+        # Kill powershell wrapper running orchestrator.main
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if proc.info.get("name", "").lower() != "powershell.exe":
+                    continue
+                cmdline = " ".join(proc.info.get("cmdline") or [])
+                if "orchestrator.main" in cmdline:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except psutil.TimeoutExpired:
+                        proc.kill()
+                    killed.append(f"powershell wrapper pid={proc.pid}")
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        # Kill automation.main
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if proc.info.get("name", "").lower() not in ("python.exe", "python"):
+                    continue
+                cmdline = proc.info.get("cmdline") or []
+                if any("automation.main" in arg for arg in cmdline):
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except psutil.TimeoutExpired:
+                        proc.kill()
+                    killed.append(f"automation.main pid={proc.pid}")
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        if killed:
+            for k in killed:
+                print(f"Killed {k}")
+        else:
+            print("Nothing to terminate")
 
     else:
         print(f"ERROR: unknown command {cmd!r}")
