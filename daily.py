@@ -210,6 +210,8 @@ def run_daily(
     mnq_1m: pd.DataFrame,
     hist_mnq_1m: pd.DataFrame,
     hist_hourly_mnq: pd.DataFrame,
+    reset_hypothesis: bool = True,
+    reset_position: bool = True,
 ) -> None:
     """Once-per-session entry point called at 09:20 ET.
 
@@ -320,7 +322,7 @@ def run_daily(
     # Write daily.json                                                     #
     # ------------------------------------------------------------------ #
     daily_state = {
-        "date": str(today),
+        "formed_at": now.isoformat() if hasattr(now, "isoformat") else str(now),
         "liquidities": liquidities,
         "estimated_dir": estimated_dir,
         "opposite_premove": opposite_premove,
@@ -329,12 +331,17 @@ def run_daily(
 
     # ------------------------------------------------------------------ #
     # Step 6: hypothesis.json.direction = "none"                          #
+    # Skipped when restarting with an active position — direction is      #
+    # preserved so the strategy can keep managing the open trade.         #
     # ------------------------------------------------------------------ #
-    hyp = load_hypothesis()
-    hyp["direction"] = "none"
-    save_hypothesis(hyp)
+    if reset_hypothesis:
+        hyp = load_hypothesis()
+        hyp["direction"] = "none"
+        save_hypothesis(hyp)
 
     # ------------------------------------------------------------------ #
     # Step 7: reset position.json per-session fields                      #
+    # Skipped when restarting with an active position.                    #
     # ------------------------------------------------------------------ #
-    _strategy.reset_position_for_session()
+    if reset_position:
+        _strategy.reset_position_for_session()
