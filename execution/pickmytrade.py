@@ -11,6 +11,12 @@ import httpx
 
 from execution.protocol import FillRecord, BarRow, assumed_fill_price
 
+# Placeholder SL prices injected into STP entry orders so Tradovate creates a
+# stop-order anchor at fill time (required for update_stop_loss to work later).
+# Values are chosen to be unreachable so the placeholder never triggers.
+_STP_PLACEHOLDER_SL_LONG  = 0.0      # below any real futures price
+_STP_PLACEHOLDER_SL_SHORT = 50000.0  # above any real MNQ price
+
 
 class PickMyTradeExecutor:
     def __init__(self, *,
@@ -79,7 +85,13 @@ class PickMyTradeExecutor:
         stop_price = float(signal["stop_price"]) if signal.get("stop_price") is not None else 0.0
         is_stop = signal.get("stop_fill_bars") is not None or signal.get("limit_fill_bars") is not None
         if is_stop:
-            payload = self._build_payload(data, order_type="STP", price=entry_price)
+            # PMT/Tradovate requires a non-zero sl in the STP entry payload to create a
+            # stop-order anchor at fill time. Without it, update_stop_loss called after
+            # fill has nothing to update. We use a placeholder far from any real price
+            # so it never triggers accidentally before the real SL is attached via
+            # update_stop_loss once the order fills.
+            placeholder_sl = _STP_PLACEHOLDER_SL_LONG if direction == "long" else _STP_PLACEHOLDER_SL_SHORT
+            payload = self._build_payload(data, order_type="STP", sl=placeholder_sl, price=entry_price)
             order_type = "stop"
         else:
             # No price field: PMT uses the latest close price as the market price
@@ -104,17 +116,22 @@ class PickMyTradeExecutor:
         )
 
     def update_stop_loss(self, position: dict, bar: BarRow) -> tuple:
-        """Update the SL on the currently open position. Returns (status_code, response_body)."""
+        """Replace the placeholder SL on a FILLED open position with the real SL price.
+
+        Only works on open (filled) positions. Calling this on an unfilled STP order
+        has no effect — PMT will acknowledge the request but Tradovate ignores it.
+        STP orders convert to MKT orders when their trigger price is touched, so by
+        the time this is called the position is always a market-filled position.
+        Returns (status_code, response_body).
+        """
         order_id = f"pmt-{uuid.uuid4().hex[:8]}"
         direction = position["direction"]
         data = "buy" if direction == "long" else "sell"
         payload = self._build_payload(
             data,
-            quantity=0,
+            order_type="MKT",  # position is always MKT-filled by the time this is called
             sl=float(position["stop_price"]),
             update_sl=True,
-            pyramid=False,
-            same_direction_ignore=True,
         )
         return self._post_order(order_id, payload)
 
