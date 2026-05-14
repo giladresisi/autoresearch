@@ -360,8 +360,8 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
         summarizer = Summarizer()
     bar_data_dir = Path(__file__).resolve().parent.parent / "data"
     _check_parquet_files(bar_data_dir)
-    _pre_session_init()
     try:
+        _pre_session_init()
         while True:
             now   = get_et_now()
             today = now.date()

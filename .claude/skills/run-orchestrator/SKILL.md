@@ -24,7 +24,8 @@ persistent Monitor that pushes a notification for each trading session milestone
 | Session started | `sessions/{date}/orchestrator.log` | Line: `automation.main started` |
 | daily.py complete | `sessions/{date}/signals.log` | Line: `[EMIT] daily complete` |
 | First directed hypothesis | `sessions/{date}/events.jsonl` | `new-hypothesis` event with `direction` = `up` or `down` |
-| Orchestrator died | `orchestrator.pid` + `tasklist.exe` | Only checked after session starts — orchestrator sleeps for hours before the session window and that is normal |
+| Startup fatal | `orchestrator_stdout.log` | `FATAL` in log means IB unreachable or other hard failure; monitor exits immediately |
+| Orchestrator died | PID snapshotted at startup + `tasklist.exe` | Checked every iteration from startup — covers both pre-session death and mid-session death |
 
 ## Step 1 — Kill any existing orchestrator
 
@@ -110,6 +111,9 @@ sig_offset=0; evt_offset=0; orch_offset=0
 [ -f "$SESSION_DIR/events.jsonl"     ] && evt_offset=$(wc -l  < "$SESSION_DIR/events.jsonl"     2>/dev/null || echo 0)
 [ -f "$ORCH_LOG"                     ] && orch_offset=$(wc -l < "$ORCH_LOG"                     2>/dev/null || echo 0)
 
+# Snapshot PID before the loop — pid file may be deleted on clean exit
+ORCH_PID=$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null)
+
 is_alive() {
     tasklist.exe //FI "PID eq $1" //NH 2>/dev/null | grep -qi "python"
 }
@@ -117,8 +121,13 @@ is_alive() {
 while true; do
     sleep 5
 
-    # Gap-fill
+    # Gap-fill — also detect FATAL startup errors (IB unreachable, etc.)
     if [ "$gap_fill_done" = false ] && [ -f "$STARTUP_LOG" ]; then
+        if grep -q "FATAL" "$STARTUP_LOG" 2>/dev/null; then
+            fatal_msg=$(grep "FATAL" "$STARTUP_LOG" | head -1)
+            echo "[KEEPALIVE] Orchestrator startup FATAL: $fatal_msg"
+            exit 0
+        fi
         if grep -q "IB 1m gap fill complete" "$STARTUP_LOG" 2>/dev/null; then
             gap_fill_done=true
             echo "[MONITOR] Gap-fill complete"
@@ -133,14 +142,18 @@ while true; do
         fi
     fi
 
-    # Keepalive + downstream milestones only once session is active
-    if [ "$session_started" = true ]; then
-        ORCH_PID=$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null)
-        if [ -n "$ORCH_PID" ] && ! is_alive "$ORCH_PID"; then
+    # Keepalive — always active from startup, not just after session begins
+    if [ -n "$ORCH_PID" ] && ! is_alive "$ORCH_PID"; then
+        if [ "$session_started" = true ]; then
             echo "[KEEPALIVE] Orchestrator (pid=$ORCH_PID) has DIED"
-            exit 0
+        else
+            echo "[KEEPALIVE] Orchestrator (pid=$ORCH_PID) died before session start — check stdout log"
         fi
+        exit 0
+    fi
 
+    # Downstream milestones only once session is active
+    if [ "$session_started" = true ]; then
         SIGNALS_LOG="$SESSION_DIR/signals.log"
         if [ "$daily_done" = false ] && [ -f "$SIGNALS_LOG" ]; then
             if tail -n "+$((sig_offset+1))" "$SIGNALS_LOG" 2>/dev/null | grep -q "daily complete"; then
@@ -175,4 +188,6 @@ As each line arrives from the Monitor, call `PushNotification`:
 | `[MONITOR] Session started …` | `Session started — automation.main running` |
 | `[MONITOR] daily.py complete` | `daily.py complete — liquidities computed` |
 | `[MONITOR] First directed hypothesis: …` | `First hypothesis: <direction> — strategy is live` |
+| `[KEEPALIVE] Orchestrator startup FATAL: …` | `CRITICAL: Orchestrator failed at startup — <first line of FATAL message>` |
+| `[KEEPALIVE] Orchestrator … died before session start …` | `CRITICAL: Orchestrator died before session start — check stdout log` |
 | `[KEEPALIVE] Orchestrator … has DIED` | `CRITICAL: Orchestrator died during session` |
