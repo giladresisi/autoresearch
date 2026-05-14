@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from execution.pickmytrade import PickMyTradeExecutor
+from execution.pickmytrade import PickMyTradeExecutor, _STP_PLACEHOLDER_SL_LONG, _STP_PLACEHOLDER_SL_SHORT
 from execution.protocol import FillRecord
 from strategy_smt import _BarRow
 
@@ -236,13 +236,22 @@ def test_market_entry_includes_sl():
     assert payload["sl"] == 19980.0
 
 
-def test_stop_entry_excludes_sl():
+def test_stop_entry_uses_placeholder_sl():
+    # Long STP: placeholder below any real price, won't trigger accidentally
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(_signal("long", limit=True), _bar())
     _drain(ex)
     payload = ex._http.post.call_args.kwargs["json"]
-    assert "sl" not in payload
+    assert payload["sl"] == _STP_PLACEHOLDER_SL_LONG
+
+    # Short STP: placeholder above any real price, won't trigger accidentally
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    ex.place_entry(_signal("short", limit=True), _bar())
+    _drain(ex)
+    payload = ex._http.post.call_args.kwargs["json"]
+    assert payload["sl"] == _STP_PLACEHOLDER_SL_SHORT
 
 
 def test_market_entry_includes_multiple_accounts():
@@ -295,30 +304,35 @@ def test_risk_percentage_zero_in_all_payloads():
     assert payload["multiple_accounts"][0]["risk_percentage"] == 0
 
 
-def test_place_stop_after_limit_fill_long():
+def test_update_stop_loss_long():
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     pos = _position("long")
-    ex.place_stop_after_limit_fill(pos, _bar())
-    _drain(ex)
+    status, body = ex.update_stop_loss(pos, _bar())
     payload = ex._http.post.call_args.kwargs["json"]
     assert payload["data"] == "buy"
-    assert payload["quantity"] == 0
+    assert payload["order_type"] == "MKT"
+    assert payload["quantity"] == 1   # uses self._contracts, not overridden to 0
     assert payload["update_sl"] is True
-    assert payload["pyramid"] is False
-    assert payload["same_direction_ignore"] is True
     assert payload["sl"] == 19980.0
+    assert "pyramid" not in payload
+    assert "same_direction_ignore" not in payload
+    assert status == 200
+    assert body == "OK"
 
 
-def test_place_stop_after_limit_fill_short():
+def test_update_stop_loss_short():
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     pos = _position("short")
-    ex.place_stop_after_limit_fill(pos, _bar())
-    _drain(ex)
+    status, body = ex.update_stop_loss(pos, _bar())
     payload = ex._http.post.call_args.kwargs["json"]
     assert payload["data"] == "sell"
+    assert payload["order_type"] == "MKT"
+    assert payload["quantity"] == 1
+    assert payload["update_sl"] is True
     assert payload["sl"] == 19980.0
+    assert status == 200
 
 
 def test_place_close_sends_data_close():

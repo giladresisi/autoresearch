@@ -79,7 +79,7 @@ def modify_stop_entry(old_pmt: dict, new_pmt: dict) -> None:
 def place_stop_after_fill(position: dict) -> None:
     """Send stop placement after a limit fill. position: {direction, stop_price}."""
     global _pending_entry
-    _executor.place_stop_after_limit_fill(position, None)
+    _executor.update_stop_loss(position, None)
     _pending_entry = None
 
 

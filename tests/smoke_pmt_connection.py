@@ -6,6 +6,10 @@
 #   moves it to a second unrealistic price via modify_stop_entry,
 #   pauses for user verification at each step, then cancels it via a close order.
 #
+# test_pmt_update_sl_after_stop_fill
+#   Verifies the post-fill SL-attach flow: MKT SELL with sl placeholder,
+#   update_stop_loss replaces the placeholder with the real SL, then closes.
+#
 # test_pmt_stop_entry_via_strategy_pipeline
 #   Runs SessionPipeline with synthetic bars crafted to produce a new-stop-entry
 #   (SELL STOP far below current market → safe pending order), then market-closes.
@@ -216,6 +220,89 @@ def test_pmt_limit_order_place_and_cancel(capsys):
     with capsys.disabled():
         print()
         print("[SMOKE] Test complete. Connection to PickMyTrade is working.")
+
+
+def test_pmt_update_sl_after_stop_fill(capsys):
+    """
+    Smoke test: verify that update_stop_loss attaches a real SL to a live open position.
+
+    Key findings from investigation:
+      - update_stop_loss only works on FILLED (open) positions, not pending orders.
+      - The initial entry order (MKT or STP) must include a non-zero sl for Tradovate
+        to create a stop-order anchor at fill time; update_stop_loss then replaces it
+        with the real SL price.
+
+    Flow:
+      1. MKT SELL with initial_sl — opens a short position.
+      2. update_stop_loss with updated_sl (different value) — Tradovate should show the change.
+      3. MKT close.
+
+    Requires SMOKE_PMT=1 and SMOKE_SL_PRICE set to an SL price above current MNQ
+    (e.g. current price + 100). The update uses SMOKE_SL_PRICE - 50 so the change
+    is visible in Tradovate.
+    """
+    _requires_smoke_env()
+
+    sl_price_env = os.environ.get("SMOKE_SL_PRICE")
+    if not sl_price_env:
+        pytest.skip("Set SMOKE_SL_PRICE to an SL price above current MNQ (e.g. current + 100) to run this test")
+    initial_sl = float(sl_price_env)
+    updated_sl = initial_sl - 50.0   # tighter stop — visually distinct from initial_sl
+    bar = _fake_bar(initial_sl)
+
+    ex = _make_executor()
+    ex.start()
+
+    # Step 1: MKT SELL with initial_sl — creates the stop-order anchor Tradovate needs
+    mkt_signal = {
+        "direction":   "short",
+        "entry_price": 0.0,      # ignored by PMT for MKT orders
+        "stop_price":  initial_sl,
+        # no stop_fill_bars → MKT order
+    }
+
+    with capsys.disabled():
+        print(f"\n[SMOKE] Sending MKT SELL (initial_sl={initial_sl:.2f})...")
+
+    ex.place_entry(mkt_signal, bar)
+    time.sleep(1)   # let entry HTTP request clear before updating SL
+
+    # Step 2: replace initial_sl with updated_sl — expect Tradovate to show the change
+    with capsys.disabled():
+        print(f"[SMOKE] Calling update_stop_loss with updated_sl={updated_sl:.2f} (was {initial_sl:.2f})...")
+
+    status, body = ex.update_stop_loss({"direction": "short", "stop_price": updated_sl}, bar)
+
+    with capsys.disabled():
+        print(f"[SMOKE] PMT response: HTTP {status} — {body[:300]}")
+
+    time.sleep(1)   # let SL update settle before closing
+
+    # Step 3: close
+    with capsys.disabled():
+        print("[SMOKE] Sending MKT close...")
+
+    ex.place_close(label="smoke_mkt_close")
+    time.sleep(2)
+
+    with capsys.disabled():
+        print("[SMOKE] All three orders dispatched.")
+        print()
+        print(">>> CHECK YOUR TRADOVATE ACCOUNT NOW <<<")
+        print(f"    SL should have changed from {initial_sl:.2f} → {updated_sl:.2f} while open.")
+        print("    ENTER = SL change visible (pass)  |  'fail' = SL missing or unchanged  |  'skip' = skip check")
+        resp = input("    > ").strip().lower()
+
+    if resp == "fail":
+        pytest.fail(f"update_stop_loss: SL did not change from {initial_sl:.2f} to {updated_sl:.2f}")
+    elif resp not in ("", "skip"):
+        pytest.fail(f"Unrecognised input: {resp!r}")
+
+    ex.stop()
+
+    with capsys.disabled():
+        print()
+        print("[SMOKE] Test complete.")
 
 
 def test_pmt_stop_entry_via_strategy_pipeline(tmp_path, monkeypatch, capsys):
