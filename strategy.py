@@ -147,9 +147,7 @@ def run_strategy(
         if _global.get("confidence") == "high":
             return None
 
-        # Block long entries when price is at or above the session ATH (fixed 09:20 high).
-        # Short entries above session ATH are valid — that's precisely the expected direction.
-        _session_ath = _global.get("session_ath")
+        _session_ath = _global.get("all_time_high") or _global.get("session_ath")
         _above_session_ath = (
             _session_ath is not None and float(mnq_bar["high"]) >= float(_session_ath)
         )
@@ -356,7 +354,7 @@ def run_strategy(
     # likewise the reference 15m bar must not have dipped below ATH during its period.
     if active_dir == _DIR_DOWN:
         _global = smt_state.load_global()
-        _session_ath = _global.get("session_ath")
+        _session_ath = _global.get("all_time_high") or _global.get("session_ath")
         if _session_ath is not None and float(mnq_bar["low"]) >= float(_session_ath):
             _last_15m_down = _find_last_bar(mnq_1m_recent, now, _DIR_DOWN, _CONF_BAR_MINS_ATH, active.get("time", ""))
             if (
