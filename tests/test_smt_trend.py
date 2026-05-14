@@ -90,6 +90,7 @@ def redirect_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(smt_state, "DAILY_PATH", tmp_path / "daily.json")
     monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
     monkeypatch.setattr(smt_state, "POSITION_PATH", tmp_path / "position.json")
+    monkeypatch.setattr(smt_state, "_hyp_cache_valid", False)
 
     # trend.py imports these at the top of each call; we must also patch the
     # names that trend.py imported directly.
@@ -229,36 +230,29 @@ class TestCautiousYes:
         save_daily(_daily_with_levels([]))
 
     def test_cautious_yes_reversal_long(self):
-        """direction=up, cautious="yes", bar.low<=cautious_price → cautious-reversal."""
+        """direction=up, cautious="yes", all recent bars bullish → no opposite bar → no signal."""
         from trend import run_trend
-        from smt_state import load_hypothesis, load_position
 
         self._setup_cautious_yes(direction="up", cautious_price=110.0)
-        # bar.low=109 <= 110
+        # bar.low=109 <= 110, but recent bars are all bullish so no 1m-break bar exists
         bar = make_1m_bar(open_=112, high=115, low=109, close=113)
         recent = make_recent_bars(closes=[112, 113], opens=[111, 112])
         result = run_trend(NOW, bar, recent)
-        assert result is not None
-        assert result["kind"] == "market-close"
-        assert result["reason"] == "cautious-reversal"
-        hyp = load_hypothesis()
-        assert hyp["direction"] == "none"
-        pos = load_position()
-        assert pos["active"] == {}
+        assert result is None
 
     def test_cautious_yes_reversal_short(self):
-        """direction=down, cautious="yes", bar.high>=cautious_price → cautious-reversal."""
+        """direction=down, cautious="yes", last bullish bar High=91, bar.high=91 → cautious-1m-break."""
         from trend import run_trend
         from smt_state import load_hypothesis
 
         self._setup_cautious_yes(direction="down", cautious_price=90.0)
-        # bar.high=91 >= 90
+        # bar.high=91; recent[1] is bullish (open=88, close=89, High=91); bar.high >= 91 → break
         bar = make_1m_bar(open_=88, high=91, low=86, close=89)
         recent = make_recent_bars(closes=[88, 89], opens=[89, 88])
         result = run_trend(NOW, bar, recent)
         assert result is not None
         assert result["kind"] == "market-close"
-        assert result["reason"] == "cautious-reversal"
+        assert result["reason"] == "cautious-1m-break"
         hyp = load_hypothesis()
         assert hyp["direction"] == "none"
 

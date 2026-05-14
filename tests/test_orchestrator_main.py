@@ -205,7 +205,7 @@ def test_start_pre_session_ib_creates_daemon_thread(tmp_path, monkeypatch):
 
     fake = FakeSource()
     with patch("data.ib_realtime.IbRealtimeSource", return_value=fake):
-        src, thr = _start_pre_session_ib(tmp_path)
+        src, thr, _ = _start_pre_session_ib(tmp_path)
 
     assert src is fake
     assert thr is not None and thr.daemon
@@ -216,7 +216,7 @@ def test_start_pre_session_ib_returns_none_when_conid_not_set(tmp_path, monkeypa
     monkeypatch.delenv("MNQ_CONID", raising=False)
     monkeypatch.delenv("MES_CONID", raising=False)
     from orchestrator.main import _start_pre_session_ib
-    src, thr = _start_pre_session_ib(tmp_path)
+    src, thr, _ = _start_pre_session_ib(tmp_path)
     assert src is None and thr is None
 
 
