@@ -119,6 +119,21 @@ class SessionPipeline:
                 encoding="utf-8",
             )
 
+        # Run hypothesis immediately so direction is populated before the first 5m bar.
+        # run_daily always leaves direction="none"; without this call the strategy would
+        # scan without a directional bias until the next 5-minute boundary.
+        _init_hyp_divs = _hyp_mod.run_hypothesis(
+            now,
+            today_mnq_at_open,
+            self._hist_mes_1m,
+            self._hist_mnq_1m,
+            self._hist_mes_1m,
+            hist_1hr=self._hist_1hr,
+            hist_4hr=self._hist_4hr,
+        )
+        for _d in (_init_hyp_divs or []):
+            self._emit(_d)
+
     def on_1m_bar(
         self,
         now: pd.Timestamp,

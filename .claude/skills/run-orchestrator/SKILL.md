@@ -27,7 +27,7 @@ persistent Monitor that pushes a notification for each trading session milestone
 | Startup fatal | `orchestrator_stdout.log` | `FATAL` in log means IB unreachable or other hard failure; monitor exits immediately |
 | Orchestrator died | PID snapshotted at startup + `tasklist.exe` | Checked every iteration from startup — covers both pre-session death and mid-session death |
 
-## Step 1 — Kill any existing orchestrator
+## Step 1 — Kill any existing orchestrator and automation.main
 
 ```powershell
 $base = "C:\Users\gilad\projects\auto-co-trader\live"
@@ -44,24 +44,41 @@ Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object { $_.I
         Write-Output "Killed wrapper pid=$($_.Id)"
     }
 }
+# Kill any lingering automation.main subprocess (survives orchestrator crashes)
+uv run python -c "
+import psutil
+for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+    try:
+        if proc.info.get('name', '').lower() not in ('python.exe', 'python'):
+            continue
+        cmdline = proc.info.get('cmdline') or []
+        if any('automation.main' in arg for arg in cmdline):
+            proc.terminate()
+            try: proc.wait(timeout=5)
+            except psutil.TimeoutExpired: proc.kill()
+            print(f'Killed automation.main pid={proc.pid}')
+    except Exception as e:
+        print(f'Warning: {e}')
+" 2>$null
 ```
 
-## Step 2 — Clear old startup log and start orchestrator
+## Step 2 — Append restart marker and start orchestrator
 
-Clearing `orchestrator_stdout.log` before starting is important: gap-fill detection
-searches that file for `IB 1m gap fill complete`. Without a clear, a stale file from a
-previous run would trigger a false-positive immediately.
+Do NOT clear `orchestrator_stdout.log` — preserving history is essential for diagnosing
+crashes where the process exits before producing any output. Instead, append a `=== RESTART`
+separator so the monitor can locate the current run's output by offset.
 
 The stdout redirect captures pre-relay messages (gap-fill, IB probe errors) that are
 lost when using bare `-WindowStyle Hidden` without redirect.
 
 ```powershell
 $base = "C:\Users\gilad\projects\auto-co-trader\live"
-Remove-Item "$base\orchestrator_stdout.log" -ErrorAction SilentlyContinue
+$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+Add-Content -Path "$base\orchestrator_stdout.log" -Value "=== RESTART $timestamp ===" -Encoding utf8
 
 Start-Process -FilePath "powershell" `
     -ArgumentList "-NoProfile", "-NonInteractive", "-Command", `
-        "Set-Location '$base'; uv run python -m orchestrator.main 2>&1 | Out-File -FilePath '$base\orchestrator_stdout.log' -Encoding utf8 -Append" `
+        "Set-Location '$base'; uv run python -m orchestrator.main --no-summary 2>&1 | Out-File -FilePath '$base\orchestrator_stdout.log' -Encoding utf8 -Append" `
     -WindowStyle Hidden
 
 Start-Sleep -Seconds 3
@@ -78,15 +95,15 @@ if ($orchPid) {
 
 Use the `Monitor` tool with `persistent: true` and `timeout_ms: 3600000`.
 
-The script computes log offsets at startup (before the loop) so it only watches lines
-written after this restart — important because `signals.log` and `events.jsonl` accumulate
-across the entire trading day and may already contain events from earlier runs.
-
 The ET date is computed via Python ZoneInfo to match how the orchestrator names its
 session directory — the Windows system clock timezone may differ.
 
 **Critical**: use `tasklist.exe` for process liveness checks. `kill -0` gives false
 negatives for Windows processes when called from Git Bash.
+
+**Race-condition fix**: milestones are checked immediately at startup (before the loop)
+so events that fired between the state-check and the monitor arm are never missed.
+Offsets are set AFTER the immediate check so the loop only watches for truly new lines.
 
 ```bash
 BASE="/c/Users/gilad/projects/auto-co-trader/live"
@@ -105,12 +122,6 @@ session_started=false
 daily_done=false
 hyp_done=false
 
-# Snapshot line counts before the loop — only watch NEW content from this point on
-sig_offset=0; evt_offset=0; orch_offset=0
-[ -f "$SESSION_DIR/signals.log"      ] && sig_offset=$(wc -l  < "$SESSION_DIR/signals.log"      2>/dev/null || echo 0)
-[ -f "$SESSION_DIR/events.jsonl"     ] && evt_offset=$(wc -l  < "$SESSION_DIR/events.jsonl"     2>/dev/null || echo 0)
-[ -f "$ORCH_LOG"                     ] && orch_offset=$(wc -l < "$ORCH_LOG"                     2>/dev/null || echo 0)
-
 # Snapshot PID before the loop — pid file may be deleted on clean exit
 ORCH_PID=$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null)
 
@@ -118,17 +129,69 @@ is_alive() {
     tasklist.exe //FI "PID eq $1" //NH 2>/dev/null | grep -qi "python"
 }
 
+# Find where the current run starts in the startup log (after last RESTART marker).
+# This prevents gap-fill detection from matching output from a previous run when the
+# log is preserved across restarts.
+startup_log_offset=0
+if [ -f "$STARTUP_LOG" ]; then
+    last_restart=$(grep -n "=== RESTART" "$STARTUP_LOG" 2>/dev/null | tail -1 | cut -d: -f1)
+    [ -n "$last_restart" ] && startup_log_offset=$last_restart
+fi
+
+# --- Immediate catch-up check (before setting offsets) ---
+# Fires notifications for any milestone that already occurred before this monitor armed.
+# This prevents the race where events fire between the caller's state-check and here.
+
+if tail -n "+$((startup_log_offset+1))" "$STARTUP_LOG" 2>/dev/null | grep -q "IB 1m gap fill complete"; then
+    gap_fill_done=true
+    echo "[MONITOR] Gap-fill complete"
+fi
+
+if tail -n "+$((startup_log_offset+1))" "$STARTUP_LOG" 2>/dev/null | grep -q "FATAL"; then
+    fatal_msg=$(tail -n "+$((startup_log_offset+1))" "$STARTUP_LOG" | grep "FATAL" | head -1)
+    echo "[KEEPALIVE] Orchestrator startup FATAL: $fatal_msg"
+    exit 0
+fi
+
+if [ -f "$ORCH_LOG" ] && grep -q "automation.main started" "$ORCH_LOG" 2>/dev/null; then
+    session_started=true
+    echo "[MONITOR] Session started — automation.main is running"
+fi
+
+if [ "$session_started" = true ]; then
+    if [ -f "$SESSION_DIR/signals.log" ] && grep -q "daily complete" "$SESSION_DIR/signals.log" 2>/dev/null; then
+        daily_done=true
+        echo "[MONITOR] daily.py complete"
+    fi
+
+    if [ -f "$SESSION_DIR/events.jsonl" ]; then
+        hyp_line=$(grep '"kind": "new-hypothesis"' "$SESSION_DIR/events.jsonl" 2>/dev/null \
+            | grep -E '"direction": "(up|down)"' | head -1)
+        if [ -n "$hyp_line" ]; then
+            hyp_done=true
+            dir_val=$(echo "$hyp_line" | grep -oE '"direction": "[^"]+"')
+            echo "[MONITOR] First directed hypothesis: $dir_val"
+        fi
+    fi
+fi
+
+# Now snapshot offsets — loop only watches lines written after this point
+sig_offset=0; evt_offset=0; orch_offset=0
+[ -f "$SESSION_DIR/signals.log"  ] && sig_offset=$(wc -l  < "$SESSION_DIR/signals.log"  2>/dev/null || echo 0)
+[ -f "$SESSION_DIR/events.jsonl" ] && evt_offset=$(wc -l  < "$SESSION_DIR/events.jsonl" 2>/dev/null || echo 0)
+[ -f "$ORCH_LOG"                 ] && orch_offset=$(wc -l < "$ORCH_LOG"                 2>/dev/null || echo 0)
+
 while true; do
     sleep 5
 
     # Gap-fill — also detect FATAL startup errors (IB unreachable, etc.)
     if [ "$gap_fill_done" = false ] && [ -f "$STARTUP_LOG" ]; then
-        if grep -q "FATAL" "$STARTUP_LOG" 2>/dev/null; then
-            fatal_msg=$(grep "FATAL" "$STARTUP_LOG" | head -1)
+        if tail -n "+$((startup_log_offset+1))" "$STARTUP_LOG" 2>/dev/null | grep -q "FATAL"; then
+            fatal_msg=$(tail -n "+$((startup_log_offset+1))" "$STARTUP_LOG" | grep "FATAL" | head -1)
             echo "[KEEPALIVE] Orchestrator startup FATAL: $fatal_msg"
             exit 0
         fi
-        if grep -q "IB 1m gap fill complete" "$STARTUP_LOG" 2>/dev/null; then
+        if tail -n "+$((startup_log_offset+1))" "$STARTUP_LOG" 2>/dev/null | grep -q "IB 1m gap fill complete"; then
             gap_fill_done=true
             echo "[MONITOR] Gap-fill complete"
         fi
