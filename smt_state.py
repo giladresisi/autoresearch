@@ -123,3 +123,28 @@ def load_position() -> dict:
 
 def save_position(d: dict) -> None:
     _atomic_write(POSITION_PATH, d)
+
+
+def bar_state_path(date_str: str | None = None) -> Path:
+    import datetime as _dt
+    d = date_str or _dt.date.today().isoformat()
+    return Path("sessions") / d / "bar_state.json"
+
+
+def save_bar_state(data: dict, date_str: str | None = None) -> None:
+    path = bar_state_path(date_str)
+    if not _IN_MEMORY:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, data)
+
+
+def load_bar_state(date_str: str | None = None) -> dict | None:
+    path = bar_state_path(date_str)
+    if _IN_MEMORY:
+        return _STORE.get(str(path))
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None

@@ -130,3 +130,6 @@ class SimulatedBrokerExecutor:
 
     def modify_stop_entry(self, old_signal: dict, new_signal: dict, bar: BarRow) -> None:
         pass
+
+    def update_stop_loss(self, position: dict, bar) -> None:
+        pass

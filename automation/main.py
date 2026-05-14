@@ -901,7 +901,6 @@ class SmtV2Dispatcher:
 
     def _emit(self, sig: dict) -> None:
         """Print signal to stdout (relay captures it to events.jsonl), then route to live_orders."""
-        import smt_state as _st
         import live_orders as _lo
         _emit_v2_signal(sig)
 
@@ -912,24 +911,16 @@ class SmtV2Dispatcher:
             if direction_v2 == "none":
                 print(f"[EMIT] {kind}: skipped — direction=none", flush=True)
                 return
-            direction = "long" if direction_v2 == "up" else "short"
-            position = _st.load_position()
-            conf_bar = position.get("confirmation_bar", {})
-            stop = conf_bar.get("body_low") if direction_v2 == "up" else conf_bar.get("body_high")
+            stop = sig.get("stop")
             if stop is None:
-                print(f"[EMIT] {kind}: skipped — confirmation_bar empty or missing body_low/body_high (conf_bar={conf_bar})", flush=True)
+                print(f"[EMIT] {kind}: skipped — signal missing stop field", flush=True)
                 return
-            pmt_signal = {
-                "direction": direction,
-                "entry_price": float(sig["price"]),
-                "stop_price": float(stop),
-                "stop_fill_bars": 1,
-            }
-            print(f"[EMIT] {kind}: sending PMT signal {pmt_signal}", flush=True)
+            direction = "long" if direction_v2 == "up" else "short"
+            print(f"[EMIT] {kind}: entry={sig['price']} stop={stop} direction={direction}", flush=True)
             if kind == "new-stop-entry":
-                _lo.place_entry(pmt_signal)
+                _lo.place_stop_entry(direction, float(sig["price"]), float(stop))
             else:
-                _lo.modify_stop_entry(_lo._pending_entry or pmt_signal, pmt_signal)
+                _lo.move_stop_entry(float(sig["price"]), float(stop), direction)
 
         elif kind == "stop-entry-filled":
             direction = "long" if direction_v2 == "up" else "short"
@@ -937,29 +928,23 @@ class SmtV2Dispatcher:
             if stop is None:
                 print(f"[EMIT] stop-entry-filled: skipped — no stop in signal", flush=True)
                 return
-            print(f"[EMIT] stop-entry-filled: sending place_stop_after_fill direction={direction} stop={stop}", flush=True)
-            _lo.place_stop_after_fill({"direction": direction, "stop_price": float(stop)})
+            _lo.stop_entry_filled(direction, float(stop))
 
         elif kind == "market-entry":
             direction = "long" if direction_v2 == "up" else "short"
             stop = sig.get("stop")
             if stop is None:
                 return
-            _lo.place_entry({
-                "direction": direction,
-                "entry_price": float(sig["price"]),
-                "stop_price": float(stop),
-            })
+            _lo.place_market_entry(direction, float(sig["price"]), float(stop))
 
         elif kind == "market-close":
-            _lo.close("v2-direction-mismatch")
+            _lo.close_position(float(sig.get("price", 0.0)), "v2-direction-mismatch")
 
         elif kind == "cancel-stop-entry":
-            _lo.cancel_entry("cancel-stop")
+            _lo.cancel_stop_entry("cancel-stop")
 
         elif kind == "stopped-out":
-            # IB stop order already executed — just clear pending state
-            _lo._pending_entry = None
+            print(f"[EMIT] stopped-out: IB stop order already executed", flush=True)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

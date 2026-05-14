@@ -63,7 +63,7 @@ def _close_session_position(log_ch: OutputChannel) -> None:
         log_ch.writeln(
             f"[ORCH] Active position at session end (fill {_fill_price:.2f}) — sending market close"
         )
-        _lo.manual_close(_fill_price, reason="session-end")
+        _lo.close_position(_fill_price, reason="session-end")
         log_ch.writeln("[ORCH] Session-end close sent")
     except Exception as _exc:
         log_ch.writeln(f"[ORCH] WARNING: session-end close failed: {_exc}")

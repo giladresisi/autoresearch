@@ -13,6 +13,7 @@ import hypothesis as _hyp_mod
 import smt_state as _smt_state
 import strategy as _strat_mod
 import trend as _trend_mod
+from smt_state import save_bar_state
 
 
 class SessionPipeline:
@@ -21,6 +22,8 @@ class SessionPipeline:
     Fixes: ATH seeding, hist_1hr/4hr to hypothesis, run_strategy every 1m bar,
     bar_dict body fields, consistent hourly resample, all-day 'recent' scope.
     """
+
+    _STOP_WICK_CAP = 15.0
 
     def __init__(
         self,
@@ -400,4 +403,26 @@ class SessionPipeline:
             self._emit(strat_sig)
             events.append(strat_sig)
 
+        self._write_bar_state(now, today_mnq)
         return events
+
+    def _write_bar_state(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> None:
+        current_5m = now.floor("5min")
+        prev_5m = current_5m - pd.Timedelta(minutes=5)
+        window = today_mnq[(today_mnq.index >= prev_5m) & (today_mnq.index < current_5m)]
+        if window.empty:
+            save_bar_state({"time": now.isoformat(),
+                            "potential_stop_long": None,
+                            "potential_stop_short": None})
+            return
+        bar_open  = float(window.iloc[0]["Open"])
+        bar_close = float(window.iloc[-1]["Close"])
+        bar_high  = float(window["High"].max())
+        bar_low   = float(window["Low"].min())
+        body_high = max(bar_open, bar_close)
+        body_low  = min(bar_open, bar_close)
+        save_bar_state({
+            "time": now.isoformat(),
+            "potential_stop_long":  round(max(bar_low,  body_low  - self._STOP_WICK_CAP), 4),
+            "potential_stop_short": round(min(bar_high, body_high + self._STOP_WICK_CAP), 4),
+        })

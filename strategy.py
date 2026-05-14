@@ -191,10 +191,24 @@ def run_strategy(
         if stop_entry != "" and _entry_reached:
             fill_price = float(stop_entry)
             conf_bar   = position["confirmation_bar"]
-            if direction == _DIR_UP:
-                stop = max(float(conf_bar["low"]), float(conf_bar["body_low"]) - _STOP_WICK_CAP)
+            if conf_bar:
+                # Automated path: confirmation_bar set by strategy
+                if direction == _DIR_UP:
+                    stop = max(float(conf_bar["low"]), float(conf_bar["body_low"]) - _STOP_WICK_CAP)
+                else:
+                    stop = min(float(conf_bar["high"]), float(conf_bar["body_high"]) + _STOP_WICK_CAP)
             else:
-                stop = min(float(conf_bar["high"]), float(conf_bar["body_high"]) + _STOP_WICK_CAP)
+                # Manual path: stop entry placed via trade.py — use bar_state.json
+                from smt_state import load_bar_state
+                bar_state = load_bar_state()
+                if bar_state is None:
+                    print("[STRATEGY] fill detected but no bar_state.json — skipping fill", flush=True)
+                    return None
+                stop = bar_state.get("potential_stop_long" if direction == _DIR_UP else "potential_stop_short")
+                if stop is None:
+                    print("[STRATEGY] fill detected but potential_stop is null in bar_state — skipping fill", flush=True)
+                    return None
+                stop = float(stop)
             # Fill as soon as price reaches the limit — bar close quality is irrelevant
             # for fill confirmation (the broker fills a limit order the instant price
             # touches it, regardless of where the bar closes).
@@ -273,7 +287,8 @@ def run_strategy(
                 position["stop_entry"]     = body_end_price
                 position["stop_direction"] = direction
                 smt_state.save_position(position)
-                return _make_signal(kind, now, body_end_price)
+                stop_loss = float(opp_5m["body_low"]) if direction == _DIR_UP else float(opp_5m["body_high"])
+                return _make_signal(kind, now, body_end_price, stop=stop_loss)
 
         # Nothing triggered
         return None

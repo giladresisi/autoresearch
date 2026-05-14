@@ -3,17 +3,12 @@
 # Executor is chosen once at import time from LIVE_TRADING env var:
 #   LIVE_TRADING=true  → PickMyTradeExecutor (real PMT webhook)
 #   LIVE_TRADING=false → SimulatedBrokerExecutor (no-op / paper mode)
-#
-# Two tiers of functions:
-#   - Executor functions (place_entry, modify_stop_entry, etc.) — no logging; called by SmtV2Dispatcher._emit
-#   - Ad-hoc functions (manual_close, manual_cancel_entry) — log + execute; called by skill / user
 from __future__ import annotations
 
 import datetime
 import json
 import os
 from pathlib import Path
-from typing import Optional
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -35,8 +30,6 @@ else:
     from execution.simulated import SimulatedBrokerExecutor
     _executor = SimulatedBrokerExecutor(human_mode=True)
 
-_pending_entry: Optional[dict] = None  # last pmt_signal sent as a stop entry (PMT shape)
-
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -52,54 +45,7 @@ def _log(event: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Executor functions — called by SmtV2Dispatcher._emit; logging done by caller
-# ---------------------------------------------------------------------------
-
-def place_entry(pmt_signal: dict) -> None:
-    """Place a new stop or market entry.
-
-    pmt_signal keys: direction ("long"/"short"), entry_price, stop_price,
-    optionally stop_fill_bars (present = STP, absent = MKT).
-    """
-    global _pending_entry
-    _executor.place_entry(pmt_signal, None)
-    if pmt_signal.get("stop_fill_bars") is not None or pmt_signal.get("limit_fill_bars") is not None:
-        _pending_entry = pmt_signal
-    else:
-        _pending_entry = None
-
-
-def modify_stop_entry(old_pmt: dict, new_pmt: dict) -> None:
-    """Cancel existing stop entry and replace with a new one."""
-    global _pending_entry
-    _executor.modify_stop_entry(old_pmt, new_pmt, None)
-    _pending_entry = new_pmt
-
-
-def place_stop_after_fill(position: dict) -> None:
-    """Send stop placement after a limit fill. position: {direction, stop_price}."""
-    global _pending_entry
-    _executor.update_stop_loss(position, None)
-    _pending_entry = None
-
-
-def close(label: str = "close") -> None:
-    """Send a market close order."""
-    global _pending_entry
-    _executor.place_close(label)
-    _pending_entry = None
-
-
-def cancel_entry(label: str = "cancel-stop") -> None:
-    """Cancel a pending stop entry if one exists. No-op if nothing is pending."""
-    global _pending_entry
-    if _pending_entry is not None:
-        _executor.place_close(label)
-        _pending_entry = None
-
-
-# ---------------------------------------------------------------------------
-# Position state helpers — read position.json; usable by skill and orchestrator
+# Position state helpers
 # ---------------------------------------------------------------------------
 
 def _load_pos() -> dict:
@@ -128,35 +74,124 @@ def has_pending_entry() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Ad-hoc convenience functions — log AND execute AND sync position.json
+# Unified API — each function: log → executor → sync position.json
 # ---------------------------------------------------------------------------
 
-def manual_close(price: float, reason: str = "user-requested") -> None:
-    """Manually close the active position. Logs, sends close order, clears position.json."""
+def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> None:
+    """Place unfilled stop entry. Logs, dispatches STP order, writes stop_entry to position.json."""
     now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
-    _log({"time": now, "kind": "market-close", "price": float(price),
-          "source": "manual", "reason": reason})
-    close("manual")
+    pmt_signal = {
+        "direction": direction,
+        "entry_price": entry_price,
+        "stop_price": stop_price,
+        "stop_fill_bars": 1,
+    }
+    _executor.place_entry(pmt_signal, None)
+    pos = _load_pos()
+    pos["stop_entry"] = str(entry_price)
+    pos["stop_direction"] = "up" if direction == "long" else "down"
+    _save_pos(pos)
+    _log({"time": now, "kind": "new-stop-entry", "direction": direction,
+          "entry_price": entry_price, "stop_price": stop_price})
+
+
+def place_market_entry(direction: str, entry_price: float, stop_price: float) -> None:
+    """Enter at market with stop. Logs, dispatches MKT+sl, writes active to position.json."""
+    now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    pmt_signal = {
+        "direction": direction,
+        "entry_price": entry_price,
+        "stop_price": stop_price,
+    }
+    _executor.place_entry(pmt_signal, None)
+    pos = _load_pos()
+    pos["active"] = {
+        "direction": direction,
+        "fill_price": entry_price,
+        "stop": stop_price,
+        "cautious": "no",
+        "contracts": 2,
+    }
+    pos["stop_entry"] = ""
+    pos["stop_direction"] = ""
+    _save_pos(pos)
+    _log({"time": now, "kind": "market-entry", "direction": direction,
+          "entry_price": entry_price, "stop_price": stop_price})
+
+
+def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: str) -> None:
+    """Cancel existing unfilled stop entry and replace. Reads old entry_price from position.json."""
+    now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    pos = _load_pos()
+    old_entry = float(pos["stop_entry"]) if pos.get("stop_entry") else new_entry_price
+    old_pmt = {
+        "direction": direction,
+        "entry_price": old_entry,
+        "stop_price": new_stop_price,
+        "stop_fill_bars": 1,
+    }
+    new_pmt = {
+        "direction": direction,
+        "entry_price": new_entry_price,
+        "stop_price": new_stop_price,
+        "stop_fill_bars": 1,
+    }
+    _executor.modify_stop_entry(old_pmt, new_pmt, None)
+    pos["stop_entry"] = str(new_entry_price)
+    _save_pos(pos)
+    _log({"time": now, "kind": "move-stop-entry", "direction": direction,
+          "old_entry_price": old_entry, "new_entry_price": new_entry_price,
+          "new_stop_price": new_stop_price})
+
+
+def stop_entry_filled(direction: str, stop_price: float) -> None:
+    """Stop entry just filled — send protective S/L to PMT, log, update active.stop in position.json."""
+    now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    _executor.update_stop_loss({"direction": direction, "stop_price": stop_price}, None)
+    pos = _load_pos()
+    if pos.get("active"):
+        pos["active"]["stop"] = stop_price
+        _save_pos(pos)
+    else:
+        print("[live_orders] stop_entry_filled: active position absent — position.json not updated", flush=True)
+    _log({"time": now, "kind": "stop-entry-filled", "direction": direction, "stop_price": stop_price})
+
+
+def cancel_stop_entry(reason: str = "user-requested") -> None:
+    """Cancel pending stop entry. No-op if stop_entry is empty. Logs, dispatches close, clears position.json."""
+    pos = _load_pos()
+    if not pos.get("stop_entry"):
+        return
+    now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    entry_price = float(pos["stop_entry"])
+    _executor.place_close("cancel-stop")
+    pos["stop_entry"] = ""
+    pos["stop_direction"] = ""
+    pos["confirmation_bar"] = {}
+    _save_pos(pos)
+    _log({"time": now, "kind": "cancel-stop-entry", "entry_price": entry_price, "reason": reason})
+
+
+def close_position(price: float, reason: str = "user-requested") -> None:
+    """Market-close active position. Logs, dispatches close, clears active in position.json."""
+    now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    _executor.place_close("close")
     pos = _load_pos()
     pos["active"] = {}
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
     pos["confirmation_bar"] = {}
     _save_pos(pos)
+    _log({"time": now, "kind": "market-close", "price": float(price), "reason": reason})
 
 
-def manual_cancel_entry(reason: str = "user-requested") -> None:
-    """Manually cancel a pending stop entry. Checks position.json — no-op if nothing pending."""
-    pos = _load_pos()
-    stop = pos.get("stop_entry", "")
-    if not stop and _pending_entry is None:
-        return
+def update_stop_loss(stop_price: float, reason: str = "user-requested") -> None:
+    """Update protective stop on active position (trade.py close <price>). Logs, dispatches update_sl, updates active.stop."""
     now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
-    price = float(stop) if stop else float((_pending_entry or {}).get("entry_price", 0))
-    _log({"time": now, "kind": "cancel-stop-entry", "price": price,
-          "source": "manual", "reason": reason})
-    cancel_entry("manual")
-    pos["stop_entry"] = ""
-    pos["stop_direction"] = ""
-    pos["confirmation_bar"] = {}
-    _save_pos(pos)
+    pos = _load_pos()
+    direction = pos.get("active", {}).get("direction", "")
+    _executor.update_stop_loss({"direction": direction, "stop_price": stop_price}, None)
+    if pos.get("active"):
+        pos["active"]["stop"] = stop_price
+        _save_pos(pos)
+    _log({"time": now, "kind": "update-stop-loss", "stop_price": stop_price, "reason": reason})

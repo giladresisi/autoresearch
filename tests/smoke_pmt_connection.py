@@ -375,14 +375,11 @@ def test_pmt_stop_entry_via_strategy_pipeline(tmp_path, monkeypatch, capsys):
         if direction_v2 == "none":
             print(f"[SMOKE-EMIT] skipped: direction=none", flush=True)
             return
-        direction = "long" if direction_v2 == "up" else "short"
-        pos = _ss.load_position()
-        conf_bar = pos.get("confirmation_bar", {})
-        stop_key = "body_low" if direction_v2 == "up" else "body_high"
-        stop = conf_bar.get(stop_key)
+        stop = sig.get("stop")
         if stop is None:
-            print(f"[SMOKE-EMIT] skipped: confirmation_bar missing {stop_key} — conf_bar={conf_bar}", flush=True)
+            print(f"[SMOKE-EMIT] skipped: signal missing stop field", flush=True)
             return
+        direction = "long" if direction_v2 == "up" else "short"
         pmt_signal = {
             "direction":      direction,
             "entry_price":    float(sig["price"]),

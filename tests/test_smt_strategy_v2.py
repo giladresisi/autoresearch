@@ -169,6 +169,8 @@ class TestNoPositionOppositeBar:
         assert result is not None
         assert result["kind"] == "new-stop-entry"
         assert result["price"] == pytest.approx(105.0)  # body_high of bearish 5m bar
+        # Stop = body_low of opposite bar (open=105, close=95 → body_low=95).
+        assert result["stop"] == pytest.approx(95.0)
 
         pos = smt_state.load_position()
         assert pos["stop_entry"] == pytest.approx(105.0)
@@ -199,6 +201,9 @@ class TestNoPositionOppositeBar:
         assert result is not None
         assert result["kind"] == "move-stop-entry"
         assert result["price"] == pytest.approx(122.0)
+        # Stop = body_low of new opposite bar (open=122, close=102 → body_low=102).
+        assert "stop" in result
+        assert result["stop"] == pytest.approx(102.0)
 
         pos = smt_state.load_position()
         assert pos["stop_entry"] == pytest.approx(122.0)
@@ -289,6 +294,52 @@ class TestFill:
 
         pos = smt_state.load_position()
         assert pos["active"]["stop"] == pytest.approx(95.0)  # wick end capped at body_low-10
+
+    def test_fill_uses_bar_state_when_conf_bar_empty(self, tmp_path, monkeypatch):
+        """Manual stop entry (empty confirmation_bar): fill uses bar_state.potential_stop_long."""
+        write_hypothesis(direction="up")
+        # stop_entry set but confirmation_bar empty (manual path via trade.py)
+        write_position(stop_entry=100.0, confirmation_bar={})
+
+        # Write bar_state.json with potential_stop_long
+        monkeypatch.chdir(tmp_path)
+        import datetime as _dt
+        today = _dt.date.today().isoformat()
+        (tmp_path / "sessions" / today).mkdir(parents=True, exist_ok=True)
+        (tmp_path / "sessions" / today / "bar_state.json").write_text(
+            '{"time": "x", "potential_stop_long": 93.0, "potential_stop_short": 107.0}',
+            encoding="utf-8",
+        )
+
+        # Bar that crosses the stop entry; distance |100-93|=7 ≥ MIN_STOP_DISTANCE
+        bar = make_5m_bar(open_=99.0, high=102.0, low=98.0, close=101.0)
+        result = run_strategy(NOW, bar, make_empty_1m_recent())
+
+        assert result is not None
+        assert result["kind"] == "stop-entry-filled"
+        assert result["price"] == pytest.approx(100.0)
+
+        pos = smt_state.load_position()
+        assert pos["active"]["stop"] == pytest.approx(93.0)
+
+    def test_fill_skips_when_conf_bar_empty_and_no_bar_state(self, tmp_path, monkeypatch):
+        """Manual stop entry + no bar_state.json → fill is skipped (returns None)."""
+        write_hypothesis(direction="up")
+        write_position(stop_entry=100.0, confirmation_bar={})
+
+        # No bar_state.json exists in tmp_path
+        monkeypatch.chdir(tmp_path)
+
+        # Bar that crosses the stop entry
+        bar = make_5m_bar(open_=99.0, high=102.0, low=98.0, close=101.0)
+        result = run_strategy(NOW, bar, make_empty_1m_recent())
+
+        # Fill skipped due to missing bar_state.json
+        assert result is None
+        pos = smt_state.load_position()
+        assert pos["active"] == {}
+        # stop_entry preserved (no fill, no clear)
+        assert pos["stop_entry"] == pytest.approx(100.0)
 
 
 class TestActivePosition:

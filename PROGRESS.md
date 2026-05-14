@@ -1,6 +1,24 @@
 # PROGRESS
 
 
+## Feature: Live Orders Refactor + Trade CLI
+
+**Status**: ✅ Complete
+**Started**: 2026-05-13
+**Plan File**: `.agents/plans/live-orders-refactor-and-trade-cli.md`
+
+Unified live_orders.py (single-tier: log+dispatch+sync), stop price moved from position.json into signals, bar_state.json written per 1m bar with auto-computed potential stops (both directions), and trade.py CLI for manual market/stop entries, cancel, move, and close.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/live-orders-refactor-and-trade-cli.md`
+- 7/7 tasks completed across 3 parallel waves; 52 new/rewritten tests (52/52 passing); 0 regressions (85/85 extended suite)
+- No divergences from plan; all acceptance criteria met
+- Live PMT end-to-end smoke test pending — requires live PMT credentials (intentionally out of scope)
+- Alignment score: 10/10
+
+---
+
 ## Feature: IB Gap-Fill + Orchestrator Disconnect Handling
 
 **Status**: ✅ Complete
