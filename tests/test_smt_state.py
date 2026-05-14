@@ -41,6 +41,10 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(smt_state, "DAILY_PATH",      tmp_path / "daily.json")
     monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
     monkeypatch.setattr(smt_state, "POSITION_PATH",   tmp_path / "position.json")
+    # Reset hypothesis cache and in-memory flag so tests don't bleed state into each other
+    monkeypatch.setattr(smt_state, "_hyp_cache",       None)
+    monkeypatch.setattr(smt_state, "_hyp_cache_valid", False)
+    monkeypatch.setattr(smt_state, "_IN_MEMORY",       False)
 
 
 class TestLoadReturnsDefaultWhenMissing:
@@ -151,3 +155,45 @@ class TestSaveUsesSortKeysForDeterminism:
         bytes_b = (tmp_path / "global.json").read_bytes()
 
         assert bytes_a == bytes_b
+
+
+_HYP = {
+    "direction": "up",
+    "weekly_mid": "above",
+    "daily_mid": "mid",
+    "last_liquidity": "day_low",
+    "divs": [],
+    "targets": [],
+    "cautious_price": "",
+    "entry_ranges": [],
+}
+
+
+class TestHypothesisCache:
+    def test_load_hypothesis_returns_cached_value(self):
+        save_hypothesis(_HYP)
+        with patch.object(smt_state, "_load", side_effect=AssertionError("should use cache")):
+            result = load_hypothesis()
+        assert result["direction"] == "up"
+
+    def test_cache_invalidated_after_in_memory_toggle(self):
+        save_hypothesis({**_HYP, "direction": "down", "weekly_mid": "below", "last_liquidity": "day_high"})
+        assert smt_state._hyp_cache_valid is True
+        smt_state.set_in_memory_mode(True)
+        smt_state.set_in_memory_mode(False)
+        assert smt_state._hyp_cache_valid is False
+
+    def test_cache_not_used_in_in_memory_mode(self):
+        smt_state.set_in_memory_mode(True)
+        save_hypothesis(_HYP)
+        assert smt_state._hyp_cache_valid is False
+        load_hypothesis()
+        assert smt_state._hyp_cache_valid is False
+
+    def test_position_not_cached(self):
+        load_position()
+        assert smt_state._hyp_cache_valid is False
+        assert smt_state._hyp_cache is None
+        load_position()
+        assert smt_state._hyp_cache_valid is False
+        assert smt_state._hyp_cache is None

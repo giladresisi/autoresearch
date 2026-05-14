@@ -174,6 +174,8 @@ class DatabentSource:
                 "DATABENTO_API_KEY environment variable is required for DatabentSource"
             )
         self._api_key = api_key
+        import databento as db
+        self._client = db.Historical(key=api_key)
 
     def fetch(
         self,
@@ -187,11 +189,9 @@ class DatabentSource:
             raise ValueError(
                 f"DatabentSource only supports 1m, 5m, and 1s intervals, got {interval!r}"
             )
-        import databento as db
         schema = "ohlcv-1s" if interval == "1s" else "ohlcv-1m"
         try:
-            client = db.Historical(key=self._api_key)
-            data = client.timeseries.get_range(
+            data = self._client.timeseries.get_range(
                 dataset="GLBX.MDP3",
                 symbols=[ticker],
                 schema=schema,
@@ -229,7 +229,7 @@ class DatabentSource:
                     available_end = f"{m.group(1)}T{m.group(2)}"
                 if available_end:
                     try:
-                        data = client.timeseries.get_range(
+                        data = self._client.timeseries.get_range(
                             dataset="GLBX.MDP3",
                             symbols=[ticker],
                             schema=schema,

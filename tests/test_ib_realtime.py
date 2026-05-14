@@ -360,6 +360,7 @@ def test_on_mnq_1m_bar_flushes_1s_pending_to_session_parquet(tmp_path):
     bar = _make_bar_mock("2026-05-08 09:31:00")
     with patch("strategy_smt.set_bar_data"):
         src._on_mnq_1m_bar([bar], True)
+    src._parquet_executor.shutdown(wait=True)  # drain background writes before reading parquets
 
     assert len(src._mnq_1s_pending) == 0
     # In-memory DF reset to empty after flush (parquet is the durable record)
@@ -384,6 +385,7 @@ def test_on_mes_1m_bar_flushes_1s_pending_to_session_parquet(tmp_path):
     bar = _make_bar_mock("2026-05-08 09:31:00")
     with patch("strategy_smt.set_bar_data"):
         src._on_mes_1m_bar([bar], True)
+    src._parquet_executor.shutdown(wait=True)  # drain background writes before reading parquets
 
     assert len(src._mes_1s_pending) == 0
     # In-memory DF reset to empty after flush (parquet is the durable record)
@@ -590,6 +592,7 @@ def test_session_1s_df_cleared_after_mnq_flush(tmp_path):
     bar = _make_bar_mock("2026-05-08 09:31:00")
     with patch("strategy_smt.set_bar_data"):
         src._on_mnq_1m_bar([bar], True)
+    src._parquet_executor.shutdown(wait=True)  # drain background writes before reading parquets
 
     assert src._mnq_1s_session_df.empty
     # Parquet contains all rows: 1 pre-existing + 2 pending
@@ -612,6 +615,7 @@ def test_session_1s_df_cleared_after_mes_flush(tmp_path):
     bar = _make_bar_mock("2026-05-08 09:31:00")
     with patch("strategy_smt.set_bar_data"):
         src._on_mes_1m_bar([bar], True)
+    src._parquet_executor.shutdown(wait=True)  # drain background writes before reading parquets
 
     assert src._mes_1s_session_df.empty
     session_files = list(tmp_path.glob("MES_1s_session_*.parquet"))
@@ -670,6 +674,7 @@ def test_parquet_written_before_trim(tmp_path):
     bar = _make_bar_mock("2026-05-08 09:31:00")
     with patch("strategy_smt.set_bar_data"):
         src._on_mnq_1m_bar([bar], True)
+    src._parquet_executor.shutdown(wait=True)  # drain background writes before reading parquets
 
     parquet_df = pd.read_parquet(tmp_path / "MNQ_1m.parquet")
     # Parquet has full history (original rows + new bar)
@@ -677,3 +682,94 @@ def test_parquet_written_before_trim(tmp_path):
     # In-memory DF is trimmed
     cutoff = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=14)
     assert src._mnq_1m_df.index[0] >= cutoff
+
+
+# ── Fix 1: background parquet writes via executor ────────────────────────────
+
+def test_parquet_write_submitted_to_executor_not_blocking(tmp_path):
+    src = _make_source(tmp_path)
+    src._parquet_executor = MagicMock()
+
+    bar = _make_bar_mock("2026-05-08 09:31:00")
+    with patch("strategy_smt.set_bar_data"), \
+         patch.object(pd.DataFrame, "to_parquet") as mock_direct:
+        src._on_mnq_1m_bar([bar], True)
+
+    assert src._parquet_executor.submit.called
+    mock_direct.assert_not_called()
+
+
+def test_executor_drained_on_stop(tmp_path):
+    src = _make_source(tmp_path)
+    src._parquet_executor = MagicMock()
+
+    src.stop()
+
+    assert src._parquet_executor.shutdown.called
+    src._parquet_executor.shutdown.assert_called_with(wait=True)
+
+
+def test_session_snap_used_not_current_df(tmp_path):
+    src = _make_source(tmp_path)
+    ts1 = _second_ts("2026-05-08 09:30:00")
+    src._mnq_1s_pending = [
+        {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0, "second_ts": ts1},
+    ]
+    src._parquet_executor = MagicMock()
+
+    bar = _make_bar_mock("2026-05-08 09:31:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._on_mnq_1m_bar([bar], True)
+
+    session_submit = None
+    for c in src._parquet_executor.submit.call_args_list:
+        path_arg = c.args[1] if len(c.args) > 1 else None
+        if path_arg is not None and "session" in str(path_arg):
+            session_submit = c
+            break
+
+    assert session_submit is not None
+    snap_df = session_submit.args[0].__self__
+    assert not snap_df.empty
+    assert src._mnq_1s_session_df.empty
+
+
+# ── Fix 5: seed dedup skip ───────────────────────────────────────────────────
+
+def test_seed_skipped_when_bar_count_unchanged(tmp_path):
+    src = _make_source(tmp_path)
+    src._last_seed_count["MNQ"] = 5
+
+    bars = [_make_bar_mock(f"2026-05-08 09:{30+i:02d}:00") for i in range(5)]
+    src._seed_from_history(bars, "MNQ")
+
+    assert src._mnq_1m_df.empty
+
+
+def test_seed_runs_when_bar_count_increases(tmp_path):
+    src = _make_source(tmp_path)
+    src._last_seed_count["MNQ"] = 0
+
+    bars = [_make_bar_mock(f"2026-05-08 09:{30+i:02d}:00") for i in range(3)]
+    src._seed_from_history(bars, "MNQ")
+    src._parquet_executor.shutdown(wait=True)
+
+    assert len(src._mnq_1m_df) == 3
+    assert src._last_seed_count["MNQ"] == 3
+
+
+# ── Fix 6: import hoist ──────────────────────────────────────────────────────
+
+def test_set_bar_data_no_inline_import(tmp_path):
+    import os
+    source_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "ib_realtime.py")
+    with open(source_path) as f:
+        source = f.read()
+
+    for fn_name in ("_on_mnq_1m_bar", "_on_mes_1m_bar"):
+        start = source.find(f"def {fn_name}")
+        assert start != -1
+        after_def = source.find("\n    def ", start + 1)
+        body = source[start:after_def] if after_def != -1 else source[start:]
+        assert "from strategy_smt import set_bar_data" not in body, \
+            f"inline import found in {fn_name}"

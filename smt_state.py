@@ -51,12 +51,18 @@ DEFAULT_POSITION = {
 _IN_MEMORY = False
 _STORE: dict[str, dict] = {}
 
+# Process-local hypothesis cache (invalidated on every save_hypothesis call).
+# Not used in _IN_MEMORY mode; not used for position (externally mutated by executor).
+_hyp_cache: dict | None = None
+_hyp_cache_valid: bool = False
+
 
 def set_in_memory_mode(enabled: bool) -> None:
-    global _IN_MEMORY
+    global _IN_MEMORY, _hyp_cache, _hyp_cache_valid
     _IN_MEMORY = enabled
-    if not enabled:
-        _STORE.clear()
+    _hyp_cache = None
+    _hyp_cache_valid = False
+    _STORE.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -110,11 +116,22 @@ def save_daily(d: dict) -> None:
 
 
 def load_hypothesis() -> dict:
-    return _load(HYPOTHESIS_PATH, DEFAULT_HYPOTHESIS)
+    global _hyp_cache, _hyp_cache_valid
+    if not _IN_MEMORY and _hyp_cache_valid and _hyp_cache is not None:
+        return copy.deepcopy(_hyp_cache)
+    result = _load(HYPOTHESIS_PATH, DEFAULT_HYPOTHESIS)
+    if not _IN_MEMORY:
+        _hyp_cache = copy.deepcopy(result)
+        _hyp_cache_valid = True
+    return result
 
 
 def save_hypothesis(d: dict) -> None:
+    global _hyp_cache, _hyp_cache_valid
     _atomic_write(HYPOTHESIS_PATH, d)
+    if not _IN_MEMORY:
+        _hyp_cache = copy.deepcopy(d)
+        _hyp_cache_valid = True  # write-through: cache the new value immediately
 
 
 def load_position() -> dict:
