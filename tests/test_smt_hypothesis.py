@@ -34,6 +34,9 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(smt_state, "DAILY_PATH",      tmp_path / "daily.json")
     monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
     monkeypatch.setattr(smt_state, "POSITION_PATH",   tmp_path / "position.json")
+    # Clear the process-level hypothesis cache so a previous test's saved hypothesis
+    # does not bleed into this test via the in-memory cache.
+    monkeypatch.setattr(smt_state, "_hyp_cache_valid", False)
 
 
 # ── Synthetic bar builders ────────────────────────────────────────────────────
@@ -306,8 +309,17 @@ def test_weekly_mid_within_tolerance():
 
 def test_daily_mid_same_three_branches():
     """daily_mid must classify above/mid/below using day_high and day_low."""
-    # day_high=180, day_low=120 → mid=150
-    # Test all three branches with different closes
+    # compute_live_hl_mid derives day_high from bars >= prev-day 18:00 ET and day_low
+    # from bars >= prev-day 19:30 ET.  The default pre-session hist only covers 18:00–18:04,
+    # so session bars (Low ≈ close-1) dominate day_low.  We anchor day_low=100 by injecting
+    # a 19:30 bar with Low=100 so day_mid = (200+100)/2 = 150 regardless of session close.
+    week_ago = _make_1m_bars([100] * 5, [101] * 5, [99] * 5, [100] * 5,
+                              start_time="2026-04-20 10:00:00")
+    pre_sess = _make_pre_session_hist()   # 18:00–18:04 ET, High=200 anchors day_high
+    anchor_1930 = _make_1m_bars([100.0], [200.0], [100.0], [100.0],
+                                 start_time="2026-04-26 19:30:00")
+    hist_mnq_1m = pd.concat([week_ago, pre_sess, anchor_1930]).sort_index()
+
     for close_price, expected in [
         (170.0, "above"),   # 170-150=20 > 10 → above
         (145.0, "mid"),     # |145-150|=5 ≤ 10 → mid
@@ -328,7 +340,7 @@ def test_daily_mid_same_three_branches():
         mes_1m = _make_1m_bars([80.0] * 5, [81.0] * 5, [79.0] * 5, [80.0] * 5,
                                  start_time="2026-04-27 10:00:00")
 
-        _call_with_nullmocks(now, mnq_1m, mes_1m)
+        _call_with_nullmocks(now, mnq_1m, mes_1m, hist_mnq_1m=hist_mnq_1m)
 
         h = load_hypothesis()
         assert h["daily_mid"] == expected, (

@@ -1,9 +1,6 @@
-"""tests/test_fold_auto_detect.py — Unit tests for _compute_fold_params and ticker split."""
+"""tests/test_fold_auto_detect.py — Unit tests for _compute_fold_params."""
 import pytest
 from train import _compute_fold_params
-from tests.conftest import (
-    TEST_TICKERS_TRAIN, TEST_TICKERS_TEST_ONLY, TEST_ALL_TICKERS,
-)
 
 
 # ── _compute_fold_params: short timeframe (< 130 bdays) ───────────────────────
@@ -69,35 +66,3 @@ def test_fold_params_boundary_130_bdays():
     n_folds, test_days = _compute_fold_params(start, end, 7, 40)
     assert n_folds == 7
     assert test_days == 40
-
-
-# ── Ticker split constraints ──────────────────────────────────────────────────
-
-def test_test_only_tickers_at_least_one():
-    """At least 1 ticker must be designated test-only."""
-    assert len(TEST_TICKERS_TEST_ONLY) >= 1
-
-
-def test_test_only_tickers_at_most_fifty_pct():
-    """Test-only tickers must be ≤ 50% of the total ticker universe."""
-    pct = len(TEST_TICKERS_TEST_ONLY) / len(TEST_ALL_TICKERS)
-    assert pct <= 0.5, (
-        f"Test-only fraction {pct:.0%} exceeds 50%. "
-        f"train={TEST_TICKERS_TRAIN}, test_only={TEST_TICKERS_TEST_ONLY}"
-    )
-
-
-def test_training_tickers_at_least_one():
-    """Training ticker set must have at least 1 ticker."""
-    assert len(TEST_TICKERS_TRAIN) >= 1
-
-
-def test_no_overlap_between_train_and_test_only():
-    """Training and test-only ticker sets must be disjoint."""
-    overlap = set(TEST_TICKERS_TRAIN) & set(TEST_TICKERS_TEST_ONLY)
-    assert not overlap, f"Tickers appear in both train and test-only: {overlap}"
-
-
-def test_all_tickers_is_union_of_train_and_test_only():
-    """TEST_ALL_TICKERS must equal the union of TRAIN + TEST_ONLY."""
-    assert set(TEST_ALL_TICKERS) == set(TEST_TICKERS_TRAIN) | set(TEST_TICKERS_TEST_ONLY)

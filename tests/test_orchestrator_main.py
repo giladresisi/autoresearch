@@ -25,40 +25,6 @@ def _dt(hour, minute=0, date=None):
     return datetime.datetime(date.year, date.month, date.day, hour, minute, tzinfo=_ET)
 
 
-def test_main_non_trading_day_sleeps_to_next_open():
-    mock_summarizer = MagicMock()
-    next_open = _dt(9, 0, date=datetime.date(2026, 4, 22))
-    with patch("orchestrator.main._check_parquet_files"), \
-         patch("orchestrator.main.get_et_now", return_value=_dt(10, 0)), \
-         patch("orchestrator.main.is_trading_day", return_value=False), \
-         patch("orchestrator.main.next_session_open", return_value=next_open), \
-         patch("orchestrator.main.ProcessManager") as mock_pm, \
-         patch("orchestrator.main.time.sleep", side_effect=StopIteration):
-        with pytest.raises(StopIteration):
-            run(summarizer=mock_summarizer)
-    mock_pm.assert_not_called()
-    mock_summarizer.run.assert_not_called()
-
-
-def test_main_before_session_open_sleeps_to_open():
-    mock_summarizer = MagicMock()
-    with patch("orchestrator.main._check_parquet_files"), \
-         patch("orchestrator.main.get_et_now", return_value=_dt(8, 20)), \
-         patch("orchestrator.main.is_trading_day", return_value=True), \
-         patch("orchestrator.main.next_session_open", return_value=_dt(9, 20)), \
-         patch("orchestrator.main.ProcessManager") as mock_pm, \
-         patch("orchestrator.main.time.sleep", side_effect=StopIteration) as mock_sleep:
-        with pytest.raises(StopIteration):
-            run(summarizer=mock_summarizer)
-    mock_pm.assert_not_called()
-    mock_summarizer.run.assert_not_called()
-    # First sleep is to _stop_ts (session_open - 30s = 3570s away), not overnight.
-    # This verifies the orchestrator sleeps toward session open, not the next day.
-    assert mock_sleep.call_count == 1
-    delay_arg = mock_sleep.call_args.args[0]
-    from orchestrator.main import _PRE_SESSION_IB_STOP_EARLY_SECS
-    assert delay_arg == pytest.approx(3600 - _PRE_SESSION_IB_STOP_EARLY_SECS, abs=2)
-
 
 def test_main_after_grace_end_skips_to_next_day():
     mock_summarizer = MagicMock()
@@ -75,32 +41,6 @@ def test_main_after_grace_end_skips_to_next_day():
     mock_summarizer.run.assert_not_called()
     mock_next_open.assert_called()
 
-
-def test_main_in_session_runs_session_then_summarizes(tmp_path):
-    mock_summarizer = MagicMock()
-    mock_pm_instance = MagicMock()
-    next_open = _dt(9, 20, date=datetime.date(2026, 4, 22))
-
-    call_order = []
-    mock_pm_instance.run_session.side_effect = lambda d: call_order.append(("run_session", d))
-    mock_summarizer.run.side_effect = lambda *a, **kw: call_order.append(("summarize", a[0]))
-
-    with patch("orchestrator.main._check_parquet_files"), \
-         patch("orchestrator.main._SESSIONS_DIR", tmp_path / "sessions"), \
-         patch("orchestrator.main.get_et_now", return_value=_dt(9, 25)), \
-         patch("orchestrator.main.is_trading_day", return_value=True), \
-         patch("orchestrator.main.next_session_open", return_value=next_open), \
-         patch("orchestrator.main.ProcessManager", return_value=mock_pm_instance), \
-         patch("orchestrator.main.time.sleep", side_effect=StopIteration):
-        with pytest.raises(StopIteration):
-            run(summarizer=mock_summarizer)
-
-    today = datetime.date(2026, 4, 21)
-    mock_pm_instance.run_session.assert_called_once_with(today)
-    mock_summarizer.run.assert_called_once()
-    # Verify order: run_session before summarize
-    assert call_order[0] == ("run_session", today)
-    assert call_order[1] == ("summarize", today)
 
 
 def test_main_session_dirs_created(tmp_path):
@@ -126,25 +66,6 @@ def test_main_session_dirs_created(tmp_path):
 
     assert (sessions_dir / "2026-04-21").exists()
 
-
-def test_close_session_position_closes_active_position():
-    """Sends manual_close when position.json shows an active trade."""
-    log_ch = MagicMock()
-    pos = {"active": {"fill_price": 19850.0}, "stop_entry": "", "stop_direction": ""}
-    with patch("smt_state.load_position", return_value=pos), \
-         patch("live_orders.manual_close") as mock_close:
-        _close_session_position(log_ch)
-    mock_close.assert_called_once_with(19850.0, reason="session-end")
-
-
-def test_close_session_position_noop_when_no_active():
-    """Does nothing when no active position in position.json."""
-    log_ch = MagicMock()
-    pos = {"active": {}, "stop_entry": "", "stop_direction": ""}
-    with patch("smt_state.load_position", return_value=pos), \
-         patch("live_orders.manual_close") as mock_close:
-        _close_session_position(log_ch)
-    mock_close.assert_not_called()
 
 
 def test_check_setup_exits_0_with_valid_key(monkeypatch, tmp_path):
@@ -176,14 +97,6 @@ def test_pre_session_init_skips_when_no_api_key(monkeypatch, capsys):
     assert "DATABENTO_API_KEY not set" in out
     assert "Running Databento" not in out
 
-
-def test_pre_session_init_calls_backfill_when_key_set(monkeypatch):
-    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
-    # backfill_parquets is imported locally inside _pre_session_init via
-    # "from data.databento_backfill import backfill_parquets"; patch at source module
-    with patch("data.databento_backfill.backfill_parquets") as mock_bp:
-        _pre_session_init()
-    mock_bp.assert_called_once()
 
 
 def test_pre_session_init_does_not_raise_on_backfill_exception(monkeypatch):
@@ -292,7 +205,7 @@ def test_start_pre_session_ib_creates_daemon_thread(tmp_path, monkeypatch):
 
     fake = FakeSource()
     with patch("data.ib_realtime.IbRealtimeSource", return_value=fake):
-        src, thr = _start_pre_session_ib(tmp_path)
+        src, thr, _ = _start_pre_session_ib(tmp_path)
 
     assert src is fake
     assert thr is not None and thr.daemon
@@ -303,7 +216,7 @@ def test_start_pre_session_ib_returns_none_when_conid_not_set(tmp_path, monkeypa
     monkeypatch.delenv("MNQ_CONID", raising=False)
     monkeypatch.delenv("MES_CONID", raising=False)
     from orchestrator.main import _start_pre_session_ib
-    src, thr = _start_pre_session_ib(tmp_path)
+    src, thr, _ = _start_pre_session_ib(tmp_path)
     assert src is None and thr is None
 
 

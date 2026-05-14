@@ -191,6 +191,7 @@ def test_cli_exit_code_zero_on_pass(tmp_path, real_parquet_available):
          "--regression-md", str(md)],
         capture_output=True,
         cwd=str(tmp_path),
+        timeout=60,
     )
     assert result.returncode == 0, f"stdout: {result.stdout.decode()}\nstderr: {result.stderr.decode()}"
 
@@ -212,5 +213,6 @@ def test_cli_exit_code_one_on_fail(tmp_path, real_parquet_available):
          "--regression-md", str(md)],
         capture_output=True,
         cwd=str(tmp_path),
+        timeout=60,
     )
     assert result.returncode == 1, f"stdout: {result.stdout.decode()}\nstderr: {result.stderr.decode()}"

@@ -77,7 +77,7 @@ class TestDatabentSource1s:
     def test_databent_source_retries_with_available_end_on_422(self):
         """When Databento returns data_end_after_available_end, fetch retries with the
         available end timestamp parsed from the error message."""
-        available_end = "2026-05-08 08:30:00+00:00"
+        available_end = "2026-05-08T08:30:00+00:00"
         error_msg = (
             f"The dataset GLBX.MDP3 has data available up to '{available_end}'. "
             "The `end` in the query ('2026-05-08 08:39:00+00:00') is after the "

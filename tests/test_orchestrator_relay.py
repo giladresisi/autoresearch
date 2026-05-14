@@ -12,9 +12,9 @@ SIGNAL_LONG = "[09:14:32] SIGNAL    long  | entry ~19850.75 (+2t slip) | stop 19
 SIGNAL_SHORT = "[09:14:32] SIGNAL    short | entry ~19850.75 (+2t slip) | stop 19848.50 | TP 19890.00 | RR ~24.0x"
 # Current format (with entry_time)
 SIGNAL_LONG_NEW = "[09:14:32] SIGNAL    long  | entry_time 09:12:00 | entry ~19850.75 (+2t slip) | stop 19848.50 | TP 19890.00 | RR ~24.0x"
-EXIT_TP = "[09:47:11] EXIT      tp    | filled 19890.00 | P&L +$78.50 | 1 MNQ1! contract"
-EXIT_STOP = "[09:47:11] EXIT      stop  | filled 19890.00 | P&L +$78.50 | 1 MNQ1! contract"
-EXIT_NEG = "[09:47:11] EXIT      stop  | filled 19890.00 | P&L -$3.00 | 1 MNQ1! contract"
+EXIT_TP = "[09:47:11] EXIT      tp    | bar_time 09:47:11 | filled 19890.00 | P&L +$78.50 | 1 MNQ1! contract"
+EXIT_STOP = "[09:47:11] EXIT      stop  | bar_time 09:47:11 | filled 19890.00 | P&L +$78.50 | 1 MNQ1! contract"
+EXIT_NEG = "[09:47:11] EXIT      stop  | bar_time 09:47:11 | filled 19890.00 | P&L -$3.00 | 1 MNQ1! contract"
 STOP_MOVE = "[09:30:00] STOP_MOVE breakeven   | stop 19848.50 -> 19850.75"
 
 
@@ -41,7 +41,7 @@ def test_emit_signal_line_parses_long():
     assert e["stop"] == 19848.50
     assert e["tp"] == 19890.00
     assert e["rr"] == 24.0
-    assert e["time"] == "09:14:32"
+    assert e["time"] == ""  # no entry_time field in legacy format
 
 
 def test_emit_signal_line_parses_short():
