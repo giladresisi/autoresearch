@@ -361,11 +361,8 @@ def run_trend(
         if cautious_state in ("secondary", "yes"):
             _ath_names = {"day_high", "week_high"}
             if _lv2 in _ath_names:
-                # ATH-equivalent secondary level: 10m confirmation normally, 20m when
-                # the position has already gained >100 pts (trend continuation signal).
-                _fill_price = float(position.get("active", {}).get("fill_price", 0.0))
-                _gain = (bar_mid - _fill_price) if direction == "up" else (_fill_price - bar_mid)
-                _conf_minutes = 20 if _gain > 100 else 10
+                # ATH-equivalent secondary level: always 20m confirmation.
+                _conf_minutes = 20
                 ts = pd.Timestamp(now)
                 if ts.minute % _conf_minutes == 0:
                     conf_start = ts - pd.Timedelta(minutes=_conf_minutes)
