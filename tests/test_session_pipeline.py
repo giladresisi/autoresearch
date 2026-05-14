@@ -545,8 +545,7 @@ def test_on_session_start_levels_json_not_overwritten_on_restart(_isolate_state,
     mtime_first = levels_path.stat().st_mtime
 
     # Second call (simulates mid-session restart on same date)
-    # daily.json now has today's date so run_daily is skipped (Option A path),
-    # but levels.json should also be skipped since it already exists.
+    # run_daily always reruns on restart; levels.json is always overwritten.
     pipeline2 = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
     pipeline2.on_session_start(now, _make_1m_bars("2025-11-14 09:20", n=1))
 
