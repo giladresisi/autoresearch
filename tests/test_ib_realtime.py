@@ -362,10 +362,12 @@ def test_on_mnq_1m_bar_flushes_1s_pending_to_session_parquet(tmp_path):
         src._on_mnq_1m_bar([bar], True)
 
     assert len(src._mnq_1s_pending) == 0
-    assert len(src._mnq_1s_session_df) == 2
-    # Session parquet written; main MNQ_1s.parquet NOT written
+    # In-memory DF reset to empty after flush (parquet is the durable record)
+    assert src._mnq_1s_session_df.empty
+    # Session parquet written with the 2 pending rows
     session_files = list(tmp_path.glob("MNQ_1s_session_*.parquet"))
     assert len(session_files) == 1
+    assert len(pd.read_parquet(session_files[0])) == 2
     assert not (tmp_path / "MNQ_1s.parquet").exists()
 
 
@@ -384,9 +386,12 @@ def test_on_mes_1m_bar_flushes_1s_pending_to_session_parquet(tmp_path):
         src._on_mes_1m_bar([bar], True)
 
     assert len(src._mes_1s_pending) == 0
-    assert len(src._mes_1s_session_df) == 2
+    # In-memory DF reset to empty after flush (parquet is the durable record)
+    assert src._mes_1s_session_df.empty
+    # Session parquet written with the 2 pending rows
     session_files = list(tmp_path.glob("MES_1s_session_*.parquet"))
     assert len(session_files) == 1
+    assert len(pd.read_parquet(session_files[0])) == 2
     assert not (tmp_path / "MES_1s.parquet").exists()
 
 
@@ -512,3 +517,163 @@ def test_gap_fill_1s_ib_paginates_in_1800s_chunks(tmp_path):
             f"Expected duration ending in ' S', got {duration_str!r}"
         seconds = int(duration_str.replace(" S", ""))
         assert seconds <= 1800, f"Chunk {seconds}s exceeds 1800s limit"
+
+
+# ── RAM reduction tests ──────────────────────────────────────────────────────
+
+def _make_bar_df(days_ago_start: int, days_ago_end: int = 0) -> pd.DataFrame:
+    """Build a test 1m bar DataFrame spanning the given age range."""
+    now = pd.Timestamp.now(tz="America/New_York")
+    start = now - pd.Timedelta(days=days_ago_start)
+    end = now - pd.Timedelta(days=days_ago_end)
+    timestamps = pd.date_range(start, end, freq="1min", tz="America/New_York")
+    n = len(timestamps)
+    return pd.DataFrame({
+        "Open":   [20000.0] * n,
+        "High":   [20010.0] * n,
+        "Low":    [19990.0] * n,
+        "Close":  [20005.0] * n,
+        "Volume": [100.0] * n,
+    }, index=timestamps)
+
+
+def test_1s_dfs_freed_after_gap_fill_in_start(tmp_path):
+    """After start() calls _gap_fill_1s_ib(), _mnq_1s_df and _mes_1s_df become empty."""
+    src = _make_source(tmp_path)
+    # Pre-populate with non-empty DFs to confirm they get freed
+    ts = pd.Timestamp("2026-05-01 09:30:00", tz="America/New_York")
+    row = pd.DataFrame(
+        {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0]},
+        index=pd.DatetimeIndex([ts]),
+    )
+    src._mnq_1s_df = row.copy()
+    src._mes_1s_df = row.copy()
+
+    class FakeIB:
+        def __init__(self):
+            self.disconnectedEvent = MagicMock()
+            self.isConnected = MagicMock(return_value=True)
+        def connect(self, *a, **kw): pass
+        def disconnect(self): pass
+
+    with patch("ib_insync.IB", return_value=FakeIB()), \
+         patch("ib_insync.Future"), \
+         patch("ib_insync.util") as util_mock, \
+         patch.object(src, "_load_parquets"), \
+         patch.object(src, "_gap_fill_1s_ib"), \
+         patch.object(src, "_setup_subscriptions"):
+        def _fake_run():
+            src._stopping = True
+        util_mock.run.side_effect = _fake_run
+        util_mock.getLoop.return_value = MagicMock()
+        src.start()
+
+    assert src.mnq_1s_df.empty, "mnq_1s_df must be empty after start() completes gap-fill"
+    assert src.mes_1s_df.empty, "mes_1s_df must be empty after start() completes gap-fill"
+
+
+def test_session_1s_df_cleared_after_mnq_flush(tmp_path):
+    """_on_mnq_1m_bar resets _mnq_1s_session_df to empty after writing to parquet."""
+    src = _make_source(tmp_path)
+    ts1 = _second_ts("2026-05-08 09:30:00")
+    ts2 = _second_ts("2026-05-08 09:30:01")
+    src._mnq_1s_pending = [
+        {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0, "second_ts": ts1},
+        {"open": 2.0, "high": 2.0, "low": 2.0, "close": 2.0, "volume": 1.0, "second_ts": ts2},
+    ]
+    # Pre-populate session DF to confirm it gets cleared, not just overwritten
+    src._mnq_1s_session_df = pd.DataFrame(
+        {"Open": [0.5], "High": [0.5], "Low": [0.5], "Close": [0.5], "Volume": [1.0]},
+        index=pd.DatetimeIndex([_second_ts("2026-05-08 09:29:59")]),
+    )
+
+    bar = _make_bar_mock("2026-05-08 09:31:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._on_mnq_1m_bar([bar], True)
+
+    assert src._mnq_1s_session_df.empty
+    # Parquet contains all rows: 1 pre-existing + 2 pending
+    session_files = list(tmp_path.glob("MNQ_1s_session_*.parquet"))
+    assert len(session_files) == 1
+    flushed = pd.read_parquet(session_files[0])
+    assert len(flushed) == 3
+
+
+def test_session_1s_df_cleared_after_mes_flush(tmp_path):
+    """_on_mes_1m_bar resets _mes_1s_session_df to empty after writing to parquet."""
+    src = _make_source(tmp_path)
+    ts1 = _second_ts("2026-05-08 09:30:00")
+    ts2 = _second_ts("2026-05-08 09:30:01")
+    src._mes_1s_pending = [
+        {"open": 3.0, "high": 3.0, "low": 3.0, "close": 3.0, "volume": 2.0, "second_ts": ts1},
+        {"open": 4.0, "high": 4.0, "low": 4.0, "close": 4.0, "volume": 2.0, "second_ts": ts2},
+    ]
+
+    bar = _make_bar_mock("2026-05-08 09:31:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._on_mes_1m_bar([bar], True)
+
+    assert src._mes_1s_session_df.empty
+    session_files = list(tmp_path.glob("MES_1s_session_*.parquet"))
+    assert len(session_files) == 1
+    assert len(pd.read_parquet(session_files[0])) == 2
+
+
+def test_mnq_1m_df_trimmed_to_14_days_after_bar(tmp_path):
+    """_on_mnq_1m_bar trims _mnq_1m_df to 14-day window after writing to parquet."""
+    src = _make_source(tmp_path)
+    src._mnq_1m_df = _make_bar_df(days_ago_start=20)
+
+    bar = _make_bar_mock("2026-05-08 09:31:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._on_mnq_1m_bar([bar], True)
+
+    cutoff = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=14)
+    assert src._mnq_1m_df.index[0] >= cutoff, "Oldest bar must be within 14 days"
+
+
+def test_mes_1m_df_trimmed_to_14_days_after_bar(tmp_path):
+    """_on_mes_1m_bar trims _mes_1m_df to 14-day window after writing to parquet."""
+    src = _make_source(tmp_path)
+    src._mes_1m_df = _make_bar_df(days_ago_start=20)
+
+    bar = _make_bar_mock("2026-05-08 09:31:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._on_mes_1m_bar([bar], True)
+
+    cutoff = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=14)
+    assert src._mes_1m_df.index[0] >= cutoff
+
+
+def test_trim_does_not_run_when_all_bars_within_14_days(tmp_path):
+    """When _mnq_1m_df contains only recent bars, no trim is applied."""
+    src = _make_source(tmp_path)
+    recent_df = _make_bar_df(days_ago_start=3)
+    src._mnq_1m_df = recent_df.copy()
+    original_len = len(src._mnq_1m_df)
+
+    bar = _make_bar_mock("2026-05-08 09:31:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._on_mnq_1m_bar([bar], True)
+
+    # After the bar is appended and written, length should be original + 1 (the new bar)
+    assert len(src._mnq_1m_df) >= original_len
+    assert src._mnq_1m_df.index[0] == recent_df.index[0], "Trim must not remove any bars when all are within 14 days"
+
+
+def test_parquet_written_before_trim(tmp_path):
+    """Parquet contains full history; in-memory DF is trimmed to 14 days afterward."""
+    src = _make_source(tmp_path)
+    src._mnq_1m_df = _make_bar_df(days_ago_start=25)
+    original_len = len(src._mnq_1m_df)
+
+    bar = _make_bar_mock("2026-05-08 09:31:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._on_mnq_1m_bar([bar], True)
+
+    parquet_df = pd.read_parquet(tmp_path / "MNQ_1m.parquet")
+    # Parquet has full history (original rows + new bar)
+    assert len(parquet_df) >= original_len
+    # In-memory DF is trimmed
+    cutoff = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=14)
+    assert src._mnq_1m_df.index[0] >= cutoff

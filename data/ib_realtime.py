@@ -309,6 +309,12 @@ class IbRealtimeSource:
         self._mnq_1m_df = pd.concat([self._mnq_1m_df, row])
         self._mnq_1m_df = self._mnq_1m_df[~self._mnq_1m_df.index.duplicated(keep="last")]
         self._mnq_1m_df.to_parquet(self._bar_data_dir / "MNQ_1m.parquet")
+        # Trim to 14-day window after writing; full history preserved on disk via .copy() to release old array
+        _cutoff = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=14)
+        if (not self._mnq_1m_df.empty
+                and self._mnq_1m_df.index.tz is not None
+                and self._mnq_1m_df.index[0] < _cutoff):
+            self._mnq_1m_df = self._mnq_1m_df[self._mnq_1m_df.index >= _cutoff].copy()
         if self._mnq_1s_pending:
             rows = [[p["open"], p["high"], p["low"], p["close"], p["volume"]]
                     for p in self._mnq_1s_pending]
@@ -323,6 +329,7 @@ class IbRealtimeSource:
             ]
             session_path = self._bar_data_dir / f"MNQ_1s_session_{self._session_date}.parquet"
             self._mnq_1s_session_df.to_parquet(session_path)
+            self._mnq_1s_session_df = self._empty_bar_df()   # free written rows; parquet is durable record
             self._mnq_1s_pending.clear()
         self._mes_tick_bar = None  # reset alongside _mnq_tick_bar (same minute boundary)
         # Reset second accumulator so last second of expiring minute does not bleed into the next
@@ -346,6 +353,12 @@ class IbRealtimeSource:
         self._mes_1m_df = pd.concat([self._mes_1m_df, row])
         self._mes_1m_df = self._mes_1m_df[~self._mes_1m_df.index.duplicated(keep="last")]
         self._mes_1m_df.to_parquet(self._bar_data_dir / "MES_1m.parquet")
+        # Trim to 14-day window after writing; .copy() breaks view chain so old array is GC'd
+        _cutoff = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=14)
+        if (not self._mes_1m_df.empty
+                and self._mes_1m_df.index.tz is not None
+                and self._mes_1m_df.index[0] < _cutoff):
+            self._mes_1m_df = self._mes_1m_df[self._mes_1m_df.index >= _cutoff].copy()
         if self._mes_1s_pending:
             rows = [[p["open"], p["high"], p["low"], p["close"], p["volume"]]
                     for p in self._mes_1s_pending]
@@ -360,6 +373,7 @@ class IbRealtimeSource:
             ]
             session_path = self._bar_data_dir / f"MES_1s_session_{self._session_date}.parquet"
             self._mes_1s_session_df.to_parquet(session_path)
+            self._mes_1s_session_df = self._empty_bar_df()   # free written rows; parquet is durable record
             self._mes_1s_pending.clear()
         from strategy_smt import set_bar_data
         set_bar_data(self._mnq_1m_df, self._mes_1m_df)
@@ -421,6 +435,9 @@ class IbRealtimeSource:
         asyncio.set_event_loop(asyncio.new_event_loop())
         self._load_parquets()
         self._gap_fill_1s_ib()
+        # Release ~70 MB: history only needed by _gap_fill_1s_ib; live signal path reads parquet
+        self._mnq_1s_df = self._empty_bar_df()
+        self._mes_1s_df = self._empty_bar_df()
         mnq_contract = Future(conId=int(self._mnq_conid), exchange="CME")
         mes_contract = Future(conId=int(self._mes_conid), exchange="CME")
         for attempt in range(self._max_retries):
