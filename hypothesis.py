@@ -13,6 +13,100 @@ CAUTIOUS_SECONDARY_MAX_DIST = 150  # pts — secondary (1m confirmation) max dis
 CAUTIOUS_INITIAL_MAX_DIST   = 110  # pts — initial (5m confirmation) max distance
 CAUTIOUS_MIN_DIST           =  40  # pts — below this secondary distance, skip the entry
 
+
+def compute_cautious_prices(
+    direction: str,
+    current_close: float,
+    liquidities: list,
+    ath: float,
+) -> dict:
+    """Return cautious price fields anchored at current_close.
+
+    Called at hypothesis time and again at position entry so levels are
+    re-evaluated against the actual fill price rather than the hypothesis price.
+    """
+    _cautious_all = []
+    for liq in liquidities:
+        liq_kind = liq.get("kind")
+        if liq_kind == "level":
+            p = liq.get("price")
+        elif liq_kind == "fvg":
+            p = liq.get("bottom") if direction == "up" else liq.get("top")
+        else:
+            continue
+        if p is None:
+            continue
+        if direction == "up" and current_close < p <= current_close + CAUTIOUS_SECONDARY_MAX_DIST:
+            _cautious_all.append((p, liq.get("name", "")))
+        elif direction == "down" and current_close - CAUTIOUS_SECONDARY_MAX_DIST <= p < current_close:
+            _cautious_all.append((p, liq.get("name", "")))
+    if direction == "up" and current_close < ath <= current_close + CAUTIOUS_SECONDARY_MAX_DIST:
+        _cautious_all.append((ath, "ATH"))
+
+    cautious_price_initial         = ""
+    cautious_price_initial_level   = ""
+    cautious_price_secondary       = ""
+    cautious_price_secondary_level = ""
+
+    if _cautious_all:
+        _sec = max(_cautious_all, key=lambda x: x[0]) if direction == "up" \
+               else min(_cautious_all, key=lambda x: x[0])
+        cautious_price_secondary       = _sec[0]
+        cautious_price_secondary_level = _sec[1]
+
+        if direction == "up":
+            _init_candidates = [(p, n) for p, n in _cautious_all
+                                if p < cautious_price_secondary and p <= current_close + CAUTIOUS_INITIAL_MAX_DIST]
+        else:
+            _init_candidates = [(p, n) for p, n in _cautious_all
+                                if p > cautious_price_secondary and p >= current_close - CAUTIOUS_INITIAL_MAX_DIST]
+
+        if _init_candidates:
+            _ini = max(_init_candidates, key=lambda x: x[0]) if direction == "up" \
+                   else min(_init_candidates, key=lambda x: x[0])
+            if abs(_ini[0] - current_close) >= CAUTIOUS_MIN_DIST:
+                cautious_price_initial       = _ini[0]
+                cautious_price_initial_level = _ini[1]
+        else:
+            _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
+            if _syn_dist >= CAUTIOUS_MIN_DIST:
+                cautious_price_initial = (
+                    current_close - _syn_dist if direction == "down"
+                    else current_close + _syn_dist
+                )
+                cautious_price_initial_level = "synthetic_85pct"
+    else:
+        _terminal_names = {"day_low", "week_low"} if direction == "down" else {"day_high", "week_high"}
+        _terminal_candidates = []
+        for liq in liquidities:
+            if liq.get("name") in _terminal_names and liq.get("kind") == "level":
+                p = liq.get("price")
+                if p is None:
+                    continue
+                if direction == "down" and p < current_close:
+                    _terminal_candidates.append((p, liq["name"]))
+                elif direction == "up" and p > current_close:
+                    _terminal_candidates.append((p, liq["name"]))
+        if _terminal_candidates:
+            _sec = max(_terminal_candidates, key=lambda x: x[0]) if direction == "down" \
+                   else min(_terminal_candidates, key=lambda x: x[0])
+            cautious_price_secondary       = _sec[0]
+            cautious_price_secondary_level = _sec[1]
+            _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
+            if _syn_dist >= CAUTIOUS_MIN_DIST:
+                cautious_price_initial = (
+                    current_close - _syn_dist if direction == "down"
+                    else current_close + _syn_dist
+                )
+                cautious_price_initial_level = "synthetic_85pct"
+
+    return {
+        "cautious_price_initial":        cautious_price_initial,
+        "cautious_price_initial_level":  cautious_price_initial_level,
+        "cautious_price_secondary":      cautious_price_secondary,
+        "cautious_price_secondary_level": cautious_price_secondary_level,
+    }
+
 LIQUIDITY_APPROACH_DIST    = 100   # pts — Rule 2: "nearly approaching" radius
 NEAR_EXTREME_DIST          =  75   # pts — Rule 3a: proximity boost to daily extreme
 MOMENTUM_BARS              =   5   # 1m bars — Rule 2: recent momentum window
@@ -968,100 +1062,12 @@ def run_hypothesis(
                 targets.append({"name": liq["name"], "price": top})
 
     # Step 8: two-tier cautious prices.
-    # Secondary (1m confirmation): furthest in-direction level within CAUTIOUS_SECONDARY_MAX_DIST.
-    # Initial  (5m confirmation): furthest in-direction level within CAUTIOUS_INITIAL_MAX_DIST
-    #   that is closer to current price than the secondary (intermediate target).
-    _cautious_all = []  # list of (price, name) within secondary range
-    for liq in liquidities:
-        liq_kind = liq.get("kind")
-        if liq_kind == "level":
-            p = liq.get("price")
-        elif liq_kind == "fvg":
-            p = liq.get("bottom") if direction == "up" else liq.get("top")
-        else:
-            continue
-        if p is None:
-            continue
-        if direction == "up" and current_close < p <= current_close + CAUTIOUS_SECONDARY_MAX_DIST:
-            _cautious_all.append((p, liq.get("name", "")))
-        elif direction == "down" and current_close - CAUTIOUS_SECONDARY_MAX_DIST <= p < current_close:
-            _cautious_all.append((p, liq.get("name", "")))
     ath = global_state["all_time_high"]
-    if direction == "up" and current_close < ath <= current_close + CAUTIOUS_SECONDARY_MAX_DIST:
-        _cautious_all.append((ath, "ATH"))
-
-    if _cautious_all:
-        _sec = max(_cautious_all, key=lambda x: x[0]) if direction == "up" \
-               else min(_cautious_all, key=lambda x: x[0])
-        cautious_price_secondary       = _sec[0]
-        cautious_price_secondary_level = _sec[1]
-
-        # Initial: furthest within CAUTIOUS_INITIAL_MAX_DIST that is strictly closer than secondary
-        if direction == "up":
-            _init_candidates = [(p, n) for p, n in _cautious_all
-                                if p < cautious_price_secondary and p <= current_close + CAUTIOUS_INITIAL_MAX_DIST]
-        else:
-            _init_candidates = [(p, n) for p, n in _cautious_all
-                                if p > cautious_price_secondary and p >= current_close - CAUTIOUS_INITIAL_MAX_DIST]
-
-        if _init_candidates:
-            _ini = max(_init_candidates, key=lambda x: x[0]) if direction == "up" \
-                   else min(_init_candidates, key=lambda x: x[0])
-            if abs(_ini[0] - current_close) >= CAUTIOUS_MIN_DIST:
-                cautious_price_initial       = _ini[0]
-                cautious_price_initial_level = _ini[1]
-            else:
-                cautious_price_initial       = ""
-                cautious_price_initial_level = ""
-        else:
-            # No natural initial candidate: place a synthetic one at 85% of the
-            # distance to secondary so a near-target reversal still triggers an exit.
-            _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
-            if _syn_dist >= CAUTIOUS_MIN_DIST:
-                cautious_price_initial = (
-                    current_close - _syn_dist if direction == "down"
-                    else current_close + _syn_dist
-                )
-                cautious_price_initial_level = "synthetic_85pct"
-            else:
-                cautious_price_initial       = ""
-                cautious_price_initial_level = ""
-    else:
-        # Fallback: when no level sits within CAUTIOUS_SECONDARY_MAX_DIST, use the
-        # nearest terminal session level (day_low/week_low for DOWN; day_high/week_high
-        # for UP) as the secondary cautious anchor. These mark the session's ultimate
-        # liquidity boundary and are always meaningful regardless of distance.
-        _terminal_names = {"day_low", "week_low"} if direction == "down" else {"day_high", "week_high"}
-        _terminal_candidates = []
-        for liq in liquidities:
-            if liq.get("name") in _terminal_names and liq.get("kind") == "level":
-                p = liq.get("price")
-                if p is None:
-                    continue
-                if direction == "down" and p < current_close:
-                    _terminal_candidates.append((p, liq["name"]))
-                elif direction == "up" and p > current_close:
-                    _terminal_candidates.append((p, liq["name"]))
-        if _terminal_candidates:
-            _sec = max(_terminal_candidates, key=lambda x: x[0]) if direction == "down" \
-                   else min(_terminal_candidates, key=lambda x: x[0])
-            cautious_price_secondary       = _sec[0]
-            cautious_price_secondary_level = _sec[1]
-            _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
-            if _syn_dist >= CAUTIOUS_MIN_DIST:
-                cautious_price_initial = (
-                    current_close - _syn_dist if direction == "down"
-                    else current_close + _syn_dist
-                )
-                cautious_price_initial_level = "synthetic_85pct"
-            else:
-                cautious_price_initial       = ""
-                cautious_price_initial_level = ""
-        else:
-            cautious_price_secondary       = ""
-            cautious_price_secondary_level = ""
-            cautious_price_initial         = ""
-            cautious_price_initial_level   = ""
+    _cp = compute_cautious_prices(direction, current_close, liquidities, ath)
+    cautious_price_initial         = _cp["cautious_price_initial"]
+    cautious_price_initial_level   = _cp["cautious_price_initial_level"]
+    cautious_price_secondary       = _cp["cautious_price_secondary"]
+    cautious_price_secondary_level = _cp["cautious_price_secondary_level"]
 
     # Step 8b: veto direction when entry conditions are unfavourable.
     # (1) Secondary cautious price is too close — not enough room to run.
