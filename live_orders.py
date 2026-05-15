@@ -95,6 +95,15 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> N
           "entry_price": entry_price, "stop_price": stop_price})
 
 
+def _current_price() -> float:
+    """Estimate current market price from the last bar_state midpoint."""
+    from smt_state import load_bar_state
+    bar = load_bar_state()
+    if bar and "potential_stop_long" in bar and "potential_stop_short" in bar:
+        return (float(bar["potential_stop_long"]) + float(bar["potential_stop_short"])) / 2.0
+    return 0.0
+
+
 def place_market_entry(direction: str, entry_price: float, stop_price: float) -> None:
     """Enter at market with stop. Logs, dispatches MKT+sl, writes active to position.json."""
     now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
@@ -104,13 +113,15 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float) ->
         "stop_price": stop_price,
     }
     _executor.place_entry(pmt_signal, None)
+    fill_price = entry_price if entry_price != 0.0 else _current_price()
     pos = _load_pos()
     pos["active"] = {
         "direction": direction,
-        "fill_price": entry_price,
+        "fill_price": fill_price,
         "stop": stop_price,
         "cautious": "no",
         "contracts": 2,
+        "time": now,
     }
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""

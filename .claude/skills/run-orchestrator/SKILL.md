@@ -30,6 +30,7 @@ files left over by a previous run on the same calendar day.
 | First directed hypothesis | `"kind": "new-hypothesis"` + `"direction": "up\|down"` | JSON line emitted by automation.main |
 | Startup fatal | `FATAL` | IB unreachable or other hard failure; monitor exits immediately |
 | Orchestrator died | PID snapshotted at startup + `tasklist.exe` | Checked every iteration from startup |
+| automation.main died | PID parsed from `[ORCH] automation.main started (pid=…)` + `tasklist.exe` | Checked every iteration after session start |
 
 ## Step 1 — Kill any existing orchestrator and automation.main
 
@@ -49,18 +50,17 @@ Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object { $_.I
     }
 }
 # Kill any lingering automation.main subprocess (survives orchestrator crashes)
+# Must check uv.exe as well — automation.main runs as: uv.exe -> python.exe -> python.exe
 uv run python -c "
 import psutil
 for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
     try:
-        if proc.info.get('name', '').lower() not in ('python.exe', 'python'):
+        if proc.info.get('name', '').lower() not in ('python.exe', 'python', 'uv.exe'):
             continue
         cmdline = proc.info.get('cmdline') or []
         if any('automation.main' in arg for arg in cmdline):
-            proc.terminate()
-            try: proc.wait(timeout=5)
-            except psutil.TimeoutExpired: proc.kill()
-            print(f'Killed automation.main pid={proc.pid}')
+            proc.kill()
+            print(f'Killed automation.main pid={proc.pid} ({proc.info[\"name\"]})')
     except Exception as e:
         print(f'Warning: {e}')
 " 2>$null
@@ -85,7 +85,7 @@ Add-Content -Path "$base\orchestrator_stdout.log" -Value "=== RESTART $timestamp
 
 Start-Process -FilePath "powershell" `
     -ArgumentList "-NoProfile", "-NonInteractive", "-Command", `
-        "Set-Location '$base'; uv run python -m orchestrator.main --no-summary 2>&1 | Out-File -FilePath '$base\orchestrator_stdout.log' -Encoding utf8 -Append" `
+        "Set-Location '$base'; try { uv run python -m orchestrator.main --no-summary 2>>'$base\orchestrator_stderr.log' | Out-File -FilePath '$base\orchestrator_stdout.log' -Encoding utf8 -Append } finally { Add-Content -Path '$base\orchestrator_stdout.log' -Value ('=== WRAPPER EXIT ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' code=' + `$LASTEXITCODE + ' ===') -Encoding utf8 }" `
     -WindowStyle Hidden
 
 Start-Sleep -Seconds 3
@@ -147,9 +147,13 @@ hyp_done=false
 
 # Snapshot PID before the loop — pid file may be deleted on clean exit
 ORCH_PID=$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null)
+AUTO_PID=""
 
+# Returns 0 if the process with the given PID is alive, 1 if dead.
+# Uses tasklist with a PID filter; "no tasks" in output means the process is gone.
+# Works for any process name (python.exe, uv.exe, etc.).
 is_alive() {
-    tasklist.exe //FI "PID eq $1" //NH 2>/dev/null | grep -qi "python"
+    ! tasklist.exe //FI "PID eq $1" //NH 2>/dev/null | grep -qi "no tasks"
 }
 
 # Find where the current run starts in the stdout log (after last RESTART marker).
@@ -179,7 +183,8 @@ fi
 
 if cur | grep -q "automation.main started"; then
     session_started=true
-    echo "[MONITOR] Session started — automation.main is running"
+    AUTO_PID=$(cur | grep "automation.main started" | tail -1 | grep -oE 'pid=[0-9]+' | grep -oE '[0-9]+')
+    echo "[MONITOR] Session started — automation.main is running (pid=$AUTO_PID)"
 fi
 
 if [ "$session_started" = true ]; then
@@ -216,11 +221,12 @@ while true; do
     if [ "$session_started" = false ]; then
         if cur | grep -q "automation.main started"; then
             session_started=true
-            echo "[MONITOR] Session started — automation.main is running"
+            AUTO_PID=$(cur | grep "automation.main started" | tail -1 | grep -oE 'pid=[0-9]+' | grep -oE '[0-9]+')
+            echo "[MONITOR] Session started — automation.main is running (pid=$AUTO_PID)"
         fi
     fi
 
-    # Keepalive — always active from startup
+    # Keepalive — orchestrator: always active from startup
     if [ -n "$ORCH_PID" ] && ! is_alive "$ORCH_PID"; then
         if [ "$session_started" = true ]; then
             echo "[KEEPALIVE] Orchestrator (pid=$ORCH_PID) has DIED"
@@ -228,6 +234,11 @@ while true; do
             echo "[KEEPALIVE] Orchestrator (pid=$ORCH_PID) died before session start — check stdout log"
         fi
         exit 0
+    fi
+
+    # Keepalive — automation.main: checked after session start
+    if [ "$session_started" = true ] && [ -n "$AUTO_PID" ] && ! is_alive "$AUTO_PID"; then
+        echo "[KEEPALIVE] automation.main (pid=$AUTO_PID) has DIED — orchestrator should restart it"
     fi
 
     # Downstream milestones — detected from stdout with offset
@@ -264,3 +275,4 @@ As each line arrives from the Monitor, call `PushNotification` for EVERY milesto
 | `[KEEPALIVE] Orchestrator startup FATAL: …` | `CRITICAL: Orchestrator failed at startup — <first line of FATAL message>` |
 | `[KEEPALIVE] Orchestrator … died before session start …` | `CRITICAL: Orchestrator died before session start — check stdout log` |
 | `[KEEPALIVE] Orchestrator … has DIED` | `CRITICAL: Orchestrator died during session` |
+| `[KEEPALIVE] automation.main … has DIED` | `WARNING: automation.main died — orchestrator should restart it` |

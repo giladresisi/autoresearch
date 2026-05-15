@@ -307,7 +307,10 @@ def run_strategy(
     active = position["active"]
 
     # 3.1 Direction mismatch (includes direction == "none")
-    if direction == "none" or direction != active.get("direction"):
+    # Normalise position vocabulary (long/short) to hypothesis vocabulary (up/down).
+    _pos_dir = active.get("direction", "")
+    _pos_hyp_dir = "up" if _pos_dir == "long" else ("down" if _pos_dir == "short" else _pos_dir)
+    if direction == "none" or direction != _pos_hyp_dir:
         position["active"]            = {}
         position["stop_entry"]       = ""
         position["confirmation_bar"]  = {}
@@ -317,7 +320,7 @@ def run_strategy(
 
     # 3.2 Stop crossed
     stop = active["stop"]
-    active_dir = active["direction"]
+    active_dir = _pos_hyp_dir  # already normalised to up/down above
     stopped = False
     if active_dir == _DIR_UP and mnq_bar["low"] <= stop:
         stopped = True
