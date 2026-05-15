@@ -11,7 +11,7 @@ _ET = ZoneInfo("America/New_York")
 
 
 def _et_now() -> str:
-    return datetime.datetime.now(tz=_ET).strftime("%H:%M:%S")
+    return datetime.datetime.now(tz=_ET).isoformat()
 
 
 class StdoutSink:
@@ -66,13 +66,13 @@ class JsonlFileSink:
                 obj = _json.loads(stripped)
             except (ValueError, _json.JSONDecodeError):
                 continue
-            obj.pop("time", None)
             kind = obj.pop("kind", None)
-            stamped = {}
+            obj.pop("time", None)
+            stamped: dict = {}
             if kind is not None:
                 stamped["kind"] = kind
-            stamped["logged_at"] = _et_now()
-            stamped.update(obj)
+            stamped["time"] = _et_now()
+            stamped.update(sorted(obj.items()))
             with open(self._path, "a", encoding="utf-8") as f:
                 f.write(_json.dumps(stamped) + "\n")
                 f.flush()

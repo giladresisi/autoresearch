@@ -10,6 +10,12 @@ Usage:
   python trade.py move 28000             # Move unfilled stop entry to 28000
   python trade.py update-sl 19700        # Move stop-loss on active position to 19700
   python trade.py close                  # Market close active position
+  python trade.py trend-broken           # Reset hypothesis direction and log trend-broken
+  python trade.py hypothesis             # Force a fresh hypothesis evaluation right now
+  python trade.py start                  # Start orchestrator (resets position.json)
+  python trade.py start --resume         # Start orchestrator, keep position.json as-is
+  python trade.py start --summary        # Start orchestrator with LLM-based summary enabled
+  python trade.py start --force          # Restart orchestrator without prompting if already running
   python trade.py terminate              # Kill orchestrator and automation.main
 
 Add --force / -f to bypass position.json state checks and override broker state:
@@ -35,6 +41,79 @@ def _resolve_direction(pos_dir: str, extra_arg: str | None) -> str | None:
     if src in ("down", "short"):
         return "short"
     return None
+
+
+def _orchestrator_pid() -> int | None:
+    """Return the live orchestrator PID from orchestrator.pid, or None if not running."""
+    import psutil
+    from pathlib import Path
+
+    pid_file = Path("orchestrator.pid")
+    if not pid_file.exists():
+        return None
+    try:
+        pid = int(pid_file.read_text().strip())
+        psutil.Process(pid)  # raises NoSuchProcess if dead
+        return pid
+    except (ValueError, OSError, psutil.NoSuchProcess):
+        return None
+
+
+def _terminate_all() -> list[str]:
+    """Kill orchestrator, its PowerShell wrapper, and automation.main. Returns list of killed descriptions."""
+    import psutil
+    from pathlib import Path
+
+    killed = []
+
+    pid_file = Path("orchestrator.pid")
+    if pid_file.exists():
+        try:
+            orch_pid = int(pid_file.read_text().strip())
+            try:
+                p = psutil.Process(orch_pid)
+                p.terminate()
+                try:
+                    p.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    p.kill()
+                killed.append(f"orchestrator pid={orch_pid}")
+            except psutil.NoSuchProcess:
+                killed.append(f"orchestrator pid={orch_pid} (already dead)")
+        except (ValueError, OSError):
+            pass
+
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if proc.info.get("name", "").lower() != "powershell.exe":
+                continue
+            cmdline = " ".join(proc.info.get("cmdline") or [])
+            if "orchestrator.main" in cmdline:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                killed.append(f"powershell wrapper pid={proc.pid}")
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if proc.info.get("name", "").lower() not in ("python.exe", "python"):
+                continue
+            cmdline = proc.info.get("cmdline") or []
+            if any("automation.main" in arg for arg in cmdline):
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                killed.append(f"automation.main pid={proc.pid}")
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    return killed
 
 
 def main() -> None:
@@ -125,62 +204,74 @@ def main() -> None:
         print(f"Market close | direction: {direction}")
         live_orders.close_position(0.0, "user-requested")
 
-    elif cmd == "terminate":
-        import psutil
+    elif cmd == "trend-broken":
+        live_orders.trend_broken()
+
+    elif cmd == "hypothesis":
+        live_orders.hypothesis()
+
+    elif cmd == "start":
+        import json
+        import subprocess
+        import time
+        from datetime import datetime
         from pathlib import Path
 
-        killed = []
+        resume = "--resume" in raw_args or "-r" in raw_args
+        summary = "--summary" in raw_args
 
-        # Kill orchestrator from PID file
-        pid_file = Path("orchestrator.pid")
-        if pid_file.exists():
-            try:
-                orch_pid = int(pid_file.read_text().strip())
-                try:
-                    p = psutil.Process(orch_pid)
-                    p.terminate()
-                    try:
-                        p.wait(timeout=5)
-                    except psutil.TimeoutExpired:
-                        p.kill()
-                    killed.append(f"orchestrator pid={orch_pid}")
-                except psutil.NoSuchProcess:
-                    killed.append(f"orchestrator pid={orch_pid} (already dead)")
-            except (ValueError, OSError):
-                pass
+        # Check if orchestrator is already running
+        existing_pid = _orchestrator_pid()
+        if existing_pid is not None:
+            if not force:
+                ans = input(f"Orchestrator already running (pid={existing_pid}). Restart? [y/N] ").strip().lower()
+                if ans != "y":
+                    print("Aborted.")
+                    sys.exit(0)
+            killed = _terminate_all()
+            for k in killed:
+                print(f"Killed {k}")
+            time.sleep(1)
 
-        # Kill powershell wrapper running orchestrator.main
-        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-            try:
-                if proc.info.get("name", "").lower() != "powershell.exe":
-                    continue
-                cmdline = " ".join(proc.info.get("cmdline") or [])
-                if "orchestrator.main" in cmdline:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except psutil.TimeoutExpired:
-                        proc.kill()
-                    killed.append(f"powershell wrapper pid={proc.pid}")
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+        if not resume:
+            pos_path = Path("data") / "position.json"
+            pos_path.write_text(json.dumps(smt_state.DEFAULT_POSITION, indent=2))
+            print("position.json reset to default")
 
-        # Kill automation.main
-        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-            try:
-                if proc.info.get("name", "").lower() not in ("python.exe", "python"):
-                    continue
-                cmdline = proc.info.get("cmdline") or []
-                if any("automation.main" in arg for arg in cmdline):
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except psutil.TimeoutExpired:
-                        proc.kill()
-                    killed.append(f"automation.main pid={proc.pid}")
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+        stdout_log = Path("orchestrator_stdout.log")
+        stderr_log = Path("orchestrator_stderr.log")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(stdout_log, "a", encoding="utf-8") as f:
+            f.write(f"=== RESTART {timestamp} ===\n")
 
+        orch_cmd = ["uv", "run", "python", "-m", "orchestrator.main"]
+        if summary:
+            orch_cmd.append("--summary")
+
+        CREATE_NO_WINDOW = 0x08000000
+        with open(stdout_log, "a", encoding="utf-8") as out_f, \
+             open(stderr_log, "a", encoding="utf-8") as err_f:
+            subprocess.Popen(
+                orch_cmd,
+                stdout=out_f,
+                stderr=err_f,
+                creationflags=CREATE_NO_WINDOW,
+            )
+
+        time.sleep(3)
+
+        new_pid = _orchestrator_pid()
+        if new_pid:
+            print(f"Orchestrator started pid={new_pid}")
+            if resume:
+                print("Resume mode: position.json unchanged")
+            if summary:
+                print("LLM summary enabled")
+        else:
+            print("WARNING: orchestrator.pid not written — check orchestrator_stdout.log for errors")
+
+    elif cmd == "terminate":
+        killed = _terminate_all()
         if killed:
             for k in killed:
                 print(f"Killed {k}")
