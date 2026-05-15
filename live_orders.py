@@ -224,6 +224,71 @@ def update_stop_loss(stop_price: float, reason: str = "user-requested", directio
 
 
 # ---------------------------------------------------------------------------
+# Pipeline dispatch — single entry point for all automatic signals
+# ---------------------------------------------------------------------------
+
+def dispatch(sig: dict) -> None:
+    """Route a pipeline signal to log + executor. Called by SmtV2Dispatcher._emit().
+
+    Direction mapping: pipeline uses "up"/"down", live_orders uses "long"/"short".
+    For manual triggers (trade.py), call the specific functions directly instead.
+    """
+    kind = sig.get("kind")
+    direction_v2 = sig.get("direction", "none")
+    direction = "long" if direction_v2 == "up" else ("short" if direction_v2 == "down" else None)
+
+    if kind == "new-stop-entry":
+        stop = sig.get("stop")
+        if direction and stop is not None:
+            place_stop_entry(direction, float(sig["price"]), float(stop))
+        return
+
+    if kind == "move-stop-entry":
+        stop = sig.get("stop")
+        if direction and stop is not None:
+            move_stop_entry(float(sig["price"]), float(stop), direction)
+        return
+
+    if kind == "stop-entry-filled":
+        stop = sig.get("stop")
+        if direction and stop is not None:
+            stop_entry_filled(direction, float(stop))
+        return
+
+    if kind == "market-entry":
+        stop = sig.get("stop")
+        if direction and stop is not None:
+            place_market_entry(direction, float(sig["price"]), float(stop))
+        return
+
+    if kind == "market-close":
+        close_position(float(sig.get("price", 0.0)), sig.get("reason", "strategy"))
+        return
+
+    if kind == "stop-entry-cancelled":
+        # position.json already cleared by the pipeline before emitting this signal;
+        # bypass the stop_entry guard and send the broker cancel directly.
+        _executor.place_close("cancel-stop")
+        _log(sig)
+        return
+
+    if kind == "stopped-out":
+        # IB's protective stop already executed — clear position state and log.
+        pos = _load_pos()
+        pos["active"] = {}
+        pos["stop_entry"] = ""
+        pos["stop_direction"] = ""
+        pos["confirmation_bar"] = {}
+        _save_pos(pos)
+        _log(sig)
+        return
+
+    # All other signal kinds (new-hypothesis, trend-broken, level-swept,
+    # smt-div, ath-crossed, dynamic-ath-crossed, cautious-armed, …): log only.
+    _log(sig)
+
+
+# ---------------------------------------------------------------------------
 # Manual commands
 # ---------------------------------------------------------------------------
 
