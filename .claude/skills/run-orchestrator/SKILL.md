@@ -35,7 +35,7 @@ files left over by a previous run on the same calendar day.
 ## Step 1 — Kill any existing orchestrator and automation.main
 
 ```powershell
-$base = "C:\Users\gilad\projects\auto-co-trader\live"
+$base = (Get-Location).Path
 $orchPid = (Get-Content "$base\orchestrator.pid" -Raw -ErrorAction SilentlyContinue).Trim()
 if ($orchPid) {
     Stop-Process -Id $orchPid -Force -ErrorAction SilentlyContinue
@@ -79,7 +79,7 @@ After confirming the PID, report the session window status so the user knows whe
 session is active now or how long until the next one opens.
 
 ```powershell
-$base = "C:\Users\gilad\projects\auto-co-trader\live"
+$base = (Get-Location).Path
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 Add-Content -Path "$base\orchestrator_stdout.log" -Value "=== RESTART $timestamp ===" -Encoding utf8
 
@@ -136,7 +136,7 @@ negatives for Windows processes when called from Git Bash.
 so events that fired between the state-check and the monitor arm are never missed.
 
 ```bash
-BASE="/c/Users/gilad/projects/auto-co-trader/live"
+BASE="$(pwd)"
 STARTUP_LOG="$BASE/orchestrator_stdout.log"
 PID_FILE="$BASE/orchestrator.pid"
 
