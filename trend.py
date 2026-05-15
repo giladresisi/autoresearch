@@ -497,11 +497,11 @@ def run_trend(
         triggered = False
         extra: dict = {}
         if direction == "up":
-            if level_price < bar_close and bar_low <= level_price:
+            if bar_low <= level_price and bar_high >= level_price:
                 triggered = True
                 extra = {"bar_low": bar_low}
         else:  # direction == "down"
-            if level_price > bar_close and bar_high >= level_price:
+            if bar_high >= level_price and bar_low <= level_price:
                 triggered = True
                 extra = {"bar_high": bar_high}
 
