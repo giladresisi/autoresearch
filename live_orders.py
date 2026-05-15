@@ -43,12 +43,17 @@ def _now_et() -> str:
 # ---------------------------------------------------------------------------
 
 def _log(event: dict) -> None:
-    """Append one JSON line to sessions/{today}/events.jsonl (append mode)."""
+    """Append one JSON line to sessions/{today}/events.jsonl.
+
+    kind and time are always written first; remaining fields follow alphabetically.
+    """
     today = datetime.date.today().isoformat()
     path = Path("sessions") / today / "events.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
+    ordered: dict = {"kind": event.get("kind", ""), "time": event.get("time", "")}
+    ordered.update(sorted((k, v) for k, v in event.items() if k not in ("kind", "time")))
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(event, sort_keys=True) + "\n")
+        f.write(json.dumps(ordered) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +91,7 @@ def has_pending_entry() -> bool:
 
 def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> None:
     """Place unfilled stop entry. Logs, dispatches STP order, writes stop_entry to position.json."""
-    now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    now = _now_et()
     pmt_signal = {
         "direction": direction,
         "entry_price": entry_price,
@@ -98,7 +103,7 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> N
     pos["stop_entry"] = str(entry_price)
     pos["stop_direction"] = "up" if direction == "long" else "down"
     _save_pos(pos)
-    _log({"time": now, "kind": "new-stop-entry", "direction": direction,
+    _log({"kind": "new-stop-entry", "time": now, "direction": direction,
           "entry_price": entry_price, "stop_price": stop_price})
 
 
@@ -113,7 +118,7 @@ def _current_price() -> float:
 
 def place_market_entry(direction: str, entry_price: float, stop_price: float) -> None:
     """Enter at market with stop. Logs, dispatches MKT+sl, writes active to position.json."""
-    now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    now = _now_et()
     pmt_signal = {
         "direction": direction,
         "entry_price": entry_price,
@@ -133,13 +138,13 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float) ->
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
     _save_pos(pos)
-    _log({"time": now, "kind": "market-entry", "direction": direction,
+    _log({"kind": "market-entry", "time": now, "direction": direction,
           "entry_price": entry_price, "stop_price": stop_price})
 
 
 def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: str) -> None:
     """Cancel existing unfilled stop entry and replace. Reads old entry_price from position.json."""
-    now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    now = _now_et()
     pos = _load_pos()
     old_entry = float(pos["stop_entry"]) if pos.get("stop_entry") else new_entry_price
     old_pmt = {
@@ -157,14 +162,14 @@ def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: st
     _executor.modify_stop_entry(old_pmt, new_pmt, None)
     pos["stop_entry"] = str(new_entry_price)
     _save_pos(pos)
-    _log({"time": now, "kind": "move-stop-entry", "direction": direction,
-          "old_entry_price": old_entry, "new_entry_price": new_entry_price,
-          "new_stop_price": new_stop_price})
+    _log({"kind": "move-stop-entry", "time": now, "direction": direction,
+          "new_entry_price": new_entry_price, "new_stop_price": new_stop_price,
+          "old_entry_price": old_entry})
 
 
 def stop_entry_filled(direction: str, stop_price: float) -> None:
     """Stop entry just filled — send protective S/L to PMT, log, update active.stop in position.json."""
-    now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    now = _now_et()
     _executor.update_stop_loss({"direction": direction, "stop_price": stop_price}, None)
     pos = _load_pos()
     if pos.get("active"):
@@ -172,7 +177,7 @@ def stop_entry_filled(direction: str, stop_price: float) -> None:
         _save_pos(pos)
     else:
         print("[live_orders] stop_entry_filled: active position absent — position.json not updated", flush=True)
-    _log({"time": now, "kind": "stop-entry-filled", "direction": direction, "stop_price": stop_price})
+    _log({"kind": "stop-entry-filled", "time": now, "direction": direction, "stop_price": stop_price})
 
 
 def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> None:
@@ -180,19 +185,19 @@ def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> No
     pos = _load_pos()
     if not force and not pos.get("stop_entry"):
         return
-    now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    now = _now_et()
     entry_price = float(pos["stop_entry"]) if pos.get("stop_entry") else 0.0
     _executor.place_close("cancel-stop")
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
     pos["confirmation_bar"] = {}
     _save_pos(pos)
-    _log({"time": now, "kind": "cancel-stop-entry", "entry_price": entry_price, "reason": reason})
+    _log({"kind": "cancel-stop-entry", "time": now, "entry_price": entry_price, "reason": reason})
 
 
 def close_position(price: float, reason: str = "user-requested") -> None:
     """Market-close active position. Logs, dispatches close, clears active in position.json."""
-    now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    now = _now_et()
     _executor.place_close("close")
     pos = _load_pos()
     pos["active"] = {}
@@ -200,7 +205,7 @@ def close_position(price: float, reason: str = "user-requested") -> None:
     pos["stop_direction"] = ""
     pos["confirmation_bar"] = {}
     _save_pos(pos)
-    _log({"time": now, "kind": "market-close", "price": float(price), "reason": reason})
+    _log({"kind": "market-close", "time": now, "price": float(price), "reason": reason})
 
 
 def update_stop_loss(stop_price: float, reason: str = "user-requested", direction: str | None = None) -> None:
@@ -208,14 +213,14 @@ def update_stop_loss(stop_price: float, reason: str = "user-requested", directio
 
     direction: override the direction read from position.json (used with --force when active is empty).
     """
-    now = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    now = _now_et()
     pos = _load_pos()
     resolved = direction if direction is not None else pos.get("active", {}).get("direction", "")
     _executor.update_stop_loss({"direction": resolved, "stop_price": stop_price}, None)
     if pos.get("active"):
         pos["active"]["stop"] = stop_price
         _save_pos(pos)
-    _log({"time": now, "kind": "update-stop-loss", "stop_price": stop_price, "reason": reason})
+    _log({"kind": "update-stop-loss", "time": now, "reason": reason, "stop_price": stop_price})
 
 
 # ---------------------------------------------------------------------------
