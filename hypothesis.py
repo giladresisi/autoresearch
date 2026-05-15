@@ -67,6 +67,14 @@ def compute_cautious_prices(
             if abs(_ini[0] - current_close) >= CAUTIOUS_MIN_DIST:
                 cautious_price_initial       = _ini[0]
                 cautious_price_initial_level = _ini[1]
+            else:
+                _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
+                if _syn_dist >= CAUTIOUS_MIN_DIST:
+                    cautious_price_initial = (
+                        current_close - _syn_dist if direction == "down"
+                        else current_close + _syn_dist
+                    )
+                    cautious_price_initial_level = "synthetic_85pct"
         else:
             _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
             if _syn_dist >= CAUTIOUS_MIN_DIST:
