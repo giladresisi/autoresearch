@@ -1,4 +1,4 @@
-# Run as: uv run python -m orchestrator.main [--no-summary] [--check-parquets] [--create-empty-parquets]
+# Run as: uv run python -m orchestrator.main [--summary] [--check-parquets] [--create-empty-parquets]
 # IMPORTANT: always use 'uv run python' (not bare 'python') so the command resolves to the
 # project venv. Bare 'python' may resolve to system Python which lacks project dependencies.
 #
@@ -493,4 +493,4 @@ if __name__ == "__main__":
     elif "--create-empty-parquets" in sys.argv:
         _cli_create_empty_parquets()
     else:
-        run(skip_summary="--no-summary" in sys.argv)
+        run(skip_summary="--summary" not in sys.argv)
