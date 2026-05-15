@@ -489,8 +489,7 @@ def run_trend(
         level_name = level.get("name", "")
         if level_name not in _HIGH_PRIO_LEVELS:
             continue
-        if (level_name, direction) in _active_cooldown_keys:
-            continue
+        _in_cooldown = (level_name, direction) in _active_cooldown_keys
 
         level_price = float(level["price"])
 
@@ -506,23 +505,21 @@ def run_trend(
                 extra = {"bar_high": bar_high}
 
         if triggered:
-            expires_at = (_now_ts + pd.Timedelta(minutes=_TREND_BROKEN_COOLDOWN_MINUTES)).isoformat()
-            new_cooldowns = [c for c in _cooldowns
-                             if not (c["level_name"] == level_name and c["direction"] == direction)]
-            new_cooldowns.append({"level_name": level_name, "direction": direction, "expires_at": expires_at})
-            position["trend_broken_cooldowns"] = new_cooldowns
-            # Only record the cooldown — do NOT clear hypothesis or limits here.
-            # The pipeline will re-evaluate hypothesis immediately and decide:
-            #   direction changed → emit trend-broken + clear limits
-            #   direction same    → emit new-hypothesis only, limits survive
-            save_position(position)
+            if not _in_cooldown:
+                expires_at = (_now_ts + pd.Timedelta(minutes=_TREND_BROKEN_COOLDOWN_MINUTES)).isoformat()
+                new_cooldowns = [c for c in _cooldowns
+                                 if not (c["level_name"] == level_name and c["direction"] == direction)]
+                new_cooldowns.append({"level_name": level_name, "direction": direction, "expires_at": expires_at})
+                position["trend_broken_cooldowns"] = new_cooldowns
+                save_position(position)
             sig = {
-                "kind":        "level-swept",
-                "time":        now.isoformat(),
-                "price":       bar_close,
-                "direction":   direction,
-                "level_name":  level_name,
-                "level_price": level_price,
+                "kind":           "level-swept",
+                "time":           now.isoformat(),
+                "price":          bar_close,
+                "direction":      direction,
+                "level_name":     level_name,
+                "level_price":    level_price,
+                "cooldown_active": _in_cooldown,
             }
             sig.update(extra)
             return sig
