@@ -10,6 +10,8 @@ Usage:
   python trade.py move 28000             # Move unfilled stop entry to 28000
   python trade.py update-sl 19700        # Move stop-loss on active position to 19700
   python trade.py close                  # Market close active position
+  python trade.py trend-broken           # Reset hypothesis direction and log trend-broken
+  python trade.py hypothesis             # Force a fresh hypothesis evaluation right now
   python trade.py terminate              # Kill orchestrator and automation.main
 
 Add --force / -f to bypass position.json state checks and override broker state:
@@ -124,6 +126,12 @@ def main() -> None:
         direction = pos.get("active", {}).get("direction", "unknown")
         print(f"Market close | direction: {direction}")
         live_orders.close_position(0.0, "user-requested")
+
+    elif cmd == "trend-broken":
+        live_orders.trend_broken()
+
+    elif cmd == "hypothesis":
+        live_orders.hypothesis()
 
     elif cmd == "terminate":
         import psutil

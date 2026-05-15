@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import zoneinfo
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -29,6 +30,12 @@ if _LIVE:
 else:
     from execution.simulated import SimulatedBrokerExecutor
     _executor = SimulatedBrokerExecutor(human_mode=True)
+
+_ET = zoneinfo.ZoneInfo("America/New_York")
+
+
+def _now_et() -> str:
+    return datetime.datetime.now(_ET).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -209,3 +216,118 @@ def update_stop_loss(stop_price: float, reason: str = "user-requested", directio
         pos["active"]["stop"] = stop_price
         _save_pos(pos)
     _log({"time": now, "kind": "update-stop-loss", "stop_price": stop_price, "reason": reason})
+
+
+# ---------------------------------------------------------------------------
+# Manual commands
+# ---------------------------------------------------------------------------
+
+def trend_broken() -> dict:
+    """Reset hypothesis direction to 'none', cancel any pending stop entry, log trend-broken.
+
+    Calls cancel_stop_entry BEFORE clearing position state so the broker cancel
+    actually fires (cancel_stop_entry is a no-op if stop_entry is already empty).
+    The next 5-minute bar will form a fresh hypothesis via the normal pipeline.
+
+    Usage:
+        import live_orders; live_orders.trend_broken()
+        python trade.py trend-broken
+    """
+    from smt_state import load_hypothesis, save_hypothesis
+
+    hypothesis = load_hypothesis()
+    broken_dir = hypothesis.get("direction", "none")
+
+    # Cancel broker order first, while stop_entry is still set in position.json.
+    cancel_stop_entry(reason="trend-broken-manual")
+
+    hypothesis["direction"] = "none"
+    save_hypothesis(hypothesis)
+
+    # Clear confirmation_bar in case cancel_stop_entry didn't (no pending stop).
+    pos = _load_pos()
+    pos["confirmation_bar"] = {}
+    _save_pos(pos)
+
+    event = {
+        "kind":             "trend-broken",
+        "time":             _now_et(),
+        "broken_direction": broken_dir,
+        "source":           "manual",
+    }
+    _log(event)
+    print(
+        f"[live_orders] trend-broken fired (was {broken_dir!r}) — "
+        "next 5m bar will form a fresh hypothesis.",
+        flush=True,
+    )
+    return event
+
+
+def hypothesis() -> list:
+    """Force a fresh hypothesis evaluation regardless of current direction.
+
+    Resets hypothesis direction to 'none', loads the latest bar parquets from disk,
+    calls run_hypothesis, and logs all resulting signals to events.jsonl.
+
+    Usage:
+        import live_orders; live_orders.hypothesis()
+        python trade.py hypothesis
+    """
+    import pandas as pd
+    from pathlib import Path as _Path
+    import hypothesis as _hyp_mod
+    from smt_state import load_hypothesis, save_hypothesis
+
+    now      = datetime.datetime.now(_ET)
+    now_ts   = pd.Timestamp(now)
+    today    = now.date()
+    now_str  = now.isoformat()
+
+    hyp     = load_hypothesis()
+    old_dir = hyp.get("direction", "none")
+    hyp["direction"] = "none"
+    save_hypothesis(hyp)
+
+    mnq_path = _Path("data/MNQ_1m.parquet")
+    mes_path = _Path("data/MES_1m.parquet")
+    if not mnq_path.exists() or not mes_path.exists():
+        print("[live_orders] hypothesis: bar parquets not found — is the orchestrator running?", flush=True)
+        return []
+
+    hist_mnq_1m = pd.read_parquet(mnq_path)
+    hist_mes_1m = pd.read_parquet(mes_path)
+    today_mnq   = hist_mnq_1m[hist_mnq_1m.index.date == today]
+    today_mes   = hist_mes_1m[hist_mes_1m.index.date == today]
+
+    _agg     = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    _14d_ago = now_ts - pd.Timedelta(days=14)
+    hist_1hr = (
+        hist_mnq_1m[hist_mnq_1m.index >= _14d_ago]
+        .resample("1h", label="left").agg(_agg).dropna(subset=["Open"])
+    )
+    hist_4hr = (
+        hist_mnq_1m
+        .resample("4h", label="left").agg(_agg).dropna(subset=["Open"])
+    )
+
+    signals = _hyp_mod.run_hypothesis(
+        now, today_mnq, today_mes,
+        hist_mnq_1m, hist_mes_1m,
+        hist_1hr=hist_1hr, hist_4hr=hist_4hr,
+        skip_position_reset=True,
+    )
+
+    if signals:
+        for sig in signals:
+            _log(dict(sig, source="manual", time=now_str))
+            print(
+                f"[live_orders] hypothesis {sig.get('kind')} "
+                f"direction={sig.get('direction', '?')} "
+                f"cautious_initial={sig.get('cautious_price_initial', '?')}",
+                flush=True,
+            )
+    else:
+        print(f"[live_orders] hypothesis: no hypothesis formed (was {old_dir!r})", flush=True)
+
+    return signals or []
