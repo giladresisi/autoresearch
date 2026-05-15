@@ -53,5 +53,8 @@ data/regression/*/
 # SMT v2 runtime state files (ephemeral, not committed)
 data/*.json
 
+# Orchestrator runtime files
+orchestrator.pid
+
 # Local regression notes
 regression.md

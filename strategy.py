@@ -175,6 +175,11 @@ def run_strategy(
 
         _MARKET_ENTRY_THRESHOLD = 0.0  # only market-enter when bar opened past the entry level (gapped through)
         MIN_STOP_DISTANCE = 5.0
+        # Tradovate rejects a stop order whose trigger price is within ~1 tick of the market price
+        # because the order fills immediately as a market order and is treated as invalid.
+        # Enforce a 10-pt buffer: if the natural entry level is too close to bar open, push it
+        # further away in the intended direction so the order reaches the exchange with room to spare.
+        MIN_APPROACH_PTS = 10.0
         MAX_CONFIRMATION_BODY_PTS = 25.0  # reject momentum/reversal bars as confirmation
 
         # 2.4 Fill check runs FIRST so a limit that fills on the same bar as a new
@@ -280,13 +285,18 @@ def run_strategy(
                     smt_state.save_position(position)
                     return _make_signal("market-entry", now, bar_mid, direction=direction, stop=stop)
 
+                # Push entry away from current price if the natural level is too close.
+                if direction == _DIR_UP:
+                    entry_price = max(body_end_price, bar_open + MIN_APPROACH_PTS)
+                else:
+                    entry_price = min(body_end_price, bar_open - MIN_APPROACH_PTS)
                 position["confirmation_bar"] = conf_bar_snap
                 kind = "new-stop-entry" if position["stop_entry"] == "" else "move-stop-entry"
-                position["stop_entry"]     = body_end_price
+                position["stop_entry"]     = entry_price
                 position["stop_direction"] = direction
                 smt_state.save_position(position)
                 stop_loss = float(opp_5m["body_low"]) if direction == _DIR_UP else float(opp_5m["body_high"])
-                return _make_signal(kind, now, body_end_price, stop=stop_loss)
+                return _make_signal(kind, now, entry_price, stop=stop_loss)
 
         # Nothing triggered
         return None
@@ -297,7 +307,10 @@ def run_strategy(
     active = position["active"]
 
     # 3.1 Direction mismatch (includes direction == "none")
-    if direction == "none" or direction != active.get("direction"):
+    # Normalise position vocabulary (long/short) to hypothesis vocabulary (up/down).
+    _pos_dir = active.get("direction", "")
+    _pos_hyp_dir = "up" if _pos_dir == "long" else ("down" if _pos_dir == "short" else _pos_dir)
+    if direction == "none" or direction != _pos_hyp_dir:
         position["active"]            = {}
         position["stop_entry"]       = ""
         position["confirmation_bar"]  = {}
@@ -307,7 +320,7 @@ def run_strategy(
 
     # 3.2 Stop crossed
     stop = active["stop"]
-    active_dir = active["direction"]
+    active_dir = _pos_hyp_dir  # already normalised to up/down above
     stopped = False
     if active_dir == _DIR_UP and mnq_bar["low"] <= stop:
         stopped = True

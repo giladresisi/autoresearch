@@ -47,31 +47,38 @@ class SessionPipeline:
         now: pd.Timestamp,
         today_mnq_at_open: pd.DataFrame,
     ) -> None:
-        """Seed ATH, reset state, compute resamples, call run_daily. Call once at 09:20 ET."""
+        """Seed ATH, reset state, compute resamples, call run_daily. Call once at session open."""
         # Deferred import: tests monkeypatch smt_state path attributes before calling this
         # method, so importing at module level would capture the un-patched paths too early.
         from smt_state import (
             DEFAULT_DAILY, DEFAULT_GLOBAL, DEFAULT_HYPOTHESIS, DEFAULT_POSITION,
-            load_daily, load_global, save_daily, save_global, save_hypothesis, save_position,
+            load_daily, load_global, load_position, save_daily, save_global, save_hypothesis, save_position,
         )
 
-        # Ensure global.json exists; create with defaults if missing.
+        # Check for an active position before resetting any state. If one exists we
+        # preserve hypothesis direction and position so the strategy can keep managing
+        # the trade; daily.py still reruns (fresh liquidities) but skips its resets.
+        _has_active = bool(load_position().get("active"))
+
         # Fix #2: Seed all_time_high from full historical high so downstream
         # code (ATH gate, strategy) never sees the DEFAULT 0.0 on the first run.
-        # run_daily will raise it further if today's bars exceed history.
         _global = load_global()
         if not self._hist_mnq_1m.empty:
             _hist_ath = float(self._hist_mnq_1m["High"].max())
             _global["all_time_high"] = max(_global["all_time_high"], _hist_ath)
-            # session_ath is fixed at 09:20 — never updated intraday.
+            # session_ath is fixed at open — never updated intraday.
             _global["session_ath"] = _hist_ath
             self._session_ath = _hist_ath
         else:
             self._session_ath = None
         self._last_hyp_cautious = ("", "")
         save_global(_global)
-        save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
-        save_position(copy.deepcopy(DEFAULT_POSITION))
+
+        # Reset hypothesis and position only when there is no active trade.
+        # With an open position we keep both so the strategy resumes management.
+        if not _has_active:
+            save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
+            save_position(copy.deepcopy(DEFAULT_POSITION))
 
         # Fix #5: Unified hourly resample — 14-day window, label="left", no Volume.
         _agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
@@ -92,32 +99,79 @@ class SessionPipeline:
             self._hist_1hr = pd.DataFrame(columns=list(_agg))
             self._hist_4hr = pd.DataFrame(columns=list(_agg))
 
-        # Option A: if daily.json is already from today (e.g. orchestrator pre-seeded it,
-        # or this is a mid-session restart), preserve it and skip the recompute.
-        # Fix #6: otherwise pass only bars up to now (≤ 09:20) to run_daily.
-        if load_daily().get("date") != str(now.date()):
-            save_daily(copy.deepcopy(DEFAULT_DAILY))
-            _daily_mod.run_daily(now, today_mnq_at_open, self._hist_mnq_1m, self._hist_1hr)
+        # Always rerun daily.py for fresh liquidities — covers both first-run and any
+        # restart (mid-session or post-session). Resets are skipped when a position is
+        # active so direction and position state are preserved for continued management.
+        save_daily(copy.deepcopy(DEFAULT_DAILY))
+        _daily_mod.run_daily(
+            now, today_mnq_at_open, self._hist_mnq_1m, self._hist_1hr,
+            reset_hypothesis=not _has_active,
+            reset_position=not _has_active,
+        )
         self._daily_triggered = True
 
-        # Write levels.json snapshot for plot_session.py — created once per day,
-        # preserved across mid-session orchestrator restarts.
+        # Write levels.json snapshot for plot_session.py — always updated when daily reruns.
         import json as _json
         from pathlib import Path as _Path
         _session_dir = _Path("sessions") / str(now.date())
         _session_dir.mkdir(parents=True, exist_ok=True)
         _levels_path = _session_dir / "levels.json"
-        if not _levels_path.exists():
-            from smt_state import load_global as _load_global
-            _daily_state = load_daily()
-            _global_state = _load_global()
-            _levels_path.write_text(
-                _json.dumps({
-                    "liquidities": _daily_state.get("liquidities", []),
-                    "all_time_high": _global_state.get("all_time_high"),
-                }, indent=2),
-                encoding="utf-8",
-            )
+        _daily_state = load_daily()
+        _levels_path.write_text(
+            _json.dumps({
+                "liquidities": _daily_state.get("liquidities", []),
+                "all_time_high": _global.get("all_time_high"),
+            }, indent=2),
+            encoding="utf-8",
+        )
+
+        # Run hypothesis immediately so direction is populated before the first 5m bar.
+        _init_hyp_divs = _hyp_mod.run_hypothesis(
+            now,
+            today_mnq_at_open,
+            self._hist_mes_1m,
+            self._hist_mnq_1m,
+            self._hist_mes_1m,
+            hist_1hr=self._hist_1hr,
+            hist_4hr=self._hist_4hr,
+        )
+        for _d in (_init_hyp_divs or []):
+            self._emit(_d)
+
+        # Reconcile hypothesis direction with any active position.
+        if _has_active:
+            _active = load_position().get("active", {})
+            _pos_dir = _active.get("direction", "")
+            # Map position vocabulary (long/short) to hypothesis vocabulary (up/down).
+            _pos_hyp_dir = "down" if _pos_dir == "short" else ("up" if _pos_dir == "long" else "none")
+            _new_hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
+
+            if _new_hyp_dir == "none":
+                # Hypothesis indeterminate — seed direction from position so strategy
+                # continues managing; trend.py will override if market moves against it.
+                _hyp_snap = _smt_state.load_hypothesis()
+                _hyp_snap["direction"] = _pos_hyp_dir
+                _smt_state.save_hypothesis(_hyp_snap)
+            elif _new_hyp_dir != _pos_hyp_dir:
+                # Direction conflict — emit trend-broken immediately so automation closes
+                # the position before any bar processing begins.
+                _last_price = (
+                    float(today_mnq_at_open.iloc[-1]["Close"])
+                    if not today_mnq_at_open.empty else 0.0
+                )
+                _pos_snap = load_position()
+                _pos_snap["confirmation_bar"] = {}
+                _pos_snap["stop_entry"] = ""
+                save_position(_pos_snap)
+                self._emit({
+                    "kind":             "trend-broken",
+                    "time":             now.isoformat(),
+                    "price":            _last_price,
+                    "broken_direction": _pos_hyp_dir,
+                    "direction":        _new_hyp_dir,
+                    "level_name":       "session-restart",
+                    "level_price":      "",
+                })
 
     def on_1m_bar(
         self,

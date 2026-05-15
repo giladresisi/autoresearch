@@ -10,10 +10,12 @@
 #
 # orchestrator/main.py
 # Daemon entry point: waits for trading sessions, runs signal_smt.py, and triggers post-session summarization.
+import atexit as _atexit
 import datetime
 import os as _os
 import sys
 import time
+import traceback as _traceback
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -227,6 +229,36 @@ def _cli_create_empty_parquets() -> None:
 
 import threading as _threading
 
+
+def _atexit_clean_exit() -> None:
+    """Stamp the stdout log on any Python-level exit (distinguishes TerminateProcess)."""
+    try:
+        _log = Path(__file__).resolve().parent.parent / "orchestrator_stdout.log"
+        _ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(_log, "a", encoding="utf-8") as _f:
+            _f.write(f"=== PYTHON EXIT {_ts} ===\n")
+    except Exception:
+        pass
+
+
+_atexit.register(_atexit_clean_exit)
+
+
+def _thread_excepthook(args) -> None:
+    """Write unhandled thread exceptions to orchestrator_crash.log."""
+    try:
+        _crash = Path(__file__).resolve().parent.parent / "orchestrator_crash.log"
+        _ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(_crash, "a", encoding="utf-8") as _f:
+            _f.write(f"=== THREAD CRASH {_ts} thread={args.thread.name} ===\n")
+            _traceback.print_exception(args.exc_type, args.exc_value, args.exc_tb, file=_f)
+            _f.write("\n")
+    except Exception:
+        pass
+
+
+_threading.excepthook = _thread_excepthook
+
 _PRE_SESSION_IB_STOP_EARLY_SECS = 30  # release client slot before session subprocess connects
 
 
@@ -360,8 +392,8 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
         summarizer = Summarizer()
     bar_data_dir = Path(__file__).resolve().parent.parent / "data"
     _check_parquet_files(bar_data_dir)
-    _pre_session_init()
     try:
+        _pre_session_init()
         while True:
             now   = get_et_now()
             today = now.date()

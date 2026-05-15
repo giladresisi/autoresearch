@@ -21,7 +21,12 @@ class StdoutSink:
         except UnicodeEncodeError:
             enc = getattr(sys.stdout, "encoding", None) or "utf-8"
             safe = text.encode(enc, errors="replace").decode(enc)
-            print(safe, end="", flush=True)
+            try:
+                print(safe, end="", flush=True)
+            except OSError:
+                pass
+        except OSError:
+            pass
 
 
 class FileSink:

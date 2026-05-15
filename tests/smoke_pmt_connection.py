@@ -348,7 +348,7 @@ def test_pmt_stop_entry_via_strategy_pipeline(tmp_path, monkeypatch, capsys):
         "all_time_high": 30000.0,
         "confidence":    "medium",
     })
-    _ss.save_daily({**_ss.DEFAULT_DAILY, "date": "2025-11-14", "estimated_dir": "down"})
+    _ss.save_daily({**_ss.DEFAULT_DAILY, "formed_at": "2025-11-14T09:20:00-05:00", "estimated_dir": "down"})
     _ss.save_hypothesis({
         **_ss.DEFAULT_HYPOTHESIS,
         "direction":  "down",

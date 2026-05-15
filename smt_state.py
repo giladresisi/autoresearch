@@ -20,7 +20,7 @@ POSITION_PATH   = DATA_DIR / "position.json"
 DEFAULT_GLOBAL = {"all_time_high": 0.0, "confidence": "medium", "trend": "up"}
 
 DEFAULT_DAILY = {
-    "date": "",
+    "formed_at": "",
     "liquidities": [],
     "estimated_dir": "up",
     "opposite_premove": "no",
