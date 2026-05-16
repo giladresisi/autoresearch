@@ -173,6 +173,17 @@ def run_strategy(
         if position["failed_entries"] > 2:
             return None
 
+        _daily = smt_state.load_daily()
+        _chop_rng = _daily.get("overnight_range", 0)
+        _chop_mid_x = position.get("session_mid_crosses", 0)
+        if (
+            _chop_rng > 0
+            and _chop_rng < 150.0
+            and _chop_mid_x >= 4
+            and position["failed_entries"] >= 2
+        ):
+            return None
+
         _MARKET_ENTRY_THRESHOLD = 0.0  # only market-enter when bar opened past the entry level (gapped through)
         MIN_STOP_DISTANCE = 5.0
         # Tradovate rejects a stop order whose trigger price is within ~1 tick of the market price

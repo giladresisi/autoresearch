@@ -321,11 +321,16 @@ def run_daily(
     # ------------------------------------------------------------------ #
     # Write daily.json                                                     #
     # ------------------------------------------------------------------ #
+    _overnight_range = 0.0
+    if "day_high" in _live_hl and "day_low" in _live_hl:
+        _overnight_range = _live_hl["day_high"] - _live_hl["day_low"]
+
     daily_state = {
         "formed_at": now.isoformat() if hasattr(now, "isoformat") else str(now),
         "liquidities": liquidities,
         "estimated_dir": estimated_dir,
         "opposite_premove": opposite_premove,
+        "overnight_range": _overnight_range,
     }
     save_daily(daily_state)
 

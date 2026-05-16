@@ -43,6 +43,7 @@ DEFAULT_POSITION = {
     "stop_direction": "",
     "confirmation_bar": {},
     "failed_entries": 0,
+    "session_mid_crosses": 0,
 }
 
 # ---------------------------------------------------------------------------
