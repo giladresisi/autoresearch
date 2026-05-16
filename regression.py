@@ -69,6 +69,7 @@ def run_regression(
     update_baseline: "bool | None" = None,
     skip_lock: bool = False,
     no_plot: bool = False,
+    mode: str = "1m",
 ) -> dict:
     """Run regression for every date in regression_md_path (or dates if provided).
 
@@ -77,6 +78,7 @@ def run_regression(
     record=True / update_baseline=True: write baseline for each date.
     record=False / update_baseline=False: diff against existing baseline.
     skip_lock=True: when no baseline exists, skip locking (SKIP); default locks (LOCK).
+    mode: "1m" (default) or "1s". 1s mode uses _1s suffix for all output/baseline files.
 
     Returns {date: {events_match, trades_match, n_trades, pnl, updated, locked, skipped}}.
     """
@@ -90,18 +92,19 @@ def run_regression(
     else:
         dates = _parse_regression_md(regression_md_path)
     results: dict[str, dict] = {}
+    _sfx = "_1s" if mode == "1s" else ""
 
     for date in dates:
-        result = run_backtest_v2(date, date, write_events=True)
+        result = run_backtest_v2(date, date, write_events=True, mode=mode)
         trades  = result.get("trades", [])
         events  = result.get("events", [])
         metrics = result.get("metrics", {})
 
         reg_dir     = Path("data") / "regression" / date
-        events_path = reg_dir / "events.jsonl"
-        trades_path = reg_dir / "trades.tsv"
-        bl_events   = reg_dir / "baseline_events.jsonl"
-        bl_trades   = reg_dir / "baseline_trades.tsv"
+        events_path = reg_dir / f"events{_sfx}.jsonl"
+        trades_path = reg_dir / f"trades{_sfx}.tsv"
+        bl_events   = reg_dir / f"baseline_events{_sfx}.jsonl"
+        bl_trades   = reg_dir / f"baseline_trades{_sfx}.tsv"
 
         _write_events_jsonl(events_path, events)
         _write_trades_tsv(trades_path, trades)
@@ -180,6 +183,10 @@ def main() -> int:
         "--no-plot", action="store_true",
         help="Skip chart generation",
     )
+    parser.add_argument(
+        "--mode", choices=["1m", "1s"], default="1m",
+        help="Bar mode: 1m (default) or 1s (partial-bar simulation, requires MNQ/MES_1s.parquet)",
+    )
     args = parser.parse_args()
 
     results = run_regression(
@@ -188,6 +195,7 @@ def main() -> int:
         record=args.update_baseline,
         skip_lock=args.skip_lock,
         no_plot=args.no_plot,
+        mode=args.mode,
     )
 
     all_pass = True
