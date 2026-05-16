@@ -217,61 +217,26 @@ class SessionPipeline:
                 # from a neutral state so it makes an unbiased direction assessment.
                 # Without clearing first, hypothesis is sticky and won't change an
                 # existing direction unless the evidence is overwhelming.
-                _hyp_snap = _smt_state.load_hypothesis()
-                _hyp_snap["direction"] = "none"
-                _smt_state.save_hypothesis(_hyp_snap)
-                _level_hyp_divs = _hyp_mod.run_hypothesis(
-                    now, today_mnq, today_mes,
-                    self._hist_mnq_1m, self._hist_mes_1m,
-                    hist_1hr=self._hist_1hr, hist_4hr=self._hist_4hr,
-                    skip_position_reset=True,
-                )
-                _new_dir = _smt_state.load_hypothesis().get("direction", "none")
-                if _new_dir == "none":
-                    # Hypothesis couldn't form after level sweep. Two cases:
-                    # (a) Bar is entirely above ATH — price in uncharted territory
-                    #     where no new hypothesis can form. Treat as a real break:
-                    #     emit trend-broken, leave direction as "none".
-                    # (b) Genuinely indeterminate — restore original direction
-                    #     and preserve limits (non-event).
-                    _ath = _smt_state.load_global().get("all_time_high")
-                    # Use the same 5m bar window as hypothesis.py's _build_5m_bar:
-                    # floor now to previous 5m boundary, take bars in [bar_start, bar_end).
-                    _above_ath = False
-                    if _ath is not None:
-                        _ts = pd.Timestamp(now)
-                        _bar_end = _ts.replace(
-                            minute=(_ts.minute // 5) * 5, second=0, microsecond=0
-                        )
-                        _bar_start = _bar_end - pd.Timedelta(minutes=5)
-                        _5m_win = today_mnq[
-                            (today_mnq.index >= _bar_start) & (today_mnq.index < _bar_end)
-                        ]
-                        if not _5m_win.empty:
-                            _above_ath = (
-                                float(_5m_win["Low"].min())  > float(_ath)
-                                and float(_5m_win["High"].max()) > float(_ath)
-                            )
-                    if not _above_ath:
-                        _hyp_snap2 = _smt_state.load_hypothesis()
-                        _hyp_snap2["direction"] = _hyp_dir
-                        _smt_state.save_hypothesis(_hyp_snap2)
-                        _new_dir = _hyp_dir
-                if _new_dir != _hyp_dir:
-                    # Direction changed — real trend break. Clear pending limits and emit
-                    # trend-broken so the automation path can cancel the PMT order.
+                #
+                # Cooldown active: the same level+direction was swept recently. Still
+                # emit trend-broken to reset direction, but skip the immediate hypothesis
+                # re-run — it will form naturally at the next 5m boundary.
+                if trend_sig.get("cooldown_active"):
+                    _hyp_snap = _smt_state.load_hypothesis()
+                    _hyp_snap["direction"] = "none"
+                    _smt_state.save_hypothesis(_hyp_snap)
                     _pos = _smt_state.load_position()
                     _pos["confirmation_bar"] = {}
                     _pos["stop_entry"] = ""
                     _smt_state.save_position(_pos)
-                    _tb_sig: dict = {
+                    _tb_sig = {
                         "kind":             "trend-broken",
                         "time":             trend_sig["time"],
                         "price":            trend_sig["price"],
                         "broken_direction": _hyp_dir,
                         "level_name":       trend_sig.get("level_name", ""),
                         "level_price":      trend_sig.get("level_price", ""),
-                        "direction":        _new_dir,
+                        "cooldown_active":  True,
                     }
                     for _k in ("bar_low", "bar_high"):
                         if _k in trend_sig:
@@ -288,39 +253,113 @@ class SessionPipeline:
                         }
                         self._emit(_cancel_sig)
                         events.append(_cancel_sig)
-                # Emit any hypothesis signals (new-hypothesis, smt-div, etc.).
-                # If direction was unchanged, limits are preserved — no trend-broken emitted.
-                # Above session ATH with direction=down, suppress new-hypothesis if
-                # cautious prices haven't changed (direction-unchanged sweeps are common
-                # there and would otherwise produce a stream of identical signals).
-                _ls_above_ath = (
-                    self._session_ath is not None
-                    and float(mnq_bar_row["High"]) >= float(self._session_ath)
-                )
-                _dir_unchanged = (_new_dir == _hyp_dir)
-                for _d in (_level_hyp_divs or []):
-                    if (
-                        _d.get("kind") == "new-hypothesis"
-                        and _new_dir == "down"
-                        and _ls_above_ath
-                        and _dir_unchanged
-                    ):
-                        _new_c = (
-                            _d.get("cautious_price_initial", ""),
-                            _d.get("cautious_price_secondary", ""),
-                        )
-                        if _new_c == self._last_hyp_cautious:
-                            continue
-                        self._last_hyp_cautious = _new_c
-                    elif _d.get("kind") == "new-hypothesis" and _new_dir == "down" and _ls_above_ath:
-                        # Direction changed AND above ATH: update tracker but always emit.
-                        self._last_hyp_cautious = (
-                            _d.get("cautious_price_initial", ""),
-                            _d.get("cautious_price_secondary", ""),
-                        )
-                    self._emit(_d)
-                    events.append(_d)
-                _hyp_dir = _new_dir
+                    _hyp_dir = "none"
+                    _level_hyp_divs = []
+                else:
+                    _hyp_snap = _smt_state.load_hypothesis()
+                    _hyp_snap["direction"] = "none"
+                    _smt_state.save_hypothesis(_hyp_snap)
+                    _level_hyp_divs = _hyp_mod.run_hypothesis(
+                        now, today_mnq, today_mes,
+                        self._hist_mnq_1m, self._hist_mes_1m,
+                        hist_1hr=self._hist_1hr, hist_4hr=self._hist_4hr,
+                        skip_position_reset=True,
+                    )
+                    _new_dir = _smt_state.load_hypothesis().get("direction", "none")
+                    if _new_dir == "none":
+                        # Hypothesis couldn't form after level sweep. Two cases:
+                        # (a) Bar is entirely above ATH — price in uncharted territory
+                        #     where no new hypothesis can form. Treat as a real break:
+                        #     emit trend-broken, leave direction as "none".
+                        # (b) Genuinely indeterminate — restore original direction
+                        #     and preserve limits (non-event).
+                        _ath = _smt_state.load_global().get("all_time_high")
+                        # Use the same 5m bar window as hypothesis.py's _build_5m_bar:
+                        # floor now to previous 5m boundary, take bars in [bar_start, bar_end).
+                        _above_ath = False
+                        if _ath is not None:
+                            _ts = pd.Timestamp(now)
+                            _bar_end = _ts.replace(
+                                minute=(_ts.minute // 5) * 5, second=0, microsecond=0
+                            )
+                            _bar_start = _bar_end - pd.Timedelta(minutes=5)
+                            _5m_win = today_mnq[
+                                (today_mnq.index >= _bar_start) & (today_mnq.index < _bar_end)
+                            ]
+                            if not _5m_win.empty:
+                                _above_ath = (
+                                    float(_5m_win["Low"].min())  > float(_ath)
+                                    and float(_5m_win["High"].max()) > float(_ath)
+                                )
+                        if not _above_ath:
+                            _hyp_snap2 = _smt_state.load_hypothesis()
+                            _hyp_snap2["direction"] = _hyp_dir
+                            _smt_state.save_hypothesis(_hyp_snap2)
+                            _new_dir = _hyp_dir
+                    if _new_dir != _hyp_dir:
+                        # Direction changed — real trend break. Clear pending limits and emit
+                        # trend-broken so the automation path can cancel the PMT order.
+                        _pos = _smt_state.load_position()
+                        _pos["confirmation_bar"] = {}
+                        _pos["stop_entry"] = ""
+                        _smt_state.save_position(_pos)
+                        _tb_sig: dict = {
+                            "kind":             "trend-broken",
+                            "time":             trend_sig["time"],
+                            "price":            trend_sig["price"],
+                            "broken_direction": _hyp_dir,
+                            "level_name":       trend_sig.get("level_name", ""),
+                            "level_price":      trend_sig.get("level_price", ""),
+                            "direction":        _new_dir,
+                        }
+                        for _k in ("bar_low", "bar_high"):
+                            if _k in trend_sig:
+                                _tb_sig[_k] = trend_sig[_k]
+                        self._emit(_tb_sig)
+                        events.append(_tb_sig)
+                        if _prev_stop != "":
+                            _cancel_sig = {
+                                "kind":      "stop-entry-cancelled",
+                                "time":      now.isoformat(),
+                                "price":     float(_prev_stop),
+                                "reason":    "trend-broken",
+                                "direction": _hyp_dir,
+                            }
+                            self._emit(_cancel_sig)
+                            events.append(_cancel_sig)
+                    # Emit any hypothesis signals (new-hypothesis, smt-div, etc.).
+                    # If direction was unchanged, limits are preserved — no trend-broken emitted.
+                    # Above session ATH with direction=down, suppress new-hypothesis if
+                    # cautious prices haven't changed (direction-unchanged sweeps are common
+                    # there and would otherwise produce a stream of identical signals).
+                    _ls_above_ath = (
+                        self._session_ath is not None
+                        and float(mnq_bar_row["High"]) >= float(self._session_ath)
+                    )
+                    _dir_unchanged = (_new_dir == _hyp_dir)
+                    for _d in (_level_hyp_divs or []):
+                        if (
+                            _d.get("kind") == "new-hypothesis"
+                            and _new_dir == "down"
+                            and _ls_above_ath
+                            and _dir_unchanged
+                        ):
+                            _new_c = (
+                                _d.get("cautious_price_initial", ""),
+                                _d.get("cautious_price_secondary", ""),
+                            )
+                            if _new_c == self._last_hyp_cautious:
+                                continue
+                            self._last_hyp_cautious = _new_c
+                        elif _d.get("kind") == "new-hypothesis" and _new_dir == "down" and _ls_above_ath:
+                            # Direction changed AND above ATH: update tracker but always emit.
+                            self._last_hyp_cautious = (
+                                _d.get("cautious_price_initial", ""),
+                                _d.get("cautious_price_secondary", ""),
+                            )
+                        self._emit(_d)
+                        events.append(_d)
+                    _hyp_dir = _new_dir
             elif trend_sig["kind"] == "ath-crossed":
                 # Bar straddled the fixed session_ath (09:20 ATH) with direction not
                 # "down". First time into uncharted territory — emit trend-broken,

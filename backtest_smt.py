@@ -1151,11 +1151,16 @@ def _build_5m_bar_v2(session_bars: "pd.DataFrame", bar_ts: "pd.Timestamp") -> "d
     }
 
 
-def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True) -> dict:
+def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True, mode: str = "1m") -> dict:
     """SMT v2 backtest: dispatches daily/hypothesis/trend/strategy per bar.
 
     Self-contained — does not use any globals from the existing run_backtest path.
     State JSON files are reset at the start of each day.
+
+    mode="1m" (default): one pipeline call per completed 1m bar from data/MNQ_1m.parquet.
+    mode="1s": aggregates 1s bars into a running partial 1m bar and calls pipeline once per
+               second, simulating live per-tick behavior. Requires data/MNQ_1s.parquet and
+               data/MES_1s.parquet. Writes events_1s.jsonl / trades_1s.tsv.
 
     Returns a dict with keys: trades, events, metrics.
     """
@@ -1170,6 +1175,19 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
     futures = load_futures_data()
     mnq_all = futures["MNQ"]
     mes_all = futures["MES"]
+
+    if mode == "1s":
+        import numpy as _np
+        _1s_dir = Path("data")
+        _1s_cache = Path(FUTURES_CACHE_DIR) / "1s"
+        _mnq_1s_p = (_1s_dir / "MNQ_1s.parquet") if (_1s_dir / "MNQ_1s.parquet").exists() else (_1s_cache / "MNQ.parquet")
+        _mes_1s_p = (_1s_dir / "MES_1s.parquet") if (_1s_dir / "MES_1s.parquet").exists() else (_1s_cache / "MES.parquet")
+        if not _mnq_1s_p.exists() or not _mes_1s_p.exists():
+            raise FileNotFoundError(
+                "Missing 1s parquets: data/MNQ_1s.parquet and data/MES_1s.parquet required for mode='1s'."
+            )
+        mnq_1s_all = pd.read_parquet(_mnq_1s_p)
+        mes_1s_all = pd.read_parquet(_mes_1s_p)
 
     business_days = pd.bdate_range(start_date, end_date)
 
@@ -1235,28 +1253,120 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             (mes_1m_today.index >= session_start_ts) & (mes_1m_today.index <= session_end_ts)
         ]
 
-        if mnq_session_bars.empty:
+        if mode == "1s":
+            mnq_1s_sess = mnq_1s_all[
+                (mnq_1s_all.index >= session_start_ts) & (mnq_1s_all.index <= session_end_ts)
+            ]
+            mes_1s_sess = mes_1s_all[
+                (mes_1s_all.index >= session_start_ts) & (mes_1s_all.index <= session_end_ts)
+            ]
+            if mnq_1s_sess.empty:
+                continue
+        elif mnq_session_bars.empty:
             continue
-
-        _sess_idx = mnq_session_bars.index
-        _n_sess   = len(_sess_idx)
 
         # ------------------------------------------------------------------ #
         # Per-bar loop                                                          #
         # ------------------------------------------------------------------ #
-        for _bar_i in range(_n_sess):
-            bar_ts      = _sess_idx[_bar_i]
-            now         = bar_ts
-            mnq_bar_row = mnq_session_bars.iloc[_bar_i]
-            mes_pos     = mes_session_bars.index.searchsorted(bar_ts, side="right")
-            mes_bar_row = mes_session_bars.iloc[mes_pos - 1] if mes_pos > 0 else mes_session_bars.iloc[0]
+        if mode == "1m":
+            _sess_idx = mnq_session_bars.index
+            for _bar_i in range(len(_sess_idx)):
+                bar_ts      = _sess_idx[_bar_i]
+                mnq_bar_row = mnq_session_bars.iloc[_bar_i]
+                mes_pos     = mes_session_bars.index.searchsorted(bar_ts, side="right")
+                mes_bar_row = mes_session_bars.iloc[mes_pos - 1] if mes_pos > 0 else mes_session_bars.iloc[0]
+                today_mnq   = mnq_1m_today[mnq_1m_today.index <= bar_ts]
+                today_mes   = mes_1m_today[mes_1m_today.index <= bar_ts]
+                _before = len(day_events)
+                pipeline.on_1m_bar(bar_ts, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
+                _annotate_slippage(day_events[_before:], V2_MARKET_CLOSE_SLIPPAGE_PTS)
 
-            today_mnq = mnq_1m_today[mnq_1m_today.index <= bar_ts]
-            today_mes = mes_1m_today[mes_1m_today.index <= bar_ts]
+        else:  # mode == "1s": aggregate 1s bars into running partial 1m bar, call once per second
+            _cols      = ["Open", "High", "Low", "Close", "Volume"]
+            _empty_1s  = pd.DataFrame(columns=_cols, dtype=float)
+            _pre_mnq   = mnq_all.iloc[_mnq_pos_day:_mnq_pos_sess]
+            _pre_mes   = mes_all.iloc[_mes_pos_day:_mes_pos_sess]
+            _mes_min_d = {
+                k: grp
+                for k, grp in mes_1s_sess.groupby(mes_1s_sess.index.floor("1min"))
+            } if not mes_1s_sess.empty else {}
+            _done_mnq: list[pd.DataFrame] = []
+            _done_mes: list[pd.DataFrame] = []
 
-            _before = len(day_events)
-            pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
-            _annotate_slippage(day_events[_before:], V2_MARKET_CLOSE_SLIPPAGE_PTS)
+            for _bar_ts, _mnq_min in mnq_1s_sess.groupby(mnq_1s_sess.index.floor("1min")):
+                _mes_min = _mes_min_d.get(_bar_ts, _empty_1s)
+                _mes_has = not _mes_min.empty
+
+                # Today context: pre-session 1m + completed session minutes
+                _base_mnq = pd.concat([_pre_mnq] + _done_mnq) if _done_mnq else (
+                    _pre_mnq if not _pre_mnq.empty else _empty_1s
+                )
+                _base_mes = pd.concat([_pre_mes] + _done_mes) if _done_mes else (
+                    _pre_mes if not _pre_mes.empty else _empty_1s
+                )
+                _bv_mnq = _base_mnq[_cols].values if not _base_mnq.empty else _np.empty((0, 5))
+                _bv_mes = _base_mes[_cols].values if not _base_mes.empty else _np.empty((0, 5))
+                _pidx   = pd.DatetimeIndex([_bar_ts], tz="America/New_York")
+                _idx_mnq = _base_mnq.index.append(_pidx)
+                _idx_mes = _base_mes.index.append(_pidx)
+                _nb_mnq = len(_bv_mnq); _nb_mes = len(_bv_mes)
+                _fm = _np.empty((_nb_mnq + 1, 5), dtype=float)
+                _fe = _np.empty((_nb_mes + 1, 5), dtype=float)
+                if _nb_mnq: _fm[:_nb_mnq] = _bv_mnq
+                if _nb_mes: _fe[:_nb_mes] = _bv_mes
+
+                # Precompute cumulative agg arrays for O(1) partial-bar building
+                _mo   = float(_mnq_min.iloc[0]["Open"])
+                _mH   = _mnq_min["High"].values.astype(float)
+                _mL   = _mnq_min["Low"].values.astype(float)
+                _mC   = _mnq_min["Close"].values.astype(float)
+                _mV   = _mnq_min["Volume"].values.astype(float)
+                _mts  = _mnq_min.index.asi8
+                _mcH  = _np.maximum.accumulate(_mH)
+                _mcL  = _np.minimum.accumulate(_mL)
+                _mcV  = _np.cumsum(_mV)
+
+                if _mes_has:
+                    _eo   = float(_mes_min.iloc[0]["Open"])
+                    _eH   = _mes_min["High"].values.astype(float)
+                    _eL   = _mes_min["Low"].values.astype(float)
+                    _eC   = _mes_min["Close"].values.astype(float)
+                    _ets  = _mes_min.index.asi8
+                    _ecH  = _np.maximum.accumulate(_eH)
+                    _ecL  = _np.minimum.accumulate(_eL)
+                    _ecV  = _np.cumsum(_mes_min["Volume"].values.astype(float))
+                else:
+                    _eo = _mo; _eC = _mC; _ets = _mts
+                    _ecH = _mcH; _ecL = _mcL; _ecV = _mcV
+
+                for _si in range(len(_mnq_min)):
+                    _now = _mnq_min.index[_si]
+                    _h = _mcH[_si]; _l = _mcL[_si]; _c = _mC[_si]; _v = _mcV[_si]
+                    _mnq_row = pd.Series({"Open": _mo, "High": _h, "Low": _l, "Close": _c, "Volume": _v})
+                    _j = int(_np.searchsorted(_ets, _mts[_si], side="right")) - 1
+                    if _j >= 0:
+                        _eh = _ecH[_j]; _el = _ecL[_j]; _ec = _eC[_j]; _ev = _ecV[_j]
+                    else:
+                        _eh = _eo; _el = _eo; _ec = _eo; _ev = 0.0
+                    _mes_row = pd.Series({"Open": _eo, "High": _eh, "Low": _el, "Close": _ec, "Volume": _ev})
+                    _fm[_nb_mnq] = [_mo, _h, _l, _c, _v]
+                    _fe[_nb_mes] = [_eo, _eh, _el, _ec, _ev]
+                    _today_mnq = pd.DataFrame(_fm, index=_idx_mnq, columns=_cols)
+                    _today_mes = pd.DataFrame(_fe, index=_idx_mes, columns=_cols)
+                    _before = len(day_events)
+                    pipeline.on_1m_bar(_now, _mnq_row, _mes_row, _today_mnq, _today_mes)
+                    _annotate_slippage(day_events[_before:], V2_MARKET_CLOSE_SLIPPAGE_PTS)
+
+                _done_mnq.append(pd.DataFrame(
+                    [[_mo, _mcH[-1], _mcL[-1], _mC[-1], _mcV[-1]]], columns=_cols, index=_pidx,
+                ))
+                _lj = len(_mes_min) - 1
+                _done_mes.append(pd.DataFrame(
+                    [[_eo,
+                      _ecH[_lj] if _mes_has else _eo, _ecL[_lj] if _mes_has else _eo,
+                      _eC[_lj]  if _mes_has else _eo, _ecV[_lj] if _mes_has else 0.0]],
+                    columns=_cols, index=_pidx,
+                ))
 
         # ------------------------------------------------------------------ #
         # Emit end-of-session event if a position is still open               #
@@ -1264,8 +1374,9 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         from smt_state import load_position as _load_pos
         _end_pos = _load_pos()
         if _end_pos.get("active"):
-            _last_bar = mnq_session_bars.iloc[-1]
-            _eod_ts   = mnq_session_bars.index[-1]
+            _eod_src  = mnq_1s_sess if mode == "1s" else mnq_session_bars
+            _last_bar = _eod_src.iloc[-1]
+            _eod_ts   = _eod_src.index[-1]
             day_events.append({
                 "kind":      "end-of-session",
                 "time":      _eod_ts.isoformat(),
@@ -1322,15 +1433,14 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             import os as _os
             out_dir = Path(f"data/regression/{date}")
             out_dir.mkdir(parents=True, exist_ok=True)
+            _sfx = "_1s" if mode == "1s" else ""
 
-            # events.jsonl
-            events_path = out_dir / "events.jsonl"
+            events_path = out_dir / f"events{_sfx}.jsonl"
             with open(events_path, "w", encoding="utf-8") as _f:
                 for evt in day_events:
                     _f.write(_json.dumps(evt, sort_keys=True) + "\n")
 
-            # trades.tsv
-            trades_path = out_dir / "trades.tsv"
+            trades_path = out_dir / f"trades{_sfx}.tsv"
             if day_trades:
                 fieldnames = [
                     "entry_time", "entry_price", "direction", "contracts",
