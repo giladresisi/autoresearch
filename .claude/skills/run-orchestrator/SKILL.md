@@ -32,72 +32,29 @@ files left over by a previous run on the same calendar day.
 | Orchestrator died | PID snapshotted at startup + `tasklist.exe` | Checked every iteration from startup |
 | automation.main died | PID parsed from `[ORCH] automation.main started (pid=…)` + `tasklist.exe` | Checked every iteration after session start |
 
-## Step 1 — Kill any existing orchestrator and automation.main
+## Step 1 — Start the orchestrator via trade.py
+
+`trade.py start` handles everything: kills any existing orchestrator and automation.main,
+appends the `=== RESTART` marker to `orchestrator_stdout.log`, launches the process with
+stdout/stderr captured to the log files, and confirms the PID.
+
+Choose flags based on the user's request:
+
+| User intent | Command |
+|---|---|
+| Fresh start (default) | `uv run python trade.py start` |
+| Already running, restart without prompt | `uv run python trade.py start --force` |
+| Keep position.json as-is | `uv run python trade.py start --resume` |
+| Restart without prompt, keep position | `uv run python trade.py start --force --resume` |
+| Enable LLM session summary | add `--summary` |
 
 ```powershell
-$base = (Get-Location).Path
-$orchPid = (Get-Content "$base\orchestrator.pid" -Raw -ErrorAction SilentlyContinue).Trim()
-if ($orchPid) {
-    Stop-Process -Id $orchPid -Force -ErrorAction SilentlyContinue
-    Write-Output "Killed orchestrator pid=$orchPid"
-}
-# Also kill any lingering stdout-capture wrapper from a previous run
-Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $PID } | ForEach-Object {
-    $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").CommandLine
-    if ($cmdLine -like "*orchestrator.main*") {
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        Write-Output "Killed wrapper pid=$($_.Id)"
-    }
-}
-# Kill any lingering automation.main subprocess (survives orchestrator crashes)
-# Must check uv.exe as well — automation.main runs as: uv.exe -> python.exe -> python.exe
-uv run python -c "
-import psutil
-for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-    try:
-        if proc.info.get('name', '').lower() not in ('python.exe', 'python', 'uv.exe'):
-            continue
-        cmdline = proc.info.get('cmdline') or []
-        if any('automation.main' in arg for arg in cmdline):
-            proc.kill()
-            print(f'Killed automation.main pid={proc.pid} ({proc.info[\"name\"]})')
-    except Exception as e:
-        print(f'Warning: {e}')
-" 2>$null
+uv run python trade.py start --force   # adjust flags per user request
 ```
 
-## Step 2 — Append restart marker and start orchestrator
-
-Do NOT clear `orchestrator_stdout.log` — preserving history is essential for diagnosing
-crashes where the process exits before producing any output. Instead, append a `=== RESTART`
-separator so the monitor can locate the current run's output by offset.
-
-The stdout redirect captures pre-relay messages (gap-fill, IB probe errors) that are
-lost when using bare `-WindowStyle Hidden` without redirect.
-
-After confirming the PID, report the session window status so the user knows whether a
-session is active now or how long until the next one opens.
+After the start command succeeds, report the session window status:
 
 ```powershell
-$base = (Get-Location).Path
-$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-Add-Content -Path "$base\orchestrator_stdout.log" -Value "=== RESTART $timestamp ===" -Encoding utf8
-
-Start-Process -FilePath "powershell" `
-    -ArgumentList "-NoProfile", "-NonInteractive", "-Command", `
-        "Set-Location '$base'; try { uv run python -m orchestrator.main --no-summary 2>>'$base\orchestrator_stderr.log' | Out-File -FilePath '$base\orchestrator_stdout.log' -Encoding utf8 -Append } finally { Add-Content -Path '$base\orchestrator_stdout.log' -Value ('=== WRAPPER EXIT ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' code=' + `$LASTEXITCODE + ' ===') -Encoding utf8 }" `
-    -WindowStyle Hidden
-
-Start-Sleep -Seconds 3
-
-$orchPid = (Get-Content "$base\orchestrator.pid" -Raw -ErrorAction SilentlyContinue).Trim()
-if ($orchPid) {
-    Write-Output "Orchestrator started pid=$orchPid"
-} else {
-    Write-Output "WARNING: orchestrator.pid not written — check orchestrator_stdout.log for errors"
-}
-
-# Report session window status
 uv run python -c "
 from session_times import SESSION_OPEN, SESSION_CLOSE
 from datetime import datetime, timedelta
@@ -121,7 +78,7 @@ else:
 "
 ```
 
-## Step 3 — Arm the persistent Monitor
+## Step 2 — Arm the persistent Monitor
 
 Use the `Monitor` tool with `persistent: true` and `timeout_ms: 3600000`.
 
@@ -142,6 +99,7 @@ PID_FILE="$BASE/orchestrator.pid"
 
 gap_fill_done=false
 session_started=false
+session_ended=false
 daily_done=false
 hyp_done=false
 
@@ -188,6 +146,10 @@ if cur | grep -q "automation.main started"; then
 fi
 
 if [ "$session_started" = true ]; then
+    if cur | grep -qF "[ORCH] Session ended"; then
+        session_ended=true
+    fi
+
     if cur | grep -qF "[EMIT] daily complete"; then
         daily_done=true
         echo "[MONITOR] daily.py complete"
@@ -226,6 +188,14 @@ while true; do
         fi
     fi
 
+    # Session ended — suppress automation.main keepalive once orchestrator closes it cleanly
+    if [ "$session_started" = true ] && [ "$session_ended" = false ]; then
+        if cur | grep -qF "[ORCH] Session ended"; then
+            session_ended=true
+            echo "[MONITOR] Session ended — automation.main shutdown was intentional"
+        fi
+    fi
+
     # Keepalive — orchestrator: always active from startup
     if [ -n "$ORCH_PID" ] && ! is_alive "$ORCH_PID"; then
         if [ "$session_started" = true ]; then
@@ -236,8 +206,8 @@ while true; do
         exit 0
     fi
 
-    # Keepalive — automation.main: checked after session start
-    if [ "$session_started" = true ] && [ -n "$AUTO_PID" ] && ! is_alive "$AUTO_PID"; then
+    # Keepalive — automation.main: only while session is active (not after clean session-end)
+    if [ "$session_started" = true ] && [ "$session_ended" = false ] && [ -n "$AUTO_PID" ] && ! is_alive "$AUTO_PID"; then
         echo "[KEEPALIVE] automation.main (pid=$AUTO_PID) has DIED — orchestrator should restart it"
     fi
 
@@ -262,7 +232,7 @@ while true; do
 done
 ```
 
-## Step 4 — Push a notification for each Monitor event
+## Step 3 — Push a notification for each Monitor event
 
 As each line arrives from the Monitor, call `PushNotification` for EVERY milestone:
 
