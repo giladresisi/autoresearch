@@ -265,6 +265,33 @@ def dispatch(sig: dict) -> None:
         close_position(float(sig.get("price", 0.0)), sig.get("reason", "strategy"))
         return
 
+    if kind == "stop-exit":
+        # Cautious stop-exit: IB stop already fired in normal flow; this is a safety-net
+        # market-close in case the stop order didn't execute (e.g. connectivity gap).
+        # trend.py has already cleared position+hypothesis in position.json before emitting.
+        _executor.place_close("close")
+        _log(sig)
+        return
+
+    if kind == "new-stop-exit":
+        # Move the protective stop to the cautious break price so IB handles the exit
+        # automatically when price reverses through it.
+        cbp = sig.get("cautious_break_price")
+        if cbp is None:
+            cbp = _load_pos().get("active", {}).get("cautious_break_price")
+        if cbp is not None:
+            update_stop_loss(float(cbp), reason="new-stop-exit")
+        _log(sig)
+        return
+
+    if kind == "move-stop-exit":
+        # Trailing stop update: slide the IB stop to the new tighter break price.
+        cbp = sig.get("cautious_break_price")
+        if cbp is not None:
+            update_stop_loss(float(cbp), reason="move-stop-exit")
+        _log(sig)
+        return
+
     if kind == "stop-entry-cancelled":
         # position.json already cleared by the pipeline before emitting this signal;
         # bypass the stop_entry guard and send the broker cancel directly.
@@ -275,6 +302,13 @@ def dispatch(sig: dict) -> None:
     if kind == "stopped-out":
         # IB's protective stop already executed — clear position state and log.
         pos = _load_pos()
+        if pos.get("active", {}).get("cautious", "no") not in ("no", ""):
+            # Cautious stop fired: also reset hypothesis so the strategy doesn't re-enter
+            # on a stale direction. (Non-cautious stops keep the hypothesis alive for re-entry.)
+            from smt_state import load_hypothesis, save_hypothesis
+            hyp = load_hypothesis()
+            hyp["direction"] = "none"
+            save_hypothesis(hyp)
         pos["active"] = {}
         pos["stop_entry"] = ""
         pos["stop_direction"] = ""
@@ -284,7 +318,7 @@ def dispatch(sig: dict) -> None:
         return
 
     # All other signal kinds (new-hypothesis, trend-broken, level-swept,
-    # smt-div, ath-crossed, dynamic-ath-crossed, cautious-armed, …): log only.
+    # smt-div, ath-crossed, dynamic-ath-crossed, …): log only.
     _log(sig)
 
 

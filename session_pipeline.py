@@ -527,6 +527,36 @@ class SessionPipeline:
             if strat_sig["kind"] in {"stopped-out", "market-close"}:
                 self._force_entry_eval = True
 
+            # Same-bar stop check for LONG (up) entries: when entry fills on bar N,
+            # the same bar's Low may already breach the protective stop. In 1s
+            # resolution this is caught naturally (price dips on the very next
+            # second bar), but in 1m mode the 60s bar aggregates the dip and the
+            # stop check doesn't run until bar N+1.
+            #
+            # Only applies to UP entries. For DOWN entries the bar's High is
+            # typically reached BEFORE the entry fills (price spikes high, then
+            # falls to fill the stop-entry), so checking bar_high >= stop would
+            # fire against a pre-fill spike rather than a post-fill reversal.
+            if strat_sig["kind"] in {"stop-entry-filled", "market-entry"}:
+                _sbsc_pos = _smt_state.load_position()
+                _sbsc_active = _sbsc_pos.get("active", {})
+                _sbsc_stop = _sbsc_active.get("stop")
+                _sbsc_dir = _sbsc_active.get("direction", "")
+                if _sbsc_stop is not None and _sbsc_dir == "up" and _l <= _sbsc_stop:
+                    _sbsc_pos["active"] = {}
+                    _sbsc_pos["stop_entry"] = ""
+                    _sbsc_pos["failed_entries"] = _sbsc_pos.get("failed_entries", 0) + 1
+                    _smt_state.save_position(_sbsc_pos)
+                    _sbsc_sig = {
+                        "kind":      "stopped-out",
+                        "time":      now.isoformat(),
+                        "price":     float(_sbsc_stop),
+                        "direction": _sbsc_dir,
+                    }
+                    self._emit(_sbsc_sig)
+                    events.append(_sbsc_sig)
+                    self._force_entry_eval = True
+
         self._write_bar_state(now, today_mnq)
         return events
 

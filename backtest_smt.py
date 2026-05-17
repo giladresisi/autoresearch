@@ -453,7 +453,7 @@ def run_backtest(
         session_mask = (
             (_mnq_dates == day)
             & (_mnq_times >= _ses_start_t)
-            & (_mnq_times <= _ses_end_t)
+            & (_mnq_times < _ses_end_t)
         )
         mnq_session = mnq_df[session_mask]
         mes_session = mes_df[session_mask]
@@ -819,6 +819,29 @@ def run_backtest(
                     position["position_id"] = _position_id
                     state = "IN_TRADE"
                     entry_bar_count = 0
+
+                    # Same-bar stop check: the entry bar's extreme may already breach
+                    # the stop (entry fills on High, stop at Low for a long within the
+                    # same 1m bar). The standard path skips the stop check until bar
+                    # N+1; this replicates what 1s resolution sees in real time.
+                    _sbsc = manage_position(position, bar)
+                    if _sbsc == "exit_stop":
+                        _exit_fill = executor.place_exit(position, _sbsc, bar)
+                        trade, day_pnl_delta = _build_trade_record(
+                            position, _sbsc, bar, MNQ_PNL_PER_POINT,
+                            fill_price=_exit_fill.fill_price,
+                        )
+                        _stamp_hypothesis_fields(trade, position)
+                        trades.append(trade)
+                        day_pnl += day_pnl_delta
+                        equity_curve[-1] += day_pnl_delta
+                        _scan_state.scan_state = "IDLE"
+                        _scan_state.pending_direction = None
+                        _scan_state.anchor_close = None
+                        _scan_state.prior_trade_bars_held = 1
+                        position = None
+                        entry_bar_count = 0
+                        state = "IDLE"
 
         # Bulk-append completed session bars to strategy globals.
         _ses_mes_slice = mes_df[
@@ -1247,18 +1270,18 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         session_end_ts = pd.Timestamp(f"{date} 16:00:00", tz="America/New_York")
 
         mnq_session_bars = mnq_1m_today[
-            (mnq_1m_today.index >= session_start_ts) & (mnq_1m_today.index <= session_end_ts)
+            (mnq_1m_today.index >= session_start_ts) & (mnq_1m_today.index < session_end_ts)
         ]
         mes_session_bars = mes_1m_today[
-            (mes_1m_today.index >= session_start_ts) & (mes_1m_today.index <= session_end_ts)
+            (mes_1m_today.index >= session_start_ts) & (mes_1m_today.index < session_end_ts)
         ]
 
         if mode == "1s":
             mnq_1s_sess = mnq_1s_all[
-                (mnq_1s_all.index >= session_start_ts) & (mnq_1s_all.index <= session_end_ts)
+                (mnq_1s_all.index >= session_start_ts) & (mnq_1s_all.index < session_end_ts)
             ]
             mes_1s_sess = mes_1s_all[
-                (mes_1s_all.index >= session_start_ts) & (mes_1s_all.index <= session_end_ts)
+                (mes_1s_all.index >= session_start_ts) & (mes_1s_all.index < session_end_ts)
             ]
             if mnq_1s_sess.empty:
                 continue
@@ -1394,7 +1417,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             kind = evt.get("kind", "")
             if kind in ("limit-entry-filled", "market-entry", "bos-entry", "stop-entry-filled"):
                 entry_event = evt
-            elif kind in ("market-close", "stopped-out", "end-of-session") and entry_event is not None:
+            elif kind in ("market-close", "stopped-out", "end-of-session", "stop-exit") and entry_event is not None:
                 exit_reason = kind
                 direction = entry_event.get("direction", "up")
                 direction_sign = 1 if direction == "up" else -1
