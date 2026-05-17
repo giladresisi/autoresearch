@@ -61,7 +61,7 @@ events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip
 for e in events:
     e["ts"] = pd.Timestamp(e["time"])
 
-EXIT_KINDS = {"stopped-out", "market-close", "end-of-session"}
+EXIT_KINDS = {"stopped-out", "market-close", "end-of-session", "stop-exit"}
 
 # ── Levels ────────────────────────────────────────────────────────────────────
 levels_path = Path(f"data/regression/{DATE}/levels.json")
@@ -328,10 +328,12 @@ EXIT_MARKER_STYLE = {
     "stopped-out":    dict(symbol="x-thin",  color="#F44336", size=14),
     "market-close":   dict(symbol="square",  color="#9E9E9E", size=11),
     "end-of-session": dict(symbol="square",  color="#BDBDBD", size=11),
+    "stop-exit":      dict(symbol="diamond", color="#FF9800", size=11),
 }
 OTHER_MARKER_STYLE = {
     "new-stop-entry":    dict(symbol="triangle-right",      color="#2196F3", size=13),
     "move-stop-entry":   dict(symbol="triangle-right-open", color="#9C27B0", size=13),
+    "new-stop-exit":     dict(symbol="triangle-left",       color="#FF5722", size=13),
     "stop-entry-filled": dict(symbol="star",                color="#4CAF50", size=17),
     "market-entry":       dict(symbol="circle",              color="#FF9800", size=15),
     "trend-broken":       dict(symbol="diamond-open",        color="#FF9800", size=13),

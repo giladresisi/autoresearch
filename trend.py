@@ -49,68 +49,59 @@ def _clear_position_and_hypothesis(
     hypothesis["direction"] = "none"
 
 
-def _last_same_dir_bar(
+def _last_same_dir_ref_bar(
     mnq_1m_recent: pd.DataFrame,
     current_bar_time: str,
     direction: str,
+    period_minutes: int = 1,
 ) -> Optional[pd.Series]:
-    """Most recent 1m bar (excl. current) whose body matches the hypothesis direction.
-    direction='down' → bearish (close < open); direction='up' → bullish (close > open).
+    """Most recent completed ref bar of period_minutes length whose body matches direction.
+
+    period_minutes=1: raw 1m bars, skipping the bar at current_bar_time.
+    period_minutes>1: aggregated bars, skipping bars not yet complete at current_bar_time.
     """
-    try:
-        current_ts = pd.Timestamp(current_bar_time)
-    except Exception:
-        current_ts = None
-
-    for i in range(len(mnq_1m_recent) - 1, -1, -1):
-        row = mnq_1m_recent.iloc[i]
-        if current_ts is not None:
-            row_ts = mnq_1m_recent.index[i]
-            if current_ts.tzinfo is not None and row_ts.tzinfo is None:
-                row_ts = row_ts.tz_localize(current_ts.tzinfo)
-            elif current_ts.tzinfo is None and row_ts.tzinfo is not None:
-                current_ts_naive = current_ts.tz_localize(None)
-                if row_ts == current_ts_naive:
-                    continue
-            if row_ts == current_ts:
-                continue
-        if direction == "down" and row["Close"] < row["Open"]:
-            return row
-        if direction == "up" and row["Close"] > row["Open"]:
-            return row
-
-    return None
-
-
-def _last_same_dir_5m_bar(
-    mnq_1m_recent: pd.DataFrame,
-    current_bar_time: str,
-    direction: str,
-) -> Optional[pd.Series]:
-    """Most recent completed 5m bar (ending before current_bar_time) whose body matches direction."""
     if mnq_1m_recent.empty:
         return None
+
     try:
         current_ts = pd.Timestamp(current_bar_time)
-        if current_ts.tzinfo is not None and mnq_1m_recent.index.tz is None:
-            current_ts = current_ts.tz_localize(None)
-        elif current_ts.tzinfo is None and mnq_1m_recent.index.tz is not None:
-            current_ts = current_ts.tz_localize(mnq_1m_recent.index.tz)
     except Exception:
         current_ts = None
 
-    _agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
-    bars_5m = mnq_1m_recent.resample("5min", label="left").agg(_agg).dropna(subset=["Open"])
+    def _matches(row: pd.Series) -> bool:
+        return (direction == "down" and row["Close"] < row["Open"]) or \
+               (direction == "up"   and row["Close"] > row["Open"])
 
-    for i in range(len(bars_5m) - 1, -1, -1):
-        row = bars_5m.iloc[i]
-        row_ts = bars_5m.index[i]
-        if current_ts is not None and row_ts + pd.Timedelta(minutes=5) > current_ts:
-            continue  # bar not yet complete relative to current 1m bar
-        if direction == "down" and row["Close"] < row["Open"]:
-            return row
-        if direction == "up" and row["Close"] > row["Open"]:
-            return row
+    if period_minutes > 1:
+        if current_ts is not None:
+            if current_ts.tzinfo is not None and mnq_1m_recent.index.tz is None:
+                current_ts = current_ts.tz_localize(None)
+            elif current_ts.tzinfo is None and mnq_1m_recent.index.tz is not None:
+                current_ts = current_ts.tz_localize(mnq_1m_recent.index.tz)
+        _agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+        bars = mnq_1m_recent.resample(f"{period_minutes}min", label="left").agg(_agg).dropna(subset=["Open"])
+        for i in range(len(bars) - 1, -1, -1):
+            row = bars.iloc[i]
+            row_ts = bars.index[i]
+            if current_ts is not None and row_ts + pd.Timedelta(minutes=period_minutes) > current_ts:
+                continue
+            if _matches(row):
+                return row
+    else:
+        for i in range(len(mnq_1m_recent) - 1, -1, -1):
+            row = mnq_1m_recent.iloc[i]
+            if current_ts is not None:
+                row_ts = mnq_1m_recent.index[i]
+                if current_ts.tzinfo is not None and row_ts.tzinfo is None:
+                    row_ts = row_ts.tz_localize(current_ts.tzinfo)
+                elif current_ts.tzinfo is None and row_ts.tzinfo is not None:
+                    current_ts_naive = current_ts.tz_localize(None)
+                    if row_ts == current_ts_naive:
+                        continue
+                if row_ts == current_ts:
+                    continue
+            if _matches(row):
+                return row
 
     return None
 
@@ -297,12 +288,13 @@ def run_trend(
             # Secondary takes priority if surpassed (it's farther, confirms strong move).
             if cautious_secondary is not None and _surpassed(cautious_secondary):
                 if _close_beyond(cautious_secondary):
-                    _ref1 = _last_same_dir_bar(mnq_1m_recent, bar_time_str, direction)
+                    _ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
                     position["active"]["cautious"] = "secondary"
                     position["active"]["cautious_break_price"] = _arm_break_price(_ref1, direction)
                     save_position(position)
-                    return {"kind": "cautious-armed", "time": now.isoformat(),
-                            "price": bar_close, "level": "secondary"}
+                    return {"kind": "new-stop-exit", "time": now.isoformat(),
+                            "price": position["active"]["cautious_break_price"] or bar_close, "level": "secondary",
+                            "cautious_break_price": position["active"]["cautious_break_price"]}
                 else:
                     # wick-only reach of secondary: wait for 1m arm-confirm bar
                     position["active"]["cautious"] = "secondary_surpassed"
@@ -311,12 +303,13 @@ def run_trend(
 
             if cautious_initial is not None and _surpassed(cautious_initial):
                 if _close_beyond(cautious_initial):
-                    _ref5 = _last_same_dir_5m_bar(mnq_1m_recent, bar_time_str, direction)
+                    _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
                     position["active"]["cautious"] = "initial"
                     position["active"]["cautious_break_price"] = _arm_break_price(_ref5, direction)
                     save_position(position)
-                    return {"kind": "cautious-armed", "time": now.isoformat(),
-                            "price": bar_close, "level": "initial"}
+                    return {"kind": "new-stop-exit", "time": now.isoformat(),
+                            "price": position["active"]["cautious_break_price"] or bar_close, "level": "initial",
+                            "cautious_break_price": position["active"]["cautious_break_price"]}
                 else:
                     # wick-only reach of initial: wait for 1m arm-confirm bar
                     position["active"]["cautious"] = "initial_surpassed"
@@ -330,12 +323,13 @@ def run_trend(
             # If secondary was reached this bar, upgrade immediately.
             if cautious_secondary is not None and _surpassed(cautious_secondary):
                 if _close_beyond(cautious_secondary):
-                    _ref1 = _last_same_dir_bar(mnq_1m_recent, bar_time_str, direction)
+                    _ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
                     position["active"]["cautious"] = "secondary"
                     position["active"]["cautious_break_price"] = _arm_break_price(_ref1, direction)
                     save_position(position)
-                    return {"kind": "cautious-armed", "time": now.isoformat(),
-                            "price": bar_close, "level": "secondary"}
+                    return {"kind": "new-stop-exit", "time": now.isoformat(),
+                            "price": position["active"]["cautious_break_price"] or bar_close, "level": "secondary",
+                            "cautious_break_price": position["active"]["cautious_break_price"]}
                 else:
                     position["active"]["cautious"] = "secondary_surpassed"
                     save_position(position)
@@ -344,12 +338,13 @@ def run_trend(
             if cautious_initial is not None:
                 _opp_close = (bar_close < bar_open) if direction == "up" else (bar_close > bar_open)
                 if _opp_close and not _close_beyond(cautious_initial):
-                    _ref5 = _last_same_dir_5m_bar(mnq_1m_recent, bar_time_str, direction)
+                    _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
                     position["active"]["cautious"] = "initial"
                     position["active"]["cautious_break_price"] = _arm_break_price(_ref5, direction)
                     save_position(position)
-                    return {"kind": "cautious-armed", "time": now.isoformat(),
-                            "price": bar_close, "level": "initial"}
+                    return {"kind": "new-stop-exit", "time": now.isoformat(),
+                            "price": position["active"]["cautious_break_price"] or bar_close, "level": "initial",
+                            "cautious_break_price": position["active"]["cautious_break_price"]}
 
             return None
 
@@ -358,12 +353,13 @@ def run_trend(
             # Upgrade to secondary if secondary level is now reached.
             if cautious_secondary is not None and _surpassed(cautious_secondary):
                 if _close_beyond(cautious_secondary):
-                    _ref1 = _last_same_dir_bar(mnq_1m_recent, bar_time_str, direction)
+                    _ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
                     position["active"]["cautious"] = "secondary"
                     position["active"]["cautious_break_price"] = _arm_break_price(_ref1, direction)
                     save_position(position)
-                    return {"kind": "cautious-armed", "time": now.isoformat(),
-                            "price": bar_close, "level": "secondary"}
+                    return {"kind": "new-stop-exit", "time": now.isoformat(),
+                            "price": position["active"]["cautious_break_price"] or bar_close, "level": "secondary",
+                            "cautious_break_price": position["active"]["cautious_break_price"]}
                 else:
                     # wick-only reach of secondary: wait for 1m arm-confirm bar
                     position["active"]["cautious"] = "secondary_surpassed"
@@ -381,7 +377,9 @@ def run_trend(
                     _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                     save_position(position)
                     save_hypothesis(hypothesis)
-                    return _market_close_signal(now, bar_mid, reason="cautious-initial-break", close_reason=_cr1)
+                    return {"kind": "stop-exit", "time": now.isoformat(),
+                            "price": float(_break_price), "reason": "cautious-initial-break",
+                            "close_reason": _cr1}
 
             return None
 
@@ -390,12 +388,13 @@ def run_trend(
             if cautious_secondary is not None:
                 _opp_close = (bar_close < bar_open) if direction == "up" else (bar_close > bar_open)
                 if (_opp_close and not _close_beyond(cautious_secondary)) or _close_beyond(cautious_secondary):
-                    _ref1 = _last_same_dir_bar(mnq_1m_recent, bar_time_str, direction)
+                    _ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
                     position["active"]["cautious"] = "secondary"
                     position["active"]["cautious_break_price"] = _arm_break_price(_ref1, direction)
                     save_position(position)
-                    return {"kind": "cautious-armed", "time": now.isoformat(),
-                            "price": bar_close, "level": "secondary"}
+                    return {"kind": "new-stop-exit", "time": now.isoformat(),
+                            "price": position["active"]["cautious_break_price"] or bar_close, "level": "secondary",
+                            "cautious_break_price": position["active"]["cautious_break_price"]}
             return None
 
         # ---- 3c: secondary cautious — 20m bar-body for ATH levels, else snapshot body-high ----
@@ -430,7 +429,9 @@ def run_trend(
                         _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                         save_position(position)
                         save_hypothesis(hypothesis)
-                        return _market_close_signal(now, bar_mid, reason="cautious-secondary-break", close_reason=_cr2)
+                        return {"kind": "stop-exit", "time": now.isoformat(),
+                                "price": float(_break_price), "reason": "cautious-secondary-break",
+                                "close_reason": _cr2}
 
         return None
 

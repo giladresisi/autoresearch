@@ -163,7 +163,7 @@ class TestCautiousArming:
         recent = make_recent_bars(closes=[100, 111], opens=[99, 100])
         result = run_trend(NOW, bar, recent)
         assert result is not None
-        assert result["kind"] == "cautious-armed"
+        assert result["kind"] == "new-stop-exit"
         pos = load_position()
         assert pos["active"]["cautious"] == "initial"
 
@@ -188,7 +188,7 @@ class TestCautiousArming:
         recent = make_recent_bars(closes=[95, 89], opens=[96, 95])
         result = run_trend(NOW, bar, recent)
         assert result is not None
-        assert result["kind"] == "cautious-armed"
+        assert result["kind"] == "new-stop-exit"
         pos = load_position()
         assert pos["active"]["cautious"] == "initial"
 
@@ -241,77 +241,87 @@ class TestCautiousYes:
         assert result is None
 
     def test_cautious_yes_reversal_short(self):
-        """direction=down, cautious="yes", last bullish bar High=91, bar.high=91 → cautious-1m-break."""
+        """direction=down, cautious="yes", body-high of last bearish bar=89, bar.high=91 → stop-exit."""
         from trend import run_trend
-        from smt_state import load_hypothesis
+        from smt_state import load_hypothesis, load_position, save_position
 
         self._setup_cautious_yes(direction="down", cautious_price=90.0)
-        # bar.high=91; recent[1] is bullish (open=88, close=89, High=91); bar.high >= 91 → break
+        # Set cautious_break_price to body-high of last bearish bar:
+        # recent[0]: open=89, close=88 (bearish) → body-high=89
+        pos = load_position()
+        pos["active"]["cautious_break_price"] = 89.0
+        save_position(pos)
         bar = make_1m_bar(open_=88, high=91, low=86, close=89)
         recent = make_recent_bars(closes=[88, 89], opens=[89, 88])
         result = run_trend(NOW, bar, recent)
         assert result is not None
-        assert result["kind"] == "market-close"
-        assert result["reason"] == "cautious-1m-break"
+        assert result["kind"] == "stop-exit"
+        assert result["reason"] == "cautious-secondary-break"
+        assert result["price"] == 89.0
         hyp = load_hypothesis()
         assert hyp["direction"] == "none"
 
     def test_cautious_yes_1m_break_long(self):
-        """direction=up, cautious="yes", last bearish bar Low=115, bar.low=114 → cautious-1m-break.
+        """direction=up, cautious="yes", body-low of last bullish bar=115, bar.low=114 → stop-exit.
 
-        For direction=up, cautious_price is above entry (e.g. 110). The reversal check fires when
-        bar.low <= cautious_price, so we must keep bar.low > cautious_price to avoid triggering
-        reversal first. We set cautious_price=110, and the 1m-break reference bar has Low=115
-        (above cautious_price). bar.low=114 breaks below that recent bearish bar's Low but
-        stays above cautious_price, so only cautious-1m-break fires.
+        For direction=up the break fires when bar.low < cautious_break_price (body-low of last
+        bullish bar). cautious_price=110 kept above bar.low=114 so the cautious-price check
+        doesn't fire first; only the stop-exit break fires.
         """
         from trend import run_trend
-        from smt_state import load_hypothesis
+        from smt_state import load_hypothesis, load_position, save_position
 
         self._setup_cautious_yes(direction="up", cautious_price=110.0)
+        # Set cautious_break_price to body-low of a recent bullish bar: min(Open=115,Close=120)=115
+        pos = load_position()
+        pos["active"]["cautious_break_price"] = 115.0
+        save_position(pos)
 
-        # recent bars: first bullish, second bearish (Low=115 — above cautious_price=110)
+        # recent: bullish bar (open=115, close=120, low=113) and bearish bar; bar.low=114 < 115
         recent = make_recent_bars(
-            closes=[118, 113],
-            opens=[112, 120],
+            closes=[120, 113],
+            opens=[115, 120],
             highs=[122, 122],
-            lows=[111, 115],
+            lows=[113, 111],
         )
-        # current bar: bar.low=114 <= last bearish Low=115; bar.low=114 > cautious_price=110
         bar = make_1m_bar(open_=116, high=119, low=114, close=117)
         result = run_trend(NOW, bar, recent)
         assert result is not None
-        assert result["kind"] == "market-close"
-        assert result["reason"] == "cautious-1m-break"
+        assert result["kind"] == "stop-exit"
+        assert result["reason"] == "cautious-secondary-break"
+        assert result["price"] == 115.0
         hyp = load_hypothesis()
         assert hyp["direction"] == "none"
 
     def test_cautious_yes_1m_break_short(self):
-        """direction=down, cautious="yes", last bullish bar High=85, bar.high=86 → cautious-1m-break.
+        """direction=down, cautious="yes", body-high of last bearish bar=88, bar.high=89 → stop-exit.
 
-        For direction=down, cautious_price is below entry (e.g. 90). The reversal check fires when
-        bar.high >= cautious_price, so we keep bar.high < cautious_price. We set cautious_price=90,
-        last bullish bar has High=85 (below cautious_price). bar.high=86 breaks above that bar's
-        High but stays below cautious_price=90.
+        For direction=down the break fires when bar.high > cautious_break_price (body-high of
+        last bearish bar). cautious_price=90 kept above bar.high=89 so the cautious-price check
+        doesn't fire first; only the stop-exit break fires.
         """
         from trend import run_trend
-        from smt_state import load_hypothesis
+        from smt_state import load_hypothesis, load_position, save_position
 
         self._setup_cautious_yes(direction="down", cautious_price=90.0)
+        # Set cautious_break_price to body-high of a recent bearish bar: max(Open=88,Close=83)=88
+        pos = load_position()
+        pos["active"]["cautious_break_price"] = 88.0
+        save_position(pos)
 
-        # recent bars: first bearish, second bullish (High=85 — below cautious_price=90)
+        # recent: bearish bar (open=88, close=83) and bullish bar; bar.high=89 > 88
         recent = make_recent_bars(
             closes=[83, 87],
             opens=[88, 82],
             highs=[89, 85],
             lows=[81, 80],
         )
-        # current bar: bar.high=86 >= last bullish High=85; bar.high=86 < cautious_price=90
-        bar = make_1m_bar(open_=84, high=86, low=82, close=83)
+        bar = make_1m_bar(open_=84, high=89, low=82, close=83)
         result = run_trend(NOW, bar, recent)
         assert result is not None
-        assert result["kind"] == "market-close"
-        assert result["reason"] == "cautious-1m-break"
+        assert result["kind"] == "stop-exit"
+        assert result["reason"] == "cautious-secondary-break"
+        assert result["price"] == 88.0
         hyp = load_hypothesis()
         assert hyp["direction"] == "none"
 

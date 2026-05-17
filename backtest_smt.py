@@ -1417,7 +1417,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             kind = evt.get("kind", "")
             if kind in ("limit-entry-filled", "market-entry", "bos-entry", "stop-entry-filled"):
                 entry_event = evt
-            elif kind in ("market-close", "stopped-out", "end-of-session") and entry_event is not None:
+            elif kind in ("market-close", "stopped-out", "end-of-session", "stop-exit") and entry_event is not None:
                 exit_reason = kind
                 direction = entry_event.get("direction", "up")
                 direction_sign = 1 if direction == "up" else -1
