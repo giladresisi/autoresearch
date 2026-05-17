@@ -1342,14 +1342,14 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                 for _si in range(len(_mnq_min)):
                     _now = _mnq_min.index[_si]
                     _h = _mcH[_si]; _l = _mcL[_si]; _c = _mC[_si]; _v = _mcV[_si]
-                    _mnq_row = pd.Series({"Open": _mo, "High": _h, "Low": _l, "Close": _c, "Volume": _v})
+                    _mnq_row = pd.Series({"Open": _mo, "High": _mH[_si], "Low": _mL[_si], "Close": _c, "Volume": _v})
                     _j = int(_np.searchsorted(_ets, _mts[_si], side="right")) - 1
                     if _j >= 0:
                         _eh = _ecH[_j]; _el = _ecL[_j]; _ec = _eC[_j]; _ev = _ecV[_j]
                     else:
                         _eh = _eo; _el = _eo; _ec = _eo; _ev = 0.0
                     _mes_row = pd.Series({"Open": _eo, "High": _eh, "Low": _el, "Close": _ec, "Volume": _ev})
-                    _fm[_nb_mnq] = [_mo, _h, _l, _c, _v]
+                    _fm[_nb_mnq] = [_mo, _mH[_si], _mL[_si], _c, _v]
                     _fe[_nb_mes] = [_eo, _eh, _el, _ec, _ev]
                     _today_mnq = pd.DataFrame(_fm, index=_idx_mnq, columns=_cols)
                     _today_mes = pd.DataFrame(_fe, index=_idx_mes, columns=_cols)

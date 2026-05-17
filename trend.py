@@ -449,6 +449,7 @@ def run_trend(
             hypothesis["direction"] = "none"
             position["confirmation_bar"] = {}
             position["stop_entry"] = ""
+            position["session_mid_crosses"] = position.get("session_mid_crosses", 0) + 1
             save_position(position)
             save_hypothesis(hypothesis)
             return {

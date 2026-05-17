@@ -148,6 +148,77 @@ def _on_bar(bar, mes_partial) -> None:
     _mes_partial_1m = mes_partial
     if _smtv2_pipeline != "v2":
         _process(bar)
+        return
+
+    # V2: call session_pipeline at 1s resolution so fill checks and entry detection
+    # happen intra-bar (same frequency as real order execution), not just at completed bars.
+    if _smtv2_dispatcher is None:
+        return
+    _bar_ts = _bar_timestamp(bar)
+    if _bar_ts.time() < SESSION_OPEN:
+        return
+
+    _mnq_df = _ib_source.mnq_1m_df if _ib_source is not None else pd.DataFrame()
+    _mes_df = _ib_source.mes_1m_df if _ib_source is not None else pd.DataFrame()
+    if _mnq_df.empty:
+        return
+
+    # Session init is idempotent; safe to call every second.
+    _smtv2_dispatcher.on_session_start(_bar_ts, _mnq_df, _mes_df)
+    if _smtv2_dispatcher._pipeline is None:
+        return
+
+    # Build mnq_bar_row as pd.Series (session_pipeline expects this type).
+    mnq_bar_row = pd.Series({
+        "Open": bar.Open, "High": bar.High, "Low": bar.Low,
+        "Close": bar.Close, "Volume": bar.Volume,
+    })
+
+    # Build today_mnq: completed bars + the current partial minute as its last row.
+    _today = _bar_ts.date()
+    _today_mnq_base = _mnq_df[_mnq_df.index.date == _today]
+    _minute_ts = _bar_ts.floor("1min")
+    _partial_mnq = pd.DataFrame(
+        [[bar.Open, bar.High, bar.Low, bar.Close, bar.Volume]],
+        columns=["Open", "High", "Low", "Close", "Volume"],
+        index=pd.DatetimeIndex([_minute_ts]),
+    )
+    if _minute_ts not in _today_mnq_base.index:
+        today_mnq = pd.concat([_today_mnq_base, _partial_mnq])
+    else:
+        today_mnq = _today_mnq_base.copy()
+        today_mnq.loc[_minute_ts] = _partial_mnq.iloc[0]
+
+    # Build mes_bar_row and today_mes from the MES partial accumulator.
+    _today_mes_base = _mes_df[_mes_df.index.date == _today]
+    if mes_partial is not None:
+        mes_bar_row = pd.Series({
+            "Open": mes_partial["open"], "High": mes_partial["high"],
+            "Low": mes_partial["low"], "Close": mes_partial["close"],
+            "Volume": mes_partial["volume"],
+        })
+        _mes_minute_ts = mes_partial.get("minute_ts")
+        if _mes_minute_ts is not None:
+            if not isinstance(_mes_minute_ts, pd.Timestamp):
+                _mes_minute_ts = pd.Timestamp(_mes_minute_ts, tz="America/New_York")
+            _partial_mes = pd.DataFrame(
+                [[mes_partial["open"], mes_partial["high"], mes_partial["low"],
+                  mes_partial["close"], mes_partial["volume"]]],
+                columns=["Open", "High", "Low", "Close", "Volume"],
+                index=pd.DatetimeIndex([_mes_minute_ts]),
+            )
+            if _mes_minute_ts not in _today_mes_base.index:
+                today_mes = pd.concat([_today_mes_base, _partial_mes])
+            else:
+                today_mes = _today_mes_base.copy()
+                today_mes.loc[_mes_minute_ts] = _partial_mes.iloc[0]
+        else:
+            today_mes = _today_mes_base
+    else:
+        mes_bar_row = pd.Series(dtype=float)
+        today_mes = _today_mes_base
+
+    _smtv2_dispatcher._pipeline.on_1m_bar(_bar_ts, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
 
 
 def _bar_timestamp(bar) -> pd.Timestamp:
@@ -1020,11 +1091,8 @@ def main() -> None:
             finally:
                 _hypothesis_generated = True
 
-        # Step 3: V2 dispatcher bar dispatch — emits new-hypothesis and signals.
-        if _smtv2_dispatcher is not None:
-            _mnq_bar = _mnq_df.iloc[-1] if not _mnq_df.empty else pd.Series(dtype=float)
-            _mes_bar = _mes_df.iloc[-1] if not _mes_df.empty else pd.Series(dtype=float)
-            _smtv2_dispatcher.on_1m_bar(_bar_ts_v2, _mnq_bar, _mes_bar, _mnq_df, _mes_df)
+        # Step 3: V2 dispatcher bar dispatch is handled per-second in _on_bar (1s resolution).
+        # _on_bar_1m_complete only handles session init (step 1 above) and V1 logic below.
 
         # Step 4: V1 only — ongoing hypothesis evaluation.
         if _hypothesis_manager is not None:

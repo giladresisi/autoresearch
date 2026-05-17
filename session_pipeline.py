@@ -41,6 +41,13 @@ class SessionPipeline:
         # Tracks (cautious_price_initial, cautious_price_secondary) of last emitted
         # new-hypothesis. Used to suppress redundant signals above session_ath.
         self._last_hyp_cautious: tuple[str, str] = ("", "")
+        self._last_5m_processed: pd.Timestamp | None = None
+        self._last_trend_hyp_1m: pd.Timestamp | None = None
+        # When True, the next on_1m_bar call runs full entry logic regardless of the
+        # 5m boundary gate. Set after a stop-out or market-close exit so the strategy
+        # can immediately re-evaluate a new entry rather than waiting until the next
+        # 5m boundary (which is how the 1m backtest behaves after a completed bar).
+        self._force_entry_eval: bool = False
 
     def on_session_start(
         self,
@@ -259,12 +266,17 @@ class SessionPipeline:
                     _hyp_snap = _smt_state.load_hypothesis()
                     _hyp_snap["direction"] = "none"
                     _smt_state.save_hypothesis(_hyp_snap)
-                    _level_hyp_divs = _hyp_mod.run_hypothesis(
-                        now, today_mnq, today_mes,
-                        self._hist_mnq_1m, self._hist_mes_1m,
-                        hist_1hr=self._hist_1hr, hist_4hr=self._hist_4hr,
-                        skip_position_reset=True,
-                    )
+                    _cur_1m = now.floor("1min")
+                    if _cur_1m != self._last_trend_hyp_1m:
+                        self._last_trend_hyp_1m = _cur_1m
+                        _level_hyp_divs = _hyp_mod.run_hypothesis(
+                            now, today_mnq, today_mes,
+                            self._hist_mnq_1m, self._hist_mes_1m,
+                            hist_1hr=self._hist_1hr, hist_4hr=self._hist_4hr,
+                            skip_position_reset=True,
+                        )
+                    else:
+                        _level_hyp_divs = []
                     _new_dir = _smt_state.load_hypothesis().get("direction", "none")
                     if _new_dir == "none":
                         # Hypothesis couldn't form after level sweep. Two cases:
@@ -364,12 +376,17 @@ class SessionPipeline:
                 # Bar straddled the fixed session_ath (09:20 ATH) with direction not
                 # "down". First time into uncharted territory — emit trend-broken,
                 # re-run hypothesis (will form with direction="down"), cancel limits.
-                _ath_hyp_divs = _hyp_mod.run_hypothesis(
-                    now, today_mnq, today_mes,
-                    self._hist_mnq_1m, self._hist_mes_1m,
-                    hist_1hr=self._hist_1hr, hist_4hr=self._hist_4hr,
-                    skip_position_reset=True,
-                )
+                _cur_1m = now.floor("1min")
+                if _cur_1m != self._last_trend_hyp_1m:
+                    self._last_trend_hyp_1m = _cur_1m
+                    _ath_hyp_divs = _hyp_mod.run_hypothesis(
+                        now, today_mnq, today_mes,
+                        self._hist_mnq_1m, self._hist_mes_1m,
+                        hist_1hr=self._hist_1hr, hist_4hr=self._hist_4hr,
+                        skip_position_reset=True,
+                    )
+                else:
+                    _ath_hyp_divs = []
                 _new_dir = _smt_state.load_hypothesis().get("direction", "none")
                 _tb_sig = {
                     "kind":             "trend-broken",
@@ -407,12 +424,17 @@ class SessionPipeline:
                 # Already above session_ath with direction="down". The running high
                 # was straddled — cautious prices may have shifted. Re-run hypothesis
                 # and emit new-hypothesis ONLY if cautious prices changed. No trend-broken.
-                _dath_hyp_divs = _hyp_mod.run_hypothesis(
-                    now, today_mnq, today_mes,
-                    self._hist_mnq_1m, self._hist_mes_1m,
-                    hist_1hr=self._hist_1hr, hist_4hr=self._hist_4hr,
-                    skip_position_reset=True,
-                )
+                _cur_1m = now.floor("1min")
+                if _cur_1m != self._last_trend_hyp_1m:
+                    self._last_trend_hyp_1m = _cur_1m
+                    _dath_hyp_divs = _hyp_mod.run_hypothesis(
+                        now, today_mnq, today_mes,
+                        self._hist_mnq_1m, self._hist_mes_1m,
+                        hist_1hr=self._hist_1hr, hist_4hr=self._hist_4hr,
+                        skip_position_reset=True,
+                    )
+                else:
+                    _dath_hyp_divs = []
                 for _d in (_dath_hyp_divs or []):
                     if _d.get("kind") == "new-hypothesis":
                         _new_c = (
@@ -444,9 +466,11 @@ class SessionPipeline:
                     self._emit(_cancel_sig)
                     events.append(_cancel_sig)
 
-        is_5m = (now.minute % 5 == 0)
+        _this_5m = now.floor("5min")
+        is_5m = (now.minute % 5 == 0) and (_this_5m != self._last_5m_processed)
 
         if is_5m:
+            self._last_5m_processed = _this_5m
             # Fix #4: all-day MNQ/MES slices (midnight to now).
             # Fix #3: pass hist_1hr and hist_4hr.
             hyp_divs = _hyp_mod.run_hypothesis(
@@ -478,7 +502,12 @@ class SessionPipeline:
             _hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
 
         # Fix #1: run_strategy on every 1m bar; full entry logic only at 5m boundaries.
-        strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent, fill_check_only=not is_5m)
+        # After an exit (stopped-out / market-close), also run full entry logic on the
+        # very next bar so the strategy can re-evaluate immediately -- matching the 1m
+        # backtest cadence where each completed bar triggers a fresh entry check.
+        _run_full_entry = is_5m or self._force_entry_eval
+        self._force_entry_eval = False
+        strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent, fill_check_only=not _run_full_entry)
         if strat_sig is not None:
             strat_sig.setdefault("direction", _hyp_dir)
             # Emit cancel when strategy's market-entry overwrites a pending limit that
@@ -495,6 +524,8 @@ class SessionPipeline:
                 events.append(_cancel_sig)
             self._emit(strat_sig)
             events.append(strat_sig)
+            if strat_sig["kind"] in {"stopped-out", "market-close"}:
+                self._force_entry_eval = True
 
         self._write_bar_state(now, today_mnq)
         return events
