@@ -366,9 +366,23 @@ def run_trend(
                     save_position(position)
                     return None
 
-            # Break: any 1m bar that crosses the body-high (direction=down) or
-            # body-low (direction=up) of the last same-direction 5m bar snapshotted
-            # at the moment initial cautious was armed.
+            # Trail the stop every 5m: if a newer completed 5m same-direction bar has a
+            # tighter body bound than the stored break price, slide it and notify dispatch
+            # to move the IB stop order.
+            _trail_ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
+            _trail_price5 = _arm_break_price(_trail_ref5, direction)
+            _trail_moved = False
+            if _trail_price5 is not None:
+                _cur_cbp = active.get("cautious_break_price")
+                if _cur_cbp is not None:
+                    _tighter = (direction == "up"   and _trail_price5 > float(_cur_cbp)) or \
+                               (direction == "down" and _trail_price5 < float(_cur_cbp))
+                    if _tighter:
+                        active["cautious_break_price"] = _trail_price5
+                        save_position(position)
+                        _trail_moved = True
+
+            # Break check uses the potentially-updated cautious_break_price.
             _break_price = active.get("cautious_break_price")
             if _break_price is not None:
                 _broke = (bar_high > float(_break_price)) if direction == "down" \
@@ -380,6 +394,11 @@ def run_trend(
                     return {"kind": "stop-exit", "time": now.isoformat(),
                             "price": float(_break_price), "reason": "cautious-initial-break",
                             "close_reason": _cr1}
+
+            if _trail_moved:
+                return {"kind": "move-stop-exit", "time": now.isoformat(),
+                        "price": bar_close, "cautious_break_price": active["cautious_break_price"],
+                        "level": "initial"}
 
             return None
 
@@ -418,9 +437,22 @@ def run_trend(
                             save_hypothesis(hypothesis)
                             return _market_close_signal(now, bar_mid, reason=f"cautious-{_conf_minutes}m-break", close_reason=_cr2)
             else:
-                # Break: any 1m bar that crosses the body-high (direction=down) or
-                # body-low (direction=up) of the last same-direction 1m bar snapshotted
-                # at the moment secondary cautious was armed.
+                # Trail the stop every 1m: if a newer completed 1m same-direction bar has a
+                # tighter body bound than the stored break price, slide it and notify dispatch.
+                _trail_ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
+                _trail_price1 = _arm_break_price(_trail_ref1, direction)
+                _trail_moved = False
+                if _trail_price1 is not None:
+                    _cur_cbp = active.get("cautious_break_price")
+                    if _cur_cbp is not None:
+                        _tighter = (direction == "up"   and _trail_price1 > float(_cur_cbp)) or \
+                                   (direction == "down" and _trail_price1 < float(_cur_cbp))
+                        if _tighter:
+                            active["cautious_break_price"] = _trail_price1
+                            save_position(position)
+                            _trail_moved = True
+
+                # Break check uses the potentially-updated cautious_break_price.
                 _break_price = active.get("cautious_break_price")
                 if _break_price is not None:
                     _broke = (bar_high > float(_break_price)) if direction == "down" \
@@ -432,6 +464,11 @@ def run_trend(
                         return {"kind": "stop-exit", "time": now.isoformat(),
                                 "price": float(_break_price), "reason": "cautious-secondary-break",
                                 "close_reason": _cr2}
+
+                if _trail_moved:
+                    return {"kind": "move-stop-exit", "time": now.isoformat(),
+                            "price": bar_close, "cautious_break_price": active["cautious_break_price"],
+                            "level": "secondary"}
 
         return None
 

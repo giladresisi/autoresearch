@@ -284,6 +284,14 @@ def dispatch(sig: dict) -> None:
         _log(sig)
         return
 
+    if kind == "move-stop-exit":
+        # Trailing stop update: slide the IB stop to the new tighter break price.
+        cbp = sig.get("cautious_break_price")
+        if cbp is not None:
+            update_stop_loss(float(cbp), reason="move-stop-exit")
+        _log(sig)
+        return
+
     if kind == "stop-entry-cancelled":
         # position.json already cleared by the pipeline before emitting this signal;
         # bypass the stop_entry guard and send the broker cancel directly.

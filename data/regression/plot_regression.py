@@ -334,6 +334,7 @@ OTHER_MARKER_STYLE = {
     "new-stop-entry":    dict(symbol="triangle-right",      color="#2196F3", size=13),
     "move-stop-entry":   dict(symbol="triangle-right-open", color="#9C27B0", size=13),
     "new-stop-exit":     dict(symbol="triangle-left",       color="#FF5722", size=13),
+    "move-stop-exit":    dict(symbol="triangle-left-open",  color="#FF5722", size=13),
     "stop-entry-filled": dict(symbol="star",                color="#4CAF50", size=17),
     "market-entry":       dict(symbol="circle",              color="#FF9800", size=15),
     "trend-broken":       dict(symbol="diamond-open",        color="#FF9800", size=13),
