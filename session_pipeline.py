@@ -43,11 +43,12 @@ class SessionPipeline:
         self._last_hyp_cautious: tuple[str, str] = ("", "")
         self._last_5m_processed: pd.Timestamp | None = None
         self._last_trend_hyp_1m: pd.Timestamp | None = None
-        # When True, the next on_1m_bar call runs full entry logic regardless of the
-        # 5m boundary gate. Set after a stop-out or market-close exit so the strategy
-        # can immediately re-evaluate a new entry rather than waiting until the next
-        # 5m boundary (which is how the 1m backtest behaves after a completed bar).
-        self._force_entry_eval: bool = False
+        # Earliest bar timestamp at which force-eval fires, or None if not armed.
+        # market-close  → floor("1min")        fires on the very next bar (same or new minute)
+        # stopped-out   → floor("1min") + 1min fires only once a new minute starts
+        # The minute gate prevents the 1s-mode cascade (re-fill + re-stop within the
+        # same second) while preserving normal 1m-mode re-entry cadence.
+        self._force_entry_eval_after: pd.Timestamp | None = None
 
     def on_session_start(
         self,
@@ -502,11 +503,16 @@ class SessionPipeline:
             _hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
 
         # Fix #1: run_strategy on every 1m bar; full entry logic only at 5m boundaries.
-        # After an exit (stopped-out / market-close), also run full entry logic on the
-        # very next bar so the strategy can re-evaluate immediately -- matching the 1m
-        # backtest cadence where each completed bar triggers a fresh entry check.
-        _run_full_entry = is_5m or self._force_entry_eval
-        self._force_entry_eval = False
+        # After an exit, force-eval re-opens the entry gate before the next 5m boundary.
+        # market-close fires immediately; stopped-out waits for the next minute boundary
+        # to prevent the 1s-mode cascade (re-fill + re-stop within the same second).
+        _force_eval_now = (
+            self._force_entry_eval_after is not None
+            and now >= self._force_entry_eval_after
+        )
+        _run_full_entry = is_5m or _force_eval_now
+        if _force_eval_now:
+            self._force_entry_eval_after = None
         strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent, fill_check_only=not _run_full_entry)
         if strat_sig is not None:
             strat_sig.setdefault("direction", _hyp_dir)
@@ -524,8 +530,10 @@ class SessionPipeline:
                 events.append(_cancel_sig)
             self._emit(strat_sig)
             events.append(strat_sig)
-            if strat_sig["kind"] in {"stopped-out", "market-close"}:
-                self._force_entry_eval = True
+            if strat_sig["kind"] == "market-close":
+                self._force_entry_eval_after = now.floor("1min")
+            elif strat_sig["kind"] == "stopped-out":
+                self._force_entry_eval_after = now.floor("1min") + pd.Timedelta(minutes=1)
 
             # Same-bar stop check for LONG (up) entries: when entry fills on bar N,
             # the same bar's Low may already breach the protective stop. In 1s
@@ -555,7 +563,7 @@ class SessionPipeline:
                     }
                     self._emit(_sbsc_sig)
                     events.append(_sbsc_sig)
-                    self._force_entry_eval = True
+                    self._force_entry_eval_after = now.floor("1min") + pd.Timedelta(minutes=1)
 
         self._write_bar_state(now, today_mnq)
         return events
