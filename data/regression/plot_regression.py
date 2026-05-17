@@ -2,9 +2,14 @@
 Generate an interactive HTML chart for a regression date.
 Overlays SMT events, key price levels, and SMT div marks on MNQ 1m candlesticks.
 
+Always plots 1m OHLCV candles from data/MNQ_1m.parquet regardless of run mode,
+since the 1s simulation derives its synthetic bars from the same 1m source data.
+
 Usage (run from project root):
-    python data/regression/plot_regression.py           # reads first date from regression.md
-    python data/regression/plot_regression.py 2026-04-23
+    python data/regression/plot_regression.py                   # reads first date from regression.md
+    python data/regression/plot_regression.py 2026-04-23        # auto-detects 1s or 1m events
+    python data/regression/plot_regression.py 2026-04-23 1s     # force 1s events file
+    python data/regression/plot_regression.py 2026-04-23 1m     # force 1m events file
 """
 
 import json
@@ -25,16 +30,33 @@ def _date_from_regression_md() -> str:
 
 
 DATE = sys.argv[1] if len(sys.argv) > 1 else _date_from_regression_md()
+_mode_arg = sys.argv[2].lower() if len(sys.argv) > 2 else None
 
 MNQ_DOLLARS_PER_POINT_PER_CONTRACT = 2.0
 DEFAULT_CONTRACTS = 2
 
-# ── Price data ────────────────────────────────────────────────────────────────
+# ── Price data — always 1m bars (1s sim derives from this same source) ────────
 df = pd.read_parquet("data/MNQ_1m.parquet")
 day = df[df.index.date == pd.Timestamp(DATE).date()]
 
-# ── Events ────────────────────────────────────────────────────────────────────
-events_path = Path(f"data/regression/{DATE}/events.jsonl")
+# ── Events — auto-detect 1s vs 1m; prefer 1s when both exist ─────────────────
+_reg_dir = Path(f"data/regression/{DATE}")
+_path_1s = _reg_dir / "events_1s.jsonl"
+_path_1m = _reg_dir / "events.jsonl"
+
+if _mode_arg == "1s":
+    events_path = _path_1s
+    _run_mode = "1s"
+elif _mode_arg == "1m":
+    events_path = _path_1m
+    _run_mode = "1m"
+elif _path_1s.exists():
+    events_path = _path_1s
+    _run_mode = "1s"
+else:
+    events_path = _path_1m
+    _run_mode = "1m"
+
 events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
 for e in events:
     e["ts"] = pd.Timestamp(e["time"])
@@ -453,8 +475,9 @@ for kind, style in OTHER_MARKER_STYLE.items():
 session_hours = (last_t - first_t).total_seconds() / 3600
 chart_height  = max(700, min(1200, int(600 + session_hours * 40)))
 
+_mode_label = f" [{_run_mode}]" if _run_mode == "1s" else ""
 fig.update_layout(
-    title=f"SMT Events — MNQ {DATE} | {len(pairs)} trades | PnL: {'+'if sum(p['pnl_usd'] for p in pairs)>=0 else ''}${sum(p['pnl_usd'] for p in pairs):.0f}",
+    title=f"SMT Events{_mode_label} — MNQ {DATE} | {len(pairs)} trades | PnL: {'+'if sum(p['pnl_usd'] for p in pairs)>=0 else ''}${sum(p['pnl_usd'] for p in pairs):.0f}",
     xaxis_title="Time (ET)",
     yaxis_title="Price",
     xaxis_rangeslider_visible=False,
@@ -465,7 +488,8 @@ fig.update_layout(
     hovermode="x unified",
 )
 
-out = Path(f"data/regression/{DATE}/chart.html")
+_chart_name = "chart_1s.html" if _run_mode == "1s" else "chart.html"
+out = Path(f"data/regression/{DATE}/{_chart_name}")
 fig.write_html(str(out), include_plotlyjs="cdn")
 print(f"Chart: {out.resolve()}")
 webbrowser.open(out.resolve().as_uri())
