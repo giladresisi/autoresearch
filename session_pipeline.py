@@ -46,9 +46,16 @@ class SessionPipeline:
         # Earliest bar timestamp at which force-eval fires, or None if not armed.
         # market-close  → floor("1min")        fires on the very next bar (same or new minute)
         # stopped-out   → floor("1min") + 1min fires only once a new minute starts
+        # stop-exit     → floor("1min") + 1min same gate, but also sets _force_market_entry
+        # market-close  → floor("1min"),        also sets _force_market_entry
         # The minute gate prevents the 1s-mode cascade (re-fill + re-stop within the
         # same second) while preserving normal 1m-mode re-entry cadence.
         self._force_entry_eval_after: pd.Timestamp | None = None
+        # When True, the next force-eval will prefer a market-entry over a stop-entry.
+        # Set after stop-exit (shallow cautious sweep) and market-close (price may have
+        # moved past the stop-entry level before the next 5m boundary).
+        # NOT set after stopped-out (full stop hit — stop-entry confirmation is valuable).
+        self._force_market_entry: bool = False
 
     def on_session_start(
         self,
@@ -511,9 +518,14 @@ class SessionPipeline:
             and now >= self._force_entry_eval_after
         )
         _run_full_entry = is_5m or _force_eval_now
+        _prefer_mkt = False
         if _force_eval_now:
             self._force_entry_eval_after = None
-        strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent, fill_check_only=not _run_full_entry)
+            _prefer_mkt = self._force_market_entry
+            self._force_market_entry = False
+        strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent,
+                                             fill_check_only=not _run_full_entry,
+                                             prefer_market_entry=_prefer_mkt)
         if strat_sig is not None:
             strat_sig.setdefault("direction", _hyp_dir)
             # Emit cancel when strategy's market-entry overwrites a pending limit that
@@ -532,8 +544,12 @@ class SessionPipeline:
             events.append(strat_sig)
             if strat_sig["kind"] == "market-close":
                 self._force_entry_eval_after = now.floor("1min")
+                self._force_market_entry = True
             elif strat_sig["kind"] == "stopped-out":
                 self._force_entry_eval_after = now.floor("1min") + pd.Timedelta(minutes=1)
+            elif strat_sig["kind"] == "stop-exit":
+                self._force_entry_eval_after = now.floor("1min") + pd.Timedelta(minutes=1)
+                self._force_market_entry = True
 
             # Same-bar stop check for LONG (up) entries: when entry fills on bar N,
             # the same bar's Low may already breach the protective stop. In 1s
