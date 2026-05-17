@@ -820,6 +820,29 @@ def run_backtest(
                     state = "IN_TRADE"
                     entry_bar_count = 0
 
+                    # Same-bar stop check: the entry bar's extreme may already breach
+                    # the stop (entry fills on High, stop at Low for a long within the
+                    # same 1m bar). The standard path skips the stop check until bar
+                    # N+1; this replicates what 1s resolution sees in real time.
+                    _sbsc = manage_position(position, bar)
+                    if _sbsc == "exit_stop":
+                        _exit_fill = executor.place_exit(position, _sbsc, bar)
+                        trade, day_pnl_delta = _build_trade_record(
+                            position, _sbsc, bar, MNQ_PNL_PER_POINT,
+                            fill_price=_exit_fill.fill_price,
+                        )
+                        _stamp_hypothesis_fields(trade, position)
+                        trades.append(trade)
+                        day_pnl += day_pnl_delta
+                        equity_curve[-1] += day_pnl_delta
+                        _scan_state.scan_state = "IDLE"
+                        _scan_state.pending_direction = None
+                        _scan_state.anchor_close = None
+                        _scan_state.prior_trade_bars_held = 1
+                        position = None
+                        entry_bar_count = 0
+                        state = "IDLE"
+
         # Bulk-append completed session bars to strategy globals.
         _ses_mes_slice = mes_df[
             (mes_df.index >= mnq_session.index[0]) & (mes_df.index <= mnq_session.index[-1])
