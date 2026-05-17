@@ -453,7 +453,7 @@ def run_backtest(
         session_mask = (
             (_mnq_dates == day)
             & (_mnq_times >= _ses_start_t)
-            & (_mnq_times <= _ses_end_t)
+            & (_mnq_times < _ses_end_t)
         )
         mnq_session = mnq_df[session_mask]
         mes_session = mes_df[session_mask]
@@ -1247,18 +1247,18 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         session_end_ts = pd.Timestamp(f"{date} 16:00:00", tz="America/New_York")
 
         mnq_session_bars = mnq_1m_today[
-            (mnq_1m_today.index >= session_start_ts) & (mnq_1m_today.index <= session_end_ts)
+            (mnq_1m_today.index >= session_start_ts) & (mnq_1m_today.index < session_end_ts)
         ]
         mes_session_bars = mes_1m_today[
-            (mes_1m_today.index >= session_start_ts) & (mes_1m_today.index <= session_end_ts)
+            (mes_1m_today.index >= session_start_ts) & (mes_1m_today.index < session_end_ts)
         ]
 
         if mode == "1s":
             mnq_1s_sess = mnq_1s_all[
-                (mnq_1s_all.index >= session_start_ts) & (mnq_1s_all.index <= session_end_ts)
+                (mnq_1s_all.index >= session_start_ts) & (mnq_1s_all.index < session_end_ts)
             ]
             mes_1s_sess = mes_1s_all[
-                (mes_1s_all.index >= session_start_ts) & (mes_1s_all.index <= session_end_ts)
+                (mes_1s_all.index >= session_start_ts) & (mes_1s_all.index < session_end_ts)
             ]
             if mnq_1s_sess.empty:
                 continue
