@@ -117,15 +117,13 @@ def _arm_break_price(ref: Optional[pd.Series], direction: str) -> Optional[float
 def _floored_break_price(
     ref: Optional[pd.Series], direction: str, fill_price: Optional[float]
 ) -> Optional[float]:
-    """Like _arm_break_price but clamped so the stop never guarantees worse than entry.
-
-    For 'up': stop must be >= fill_price (can't place a stop-loss below what we paid).
-    For 'down': stop must be <= fill_price.
-    """
+    """Like _arm_break_price but floors the result to fill_price so the stop never moves against the position."""
     price = _arm_break_price(ref, direction)
     if price is None or not fill_price:
         return price
-    return max(price, fill_price) if direction == "up" else min(price, fill_price)
+    if direction == "up":
+        return max(price, fill_price)
+    return min(price, fill_price)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +165,7 @@ def run_trend(
     _lv2 = hypothesis.get("cautious_price_secondary_level", "") or ""
     _cr1 = f"1st-cautious ({_lv1})" if _lv1 else "1st-cautious"
     _cr2 = f"2nd-cautious ({_lv2})" if _lv2 else "2nd-cautious"
+    _ath_secondary = _lv2 in {"day_high", "week_high"}
 
     _liq_map = {l["name"]: l["price"] for l in daily.get("liquidities", [])
                 if l.get("kind") == "level"}
@@ -305,11 +304,14 @@ def run_trend(
                 if _close_beyond(cautious_secondary):
                     _ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
                     position["active"]["cautious"] = "secondary"
-                    position["active"]["cautious_break_price"] = _floored_break_price(_ref1, direction, _fill_price)
+                    _sec_cbp = _fill_price if _ath_secondary else _floored_break_price(_ref1, direction, _fill_price)
+                    position["active"]["cautious_break_price"] = _sec_cbp
                     save_position(position)
+                    if position["active"]["cautious_break_price"] is None:
+                        return None
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
-                            "price": position["active"]["cautious_break_price"] or bar_close, "level": "secondary",
-                            "cautious_break_price": position["active"]["cautious_break_price"]}
+                            "price": _sec_cbp, "level": "secondary",
+                            "cautious_break_price": _sec_cbp}
                 else:
                     # wick-only reach of secondary: wait for 1m arm-confirm bar
                     position["active"]["cautious"] = "secondary_surpassed"
@@ -322,8 +324,10 @@ def run_trend(
                     position["active"]["cautious"] = "initial"
                     position["active"]["cautious_break_price"] = _floored_break_price(_ref5, direction, _fill_price)
                     save_position(position)
+                    if position["active"]["cautious_break_price"] is None:
+                        return None  # deferred: trail will arm once price clears entry
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
-                            "price": position["active"]["cautious_break_price"] or bar_close, "level": "initial",
+                            "price": position["active"]["cautious_break_price"], "level": "initial",
                             "cautious_break_price": position["active"]["cautious_break_price"]}
                 else:
                     # wick-only reach of initial: wait for 1m arm-confirm bar
@@ -340,11 +344,14 @@ def run_trend(
                 if _close_beyond(cautious_secondary):
                     _ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
                     position["active"]["cautious"] = "secondary"
-                    position["active"]["cautious_break_price"] = _floored_break_price(_ref1, direction, _fill_price)
+                    _sec_cbp = _fill_price if _ath_secondary else _floored_break_price(_ref1, direction, _fill_price)
+                    position["active"]["cautious_break_price"] = _sec_cbp
                     save_position(position)
+                    if position["active"]["cautious_break_price"] is None:
+                        return None
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
-                            "price": position["active"]["cautious_break_price"] or bar_close, "level": "secondary",
-                            "cautious_break_price": position["active"]["cautious_break_price"]}
+                            "price": _sec_cbp, "level": "secondary",
+                            "cautious_break_price": _sec_cbp}
                 else:
                     position["active"]["cautious"] = "secondary_surpassed"
                     save_position(position)
@@ -357,8 +364,10 @@ def run_trend(
                     position["active"]["cautious"] = "initial"
                     position["active"]["cautious_break_price"] = _floored_break_price(_ref5, direction, _fill_price)
                     save_position(position)
+                    if position["active"]["cautious_break_price"] is None:
+                        return None  # deferred: trail will arm once price clears entry
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
-                            "price": position["active"]["cautious_break_price"] or bar_close, "level": "initial",
+                            "price": position["active"]["cautious_break_price"], "level": "initial",
                             "cautious_break_price": position["active"]["cautious_break_price"]}
 
             return None
@@ -366,16 +375,20 @@ def run_trend(
         # ---- 3b: initial cautious — break when price crosses snapshot body-high ----
         if cautious_state == "initial":
             # Upgrade to secondary if secondary level is now reached.
-            # Emits move-stop-exit (not new) since an initial stop order is already open.
             if cautious_secondary is not None and _surpassed(cautious_secondary):
                 if _close_beyond(cautious_secondary):
                     _ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
+                    _had_prior_stop = active.get("cautious_break_price") is not None
                     position["active"]["cautious"] = "secondary"
-                    position["active"]["cautious_break_price"] = _floored_break_price(_ref1, direction, _fill_price)
+                    _sec_cbp = _fill_price if _ath_secondary else _floored_break_price(_ref1, direction, _fill_price)
+                    position["active"]["cautious_break_price"] = _sec_cbp
                     save_position(position)
-                    return {"kind": "move-stop-exit", "time": now.isoformat(),
-                            "price": position["active"]["cautious_break_price"] or bar_close, "level": "secondary",
-                            "cautious_break_price": position["active"]["cautious_break_price"]}
+                    if position["active"]["cautious_break_price"] is None:
+                        return None
+                    return {"kind": "move-stop-exit" if _had_prior_stop else "new-stop-exit",
+                            "time": now.isoformat(),
+                            "price": _sec_cbp, "level": "secondary",
+                            "cautious_break_price": _sec_cbp}
                 else:
                     # wick-only reach of secondary: wait for 1m arm-confirm bar
                     position["active"]["cautious"] = "secondary_surpassed"
@@ -424,24 +437,35 @@ def run_trend(
                 _opp_close = (bar_close < bar_open) if direction == "up" else (bar_close > bar_open)
                 if (_opp_close and not _close_beyond(cautious_secondary)) or _close_beyond(cautious_secondary):
                     _ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
-                    # cautious_break_price is set only if we transitioned from "initial"
-                    # (which already placed a stop order); "no" or "initial_surpassed" paths
-                    # leave it None. Use move-stop-exit only when a prior stop exists.
                     _had_prior_stop = active.get("cautious_break_price") is not None
                     position["active"]["cautious"] = "secondary"
-                    position["active"]["cautious_break_price"] = _floored_break_price(_ref1, direction, _fill_price)
+                    _sec_cbp = _fill_price if _ath_secondary else _floored_break_price(_ref1, direction, _fill_price)
+                    position["active"]["cautious_break_price"] = _sec_cbp
                     save_position(position)
+                    if position["active"]["cautious_break_price"] is None:
+                        return None
                     return {"kind": "move-stop-exit" if _had_prior_stop else "new-stop-exit",
                             "time": now.isoformat(),
-                            "price": position["active"]["cautious_break_price"] or bar_close, "level": "secondary",
-                            "cautious_break_price": position["active"]["cautious_break_price"]}
+                            "price": _sec_cbp, "level": "secondary",
+                            "cautious_break_price": _sec_cbp}
             return None
 
         # ---- 3c: secondary cautious — 20m bar-body for ATH levels, else snapshot body-high ----
         if cautious_state in ("secondary", "yes"):
-            _ath_names = {"day_high", "week_high"}
-            if _lv2 in _ath_names:
-                # ATH-equivalent secondary level: always 20m confirmation.
+            if _ath_secondary:
+                # Break-even stop: IB stop sits at fill_price; exit only on full reversal to entry.
+                _cbp = active.get("cautious_break_price")
+                if _cbp is not None:
+                    _be_broken = (bar_high > float(_cbp)) if direction == "down" \
+                                 else (bar_low  < float(_cbp))
+                    if _be_broken:
+                        _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                        save_position(position)
+                        save_hypothesis(hypothesis)
+                        return {"kind": "stop-exit", "time": now.isoformat(),
+                                "price": float(_cbp), "reason": "cautious-secondary-break",
+                                "close_reason": _cr2}
+                # ATH secondary: wait for 20m candle confirmation; no trailing.
                 _conf_minutes = 20
                 ts = pd.Timestamp(now)
                 if ts.minute % _conf_minutes == 0:
