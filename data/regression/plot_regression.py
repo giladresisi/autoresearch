@@ -204,7 +204,7 @@ for e in events:
 if limit_x:
     fig.add_trace(go.Scatter(
         x=limit_x, y=limit_y,
-        mode="lines", name="limit price",
+        mode="lines", name="stop price",
         line=dict(dash="dot", color="#64B5F6", width=1.5),
         hoverinfo="skip",
     ))

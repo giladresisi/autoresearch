@@ -57,7 +57,14 @@ class SessionPipeline:
         # Bar close price when the current hypothesis was formed. Used to suppress
         # cooldown-path trend-broken when the level was already past at formation
         # (e.g. a 1s bar revisits a level the hypothesis already priced in).
+        # An aggression override fires trend-broken regardless when the current bar is
+        # more than _COOLDOWN_AGGRESSION_PTS beyond the formation offset from the level.
         self._hyp_formation_price: float | None = None
+        # Set of (level_name, direction) pairs absorbed without direction change in the
+        # non-cooldown level-swept path. Suppresses cooldown sweeps of the same level
+        # even when _hyp_formation_price wouldn't (belt-and-suspenders).
+        self._accepted_level_sweeps: set[tuple[str, str]] = set()
+        self._COOLDOWN_AGGRESSION_PTS = 15.0
 
     def on_session_start(
         self,
@@ -89,6 +96,8 @@ class SessionPipeline:
         else:
             self._session_ath = None
         self._last_hyp_cautious = ("", "")
+        self._hyp_formation_price = None
+        self._accepted_level_sweeps = set()
         save_global(_global)
 
         # Reset hypothesis and position only when there is no active trade.
@@ -239,15 +248,35 @@ class SessionPipeline:
                 # emit trend-broken to reset direction, but skip the immediate hypothesis
                 # re-run — it will form naturally at the next 5m boundary.
                 if trend_sig.get("cooldown_active"):
-                    _level_price_f = float(trend_sig.get("level_price", 0) or 0)
+                    _level_name_cd  = trend_sig.get("level_name", "")
+                    _level_price_cd = float(trend_sig.get("level_price", 0) or 0)
+                    # Suppress if the level was already priced in at hypothesis formation
+                    # (formation close was on same side as level).
                     _suppress_tb = (
-                        self._hyp_formation_price is not None
-                        and _level_price_f > 0
-                        and (
-                            (_hyp_dir == "up" and self._hyp_formation_price <= _level_price_f)
-                            or (_hyp_dir == "down" and self._hyp_formation_price >= _level_price_f)
+                        (bool(_level_name_cd) and (_level_name_cd, _hyp_dir) in self._accepted_level_sweeps)
+                        or (
+                            self._hyp_formation_price is not None
+                            and _level_price_cd > 0
+                            and (
+                                (_hyp_dir == "up"   and self._hyp_formation_price <= _level_price_cd)
+                                or (_hyp_dir == "down" and self._hyp_formation_price >= _level_price_cd)
+                            )
                         )
                     )
+                    # Aggression override: if the current bar is significantly more than
+                    # formation_offset past the level, the level is being genuinely violated
+                    # (e.g. Apr 16: 84 pts vs 5 pt formation offset). Fire trend-broken.
+                    if _suppress_tb and _level_price_cd > 0 and self._hyp_formation_price is not None:
+                        _bar_low_cd  = float(trend_sig.get("bar_low",  _level_price_cd) or _level_price_cd)
+                        _bar_high_cd = float(trend_sig.get("bar_high", _level_price_cd) or _level_price_cd)
+                        if _hyp_dir == "up":
+                            _form_off = _level_price_cd - self._hyp_formation_price
+                            _cur_off  = _level_price_cd - _bar_low_cd
+                        else:
+                            _form_off = self._hyp_formation_price - _level_price_cd
+                            _cur_off  = _bar_high_cd - _level_price_cd
+                        if _cur_off > _form_off + self._COOLDOWN_AGGRESSION_PTS:
+                            _suppress_tb = False
                     if not _suppress_tb:
                         _hyp_snap = _smt_state.load_hypothesis()
                         _hyp_snap["direction"] = "none"
@@ -281,6 +310,8 @@ class SessionPipeline:
                             self._emit(_cancel_sig)
                             events.append(_cancel_sig)
                         _hyp_dir = "none"
+                        self._hyp_formation_price = None
+                        self._accepted_level_sweeps.clear()
                     _level_hyp_divs = []
                 else:
                     _hyp_snap = _smt_state.load_hypothesis()
@@ -331,6 +362,7 @@ class SessionPipeline:
                     if _new_dir != _hyp_dir:
                         # Direction changed — real trend break. Clear pending limits and emit
                         # trend-broken so the automation path can cancel the PMT order.
+                        self._accepted_level_sweeps.clear()
                         _pos = _smt_state.load_position()
                         _pos["confirmation_bar"] = {}
                         _pos["stop_entry"] = ""
@@ -359,6 +391,12 @@ class SessionPipeline:
                             }
                             self._emit(_cancel_sig)
                             events.append(_cancel_sig)
+                    else:
+                        # Direction unchanged — this level sweep was absorbed without flipping.
+                        # Record it so a subsequent cooldown sweep of the same level is suppressed.
+                        _level_name_nc = trend_sig.get("level_name", "")
+                        if _level_name_nc and _hyp_dir != "none":
+                            self._accepted_level_sweeps.add((_level_name_nc, _hyp_dir))
                     # Emit any hypothesis signals (new-hypothesis, smt-div, etc.).
                     # If direction was unchanged, limits are preserved — no trend-broken emitted.
                     # Above session ATH with direction=down, suppress new-hypothesis if
@@ -436,6 +474,8 @@ class SessionPipeline:
                     }
                     self._emit(_cancel_sig)
                     events.append(_cancel_sig)
+                self._hyp_formation_price = None
+                self._accepted_level_sweeps.clear()
                 for _d in (_ath_hyp_divs or []):
                     self._emit(_d)
                     if _d.get("kind") == "new-hypothesis":
@@ -528,7 +568,10 @@ class SessionPipeline:
                     self._emit(d)
                     events.append(d)
             # Reload direction so strategy sees the updated bias on the same bar.
-            _hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
+            _new_5m_dir = _smt_state.load_hypothesis().get("direction", "none")
+            if _new_5m_dir != _hyp_dir:
+                self._accepted_level_sweeps.clear()
+            _hyp_dir = _new_5m_dir
 
         # Fix #1: run_strategy on every 1m bar; full entry logic only at 5m boundaries.
         # After an exit, force-eval re-opens the entry gate before the next 5m boundary.
