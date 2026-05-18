@@ -114,6 +114,20 @@ def _arm_break_price(ref: Optional[pd.Series], direction: str) -> Optional[float
         else float(min(ref["Open"], ref["Close"]))
 
 
+def _floored_break_price(
+    ref: Optional[pd.Series], direction: str, fill_price: Optional[float]
+) -> Optional[float]:
+    """Like _arm_break_price but clamped so the stop never guarantees worse than entry.
+
+    For 'up': stop must be >= fill_price (can't place a stop-loss below what we paid).
+    For 'down': stop must be <= fill_price.
+    """
+    price = _arm_break_price(ref, direction)
+    if price is None or not fill_price:
+        return price
+    return max(price, fill_price) if direction == "up" else min(price, fill_price)
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -246,6 +260,7 @@ def run_trend(
     # ------------------------------------------------------------------
     if active:
         cautious_state = active.get("cautious", "no")
+        _fill_price    = float(active.get("fill_price") or 0) or None
 
         cautious_initial   = float(cautious_initial_raw)   if cautious_initial_raw   != "" else None
         cautious_secondary = float(cautious_secondary_raw) if cautious_secondary_raw != "" else None
@@ -290,7 +305,7 @@ def run_trend(
                 if _close_beyond(cautious_secondary):
                     _ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
                     position["active"]["cautious"] = "secondary"
-                    position["active"]["cautious_break_price"] = _arm_break_price(_ref1, direction)
+                    position["active"]["cautious_break_price"] = _floored_break_price(_ref1, direction, _fill_price)
                     save_position(position)
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
                             "price": position["active"]["cautious_break_price"] or bar_close, "level": "secondary",
@@ -305,7 +320,7 @@ def run_trend(
                 if _close_beyond(cautious_initial):
                     _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
                     position["active"]["cautious"] = "initial"
-                    position["active"]["cautious_break_price"] = _arm_break_price(_ref5, direction)
+                    position["active"]["cautious_break_price"] = _floored_break_price(_ref5, direction, _fill_price)
                     save_position(position)
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
                             "price": position["active"]["cautious_break_price"] or bar_close, "level": "initial",
@@ -325,7 +340,7 @@ def run_trend(
                 if _close_beyond(cautious_secondary):
                     _ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
                     position["active"]["cautious"] = "secondary"
-                    position["active"]["cautious_break_price"] = _arm_break_price(_ref1, direction)
+                    position["active"]["cautious_break_price"] = _floored_break_price(_ref1, direction, _fill_price)
                     save_position(position)
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
                             "price": position["active"]["cautious_break_price"] or bar_close, "level": "secondary",
@@ -340,7 +355,7 @@ def run_trend(
                 if _opp_close and not _close_beyond(cautious_initial):
                     _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
                     position["active"]["cautious"] = "initial"
-                    position["active"]["cautious_break_price"] = _arm_break_price(_ref5, direction)
+                    position["active"]["cautious_break_price"] = _floored_break_price(_ref5, direction, _fill_price)
                     save_position(position)
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
                             "price": position["active"]["cautious_break_price"] or bar_close, "level": "initial",
@@ -351,13 +366,14 @@ def run_trend(
         # ---- 3b: initial cautious — break when price crosses snapshot body-high ----
         if cautious_state == "initial":
             # Upgrade to secondary if secondary level is now reached.
+            # Emits move-stop-exit (not new) since an initial stop order is already open.
             if cautious_secondary is not None and _surpassed(cautious_secondary):
                 if _close_beyond(cautious_secondary):
                     _ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
                     position["active"]["cautious"] = "secondary"
-                    position["active"]["cautious_break_price"] = _arm_break_price(_ref1, direction)
+                    position["active"]["cautious_break_price"] = _floored_break_price(_ref1, direction, _fill_price)
                     save_position(position)
-                    return {"kind": "new-stop-exit", "time": now.isoformat(),
+                    return {"kind": "move-stop-exit", "time": now.isoformat(),
                             "price": position["active"]["cautious_break_price"] or bar_close, "level": "secondary",
                             "cautious_break_price": position["active"]["cautious_break_price"]}
                 else:
@@ -370,7 +386,7 @@ def run_trend(
             # tighter body bound than the stored break price, slide it and notify dispatch
             # to move the IB stop order.
             _trail_ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
-            _trail_price5 = _arm_break_price(_trail_ref5, direction)
+            _trail_price5 = _floored_break_price(_trail_ref5, direction, _fill_price)
             _trail_moved = False
             if _trail_price5 is not None:
                 _cur_cbp = active.get("cautious_break_price")
@@ -408,10 +424,15 @@ def run_trend(
                 _opp_close = (bar_close < bar_open) if direction == "up" else (bar_close > bar_open)
                 if (_opp_close and not _close_beyond(cautious_secondary)) or _close_beyond(cautious_secondary):
                     _ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
+                    # cautious_break_price is set only if we transitioned from "initial"
+                    # (which already placed a stop order); "no" or "initial_surpassed" paths
+                    # leave it None. Use move-stop-exit only when a prior stop exists.
+                    _had_prior_stop = active.get("cautious_break_price") is not None
                     position["active"]["cautious"] = "secondary"
-                    position["active"]["cautious_break_price"] = _arm_break_price(_ref1, direction)
+                    position["active"]["cautious_break_price"] = _floored_break_price(_ref1, direction, _fill_price)
                     save_position(position)
-                    return {"kind": "new-stop-exit", "time": now.isoformat(),
+                    return {"kind": "move-stop-exit" if _had_prior_stop else "new-stop-exit",
+                            "time": now.isoformat(),
                             "price": position["active"]["cautious_break_price"] or bar_close, "level": "secondary",
                             "cautious_break_price": position["active"]["cautious_break_price"]}
             return None
@@ -440,7 +461,7 @@ def run_trend(
                 # Trail the stop every 1m: if a newer completed 1m same-direction bar has a
                 # tighter body bound than the stored break price, slide it and notify dispatch.
                 _trail_ref1 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction)
-                _trail_price1 = _arm_break_price(_trail_ref1, direction)
+                _trail_price1 = _floored_break_price(_trail_ref1, direction, _fill_price)
                 _trail_moved = False
                 if _trail_price1 is not None:
                     _cur_cbp = active.get("cautious_break_price")
