@@ -49,6 +49,8 @@ class IbRealtimeSource:
         self._ib             = None
         self._stopping       = False
         self._event_loop     = None
+        self._mnq_contract   = None  # saved in _setup_subscriptions for cancelMktData
+        self._mes_contract   = None
         self._mnq_1m_df      = self._empty_bar_df()
         self._mes_1m_df      = self._empty_bar_df()
         self._mnq_partial_1m = None
@@ -452,30 +454,133 @@ class IbRealtimeSource:
             self._mnq_1s_pending.append(finalized)
         self._mnq_partial_1m = self._update_partial_1m(self._mnq_partial_1m, t.price, t.size, minute_ts)
 
+    def _on_mnq_mkt_data(self, ticker) -> None:
+        import math as _math
+        for tick in ticker.ticks:
+            if tick.tickType != 4:
+                continue
+            price = tick.price
+            if not price or _math.isnan(price) or price <= 0:
+                continue
+            size = ticker.lastSize or 0
+            ts = pd.Timestamp(tick.time) if tick.time else pd.Timestamp.now(tz="UTC")
+            if ts.tz is None:
+                ts = ts.tz_localize("UTC")
+            second_ts = ts.tz_convert("America/New_York").floor("s")
+            minute_ts = second_ts.floor("min")
+            old_minute_ts = self._mnq_partial_1m["minute_ts"] if self._mnq_partial_1m else None
+            self._mnq_tick_bar, finalized = self._update_tick_accumulator(
+                self._mnq_tick_bar, price, size, second_ts
+            )
+            if finalized is not None and self._mnq_partial_1m is not None:
+                bar_row = self._partial_1m_to_bar_row(self._mnq_partial_1m, finalized["second_ts"])
+                self._on_bar(bar_row, self._mes_partial_1m)
+            if finalized is not None:
+                self._mnq_1s_pending.append(finalized)
+            if old_minute_ts is not None and minute_ts != old_minute_ts:
+                self._flush_completed_1m_bar("MNQ", self._mnq_partial_1m, old_minute_ts)
+            self._mnq_partial_1m = self._update_partial_1m(
+                self._mnq_partial_1m, price, size, minute_ts
+            )
+
+    def _on_mes_mkt_data(self, ticker) -> None:
+        import math as _math
+        for tick in ticker.ticks:
+            if tick.tickType != 4:
+                continue
+            price = tick.price
+            if not price or _math.isnan(price) or price <= 0:
+                continue
+            size = ticker.lastSize or 0
+            ts = pd.Timestamp(tick.time) if tick.time else pd.Timestamp.now(tz="UTC")
+            if ts.tz is None:
+                ts = ts.tz_localize("UTC")
+            second_ts = ts.tz_convert("America/New_York").floor("s")
+            minute_ts = second_ts.floor("min")
+            old_minute_ts = self._mes_partial_1m["minute_ts"] if self._mes_partial_1m else None
+            self._mes_tick_bar, mes_finalized = self._update_tick_accumulator(
+                self._mes_tick_bar, price, size, second_ts
+            )
+            if mes_finalized is not None:
+                self._mes_1s_pending.append(mes_finalized)
+            if old_minute_ts is not None and minute_ts != old_minute_ts:
+                self._flush_completed_1m_bar("MES", self._mes_partial_1m, old_minute_ts)
+            self._mes_partial_1m = self._update_partial_1m(
+                self._mes_partial_1m, price, size, minute_ts
+            )
+
+    def _flush_1s_pending_to_parquet(self, instrument: str) -> None:
+        pending = self._mnq_1s_pending if instrument == "MNQ" else self._mes_1s_pending
+        if not pending:
+            return
+        snap = pending[:]
+        pending.clear()
+        path = self._bar_data_dir / f"{instrument}_1s.parquet"
+
+        def _write(path=path, snap=snap):
+            new_df = pd.DataFrame(
+                [[p["open"], p["high"], p["low"], p["close"], p["volume"]] for p in snap],
+                columns=["Open", "High", "Low", "Close", "Volume"],
+                index=pd.DatetimeIndex([p["second_ts"] for p in snap]),
+            )
+            if path.exists():
+                existing = pd.read_parquet(path)
+                combined = pd.concat([existing, new_df]).sort_index()
+                combined = combined[~combined.index.duplicated(keep="last")]
+            else:
+                combined = new_df
+            combined.to_parquet(path)
+
+        self._parquet_executor.submit(_write)
+
+    def _flush_completed_1m_bar(self, instrument: str, partial_1m, bar_ts) -> None:
+        row = pd.DataFrame(
+            [[partial_1m["open"], partial_1m["high"], partial_1m["low"],
+              partial_1m["close"], partial_1m["volume"]]],
+            columns=["Open", "High", "Low", "Close", "Volume"],
+            index=pd.DatetimeIndex([bar_ts]),
+        )
+        if instrument == "MNQ":
+            self._mnq_1m_df = pd.concat([self._mnq_1m_df, row])
+            self._mnq_1m_df = self._mnq_1m_df[~self._mnq_1m_df.index.duplicated(keep="last")]
+            snap = self._mnq_1m_df.copy()
+            self._parquet_executor.submit(snap.to_parquet, self._bar_data_dir / "MNQ_1m.parquet")
+        else:
+            self._mes_1m_df = pd.concat([self._mes_1m_df, row])
+            self._mes_1m_df = self._mes_1m_df[~self._mes_1m_df.index.duplicated(keep="last")]
+            snap = self._mes_1m_df.copy()
+            self._parquet_executor.submit(snap.to_parquet, self._bar_data_dir / "MES_1m.parquet")
+        self._flush_1s_pending_to_parquet(instrument)
+        _set_bar_data(self._mnq_1m_df, self._mes_1m_df)
+        if instrument == "MNQ" and self._on_bar_1m_complete is not None:
+            from types import SimpleNamespace
+            self._on_bar_1m_complete([SimpleNamespace(date=bar_ts)])
+
     def _setup_subscriptions(self, mnq_contract, mes_contract) -> None:
-        mnq_1m = self._ib.reqHistoricalData(
-            mnq_contract, endDateTime="", durationStr="3 D",
-            barSizeSetting="1 min", whatToShow="TRADES",
-            useRTH=False, formatDate=2, keepUpToDate=True,
-        )
-        mes_1m = self._ib.reqHistoricalData(
-            mes_contract, endDateTime="", durationStr="3 D",
-            barSizeSetting="1 min", whatToShow="TRADES",
-            useRTH=False, formatDate=2, keepUpToDate=True,
-        )
-        mnq_tick = self._ib.reqTickByTickData(mnq_contract, "AllLast", 0, False)
-        mes_tick  = self._ib.reqTickByTickData(mes_contract, "AllLast", 0, False)
-        mnq_1m.updateEvent   += self._on_mnq_1m_bar
-        mes_1m.updateEvent   += self._on_mes_1m_bar
-        mnq_tick.updateEvent += self._on_mnq_tick
-        mes_tick.updateEvent += self._on_mes_tick
+        self._mnq_contract = mnq_contract
+        self._mes_contract = mes_contract
+        mnq_t = self._ib.reqMktData(mnq_contract, "", False, False)
+        mes_t = self._ib.reqMktData(mes_contract, "", False, False)
+        mnq_t.updateEvent += self._on_mnq_mkt_data
+        mes_t.updateEvent += self._on_mes_mkt_data
+
+        # Parquets are already loaded — fire _on_bar_1m_complete after 30s so
+        # session init (daily.py, hypothesis) doesn't wait for a minute boundary.
+        if self._on_bar_1m_complete is not None and not self._mnq_1m_df.empty:
+            import threading as _threading
+            def _parquet_fallback():
+                from types import SimpleNamespace
+                self._on_bar_1m_complete([SimpleNamespace(
+                    date=pd.Timestamp.now(tz="America/New_York")
+                )])
+            _threading.Timer(30.0, _parquet_fallback).start()
 
     def start(self) -> None:
         import asyncio, time
-        from ib_insync import IB, Future, util
-        # ib_insync requires an asyncio event loop in the calling thread.
-        # Daemon threads have none — create one before any IB calls.
+        # eventkit (ib_insync dependency) calls get_event_loop() at module import time;
+        # non-main threads have no loop, so create one before the import.
         asyncio.set_event_loop(asyncio.new_event_loop())
+        from ib_insync import IB, Future, util
         self._load_parquets()
         self._gap_fill_1s_ib()
         # Release ~70 MB: history only needed by _gap_fill_1s_ib; live signal path reads parquet
@@ -534,11 +639,20 @@ class IbRealtimeSource:
 
     def stop(self) -> None:
         self._stopping = True
-        # Stop the asyncio event loop from any thread — loop.call_soon_threadsafe is the
-        # correct cross-thread API; loop.stop() alone is only safe from inside the loop.
+        # Cancel market data subscriptions and stop the event loop.
+        # stop() is called from the orchestrator thread, so we use call_soon_threadsafe
+        # to run the cancellations safely inside the IB event loop thread.
         try:
             if self._event_loop and self._event_loop.is_running():
-                self._event_loop.call_soon_threadsafe(self._event_loop.stop)
+                def _cancel_and_stop():
+                    for contract in (self._mnq_contract, self._mes_contract):
+                        if contract and self._ib and self._ib.isConnected():
+                            try:
+                                self._ib.cancelMktData(contract)
+                            except Exception:
+                                pass
+                    self._event_loop.stop()
+                self._event_loop.call_soon_threadsafe(_cancel_and_stop)
         except Exception:
             pass
         try:
