@@ -260,6 +260,21 @@ _threading.excepthook = _thread_excepthook
 
 _PRE_SESSION_IB_STOP_EARLY_SECS = 30  # release client slot before session subprocess connects
 
+_STOP_FILE = Path(__file__).resolve().parent.parent / "orchestrator_stop.req"
+
+
+class _GracefulStop(Exception):
+    """Raised when trade.py terminate writes the stop-request sentinel file."""
+
+
+def _check_stop_requested() -> None:
+    if _STOP_FILE.exists():
+        try:
+            _STOP_FILE.unlink()
+        except OSError:
+            pass
+        raise _GracefulStop()
+
 
 def _start_pre_session_ib(
     bar_data_dir: Path,
@@ -322,11 +337,12 @@ def _sleep_until(target: datetime.datetime, label: str, ib_health_check=None) ->
         hours = delay / 3600
         print(f"[ORCH] Sleeping {hours:.1f}h until {label}", flush=True)
         while True:
+            _check_stop_requested()
             now = get_et_now()
             remaining = (target - now).total_seconds()
             if remaining <= 0:
                 break
-            time.sleep(min(30.0, remaining))
+            time.sleep(min(5.0, remaining))
             if ib_health_check is not None:
                 ib_health_check()
 
@@ -391,6 +407,8 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
         summarizer = Summarizer()
     bar_data_dir = Path(__file__).resolve().parent.parent / "data"
     _check_parquet_files(bar_data_dir)
+    _pre_src = None
+    _pre_thr = None
     try:
         _pre_session_init()
         while True:
@@ -457,8 +475,13 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
             _sleep_until(next_session_open(get_et_now()), "next trading session",
                          ib_health_check=_make_ib_health_check(_pre_thr, _pre_err))
             _stop_pre_session_ib(_pre_src, _pre_thr)
+    except _GracefulStop:
+        print("\n[ORCH] Stop requested — shutting down gracefully.", flush=True)
+        _stop_pre_session_ib(_pre_src, _pre_thr)
+        sys.exit(0)
     except KeyboardInterrupt:
         print("\n[ORCH] Shutting down.", flush=True)
+        _stop_pre_session_ib(_pre_src, _pre_thr)
         sys.exit(0)
     finally:
         try:
