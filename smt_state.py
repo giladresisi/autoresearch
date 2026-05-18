@@ -17,6 +17,14 @@ DAILY_PATH      = DATA_DIR / "daily.json"
 HYPOTHESIS_PATH = DATA_DIR / "hypothesis.json"
 POSITION_PATH   = DATA_DIR / "position.json"
 
+# Session date locked at startup (ET date, YYYY-MM-DD). Set via set_session_date().
+_SESSION_DATE: str = ""
+
+
+def set_session_date(d: str) -> None:
+    global _SESSION_DATE
+    _SESSION_DATE = d
+
 DEFAULT_GLOBAL = {"all_time_high": 0.0, "confidence": "medium", "trend": "up"}
 
 DEFAULT_DAILY = {
@@ -145,7 +153,7 @@ def save_position(d: dict) -> None:
 
 def bar_state_path(date_str: str | None = None) -> Path:
     import datetime as _dt
-    d = date_str or _dt.date.today().isoformat()
+    d = date_str or _SESSION_DATE or _dt.date.today().isoformat()
     return Path("sessions") / d / "bar_state.json"
 
 

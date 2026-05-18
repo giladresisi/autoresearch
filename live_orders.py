@@ -33,6 +33,15 @@ else:
 
 _ET = zoneinfo.ZoneInfo("America/New_York")
 
+# Session date locked at startup by automation.main (ET date, YYYY-MM-DD).
+# Never recalculated mid-session so the folder stays stable across ET midnight.
+_SESSION_DATE: str = ""
+
+
+def set_session_date(d: str) -> None:
+    global _SESSION_DATE
+    _SESSION_DATE = d
+
 
 def _now_et() -> str:
     return datetime.datetime.now(_ET).isoformat()
@@ -47,7 +56,7 @@ def _log(event: dict) -> None:
 
     kind and time are always written first; remaining fields follow alphabetically.
     """
-    today = datetime.date.today().isoformat()
+    today = _SESSION_DATE or datetime.datetime.now(_ET).date().isoformat()
     path = Path("sessions") / today / "events.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     ordered: dict = {"kind": event.get("kind", ""), "time": event.get("time", "")}

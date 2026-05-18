@@ -38,14 +38,11 @@ _FIXED_DATE = "2026-01-15"
 
 
 @pytest.fixture()
-def _mock_today(monkeypatch):
-    """Patch datetime.date.today() to return a fixed date."""
-    fixed = datetime.date(2026, 1, 15)
-    monkeypatch.setattr(
-        "live_orders.datetime.date",
-        type("_date", (), {"today": staticmethod(lambda: fixed)})(),
-    )
-    return _FIXED_DATE
+def _mock_today():
+    """Fix the session date so events.jsonl lands in a predictable folder."""
+    live_orders.set_session_date(_FIXED_DATE)
+    yield _FIXED_DATE
+    live_orders.set_session_date("")
 
 
 # ---------------------------------------------------------------------------
