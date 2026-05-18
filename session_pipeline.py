@@ -43,11 +43,21 @@ class SessionPipeline:
         self._last_hyp_cautious: tuple[str, str] = ("", "")
         self._last_5m_processed: pd.Timestamp | None = None
         self._last_trend_hyp_1m: pd.Timestamp | None = None
-        # When True, the next on_1m_bar call runs full entry logic regardless of the
-        # 5m boundary gate. Set after a stop-out or market-close exit so the strategy
-        # can immediately re-evaluate a new entry rather than waiting until the next
-        # 5m boundary (which is how the 1m backtest behaves after a completed bar).
-        self._force_entry_eval: bool = False
+        # Earliest bar timestamp at which force-eval fires, or None if not armed.
+        # Both stop-exit and market-close come from trend.py (trend_sig), not strategy.py.
+        # market-close → floor("1min")        fires immediately (next bar)
+        # stop-exit    → floor("1min") + 1min wait one minute (cascade guard)
+        # stopped-out  → floor("1min") + 1min wait one minute (cascade guard)
+        # The minute gate prevents the 1s cascade (re-fill + re-stop within one second).
+        self._force_entry_eval_after: pd.Timestamp | None = None
+        # When True, the next force-eval will prefer a market-entry over a stop-entry.
+        # Set after stop-exit (shallow sweep) — enter at bar_mid immediately.
+        # Not set after market-close or stopped-out (let normal stop/approach logic apply).
+        self._force_market_entry: bool = False
+        # Bar close price when the current hypothesis was formed. Used to suppress
+        # cooldown-path trend-broken when the level was already past at formation
+        # (e.g. a 1s bar revisits a level the hypothesis already priced in).
+        self._hyp_formation_price: float | None = None
 
     def on_session_start(
         self,
@@ -229,38 +239,48 @@ class SessionPipeline:
                 # emit trend-broken to reset direction, but skip the immediate hypothesis
                 # re-run — it will form naturally at the next 5m boundary.
                 if trend_sig.get("cooldown_active"):
-                    _hyp_snap = _smt_state.load_hypothesis()
-                    _hyp_snap["direction"] = "none"
-                    _smt_state.save_hypothesis(_hyp_snap)
-                    _pos = _smt_state.load_position()
-                    _pos["confirmation_bar"] = {}
-                    _pos["stop_entry"] = ""
-                    _smt_state.save_position(_pos)
-                    _tb_sig = {
-                        "kind":             "trend-broken",
-                        "time":             trend_sig["time"],
-                        "price":            trend_sig["price"],
-                        "broken_direction": _hyp_dir,
-                        "level_name":       trend_sig.get("level_name", ""),
-                        "level_price":      trend_sig.get("level_price", ""),
-                        "cooldown_active":  True,
-                    }
-                    for _k in ("bar_low", "bar_high"):
-                        if _k in trend_sig:
-                            _tb_sig[_k] = trend_sig[_k]
-                    self._emit(_tb_sig)
-                    events.append(_tb_sig)
-                    if _prev_stop != "":
-                        _cancel_sig = {
-                            "kind":      "stop-entry-cancelled",
-                            "time":      now.isoformat(),
-                            "price":     float(_prev_stop),
-                            "reason":    "trend-broken",
-                            "direction": _hyp_dir,
+                    _level_price_f = float(trend_sig.get("level_price", 0) or 0)
+                    _suppress_tb = (
+                        self._hyp_formation_price is not None
+                        and _level_price_f > 0
+                        and (
+                            (_hyp_dir == "up" and self._hyp_formation_price <= _level_price_f)
+                            or (_hyp_dir == "down" and self._hyp_formation_price >= _level_price_f)
+                        )
+                    )
+                    if not _suppress_tb:
+                        _hyp_snap = _smt_state.load_hypothesis()
+                        _hyp_snap["direction"] = "none"
+                        _smt_state.save_hypothesis(_hyp_snap)
+                        _pos = _smt_state.load_position()
+                        _pos["confirmation_bar"] = {}
+                        _pos["stop_entry"] = ""
+                        _smt_state.save_position(_pos)
+                        _tb_sig = {
+                            "kind":             "trend-broken",
+                            "time":             trend_sig["time"],
+                            "price":            trend_sig["price"],
+                            "broken_direction": _hyp_dir,
+                            "level_name":       trend_sig.get("level_name", ""),
+                            "level_price":      trend_sig.get("level_price", ""),
+                            "cooldown_active":  True,
                         }
-                        self._emit(_cancel_sig)
-                        events.append(_cancel_sig)
-                    _hyp_dir = "none"
+                        for _k in ("bar_low", "bar_high"):
+                            if _k in trend_sig:
+                                _tb_sig[_k] = trend_sig[_k]
+                        self._emit(_tb_sig)
+                        events.append(_tb_sig)
+                        if _prev_stop != "":
+                            _cancel_sig = {
+                                "kind":      "stop-entry-cancelled",
+                                "time":      now.isoformat(),
+                                "price":     float(_prev_stop),
+                                "reason":    "trend-broken",
+                                "direction": _hyp_dir,
+                            }
+                            self._emit(_cancel_sig)
+                            events.append(_cancel_sig)
+                        _hyp_dir = "none"
                     _level_hyp_divs = []
                 else:
                     _hyp_snap = _smt_state.load_hypothesis()
@@ -369,6 +389,11 @@ class SessionPipeline:
                                 _d.get("cautious_price_initial", ""),
                                 _d.get("cautious_price_secondary", ""),
                             )
+                        if _d.get("kind") == "new-hypothesis" and _new_dir != _hyp_dir:
+                            # Only update when direction actually changed; if unchanged,
+                            # preserve the original formation price so cooldown suppression
+                            # can still check whether the level was already past at first formation.
+                            self._hyp_formation_price = _c
                         self._emit(_d)
                         events.append(_d)
                     _hyp_dir = _new_dir
@@ -418,6 +443,7 @@ class SessionPipeline:
                             _d.get("cautious_price_initial", ""),
                             _d.get("cautious_price_secondary", ""),
                         )
+                        self._hyp_formation_price = _c
                 events.extend(_ath_hyp_divs or [])
                 _hyp_dir = _new_dir
             elif trend_sig["kind"] == "dynamic-ath-crossed":
@@ -445,6 +471,7 @@ class SessionPipeline:
                             self._emit(_d)
                             events.append(_d)
                             self._last_hyp_cautious = _new_c
+                            self._hyp_formation_price = _c
                     else:
                         self._emit(_d)
                         events.append(_d)
@@ -496,18 +523,30 @@ class SessionPipeline:
                         if _new_c == self._last_hyp_cautious:
                             continue
                         self._last_hyp_cautious = _new_c
+                    if d.get("kind") == "new-hypothesis":
+                        self._hyp_formation_price = _c
                     self._emit(d)
                     events.append(d)
             # Reload direction so strategy sees the updated bias on the same bar.
             _hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
 
         # Fix #1: run_strategy on every 1m bar; full entry logic only at 5m boundaries.
-        # After an exit (stopped-out / market-close), also run full entry logic on the
-        # very next bar so the strategy can re-evaluate immediately -- matching the 1m
-        # backtest cadence where each completed bar triggers a fresh entry check.
-        _run_full_entry = is_5m or self._force_entry_eval
-        self._force_entry_eval = False
-        strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent, fill_check_only=not _run_full_entry)
+        # After an exit, force-eval re-opens the entry gate before the next 5m boundary.
+        # market-close fires immediately; stopped-out waits for the next minute boundary
+        # to prevent the 1s-mode cascade (re-fill + re-stop within the same second).
+        _force_eval_now = (
+            self._force_entry_eval_after is not None
+            and now >= self._force_entry_eval_after
+        )
+        _run_full_entry = is_5m or _force_eval_now
+        _prefer_mkt = False
+        if _force_eval_now:
+            self._force_entry_eval_after = None
+            _prefer_mkt = self._force_market_entry
+            self._force_market_entry = False
+        strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent,
+                                             fill_check_only=not _run_full_entry,
+                                             prefer_market_entry=_prefer_mkt)
         if strat_sig is not None:
             strat_sig.setdefault("direction", _hyp_dir)
             # Emit cancel when strategy's market-entry overwrites a pending limit that
@@ -524,8 +563,13 @@ class SessionPipeline:
                 events.append(_cancel_sig)
             self._emit(strat_sig)
             events.append(strat_sig)
-            if strat_sig["kind"] in {"stopped-out", "market-close"}:
-                self._force_entry_eval = True
+            if strat_sig["kind"] == "market-close":
+                # Handles the rare direction-mismatch path from strategy.py.
+                # The main cautiousbreak path comes from trend_sig and is handled above.
+                self._force_entry_eval_after = now.floor("1min")
+                self._force_market_entry = True
+            elif strat_sig["kind"] == "stopped-out":
+                self._force_entry_eval_after = now.floor("1min") + pd.Timedelta(minutes=1)
 
             # Same-bar stop check for LONG (up) entries: when entry fills on bar N,
             # the same bar's Low may already breach the protective stop. In 1s
@@ -555,7 +599,7 @@ class SessionPipeline:
                     }
                     self._emit(_sbsc_sig)
                     events.append(_sbsc_sig)
-                    self._force_entry_eval = True
+                    self._force_entry_eval_after = now.floor("1min") + pd.Timedelta(minutes=1)
 
         self._write_bar_state(now, today_mnq)
         return events

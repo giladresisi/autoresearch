@@ -117,6 +117,7 @@ def run_strategy(
     mnq_bar: dict,
     mnq_1m_recent: pd.DataFrame,
     fill_check_only: bool = False,
+    prefer_market_entry: bool = False,
 ) -> Optional[dict]:
     """Process a completed 1m bar and return an Optional Signal.
 
@@ -253,7 +254,7 @@ def run_strategy(
         if opp_5m is not None and (opp_5m["body_high"] - opp_5m["body_low"]) <= MAX_CONFIRMATION_BODY_PTS:
             body_end_price = opp_5m["body_high"] if direction == _DIR_UP else opp_5m["body_low"]
             current_conf_time = position.get("confirmation_bar", {}).get("time", "")
-            if opp_5m["time"] != current_conf_time:
+            if opp_5m["time"] != current_conf_time or prefer_market_entry:
                 conf_bar_snap = {
                     "time":      opp_5m["time"],
                     "high":      opp_5m["high"],
@@ -268,7 +269,7 @@ def run_strategy(
                 else:
                     approach = bar_open - body_end_price
 
-                if approach < _MARKET_ENTRY_THRESHOLD:
+                if approach < _MARKET_ENTRY_THRESHOLD or prefer_market_entry:
                     bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
                     if direction == _DIR_UP:
                         stop = max(float(opp_5m["low"]), float(opp_5m["body_low"]) - _STOP_WICK_CAP)
@@ -276,10 +277,18 @@ def run_strategy(
                         stop = min(float(opp_5m["high"]), float(opp_5m["body_high"]) + _STOP_WICK_CAP)
                     # Directional stop check: stop must be on the protective side of entry.
                     # abs() alone passes when the bar moved past the conf bar during the candle.
+                    # On prefer_market_entry re-entries (post stop-exit sweep), push the stop
+                    # just far enough to satisfy MIN_STOP_DISTANCE rather than rejecting.
                     if direction == _DIR_UP   and (bar_mid - float(stop)) < MIN_STOP_DISTANCE:
-                        return None
+                        if prefer_market_entry:
+                            stop = bar_mid - MIN_STOP_DISTANCE
+                        else:
+                            return None
                     if direction == _DIR_DOWN and (float(stop) - bar_mid) < MIN_STOP_DISTANCE:
-                        return None
+                        if prefer_market_entry:
+                            stop = bar_mid + MIN_STOP_DISTANCE
+                        else:
+                            return None
                     if not _entry_bar_cpr_ok(mnq_bar, direction):
                         return None
                     position["active"] = {
