@@ -258,7 +258,7 @@ def _thread_excepthook(args) -> None:
 
 _threading.excepthook = _thread_excepthook
 
-_PRE_SESSION_IB_STOP_EARLY_SECS = 30  # release client slot before session subprocess connects
+_PRE_SESSION_IB_STOP_EARLY_SECS = 60  # stop pre-session IB 1m early so automation.main gap-fills and is live by open
 
 _STOP_FILE = Path(__file__).resolve().parent.parent / "orchestrator_stop.req"
 
@@ -432,8 +432,11 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
                 if now < _stop_ts:
                     _sleep_until(_stop_ts, "pre-session IB shutdown", ib_health_check=_ib_check)
                 _stop_pre_session_ib(_pre_src, _pre_thr)
-                _sleep_until(session_open_dt, f"session open {_SESSION_OPEN_V2.strftime('%H:%M')} ET")
-                continue
+                # Brief pause so IB Gateway fully releases the client slot before
+                # automation.main connects with the same (or overlapping) client ID.
+                time.sleep(10)
+                # Fall through to session run — automation.main gap-fills the handoff
+                # window and reqMktData is live by actual session open.
 
             if now >= grace_end_dt:
                 _pre_src, _pre_thr, _pre_err = _start_pre_session_ib(bar_data_dir)
