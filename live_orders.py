@@ -284,21 +284,29 @@ def dispatch(sig: dict) -> None:
         return
 
     if kind == "new-stop-exit":
-        # Move the protective stop to the cautious break price so IB handles the exit
-        # automatically when price reverses through it.
         cbp = sig.get("cautious_break_price")
         if cbp is None:
             cbp = _load_pos().get("active", {}).get("cautious_break_price")
         if cbp is not None:
-            update_stop_loss(float(cbp), reason="new-stop-exit")
+            if sig.get("level") == "secondary":
+                # Secondary exit is managed by 1m bar-close check in trend.py.
+                # Move IB stop far from money so wicks never trigger a fill.
+                _dir = sig.get("direction", _load_pos().get("active", {}).get("direction", ""))
+                _far = 0.0 if _dir in ("up", "long") else 50000.0
+                update_stop_loss(_far, reason="new-stop-exit")
+            else:
+                update_stop_loss(float(cbp), reason="new-stop-exit")
         _log(sig)
         return
 
     if kind == "move-stop-exit":
-        # Trailing stop update: slide the IB stop to the new tighter break price.
         cbp = sig.get("cautious_break_price")
         if cbp is not None:
-            update_stop_loss(float(cbp), reason="move-stop-exit")
+            if sig.get("level") == "secondary":
+                # IB stop already at 0/50000 for secondary — no update needed.
+                pass
+            else:
+                update_stop_loss(float(cbp), reason="move-stop-exit")
         _log(sig)
         return
 
