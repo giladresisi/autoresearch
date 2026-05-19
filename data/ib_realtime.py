@@ -479,6 +479,7 @@ class IbRealtimeSource:
                 self._mnq_1s_pending.append(finalized)
             if old_minute_ts is not None and minute_ts != old_minute_ts:
                 self._flush_completed_1m_bar("MNQ", self._mnq_partial_1m, old_minute_ts)
+                self._flush_1s_pending_to_parquet("MES")
             self._mnq_partial_1m = self._update_partial_1m(
                 self._mnq_partial_1m, price, size, minute_ts
             )
