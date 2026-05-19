@@ -11,6 +11,7 @@ PickMyTrade webhook credentials in environment (PMT_WEBHOOK_URL, PMT_API_KEY).
 State machine: SCANNING → MANAGING, one trade per session.
 """
 import os
+import sys
 from pathlib import Path
 import json
 import math as _math
