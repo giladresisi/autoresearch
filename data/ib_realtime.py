@@ -691,7 +691,7 @@ def gap_fill_1m_ib(bar_data_dir: Path) -> None:
         return
 
     MAX_LOOKBACK_DAYS = 30
-    GAP_FILL_MAX_DAYS = 14
+    GAP_FILL_MAX_DAYS = 2  # IB historical data unreliable beyond ~2 days; Databento fills the rest
 
     now = pd.Timestamp.now(tz="America/New_York")
     today_midnight = now.normalize()
