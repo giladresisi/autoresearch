@@ -366,9 +366,20 @@ def run_trend(
                     save_position(position)
                     if position["active"]["cautious_break_price"] is None:
                         return None  # deferred: trail will arm once price clears entry
+                    _cbp = float(position["active"]["cautious_break_price"])
+                    # If the arm-confirm bar itself breaches the break price, exit immediately.
+                    # In 1s live the next tick fires the break check; this aligns 1m regression.
+                    _already_broke = (bar_high > _cbp) if direction == "down" else (bar_low < _cbp)
+                    if _already_broke:
+                        _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                        save_position(position)
+                        save_hypothesis(hypothesis)
+                        return {"kind": "stop-exit", "time": now.isoformat(),
+                                "price": _cbp, "reason": "cautious-initial-break",
+                                "close_reason": _cr1}
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
-                            "price": position["active"]["cautious_break_price"], "level": "initial",
-                            "cautious_break_price": position["active"]["cautious_break_price"]}
+                            "price": _cbp, "level": "initial",
+                            "cautious_break_price": _cbp}
 
             return None
 
