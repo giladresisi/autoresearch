@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
+import session_times
 
 
 def _date_from_regression_md() -> str:
@@ -125,8 +126,13 @@ for e in events:
         pending_fill = None
 
 # ── Zoom window ───────────────────────────────────────────────────────────────
-first_t = min(e["ts"] for e in events) - pd.Timedelta(minutes=30)
-last_t  = max(e["ts"] for e in events) + pd.Timedelta(minutes=30)
+if events:
+    first_t = min(e["ts"] for e in events) - pd.Timedelta(minutes=30)
+    last_t  = max(e["ts"] for e in events) + pd.Timedelta(minutes=30)
+else:
+    _et = "America/New_York"
+    first_t = pd.Timestamp(f"{DATE} {session_times.SESSION_OPEN}", tz=_et)
+    last_t  = pd.Timestamp(f"{DATE} {session_times.SESSION_CLOSE}", tz=_et)
 window  = day[(day.index >= first_t) & (day.index <= last_t)]
 
 price_lo = window["Low"].min()
