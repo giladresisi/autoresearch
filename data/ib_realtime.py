@@ -185,11 +185,11 @@ class IbRealtimeSource:
             for instrument, df_attr, parquet_name, conid in pairs:
                 try:
                     df = getattr(self, df_attr)
-                    if df.empty:
-                        print(f"[gap_fill_1s_ib] {instrument}: no seed data — skipping", flush=True)
-                        continue
                     earliest = pd.Timestamp(_1S_EARLIEST, tz="America/New_York")
-                    start_dt = max(df.index[-1], earliest)
+                    if df.empty:
+                        start_dt = earliest
+                    else:
+                        start_dt = max(df.index[-1], earliest)
                     if (end_dt - start_dt).total_seconds() <= 60:
                         continue
                     contract = _IBContract(conId=int(conid), exchange="CME")
