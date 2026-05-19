@@ -6,6 +6,8 @@ Reads from sessions/{date}/ — works mid-session (no events yet = shows bars + 
 Usage (run from automation root):
     python plot_session.py                # today's session
     python plot_session.py 2026-05-06    # specific date
+
+Output: sessions/{date}/chart_{HH-MM}.html (timestamped at time of request)
 """
 
 import datetime
@@ -13,12 +15,16 @@ import json
 import sys
 import webbrowser
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
 
 
 DATE = sys.argv[1] if len(sys.argv) > 1 else str(datetime.date.today())
+_NOW_ET = datetime.datetime.now(tz=ZoneInfo("America/New_York"))
+_REQUEST_TIME = _NOW_ET.strftime("%H-%M")
+_REQUEST_TIME_LABEL = _NOW_ET.strftime("%H:%M ET")
 
 SESSION_DIR = Path(f"sessions/{DATE}")
 MNQ_DOLLARS_PER_POINT_PER_CONTRACT = 2.0
@@ -39,7 +45,14 @@ if events_path.exists():
 for e in events:
     e["ts"] = pd.Timestamp(e["time"])
 
-EXIT_KINDS = {"stopped-out", "market-close", "end-of-session"}
+
+def _event_price(e: dict) -> float:
+    """Return a display price for any event regardless of live vs regression field naming."""
+    return float(e.get("_fill_price") or e.get("price") or
+                 e.get("entry_price") or e.get("new_entry_price") or
+                 e.get("stop_price") or 0.0)
+
+EXIT_KINDS = {"stopped-out", "market-close", "end-of-session", "stop-exit"}
 
 # ── Levels ────────────────────────────────────────────────────────────────────
 levels_path = SESSION_DIR / "levels.json"
@@ -82,15 +95,29 @@ LEVEL_STYLE: dict[str, tuple] = {
 LEVEL_PRIORITY = list(LEVEL_STYLE.keys())
 
 # ── Pair fills to exits ───────────────────────────────────────────────────────
+# Live stop-entry-filled events use stop_price (stop-loss), not the fill price.
+# We track entry_price from the preceding new/move-stop-entry and inject _fill_price
+# so the rest of the chart code can use _event_price() uniformly.
 pairs = []
 pending_fill = None
+_last_order_price: float | None = None
+
 for e in events:
+    if e["kind"] == "new-stop-entry":
+        _last_order_price = float(e.get("entry_price") or e.get("price") or 0)
+    elif e["kind"] == "move-stop-entry":
+        _last_order_price = float(e.get("new_entry_price") or e.get("entry_price") or e.get("price") or 0)
     if e["kind"] in ("stop-entry-filled", "market-entry"):
         pending_fill = e
+        if "price" not in e and _last_order_price:
+            e["_fill_price"] = _last_order_price
+        _last_order_price = None
     elif e["kind"] in EXIT_KINDS and pending_fill is not None:
-        direction_sign = 1 if pending_fill.get("direction", "up") == "up" else -1
+        direction_sign = 1 if pending_fill.get("direction", "up") in ("up", "long") else -1
         entry_slip = float(pending_fill.get("slippage", 0.0))
-        entry_fill_price = pending_fill["price"] + direction_sign * entry_slip
+        raw_entry = float(pending_fill.get("_fill_price") or pending_fill.get("price") or
+                          pending_fill.get("stop_price") or 0.0)
+        entry_fill_price = raw_entry + direction_sign * entry_slip
         slip = float(e.get("slippage", 0.0))
         exit_fill_price = e["price"] - direction_sign * slip
         pnl_pts = round((exit_fill_price - entry_fill_price) * direction_sign, 2)
@@ -179,7 +206,8 @@ for e in events:
         if pending_t is not None:
             limit_x += [pending_t, e["ts"], None]
             limit_y += [pending_p, pending_p, None]
-        pending_t, pending_p = e["ts"], e["price"]
+        pending_t = e["ts"]
+        pending_p = float(e.get("entry_price") or e.get("new_entry_price") or e.get("price") or 0)
     elif e["kind"] in ("stop-entry-filled", "cancel-stop-entry", "market-entry"):
         if pending_t is not None:
             limit_x += [pending_t, e["ts"], None]
@@ -189,7 +217,7 @@ for e in events:
 if limit_x:
     fig.add_trace(go.Scatter(
         x=limit_x, y=limit_y,
-        mode="lines", name="limit price",
+        mode="lines", name="stop price",
         line=dict(dash="dot", color="#64B5F6", width=1.5),
         hoverinfo="skip",
     ))
@@ -312,11 +340,14 @@ EXIT_MARKER_STYLE = {
     "stopped-out":    dict(symbol="x-thin",  color="#F44336", size=14),
     "market-close":   dict(symbol="square",  color="#9E9E9E", size=11),
     "end-of-session": dict(symbol="square",  color="#BDBDBD", size=11),
+    "stop-exit":      dict(symbol="diamond", color="#FF9800", size=11),
 }
 OTHER_MARKER_STYLE = {
     "new-stop-entry":    dict(symbol="triangle-right",      color="#2196F3", size=13),
     "move-stop-entry":   dict(symbol="triangle-right-open", color="#9C27B0", size=13),
     "cancel-stop-entry": dict(symbol="x-open",              color="#FF9800", size=13),
+    "new-stop-exit":     dict(symbol="triangle-left",       color="#FF5722", size=13),
+    "move-stop-exit":    dict(symbol="triangle-left-open",  color="#FF5722", size=13),
     "stop-entry-filled": dict(symbol="star",                color="#4CAF50", size=17),
     "market-entry":       dict(symbol="circle",              color="#FF9800", size=15),
     "trend-broken":       dict(symbol="diamond-open",        color="#FF9800", size=13),
@@ -341,8 +372,6 @@ for kind, style in EXIT_MARKER_STYLE.items():
             colors.append(style["color"])
         texts.append(label)
         parts = [f"<b>{e['kind']}</b>", f"price: {e['price']}", f"time: {e['ts'].strftime('%H:%M')}"]
-        if "source" in e:
-            parts.append(f"source: {e['source']}")
         if pair:
             parts.append(f"pnl: {label}")
         if "close_reason" in e:
@@ -368,16 +397,20 @@ for kind, style in OTHER_MARKER_STYLE.items():
         continue
     hover = []
     for e in group:
-        parts = [f"<b>{e['kind']}</b>", f"price: {e['price']}", f"time: {e['ts'].strftime('%H:%M')}"]
-        if "source" in e:
-            parts.append(f"source: {e['source']}")
+        ep = _event_price(e)
+        parts = [f"<b>{e['kind']}</b>", f"price: {ep}", f"time: {e['ts'].strftime('%H:%M')}"]
         if "direction" in e:
             parts.append(f"direction: {e['direction']}")
-        if "stop" in e:
-            stop = e["stop"]
+        # Live events use stop_price / entry_price / new_entry_price instead of stop / price
+        if "entry_price" in e:
+            parts.append(f"entry_price: {e['entry_price']}")
+        if "new_entry_price" in e:
+            parts.append(f"new_entry_price: {e['new_entry_price']}")
+        if "stop" in e or "stop_price" in e:
+            stop = e.get("stop") or e.get("stop_price")
             if kind == "stop-entry-filled":
-                dist = abs(e["price"] - stop)
-                parts.append(f"stop: {stop} ({dist:.2f} pts)")
+                dist = abs(ep - stop) if ep and stop else "?"
+                parts.append(f"stop: {stop} ({dist:.2f} pts)" if isinstance(dist, float) else f"stop: {stop}")
             else:
                 parts.append(f"stop: {stop}")
         if "reason" in e:
@@ -387,6 +420,10 @@ for kind, style in OTHER_MARKER_STYLE.items():
                 parts.append(f"was: {e['broken_direction']}")
             if e.get("level_name"):
                 parts.append(f"broke level: {e['level_name']} @ {e['level_price']}")
+            if "bar_low" in e:
+                parts.append(f"bar low: {e['bar_low']}")
+            if "bar_high" in e:
+                parts.append(f"bar high: {e['bar_high']}")
         if kind == "new-hypothesis":
             if e.get("weekly_mid"):
                 parts.append(f"weekly_mid: {e['weekly_mid']}")
@@ -394,6 +431,20 @@ for kind, style in OTHER_MARKER_STYLE.items():
                 parts.append(f"daily_mid: {e['daily_mid']}")
             if e.get("last_liquidity"):
                 parts.append(f"last_liquidity: {e['last_liquidity']}")
+            cp_sec  = e.get("cautious_price_secondary", "")
+            cpl_sec = e.get("cautious_price_secondary_level", "")
+            cp_ini  = e.get("cautious_price_initial", "")
+            cpl_ini = e.get("cautious_price_initial_level", "")
+            if cp_sec not in ("", None):
+                parts.append(f"cautious_secondary: {cp_sec} ({cpl_sec})" if cpl_sec else f"cautious_secondary: {cp_sec}")
+            else:
+                parts.append("cautious_secondary: none")
+            if cp_ini not in ("", None):
+                parts.append(f"cautious_initial: {cp_ini} ({cpl_ini})" if cpl_ini else f"cautious_initial: {cp_ini}")
+            else:
+                parts.append("cautious_initial: none")
+            for er in e.get("entry_ranges", []):
+                parts.append(f"entry_{er['source']}: [{er['low']}, {er['high']}]")
             dr = e.get("direction_reason", {})
             if dr:
                 _rule = dr.get("rule", "?")
@@ -418,10 +469,23 @@ for kind, style in OTHER_MARKER_STYLE.items():
                 else:
                     _decided = _rule
                 parts.append(f"decided_by: {_decided}")
+                parts.append(f"weekly: {dr.get('weekly_zone', '?')} | daily: {dr.get('daily_zone', '?')}")
+                parts.append(f"smt_score: {dr.get('smt_score', '?')}")
+                if dr.get("fresh_touch_level"):
+                    parts.append(f"touched: {dr['fresh_touch_level']}  smt: {dr.get('smt_alignment', '?')}")
+                if dr.get("approaching_level"):
+                    parts.append(f"approaching: {dr['approaching_level']} ({dr.get('approaching_dist', '?')} pts)")
+                if dr.get("combined_score") is not None:
+                    parts.append(
+                        f"pd: {dr.get('pd_score', '?')}  "
+                        f"bos1h: {dr.get('bos_score_1hr', '?')}  "
+                        f"bos4h: {dr.get('bos_score_4hr', '?')}  "
+                        f"→ {dr.get('combined_score', '?')}"
+                    )
         hover.append("<br>".join(parts))
     fig.add_trace(go.Scatter(
         x=[e["ts"] for e in group],
-        y=[e["price"] for e in group],
+        y=[_event_price(e) for e in group],
         mode="markers", name=kind.replace("-", " "),
         marker=dict(symbol=style["symbol"], color=style["color"],
                     size=style["size"], line=dict(width=2, color=style["color"])),
@@ -435,9 +499,10 @@ chart_height  = max(700, min(1200, int(600 + session_hours * 40)))
 
 pnl_total = sum(p["pnl_usd"] for p in pairs)
 pnl_str = f"{'+'if pnl_total >= 0 else ''}${pnl_total:.0f}"
-title = f"Live Session — MNQ {DATE} | {len(pairs)} trade{'s' if len(pairs) != 1 else ''} | PnL: {pnl_str}"
-if not events:
-    title = f"Live Session — MNQ {DATE} | No events yet"
+if events:
+    title = f"Live Session — MNQ {DATE} @ {_REQUEST_TIME_LABEL} | {len(pairs)} trade{'s' if len(pairs) != 1 else ''} | PnL: {pnl_str}"
+else:
+    title = f"Live Session — MNQ {DATE} @ {_REQUEST_TIME_LABEL} | No events yet"
 
 fig.update_layout(
     title=title,
@@ -452,7 +517,7 @@ fig.update_layout(
 )
 
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
-out = SESSION_DIR / "chart.html"
+out = SESSION_DIR / f"chart_{_REQUEST_TIME}.html"
 fig.write_html(str(out), include_plotlyjs="cdn")
 print(f"Chart: {out.resolve()}")
 webbrowser.open(out.resolve().as_uri())
