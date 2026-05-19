@@ -509,10 +509,11 @@ def run_trend(
                             _trail_moved = True
 
                 # Break check uses the potentially-updated cautious_break_price.
+                # Secondary exits use bar *close* — intrabar wicks are ignored.
                 _break_price = active.get("cautious_break_price")
                 if _break_price is not None:
-                    _broke = (bar_high > float(_break_price)) if direction == "down" \
-                             else (bar_low  < float(_break_price))
+                    _broke = (bar_close > float(_break_price)) if direction == "down" \
+                             else (bar_close < float(_break_price))
                     if _broke:
                         _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
                         save_position(position)
