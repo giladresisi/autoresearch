@@ -17,8 +17,11 @@ import sys
 import webbrowser
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
 import pandas as pd
 import plotly.graph_objects as go
+import session_times
 
 
 def _date_from_regression_md() -> str:
@@ -125,8 +128,13 @@ for e in events:
         pending_fill = None
 
 # ── Zoom window ───────────────────────────────────────────────────────────────
-first_t = min(e["ts"] for e in events) - pd.Timedelta(minutes=30)
-last_t  = max(e["ts"] for e in events) + pd.Timedelta(minutes=30)
+if events:
+    first_t = min(e["ts"] for e in events) - pd.Timedelta(minutes=30)
+    last_t  = max(e["ts"] for e in events) + pd.Timedelta(minutes=30)
+else:
+    _et = "America/New_York"
+    first_t = pd.Timestamp(f"{DATE} {session_times.SESSION_OPEN}", tz=_et)
+    last_t  = pd.Timestamp(f"{DATE} {session_times.SESSION_CLOSE}", tz=_et)
 window  = day[(day.index >= first_t) & (day.index <= last_t)]
 
 price_lo = window["Low"].min()
@@ -195,7 +203,7 @@ for e in events:
             limit_x += [pending_t, e["ts"], None]
             limit_y += [pending_p, pending_p, None]
         pending_t, pending_p = e["ts"], e["price"]
-    elif e["kind"] in ("stop-entry-filled", "limit-entry-cancelled", "limit-entry-expired", "market-entry"):
+    elif e["kind"] in ("stop-entry-filled", "stop-entry-cancelled", "limit-entry-cancelled", "limit-entry-expired", "market-entry"):
         if pending_t is not None:
             limit_x += [pending_t, e["ts"], None]
             limit_y += [pending_p, pending_p, None]

@@ -9,6 +9,7 @@
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -153,6 +154,7 @@ def run_regression(
             subprocess.run(
                 [sys.executable, "data/regression/plot_regression.py", date],
                 check=False,
+                env=dict(os.environ, PYTHONPATH=str(Path(__file__).parent)),
             )
 
         results[date] = res

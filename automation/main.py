@@ -11,6 +11,7 @@ PickMyTrade webhook credentials in environment (PMT_WEBHOOK_URL, PMT_API_KEY).
 State machine: SCANNING → MANAGING, one trade per session.
 """
 import os
+import sys
 from pathlib import Path
 import json
 import math as _math
@@ -1037,6 +1038,9 @@ def main() -> None:
 
     today_str = pd.Timestamp.now(tz="America/New_York").strftime("%Y-%m-%d")
     (SESSIONS_DIR / today_str).mkdir(parents=True, exist_ok=True)
+    import live_orders as _lo_mod, smt_state as _smt_state_mod
+    _lo_mod.set_session_date(today_str)
+    _smt_state_mod.set_session_date(today_str)
     _account_ids = [s.strip() for s in os.environ.get("TRADING_ACCOUNT_IDS", "").split(",") if s.strip()]
     _executor = PickMyTradeExecutor(
         webhook_url=os.environ["PMT_WEBHOOK_URL"],

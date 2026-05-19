@@ -139,7 +139,7 @@ class SessionPipeline:
         # Write levels.json snapshot for plot_session.py — always updated when daily reruns.
         import json as _json
         from pathlib import Path as _Path
-        _session_dir = _Path("sessions") / str(now.date())
+        _session_dir = _Path("sessions") / (_smt_state._SESSION_DATE or str(now.date()))
         _session_dir.mkdir(parents=True, exist_ok=True)
         _levels_path = _session_dir / "levels.json"
         _daily_state = load_daily()

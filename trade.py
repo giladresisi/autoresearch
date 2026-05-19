@@ -60,24 +60,34 @@ def _orchestrator_pid() -> int | None:
 
 
 def _terminate_all() -> list[str]:
-    """Kill orchestrator, its PowerShell wrapper, and automation.main. Returns list of killed descriptions."""
+    """Gracefully stop orchestrator (cancelMktData + IB disconnect + parquet flush), then kill
+    automation.main. Returns list of killed/stopped descriptions."""
     import psutil
     from pathlib import Path
 
     killed = []
 
     pid_file = Path("orchestrator.pid")
+    stop_file = Path("orchestrator_stop.req")
     if pid_file.exists():
         try:
             orch_pid = int(pid_file.read_text().strip())
             try:
                 p = psutil.Process(orch_pid)
-                p.terminate()
+                # Write stop sentinel so the orchestrator's sleep loop wakes, calls
+                # source.stop() (cancelMktData + IB disconnect + parquet flush), then exits.
+                stop_file.write_text("stop")
                 try:
-                    p.wait(timeout=5)
+                    p.wait(timeout=20)
+                    killed.append(f"orchestrator pid={orch_pid} (graceful)")
                 except psutil.TimeoutExpired:
+                    # Orchestrator didn't exit in time — hard kill as fallback.
+                    try:
+                        stop_file.unlink()
+                    except OSError:
+                        pass
                     p.kill()
-                killed.append(f"orchestrator pid={orch_pid}")
+                    killed.append(f"orchestrator pid={orch_pid} (force-killed after timeout)")
             except psutil.NoSuchProcess:
                 killed.append(f"orchestrator pid={orch_pid} (already dead)")
         except (ValueError, OSError):

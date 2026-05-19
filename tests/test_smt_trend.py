@@ -241,18 +241,20 @@ class TestCautiousYes:
         assert result is None
 
     def test_cautious_yes_reversal_short(self):
-        """direction=down, cautious="yes", body-high of last bearish bar=89, bar.high=91 → stop-exit."""
+        """direction=down, cautious="yes", cautious_break_price=89, bar.close=91 > 89 → stop-exit.
+
+        Secondary exits use bar *close*, not intrabar high — wick alone does not trigger.
+        """
         from trend import run_trend
         from smt_state import load_hypothesis, load_position, save_position
 
         self._setup_cautious_yes(direction="down", cautious_price=90.0)
-        # Set cautious_break_price to body-high of last bearish bar:
-        # recent[0]: open=89, close=88 (bearish) → body-high=89
         pos = load_position()
         pos["active"]["cautious_break_price"] = 89.0
         save_position(pos)
-        bar = make_1m_bar(open_=88, high=91, low=86, close=89)
-        recent = make_recent_bars(closes=[88, 89], opens=[89, 88])
+        # bar.close=91 > 89 → stop-exit fires; bar.high=95 is irrelevant (wick-only ignored)
+        bar = make_1m_bar(open_=88, high=95, low=86, close=91)
+        recent = make_recent_bars(closes=[88, 91], opens=[89, 88])
         result = run_trend(NOW, bar, recent)
         assert result is not None
         assert result["kind"] == "stop-exit"
@@ -262,29 +264,27 @@ class TestCautiousYes:
         assert hyp["direction"] == "none"
 
     def test_cautious_yes_1m_break_long(self):
-        """direction=up, cautious="yes", body-low of last bullish bar=115, bar.low=114 → stop-exit.
+        """direction=up, cautious="yes", cautious_break_price=115, bar.close=113 < 115 → stop-exit.
 
-        For direction=up the break fires when bar.low < cautious_break_price (body-low of last
-        bullish bar). cautious_price=110 kept above bar.low=114 so the cautious-price check
-        doesn't fire first; only the stop-exit break fires.
+        Secondary exits use bar *close* — a wick below the break price (bar.low=111) without
+        closing below it does NOT trigger. Exit fires only when the bar closes below 115.
         """
         from trend import run_trend
         from smt_state import load_hypothesis, load_position, save_position
 
         self._setup_cautious_yes(direction="up", cautious_price=110.0)
-        # Set cautious_break_price to body-low of a recent bullish bar: min(Open=115,Close=120)=115
         pos = load_position()
         pos["active"]["cautious_break_price"] = 115.0
         save_position(pos)
 
-        # recent: bullish bar (open=115, close=120, low=113) and bearish bar; bar.low=114 < 115
+        # recent: bullish bar (open=115, close=120) and bearish bar; bar.close=113 < 115
         recent = make_recent_bars(
             closes=[120, 113],
             opens=[115, 120],
             highs=[122, 122],
-            lows=[113, 111],
+            lows=[111, 111],
         )
-        bar = make_1m_bar(open_=116, high=119, low=114, close=117)
+        bar = make_1m_bar(open_=116, high=119, low=111, close=113)
         result = run_trend(NOW, bar, recent)
         assert result is not None
         assert result["kind"] == "stop-exit"
@@ -294,29 +294,27 @@ class TestCautiousYes:
         assert hyp["direction"] == "none"
 
     def test_cautious_yes_1m_break_short(self):
-        """direction=down, cautious="yes", body-high of last bearish bar=88, bar.high=89 → stop-exit.
+        """direction=down, cautious="yes", cautious_break_price=88, bar.close=90 > 88 → stop-exit.
 
-        For direction=down the break fires when bar.high > cautious_break_price (body-high of
-        last bearish bar). cautious_price=90 kept above bar.high=89 so the cautious-price check
-        doesn't fire first; only the stop-exit break fires.
+        Secondary exits use bar *close* — a wick above the break price (bar.high=92) without
+        closing above it does NOT trigger. Exit fires only when the bar closes above 88.
         """
         from trend import run_trend
         from smt_state import load_hypothesis, load_position, save_position
 
         self._setup_cautious_yes(direction="down", cautious_price=90.0)
-        # Set cautious_break_price to body-high of a recent bearish bar: max(Open=88,Close=83)=88
         pos = load_position()
         pos["active"]["cautious_break_price"] = 88.0
         save_position(pos)
 
-        # recent: bearish bar (open=88, close=83) and bullish bar; bar.high=89 > 88
+        # recent: bearish bar (open=88, close=83) and bullish bar; bar.close=90 > 88
         recent = make_recent_bars(
-            closes=[83, 87],
+            closes=[83, 90],
             opens=[88, 82],
-            highs=[89, 85],
+            highs=[92, 92],
             lows=[81, 80],
         )
-        bar = make_1m_bar(open_=84, high=89, low=82, close=83)
+        bar = make_1m_bar(open_=84, high=92, low=82, close=90)
         result = run_trend(NOW, bar, recent)
         assert result is not None
         assert result["kind"] == "stop-exit"

@@ -33,6 +33,15 @@ else:
 
 _ET = zoneinfo.ZoneInfo("America/New_York")
 
+# Session date locked at startup by automation.main (ET date, YYYY-MM-DD).
+# Never recalculated mid-session so the folder stays stable across ET midnight.
+_SESSION_DATE: str = ""
+
+
+def set_session_date(d: str) -> None:
+    global _SESSION_DATE
+    _SESSION_DATE = d
+
 
 def _now_et() -> str:
     return datetime.datetime.now(_ET).isoformat()
@@ -47,7 +56,7 @@ def _log(event: dict) -> None:
 
     kind and time are always written first; remaining fields follow alphabetically.
     """
-    today = datetime.date.today().isoformat()
+    today = _SESSION_DATE or datetime.datetime.now(_ET).date().isoformat()
     path = Path("sessions") / today / "events.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     ordered: dict = {"kind": event.get("kind", ""), "time": event.get("time", "")}
@@ -167,7 +176,7 @@ def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: st
           "old_entry_price": old_entry})
 
 
-def stop_entry_filled(direction: str, stop_price: float) -> None:
+def stop_entry_filled(direction: str, stop_price: float, fill_price: float = 0.0) -> None:
     """Stop entry just filled — send protective S/L to PMT, log, update active.stop in position.json."""
     now = _now_et()
     _executor.update_stop_loss({"direction": direction, "stop_price": stop_price}, None)
@@ -177,7 +186,8 @@ def stop_entry_filled(direction: str, stop_price: float) -> None:
         _save_pos(pos)
     else:
         print("[live_orders] stop_entry_filled: active position absent — position.json not updated", flush=True)
-    _log({"kind": "stop-entry-filled", "time": now, "direction": direction, "stop_price": stop_price})
+    _log({"kind": "stop-entry-filled", "time": now, "direction": direction,
+          "price": fill_price, "stop_price": stop_price})
 
 
 def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> None:
@@ -252,7 +262,7 @@ def dispatch(sig: dict) -> None:
     if kind == "stop-entry-filled":
         stop = sig.get("stop")
         if direction and stop is not None:
-            stop_entry_filled(direction, float(stop))
+            stop_entry_filled(direction, float(stop), float(sig.get("price", 0.0)))
         return
 
     if kind == "market-entry":
@@ -274,21 +284,29 @@ def dispatch(sig: dict) -> None:
         return
 
     if kind == "new-stop-exit":
-        # Move the protective stop to the cautious break price so IB handles the exit
-        # automatically when price reverses through it.
         cbp = sig.get("cautious_break_price")
         if cbp is None:
             cbp = _load_pos().get("active", {}).get("cautious_break_price")
         if cbp is not None:
-            update_stop_loss(float(cbp), reason="new-stop-exit")
+            if sig.get("level") == "secondary":
+                # Secondary exit is managed by 1m bar-close check in trend.py.
+                # Move IB stop far from money so wicks never trigger a fill.
+                _dir = sig.get("direction", _load_pos().get("active", {}).get("direction", ""))
+                _far = 0.0 if _dir in ("up", "long") else 50000.0
+                update_stop_loss(_far, reason="new-stop-exit")
+            else:
+                update_stop_loss(float(cbp), reason="new-stop-exit")
         _log(sig)
         return
 
     if kind == "move-stop-exit":
-        # Trailing stop update: slide the IB stop to the new tighter break price.
         cbp = sig.get("cautious_break_price")
         if cbp is not None:
-            update_stop_loss(float(cbp), reason="move-stop-exit")
+            if sig.get("level") == "secondary":
+                # IB stop already at 0/50000 for secondary — no update needed.
+                pass
+            else:
+                update_stop_loss(float(cbp), reason="move-stop-exit")
         _log(sig)
         return
 

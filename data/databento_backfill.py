@@ -198,7 +198,7 @@ def merge_session_1s_parquets(bar_data_dir: Path) -> None:
                             contract = _IBContract(conId=int(conid), exchange="CME")
                             bars = ib.reqHistoricalData(
                                 contract,
-                                endDateTime=gap_end.strftime("%Y%m%d %H:%M:%S"),
+                                endDateTime=gap_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
                                 durationStr=f"{gap_s} S",
                                 barSizeSetting="1 secs",
                                 whatToShow="TRADES",

@@ -90,12 +90,11 @@ def _check_ib_reachable() -> None:
 
 
 def _pre_session_init() -> None:
-    """Run at orchestrator startup: Databento rolling backfill for historical bars.
+    """Run at orchestrator startup: merge leftover session 1s parquets, then IB gap-fills.
 
-    Gracefully skips if DATABENTO_API_KEY is absent or if the fetch fails — the
-    IB seed (3-day keepUpToDate) will cover recent bars when the strategy connects.
+    All backfill is IB-only. Databento disabled: retroactive roll adjustments cause
+    price discontinuities in append-only parquets.
     """
-    import os
     from pathlib import Path as _Path
     _check_ib_reachable()
     bar_data_dir = _Path(__file__).resolve().parent.parent / "data"
@@ -104,33 +103,6 @@ def _pre_session_init() -> None:
         merge_session_1s_parquets(bar_data_dir)
     except Exception as exc:
         print(f"[ORCH] WARNING: session 1s merge (crash recovery) failed: {exc}", flush=True)
-    if not os.environ.get("DATABENTO_API_KEY"):
-        print(
-            "[ORCH] DATABENTO_API_KEY not set — skipping Databento pre-session backfill",
-            flush=True,
-        )
-        return
-    try:
-        from data.databento_backfill import backfill_parquets
-        print("[ORCH] Running Databento pre-session backfill ...", flush=True)
-        backfill_parquets(bar_data_dir)
-        print("[ORCH] Databento pre-session backfill complete", flush=True)
-    except Exception as exc:
-        print(
-            f"[ORCH] WARNING: Databento backfill failed: {exc} — "
-            "IB seed will cover recent bars at session start",
-            flush=True,
-        )
-    try:
-        from data.databento_backfill import backfill_1s_parquets
-        print("[ORCH] Running Databento 1s pre-session backfill ...", flush=True)
-        backfill_1s_parquets(bar_data_dir)
-        print("[ORCH] Databento 1s pre-session backfill complete", flush=True)
-    except Exception as exc:
-        print(
-            f"[ORCH] WARNING: Databento 1s backfill failed: {exc}",
-            flush=True,
-        )
     try:
         from data.ib_realtime import gap_fill_1m_ib
         print("[ORCH] Running IB 1m gap fill ...", flush=True)
@@ -258,7 +230,22 @@ def _thread_excepthook(args) -> None:
 
 _threading.excepthook = _thread_excepthook
 
-_PRE_SESSION_IB_STOP_EARLY_SECS = 30  # release client slot before session subprocess connects
+_PRE_SESSION_IB_STOP_EARLY_SECS = 60  # stop pre-session IB 1m early so automation.main gap-fills and is live by open
+
+_STOP_FILE = Path(__file__).resolve().parent.parent / "orchestrator_stop.req"
+
+
+class _GracefulStop(Exception):
+    """Raised when trade.py terminate writes the stop-request sentinel file."""
+
+
+def _check_stop_requested() -> None:
+    if _STOP_FILE.exists():
+        try:
+            _STOP_FILE.unlink()
+        except OSError:
+            pass
+        raise _GracefulStop()
 
 
 def _start_pre_session_ib(
@@ -322,11 +309,12 @@ def _sleep_until(target: datetime.datetime, label: str, ib_health_check=None) ->
         hours = delay / 3600
         print(f"[ORCH] Sleeping {hours:.1f}h until {label}", flush=True)
         while True:
+            _check_stop_requested()
             now = get_et_now()
             remaining = (target - now).total_seconds()
             if remaining <= 0:
                 break
-            time.sleep(min(30.0, remaining))
+            time.sleep(min(5.0, remaining))
             if ib_health_check is not None:
                 ib_health_check()
 
@@ -391,6 +379,8 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
         summarizer = Summarizer()
     bar_data_dir = Path(__file__).resolve().parent.parent / "data"
     _check_parquet_files(bar_data_dir)
+    _pre_src = None
+    _pre_thr = None
     try:
         _pre_session_init()
         while True:
@@ -414,8 +404,11 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
                 if now < _stop_ts:
                     _sleep_until(_stop_ts, "pre-session IB shutdown", ib_health_check=_ib_check)
                 _stop_pre_session_ib(_pre_src, _pre_thr)
-                _sleep_until(session_open_dt, f"session open {_SESSION_OPEN_V2.strftime('%H:%M')} ET")
-                continue
+                # Brief pause so IB Gateway fully releases the client slot before
+                # automation.main connects with the same (or overlapping) client ID.
+                time.sleep(10)
+                # Fall through to session run — automation.main gap-fills the handoff
+                # window and reqMktData is live by actual session open.
 
             if now >= grace_end_dt:
                 _pre_src, _pre_thr, _pre_err = _start_pre_session_ib(bar_data_dir)
@@ -457,8 +450,13 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
             _sleep_until(next_session_open(get_et_now()), "next trading session",
                          ib_health_check=_make_ib_health_check(_pre_thr, _pre_err))
             _stop_pre_session_ib(_pre_src, _pre_thr)
+    except _GracefulStop:
+        print("\n[ORCH] Stop requested — shutting down gracefully.", flush=True)
+        _stop_pre_session_ib(_pre_src, _pre_thr)
+        sys.exit(0)
     except KeyboardInterrupt:
         print("\n[ORCH] Shutting down.", flush=True)
+        _stop_pre_session_ib(_pre_src, _pre_thr)
         sys.exit(0)
     finally:
         try:
