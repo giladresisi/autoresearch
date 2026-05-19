@@ -176,7 +176,7 @@ def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: st
           "old_entry_price": old_entry})
 
 
-def stop_entry_filled(direction: str, stop_price: float) -> None:
+def stop_entry_filled(direction: str, stop_price: float, fill_price: float = 0.0) -> None:
     """Stop entry just filled — send protective S/L to PMT, log, update active.stop in position.json."""
     now = _now_et()
     _executor.update_stop_loss({"direction": direction, "stop_price": stop_price}, None)
@@ -186,7 +186,8 @@ def stop_entry_filled(direction: str, stop_price: float) -> None:
         _save_pos(pos)
     else:
         print("[live_orders] stop_entry_filled: active position absent — position.json not updated", flush=True)
-    _log({"kind": "stop-entry-filled", "time": now, "direction": direction, "stop_price": stop_price})
+    _log({"kind": "stop-entry-filled", "time": now, "direction": direction,
+          "price": fill_price, "stop_price": stop_price})
 
 
 def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> None:
@@ -261,7 +262,7 @@ def dispatch(sig: dict) -> None:
     if kind == "stop-entry-filled":
         stop = sig.get("stop")
         if direction and stop is not None:
-            stop_entry_filled(direction, float(stop))
+            stop_entry_filled(direction, float(stop), float(sig.get("price", 0.0)))
         return
 
     if kind == "market-entry":
