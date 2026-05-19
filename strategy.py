@@ -238,7 +238,8 @@ def run_strategy(
                 }
                 position["stop_entry"]      = ""
                 position["stop_direction"]  = ""
-                position["confirmation_bar"] = {}
+                # confirmation_bar intentionally preserved across fill so that after a
+                # stop-out the same 5m bar cannot be reused as confirmation for re-entry.
                 smt_state.save_position(position)
                 return _make_signal("stop-entry-filled", now, fill_price, direction=direction, stop=stop)
 
