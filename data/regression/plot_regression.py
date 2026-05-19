@@ -195,7 +195,7 @@ for e in events:
             limit_x += [pending_t, e["ts"], None]
             limit_y += [pending_p, pending_p, None]
         pending_t, pending_p = e["ts"], e["price"]
-    elif e["kind"] in ("stop-entry-filled", "limit-entry-cancelled", "limit-entry-expired", "market-entry"):
+    elif e["kind"] in ("stop-entry-filled", "stop-entry-cancelled", "limit-entry-cancelled", "limit-entry-expired", "market-entry"):
         if pending_t is not None:
             limit_x += [pending_t, e["ts"], None]
             limit_y += [pending_p, pending_p, None]

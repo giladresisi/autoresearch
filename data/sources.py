@@ -221,12 +221,15 @@ class DatabentSource:
                 # Pattern 2: "Try again with an end time before YYYY-MM-DDTHH:MM:SS..."
                 if not m:
                     m2 = re.search(
-                        r"end time before (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^\s]*)",
+                        r"end time before (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)",
                         exc_str,
                     )
                     available_end = m2.group(1) if m2 else None
                 else:
                     available_end = f"{m.group(1)}T{m.group(2)}"
+                # Truncate to second precision — Databento rejects sub-second end timestamps
+                if available_end:
+                    available_end = re.sub(r"\.\d+", "", available_end)
                 if available_end:
                     try:
                         data = self._client.timeseries.get_range(
@@ -239,8 +242,35 @@ class DatabentSource:
                         )
                         df = data.to_df()
                     except Exception as retry_exc:
-                        print(f"DatabentSource: retry failed for {ticker}: {retry_exc}", file=sys.stderr)
-                        return None
+                        # available_end may still be within today's unprocessed window.
+                        # dataset_unavailable_range error also embeds a suggested cutoff.
+                        retry_exc_str = str(retry_exc)
+                        if "dataset_unavailable_range" in retry_exc_str:
+                            m3 = re.search(
+                                r"end time before (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)",
+                                retry_exc_str,
+                            )
+                            if m3:
+                                available_end2 = re.sub(r"\.\d+", "", m3.group(1))
+                                try:
+                                    data = self._client.timeseries.get_range(
+                                        dataset="GLBX.MDP3",
+                                        symbols=[ticker],
+                                        schema=schema,
+                                        start=start,
+                                        end=available_end2,
+                                        stype_in="continuous",
+                                    )
+                                    df = data.to_df()
+                                except Exception as retry2_exc:
+                                    print(f"DatabentSource: second retry failed for {ticker}: {retry2_exc}", file=sys.stderr)
+                                    return None
+                            else:
+                                print(f"DatabentSource: retry failed for {ticker}: {retry_exc}", file=sys.stderr)
+                                return None
+                        else:
+                            print(f"DatabentSource: retry failed for {ticker}: {retry_exc}", file=sys.stderr)
+                            return None
                 else:
                     print(f"DatabentSource: error fetching {ticker}: {exc}", file=sys.stderr)
                     return None
