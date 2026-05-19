@@ -202,7 +202,7 @@ class IbRealtimeSource:
                         chunk_s = max(1, int((chunk_end - chunk_start).total_seconds()))
                         bars = ib.reqHistoricalData(
                             contract,
-                            endDateTime=chunk_end.strftime("%Y%m%d %H:%M:%S"),
+                            endDateTime=chunk_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
                             durationStr=f"{chunk_s} S",
                             barSizeSetting="1 secs",
                             whatToShow="TRADES",

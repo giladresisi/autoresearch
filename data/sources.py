@@ -414,7 +414,7 @@ class IBGatewaySource:
                         duration_days = max(1, (chunk_end - chunk_start).days)
                         bars = ib.reqHistoricalData(
                             contract,
-                            endDateTime=chunk_end.strftime("%Y%m%d %H:%M:%S"),
+                            endDateTime=chunk_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
                             durationStr=f"{duration_days} D",
                             barSizeSetting=bar_size,
                             whatToShow="TRADES",
@@ -435,7 +435,7 @@ class IBGatewaySource:
                     duration_days = max(1, (chunk_end - chunk_start).days)
                     bars = ib.reqHistoricalData(
                         contract,
-                        endDateTime=chunk_end.strftime("%Y%m%d %H:%M:%S"),
+                        endDateTime=chunk_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
                         durationStr=f"{duration_days} D",
                         barSizeSetting=bar_size,
                         whatToShow="TRADES",
