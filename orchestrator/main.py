@@ -90,12 +90,11 @@ def _check_ib_reachable() -> None:
 
 
 def _pre_session_init() -> None:
-    """Run at orchestrator startup: Databento rolling backfill for historical bars.
+    """Run at orchestrator startup: merge leftover session 1s parquets, then IB gap-fills.
 
-    Gracefully skips if DATABENTO_API_KEY is absent or if the fetch fails — the
-    IB seed (3-day keepUpToDate) will cover recent bars when the strategy connects.
+    All backfill is IB-only. Databento disabled: retroactive roll adjustments cause
+    price discontinuities in append-only parquets.
     """
-    import os
     from pathlib import Path as _Path
     _check_ib_reachable()
     bar_data_dir = _Path(__file__).resolve().parent.parent / "data"
@@ -104,33 +103,6 @@ def _pre_session_init() -> None:
         merge_session_1s_parquets(bar_data_dir)
     except Exception as exc:
         print(f"[ORCH] WARNING: session 1s merge (crash recovery) failed: {exc}", flush=True)
-    if not os.environ.get("DATABENTO_API_KEY"):
-        print(
-            "[ORCH] DATABENTO_API_KEY not set — skipping Databento pre-session backfill",
-            flush=True,
-        )
-        return
-    try:
-        from data.databento_backfill import backfill_parquets
-        print("[ORCH] Running Databento pre-session backfill ...", flush=True)
-        backfill_parquets(bar_data_dir)
-        print("[ORCH] Databento pre-session backfill complete", flush=True)
-    except Exception as exc:
-        print(
-            f"[ORCH] WARNING: Databento backfill failed: {exc} — "
-            "IB seed will cover recent bars at session start",
-            flush=True,
-        )
-    try:
-        from data.databento_backfill import backfill_1s_parquets
-        print("[ORCH] Running Databento 1s pre-session backfill ...", flush=True)
-        backfill_1s_parquets(bar_data_dir)
-        print("[ORCH] Databento 1s pre-session backfill complete", flush=True)
-    except Exception as exc:
-        print(
-            f"[ORCH] WARNING: Databento 1s backfill failed: {exc}",
-            flush=True,
-        )
     try:
         from data.ib_realtime import gap_fill_1m_ib
         print("[ORCH] Running IB 1m gap fill ...", flush=True)

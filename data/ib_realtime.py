@@ -234,26 +234,6 @@ class IbRealtimeSource:
                     _snap = combined
                     self._parquet_executor.submit(_snap.to_parquet, self._bar_data_dir / parquet_name)
                     print(f"[gap_fill_1s_ib] {instrument}: +{len(new_df)} 1s bars", flush=True)
-
-                    # Derive 1m bars from the fetched 1s bars and merge into the 1m parquet.
-                    # Only include bars whose minute is fully complete (bar start < end_dt floor).
-                    complete_minute = end_dt.floor("min")
-                    new_1m = (
-                        new_df[new_df.index < complete_minute][["Open", "High", "Low", "Close", "Volume"]]
-                        .resample("1min", closed="left", label="left")
-                        .agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"})
-                        .dropna(subset=["Open"])
-                    )
-                    if not new_1m.empty:
-                        df_1m_attr = "_mnq_1m_df" if instrument == "MNQ" else "_mes_1m_df"
-                        parquet_1m  = "MNQ_1m.parquet" if instrument == "MNQ" else "MES_1m.parquet"
-                        df_1m = getattr(self, df_1m_attr)
-                        combined_1m = pd.concat([df_1m, new_1m]).sort_index()
-                        combined_1m = combined_1m[~combined_1m.index.duplicated(keep="last")]
-                        setattr(self, df_1m_attr, combined_1m)
-                        _snap_1m = combined_1m
-                        self._parquet_executor.submit(_snap_1m.to_parquet, self._bar_data_dir / parquet_1m)
-                        print(f"[gap_fill_1s_ib] {instrument}: +{len(new_1m)} 1m bars derived", flush=True)
                 except Exception as exc:
                     print(f"[gap_fill_1s_ib] {instrument}: error: {exc}", flush=True)
         except Exception as exc:
