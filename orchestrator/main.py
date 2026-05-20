@@ -90,7 +90,11 @@ def _check_ib_reachable() -> None:
 
 
 def _pre_session_init() -> None:
-    """Run at orchestrator startup: merge leftover session 1s parquets, then IB gap-fills.
+    """Run at orchestrator startup: merge leftover session 1s parquets; IB gap-fill (signal mode only).
+
+    In LIVE_TRADING mode the IB gap-fill is skipped here — automation.main connects to IB
+    immediately on startup and handles its own gap-fill, so running a separate gap-fill first
+    would be redundant and could cause a brief IB client-ID conflict.
 
     All backfill is IB-only. Databento disabled: retroactive roll adjustments cause
     price discontinuities in append-only parquets.
@@ -103,13 +107,14 @@ def _pre_session_init() -> None:
         merge_session_1s_parquets(bar_data_dir)
     except Exception as exc:
         print(f"[ORCH] WARNING: session 1s merge (crash recovery) failed: {exc}", flush=True)
-    try:
-        from data.ib_realtime import gap_fill_1m_ib
-        print("[ORCH] Running IB 1m gap fill ...", flush=True)
-        gap_fill_1m_ib(bar_data_dir)
-        print("[ORCH] IB 1m gap fill complete", flush=True)
-    except Exception as exc:
-        print(f"[ORCH] WARNING: IB 1m gap fill failed: {exc}", flush=True)
+    if not LIVE_TRADING:
+        try:
+            from data.ib_realtime import gap_fill_1m_ib
+            print("[ORCH] Running IB 1m gap fill ...", flush=True)
+            gap_fill_1m_ib(bar_data_dir)
+            print("[ORCH] IB 1m gap fill complete", flush=True)
+        except Exception as exc:
+            print(f"[ORCH] WARNING: IB 1m gap fill failed: {exc}", flush=True)
 
 
 def _check_parquet_files(bar_data_dir: Path) -> None:
@@ -230,7 +235,7 @@ def _thread_excepthook(args) -> None:
 
 _threading.excepthook = _thread_excepthook
 
-_PRE_SESSION_IB_STOP_EARLY_SECS = 60  # stop pre-session IB 1m early so automation.main gap-fills and is live by open
+_PRE_SESSION_IB_STOP_EARLY_SECS = 60  # signal mode only: stop pre-session IB this many seconds before open
 
 _STOP_FILE = Path(__file__).resolve().parent.parent / "orchestrator_stop.req"
 
@@ -398,17 +403,21 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
             grace_end_dt    = datetime.datetime.combine(today, _SESSION_CLOSE_V2).replace(tzinfo=_ET)
 
             if now < session_open_dt:
-                _pre_src, _pre_thr, _pre_err = _start_pre_session_ib(bar_data_dir)
-                _ib_check = _make_ib_health_check(_pre_thr, _pre_err)
-                _stop_ts = session_open_dt - datetime.timedelta(seconds=_PRE_SESSION_IB_STOP_EARLY_SECS)
-                if now < _stop_ts:
-                    _sleep_until(_stop_ts, "pre-session IB shutdown", ib_health_check=_ib_check)
-                _stop_pre_session_ib(_pre_src, _pre_thr)
-                # Brief pause so IB Gateway fully releases the client slot before
-                # automation.main connects with the same (or overlapping) client ID.
-                time.sleep(10)
-                # Fall through to session run — automation.main gap-fills the handoff
-                # window and reqMktData is live by actual session open.
+                if LIVE_TRADING:
+                    # automation.main starts immediately: it connects to IB, gap-fills, and
+                    # streams bars into the parquets well before session open with no handoff gap.
+                    print("[ORCH] LIVE_TRADING: starting automation.main now for early gap-fill", flush=True)
+                else:
+                    # Signal mode: pre-session IB accumulator runs until 60s before open,
+                    # then signal_smt.py takes over the IB connection.
+                    _pre_src, _pre_thr, _pre_err = _start_pre_session_ib(bar_data_dir)
+                    _ib_check = _make_ib_health_check(_pre_thr, _pre_err)
+                    _stop_ts = session_open_dt - datetime.timedelta(seconds=_PRE_SESSION_IB_STOP_EARLY_SECS)
+                    if now < _stop_ts:
+                        _sleep_until(_stop_ts, "pre-session IB shutdown", ib_health_check=_ib_check)
+                    _stop_pre_session_ib(_pre_src, _pre_thr)
+                    time.sleep(10)
+                # Fall through to session run.
 
             if now >= grace_end_dt:
                 _pre_src, _pre_thr, _pre_err = _start_pre_session_ib(bar_data_dir)
