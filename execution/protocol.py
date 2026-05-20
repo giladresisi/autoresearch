@@ -2,6 +2,7 @@
 # FillRecord dataclass, assumed_fill_price utility, and FillExecutor Protocol.
 # All executors (simulated, live) implement FillExecutor so callers are decoupled from fill mechanics.
 from __future__ import annotations
+import datetime
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -14,15 +15,28 @@ def assumed_fill_price(
     reference_price: float,
     slip_ticks: int = 2,
     tick_size: float = 0.25,
+    bar_time: "datetime.time | None" = None,
 ) -> float:
-    """Estimate fill price with tick-based entry slippage for market orders.
+    """Estimate fill price with tick-based entry slippage.
 
-    Limit and stop orders fill at the reference price by definition.
-    Long market entries pay slip; short market entries receive less.
+    Market orders: always 1 tick (observed live slippage; slip_ticks parameter ignored).
+    Stop orders: time-based slippage — 4 ticks before 11:00 ET (higher volatility),
+        2 ticks at or after 11:00 ET.  bar_time=None uses the pessimistic 4-tick default.
+    Limit and all other order types: fill at reference_price unchanged.
+    Long direction: slippage is adverse (adds to price).
+    Short direction: slippage is adverse (subtracts from price).
     """
-    if order_type != "market":
+    if order_type == "market":
+        effective_ticks = 1
+    elif order_type == "stop":
+        cutoff = datetime.time(11, 0)
+        if bar_time is None or bar_time < cutoff:
+            effective_ticks = 4
+        else:
+            effective_ticks = 2
+    else:
         return reference_price
-    slip = slip_ticks * tick_size
+    slip = effective_ticks * tick_size
     return reference_price + slip if direction == "long" else reference_price - slip
 
 

@@ -354,3 +354,238 @@ def test_get_position_delegates():
     pos = {"active": {"direction": "long"}, "stop_entry": "", "stop_direction": ""}
     with patch("smt_state.load_position", return_value=pos):
         assert live_orders.get_position() == pos
+
+
+# ---------------------------------------------------------------------------
+# Helpers for D4 / D6 / D8 guard tests
+# ---------------------------------------------------------------------------
+
+def _reset_guard_state():
+    """Reset all module-level guard timestamps between tests."""
+    live_orders._entry_sent_bar_time = None
+    live_orders._fill_bar_time = None
+    live_orders._cancel_bar_time = None
+    live_orders._pending_close_after = None
+
+
+_T0 = "2026-05-19T10:30:00-04:00"
+_T0_PLUS_0_5S = "2026-05-19T10:30:00.5-04:00"
+_T0_PLUS_1_5S = "2026-05-19T10:30:01.5-04:00"
+_T0_PLUS_1S   = "2026-05-19T10:30:01-04:00"
+_T0_PLUS_2S   = "2026-05-19T10:30:02-04:00"
+_T0_PLUS_3S   = "2026-05-19T10:30:03-04:00"
+_T0_PLUS_4S   = "2026-05-19T10:30:04-04:00"
+
+_POS_WITH_STOP = {
+    "active": {}, "stop_entry": "19900.0", "stop_direction": "up",
+    "confirmation_bar": {}, "failed_entries": 0,
+}
+_POS_EMPTY = {
+    "active": {}, "stop_entry": "", "stop_direction": "",
+    "confirmation_bar": {}, "failed_entries": 0,
+}
+_POS_ACTIVE = {
+    "active": {"direction": "long", "fill_price": 19900.0, "stop": 19870.0,
+               "contracts": 2, "cautious": "no"},
+    "stop_entry": "", "stop_direction": "", "confirmation_bar": {}, "failed_entries": 0,
+}
+
+
+# ---------------------------------------------------------------------------
+# D4 tests
+# ---------------------------------------------------------------------------
+
+def test_d4_cancel_suppressed_within_1s(_in_tmp, _mock_today):
+    """D4: stop-entry-cancelled fires 0.5s after new-stop-entry → cancel NOT dispatched."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_POS_WITH_STOP), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({
+            "kind": "new-stop-entry", "time": _T0,
+            "direction": "up", "price": 19900.0, "stop": 19870.0,
+        })
+        live_orders.dispatch({
+            "kind": "stop-entry-cancelled", "time": _T0_PLUS_0_5S,
+            "price": 19900.0, "reason": "trend-broken", "direction": "up",
+        })
+
+    mock_executor.place_close.assert_not_called()
+
+
+def test_d4_cancel_allowed_after_1s(_in_tmp, _mock_today):
+    """D4: stop-entry-cancelled fires 1.5s after new-stop-entry → cancel IS dispatched."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_POS_WITH_STOP), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({
+            "kind": "new-stop-entry", "time": _T0,
+            "direction": "up", "price": 19900.0, "stop": 19870.0,
+        })
+        live_orders.dispatch({
+            "kind": "stop-entry-cancelled", "time": _T0_PLUS_1_5S,
+            "price": 19900.0, "reason": "trend-broken", "direction": "up",
+        })
+
+    mock_executor.place_close.assert_called_once_with("cancel-stop")
+
+
+def test_d4_cancel_allowed_no_prior_entry(_in_tmp, _mock_today):
+    """D4: stop-entry-cancelled with no prior new-stop-entry → cancel IS dispatched."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_POS_WITH_STOP), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({
+            "kind": "stop-entry-cancelled", "time": _T0,
+            "price": 19900.0, "reason": "trend-broken", "direction": "up",
+        })
+
+    mock_executor.place_close.assert_called_once_with("cancel-stop")
+
+
+# ---------------------------------------------------------------------------
+# D6 tests
+# ---------------------------------------------------------------------------
+
+def test_d6_stop_exit_suppressed_within_3s(_in_tmp, _mock_today):
+    """D6: stop-exit fires 1s after stop-entry-filled → close NOT dispatched."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_POS_ACTIVE), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({
+            "kind": "stop-entry-filled", "time": _T0,
+            "direction": "up", "price": 19900.0, "stop": 19870.0,
+        })
+        live_orders.dispatch({
+            "kind": "stop-exit", "time": _T0_PLUS_1S,
+            "direction": "up", "price": 19900.0,
+        })
+
+    mock_executor.place_close.assert_not_called()
+
+
+def test_d6_stop_exit_allowed_after_3s(_in_tmp, _mock_today):
+    """D6: stop-exit fires 4s after stop-entry-filled → close IS dispatched."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_POS_ACTIVE), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({
+            "kind": "stop-entry-filled", "time": _T0,
+            "direction": "up", "price": 19900.0, "stop": 19870.0,
+        })
+        live_orders.dispatch({
+            "kind": "stop-exit", "time": _T0_PLUS_4S,
+            "direction": "up", "price": 19880.0,
+        })
+
+    mock_executor.place_close.assert_called_once_with("close")
+
+
+def test_d6_stop_exit_allowed_no_prior_fill(_in_tmp, _mock_today):
+    """D6: stop-exit with no prior stop-entry-filled → close IS dispatched."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_POS_ACTIVE), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({
+            "kind": "stop-exit", "time": _T0,
+            "direction": "up", "price": 19900.0,
+        })
+
+    mock_executor.place_close.assert_called_once_with("close")
+
+
+# ---------------------------------------------------------------------------
+# D8 tests
+# ---------------------------------------------------------------------------
+
+def test_d8_market_close_deferred_within_3s(_in_tmp, _mock_today):
+    """D8: market-close fires 1s after stop-entry-cancelled → close_position NOT called."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_POS_EMPTY), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({
+            "kind": "stop-entry-cancelled", "time": _T0,
+            "price": 19900.0, "reason": "trend-broken", "direction": "up",
+        })
+        live_orders.dispatch({
+            "kind": "market-close", "time": _T0_PLUS_1S,
+            "price": 19890.0, "reason": "strategy",
+        })
+
+    # place_close("cancel-stop") from the cancel is called, but place_close("close") is not
+    call_args_list = [call.args[0] for call in mock_executor.place_close.call_args_list]
+    assert "close" not in call_args_list
+
+
+def test_d8_market_close_allowed_after_3s(_in_tmp, _mock_today):
+    """D8: market-close fires 4s after stop-entry-cancelled → close_position IS called."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_POS_EMPTY), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({
+            "kind": "stop-entry-cancelled", "time": _T0,
+            "price": 19900.0, "reason": "trend-broken", "direction": "up",
+        })
+        live_orders.dispatch({
+            "kind": "market-close", "time": _T0_PLUS_4S,
+            "price": 19890.0, "reason": "strategy",
+        })
+
+    call_args_list = [call.args[0] for call in mock_executor.place_close.call_args_list]
+    assert "close" in call_args_list
+
+
+def test_d8_fill_cancels_pending_close(_in_tmp, _mock_today):
+    """D8: fill arrives during the 3s deferral → pending_close cleared; market-close proceeds."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_POS_ACTIVE), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({
+            "kind": "stop-entry-cancelled", "time": _T0,
+            "price": 19900.0, "reason": "trend-broken", "direction": "up",
+        })
+        live_orders.dispatch({
+            "kind": "stop-entry-filled", "time": _T0_PLUS_1S,
+            "direction": "up", "price": 19900.0, "stop": 19870.0,
+        })
+        live_orders.dispatch({
+            "kind": "market-close", "time": _T0_PLUS_2S,
+            "price": 19890.0, "reason": "strategy",
+        })
+
+    # pending_close_after was cleared by the fill, so market-close at T+2s goes through
+    call_args_list = [call.args[0] for call in mock_executor.place_close.call_args_list]
+    assert "close" in call_args_list
+
+
+def test_d8_market_close_noop_pending_if_no_prior_cancel(_in_tmp, _mock_today):
+    """D8: market-close with no prior stop-entry-cancelled → close_position IS called (no deferral)."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_POS_EMPTY), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({
+            "kind": "market-close", "time": _T0,
+            "price": 19890.0, "reason": "strategy",
+        })
+
+    call_args_list = [call.args[0] for call in mock_executor.place_close.call_args_list]
+    assert "close" in call_args_list

@@ -11,6 +11,8 @@ import os
 import zoneinfo
 from pathlib import Path
 
+import pandas as pd
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -36,6 +38,16 @@ _ET = zoneinfo.ZoneInfo("America/New_York")
 # Session date locked at startup by automation.main (ET date, YYYY-MM-DD).
 # Never recalculated mid-session so the folder stays stable across ET midnight.
 _SESSION_DATE: str = ""
+
+# D4: timestamp when last stop entry was dispatched (bar time)
+_entry_sent_bar_time: "pd.Timestamp | None" = None
+
+# D6: timestamp when last stop entry fill was detected (bar time)
+_fill_bar_time: "pd.Timestamp | None" = None
+
+# D8: timestamp when last stop-entry-cancelled fired (bar time), and pending close flag
+_cancel_bar_time: "pd.Timestamp | None" = None
+_pending_close_after: "pd.Timestamp | None" = None
 
 
 def set_session_date(d: str) -> None:
@@ -248,6 +260,8 @@ def dispatch(sig: dict) -> None:
     Direction mapping: pipeline uses "up"/"down", live_orders uses "long"/"short".
     For manual triggers (trade.py), call the specific functions directly instead.
     """
+    global _entry_sent_bar_time, _fill_bar_time, _cancel_bar_time, _pending_close_after
+
     kind = sig.get("kind")
     direction_v2 = sig.get("direction", "none")
     direction = "long" if direction_v2 == "up" else ("short" if direction_v2 == "down" else None)
@@ -256,6 +270,11 @@ def dispatch(sig: dict) -> None:
         stop = sig.get("stop")
         if direction and stop is not None:
             place_stop_entry(direction, float(sig["price"]), float(stop))
+        if sig.get("time"):
+            try:
+                _entry_sent_bar_time = pd.Timestamp(sig["time"])
+            except Exception:
+                _entry_sent_bar_time = None
         return
 
     if kind == "move-stop-entry":
@@ -268,6 +287,12 @@ def dispatch(sig: dict) -> None:
         stop = sig.get("stop")
         if direction and stop is not None:
             stop_entry_filled(direction, float(stop), float(sig.get("price", 0.0)))
+        if sig.get("time"):
+            try:
+                _fill_bar_time = pd.Timestamp(sig["time"])
+            except Exception:
+                _fill_bar_time = None
+        _pending_close_after = None  # Cancel deferred close — position confirmed filled
         return
 
     if kind == "market-entry":
@@ -277,6 +302,16 @@ def dispatch(sig: dict) -> None:
         return
 
     if kind == "market-close":
+        if _pending_close_after is not None and sig.get("time"):
+            try:
+                _close_ts = pd.Timestamp(sig["time"])
+                if _close_ts < _pending_close_after:
+                    _log(sig)   # log the deferred signal
+                    return      # don't close yet — wait until pending_close_after
+                # Time has passed — clear the pending flag and proceed with close
+            except Exception:
+                pass
+        _pending_close_after = None  # clear regardless after processing
         close_position(float(sig.get("price", 0.0)), sig.get("reason", "strategy"))
         return
 
@@ -284,6 +319,14 @@ def dispatch(sig: dict) -> None:
         # Cautious stop-exit: IB stop already fired in normal flow; this is a safety-net
         # market-close in case the stop order didn't execute (e.g. connectivity gap).
         # trend.py has already cleared position+hypothesis in position.json before emitting.
+        if _fill_bar_time is not None and sig.get("time"):
+            try:
+                _exit_ts = pd.Timestamp(sig["time"])
+                if _exit_ts - _fill_bar_time < pd.Timedelta(seconds=3):
+                    _log(sig)  # still log
+                    return     # but don't send the close (too soon after fill)
+            except Exception:
+                pass
         _executor.place_close("close")
         _log(sig)
         return
@@ -318,12 +361,28 @@ def dispatch(sig: dict) -> None:
     if kind == "stop-entry-cancelled":
         # position.json already cleared by the pipeline before emitting this signal;
         # bypass the stop_entry guard and send the broker cancel directly.
+        if _entry_sent_bar_time is not None and sig.get("time"):
+            try:
+                _cancel_ts = pd.Timestamp(sig["time"])
+                if _cancel_ts - _entry_sent_bar_time < pd.Timedelta(seconds=1):
+                    _log(sig)  # still log the signal
+                    return     # but don't dispatch the cancel (too soon after entry)
+            except Exception:
+                pass
         _executor.place_close("cancel-stop")
         _log(sig)
+        if sig.get("time"):
+            try:
+                _cancel_bar_time = pd.Timestamp(sig["time"])
+                _pending_close_after = _cancel_bar_time + pd.Timedelta(seconds=3)
+            except Exception:
+                _cancel_bar_time = None
+                _pending_close_after = None
         return
 
     if kind == "stopped-out":
         # IB's protective stop already executed — clear position state and log.
+        _fill_bar_time = None
         pos = _load_pos()
         if pos.get("active", {}).get("cautious", "no") not in ("no", ""):
             # Cautious stop fired: also reset hypothesis so the strategy doesn't re-enter

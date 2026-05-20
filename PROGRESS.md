@@ -1,6 +1,14 @@
 # PROGRESS
 
 
+## Feature: D7 — Session-End Close + IB Disconnect Hard Close
+### Planning Phase
+**Status**: ✅ Planned
+**Started**: 2026-05-20
+**Plan File**: `.agents/plans/session-end-ib-disconnect.md`
+
+---
+
 ## Feature: Live Orders Refactor + Trade CLI
 
 **Status**: ✅ Complete

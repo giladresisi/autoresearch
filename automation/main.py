@@ -159,6 +159,14 @@ def _on_bar(bar, mes_partial) -> None:
     if _bar_ts.time() < SESSION_OPEN:
         return
 
+    if _bar_ts.time() >= SESSION_CLOSE:
+        import live_orders as _lo_sc
+        if _lo_sc.has_pending_entry():
+            _lo_sc.cancel_stop_entry("session-end")
+        if _lo_sc.has_active_position():
+            _lo_sc.close_position(float(getattr(bar, "Close", 0.0)), reason="session-end")
+        return
+
     _mnq_df = _ib_source.mnq_1m_df if _ib_source is not None else pd.DataFrame()
     _mes_df = _ib_source.mes_1m_df if _ib_source is not None else pd.DataFrame()
     if _mnq_df.empty:
@@ -881,6 +889,10 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
         return
 
     if result == "exit_session_end":
+        try:
+            _executor.place_close("session-end")
+        except Exception as _exc:
+            print(f"[automation] session-end close error: {_exc}", flush=True)
         exit_price = float(bar.Close)
     elif result in (
         "exit_tp", "exit_secondary", "exit_stop",
@@ -1115,6 +1127,27 @@ def main() -> None:
     try:
         _ib_source.start()  # blocks; retry loop is inside IbRealtimeSource
     except IbGatewayDisconnectedError:
+        import time as _wall_clock
+        import live_orders as _lo_dc
+        _has_position = (
+            (_state == "MANAGING" and _position is not None)
+            or _lo_dc.has_active_position()
+        )
+        if _has_position:
+            print(
+                "[automation] IB disconnect with open position — "
+                "30s grace period (reconnect IB now to resume)",
+                flush=True,
+            )
+            _wall_clock.sleep(30)
+            print("[automation] Grace period expired — issuing hard close via PMT", flush=True)
+            try:
+                _executor.place_close("ib-disconnect")
+            except Exception as _dc_exc:
+                print(
+                    f"[automation] Hard close failed (leaving for AutoLiq): {_dc_exc}",
+                    flush=True,
+                )
         # Gateway shut down — executor.stop() runs in finally; exit code 2 signals orchestrator
         print("[automation] IB Gateway disconnected — exiting with code 2", flush=True)
         sys.exit(2)
