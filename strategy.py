@@ -311,15 +311,19 @@ def run_strategy(
                     entry_price = max(body_end_price, bar_open + MIN_APPROACH_PTS)
                 else:
                     entry_price = min(body_end_price, bar_open - MIN_APPROACH_PTS)
+                if direction == _DIR_UP:
+                    stop_loss = max(float(opp_5m["low"]), float(opp_5m["body_low"]) - _STOP_WICK_CAP)
+                else:
+                    stop_loss = min(float(opp_5m["high"]), float(opp_5m["body_high"]) + _STOP_WICK_CAP)
+                if direction == _DIR_UP and (entry_price - stop_loss) < MIN_STOP_DISTANCE:
+                    return None
+                if direction == _DIR_DOWN and (stop_loss - entry_price) < MIN_STOP_DISTANCE:
+                    return None
                 position["confirmation_bar"] = conf_bar_snap
                 kind = "new-stop-entry" if position["stop_entry"] == "" else "move-stop-entry"
                 position["stop_entry"]     = entry_price
                 position["stop_direction"] = direction
                 smt_state.save_position(position)
-                if direction == _DIR_UP:
-                    stop_loss = max(float(opp_5m["low"]), float(opp_5m["body_low"]) - _STOP_WICK_CAP)
-                else:
-                    stop_loss = min(float(opp_5m["high"]), float(opp_5m["body_high"]) + _STOP_WICK_CAP)
                 return _make_signal(kind, now, entry_price, stop=stop_loss)
 
         # Nothing triggered
