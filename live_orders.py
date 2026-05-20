@@ -217,7 +217,7 @@ def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> No
     _executor.place_close("cancel-stop")
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
-    pos["confirmation_bar"] = {}
+    pos["conf_bar_entry"] = {}
     _save_pos(pos)
     _log({"kind": "cancel-stop-entry", "time": now, "entry_price": entry_price, "reason": reason})
 
@@ -230,7 +230,7 @@ def close_position(price: float, reason: str = "user-requested") -> None:
     pos["active"] = {}
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
-    pos["confirmation_bar"] = {}
+    pos["conf_bar_entry"] = {}
     _save_pos(pos)
     _log({"kind": "market-close", "time": now, "price": float(price), "reason": reason})
 
@@ -394,7 +394,7 @@ def dispatch(sig: dict) -> None:
         pos["active"] = {}
         pos["stop_entry"] = ""
         pos["stop_direction"] = ""
-        pos["confirmation_bar"] = {}
+        pos["conf_bar_entry"] = {}
         _save_pos(pos)
         _log(sig)
         return
@@ -430,14 +430,15 @@ def trend_broken() -> dict:
     hypothesis["direction"] = "none"
     save_hypothesis(hypothesis)
 
-    # Clear confirmation_bar in case cancel_stop_entry didn't (no pending stop).
+    # Clear conf_bar_entry in case cancel_stop_entry didn't (no pending stop).
     pos = _load_pos()
-    pos["confirmation_bar"] = {}
+    pos["conf_bar_entry"] = {}
     _save_pos(pos)
 
     event = {
         "kind":             "trend-broken",
         "time":             _now_et(),
+        "direction":        "none",
         "broken_direction": broken_dir,
         "source":           "manual",
     }

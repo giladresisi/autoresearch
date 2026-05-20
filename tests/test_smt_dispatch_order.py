@@ -1,4 +1,4 @@
-# tests/test_smt_dispatch_order.py
+﻿# tests/test_smt_dispatch_order.py
 # Tests for run_backtest_v2 dispatch ordering and behaviour.
 
 from __future__ import annotations
@@ -224,7 +224,7 @@ def test_trend_invalidation_blocks_same_bar_fill(tmp_path, monkeypatch, _isolate
     _ss.save_position({
         "active": {},
         "stop_entry": 21000.0,
-        "confirmation_bar": conf_bar,
+        "conf_bar_entry": conf_bar,
         "failed_entries": 0,
     })
 

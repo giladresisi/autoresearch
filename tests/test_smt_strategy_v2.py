@@ -1,4 +1,4 @@
-# tests/test_smt_strategy_v2.py
+﻿# tests/test_smt_strategy_v2.py
 # Unit tests for strategy.py (SMT v2 pipeline per-5m-bar logic).
 # Uses monkeypatch to redirect smt_state paths to tmp_path.
 # All fixtures are synthetic — no parquet loading, no IB connection.
@@ -100,14 +100,14 @@ def write_hypothesis(direction="none", **kwargs):
 def write_position(
     active=None,
     stop_entry="",
-    confirmation_bar=None,
+    conf_bar_entry=None,
     pending_stop=None,
     failed_entries=0,
 ):
     p = copy.deepcopy(smt_state.DEFAULT_POSITION)
     p["active"]            = active if active is not None else {}
     p["stop_entry"]        = stop_entry
-    p["confirmation_bar"]  = confirmation_bar if confirmation_bar is not None else {}
+    p["conf_bar_entry"]  = conf_bar_entry if conf_bar_entry is not None else {}
     p["pending_stop"]      = pending_stop
     p["failed_entries"]    = failed_entries
     smt_state.save_position(p)
@@ -176,8 +176,8 @@ class TestNoPositionOppositeBar:
 
         pos = smt_state.load_position()
         assert pos["stop_entry"] == pytest.approx(105.0)
-        assert pos["confirmation_bar"] != {}
-        assert pos["confirmation_bar"]["body_high"] == pytest.approx(105.0)
+        assert pos["conf_bar_entry"] != {}
+        assert pos["conf_bar_entry"]["body_high"] == pytest.approx(105.0)
 
     def test_second_opposite_5m_emits_move_limit_entry(self):
         """Existing limit_entry + new opposite 1m bars → move-limit-entry, limit updated.
@@ -188,7 +188,7 @@ class TestNoPositionOppositeBar:
         write_hypothesis(direction="up")
         write_position(
             stop_entry=105.0,
-            confirmation_bar={
+            conf_bar_entry={
                 "time": "2026-04-27T09:55:00-04:00",
                 "high": 108.0, "low": 92.0,
                 "body_high": 105.0, "body_low": 102.0,
@@ -221,7 +221,7 @@ class TestNoPositionOppositeBar:
         assert result is None
         pos = smt_state.load_position()
         assert pos["stop_entry"] == ""
-        assert pos["confirmation_bar"] == {}
+        assert pos["conf_bar_entry"] == {}
 
 
 class TestFill:
@@ -237,7 +237,7 @@ class TestFill:
             "high": 105.0, "low": 95.0,
             "body_high": 103.0, "body_low": 94.0,
         }
-        write_position(stop_entry=100.0, confirmation_bar=conf)
+        write_position(stop_entry=100.0, conf_bar_entry=conf)
         # Bullish bar (non-opposite for direction=up) whose range spans 100
         bar = make_5m_bar(open_=99.0, high=102.0, low=98.0, close=101.0)
         result = run_strategy(NOW, bar, make_empty_1m_recent())
@@ -253,9 +253,9 @@ class TestFill:
         assert pos["active"]["contracts"] == 2
         assert pos["active"]["cautious"] == "no"
         assert pos["stop_entry"] == ""
-        # confirmation_bar is intentionally preserved after fill so the same bar
+        # conf_bar_entry is intentionally preserved after fill so the same bar
         # cannot be reused as confirmation for re-entry after a stop-out.
-        assert pos["confirmation_bar"] != {}
+        assert pos["conf_bar_entry"] != {}
 
     def test_stop_side_short(self):
         """SHORT fill: stop = min(conf.high, body_high + 10pt cap).
@@ -268,7 +268,7 @@ class TestFill:
             "high": 110.0, "low": 90.0,
             "body_high": 105.0, "body_low": 98.0,
         }
-        write_position(stop_entry=100.0, confirmation_bar=conf)
+        write_position(stop_entry=100.0, conf_bar_entry=conf)
         bar = make_5m_bar(open_=101.0, high=103.0, low=98.0, close=99.0)
         result = run_strategy(NOW, bar, make_empty_1m_recent())
 
@@ -289,7 +289,7 @@ class TestFill:
             "high": 110.0, "low": 95.0,
             "body_high": 105.0, "body_low": 94.0,
         }
-        write_position(stop_entry=100.0, confirmation_bar=conf)
+        write_position(stop_entry=100.0, conf_bar_entry=conf)
         bar = make_5m_bar(open_=99.0, high=102.0, low=98.0, close=101.0)
         result = run_strategy(NOW, bar, make_empty_1m_recent())
 
@@ -300,10 +300,10 @@ class TestFill:
         assert pos["active"]["stop"] == pytest.approx(95.0)  # wick end capped at body_low-10
 
     def test_fill_uses_bar_state_when_conf_bar_empty(self, tmp_path, monkeypatch):
-        """Manual stop entry (empty confirmation_bar): fill uses bar_state.potential_stop_long."""
+        """Manual stop entry (empty conf_bar_entry): fill uses bar_state.potential_stop_long."""
         write_hypothesis(direction="up")
-        # stop_entry set but confirmation_bar empty (manual path via trade.py)
-        write_position(stop_entry=100.0, confirmation_bar={})
+        # stop_entry set but conf_bar_entry empty (manual path via trade.py)
+        write_position(stop_entry=100.0, conf_bar_entry={})
 
         # Write bar_state.json with potential_stop_long
         monkeypatch.chdir(tmp_path)
@@ -335,7 +335,7 @@ class TestFill:
             "high": 105.0, "low": 95.0,
             "body_high": 103.0, "body_low": 94.0,
         }
-        write_position(stop_entry=100.0, confirmation_bar=conf, pending_stop=92.0)
+        write_position(stop_entry=100.0, conf_bar_entry=conf, pending_stop=92.0)
         bar = make_5m_bar(open_=99.0, high=102.0, low=98.0, close=101.0)
         result = run_strategy(NOW, bar, make_empty_1m_recent())
 
@@ -349,7 +349,7 @@ class TestFill:
     def test_fill_skips_when_conf_bar_empty_and_no_bar_state(self, tmp_path, monkeypatch):
         """Manual stop entry + no bar_state.json → fill is skipped (returns None)."""
         write_hypothesis(direction="up")
-        write_position(stop_entry=100.0, confirmation_bar={})
+        write_position(stop_entry=100.0, conf_bar_entry={})
 
         # No bar_state.json exists in tmp_path
         monkeypatch.chdir(tmp_path)
@@ -440,7 +440,7 @@ class TestSameBarOverride:
             "high": 108.0, "low": 92.0,
             "body_high": 105.0, "body_low": 98.0,
         }
-        write_position(stop_entry=100.0, confirmation_bar=conf)
+        write_position(stop_entry=100.0, conf_bar_entry=conf)
         bar = make_5m_bar(open_=105.0, high=110.0, low=90.0, close=95.0)
         recent = make_opp_1m_recent("up", open_=112.0, close_=102.0, high=115.0, low=88.0)
         result = run_strategy(NOW, bar, recent)

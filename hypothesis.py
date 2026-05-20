@@ -331,10 +331,10 @@ def _compute_divs(
 
             divs.append({
                 "kind":          "smt-div",
+                "time":          bar_ts.isoformat(),
+                "side":          side,
                 "timeframe":     tf_label,
                 "type":          smt_type,
-                "side":          side,
-                "time":          bar_ts.isoformat(),
                 "price":         bar_close,
                 "mnq_div_price": mnq_div_price,
                 "mes_div_price": mes_div_price,
@@ -346,10 +346,10 @@ def _compute_divs(
             fill_side = "bullish" if fill_dir == "long" else "bearish"
             divs.append({
                 "kind":      "smt-div",
+                "time":      bar_ts.isoformat(),
+                "side":      fill_side,
                 "timeframe": tf_label,
                 "type":      "fill",
-                "side":      fill_side,
-                "time":      bar_ts.isoformat(),
                 "price":     bar_close,
                 "level":     None,
             })
@@ -1145,7 +1145,7 @@ def run_hypothesis(
     # skip_position_reset=True is passed by the pipeline when it temporarily cleared
     # direction to "none" for an unbiased level-swept re-evaluation.  In that case the
     # transition is artificial: failed_entries still resets (level sweep is a fresh
-    # context) but stop_entry and confirmation_bar are preserved so a pending stop entry
+    # context) but stop_entry and conf_bar_entry are preserved so a pending stop entry
     # that was set before the sweep survives.
     if old_direction == "none" and direction != "none":
         if skip_position_reset:
@@ -1158,8 +1158,8 @@ def run_hypothesis(
     hyp_event = {
         "kind":          "new-hypothesis",
         "time":          pd.Timestamp(now).isoformat(),
-        "price":         current_close,
         "direction":     direction,
+        "price":         current_close,
         "weekly_mid":    weekly_mid,
         "daily_mid":     daily_mid,
         "last_liquidity": last_liquidity,

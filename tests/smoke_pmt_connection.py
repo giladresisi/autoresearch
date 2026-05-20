@@ -1,4 +1,4 @@
-# tests/smoke_pmt_connection.py
+﻿# tests/smoke_pmt_connection.py
 # Manual smoke tests for PickMyTrade connectivity.
 #
 # test_pmt_limit_order_place_and_cancel
@@ -13,7 +13,7 @@
 # test_pmt_stop_entry_via_strategy_pipeline
 #   Runs SessionPipeline with synthetic bars crafted to produce a new-stop-entry
 #   (SELL STOP far below current market → safe pending order), then market-closes.
-#   The emit_fn mirrors SmtV2Dispatcher._emit() exactly, including the confirmation_bar
+#   The emit_fn mirrors SmtV2Dispatcher._emit() exactly, including the conf_bar_entry
 #   state read, to verify the full strategy → emit → PMT dispatch path end-to-end.
 #   Use this test to diagnose why stop-entry signals appear in events.jsonl but do
 #   not reach the PMT executor.
@@ -311,7 +311,7 @@ def test_pmt_stop_entry_via_strategy_pipeline(tmp_path, monkeypatch, capsys):
     (SELL STP far below current market — safe, pending only), then market-close.
 
     Mirrors the exact dispatch path used in live trading:
-      strategy.run_strategy → emit_fn reads confirmation_bar from smt_state
+      strategy.run_strategy → emit_fn reads conf_bar_entry from smt_state
       → place_entry sends SELL STP to PMT → place_close cancels it.
 
     Use this test to diagnose why stop-entry signals appear in events.jsonl but

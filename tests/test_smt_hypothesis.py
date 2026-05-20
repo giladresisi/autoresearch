@@ -1,4 +1,4 @@
-# tests/test_smt_hypothesis.py
+﻿# tests/test_smt_hypothesis.py
 # Unit tests for hypothesis.py — the every-5m hypothesis module.
 # All tests redirect smt_state paths to tmp_path and build synthetic fixtures.
 
@@ -655,15 +655,15 @@ def test_entry_ranges_uses_12hr_and_1week_anchors():
 # ══ Test 15: failed_entries reset on direction transition from none ═══════════
 
 def test_failed_entries_reset_on_direction_transition_from_none():
-    """Transition none → up must reset failed_entries=0 and confirmation_bar={}."""
+    """Transition none → up must reset failed_entries=0 and conf_bar_entry={}."""
     save_global(_make_default_global())
     save_daily(_make_default_daily())
 
-    # Pre-set position with non-zero failed_entries and a confirmation_bar
+    # Pre-set position with non-zero failed_entries and a conf_bar_entry
     position = {
         "active": {},
         "stop_entry": "",
-        "confirmation_bar": {"high": 155.0, "low": 145.0},
+        "conf_bar_entry": {"high": 155.0, "low": 145.0},
         "failed_entries": 2,
     }
     save_position(position)
@@ -688,8 +688,8 @@ def test_failed_entries_reset_on_direction_transition_from_none():
     assert pos["failed_entries"] == 0, (
         f"failed_entries should be 0 after none→up transition, got {pos['failed_entries']}"
     )
-    assert pos["confirmation_bar"] == {}, (
-        f"confirmation_bar should be {{}} after transition, got {pos['confirmation_bar']}"
+    assert pos["conf_bar_entry"] == {}, (
+        f"conf_bar_entry should be {{}} after transition, got {pos['conf_bar_entry']}"
     )
 
 
@@ -794,7 +794,7 @@ def test_failed_entries_not_reset_when_direction_stays_set():
         "active": {},
         "stop_entry": "",
         "stop_direction": "",
-        "confirmation_bar": {},
+        "conf_bar_entry": {},
         "failed_entries": 3,
     }
     save_position(position)
