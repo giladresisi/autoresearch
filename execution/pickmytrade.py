@@ -6,10 +6,13 @@ import concurrent.futures
 import datetime
 import time
 import uuid
+import zoneinfo
 
 import httpx
 
 from execution.protocol import FillRecord, BarRow, assumed_fill_price
+
+_ET = zoneinfo.ZoneInfo("America/New_York")
 
 
 
@@ -88,8 +91,17 @@ class PickMyTradeExecutor:
             order_type = "market"
         # Fire-and-forget: bar callback returns immediately; HTTP runs in background thread
         self._order_pool.submit(self._post_order, order_id, payload)
+        # Extract bar_time in ET for time-based slippage decision
+        if bar is not None and hasattr(bar, "name") and bar.name is not None:
+            _bar_ts = bar.name
+            if hasattr(_bar_ts, "tz_convert"):
+                _bar_ts = _bar_ts.tz_convert(_ET)
+            _bar_time = _bar_ts.time()
+        else:
+            _bar_time = datetime.datetime.now(_ET).time()
         fill_price = assumed_fill_price(
-            direction, order_type, entry_price, self._entry_slip_ticks, self._tick_size
+            direction, order_type, entry_price, self._entry_slip_ticks, self._tick_size,
+            bar_time=_bar_time,
         )
         return FillRecord(
             order_id=order_id,

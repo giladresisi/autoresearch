@@ -122,35 +122,39 @@ def test_place_entry_returns_fill_record():
 
 
 def test_pmt_market_entry_long_slippage():
+    # MKT always 1 tick regardless of entry_slip_ticks
     ex = _make_executor(entry_slip_ticks=2)
     ex._http.post = MagicMock(return_value=_ok_response())
     rec = ex.place_entry(_signal("long"), _bar())
     _drain(ex)
-    assert rec.fill_price == pytest.approx(20000.0 + 2 * 0.25)
+    assert rec.fill_price == pytest.approx(20000.0 + 1 * 0.25)
 
 
 def test_pmt_market_entry_short_slippage():
+    # MKT always 1 tick regardless of entry_slip_ticks
     ex = _make_executor(entry_slip_ticks=2)
     ex._http.post = MagicMock(return_value=_ok_response())
     rec = ex.place_entry(_signal("short"), _bar())
     _drain(ex)
-    assert rec.fill_price == pytest.approx(20000.0 - 2 * 0.25)
+    assert rec.fill_price == pytest.approx(20000.0 - 1 * 0.25)
 
 
-def test_pmt_stop_entry_no_slippage():
+def test_pmt_stop_entry_before_1100_applies_4tick_slippage():
+    # _bar() timestamp is 10:00 ET → before 11:00 → 4 ticks slippage
     ex = _make_executor(entry_slip_ticks=2)
     ex._http.post = MagicMock(return_value=_ok_response())
     rec = ex.place_entry(_signal("long", limit=True), _bar())
     _drain(ex)
-    assert rec.fill_price == pytest.approx(20000.0)
+    assert rec.fill_price == pytest.approx(20000.0 + 4 * 0.25)
 
 
-def test_pmt_zero_slip_ticks_fill_at_signal_price():
+def test_pmt_zero_slip_ticks_mkt_still_applies_1tick():
+    # MKT orders ignore entry_slip_ticks — always 1 tick
     ex = _make_executor(entry_slip_ticks=0)
     ex._http.post = MagicMock(return_value=_ok_response())
     rec = ex.place_entry(_signal("long"), _bar())
     _drain(ex)
-    assert rec.fill_price == pytest.approx(20000.0)
+    assert rec.fill_price == pytest.approx(20000.0 + 1 * 0.25)
 
 
 def test_place_exit_long_posts_sell_close():
@@ -412,6 +416,28 @@ def test_modify_stop_entry_close_is_synchronous():
     # First call must be direct (synchronous close), second via pool (async re-place)
     assert call_order[0] == ("direct", "close")
     assert call_order[1][0] == "pool"
+
+
+def test_pmt_stop_entry_after_1100_applies_2tick_slippage():
+    # Bar timestamp at 11:30 ET → at or after 11:00 → 2 ticks slippage for STP
+    ts_after = pd.Timestamp("2026-04-30 11:30:00", tz="America/New_York")
+    bar_after = _BarRow(20000.0, 20005.0, 19995.0, 20000.0, 100.0, ts_after)
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    rec = ex.place_entry(_signal("long", limit=True), bar_after)
+    _drain(ex)
+    assert rec.fill_price == pytest.approx(20000.0 + 2 * 0.25)
+
+
+def test_pmt_place_entry_passes_bar_time_to_assumed_fill_price():
+    # Verifies bar_time is used: STP fill should differ from reference_price
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    rec = ex.place_entry(_signal("long", limit=True), _bar())
+    _drain(ex)
+    # bar is at 10:00 ET → 4-tick STP slippage → fill != reference price
+    assert rec.fill_price != pytest.approx(20000.0)
+    assert rec.fill_price == pytest.approx(20000.0 + 4 * 0.25)
 
 
 def test_modify_stop_entry_replaces_even_if_close_fails():
