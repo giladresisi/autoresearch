@@ -165,8 +165,6 @@ def run_trend(
     _lv2 = hypothesis.get("cautious_price_secondary_level", "") or ""
     _cr1 = f"1st-cautious ({_lv1})" if _lv1 else "1st-cautious"
     _cr2 = f"2nd-cautious ({_lv2})" if _lv2 else "2nd-cautious"
-    _ath_secondary = _lv2 in {"day_high", "week_high"}
-
     _liq_map = {l["name"]: l["price"] for l in daily.get("liquidities", [])
                 if l.get("kind") == "level"}
     _dh = _liq_map.get("day_high")
@@ -221,6 +219,16 @@ def run_trend(
     if bar_high > _old_ath:
         _global_pre["all_time_high"] = bar_high
         save_global(_global_pre)
+
+    # True only when the secondary cautious level is genuinely at ATH territory —
+    # i.e. its price is at or above the pre-session ATH, meaning there is no
+    # historical reference for how far price may run.
+    _ath_secondary = (
+        _lv2 in {"day_high", "week_high"}
+        and _session_ath > 0
+        and cautious_secondary_raw != ""
+        and float(cautious_secondary_raw) >= _session_ath
+    )
 
     # ------------------------------------------------------------------
     # Step 2: early exit when no active direction.
