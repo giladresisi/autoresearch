@@ -33,6 +33,9 @@ def _run_trade(argv: list[str], monkeypatch,
 
 def test_up_market_reads_bar_state(monkeypatch, capsys):
     mock_lo = MagicMock()
+    mock_lo.get_position.return_value = {
+        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+    }
     mock_smt = MagicMock()
     mock_smt.load_bar_state.return_value = {
         "time": "x", "potential_stop_long": 27000.0, "potential_stop_short": 27100.0,
@@ -85,13 +88,37 @@ def test_up_market_fails_null_stop(monkeypatch, capsys):
 
 def test_up_stop_entry_places_stp(monkeypatch, capsys):
     mock_lo = MagicMock()
+    mock_lo.get_position.return_value = {
+        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+    }
     mock_smt = MagicMock()
-    _run_trade(["up", "27000"], monkeypatch, mock_lo, mock_smt)
+    # Explicit sl_price as third argv arg
+    _run_trade(["up", "27000", "26950"], monkeypatch, mock_lo, mock_smt)
 
-    mock_lo.place_stop_entry.assert_called_once_with("long", 27000.0, 0.0)
+    mock_lo.place_stop_entry.assert_called_once_with("long", 27000.0, 26950.0)
     out = capsys.readouterr().out
     assert "Stop entry LONG" in out
     assert "27000" in out
+
+
+# ---------------------------------------------------------------------------
+# Test 4b: `trade.py up 27000` reads sl from bar_state when no explicit sl given
+# ---------------------------------------------------------------------------
+
+def test_up_stop_entry_reads_sl_from_bar_state(monkeypatch, capsys):
+    mock_lo = MagicMock()
+    mock_lo.get_position.return_value = {
+        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+    }
+    mock_smt = MagicMock()
+    mock_smt.load_bar_state.return_value = {
+        "time": "x", "potential_stop_long": 26900.0, "potential_stop_short": 27150.0,
+    }
+    _run_trade(["up", "27000"], monkeypatch, mock_lo, mock_smt)
+
+    mock_lo.place_stop_entry.assert_called_once_with("long", 27000.0, 26900.0)
+    out = capsys.readouterr().out
+    assert "Stop entry LONG" in out
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +127,9 @@ def test_up_stop_entry_places_stp(monkeypatch, capsys):
 
 def test_down_market_uses_potential_stop_short(monkeypatch, capsys):
     mock_lo = MagicMock()
+    mock_lo.get_position.return_value = {
+        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+    }
     mock_smt = MagicMock()
     mock_smt.load_bar_state.return_value = {
         "time": "x", "potential_stop_long": 27000.0, "potential_stop_short": 27150.0,
@@ -117,10 +147,14 @@ def test_down_market_uses_potential_stop_short(monkeypatch, capsys):
 
 def test_down_stop_entry_places_stp(monkeypatch, capsys):
     mock_lo = MagicMock()
+    mock_lo.get_position.return_value = {
+        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+    }
     mock_smt = MagicMock()
-    _run_trade(["down", "27000"], monkeypatch, mock_lo, mock_smt)
+    # Explicit sl_price as third argv arg
+    _run_trade(["down", "27000", "27050"], monkeypatch, mock_lo, mock_smt)
 
-    mock_lo.place_stop_entry.assert_called_once_with("short", 27000.0, 0.0)
+    mock_lo.place_stop_entry.assert_called_once_with("short", 27000.0, 27050.0)
     out = capsys.readouterr().out
     assert "Stop entry SHORT" in out
 
@@ -156,7 +190,7 @@ def test_cancel_calls_cancel_stop_entry(monkeypatch, capsys):
     mock_smt = MagicMock()
     _run_trade(["cancel"], monkeypatch, mock_lo, mock_smt)
 
-    mock_lo.cancel_stop_entry.assert_called_once_with("user-requested")
+    mock_lo.cancel_stop_entry.assert_called_once_with("user-requested", force=False)
 
 
 # ---------------------------------------------------------------------------
@@ -225,38 +259,38 @@ def test_close_market_fails_when_no_active(monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# stop <price>
+# update-sl <price>
 # ---------------------------------------------------------------------------
 
-def test_stop_calls_update_stop_loss(monkeypatch, capsys):
+def test_update_sl_calls_update_stop_loss(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
         "active": {"direction": "long"}, "stop_entry": "", "stop_direction": "",
     }
     mock_smt = MagicMock()
-    _run_trade(["stop", "19700"], monkeypatch, mock_lo, mock_smt)
-    mock_lo.update_stop_loss.assert_called_once_with(19700.0, "user-requested")
+    _run_trade(["update-sl", "19700"], monkeypatch, mock_lo, mock_smt)
+    mock_lo.update_stop_loss.assert_called_once_with(19700.0, "user-requested", direction="long")
 
 
-def test_stop_fails_when_no_active(monkeypatch, capsys):
+def test_update_sl_fails_when_no_active(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
         "active": {}, "stop_entry": "", "stop_direction": "",
     }
     mock_smt = MagicMock()
     with pytest.raises(SystemExit) as exc:
-        _run_trade(["stop", "19700"], monkeypatch, mock_lo, mock_smt)
+        _run_trade(["update-sl", "19700"], monkeypatch, mock_lo, mock_smt)
     assert exc.value.code == 1
     mock_lo.update_stop_loss.assert_not_called()
 
 
-def test_stop_fails_when_no_price_arg(monkeypatch, capsys):
+def test_update_sl_fails_when_no_price_arg(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
         "active": {"direction": "long"}, "stop_entry": "", "stop_direction": "",
     }
     mock_smt = MagicMock()
     with pytest.raises(SystemExit) as exc:
-        _run_trade(["stop"], monkeypatch, mock_lo, mock_smt)
+        _run_trade(["update-sl"], monkeypatch, mock_lo, mock_smt)
     assert exc.value.code == 1
     mock_lo.update_stop_loss.assert_not_called()
