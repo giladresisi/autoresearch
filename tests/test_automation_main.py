@@ -570,3 +570,266 @@ def test_numpy_arrays_match_column_list_values(monkeypatch, tmp_path, capsys):
     # _mnq_o is the first array; its last value must match bar.Open
     mnq_o_arr = arrays[0]
     assert mnq_o_arr[-1] == pytest.approx(20003.0)
+
+
+# ── D7: Session-end close + IB disconnect hard close ─────────────────────────
+
+def test_v1_session_end_sends_pmt_close(monkeypatch, tmp_path, capsys):
+    """V1: when manage_position returns 'hold' at session end, place_close('session-end') fires."""
+    import automation.main as am
+    import strategy_smt
+    pos = _setup_managing_state(monkeypatch, tmp_path, direction="long")
+
+    pos_file = tmp_path / "position.json"
+    pos_file.write_text(json.dumps(pos))
+    monkeypatch.setattr(am, "POSITION_FILE", pos_file)
+
+    mock_executor = MagicMock()
+    mock_executor.place_close.return_value = None
+    monkeypatch.setattr(am, "_executor", mock_executor)
+    monkeypatch.setattr(am, "manage_position", lambda p, b: "hold")
+
+    test_ts = pd.Timestamp("2026-04-30 13:30:00", tz="America/New_York")
+    bar = strategy_smt._BarRow(20000.0, 20005.0, 19995.0, 20010.0, 100.0, test_ts)
+    am._process_managing(bar, test_ts, test_ts.time())
+
+    mock_executor.place_close.assert_called_once_with("session-end")
+    assert am._state == "SCANNING"
+    capsys.readouterr()
+
+
+def test_v1_session_end_already_scanning(monkeypatch, tmp_path, capsys):
+    """When state is SCANNING, _process routes to _process_scanning — place_close never called."""
+    import automation.main as am
+    import strategy_smt
+    _setup_scanning_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(strategy_smt, "process_scan_bar", lambda *a, **kw: None)
+    monkeypatch.setattr(am, "compute_tdo", lambda df, date: 19900.0)
+
+    mock_executor = MagicMock()
+    monkeypatch.setattr(am, "_executor", mock_executor)
+
+    test_ts = pd.Timestamp("2026-04-30 13:30:00", tz="America/New_York")
+    bar = strategy_smt._BarRow(20000.0, 20005.0, 19995.0, 20000.0, 100.0, test_ts)
+    am._process(bar)
+
+    mock_executor.place_close.assert_not_called()
+    capsys.readouterr()
+
+
+def test_v1_session_end_no_double_close_on_stop(monkeypatch, tmp_path, capsys):
+    """V1: when manage_position returns 'exit_stop' at session end, only place_exit fires."""
+    import automation.main as am
+    import strategy_smt
+    pos = _setup_managing_state(monkeypatch, tmp_path, direction="long")
+
+    pos_file = tmp_path / "position.json"
+    pos_file.write_text(json.dumps(pos))
+    monkeypatch.setattr(am, "POSITION_FILE", pos_file)
+
+    mock_executor = MagicMock()
+    mock_executor.place_exit.return_value = None
+    monkeypatch.setattr(am, "_executor", mock_executor)
+    monkeypatch.setattr(am, "manage_position", lambda p, b: "exit_stop")
+
+    test_ts = pd.Timestamp("2026-04-30 13:30:00", tz="America/New_York")
+    bar = strategy_smt._BarRow(19950.0, 19955.0, 19945.0, 19952.0, 100.0, test_ts)
+    am._process_managing(bar, test_ts, test_ts.time())
+
+    mock_executor.place_exit.assert_called_once()
+    assert mock_executor.place_exit.call_args[0][1] == "exit_stop"
+    mock_executor.place_close.assert_not_called()
+    assert am._state == "SCANNING"
+    capsys.readouterr()
+
+
+def test_v2_session_end_closes_active_position(monkeypatch, tmp_path):
+    """V2: bar at 16:00:01 with active position → close_position(reason='session-end') called."""
+    import automation.main as am
+    import live_orders
+    import strategy_smt
+
+    monkeypatch.setattr(am, "_smtv2_pipeline", "v2")
+    monkeypatch.setattr(am, "_smtv2_dispatcher", MagicMock())
+    monkeypatch.setattr(am, "_ib_source", _make_stub_ib_source())
+
+    cancel_mock = MagicMock()
+    close_mock = MagicMock()
+    monkeypatch.setattr(live_orders, "has_pending_entry", lambda: False)
+    monkeypatch.setattr(live_orders, "has_active_position", lambda: True)
+    monkeypatch.setattr(live_orders, "cancel_stop_entry", cancel_mock)
+    monkeypatch.setattr(live_orders, "close_position", close_mock)
+
+    test_ts = pd.Timestamp("2026-05-19 16:00:01", tz="America/New_York")
+    bar = strategy_smt._BarRow(20000.0, 20005.0, 19995.0, 20001.0, 50.0, test_ts)
+    am._on_bar(bar, None)
+
+    close_mock.assert_called_once_with(pytest.approx(20001.0), reason="session-end")
+    cancel_mock.assert_not_called()
+    am._smtv2_dispatcher._pipeline.on_1m_bar.assert_not_called()
+
+
+def test_v2_session_end_cancels_pending_entry(monkeypatch, tmp_path):
+    """V2: bar at 16:00:01 with pending entry only → cancel_stop_entry('session-end') called."""
+    import automation.main as am
+    import live_orders
+    import strategy_smt
+
+    monkeypatch.setattr(am, "_smtv2_pipeline", "v2")
+    monkeypatch.setattr(am, "_smtv2_dispatcher", MagicMock())
+    monkeypatch.setattr(am, "_ib_source", _make_stub_ib_source())
+
+    cancel_mock = MagicMock()
+    close_mock = MagicMock()
+    monkeypatch.setattr(live_orders, "has_pending_entry", lambda: True)
+    monkeypatch.setattr(live_orders, "has_active_position", lambda: False)
+    monkeypatch.setattr(live_orders, "cancel_stop_entry", cancel_mock)
+    monkeypatch.setattr(live_orders, "close_position", close_mock)
+
+    test_ts = pd.Timestamp("2026-05-19 16:00:01", tz="America/New_York")
+    bar = strategy_smt._BarRow(20000.0, 20005.0, 19995.0, 20001.0, 50.0, test_ts)
+    am._on_bar(bar, None)
+
+    cancel_mock.assert_called_once_with("session-end")
+    close_mock.assert_not_called()
+
+
+def test_v2_session_end_already_flat_noop(monkeypatch, tmp_path):
+    """V2: bar at 16:00:01 with no position/entry → neither cancel nor close called."""
+    import automation.main as am
+    import live_orders
+    import strategy_smt
+
+    monkeypatch.setattr(am, "_smtv2_pipeline", "v2")
+    monkeypatch.setattr(am, "_smtv2_dispatcher", MagicMock())
+    monkeypatch.setattr(am, "_ib_source", _make_stub_ib_source())
+
+    cancel_mock = MagicMock()
+    close_mock = MagicMock()
+    monkeypatch.setattr(live_orders, "has_pending_entry", lambda: False)
+    monkeypatch.setattr(live_orders, "has_active_position", lambda: False)
+    monkeypatch.setattr(live_orders, "cancel_stop_entry", cancel_mock)
+    monkeypatch.setattr(live_orders, "close_position", close_mock)
+
+    test_ts = pd.Timestamp("2026-05-19 16:00:01", tz="America/New_York")
+    bar = strategy_smt._BarRow(20000.0, 20005.0, 19995.0, 20001.0, 50.0, test_ts)
+    am._on_bar(bar, None)
+
+    cancel_mock.assert_not_called()
+    close_mock.assert_not_called()
+
+
+def _setup_ib_disconnect(monkeypatch, tmp_path, *, with_v1_position: bool):
+    """Common setup for IB-disconnect tests. Returns (mock_executor, mock_ib)."""
+    from data.ib_realtime import IbGatewayDisconnectedError
+    import automation.main as am
+
+    monkeypatch.setenv("PMT_WEBHOOK_URL", "https://example.com")
+    monkeypatch.setenv("PMT_API_KEY", "test-key")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir(exist_ok=True)
+
+    pos_file = tmp_path / "data" / "live_position.json"
+    monkeypatch.setattr(am, "POSITION_FILE", pos_file)
+
+    if with_v1_position:
+        pos = {
+            "direction": "long", "entry_price": 20000.0, "assumed_entry": 20000.5,
+            "take_profit": 20100.0, "stop_price": 19950.0, "tdo": 20100.0,
+            "contracts": 1, "instrument": "MNQ1!",
+            "entry_time": "2026-05-19 10:00:00-04:00", "tp_breached": False,
+        }
+        pos_file.write_text(json.dumps(pos))
+
+    mock_executor = MagicMock()
+    mock_ib = MagicMock()
+    mock_ib.start.side_effect = IbGatewayDisconnectedError("disconnected")
+    return mock_executor, mock_ib
+
+
+def test_ib_disconnect_v1_position_open_sends_close_after_30s(monkeypatch, tmp_path):
+    """IB disconnect with V1 open position: sleeps 30s then calls place_close('ib-disconnect')."""
+    import automation.main as am
+    import live_orders
+
+    mock_executor, mock_ib = _setup_ib_disconnect(monkeypatch, tmp_path, with_v1_position=True)
+    monkeypatch.setattr(live_orders, "has_active_position", lambda: False)
+
+    sleep_mock = MagicMock()
+    with patch("automation.main.PickMyTradeExecutor", return_value=mock_executor), \
+         patch("automation.main.IbRealtimeSource", return_value=mock_ib), \
+         patch("automation.main.HypothesisManager"), \
+         patch("automation.main._load_hist_mnq", return_value=pd.DataFrame()), \
+         patch("time.sleep", sleep_mock):
+        with pytest.raises(SystemExit) as exc_info:
+            am.main()
+
+    assert exc_info.value.code == 2
+    sleep_mock.assert_called_once_with(30)
+    mock_executor.place_close.assert_called_once_with("ib-disconnect")
+
+
+def test_ib_disconnect_already_flat_exits_immediately(monkeypatch, tmp_path):
+    """IB disconnect with no open position: exits immediately without sleep or close."""
+    import automation.main as am
+    import live_orders
+
+    mock_executor, mock_ib = _setup_ib_disconnect(monkeypatch, tmp_path, with_v1_position=False)
+    monkeypatch.setattr(live_orders, "has_active_position", lambda: False)
+
+    sleep_mock = MagicMock()
+    with patch("automation.main.PickMyTradeExecutor", return_value=mock_executor), \
+         patch("automation.main.IbRealtimeSource", return_value=mock_ib), \
+         patch("automation.main.HypothesisManager"), \
+         patch("automation.main._load_hist_mnq", return_value=pd.DataFrame()), \
+         patch("time.sleep", sleep_mock):
+        with pytest.raises(SystemExit) as exc_info:
+            am.main()
+
+    assert exc_info.value.code == 2
+    sleep_mock.assert_not_called()
+    mock_executor.place_close.assert_not_called()
+
+
+def test_ib_disconnect_v2_position_open_sends_close(monkeypatch, tmp_path):
+    """IB disconnect with V2 active position (smt_state): sleeps 30s then places close."""
+    import automation.main as am
+    import live_orders
+
+    mock_executor, mock_ib = _setup_ib_disconnect(monkeypatch, tmp_path, with_v1_position=False)
+    monkeypatch.setattr(live_orders, "has_active_position", lambda: True)
+
+    sleep_mock = MagicMock()
+    with patch("automation.main.PickMyTradeExecutor", return_value=mock_executor), \
+         patch("automation.main.IbRealtimeSource", return_value=mock_ib), \
+         patch("automation.main.HypothesisManager"), \
+         patch("automation.main._load_hist_mnq", return_value=pd.DataFrame()), \
+         patch("time.sleep", sleep_mock):
+        with pytest.raises(SystemExit) as exc_info:
+            am.main()
+
+    assert exc_info.value.code == 2
+    sleep_mock.assert_called_once_with(30)
+    mock_executor.place_close.assert_called_once_with("ib-disconnect")
+
+
+def test_ib_disconnect_close_failure_still_exits(monkeypatch, tmp_path):
+    """IB disconnect: if place_close raises, error is logged and process still exits with code 2."""
+    import automation.main as am
+    import live_orders
+
+    mock_executor, mock_ib = _setup_ib_disconnect(monkeypatch, tmp_path, with_v1_position=True)
+    mock_executor.place_close.side_effect = RuntimeError("PMT unreachable")
+    monkeypatch.setattr(live_orders, "has_active_position", lambda: False)
+
+    sleep_mock = MagicMock()
+    with patch("automation.main.PickMyTradeExecutor", return_value=mock_executor), \
+         patch("automation.main.IbRealtimeSource", return_value=mock_ib), \
+         patch("automation.main.HypothesisManager"), \
+         patch("automation.main._load_hist_mnq", return_value=pd.DataFrame()), \
+         patch("time.sleep", sleep_mock):
+        with pytest.raises(SystemExit) as exc_info:
+            am.main()
+
+    assert exc_info.value.code == 2
+    mock_executor.place_close.assert_called_once_with("ib-disconnect")
