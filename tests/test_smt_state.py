@@ -88,6 +88,7 @@ class TestSaveThenLoadRoundtrip:
     def test_daily_roundtrip(self):
         data = {
             "date": "2026-04-27",
+            "formed_at": "2026-04-27T09:30:00",
             "liquidities": [{"name": "TDO", "kind": "level", "price": 21412.5}],
             "estimated_dir": "down",
             "opposite_premove": "yes",
@@ -115,7 +116,9 @@ class TestSaveThenLoadRoundtrip:
             "stop_entry": 21395.0,
             "stop_direction": "long",
             "confirmation_bar": {"high": 21402.0, "low": 21390.0},
+            "pending_stop": 21380.0,
             "failed_entries": 1,
+            "session_mid_crosses": 0,
         }
         save_position(data)
         assert load_position() == data

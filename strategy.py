@@ -204,26 +204,30 @@ def run_strategy(
             (direction == _DIR_DOWN and float(mnq_bar["low"])  <= _entry_f)
         )
         if stop_entry != "" and _entry_reached:
-            fill_price = float(stop_entry)
-            conf_bar   = position["confirmation_bar"]
-            if conf_bar:
-                # Automated path: confirmation_bar set by strategy
-                if direction == _DIR_UP:
-                    stop = max(float(conf_bar["low"]), float(conf_bar["body_low"]) - _STOP_WICK_CAP)
-                else:
-                    stop = min(float(conf_bar["high"]), float(conf_bar["body_high"]) + _STOP_WICK_CAP)
+            fill_price   = float(stop_entry)
+            pending_stop = position.get("pending_stop")
+            if pending_stop is not None:
+                stop = float(pending_stop)
             else:
-                # Manual path: stop entry placed via trade.py — use bar_state.json
-                from smt_state import load_bar_state
-                bar_state = load_bar_state()
-                if bar_state is None:
-                    print("[STRATEGY] fill detected but no bar_state.json — skipping fill", flush=True)
-                    return None
-                stop = bar_state.get("potential_stop_long" if direction == _DIR_UP else "potential_stop_short")
-                if stop is None:
-                    print("[STRATEGY] fill detected but potential_stop is null in bar_state — skipping fill", flush=True)
-                    return None
-                stop = float(stop)
+                conf_bar = position["confirmation_bar"]
+                if conf_bar:
+                    # Backward-compat: positions written before pending_stop was added
+                    if direction == _DIR_UP:
+                        stop = max(float(conf_bar["low"]), float(conf_bar["body_low"]) - _STOP_WICK_CAP)
+                    else:
+                        stop = min(float(conf_bar["high"]), float(conf_bar["body_high"]) + _STOP_WICK_CAP)
+                else:
+                    # Manual path: stop entry placed via trade.py — use bar_state.json
+                    from smt_state import load_bar_state
+                    bar_state = load_bar_state()
+                    if bar_state is None:
+                        print("[STRATEGY] fill detected but no bar_state.json — skipping fill", flush=True)
+                        return None
+                    stop = bar_state.get("potential_stop_long" if direction == _DIR_UP else "potential_stop_short")
+                    if stop is None:
+                        print("[STRATEGY] fill detected but potential_stop is null in bar_state — skipping fill", flush=True)
+                        return None
+                    stop = float(stop)
             # Fill as soon as price reaches the limit — bar close quality is irrelevant
             # for fill confirmation (the broker fills a limit order the instant price
             # touches it, regardless of where the bar closes).
@@ -311,12 +315,20 @@ def run_strategy(
                     entry_price = max(body_end_price, bar_open + MIN_APPROACH_PTS)
                 else:
                     entry_price = min(body_end_price, bar_open - MIN_APPROACH_PTS)
+                if direction == _DIR_UP:
+                    stop_loss = max(float(opp_5m["low"]), float(opp_5m["body_low"]) - _STOP_WICK_CAP)
+                else:
+                    stop_loss = min(float(opp_5m["high"]), float(opp_5m["body_high"]) + _STOP_WICK_CAP)
+                if direction == _DIR_UP and (entry_price - stop_loss) < MIN_STOP_DISTANCE:
+                    return None
+                if direction == _DIR_DOWN and (stop_loss - entry_price) < MIN_STOP_DISTANCE:
+                    return None
                 position["confirmation_bar"] = conf_bar_snap
                 kind = "new-stop-entry" if position["stop_entry"] == "" else "move-stop-entry"
                 position["stop_entry"]     = entry_price
                 position["stop_direction"] = direction
+                position["pending_stop"]   = stop_loss
                 smt_state.save_position(position)
-                stop_loss = float(opp_5m["body_low"]) if direction == _DIR_UP else float(opp_5m["body_high"])
                 return _make_signal(kind, now, entry_price, stop=stop_loss)
 
         # Nothing triggered

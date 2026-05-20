@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from execution.pickmytrade import PickMyTradeExecutor, _STP_PLACEHOLDER_SL_LONG, _STP_PLACEHOLDER_SL_SHORT
+from execution.pickmytrade import PickMyTradeExecutor
 from execution.protocol import FillRecord
 from strategy_smt import _BarRow
 
@@ -236,22 +236,37 @@ def test_market_entry_includes_sl():
     assert payload["sl"] == 19980.0
 
 
-def test_stop_entry_uses_placeholder_sl():
-    # Long STP: placeholder below any real price, won't trigger accidentally
+def test_stop_entry_sends_real_sl():
+    # Long STP: real stop_price from signal (19980.0 from _signal())
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(_signal("long", limit=True), _bar())
     _drain(ex)
     payload = ex._http.post.call_args.kwargs["json"]
-    assert payload["sl"] == _STP_PLACEHOLDER_SL_LONG
+    assert payload["sl"] == pytest.approx(19980.0)
 
-    # Short STP: placeholder above any real price, won't trigger accidentally
+    # Short STP: real stop_price from signal
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     ex.place_entry(_signal("short", limit=True), _bar())
     _drain(ex)
     payload = ex._http.post.call_args.kwargs["json"]
-    assert payload["sl"] == _STP_PLACEHOLDER_SL_SHORT
+    assert payload["sl"] == pytest.approx(19980.0)
+
+
+def test_modify_stop_entry_includes_sl():
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    old = _signal("long", limit=True)
+    new = {**_signal("long", limit=True), "entry_price": 20050.0}
+    ex.modify_stop_entry(old, new, _bar())
+    _drain(ex)
+    # Two HTTP calls: synchronous cancel (close) + async new STP
+    assert ex._http.post.call_count == 2
+    payload = ex._http.post.call_args.kwargs["json"]  # last call = new STP
+    assert payload["order_type"] == "STP"
+    assert payload["price"] == pytest.approx(20050.0)
+    assert payload["sl"] == pytest.approx(19980.0)
 
 
 def test_market_entry_includes_multiple_accounts():

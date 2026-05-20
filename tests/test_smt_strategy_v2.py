@@ -101,12 +101,14 @@ def write_position(
     active=None,
     stop_entry="",
     confirmation_bar=None,
+    pending_stop=None,
     failed_entries=0,
 ):
     p = copy.deepcopy(smt_state.DEFAULT_POSITION)
     p["active"]            = active if active is not None else {}
     p["stop_entry"]        = stop_entry
     p["confirmation_bar"]  = confirmation_bar if confirmation_bar is not None else {}
+    p["pending_stop"]      = pending_stop
     p["failed_entries"]    = failed_entries
     smt_state.save_position(p)
     return p
@@ -169,8 +171,8 @@ class TestNoPositionOppositeBar:
         assert result is not None
         assert result["kind"] == "new-stop-entry"
         assert result["price"] == pytest.approx(105.0)  # body_high of bearish 5m bar
-        # Stop = body_low of opposite bar (open=105, close=95 → body_low=95).
-        assert result["stop"] == pytest.approx(95.0)
+        # Stop = max(low=90, body_low-cap=80) = 90 (wick within cap → uses actual low).
+        assert result["stop"] == pytest.approx(90.0)
 
         pos = smt_state.load_position()
         assert pos["stop_entry"] == pytest.approx(105.0)
@@ -201,9 +203,9 @@ class TestNoPositionOppositeBar:
         assert result is not None
         assert result["kind"] == "move-stop-entry"
         assert result["price"] == pytest.approx(122.0)
-        # Stop = body_low of new opposite bar (open=122, close=102 → body_low=102).
+        # Stop = max(low=85, body_low-cap=87) = 87 (wick 17 pts > cap 15 → capped).
         assert "stop" in result
-        assert result["stop"] == pytest.approx(102.0)
+        assert result["stop"] == pytest.approx(87.0)
 
         pos = smt_state.load_position()
         assert pos["stop_entry"] == pytest.approx(122.0)
@@ -251,7 +253,9 @@ class TestFill:
         assert pos["active"]["contracts"] == 2
         assert pos["active"]["cautious"] == "no"
         assert pos["stop_entry"] == ""
-        assert pos["confirmation_bar"] == {}
+        # confirmation_bar is intentionally preserved after fill so the same bar
+        # cannot be reused as confirmation for re-entry after a stop-out.
+        assert pos["confirmation_bar"] != {}
 
     def test_stop_side_short(self):
         """SHORT fill: stop = min(conf.high, body_high + 10pt cap).
@@ -321,6 +325,26 @@ class TestFill:
 
         pos = smt_state.load_position()
         assert pos["active"]["stop"] == pytest.approx(93.0)
+
+    def test_fill_uses_pending_stop_when_set(self):
+        """Fill path reads pending_stop from position.json when present, ignoring conf_bar."""
+        write_hypothesis(direction="up")
+        # pending_stop=92.0 stored; conf_bar would compute stop=95 if used instead
+        conf = {
+            "time": "2026-04-27T09:55:00-04:00",
+            "high": 105.0, "low": 95.0,
+            "body_high": 103.0, "body_low": 94.0,
+        }
+        write_position(stop_entry=100.0, confirmation_bar=conf, pending_stop=92.0)
+        bar = make_5m_bar(open_=99.0, high=102.0, low=98.0, close=101.0)
+        result = run_strategy(NOW, bar, make_empty_1m_recent())
+
+        assert result is not None
+        assert result["kind"] == "stop-entry-filled"
+        assert result["stop"] == pytest.approx(92.0)
+
+        pos = smt_state.load_position()
+        assert pos["active"]["stop"] == pytest.approx(92.0)
 
     def test_fill_skips_when_conf_bar_empty_and_no_bar_state(self, tmp_path, monkeypatch):
         """Manual stop entry + no bar_state.json → fill is skipped (returns None)."""

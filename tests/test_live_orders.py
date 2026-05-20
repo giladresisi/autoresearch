@@ -70,6 +70,7 @@ def test_place_stop_entry_logs_and_syncs(_in_tmp, _mock_today):
     # position.json updated
     assert saved["stop_entry"] == "19850.0"
     assert saved["stop_direction"] == "up"
+    assert saved["pending_stop"] == pytest.approx(19820.0)
 
     # Event logged
     events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
@@ -147,7 +148,7 @@ def test_move_stop_entry_reads_old_from_position(_in_tmp, _mock_today):
 # Test 4: stop_entry_filled sends S/L and updates active.stop
 # ---------------------------------------------------------------------------
 
-def test_stop_entry_filled_sends_sl_and_updates_stop(_in_tmp, _mock_today):
+def test_stop_entry_filled_updates_stop_only(_in_tmp, _mock_today):
     pos = {
         "active": {"direction": "long", "fill_price": 19850.0, "stop": 0.0,
                    "contracts": 2, "cautious": "no"},
@@ -161,12 +162,10 @@ def test_stop_entry_filled_sends_sl_and_updates_stop(_in_tmp, _mock_today):
          patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
         live_orders.stop_entry_filled("long", 19820.0)
 
-    mock_executor.update_stop_loss.assert_called_once()
-    sl_signal = mock_executor.update_stop_loss.call_args.args[0]
-    assert sl_signal["direction"] == "long"
-    assert sl_signal["stop_price"] == pytest.approx(19820.0)
+    # Real S/L was embedded in the STP order at placement — no update_stop_loss needed
+    mock_executor.update_stop_loss.assert_not_called()
 
-    # active.stop updated to the new stop_price
+    # active.stop is still updated in position.json
     assert saved["active"]["stop"] == pytest.approx(19820.0)
 
     events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
@@ -187,8 +186,8 @@ def test_stop_entry_filled_noop_save_when_no_active(_in_tmp, _mock_today):
          patch("smt_state.save_position") as mock_save:
         live_orders.stop_entry_filled("long", 19820.0)
 
-    # Executor must still fire (broker needs the stop order)
-    mock_executor.update_stop_loss.assert_called_once()
+    # No executor call — real S/L was in the STP order at placement
+    mock_executor.update_stop_loss.assert_not_called()
     # position.json must NOT be updated (no active to patch)
     mock_save.assert_not_called()
     # Event is still logged

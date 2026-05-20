@@ -111,6 +111,7 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> N
     pos = _load_pos()
     pos["stop_entry"] = str(entry_price)
     pos["stop_direction"] = "up" if direction == "long" else "down"
+    pos["pending_stop"] = stop_price
     _save_pos(pos)
     _log({"kind": "new-stop-entry", "time": now, "direction": direction,
           "entry_price": entry_price, "stop_price": stop_price})
@@ -170,6 +171,7 @@ def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: st
     }
     _executor.modify_stop_entry(old_pmt, new_pmt, None)
     pos["stop_entry"] = str(new_entry_price)
+    pos["pending_stop"] = new_stop_price
     _save_pos(pos)
     _log({"kind": "move-stop-entry", "time": now, "direction": direction,
           "new_entry_price": new_entry_price, "new_stop_price": new_stop_price,
@@ -177,9 +179,12 @@ def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: st
 
 
 def stop_entry_filled(direction: str, stop_price: float, fill_price: float = 0.0) -> None:
-    """Stop entry just filled — send protective S/L to PMT, log, update active.stop in position.json."""
+    """Stop entry just filled — log and update active.stop in position.json.
+
+    The real S/L was already embedded in the STP order at placement time, so
+    no separate update_stop_loss call is needed here.
+    """
     now = _now_et()
-    _executor.update_stop_loss({"direction": direction, "stop_price": stop_price}, None)
     pos = _load_pos()
     if pos.get("active"):
         pos["active"]["stop"] = stop_price

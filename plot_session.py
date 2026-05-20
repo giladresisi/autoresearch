@@ -247,7 +247,7 @@ for p in pairs:
         continue
     sp_x.append(p["fill"]["ts"])
     sp_y.append(stop_price)
-    sp_hover.append(f"<b>stop placed</b><br>level: {stop_price}<br>time: {p['fill']['ts'].strftime('%H:%M')}")
+    sp_hover.append(f"<b>stop placed</b><br>level: {stop_price}<br>time: {p['fill']['ts'].strftime('%H:%M:%S')}")
 
 if sp_x:
     fig.add_trace(go.Scatter(
@@ -305,7 +305,7 @@ def _div_hover(e: dict) -> str:
         f"tf: {e.get('timeframe')}",
         f"type: {e.get('type')}",
         f"side: {e.get('side')}",
-        f"time: {e['ts'].strftime('%H:%M')}",
+        f"time: {e['ts'].strftime('%H:%M:%S')}",
     ]
     mnq_lv = e.get("mnq_div_price")
     if mnq_lv is not None:
@@ -371,7 +371,7 @@ for kind, style in EXIT_MARKER_STYLE.items():
             label = ""
             colors.append(style["color"])
         texts.append(label)
-        parts = [f"<b>{e['kind']}</b>", f"price: {e['price']}", f"time: {e['ts'].strftime('%H:%M')}"]
+        parts = [f"<b>{e['kind']}</b>", f"price: {e['price']}", f"time: {e['ts'].strftime('%H:%M:%S')}"]
         if pair:
             parts.append(f"pnl: {label}")
         if "close_reason" in e:
@@ -398,7 +398,7 @@ for kind, style in OTHER_MARKER_STYLE.items():
     hover = []
     for e in group:
         ep = _event_price(e)
-        parts = [f"<b>{e['kind']}</b>", f"price: {ep}", f"time: {e['ts'].strftime('%H:%M')}"]
+        parts = [f"<b>{e['kind']}</b>", f"price: {ep}", f"time: {e['ts'].strftime('%H:%M:%S')}"]
         if "direction" in e:
             parts.append(f"direction: {e['direction']}")
         # Live events use stop_price / entry_price / new_entry_price instead of stop / price
