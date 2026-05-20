@@ -169,8 +169,8 @@ class TestNoPositionOppositeBar:
         assert result is not None
         assert result["kind"] == "new-stop-entry"
         assert result["price"] == pytest.approx(105.0)  # body_high of bearish 5m bar
-        # Stop = body_low of opposite bar (open=105, close=95 → body_low=95).
-        assert result["stop"] == pytest.approx(95.0)
+        # Stop = max(low=90, body_low-cap=80) = 90 (wick within cap → uses actual low).
+        assert result["stop"] == pytest.approx(90.0)
 
         pos = smt_state.load_position()
         assert pos["stop_entry"] == pytest.approx(105.0)
@@ -201,9 +201,9 @@ class TestNoPositionOppositeBar:
         assert result is not None
         assert result["kind"] == "move-stop-entry"
         assert result["price"] == pytest.approx(122.0)
-        # Stop = body_low of new opposite bar (open=122, close=102 → body_low=102).
+        # Stop = max(low=85, body_low-cap=87) = 87 (wick 17 pts > cap 15 → capped).
         assert "stop" in result
-        assert result["stop"] == pytest.approx(102.0)
+        assert result["stop"] == pytest.approx(87.0)
 
         pos = smt_state.load_position()
         assert pos["stop_entry"] == pytest.approx(122.0)

@@ -316,7 +316,10 @@ def run_strategy(
                 position["stop_entry"]     = entry_price
                 position["stop_direction"] = direction
                 smt_state.save_position(position)
-                stop_loss = float(opp_5m["body_low"]) if direction == _DIR_UP else float(opp_5m["body_high"])
+                if direction == _DIR_UP:
+                    stop_loss = max(float(opp_5m["low"]), float(opp_5m["body_low"]) - _STOP_WICK_CAP)
+                else:
+                    stop_loss = min(float(opp_5m["high"]), float(opp_5m["body_high"]) + _STOP_WICK_CAP)
                 return _make_signal(kind, now, entry_price, stop=stop_loss)
 
         # Nothing triggered
