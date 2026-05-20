@@ -20,6 +20,7 @@ _DIR_DOWN          = "down"
 _CONF_BAR_MINS     = 5   # default confirmation bar window
 _CONF_BAR_MINS_ATH = 15  # confirmation bar window when above session ATH
 _STOP_WICK_CAP     = 15.0  # max pts a conf-bar wick can extend the stop beyond the body
+MAX_FAILED_ENTRIES = 2   # block new entries once this many stops have been hit this hypothesis
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -171,7 +172,7 @@ def run_strategy(
 
         if direction == "none":
             return None
-        if position["failed_entries"] > 2:
+        if position["failed_entries"] > MAX_FAILED_ENTRIES:
             return None
 
         _daily = smt_state.load_daily()
@@ -181,7 +182,7 @@ def run_strategy(
             _chop_rng > 0
             and _chop_rng < 150.0
             and _chop_mid_x >= 4
-            and position["failed_entries"] >= 2
+            and position["failed_entries"] >= MAX_FAILED_ENTRIES
         ):
             return None
 
