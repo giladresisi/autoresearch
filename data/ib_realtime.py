@@ -459,7 +459,6 @@ class IbRealtimeSource:
                 self._mnq_1s_pending.append(finalized)
             if old_minute_ts is not None and minute_ts != old_minute_ts:
                 self._flush_completed_1m_bar("MNQ", self._mnq_partial_1m, old_minute_ts)
-                self._flush_1s_pending_to_parquet("MES")
             self._mnq_partial_1m = self._update_partial_1m(
                 self._mnq_partial_1m, price, size, minute_ts
             )
@@ -641,6 +640,13 @@ class IbRealtimeSource:
                 self._ib.disconnect()
         except Exception:
             pass
+        # Flush 1s bars accumulated since the last minute boundary; event loop is
+        # stopped and disconnected by this point so pending lists are stable.
+        for instrument in ("MNQ", "MES"):
+            try:
+                self._flush_1s_pending_to_parquet(instrument)
+            except Exception:
+                pass
         # Drain pending parquet writes before exit so no data is lost on shutdown.
         try:
             self._parquet_executor.shutdown(wait=True)
