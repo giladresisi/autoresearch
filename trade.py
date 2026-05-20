@@ -148,9 +148,22 @@ def main() -> None:
             sys.exit(1)
         if len(args) >= 2:
             entry_price = float(args[1])
+            if len(args) >= 3:
+                sl_price = float(args[2])
+            else:
+                bar_state = smt_state.load_bar_state()
+                if bar_state is None:
+                    print("ERROR: bar_state.json not found — provide sl_price explicitly (e.g. trade.py up 20000 19950)")
+                    sys.exit(1)
+                stop_key = "potential_stop_long" if direction == "long" else "potential_stop_short"
+                _sl = bar_state.get(stop_key)
+                if _sl is None:
+                    print(f"ERROR: {stop_key} is null in bar_state.json — provide sl_price explicitly")
+                    sys.exit(1)
+                sl_price = float(_sl)
             label = "LONG" if direction == "long" else "SHORT"
-            print(f"Stop entry {label} at {entry_price} | S/L: to be set at fill")
-            live_orders.place_stop_entry(direction, entry_price, 0.0)
+            print(f"Stop entry {label} at {entry_price} | S/L: {sl_price}")
+            live_orders.place_stop_entry(direction, entry_price, sl_price)
         else:
             bar_state = smt_state.load_bar_state()
             if bar_state is None:
@@ -188,8 +201,9 @@ def main() -> None:
         if direction is None:
             print("ERROR: direction unknown — provide it explicitly: trade.py move <price> --force up|down")
             sys.exit(1)
-        print(f"Moving stop entry -> {new_price} | direction: {direction}")
-        live_orders.move_stop_entry(new_price, 0.0, direction)
+        pending_stop = float(pos.get("pending_stop") or 0.0)
+        print(f"Moving stop entry -> {new_price} | direction: {direction} | S/L: {pending_stop}")
+        live_orders.move_stop_entry(new_price, pending_stop, direction)
 
     elif cmd == "update-sl":
         if len(args) < 2:

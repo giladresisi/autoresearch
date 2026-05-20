@@ -50,6 +50,7 @@ DEFAULT_POSITION = {
     "stop_entry": "",
     "stop_direction": "",
     "confirmation_bar": {},
+    "pending_stop": None,
     "failed_entries": 0,
     "session_mid_crosses": 0,
 }

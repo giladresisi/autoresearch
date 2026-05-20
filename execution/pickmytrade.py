@@ -11,11 +11,6 @@ import httpx
 
 from execution.protocol import FillRecord, BarRow, assumed_fill_price
 
-# Placeholder SL prices injected into STP entry orders so Tradovate creates a
-# stop-order anchor at fill time (required for update_stop_loss to work later).
-# Values are chosen to be unreachable so the placeholder never triggers.
-_STP_PLACEHOLDER_SL_LONG  = 0.0      # below any real futures price
-_STP_PLACEHOLDER_SL_SHORT = 50000.0  # above any real MNQ price
 
 
 class PickMyTradeExecutor:
@@ -85,13 +80,7 @@ class PickMyTradeExecutor:
         stop_price = float(signal["stop_price"]) if signal.get("stop_price") is not None else 0.0
         is_stop = signal.get("stop_fill_bars") is not None or signal.get("limit_fill_bars") is not None
         if is_stop:
-            # PMT/Tradovate requires a non-zero sl in the STP entry payload to create a
-            # stop-order anchor at fill time. Without it, update_stop_loss called after
-            # fill has nothing to update. We use a placeholder far from any real price
-            # so it never triggers accidentally before the real SL is attached via
-            # update_stop_loss once the order fills.
-            placeholder_sl = _STP_PLACEHOLDER_SL_LONG if direction == "long" else _STP_PLACEHOLDER_SL_SHORT
-            payload = self._build_payload(data, order_type="STP", sl=placeholder_sl, price=entry_price)
+            payload = self._build_payload(data, order_type="STP", sl=stop_price, price=entry_price)
             order_type = "stop"
         else:
             # No price field: PMT uses the latest close price as the market price
@@ -153,7 +142,8 @@ class PickMyTradeExecutor:
         direction = new_signal["direction"]
         data = "buy" if direction == "long" else "sell"
         entry_price = float(new_signal["entry_price"])
-        payload = self._build_payload(data, order_type="STP", price=entry_price)
+        stop_price = float(new_signal.get("stop_price", 0.0))
+        payload = self._build_payload(data, order_type="STP", price=entry_price, sl=stop_price)
         self._order_pool.submit(self._post_order, order_id, payload)
 
     def _post_order(self, order_id: str, payload: dict) -> tuple:
