@@ -2,10 +2,10 @@
 name: parquet-check
 description: >
   Use when the trading session ends or the orchestrator is about to start, to validate
-  and repair 1s session parquet files. Validates MNQ_1s_session_*.parquet and
-  MES_1s_session_*.parquet, auto-repairs issues (targeted fill for minor/major gaps,
-  full IB rebuild for critical ones in session-end mode), merges into main parquets,
-  and backs up the result. Runs end-to-end without confirmation prompts.
+  and repair session parquet files. Validates MNQ/MES 1s session files AND the main
+  1m parquets. Auto-repairs 1s issues (targeted fill for minor/major gaps, full IB
+  rebuild for critical). Repairs corrupt 1m parquets from backup + 1s resample.
+  Merges into main parquets and backs up the result. Runs end-to-end without prompts.
   Trigger phrases: "session ended", "run parquet check", "check the session data",
   "parquet health", "check data integrity", "merge session data", "data health check".
 ---
@@ -36,7 +36,7 @@ Use `--dry-run` if the user wants validation only without any data changes.
 
 ## Step 2 — Parse and assess
 
-For each instrument in the JSON `instruments` field, read:
+**1s parquets** — for each instrument in `instruments`:
 - `severity`: ok / minor / major / critical
 - `action`: what was done (merge, targeted_fill_then_merge, rebuild_then_merge, gap_fill_then_merge, skip)
 - `merge_success`: true / false / null (null = dry-run)
@@ -46,6 +46,17 @@ For each instrument in the JSON `instruments` field, read:
 
 **If `merge_success = false`**: escalate — tell the user what manual steps are needed
 and why the automatic fix failed (check `reason` field in the JSON).
+
+**1m parquets** — for each instrument in `instruments_1m`:
+- `action`: ok / repair_from_backup
+- `repair_success`: true / false / null (null = dry-run or healthy)
+- `backup_written`: true / false (healthy run writes a fresh .bak; repaired run also writes .bak)
+- `backup_used`: path of the backup that was used (only present on repair)
+- `gapfill_status`: "ok: appended N 1m bars from M 1s bars" or "failed: <reason>"
+- `corrupted_saved_as`: filename of the saved corrupt copy (only present on repair)
+
+**If `repair_success = false`**: escalate — backup was not found or was unreadable, or
+the 1s session file had critical quality. Manual intervention required.
 
 **If `exit_code = 3`**: script error; read `check_session_stderr.log`, report the raw
 error to the user.

@@ -327,6 +327,171 @@ def gap_fill_to_now(ib, contract, main_path: Path) -> pd.DataFrame:
     return fetch_range(ib, contract, gap_start, gap_end)
 
 
+INSTRUMENTS_1M = [
+    ("MNQ", "MNQ_1m.parquet", "MNQ_1s_session_*.parquet"),
+    ("MES", "MES_1m.parquet", "MES_1s_session_*.parquet"),
+]
+
+
+def _find_1m_backup(inst: str, main_path: Path) -> Path | None:
+    """Return the best readable backup for a 1m parquet, or None.
+
+    Priority:
+    1. <main>.parquet.bak alongside the main file (written by this script)
+    2. data/backup_parquets_until_*/<inst>_1m.parquet.bak dirs, most-recent first
+    """
+    bak = main_path.with_suffix(".parquet.bak")
+    if bak.exists():
+        try:
+            df = pd.read_parquet(bak)
+            if not df.empty:
+                return bak
+        except Exception:
+            pass
+
+    for bdir in sorted(DATA_DIR.glob("backup_parquets_until_*"),
+                       key=lambda p: p.stat().st_mtime, reverse=True):
+        candidate = bdir / f"{inst}_1m.parquet.bak"
+        if candidate.exists():
+            try:
+                df = pd.read_parquet(candidate)
+                if not df.empty:
+                    return candidate
+            except Exception:
+                continue
+
+    return None
+
+
+def _gapfill_1m_from_session_1s(
+    inst: str, backup_df: pd.DataFrame, price_lo: float, price_hi: float
+) -> tuple[pd.DataFrame, str]:
+    """Resample available 1s session files into 1m bars and append to backup_df.
+
+    Returns (filled_df, status_message).
+    """
+    session_files = sorted(DATA_DIR.glob(f"{inst}_1s_session_*.parquet"))
+    if not session_files:
+        return backup_df, "failed: no 1s session files found"
+
+    backup_last = backup_df.index[-1]
+    chunks: list[pd.DataFrame] = []
+
+    for sf in session_files:
+        df_1s = _safe_read(sf)
+        if df_1s is None or df_1s.empty:
+            continue
+        v = validate_session_df(df_1s, price_lo, price_hi)
+        if v["severity"] == "critical":
+            return backup_df, f"failed: 1s session file {sf.name} has critical quality"
+        after = df_1s[df_1s.index > backup_last]
+        if not after.empty:
+            chunks.append(after)
+
+    if not chunks:
+        return backup_df, "failed: no 1s data after backup's last bar"
+
+    all_1s = pd.concat(chunks).sort_index()
+    all_1s = all_1s[~all_1s.index.duplicated(keep="last")]
+
+    agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    if "Volume" in all_1s.columns:
+        agg["Volume"] = "sum"
+    df_1m = all_1s.resample("1min").agg(agg).dropna(subset=["Open"])
+
+    if df_1m.empty:
+        return backup_df, "failed: resampled 1m DataFrame is empty"
+
+    combined = pd.concat([backup_df, df_1m])
+    combined = combined[~combined.index.duplicated(keep="last")]
+    combined = combined.sort_index()
+    return combined, f"ok: appended {len(df_1m)} 1m bars from {len(all_1s)} 1s bars"
+
+
+def check_1m_parquet(inst: str, main_1m_name: str, session_1s_glob: str,
+                     dry_run: bool) -> dict:
+    """Validate the main 1m parquet; repair from backup + 1s resample if corrupt.
+
+    When healthy, writes a fresh .bak so the next repair has a post-session snapshot.
+    Returns a result dict included in the JSON report under 'instruments_1m'.
+    """
+    main_path = DATA_DIR / main_1m_name
+    price_lo, price_hi = PRICE_BOUNDS[inst]
+
+    result: dict = {
+        "action": "ok",
+        "repair_success": None,
+        "backup_written": False,
+        "validation": None,
+    }
+
+    # ── Try to read the parquet ───────────────────────────────────────────────
+    df = None
+    try:
+        df = pd.read_parquet(main_path)
+    except Exception as exc:
+        result["validation"] = {"severity": "critical", "readable": False, "error": str(exc)}
+
+    if df is not None:
+        # Only check for non-positive closes — price bounds span years of history and
+        # would flag valid older bars as bad (e.g. MNQ <20k in early 2024).
+        bad = df[df["Close"] <= 0]
+        result["validation"] = {
+            "severity": "ok" if bad.empty else "minor",
+            "readable": True,
+            "rows": len(df),
+            "first": df.index[0].isoformat() if not df.empty else None,
+            "last":  df.index[-1].isoformat() if not df.empty else None,
+            "bad_rows": len(bad),
+        }
+        # Healthy: refresh the .bak for future repairs
+        if not dry_run and not df.empty:
+            backup_main(main_path)
+            result["backup_written"] = True
+        return result
+
+    # ── Corrupt — attempt repair ──────────────────────────────────────────────
+    result["action"] = "repair_from_backup"
+
+    if dry_run:
+        result["repair_success"] = None
+        result["reason"] = "dry-run: would attempt repair from backup + 1s resample"
+        return result
+
+    backup_path = _find_1m_backup(inst, main_path)
+    if backup_path is None:
+        result["repair_success"] = False
+        result["reason"] = "no readable backup found"
+        return result
+
+    try:
+        backup_df = pd.read_parquet(backup_path)
+    except Exception as exc:
+        result["repair_success"] = False
+        result["reason"] = f"backup unreadable: {exc}"
+        return result
+
+    result["backup_used"] = str(backup_path)
+    result["backup_last_bar"] = backup_df.index[-1].isoformat() if not backup_df.empty else None
+
+    filled_df, status = _gapfill_1m_from_session_1s(inst, backup_df, price_lo, price_hi)
+    result["gapfill_status"] = status
+
+    # Preserve the corrupted file before overwriting
+    corrupted_save = main_path.with_suffix(".parquet.corrupted")
+    shutil.copy2(main_path, corrupted_save)
+    result["corrupted_saved_as"] = corrupted_save.name
+
+    write_atomic(filled_df, main_path)
+    backup_main(main_path)
+    result["repair_success"] = True
+    result["backup_written"] = True
+    result["repaired_rows"] = len(filled_df)
+    print(f"[check] {inst} 1m repaired: {status}", file=sys.stderr)
+
+    return result
+
+
 def process_instrument(inst: str, conid: int, main_name: str, session_glob: str,
                        mode: str, dry_run: bool, ib) -> dict:
     """Validate, repair, and merge one instrument's session files. Returns result dict."""
@@ -486,6 +651,13 @@ def main():
             if result.get("action") not in (None, "skip"):
                 exit_code = max(exit_code, 1)
             if result.get("merge_success") is False:
+                exit_code = max(exit_code, 2)
+
+        report["instruments_1m"] = {}
+        for inst, main_1m_name, session_1s_glob in INSTRUMENTS_1M:
+            result_1m = check_1m_parquet(inst, main_1m_name, session_1s_glob, args.dry_run)
+            report["instruments_1m"][inst] = result_1m
+            if result_1m.get("repair_success") is False:
                 exit_code = max(exit_code, 2)
 
     except Exception as exc:
