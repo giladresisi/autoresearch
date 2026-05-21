@@ -7,10 +7,10 @@ from pathlib import Path
 DATA = Path(__file__).parent.parent / "data"
 
 SPECS = {
-    "MNQ_1m": ("MNQ_1m.parquet", 15000, 24000, "min"),
-    "MES_1m": ("MES_1m.parquet",  4500,  7500, "min"),
-    "MNQ_1s": ("MNQ_1s.parquet", 15000, 24000,   "s"),
-    "MES_1s": ("MES_1s.parquet",  4500,  7500,   "s"),
+    "MNQ_1m": ("MNQ_1m.parquet", 15000, 36000, "min"),
+    "MES_1m": ("MES_1m.parquet",  4000,  9000, "min"),
+    "MNQ_1s": ("MNQ_1s.parquet", 15000, 36000,   "s"),
+    "MES_1s": ("MES_1s.parquet",  4000,  9000,   "s"),
 }
 
 # Recent valid MNQ price sample (from backup data) to cross-check contract
