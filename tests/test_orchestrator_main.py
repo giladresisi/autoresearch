@@ -101,7 +101,7 @@ def test_pre_session_init_skips_when_no_api_key(monkeypatch, capsys):
 
 def test_pre_session_init_does_not_raise_on_backfill_exception(monkeypatch):
     monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
-    with patch("data.databento_backfill.backfill_parquets", side_effect=RuntimeError("network")):
+    with patch("data.parquet_maintenance.backfill_parquets", side_effect=RuntimeError("network")):
         _pre_session_init()  # must not raise despite the exception
 
 

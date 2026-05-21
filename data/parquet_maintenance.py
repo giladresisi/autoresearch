@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -46,7 +47,9 @@ def backfill_parquets(
             continue
         combined = pd.concat([existing, df_new]).sort_index()
         combined = combined[~combined.index.duplicated(keep="last")]
-        combined.to_parquet(path)
+        tmp = path.with_suffix(".parquet.tmp")
+        combined.to_parquet(tmp, use_dictionary=False)
+        os.replace(tmp, path)
 
 
 def _empty_df() -> pd.DataFrame:
@@ -58,22 +61,17 @@ def _empty_df() -> pd.DataFrame:
 
 
 def _safe_read_parquet(path: Path) -> pd.DataFrame:
-    """Read a parquet file, returning an empty DF if missing or corrupted.
+    """Read a parquet file, returning an empty DF if missing or unreadable.
 
-    On corruption: recreates the file as empty so the next read succeeds.
+    Never modifies the file — corrupt files are left intact for manual recovery.
     """
     if not path.exists():
         return _empty_df()
     try:
         return pd.read_parquet(path)
     except Exception as exc:
-        print(f"[databento_backfill] WARNING: {path.name} corrupted ({exc}); recreating empty", flush=True)
-        empty = _empty_df()
-        try:
-            empty.to_parquet(path)
-        except Exception:
-            pass
-        return empty
+        print(f"[parquet_maintenance] WARNING: {path.name} unreadable ({exc}); returning empty DF", flush=True)
+        return _empty_df()
 
 
 def _safe_read_last_ts(path: Path) -> "pd.Timestamp | None":
@@ -131,7 +129,9 @@ def backfill_1s_parquets(
             continue
         combined = pd.concat([existing, df_new]).sort_index()
         combined = combined[~combined.index.duplicated(keep="last")]
-        combined.to_parquet(path)
+        tmp = path.with_suffix(".parquet.tmp")
+        combined.to_parquet(tmp, use_dictionary=False)
+        os.replace(tmp, path)
 
 
 def merge_session_1s_parquets(bar_data_dir: Path) -> None:
@@ -146,7 +146,6 @@ def merge_session_1s_parquets(bar_data_dir: Path) -> None:
     IB connection failure is non-fatal: merge proceeds without gap fill.
     IB params from env: IB_HOST, IB_PORT, MNQ_CONID, MES_CONID.
     """
-    import os
     from ib_insync import IB, Contract as _IBContract, util as _util
 
     bar_data_dir = Path(bar_data_dir)
@@ -225,7 +224,9 @@ def merge_session_1s_parquets(bar_data_dir: Path) -> None:
                 existing = pd.concat([existing, session_df]).sort_index()
                 existing = existing[~existing.index.duplicated(keep="last")]
 
-            existing.to_parquet(main_path)
+            tmp = main_path.with_suffix(".parquet.tmp")
+            existing.to_parquet(tmp, use_dictionary=False)
+            os.replace(tmp, main_path)
             for session_path in session_files:
                 if session_path.exists():
                     session_path.unlink()
