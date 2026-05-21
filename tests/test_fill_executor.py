@@ -45,17 +45,17 @@ def _position(direction="long", entry=20000.0):
 # Entry tests
 
 def test_market_entry_long_applies_slippage():
-    # MKT orders always use 1 tick regardless of entry_slip_ticks
+    # MKT orders always use 3 ticks (live-calibrated); entry_slip_ticks is ignored
     ex = SimulatedBrokerExecutor(entry_slip_ticks=2)
     rec = ex.place_entry(_signal("long", 20000.0), _bar())
-    assert rec.fill_price == 20000.0 + 1 * 0.25
+    assert rec.fill_price == 20000.0 + 3 * 0.25
 
 
 def test_market_entry_short_applies_slippage():
-    # MKT orders always use 1 tick regardless of entry_slip_ticks
+    # MKT orders always use 3 ticks (live-calibrated); entry_slip_ticks is ignored
     ex = SimulatedBrokerExecutor(entry_slip_ticks=2)
     rec = ex.place_entry(_signal("short", 20000.0), _bar())
-    assert rec.fill_price == 20000.0 - 1 * 0.25
+    assert rec.fill_price == 20000.0 - 3 * 0.25
 
 
 def test_stop_entry_exact_price():
@@ -66,17 +66,17 @@ def test_stop_entry_exact_price():
 
 
 def test_human_mode_additive_slippage_long():
-    # MKT base is 1 tick; human_slip_pts added on top
+    # MKT base is 3 ticks (live-calibrated); human_slip_pts added on top
     ex = SimulatedBrokerExecutor(human_mode=True, human_slip_pts=3.0, entry_slip_ticks=2)
     rec = ex.place_entry(_signal("long", 20000.0), _bar())
-    assert rec.fill_price == 20000.0 + 1 * 0.25 + 3.0
+    assert rec.fill_price == 20000.0 + 3 * 0.25 + 3.0
 
 
 def test_human_mode_additive_slippage_short():
-    # MKT base is 1 tick; human_slip_pts subtracted on top
+    # MKT base is 3 ticks (live-calibrated); human_slip_pts subtracted on top
     ex = SimulatedBrokerExecutor(human_mode=True, human_slip_pts=3.0, entry_slip_ticks=2)
     rec = ex.place_entry(_signal("short", 20000.0), _bar())
-    assert rec.fill_price == 20000.0 - 1 * 0.25 - 3.0
+    assert rec.fill_price == 20000.0 - 3 * 0.25 - 3.0
 
 
 # Exit tests
@@ -171,13 +171,13 @@ def test_unknown_exit_type_raises_value_error():
 # assumed_fill_price utility
 
 def test_assumed_fill_price_market_long():
-    # MKT always uses 1 tick; slip_ticks parameter is ignored for market orders
-    assert assumed_fill_price("long", "market", 20000.0, slip_ticks=2, tick_size=0.25) == pytest.approx(20000.25)
+    # MKT always uses 3 ticks (live-calibrated); slip_ticks parameter is ignored for market orders
+    assert assumed_fill_price("long", "market", 20000.0, slip_ticks=2, tick_size=0.25) == pytest.approx(20000.75)
 
 
 def test_assumed_fill_price_market_short():
-    # MKT always uses 1 tick; slip_ticks parameter is ignored for market orders
-    assert assumed_fill_price("short", "market", 20000.0, slip_ticks=2, tick_size=0.25) == pytest.approx(19999.75)
+    # MKT always uses 3 ticks (live-calibrated); slip_ticks parameter is ignored for market orders
+    assert assumed_fill_price("short", "market", 20000.0, slip_ticks=2, tick_size=0.25) == pytest.approx(19999.25)
 
 
 def test_assumed_fill_price_limit_no_slip():
@@ -191,13 +191,13 @@ def test_assumed_fill_price_stop_no_slip():
 
 
 def test_assumed_fill_price_custom_tick_size():
-    # MKT always 1 tick; tick_size still respected
-    assert assumed_fill_price("long", "market", 20000.0, slip_ticks=3, tick_size=0.5) == pytest.approx(20000.5)
+    # MKT always 3 ticks (live-calibrated); tick_size still respected
+    assert assumed_fill_price("long", "market", 20000.0, slip_ticks=3, tick_size=0.5) == pytest.approx(20001.5)
 
 
 def test_assumed_fill_price_zero_slip():
-    # MKT slip_ticks=0 is ignored; 1 tick is always applied
-    assert assumed_fill_price("long", "market", 20000.0, slip_ticks=0) == pytest.approx(20000.25)
+    # MKT slip_ticks=0 is ignored; 3 ticks always applied (live-calibrated)
+    assert assumed_fill_price("long", "market", 20000.0, slip_ticks=0) == pytest.approx(20000.75)
 
 
 def test_simulated_entry_uses_assumed_fill_price():
@@ -218,7 +218,7 @@ def test_assumed_fill_price_stp_before_1100_long():
 def test_assumed_fill_price_stp_after_1100_long():
     import datetime as _dt
     fill = assumed_fill_price("long", "stop", 20000.0, tick_size=0.25, bar_time=_dt.time(11, 0))
-    assert fill == pytest.approx(20000.0 + 2 * 0.25)  # 2 ticks at or after 11:00
+    assert fill == pytest.approx(20000.0 + 1 * 0.25)  # 1 tick at or after 11:00
 
 
 def test_assumed_fill_price_stp_before_1100_short():
@@ -230,19 +230,19 @@ def test_assumed_fill_price_stp_before_1100_short():
 def test_assumed_fill_price_stp_after_1100_short():
     import datetime as _dt
     fill = assumed_fill_price("short", "stop", 20000.0, tick_size=0.25, bar_time=_dt.time(12, 0))
-    assert fill == pytest.approx(20000.0 - 2 * 0.25)  # adverse: lower for short
+    assert fill == pytest.approx(20000.0 - 1 * 0.25)  # adverse: lower for short
 
 
 def test_assumed_fill_price_mkt_long():
     import datetime as _dt
     fill = assumed_fill_price("long", "market", 20000.0, tick_size=0.25, bar_time=_dt.time(9, 45))
-    assert fill == pytest.approx(20000.0 + 1 * 0.25)  # always 1 tick
+    assert fill == pytest.approx(20000.0 + 3 * 0.25)  # always 3 ticks (live-calibrated)
 
 
 def test_assumed_fill_price_mkt_short():
     import datetime as _dt
     fill = assumed_fill_price("short", "market", 20000.0, tick_size=0.25, bar_time=_dt.time(14, 0))
-    assert fill == pytest.approx(20000.0 - 1 * 0.25)  # always 1 tick
+    assert fill == pytest.approx(20000.0 - 3 * 0.25)  # always 3 ticks (live-calibrated)
 
 
 def test_assumed_fill_price_stp_bar_time_none_uses_pessimistic():

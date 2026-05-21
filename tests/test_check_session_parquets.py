@@ -1,0 +1,794 @@
+# tests/test_check_session_parquets.py
+# Tests for scripts/check_session_parquets.py
+from __future__ import annotations
+
+import io
+import json
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, Mock, patch
+
+import pandas as pd
+import pytest
+
+
+@pytest.fixture
+def bar_dir(tmp_path):
+    return tmp_path
+
+
+def _make_session_df(timestamps, price=27000.0):
+    idx = pd.DatetimeIndex([
+        pd.Timestamp(ts, tz="America/New_York") for ts in timestamps
+    ])
+    return pd.DataFrame({
+        "Open": price, "High": price + 10, "Low": price - 10,
+        "Close": price, "Volume": 100.0,
+    }, index=idx)
+
+
+def _make_ib_mock(bars=None):
+    ib = MagicMock()
+    ib.isConnected.return_value = True
+    ib.reqHistoricalData.return_value = bars or []
+    return ib
+
+
+# ---------------------------------------------------------------------------
+# TestValidateSessionDf
+# ---------------------------------------------------------------------------
+
+class TestValidateSessionDf:
+    def test_ok_clean_df(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        base = pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York")
+        idx = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(100)])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+
+        result = validate_session_df(df, price_lo=20000, price_hi=35000)
+        assert result["severity"] == "ok"
+
+    def test_minor_single_bad_price_row(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        base = pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York")
+        idx = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(1000)])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+        # 1 bad row: High=999 (below price_lo=20000)
+        df.iloc[5, df.columns.get_loc("High")] = 999.0
+        df.iloc[5, df.columns.get_loc("Low")] = 989.0
+        df.iloc[5, df.columns.get_loc("Close")] = 994.0
+        df.iloc[5, df.columns.get_loc("Open")] = 994.0
+
+        result = validate_session_df(df, price_lo=20000, price_hi=35000)
+        # 1/1000 = 0.1% — below BAD_ROW_MINOR_FRAC (1%) but total_bad > 0 -> minor
+        assert result["severity"] == "minor"
+
+    def test_major_bad_row_fraction(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        base = pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York")
+        idx = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(100)])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+        # 2 bad rows = 2% >= BAD_ROW_MINOR_FRAC=1% -> major
+        for i in [0, 1]:
+            df.iloc[i, df.columns.get_loc("High")] = 999.0
+            df.iloc[i, df.columns.get_loc("Low")] = 989.0
+            df.iloc[i, df.columns.get_loc("Close")] = 994.0
+            df.iloc[i, df.columns.get_loc("Open")] = 994.0
+
+        result = validate_session_df(df, price_lo=20000, price_hi=35000)
+        assert result["severity"] == "major"
+
+    def test_critical_bad_row_fraction(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        base = pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York")
+        idx = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(100)])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+        # 6 bad rows = 6% >= BAD_ROW_CRITICAL_FRAC=5% -> critical
+        for i in range(6):
+            df.iloc[i, df.columns.get_loc("High")] = 999.0
+            df.iloc[i, df.columns.get_loc("Low")] = 989.0
+            df.iloc[i, df.columns.get_loc("Close")] = 994.0
+            df.iloc[i, df.columns.get_loc("Open")] = 994.0
+
+        result = validate_session_df(df, price_lo=20000, price_hi=35000)
+        assert result["severity"] == "critical"
+
+    def test_minor_small_gap(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        # Monday 2026-05-18 10:00 ET, gap of ~3 minutes (180s) between index 300 and 480
+        base = pd.Timestamp("2026-05-18 10:00:00", tz="America/New_York")
+        timestamps = (
+            [base + pd.Timedelta(seconds=i) for i in range(300)]
+            + [base + pd.Timedelta(seconds=480 + i) for i in range(60)]
+        )
+        idx = pd.DatetimeIndex(timestamps)
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+
+        result = validate_session_df(df, price_lo=20000, price_hi=35000)
+        # gap = 180s > 90s but < SMALL_GAP_THRESHOLD=5min=300s -> minor
+        assert result["severity"] == "minor"
+        assert result["max_gap_s"] > 90
+        assert result["max_gap_s"] < 300
+
+    def test_major_large_gap(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        # Monday 2026-05-18 10:00 ET, gap of ~30 minutes
+        base = pd.Timestamp("2026-05-18 10:00:00", tz="America/New_York")
+        timestamps = (
+            [base + pd.Timedelta(seconds=i) for i in range(60)]
+            + [base + pd.Timedelta(seconds=2000 + i) for i in range(60)]
+        )
+        idx = pd.DatetimeIndex(timestamps)
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+
+        result = validate_session_df(df, price_lo=20000, price_hi=35000)
+        # gap ~1940s >= SMALL_GAP_THRESHOLD=300s and < LARGE_GAP_THRESHOLD=3600s -> major
+        assert result["severity"] == "major"
+
+    def test_critical_very_large_gap(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        # Monday 2026-05-18 10:00 ET, gap of ~83 minutes
+        base = pd.Timestamp("2026-05-18 10:00:00", tz="America/New_York")
+        timestamps = (
+            [base + pd.Timedelta(seconds=i) for i in range(60)]
+            + [base + pd.Timedelta(seconds=5000 + i) for i in range(60)]
+        )
+        idx = pd.DatetimeIndex(timestamps)
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+
+        result = validate_session_df(df, price_lo=20000, price_hi=35000)
+        # gap ~4940s >= LARGE_GAP_THRESHOLD=3600s -> critical
+        assert result["severity"] == "critical"
+
+    def test_empty_df_is_critical(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        result = validate_session_df(pd.DataFrame(), price_lo=20000, price_hi=35000)
+        assert result["severity"] == "critical"
+
+    def test_none_df_is_critical(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        result = validate_session_df(None, price_lo=20000, price_hi=35000)
+        assert result["severity"] == "critical"
+
+    def test_maintenance_gap_ignored(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        # Monday 2026-05-18: maintenance window 17:00-18:00 ET
+        # Gap from 17:01 to 17:59 is within maintenance -> expected -> no unexpected gaps
+        base_before = pd.Timestamp("2026-05-18 16:57:00", tz="America/New_York")
+        base_after  = pd.Timestamp("2026-05-18 18:02:00", tz="America/New_York")
+        timestamps = (
+            [base_before + pd.Timedelta(seconds=i) for i in range(60)]
+            + [base_after + pd.Timedelta(seconds=i) for i in range(60)]
+        )
+        idx = pd.DatetimeIndex(timestamps)
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+
+        result = validate_session_df(df, price_lo=20000, price_hi=35000)
+        assert result["unexpected_gaps"] == []
+        assert result["severity"] == "ok"
+
+    def test_weekend_gap_ignored(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        # Friday close 17:00 ET (at/after CLOSE_T) -> Monday open 18:02 ET
+        # gap_start must be >= 17:00 for in_fri_close to be True
+        base_fri = pd.Timestamp("2026-05-15 17:00:00", tz="America/New_York")
+        base_mon = pd.Timestamp("2026-05-18 18:02:00", tz="America/New_York")
+        timestamps = (
+            [base_fri + pd.Timedelta(seconds=i) for i in range(30)]
+            + [base_mon + pd.Timedelta(seconds=i) for i in range(30)]
+        )
+        idx = pd.DatetimeIndex(timestamps)
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+
+        result = validate_session_df(df, price_lo=20000, price_hi=35000)
+        assert result["unexpected_gaps"] == []
+        assert result["severity"] == "ok"
+
+    def test_late_start_returns_late_start_hours(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        base = pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York")
+        idx = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(10)])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+
+        expected_start = pd.Timestamp("2026-05-19 18:00:00", tz="America/New_York")
+        result = validate_session_df(df, price_lo=20000, price_hi=35000,
+                                     expected_session_start=expected_start)
+        # 09:30 on May 20 - 18:00 on May 19 = 15.5 hours
+        assert result["late_start_hours"] >= 15.0
+        # validate_session_df itself doesn't escalate for late_start_hours
+        assert result["severity"] == "ok"
+
+    def test_on_time_start_zero_late_hours(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        base = pd.Timestamp("2026-05-20 18:05:00", tz="America/New_York")
+        idx = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(10)])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+
+        expected_start = pd.Timestamp("2026-05-20 18:00:00", tz="America/New_York")
+        result = validate_session_df(df, price_lo=20000, price_hi=35000,
+                                     expected_session_start=expected_start)
+        assert result["late_start_hours"] < 0.1
+
+    def test_no_expected_start_zero_late_hours(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        base = pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York")
+        idx = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(10)])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+
+        result = validate_session_df(df, price_lo=20000, price_hi=35000,
+                                     expected_session_start=None)
+        assert result["late_start_hours"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestIsExpectedClosed
+# ---------------------------------------------------------------------------
+
+class TestIsExpectedClosed:
+    def test_friday_close_expected(self):
+        from scripts.check_session_parquets import _is_expected_closed
+
+        gap_start = pd.Timestamp("2026-05-15 17:01:00", tz="America/New_York")
+        gap_end   = pd.Timestamp("2026-05-15 23:00:00", tz="America/New_York")
+        assert _is_expected_closed(gap_start, gap_end) is True
+
+    def test_saturday_expected(self):
+        from scripts.check_session_parquets import _is_expected_closed
+
+        gap_start = pd.Timestamp("2026-05-16 12:00:00", tz="America/New_York")
+        gap_end   = pd.Timestamp("2026-05-16 13:00:00", tz="America/New_York")
+        assert _is_expected_closed(gap_start, gap_end) is True
+
+    def test_sunday_before_18_expected(self):
+        from scripts.check_session_parquets import _is_expected_closed
+
+        gap_start = pd.Timestamp("2026-05-17 10:00:00", tz="America/New_York")
+        gap_end   = pd.Timestamp("2026-05-17 11:00:00", tz="America/New_York")
+        assert _is_expected_closed(gap_start, gap_end) is True
+
+    def test_weekday_maint_expected(self):
+        from scripts.check_session_parquets import _is_expected_closed
+
+        # Monday 2026-05-19, maintenance window 17:01 -> 18:00 (< 75 min, ends at 18:00 ET)
+        # The logic requires end_et.hour <= 18 AND end_et.minute <= 5
+        gap_start = pd.Timestamp("2026-05-19 17:01:00", tz="America/New_York")
+        gap_end   = pd.Timestamp("2026-05-19 18:00:00", tz="America/New_York")
+        assert _is_expected_closed(gap_start, gap_end) is True
+
+    def test_weekday_overnight_unexpected(self):
+        from scripts.check_session_parquets import _is_expected_closed
+
+        # Tuesday 2026-05-20 02:00 -> 03:00 — not a maintenance/closed window
+        gap_start = pd.Timestamp("2026-05-20 02:00:00", tz="America/New_York")
+        gap_end   = pd.Timestamp("2026-05-20 03:00:00", tz="America/New_York")
+        assert _is_expected_closed(gap_start, gap_end) is False
+
+    def test_maint_too_long_unexpected(self):
+        from scripts.check_session_parquets import _is_expected_closed
+
+        # Monday 2026-05-19, 17:00 -> 19:00 is 120 min > 75 min limit
+        gap_start = pd.Timestamp("2026-05-19 17:00:00", tz="America/New_York")
+        gap_end   = pd.Timestamp("2026-05-19 19:00:00", tz="America/New_York")
+        assert _is_expected_closed(gap_start, gap_end) is False
+
+
+# ---------------------------------------------------------------------------
+# TestWriteAtomicAndBackup
+# ---------------------------------------------------------------------------
+
+class TestWriteAtomicAndBackup:
+    def test_write_atomic_produces_correct_file(self, tmp_path):
+        from scripts.check_session_parquets import write_atomic
+
+        base = pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York")
+        idx = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(3)])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+
+        out_path = tmp_path / "test.parquet"
+        write_atomic(df, out_path)
+
+        assert out_path.exists()
+        result = pd.read_parquet(out_path)
+        assert len(result) == 3
+
+    def test_write_atomic_no_tmp_left(self, tmp_path):
+        from scripts.check_session_parquets import write_atomic
+
+        base = pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York")
+        idx = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(3)])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+
+        out_path = tmp_path / "test.parquet"
+        write_atomic(df, out_path)
+
+        assert not (tmp_path / "test.parquet.tmp").exists()
+
+    def test_backup_main_overwrites_bak(self, tmp_path):
+        from scripts.check_session_parquets import backup_main
+
+        main_path = tmp_path / "MNQ_1s.parquet"
+
+        base = pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York")
+        # Write 2-row df first
+        idx2 = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(2)])
+        df2 = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx2)
+        df2.to_parquet(main_path)
+        backup_main(main_path)
+
+        # Now overwrite with 3-row df
+        idx3 = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(3)])
+        df3 = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx3)
+        df3.to_parquet(main_path)
+        backup_main(main_path)
+
+        bak_path = tmp_path / "MNQ_1s.parquet.bak"
+        assert bak_path.exists()
+        result = pd.read_parquet(bak_path)
+        assert len(result) == 3
+
+
+# ---------------------------------------------------------------------------
+# TestProcessInstrumentSessionEnd
+# ---------------------------------------------------------------------------
+
+def _make_valid_session(bar_dir, inst="MNQ", n_rows=100, price=27000.0):
+    """Write a valid session parquet to bar_dir."""
+    idx = pd.DatetimeIndex([
+        pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York") + pd.Timedelta(seconds=i)
+        for i in range(n_rows)
+    ])
+    df = pd.DataFrame({
+        "Open": price, "High": price + 10, "Low": price - 10,
+        "Close": price, "Volume": 100.0,
+    }, index=idx)
+    fname = bar_dir / f"{inst}_1s_session_20260520.parquet"
+    df.to_parquet(fname, use_dictionary=False)
+    return fname, df
+
+
+def _make_main_parquet(bar_dir, inst="MNQ"):
+    main_df = pd.DataFrame(
+        {"Open": [27000.], "High": [27010.], "Low": [26990.], "Close": [27005.], "Volume": [100.]},
+        index=pd.DatetimeIndex([pd.Timestamp("2026-05-19 09:30:00", tz="America/New_York")])
+    )
+    main_path = bar_dir / f"{inst}_1s.parquet"
+    main_df.to_parquet(main_path)
+    return main_path
+
+
+class TestProcessInstrumentSessionEnd:
+    def _call_process(self, bar_dir, inst="MNQ", conid=12345, mode="session-end",
+                      dry_run=False, ib=None, extra_patches=None):
+        from scripts.check_session_parquets import process_instrument
+
+        patches = [
+            patch("scripts.check_session_parquets.DATA_DIR", bar_dir),
+            patch("data.parquet_maintenance.merge_session_1s_parquets"),
+            patch("ib_insync.Contract", MagicMock()),
+        ]
+        if extra_patches:
+            patches.extend(extra_patches)
+
+        # Use contextlib-style manual entering
+        entered = []
+        mocks = []
+        try:
+            for p in patches:
+                m = p.__enter__()
+                entered.append(p)
+                mocks.append(m)
+            return process_instrument(
+                inst, conid, f"{inst}_1s.parquet", f"{inst}_1s_session_*.parquet",
+                mode, dry_run, ib or _make_ib_mock()
+            ), mocks
+        finally:
+            for p in reversed(entered):
+                p.__exit__(None, None, None)
+
+    def test_ok_session_merges_and_backs_up(self, bar_dir):
+        from scripts.check_session_parquets import process_instrument
+
+        _make_valid_session(bar_dir)
+        _make_main_parquet(bar_dir)
+
+        with patch("scripts.check_session_parquets.DATA_DIR", bar_dir), \
+             patch("data.parquet_maintenance.merge_session_1s_parquets") as mock_merge, \
+             patch("ib_insync.Contract", MagicMock()), \
+             patch("scripts.check_session_parquets.get_session_start_for_end_mode",
+                   return_value=pd.Timestamp("2026-05-20 09:00:00", tz="America/New_York")):
+
+            result = process_instrument(
+                "MNQ", 12345, "MNQ_1s.parquet", "MNQ_1s_session_*.parquet",
+                "session-end", False, _make_ib_mock()
+            )
+
+        assert result["merge_success"] is True
+        assert result["backup_written"] is True
+        assert mock_merge.called
+
+    def test_minor_session_merges_as_is(self, bar_dir):
+        from scripts.check_session_parquets import process_instrument
+
+        # Build session df starting near expected_start (18:10 ET vs 18:00 ET = 10min late, OK)
+        # with a 3-min (180s) gap in the middle -> minor severity
+        base = pd.Timestamp("2026-05-18 18:10:00", tz="America/New_York")
+        timestamps = (
+            [base + pd.Timedelta(seconds=i) for i in range(300)]
+            + [base + pd.Timedelta(seconds=480 + i) for i in range(60)]
+        )
+        idx = pd.DatetimeIndex(timestamps)
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+        session_path = bar_dir / "MNQ_1s_session_20260518.parquet"
+        df.to_parquet(session_path, use_dictionary=False)
+        _make_main_parquet(bar_dir)
+
+        with patch("scripts.check_session_parquets.DATA_DIR", bar_dir), \
+             patch("data.parquet_maintenance.merge_session_1s_parquets"), \
+             patch("ib_insync.Contract", MagicMock()), \
+             patch("scripts.check_session_parquets.get_session_start_for_end_mode",
+                   return_value=pd.Timestamp("2026-05-18 18:00:00", tz="America/New_York")):
+
+            result = process_instrument(
+                "MNQ", 12345, "MNQ_1s.parquet", "MNQ_1s_session_*.parquet",
+                "session-end", False, _make_ib_mock()
+            )
+
+        assert result["action"] == "merge"
+        assert result["merge_success"] is True
+
+    def test_major_session_targeted_fill(self, bar_dir):
+        from scripts.check_session_parquets import process_instrument
+
+        # Build session starting near expected time (18:10 ET) with 30-min gap -> major severity
+        base = pd.Timestamp("2026-05-18 18:10:00", tz="America/New_York")
+        timestamps = (
+            [base + pd.Timedelta(seconds=i) for i in range(60)]
+            + [base + pd.Timedelta(seconds=2000 + i) for i in range(60)]
+        )
+        idx = pd.DatetimeIndex(timestamps)
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+        session_path = bar_dir / "MNQ_1s_session_20260518.parquet"
+        df.to_parquet(session_path, use_dictionary=False)
+        _make_main_parquet(bar_dir)
+
+        with patch("scripts.check_session_parquets.DATA_DIR", bar_dir), \
+             patch("data.parquet_maintenance.merge_session_1s_parquets"), \
+             patch("ib_insync.Contract", MagicMock()), \
+             patch("scripts.check_session_parquets.get_session_start_for_end_mode",
+                   return_value=pd.Timestamp("2026-05-18 18:00:00", tz="America/New_York")), \
+             patch("scripts.check_session_parquets.targeted_fill", return_value=df):
+
+            result = process_instrument(
+                "MNQ", 12345, "MNQ_1s.parquet", "MNQ_1s_session_*.parquet",
+                "session-end", False, _make_ib_mock()
+            )
+
+        assert result["action"] == "targeted_fill_then_merge"
+
+    def test_critical_session_end_rebuilds(self, bar_dir):
+        from scripts.check_session_parquets import process_instrument
+
+        # 6% bad rows -> critical
+        base = pd.Timestamp("2026-05-18 10:00:00", tz="America/New_York")
+        idx = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(100)])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+        for i in range(6):
+            df.iloc[i, df.columns.get_loc("High")] = 999.0
+            df.iloc[i, df.columns.get_loc("Low")] = 989.0
+            df.iloc[i, df.columns.get_loc("Close")] = 994.0
+            df.iloc[i, df.columns.get_loc("Open")] = 994.0
+        session_path = bar_dir / "MNQ_1s_session_20260518.parquet"
+        df.to_parquet(session_path, use_dictionary=False)
+        _make_main_parquet(bar_dir)
+
+        # rebuild_session returns a valid df
+        good_base = pd.Timestamp("2026-05-18 18:00:00", tz="America/New_York")
+        good_idx = pd.DatetimeIndex([good_base + pd.Timedelta(seconds=i) for i in range(10)])
+        good_df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=good_idx)
+
+        with patch("scripts.check_session_parquets.DATA_DIR", bar_dir), \
+             patch("data.parquet_maintenance.merge_session_1s_parquets"), \
+             patch("ib_insync.Contract", MagicMock()), \
+             patch("scripts.check_session_parquets.get_session_start_for_end_mode",
+                   return_value=pd.Timestamp("2026-05-17 18:00:00", tz="America/New_York")), \
+             patch("scripts.check_session_parquets.rebuild_session", return_value=good_df):
+
+            result = process_instrument(
+                "MNQ", 12345, "MNQ_1s.parquet", "MNQ_1s_session_*.parquet",
+                "session-end", False, _make_ib_mock()
+            )
+
+        assert result["action"] == "rebuild_then_merge"
+
+    def test_no_session_file_session_end_skip(self, bar_dir):
+        from scripts.check_session_parquets import process_instrument
+
+        # No session files
+        with patch("scripts.check_session_parquets.DATA_DIR", bar_dir), \
+             patch("ib_insync.Contract", MagicMock()):
+
+            result = process_instrument(
+                "MNQ", 12345, "MNQ_1s.parquet", "MNQ_1s_session_*.parquet",
+                "session-end", False, None
+            )
+
+        assert result["action"] == "skip"
+        assert result.get("merge_success") is None
+
+    def test_dry_run_no_disk_writes(self, bar_dir):
+        from scripts.check_session_parquets import process_instrument
+
+        _make_valid_session(bar_dir)
+        _make_main_parquet(bar_dir)
+
+        files_before = set(bar_dir.glob("*.parquet"))
+
+        with patch("scripts.check_session_parquets.DATA_DIR", bar_dir), \
+             patch("data.parquet_maintenance.merge_session_1s_parquets"), \
+             patch("ib_insync.Contract", MagicMock()), \
+             patch("scripts.check_session_parquets.get_session_start_for_end_mode",
+                   return_value=pd.Timestamp("2026-05-20 09:00:00", tz="America/New_York")):
+
+            result = process_instrument(
+                "MNQ", 12345, "MNQ_1s.parquet", "MNQ_1s_session_*.parquet",
+                "session-end", True, _make_ib_mock()
+            )
+
+        files_after = set(bar_dir.glob("*.parquet"))
+        assert files_before == files_after
+        assert result["merge_success"] is None
+
+    def test_late_start_escalates_to_rebuild(self, bar_dir):
+        from scripts.check_session_parquets import process_instrument
+
+        _make_valid_session(bar_dir)
+        _make_main_parquet(bar_dir)
+
+        # Session starts at 09:30, expected at 18:00 night before -> ~15.5h late -> critical
+        good_base = pd.Timestamp("2026-05-19 18:00:00", tz="America/New_York")
+        good_idx = pd.DatetimeIndex([good_base + pd.Timedelta(seconds=i) for i in range(10)])
+        good_df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=good_idx)
+
+        with patch("scripts.check_session_parquets.DATA_DIR", bar_dir), \
+             patch("data.parquet_maintenance.merge_session_1s_parquets"), \
+             patch("ib_insync.Contract", MagicMock()), \
+             patch("scripts.check_session_parquets.get_session_start_for_end_mode",
+                   return_value=pd.Timestamp("2026-05-19 18:00:00", tz="America/New_York")), \
+             patch("scripts.check_session_parquets.rebuild_session", return_value=good_df):
+
+            result = process_instrument(
+                "MNQ", 12345, "MNQ_1s.parquet", "MNQ_1s_session_*.parquet",
+                "session-end", False, _make_ib_mock()
+            )
+
+        assert result["action"] == "rebuild_then_merge"
+        assert result["severity"] == "critical"
+
+
+# ---------------------------------------------------------------------------
+# TestProcessInstrumentOrchestratorStart
+# ---------------------------------------------------------------------------
+
+class TestProcessInstrumentOrchestratorStart:
+    def test_no_session_file_gap_fills(self, bar_dir):
+        from scripts.check_session_parquets import process_instrument
+
+        _make_main_parquet(bar_dir)
+
+        good_base = pd.Timestamp("2026-05-20 18:00:00", tz="America/New_York")
+        good_idx = pd.DatetimeIndex([good_base + pd.Timedelta(seconds=i) for i in range(10)])
+        good_df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=good_idx)
+
+        with patch("scripts.check_session_parquets.DATA_DIR", bar_dir), \
+             patch("data.parquet_maintenance.merge_session_1s_parquets"), \
+             patch("ib_insync.Contract", MagicMock()), \
+             patch("scripts.check_session_parquets.gap_fill_to_now", return_value=good_df):
+
+            result = process_instrument(
+                "MNQ", 12345, "MNQ_1s.parquet", "MNQ_1s_session_*.parquet",
+                "orchestrator-start", False, _make_ib_mock()
+            )
+
+        assert result["action"] == "gap_fill_created_session"
+        assert result.get("gap_fill_bars", 0) > 0
+
+    def test_critical_orch_start_gap_fills_not_rebuilds(self, bar_dir):
+        from scripts.check_session_parquets import process_instrument
+
+        # Session with 6% bad rows -> critical, but orch-start uses gap_fill_then_merge
+        base = pd.Timestamp("2026-05-18 10:00:00", tz="America/New_York")
+        idx = pd.DatetimeIndex([base + pd.Timedelta(seconds=i) for i in range(100)])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+        for i in range(6):
+            df.iloc[i, df.columns.get_loc("High")] = 999.0
+            df.iloc[i, df.columns.get_loc("Low")] = 989.0
+            df.iloc[i, df.columns.get_loc("Close")] = 994.0
+            df.iloc[i, df.columns.get_loc("Open")] = 994.0
+        session_path = bar_dir / "MNQ_1s_session_20260518.parquet"
+        df.to_parquet(session_path, use_dictionary=False)
+        _make_main_parquet(bar_dir)
+
+        good_base = pd.Timestamp("2026-05-18 18:00:00", tz="America/New_York")
+        good_idx = pd.DatetimeIndex([good_base + pd.Timedelta(seconds=i) for i in range(10)])
+        good_df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=good_idx)
+
+        with patch("scripts.check_session_parquets.DATA_DIR", bar_dir), \
+             patch("data.parquet_maintenance.merge_session_1s_parquets"), \
+             patch("ib_insync.Contract", MagicMock()), \
+             patch("scripts.check_session_parquets.gap_fill_to_now", return_value=good_df):
+
+            result = process_instrument(
+                "MNQ", 12345, "MNQ_1s.parquet", "MNQ_1s_session_*.parquet",
+                "orchestrator-start", False, _make_ib_mock()
+            )
+
+        assert result["action"] == "gap_fill_then_merge"
+
+
+# ---------------------------------------------------------------------------
+# TestMainEntryPoint
+# ---------------------------------------------------------------------------
+
+class TestMainEntryPoint:
+    def test_main_outputs_valid_json(self, tmp_path):
+        from scripts.check_session_parquets import main
+
+        with patch("scripts.check_session_parquets.DATA_DIR", tmp_path), \
+             patch("sys.argv", ["prog", "--mode", "session-end", "--dry-run"]):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                with pytest.raises(SystemExit):
+                    main()
+
+        output = captured.getvalue()
+        result = json.loads(output)
+        assert "mode" in result
+        assert "instruments" in result
+        assert "exit_code" in result
+
+    def test_main_exit_code_0_when_no_sessions(self, tmp_path):
+        from scripts.check_session_parquets import main
+
+        with patch("scripts.check_session_parquets.DATA_DIR", tmp_path), \
+             patch("sys.argv", ["prog", "--mode", "session-end", "--dry-run"]):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 0
+
+    def test_main_exit_code_1_when_fixed(self, tmp_path):
+        from scripts.check_session_parquets import main
+
+        # Create valid session file
+        idx = pd.DatetimeIndex([
+            pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York") + pd.Timedelta(seconds=i)
+            for i in range(10)
+        ])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+        df.to_parquet(tmp_path / "MNQ_1s_session_20260520.parquet")
+
+        with patch("scripts.check_session_parquets.DATA_DIR", tmp_path), \
+             patch("sys.argv", ["prog", "--mode", "session-end", "--dry-run"]):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 1
+
+    def test_main_exit_code_2_when_unfixable(self, tmp_path):
+        from scripts.check_session_parquets import main
+
+        # Session file exists; mock process_instrument returning merge_success=False
+        idx = pd.DatetimeIndex([
+            pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York") + pd.Timedelta(seconds=i)
+            for i in range(10)
+        ])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+        df.to_parquet(tmp_path / "MNQ_1s_session_20260520.parquet")
+
+        with patch("scripts.check_session_parquets.DATA_DIR", tmp_path), \
+             patch("sys.argv", ["prog", "--mode", "session-end", "--dry-run"]), \
+             patch("scripts.check_session_parquets.process_instrument",
+                   return_value={"action": "merge", "severity": "critical",
+                                 "merge_success": False, "backup_written": False}):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 2
