@@ -110,6 +110,9 @@ AUTO_PID=""
 # Returns 0 if the process with the given PID is alive, 1 if dead.
 # Uses tasklist with a PID filter; "no tasks" in output means the process is gone.
 # Works for any process name (python.exe, uv.exe, etc.).
+# CRITICAL: Do NOT grep for "python" or any process name — automation.main is spawned
+# via `uv run python`, so its PID belongs to uv.exe, not python.exe. Always check
+# for "no tasks" (PID absent) rather than matching by name.
 is_alive() {
     ! tasklist.exe //FI "PID eq $1" //NH 2>/dev/null | grep -qi "no tasks"
 }
