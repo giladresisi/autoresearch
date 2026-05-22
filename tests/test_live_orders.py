@@ -1,4 +1,4 @@
-# tests/test_live_orders.py
+﻿# tests/test_live_orders.py
 # Unit tests for the unified live_orders.py API.
 # Each test redirects session output to tmp_path and mocks the executor.
 
@@ -51,7 +51,7 @@ def _mock_today():
 
 def test_place_stop_entry_logs_and_syncs(_in_tmp, _mock_today):
     empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
-                 "confirmation_bar": {}, "failed_entries": 0}
+                 "conf_bar_entry": {}, "failed_entries": 0}
     mock_executor = MagicMock()
     saved: dict = {}
     with patch.object(live_orders, "_executor", mock_executor), \
@@ -85,7 +85,7 @@ def test_place_stop_entry_logs_and_syncs(_in_tmp, _mock_today):
 
 def test_place_market_entry_logs_and_syncs(_in_tmp, _mock_today):
     empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
-                 "confirmation_bar": {}, "failed_entries": 0}
+                 "conf_bar_entry": {}, "failed_entries": 0}
     mock_executor = MagicMock()
     saved: dict = {}
     with patch.object(live_orders, "_executor", mock_executor), \
@@ -121,7 +121,7 @@ def test_place_market_entry_logs_and_syncs(_in_tmp, _mock_today):
 
 def test_move_stop_entry_reads_old_from_position(_in_tmp, _mock_today):
     pos = {"active": {}, "stop_entry": "19850.0", "stop_direction": "up",
-           "confirmation_bar": {}, "failed_entries": 0}
+           "conf_bar_entry": {}, "failed_entries": 0}
     mock_executor = MagicMock()
     saved: dict = {}
     with patch.object(live_orders, "_executor", mock_executor), \
@@ -152,7 +152,7 @@ def test_stop_entry_filled_updates_stop_only(_in_tmp, _mock_today):
     pos = {
         "active": {"direction": "long", "fill_price": 19850.0, "stop": 0.0,
                    "contracts": 2, "cautious": "no"},
-        "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+        "stop_entry": "", "stop_direction": "", "conf_bar_entry": {},
         "failed_entries": 0,
     }
     mock_executor = MagicMock()
@@ -179,7 +179,7 @@ def test_stop_entry_filled_updates_stop_only(_in_tmp, _mock_today):
 
 def test_stop_entry_filled_noop_save_when_no_active(_in_tmp, _mock_today):
     pos = {"active": {}, "stop_entry": "19850.0", "stop_direction": "up",
-           "confirmation_bar": {}, "failed_entries": 0}
+           "conf_bar_entry": {}, "failed_entries": 0}
     mock_executor = MagicMock()
     with patch.object(live_orders, "_executor", mock_executor), \
          patch("smt_state.load_position", return_value=pos), \
@@ -202,7 +202,7 @@ def test_stop_entry_filled_noop_save_when_no_active(_in_tmp, _mock_today):
 
 def test_cancel_stop_entry_noop_when_empty(_in_tmp, _mock_today):
     empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
-                 "confirmation_bar": {}, "failed_entries": 0}
+                 "conf_bar_entry": {}, "failed_entries": 0}
     mock_executor = MagicMock()
     with patch.object(live_orders, "_executor", mock_executor), \
          patch("smt_state.load_position", return_value=empty_pos), \
@@ -225,7 +225,7 @@ def test_cancel_stop_entry_clears_position(_in_tmp, _mock_today):
         "active": {},
         "stop_entry": "19900.0",
         "stop_direction": "up",
-        "confirmation_bar": {"open": 19890.0},
+        "conf_bar_entry": {"open": 19890.0},
         "failed_entries": 0,
     }
     mock_executor = MagicMock()
@@ -238,7 +238,7 @@ def test_cancel_stop_entry_clears_position(_in_tmp, _mock_today):
     mock_executor.place_close.assert_called_once_with("cancel-stop")
     assert saved["stop_entry"] == ""
     assert saved["stop_direction"] == ""
-    assert saved["confirmation_bar"] == {}
+    assert saved["conf_bar_entry"] == {}
 
     events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
     assert len(events) == 1
@@ -256,7 +256,7 @@ def test_close_position_clears_active(_in_tmp, _mock_today):
                    "contracts": 2, "cautious": "no"},
         "stop_entry": "19850.0",
         "stop_direction": "up",
-        "confirmation_bar": {"open": 19840.0},
+        "conf_bar_entry": {"open": 19840.0},
         "failed_entries": 1,
     }
     mock_executor = MagicMock()
@@ -270,7 +270,7 @@ def test_close_position_clears_active(_in_tmp, _mock_today):
     assert saved["active"] == {}
     assert saved["stop_entry"] == ""
     assert saved["stop_direction"] == ""
-    assert saved["confirmation_bar"] == {}
+    assert saved["conf_bar_entry"] == {}
 
     events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
     assert len(events) == 1
@@ -287,7 +287,7 @@ def test_update_stop_loss_dispatches_update_sl(_in_tmp, _mock_today):
     pos = {
         "active": {"direction": "long", "fill_price": 19850.0, "stop": 19820.0,
                    "contracts": 2, "cautious": "no"},
-        "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+        "stop_entry": "", "stop_direction": "", "conf_bar_entry": {},
         "failed_entries": 0,
     }
     mock_executor = MagicMock()
@@ -378,16 +378,16 @@ _T0_PLUS_4S   = "2026-05-19T10:30:04-04:00"
 
 _POS_WITH_STOP = {
     "active": {}, "stop_entry": "19900.0", "stop_direction": "up",
-    "confirmation_bar": {}, "failed_entries": 0,
+    "conf_bar_entry": {}, "failed_entries": 0,
 }
 _POS_EMPTY = {
     "active": {}, "stop_entry": "", "stop_direction": "",
-    "confirmation_bar": {}, "failed_entries": 0,
+    "conf_bar_entry": {}, "failed_entries": 0,
 }
 _POS_ACTIVE = {
     "active": {"direction": "long", "fill_price": 19900.0, "stop": 19870.0,
                "contracts": 2, "cautious": "no"},
-    "stop_entry": "", "stop_direction": "", "confirmation_bar": {}, "failed_entries": 0,
+    "stop_entry": "", "stop_direction": "", "conf_bar_entry": {}, "failed_entries": 0,
 }
 
 

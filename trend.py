@@ -38,6 +38,22 @@ def _market_close_signal(now: datetime, price: float, reason: str, close_reason:
     return sig
 
 
+def _ref_bar_to_dict(ref: Optional[pd.Series]) -> dict:
+    """Convert a pd.Series bar (from _last_same_dir_ref_bar) to a storable dict."""
+    if ref is None:
+        return {}
+    ts = ref.name
+    return {
+        "time":      ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+        "open":      float(ref["Open"]),
+        "high":      float(ref["High"]),
+        "low":       float(ref["Low"]),
+        "close":     float(ref["Close"]),
+        "body_high": float(max(ref["Open"], ref["Close"])),
+        "body_low":  float(min(ref["Open"], ref["Close"])),
+    }
+
+
 def _clear_position_and_hypothesis(
     position: dict, hypothesis: dict, *, clear_active: bool
 ) -> None:
@@ -45,7 +61,8 @@ def _clear_position_and_hypothesis(
     if clear_active:
         position["active"] = {}
     position["stop_entry"] = ""
-    position["confirmation_bar"] = {}
+    position["conf_bar_entry"] = {}
+    position["conf_bar_exit"]  = {}
     hypothesis["direction"] = "none"
 
 
@@ -165,8 +182,6 @@ def run_trend(
     _lv2 = hypothesis.get("cautious_price_secondary_level", "") or ""
     _cr1 = f"1st-cautious ({_lv1})" if _lv1 else "1st-cautious"
     _cr2 = f"2nd-cautious ({_lv2})" if _lv2 else "2nd-cautious"
-    _ath_secondary = _lv2 in {"day_high", "week_high"}
-
     _liq_map = {l["name"]: l["price"] for l in daily.get("liquidities", [])
                 if l.get("kind") == "level"}
     _dh = _liq_map.get("day_high")
@@ -222,6 +237,16 @@ def run_trend(
         _global_pre["all_time_high"] = bar_high
         save_global(_global_pre)
 
+    # True only when the secondary cautious level is genuinely at ATH territory —
+    # i.e. its price is at or above the pre-session ATH, meaning there is no
+    # historical reference for how far price may run.
+    _ath_secondary = (
+        _lv2 in {"day_high", "week_high"}
+        and _session_ath > 0
+        and cautious_secondary_raw != ""
+        and float(cautious_secondary_raw) >= _session_ath
+    )
+
     # ------------------------------------------------------------------
     # Step 2: early exit when no active direction.
     # ------------------------------------------------------------------
@@ -233,17 +258,19 @@ def run_trend(
     _global_trend = _global_state.get("trend", "up")
     if _global_state.get("confidence") == "high" and direction != _global_trend:
         hypothesis["direction"] = "none"
-        position["confirmation_bar"] = {}
+        position["conf_bar_entry"] = {}
+        position["conf_bar_exit"]  = {}
         position["stop_entry"] = ""
         save_position(position)
         save_hypothesis(hypothesis)
         return {
             "kind":             "trend-broken",
             "time":             now.isoformat(),
-            "price":            float(mnq_1m_bar.get("close", 0)),
+            "direction":        direction,
             "broken_direction": direction,
             "level_name":       "global_trend",
             "level_price":      None,
+            "price":            float(mnq_1m_bar.get("close", 0)),
         }
 
     # bar_high / bar_low already extracted in ATH block above.
@@ -306,6 +333,7 @@ def run_trend(
                     position["active"]["cautious"] = "secondary"
                     _sec_cbp = _fill_price if _ath_secondary else _floored_break_price(_ref1, direction, _fill_price)
                     position["active"]["cautious_break_price"] = _sec_cbp
+                    position["conf_bar_exit"] = {} if _ath_secondary else _ref_bar_to_dict(_ref1)
                     save_position(position)
                     if position["active"]["cautious_break_price"] is None:
                         return None
@@ -323,6 +351,7 @@ def run_trend(
                     _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
                     position["active"]["cautious"] = "initial"
                     position["active"]["cautious_break_price"] = _floored_break_price(_ref5, direction, _fill_price)
+                    position["conf_bar_exit"] = _ref_bar_to_dict(_ref5)
                     save_position(position)
                     if position["active"]["cautious_break_price"] is None:
                         return None  # deferred: trail will arm once price clears entry
@@ -346,6 +375,7 @@ def run_trend(
                     position["active"]["cautious"] = "secondary"
                     _sec_cbp = _fill_price if _ath_secondary else _floored_break_price(_ref1, direction, _fill_price)
                     position["active"]["cautious_break_price"] = _sec_cbp
+                    position["conf_bar_exit"] = {} if _ath_secondary else _ref_bar_to_dict(_ref1)
                     save_position(position)
                     if position["active"]["cautious_break_price"] is None:
                         return None
@@ -363,6 +393,7 @@ def run_trend(
                     _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
                     position["active"]["cautious"] = "initial"
                     position["active"]["cautious_break_price"] = _floored_break_price(_ref5, direction, _fill_price)
+                    position["conf_bar_exit"] = _ref_bar_to_dict(_ref5)
                     save_position(position)
                     if position["active"]["cautious_break_price"] is None:
                         return None  # deferred: trail will arm once price clears entry
@@ -393,6 +424,7 @@ def run_trend(
                     position["active"]["cautious"] = "secondary"
                     _sec_cbp = _fill_price if _ath_secondary else _floored_break_price(_ref1, direction, _fill_price)
                     position["active"]["cautious_break_price"] = _sec_cbp
+                    position["conf_bar_exit"] = {} if _ath_secondary else _ref_bar_to_dict(_ref1)
                     save_position(position)
                     if position["active"]["cautious_break_price"] is None:
                         return None
@@ -419,6 +451,7 @@ def run_trend(
                                (direction == "down" and _trail_price5 < float(_cur_cbp))
                     if _tighter:
                         active["cautious_break_price"] = _trail_price5
+                        position["conf_bar_exit"] = _ref_bar_to_dict(_trail_ref5)
                         save_position(position)
                         _trail_moved = True
 
@@ -452,6 +485,7 @@ def run_trend(
                     position["active"]["cautious"] = "secondary"
                     _sec_cbp = _fill_price if _ath_secondary else _floored_break_price(_ref1, direction, _fill_price)
                     position["active"]["cautious_break_price"] = _sec_cbp
+                    position["conf_bar_exit"] = {} if _ath_secondary else _ref_bar_to_dict(_ref1)
                     save_position(position)
                     if position["active"]["cautious_break_price"] is None:
                         return None
@@ -505,6 +539,7 @@ def run_trend(
                                    (direction == "down" and _trail_price1 < float(_cur_cbp))
                         if _tighter:
                             active["cautious_break_price"] = _trail_price1
+                            position["conf_bar_exit"] = _ref_bar_to_dict(_trail_ref1)
                             save_position(position)
                             _trail_moved = True
 
@@ -542,7 +577,8 @@ def run_trend(
                       (direction == "down" and bar_close > daily_mid_price)
         if _mid_broken:
             hypothesis["direction"] = "none"
-            position["confirmation_bar"] = {}
+            position["conf_bar_entry"] = {}
+            position["conf_bar_exit"]  = {}
             position["stop_entry"] = ""
             position["session_mid_crosses"] = position.get("session_mid_crosses", 0) + 1
             save_position(position)
@@ -550,10 +586,11 @@ def run_trend(
             return {
                 "kind":             "trend-broken",
                 "time":             now.isoformat(),
-                "price":            bar_close,
+                "direction":        direction,
                 "broken_direction": direction,
                 "level_name":       "daily_mid",
                 "level_price":      daily_mid_price,
+                "price":            bar_close,
             }
 
     # Weekly-mid invalidation: same logic applied to the broader weekly range.
@@ -562,24 +599,27 @@ def run_trend(
                      (direction == "down" and bar_close > weekly_mid_price)
         if _wm_broken:
             hypothesis["direction"] = "none"
-            position["confirmation_bar"] = {}
+            position["conf_bar_entry"] = {}
+            position["conf_bar_exit"]  = {}
             position["stop_entry"] = ""
             save_position(position)
             save_hypothesis(hypothesis)
             return {
                 "kind":             "trend-broken",
                 "time":             now.isoformat(),
-                "price":            bar_close,
+                "direction":        direction,
                 "broken_direction": direction,
                 "level_name":       "weekly_mid",
                 "level_price":      weekly_mid_price,
+                "price":            bar_close,
             }
 
     # Session ATH straddle: bar crossed the fixed 09:20 ATH with direction not "down".
     # This is the first time into uncharted territory — invalidate the "up" thesis.
     if _session_ath_straddle:
         hypothesis["direction"] = "none"
-        position["confirmation_bar"] = {}
+        position["conf_bar_entry"] = {}
+        position["conf_bar_exit"]  = {}
         position["stop_entry"] = ""
         save_position(position)
         save_hypothesis(hypothesis)

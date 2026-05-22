@@ -773,3 +773,125 @@ def test_set_bar_data_no_inline_import(tmp_path):
         body = source[start:after_def] if after_def != -1 else source[start:]
         assert "from strategy_smt import set_bar_data" not in body, \
             f"inline import found in {fn_name}"
+
+
+# ── _flush_completed_1m_bar (active mkt-data path) ──────────────────────────
+
+def _make_partial_1m(minute_str: str) -> dict:
+    ts = pd.Timestamp(minute_str, tz="America/New_York").floor("min")
+    return {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5,
+            "volume": 50.0, "minute_ts": ts}
+
+
+def test_flush_completed_1m_bar_writes_session_file_not_main_1s(tmp_path):
+    """The active mkt-data path must write 1s bars to a session file, NOT MNQ_1s.parquet."""
+    src = _make_source(tmp_path)
+    ts1 = _second_ts("2026-05-20 09:30:00")
+    ts2 = _second_ts("2026-05-20 09:30:01")
+    src._mnq_1s_pending = [
+        {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0, "second_ts": ts1},
+        {"open": 2.0, "high": 2.0, "low": 2.0, "close": 2.0, "volume": 1.0, "second_ts": ts2},
+    ]
+    partial = _make_partial_1m("2026-05-20 09:30:00")
+
+    with patch("strategy_smt.set_bar_data"):
+        src._flush_completed_1m_bar("MNQ", partial, partial["minute_ts"])
+    src._parquet_executor.shutdown(wait=True)
+
+    assert not (tmp_path / "MNQ_1s.parquet").exists(), "main 1s parquet must NOT be written mid-session"
+    session_files = list(tmp_path.glob("MNQ_1s_session_*.parquet"))
+    assert len(session_files) == 1
+    flushed = pd.read_parquet(session_files[0])
+    assert len(flushed) == 2
+
+
+def test_flush_completed_1m_bar_mes_writes_session_file(tmp_path):
+    """Symmetric test for MES: _flush_completed_1m_bar must write MES session file."""
+    src = _make_source(tmp_path)
+    ts1 = _second_ts("2026-05-20 09:30:00")
+    src._mes_1s_pending = [
+        {"open": 5.0, "high": 5.0, "low": 5.0, "close": 5.0, "volume": 2.0, "second_ts": ts1},
+    ]
+    partial = _make_partial_1m("2026-05-20 09:30:00")
+
+    with patch("strategy_smt.set_bar_data"):
+        src._flush_completed_1m_bar("MES", partial, partial["minute_ts"])
+    src._parquet_executor.shutdown(wait=True)
+
+    assert not (tmp_path / "MES_1s.parquet").exists()
+    session_files = list(tmp_path.glob("MES_1s_session_*.parquet"))
+    assert len(session_files) == 1
+    assert len(pd.read_parquet(session_files[0])) == 1
+
+
+def test_flush_completed_1m_bar_session_accumulates_across_minutes(tmp_path):
+    """Session DF grows across multiple minute flushes; session file always has all bars."""
+    src = _make_source(tmp_path)
+    ts1 = _second_ts("2026-05-20 09:30:00")
+    ts2 = _second_ts("2026-05-20 09:31:00")
+
+    src._mnq_1s_pending = [
+        {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0, "second_ts": ts1},
+    ]
+    partial1 = _make_partial_1m("2026-05-20 09:30:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._flush_completed_1m_bar("MNQ", partial1, partial1["minute_ts"])
+
+    src._mnq_1s_pending = [
+        {"open": 2.0, "high": 2.0, "low": 2.0, "close": 2.0, "volume": 1.0, "second_ts": ts2},
+    ]
+    partial2 = _make_partial_1m("2026-05-20 09:31:00")
+    with patch("strategy_smt.set_bar_data"):
+        src._flush_completed_1m_bar("MNQ", partial2, partial2["minute_ts"])
+    src._parquet_executor.shutdown(wait=True)
+
+    session_files = list(tmp_path.glob("MNQ_1s_session_*.parquet"))
+    assert len(session_files) == 1
+    flushed = pd.read_parquet(session_files[0])
+    assert len(flushed) == 2, "session file must contain all bars, not just the last minute"
+
+
+def test_flush_completed_1m_bar_writes_1m_parquet(tmp_path):
+    """_flush_completed_1m_bar must write the completed 1m bar to MNQ_1m.parquet."""
+    src = _make_source(tmp_path)
+    partial = _make_partial_1m("2026-05-20 09:30:00")
+
+    with patch("strategy_smt.set_bar_data"):
+        src._flush_completed_1m_bar("MNQ", partial, partial["minute_ts"])
+    src._parquet_executor.shutdown(wait=True)
+
+    assert (tmp_path / "MNQ_1m.parquet").exists()
+    df = pd.read_parquet(tmp_path / "MNQ_1m.parquet")
+    assert len(df) == 1
+    assert df.index[0] == partial["minute_ts"]
+
+
+def test_flush_completed_1m_bar_no_tmp_file_left(tmp_path):
+    """Atomic write must leave no .parquet.tmp files after successful flush."""
+    src = _make_source(tmp_path)
+    partial = _make_partial_1m("2026-05-20 09:30:00")
+
+    with patch("strategy_smt.set_bar_data"):
+        src._flush_completed_1m_bar("MNQ", partial, partial["minute_ts"])
+    src._parquet_executor.shutdown(wait=True)
+
+    tmp_files = list(tmp_path.glob("*.parquet.tmp"))
+    assert len(tmp_files) == 0, f"Stale .tmp files: {tmp_files}"
+
+
+def test_stop_flushes_pending_to_session_not_main_1s(tmp_path):
+    """stop() must flush remaining 1s bars to session file, not MNQ_1s.parquet."""
+    src = _make_source(tmp_path)
+    ts1 = _second_ts("2026-05-20 16:59:00")
+    src._mnq_1s_pending = [
+        {"open": 3.0, "high": 3.0, "low": 3.0, "close": 3.0, "volume": 1.0, "second_ts": ts1},
+    ]
+    src._mes_1s_pending = []
+    src._event_loop = None  # stop() checks if loop is running
+
+    src.stop()
+
+    assert not (tmp_path / "MNQ_1s.parquet").exists(), "stop() must not write to main 1s parquet"
+    session_files = list(tmp_path.glob("MNQ_1s_session_*.parquet"))
+    assert len(session_files) == 1
+    assert len(pd.read_parquet(session_files[0])) == 1

@@ -9,6 +9,7 @@ _IB_1S_CHUNK_SECONDS = 1800
 # Earliest timestamp for 1s gap-fill — prevents requesting unbounded historical data
 _1S_EARLIEST = "2026-05-01"
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
@@ -92,6 +93,14 @@ class IbRealtimeSource:
             dtype=float,
         )
 
+    def _submit_parquet_write(self, df: pd.DataFrame, path: Path) -> None:
+        """Submit an atomic parquet write to the executor (write-to-tmp then os.replace)."""
+        def _write(snap=df, dst=path):
+            tmp = dst.with_suffix(".parquet.tmp")
+            snap.to_parquet(tmp, use_dictionary=False)
+            os.replace(tmp, dst)
+        self._parquet_executor.submit(_write)
+
     def _load_parquets(self) -> None:
         for attr, filename in [
             ("_mnq_1m_df", "MNQ_1m.parquet"),
@@ -112,7 +121,9 @@ class IbRealtimeSource:
                 )
                 empty = self._empty_bar_df()
                 try:
-                    empty.to_parquet(path)
+                    tmp = path.with_suffix(".parquet.tmp")
+                    empty.to_parquet(tmp, use_dictionary=False)
+                    os.replace(tmp, path)
                 except Exception:
                     pass
                 setattr(self, attr, empty)
@@ -150,10 +161,8 @@ class IbRealtimeSource:
             self._mes_1m_df = pd.concat([self._mes_1m_df, mes_new]).sort_index()
             self._mes_1m_df = self._mes_1m_df[~self._mes_1m_df.index.duplicated(keep="last")]
         self._bar_data_dir.mkdir(parents=True, exist_ok=True)
-        _mnq_snap = self._mnq_1m_df
-        _mes_snap = self._mes_1m_df
-        self._parquet_executor.submit(_mnq_snap.to_parquet, self._bar_data_dir / "MNQ_1m.parquet")
-        self._parquet_executor.submit(_mes_snap.to_parquet, self._bar_data_dir / "MES_1m.parquet")
+        self._submit_parquet_write(self._mnq_1m_df.copy(), self._bar_data_dir / "MNQ_1m.parquet")
+        self._submit_parquet_write(self._mes_1m_df.copy(), self._bar_data_dir / "MES_1m.parquet")
 
     def _gap_fill_1s_ib(self) -> None:
         """Fill recent 1s bars from IB: covers what Databento can't serve (last few hours).
@@ -231,8 +240,7 @@ class IbRealtimeSource:
                     combined = combined[~combined.index.duplicated(keep="last")]
                     setattr(self, df_attr, combined)
                     self._bar_data_dir.mkdir(parents=True, exist_ok=True)
-                    _snap = combined
-                    self._parquet_executor.submit(_snap.to_parquet, self._bar_data_dir / parquet_name)
+                    self._submit_parquet_write(combined.copy(), self._bar_data_dir / parquet_name)
                     print(f"[gap_fill_1s_ib] {instrument}: +{len(new_df)} 1s bars", flush=True)
                 except Exception as exc:
                     print(f"[gap_fill_1s_ib] {instrument}: error: {exc}", flush=True)
@@ -307,14 +315,12 @@ class IbRealtimeSource:
             combined = pd.concat([self._mnq_1m_df, new_df]).sort_index()
             combined = combined[~combined.index.duplicated(keep="last")]
             self._mnq_1m_df = combined
-            _snap = self._mnq_1m_df.copy()
-            self._parquet_executor.submit(_snap.to_parquet, self._bar_data_dir / "MNQ_1m.parquet")
+            self._submit_parquet_write(combined.copy(), self._bar_data_dir / "MNQ_1m.parquet")
         else:
             combined = pd.concat([self._mes_1m_df, new_df]).sort_index()
             combined = combined[~combined.index.duplicated(keep="last")]
             self._mes_1m_df = combined
-            _snap = self._mes_1m_df.copy()
-            self._parquet_executor.submit(_snap.to_parquet, self._bar_data_dir / "MES_1m.parquet")
+            self._submit_parquet_write(combined.copy(), self._bar_data_dir / "MES_1m.parquet")
 
     def _on_mnq_1m_bar(self, bars, hasNewBar) -> None:
         if not hasNewBar:
@@ -489,29 +495,38 @@ class IbRealtimeSource:
                 self._mes_partial_1m, price, size, minute_ts
             )
 
-    def _flush_1s_pending_to_parquet(self, instrument: str) -> None:
+    def _flush_1s_pending_to_session_file(self, instrument: str) -> None:
+        """Flush pending 1s bars to the session parquet (not the main parquet).
+
+        Session DF accumulates all bars for this session in memory; the session
+        parquet is a crash-durable snapshot overwritten atomically each flush.
+        merge_session_1s_parquets() merges it into the main parquet at session end.
+        """
         pending = self._mnq_1s_pending if instrument == "MNQ" else self._mes_1s_pending
         if not pending:
             return
         snap = pending[:]
         pending.clear()
-        path = self._bar_data_dir / f"{instrument}_1s.parquet"
-
-        def _write(path=path, snap=snap):
-            new_df = pd.DataFrame(
-                [[p["open"], p["high"], p["low"], p["close"], p["volume"]] for p in snap],
-                columns=["Open", "High", "Low", "Close", "Volume"],
-                index=pd.DatetimeIndex([p["second_ts"] for p in snap]),
-            )
-            if path.exists():
-                existing = pd.read_parquet(path)
-                combined = pd.concat([existing, new_df]).sort_index()
-                combined = combined[~combined.index.duplicated(keep="last")]
-            else:
-                combined = new_df
-            combined.to_parquet(path)
-
-        self._parquet_executor.submit(_write)
+        new_df = pd.DataFrame(
+            [[p["open"], p["high"], p["low"], p["close"], p["volume"]] for p in snap],
+            columns=["Open", "High", "Low", "Close", "Volume"],
+            index=pd.DatetimeIndex([p["second_ts"] for p in snap]),
+        )
+        if instrument == "MNQ":
+            self._mnq_1s_session_df = pd.concat([self._mnq_1s_session_df, new_df]).sort_index()
+            self._mnq_1s_session_df = self._mnq_1s_session_df[
+                ~self._mnq_1s_session_df.index.duplicated(keep="last")
+            ]
+            session_path = self._bar_data_dir / f"MNQ_1s_session_{self._session_date}.parquet"
+            ses_snap = self._mnq_1s_session_df.copy()
+        else:
+            self._mes_1s_session_df = pd.concat([self._mes_1s_session_df, new_df]).sort_index()
+            self._mes_1s_session_df = self._mes_1s_session_df[
+                ~self._mes_1s_session_df.index.duplicated(keep="last")
+            ]
+            session_path = self._bar_data_dir / f"MES_1s_session_{self._session_date}.parquet"
+            ses_snap = self._mes_1s_session_df.copy()
+        self._submit_parquet_write(ses_snap, session_path)
 
     def _flush_completed_1m_bar(self, instrument: str, partial_1m, bar_ts) -> None:
         row = pd.DataFrame(
@@ -523,14 +538,12 @@ class IbRealtimeSource:
         if instrument == "MNQ":
             self._mnq_1m_df = pd.concat([self._mnq_1m_df, row])
             self._mnq_1m_df = self._mnq_1m_df[~self._mnq_1m_df.index.duplicated(keep="last")]
-            snap = self._mnq_1m_df.copy()
-            self._parquet_executor.submit(snap.to_parquet, self._bar_data_dir / "MNQ_1m.parquet")
+            self._submit_parquet_write(self._mnq_1m_df.copy(), self._bar_data_dir / "MNQ_1m.parquet")
         else:
             self._mes_1m_df = pd.concat([self._mes_1m_df, row])
             self._mes_1m_df = self._mes_1m_df[~self._mes_1m_df.index.duplicated(keep="last")]
-            snap = self._mes_1m_df.copy()
-            self._parquet_executor.submit(snap.to_parquet, self._bar_data_dir / "MES_1m.parquet")
-        self._flush_1s_pending_to_parquet(instrument)
+            self._submit_parquet_write(self._mes_1m_df.copy(), self._bar_data_dir / "MES_1m.parquet")
+        self._flush_1s_pending_to_session_file(instrument)
         _set_bar_data(self._mnq_1m_df, self._mes_1m_df)
         if instrument == "MNQ" and self._on_bar_1m_complete is not None:
             from types import SimpleNamespace
@@ -640,11 +653,11 @@ class IbRealtimeSource:
                 self._ib.disconnect()
         except Exception:
             pass
-        # Flush 1s bars accumulated since the last minute boundary; event loop is
+        # Flush 1s bars from the last partial minute to the session file; event loop is
         # stopped and disconnected by this point so pending lists are stable.
         for instrument in ("MNQ", "MES"):
             try:
-                self._flush_1s_pending_to_parquet(instrument)
+                self._flush_1s_pending_to_session_file(instrument)
             except Exception:
                 pass
         # Drain pending parquet writes before exit so no data is lost on shutdown.
@@ -652,6 +665,26 @@ class IbRealtimeSource:
             self._parquet_executor.shutdown(wait=True)
         except Exception:
             pass
+
+
+def _count_expected_1m_bars(start: "pd.Timestamp", end: "pd.Timestamp") -> int:
+    """Count expected 1m bars in [start, end) for CME NQ/MNQ, excluding maintenance and weekends."""
+    if end <= start:
+        return 0
+    idx = pd.date_range(
+        start.floor("1min"), end.floor("1min"),
+        freq="1min", tz="America/New_York", inclusive="left",
+    )
+    if idx.empty:
+        return 0
+    wd = idx.weekday
+    h  = idx.hour
+    active = ~(
+        (h == 17) |
+        ((wd == 5) & (h >= 17)) |
+        ((wd == 6) & (h < 18))
+    )
+    return int(active.sum())
 
 
 def gap_fill_1m_ib(bar_data_dir: Path) -> None:
@@ -711,14 +744,25 @@ def gap_fill_1m_ib(bar_data_dir: Path) -> None:
     mes_new = source.fetch(mes_conid, mes_start.isoformat(), end_str, interval="1m", contract_type="future_by_conid")
 
     bar_data_dir.mkdir(parents=True, exist_ok=True)
-    for instrument, df, new_df, fname in [
-        ("MNQ", mnq_df, mnq_new, "MNQ_1m.parquet"),
-        ("MES", mes_df, mes_new, "MES_1m.parquet"),
+    for instrument, df, new_df, fname, start_ts in [
+        ("MNQ", mnq_df, mnq_new, "MNQ_1m.parquet", mnq_start),
+        ("MES", mes_df, mes_new, "MES_1m.parquet", mes_start),
     ]:
+        actual   = len(new_df) if (new_df is not None and not new_df.empty) else 0
+        expected = _count_expected_1m_bars(start_ts, now)
         if new_df is None or new_df.empty:
             print(f"[gap_fill_1m_ib] {instrument}: 0 new bars", flush=True)
-            continue
-        combined = pd.concat([df, new_df]).sort_index()
-        combined = combined[~combined.index.duplicated(keep="last")]
-        combined.to_parquet(bar_data_dir / fname)
-        print(f"[gap_fill_1m_ib] {instrument}: +{len(new_df)} bars", flush=True)
+        else:
+            combined = pd.concat([df, new_df]).sort_index()
+            combined = combined[~combined.index.duplicated(keep="last")]
+            dst = bar_data_dir / fname
+            tmp = dst.with_suffix(".parquet.tmp")
+            combined.to_parquet(tmp, use_dictionary=False)
+            os.replace(tmp, dst)
+            print(f"[gap_fill_1m_ib] {instrument}: +{len(new_df)} bars", flush=True)
+        if expected > 5 and actual < int(0.8 * expected):
+            print(
+                f"[gap_fill_1m_ib] WARN: {instrument} incomplete fill — "
+                f"{actual}/{expected} bars ({100 * actual // expected}% coverage)",
+                flush=True,
+            )

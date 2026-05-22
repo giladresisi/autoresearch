@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -8,6 +9,10 @@ from data.sources import DatabentSource
 
 MNQ_TICKER = "MNQ.v.0"
 MES_TICKER  = "MES.v.0"
+
+_GAP_FILL_CHUNK_S      = 1800   # IB hard limit: 1800 S per request for 1s bars
+_GAP_FILL_PACING_SLEEP = 660    # 11 min — safe margin above IB's 10-min window
+_GAP_FILL_MAX_RETRIES  = 3      # consecutive pacing failures before aborting
 
 
 def backfill_parquets(
@@ -46,7 +51,9 @@ def backfill_parquets(
             continue
         combined = pd.concat([existing, df_new]).sort_index()
         combined = combined[~combined.index.duplicated(keep="last")]
-        combined.to_parquet(path)
+        tmp = path.with_suffix(".parquet.tmp")
+        combined.to_parquet(tmp, use_dictionary=False)
+        os.replace(tmp, path)
 
 
 def _empty_df() -> pd.DataFrame:
@@ -58,22 +65,17 @@ def _empty_df() -> pd.DataFrame:
 
 
 def _safe_read_parquet(path: Path) -> pd.DataFrame:
-    """Read a parquet file, returning an empty DF if missing or corrupted.
+    """Read a parquet file, returning an empty DF if missing or unreadable.
 
-    On corruption: recreates the file as empty so the next read succeeds.
+    Never modifies the file — corrupt files are left intact for manual recovery.
     """
     if not path.exists():
         return _empty_df()
     try:
         return pd.read_parquet(path)
     except Exception as exc:
-        print(f"[databento_backfill] WARNING: {path.name} corrupted ({exc}); recreating empty", flush=True)
-        empty = _empty_df()
-        try:
-            empty.to_parquet(path)
-        except Exception:
-            pass
-        return empty
+        print(f"[parquet_maintenance] WARNING: {path.name} unreadable ({exc}); returning empty DF", flush=True)
+        return _empty_df()
 
 
 def _safe_read_last_ts(path: Path) -> "pd.Timestamp | None":
@@ -131,7 +133,136 @@ def backfill_1s_parquets(
             continue
         combined = pd.concat([existing, df_new]).sort_index()
         combined = combined[~combined.index.duplicated(keep="last")]
-        combined.to_parquet(path)
+        tmp = path.with_suffix(".parquet.tmp")
+        combined.to_parquet(tmp, use_dictionary=False)
+        os.replace(tmp, path)
+
+
+def _prev_trading_ts_gap(ts: pd.Timestamp) -> pd.Timestamp:
+    """Return ts if it's a trading time, else the most recent trading close before ts.
+
+    CME Globex MNQ/MES schedule (ET):
+      Opens:       Sunday 18:00
+      Daily break: 17:00-18:00 Mon-Thu
+      Weekend:     Friday 17:00 through Sunday 18:00
+    """
+    ts_et = ts.tz_convert("America/New_York")
+    dow   = ts_et.weekday()  # 0=Mon..4=Fri, 5=Sat, 6=Sun
+    t     = ts_et.hour * 3600 + ts_et.minute * 60 + ts_et.second
+
+    CLOSE     = 17 * 3600  # 17:00:00 ET
+    BREAK_END = 18 * 3600  # 18:00:00 ET
+
+    in_wknd  = (dow == 4 and t > CLOSE) or dow == 5 or (dow == 6 and t < BREAK_END)
+    in_break = (not in_wknd) and CLOSE < t < BREAK_END  # Mon-Thu break
+
+    if not (in_wknd or in_break):
+        return ts
+
+    if in_break:
+        return ts_et.normalize() + pd.Timedelta(hours=17)
+
+    days_to_fri = (dow - 4) % 7
+    fri = ts_et.normalize() - pd.Timedelta(days=days_to_fri)
+    return fri + pd.Timedelta(hours=17)
+
+
+def _fetch_gap_chunked(
+    ib, contract, gap_start: pd.Timestamp, gap_end: pd.Timestamp
+) -> tuple:
+    """Fetch gap data in ≤1800 S chunks, retrying on IB pacing errors.
+
+    Returns (gap_df, success). success=False if pacing retries exhausted.
+    success=True even if 0 bars returned (valid for market-closed windows).
+    """
+    import time as _time
+    from ib_insync import util as _util
+
+    all_bars = []
+    chunk_end = gap_end
+    consecutive_pacing = 0
+    pacing_hit = False
+
+    def _on_error(reqId, errorCode, errorString, contract):
+        nonlocal pacing_hit
+        if errorCode == 162 and "pacing" in errorString.lower():
+            pacing_hit = True
+
+    ib.errorEvent += _on_error
+    try:
+        while chunk_end > gap_start:
+            adjusted = _prev_trading_ts_gap(chunk_end)
+            if adjusted < chunk_end:
+                chunk_end = adjusted
+                continue
+
+            chunk_start = max(gap_start, chunk_end - pd.Timedelta(seconds=_GAP_FILL_CHUNK_S))
+            chunk_s = max(1, int((chunk_end - chunk_start).total_seconds()))
+
+            pacing_hit = False
+            bars = ib.reqHistoricalData(
+                contract,
+                endDateTime=chunk_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
+                durationStr=f"{chunk_s} S",
+                barSizeSetting="1 secs",
+                whatToShow="TRADES",
+                useRTH=False,
+                formatDate=2,
+            )
+
+            if not bars and pacing_hit:
+                consecutive_pacing += 1
+                if consecutive_pacing > _GAP_FILL_MAX_RETRIES:
+                    print(
+                        f"[merge_session_1s] gap fill: pacing retries exhausted "
+                        f"({_GAP_FILL_MAX_RETRIES} consecutive) — aborting",
+                        flush=True,
+                    )
+                    return pd.DataFrame(), False
+                wait_min = _GAP_FILL_PACING_SLEEP // 60
+                print(
+                    f"[merge_session_1s] gap fill: pacing — sleeping {wait_min} min "
+                    f"(retry {consecutive_pacing}/{_GAP_FILL_MAX_RETRIES}) ...",
+                    flush=True,
+                )
+                _time.sleep(_GAP_FILL_PACING_SLEEP)
+                pacing_hit = False
+                bars = ib.reqHistoricalData(
+                    contract,
+                    endDateTime=chunk_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
+                    durationStr=f"{chunk_s} S",
+                    barSizeSetting="1 secs",
+                    whatToShow="TRADES",
+                    useRTH=False,
+                    formatDate=2,
+                )
+                if not bars:
+                    chunk_end = chunk_start
+                    continue
+                consecutive_pacing = 0  # retry succeeded — reset counter
+            else:
+                consecutive_pacing = 0
+
+            if bars:
+                all_bars.extend(bars)
+            chunk_end = chunk_start
+    finally:
+        ib.errorEvent -= _on_error
+
+    if not all_bars:
+        return pd.DataFrame(), True
+
+    df = _util.df(all_bars).rename(columns={
+        "date": "datetime", "open": "Open", "high": "High",
+        "low": "Low", "close": "Close", "volume": "Volume",
+    }).set_index("datetime")
+    if df.index.tzinfo is None:
+        df.index = df.index.tz_localize("America/New_York")
+    else:
+        df.index = df.index.tz_convert("America/New_York")
+    df = df[["Open", "High", "Low", "Close", "Volume"]].sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    return df, True
 
 
 def merge_session_1s_parquets(bar_data_dir: Path) -> None:
@@ -146,8 +277,7 @@ def merge_session_1s_parquets(bar_data_dir: Path) -> None:
     IB connection failure is non-fatal: merge proceeds without gap fill.
     IB params from env: IB_HOST, IB_PORT, MNQ_CONID, MES_CONID.
     """
-    import os
-    from ib_insync import IB, Contract as _IBContract, util as _util
+    from ib_insync import IB, Contract as _IBContract
 
     bar_data_dir = Path(bar_data_dir)
     _host    = os.environ.get("IB_HOST", "127.0.0.1")
@@ -181,6 +311,7 @@ def merge_session_1s_parquets(bar_data_dir: Path) -> None:
         for instrument, main_name, session_files, conid in merges_needed:
             main_path = bar_data_dir / main_name
             existing  = _safe_read_parquet(main_path)
+            abort_merge = False
 
             for session_path in session_files:
                 session_df = _safe_read_parquet(session_path)
@@ -188,44 +319,41 @@ def merge_session_1s_parquets(bar_data_dir: Path) -> None:
                     session_path.unlink()
                     continue
 
-                # IB gap fill: main[-1] → session[0]
+                # IB gap fill: main[-1] → session[0], chunked to respect IB's 1800 S limit
                 if ib_ok and conid and not existing.empty:
                     gap_start = existing.index[-1]
                     gap_end   = session_df.index[0]
                     gap_s     = max(0, int((gap_end - gap_start).total_seconds()) - 1)
                     if gap_s > 1:
-                        try:
-                            contract = _IBContract(conId=int(conid), exchange="CME")
-                            bars = ib.reqHistoricalData(
-                                contract,
-                                endDateTime=gap_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
-                                durationStr=f"{gap_s} S",
-                                barSizeSetting="1 secs",
-                                whatToShow="TRADES",
-                                useRTH=False,
-                                formatDate=2,
+                        contract = _IBContract(conId=int(conid), exchange="CME")
+                        gap_df, gap_ok = _fetch_gap_chunked(ib, contract, gap_start, gap_end)
+                        if not gap_ok:
+                            print(
+                                f"[merge_session_1s] {instrument}: WARNING — gap fill failed after "
+                                f"{_GAP_FILL_MAX_RETRIES} pacing retries. Gap "
+                                f"{gap_start.strftime('%m-%d %H:%M')} → "
+                                f"{gap_end.strftime('%m-%d %H:%M')} ({gap_s}s) not filled. "
+                                f"Skipping merge to avoid writing incomplete data.",
+                                flush=True,
                             )
-                            if bars:
-                                gap_df = _util.df(bars).rename(columns={
-                                    "date": "datetime", "open": "Open", "high": "High",
-                                    "low": "Low", "close": "Close", "volume": "Volume",
-                                }).set_index("datetime")
-                                if gap_df.index.tzinfo is None:
-                                    gap_df.index = gap_df.index.tz_localize("America/New_York")
-                                else:
-                                    gap_df.index = gap_df.index.tz_convert("America/New_York")
-                                existing = pd.concat(
-                                    [existing, gap_df[["Open", "High", "Low", "Close", "Volume"]]]
-                                ).sort_index()
-                                existing = existing[~existing.index.duplicated(keep="last")]
-                                print(f"[merge_session_1s] {instrument}: +{len(gap_df)} gap bars", flush=True)
-                        except Exception as exc:
-                            print(f"[merge_session_1s] {instrument}: gap fill failed ({exc})", flush=True)
+                            abort_merge = True
+                            break  # preserve session file and skip main parquet write
+                        if not gap_df.empty:
+                            existing = pd.concat(
+                                [existing, gap_df[["Open", "High", "Low", "Close", "Volume"]]]
+                            ).sort_index()
+                            existing = existing[~existing.index.duplicated(keep="last")]
+                            print(f"[merge_session_1s] {instrument}: +{len(gap_df)} gap bars", flush=True)
 
                 existing = pd.concat([existing, session_df]).sort_index()
                 existing = existing[~existing.index.duplicated(keep="last")]
 
-            existing.to_parquet(main_path)
+            if abort_merge:
+                continue  # skip to next instrument — do NOT write main parquet or delete session
+
+            tmp = main_path.with_suffix(".parquet.tmp")
+            existing.to_parquet(tmp, use_dictionary=False)
+            os.replace(tmp, main_path)
             for session_path in session_files:
                 if session_path.exists():
                     session_path.unlink()

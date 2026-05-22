@@ -19,21 +19,21 @@ def assumed_fill_price(
 ) -> float:
     """Estimate fill price with tick-based entry slippage.
 
-    Market orders: always 1 tick (observed live slippage; slip_ticks parameter ignored).
+    Market orders: 3 ticks (calibrated from live PMT relay observations).
     Stop orders: time-based slippage — 4 ticks before 11:00 ET (higher volatility),
-        2 ticks at or after 11:00 ET.  bar_time=None uses the pessimistic 4-tick default.
+        1 tick at or after 11:00 ET.  bar_time=None uses the pessimistic 4-tick default.
     Limit and all other order types: fill at reference_price unchanged.
     Long direction: slippage is adverse (adds to price).
     Short direction: slippage is adverse (subtracts from price).
     """
     if order_type == "market":
-        effective_ticks = 1
+        effective_ticks = 3
     elif order_type == "stop":
         cutoff = datetime.time(11, 0)
         if bar_time is None or bar_time < cutoff:
             effective_ticks = 4
         else:
-            effective_ticks = 2
+            effective_ticks = 1
     else:
         return reference_price
     slip = effective_ticks * tick_size

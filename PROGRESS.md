@@ -1,6 +1,22 @@
 # PROGRESS
 
 
+## Feature: Parquet Session Health Check Skill
+### Planning Phase
+**Status**: ✅ Complete
+**Started**: 2026-05-21
+**Plan File**: `.agents/plans/parquet-session-health-check.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/parquet-session-health-check.md`
+- 4/4 tasks completed; 42 new tests (42/42 passing); 0 regressions
+- Three divergences: `continue`→`abort_merge` flag fix for correct merge-skip semantics; duration math drops -1 offset (dedup handles overlap); test expectation updated to match correct abort behavior
+- Live IB probe (step 6) skipped — requires live IB Gateway
+- Alignment score: 9/10
+
+---
+
 ## Feature: D7 — Session-End Close + IB Disconnect Hard Close
 ### Planning Phase
 **Status**: ✅ Planned

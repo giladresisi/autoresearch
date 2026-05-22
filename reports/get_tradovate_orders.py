@@ -13,6 +13,42 @@ def _fmt(d: datetime.date) -> str:
     return d.strftime("%m/%d/%Y")
 
 
+def _convert_timestamps_to_et(path: Path) -> None:
+    """Subtract 11 h from Timestamp and Fill Time columns (Tradovate exports UTC+7; ET = UTC-4 in summer)."""
+    import csv as _csv
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        return
+    rows = list(_csv.DictReader(text.splitlines()))
+    if not rows:
+        return
+    fieldnames = list(rows[0].keys())
+    offset = datetime.timedelta(hours=11)
+    ts_fmt = "%m/%d/%Y %H:%M:%S"
+    for row in rows:
+        for col in ("Timestamp", "Fill Time"):
+            val = (row.get(col) or "").strip()
+            if val:
+                try:
+                    dt = datetime.datetime.strptime(val, ts_fmt) - offset
+                    row[col] = dt.strftime(ts_fmt)
+                except ValueError:
+                    pass
+        ts_val = (row.get("Timestamp") or "").strip()
+        if ts_val:
+            try:
+                dt = datetime.datetime.strptime(ts_val, ts_fmt)
+                row["Date"] = f"{dt.month}/{dt.day}/{str(dt.year)[2:]}"
+            except ValueError:
+                pass
+    import io as _io
+    buf = _io.StringIO()
+    writer = _csv.DictWriter(buf, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+    path.write_text(buf.getvalue(), encoding="utf-8")
+
+
 def run(session_date: datetime.date, *, headed: bool = False) -> list[Path]:
     load_dotenv()
     username   = os.environ["TRADOVATE_USERNAME"]
@@ -92,6 +128,7 @@ def run(session_date: datetime.date, *, headed: bool = False) -> list[Path]:
 
             orders_path = out_dir / "tradovate_orders.csv"
             _download_csv(modal, page, orders_path)
+            _convert_timestamps_to_et(orders_path)
 
             # ── Position History tab ───────────────────────────────────────────
             modal.get_by_text("Position History", exact=True).click()
@@ -100,6 +137,7 @@ def run(session_date: datetime.date, *, headed: bool = False) -> list[Path]:
 
             pos_path = out_dir / "tradovate_position_history.csv"
             _download_csv(modal, page, pos_path)
+            _convert_timestamps_to_et(pos_path)
 
         except Exception:
             page.screenshot(path=str(out_dir / "tradovate_error.png"))

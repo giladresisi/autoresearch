@@ -1,4 +1,4 @@
-# tests/test_trade_cli.py
+﻿# tests/test_trade_cli.py
 # Unit tests for trade.py CLI — direct import + monkeypatch for clean isolation.
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def _run_trade(argv: list[str], monkeypatch,
 def test_up_market_reads_bar_state(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
-        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+        "active": {}, "stop_entry": "", "stop_direction": "", "conf_bar_entry": {},
     }
     mock_smt = MagicMock()
     mock_smt.load_bar_state.return_value = {
@@ -89,7 +89,7 @@ def test_up_market_fails_null_stop(monkeypatch, capsys):
 def test_up_stop_entry_places_stp(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
-        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+        "active": {}, "stop_entry": "", "stop_direction": "", "conf_bar_entry": {},
     }
     mock_smt = MagicMock()
     # Explicit sl_price as third argv arg
@@ -108,7 +108,7 @@ def test_up_stop_entry_places_stp(monkeypatch, capsys):
 def test_up_stop_entry_reads_sl_from_bar_state(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
-        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+        "active": {}, "stop_entry": "", "stop_direction": "", "conf_bar_entry": {},
     }
     mock_smt = MagicMock()
     mock_smt.load_bar_state.return_value = {
@@ -128,7 +128,7 @@ def test_up_stop_entry_reads_sl_from_bar_state(monkeypatch, capsys):
 def test_down_market_uses_potential_stop_short(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
-        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+        "active": {}, "stop_entry": "", "stop_direction": "", "conf_bar_entry": {},
     }
     mock_smt = MagicMock()
     mock_smt.load_bar_state.return_value = {
@@ -148,7 +148,7 @@ def test_down_market_uses_potential_stop_short(monkeypatch, capsys):
 def test_down_stop_entry_places_stp(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
-        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+        "active": {}, "stop_entry": "", "stop_direction": "", "conf_bar_entry": {},
     }
     mock_smt = MagicMock()
     # Explicit sl_price as third argv arg
@@ -166,7 +166,7 @@ def test_down_stop_entry_places_stp(monkeypatch, capsys):
 def test_cancel_noop_when_no_pending(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
-        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+        "active": {}, "stop_entry": "", "stop_direction": "", "conf_bar_entry": {},
     }
     mock_smt = MagicMock()
     with pytest.raises(SystemExit) as exc:
@@ -185,7 +185,7 @@ def test_cancel_calls_cancel_stop_entry(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
         "active": {}, "stop_entry": "27000.0", "stop_direction": "up",
-        "confirmation_bar": {},
+        "conf_bar_entry": {},
     }
     mock_smt = MagicMock()
     _run_trade(["cancel"], monkeypatch, mock_lo, mock_smt)
@@ -200,7 +200,7 @@ def test_cancel_calls_cancel_stop_entry(monkeypatch, capsys):
 def test_move_fails_when_no_pending(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
-        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+        "active": {}, "stop_entry": "", "stop_direction": "", "conf_bar_entry": {},
     }
     mock_smt = MagicMock()
     with pytest.raises(SystemExit) as exc:
@@ -217,7 +217,7 @@ def test_move_calls_move_stop_entry(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
         "active": {}, "stop_entry": "27000.0", "stop_direction": "up",
-        "confirmation_bar": {},
+        "conf_bar_entry": {},
     }
     mock_smt = MagicMock()
     _run_trade(["move", "28000"], monkeypatch, mock_lo, mock_smt)
@@ -233,7 +233,7 @@ def test_close_market_calls_close_position(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
         "active": {"direction": "long", "fill_price": 27000.0, "stop": 26970.0},
-        "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+        "stop_entry": "", "stop_direction": "", "conf_bar_entry": {},
     }
     mock_smt = MagicMock()
     _run_trade(["close"], monkeypatch, mock_lo, mock_smt)
@@ -248,7 +248,7 @@ def test_close_market_calls_close_position(monkeypatch, capsys):
 def test_close_market_fails_when_no_active(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {
-        "active": {}, "stop_entry": "", "stop_direction": "", "confirmation_bar": {},
+        "active": {}, "stop_entry": "", "stop_direction": "", "conf_bar_entry": {},
     }
     mock_smt = MagicMock()
     with pytest.raises(SystemExit) as exc:

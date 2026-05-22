@@ -20,6 +20,7 @@ _DIR_DOWN          = "down"
 _CONF_BAR_MINS     = 5   # default confirmation bar window
 _CONF_BAR_MINS_ATH = 15  # confirmation bar window when above session ATH
 _STOP_WICK_CAP     = 15.0  # max pts a conf-bar wick can extend the stop beyond the body
+MAX_FAILED_ENTRIES = 2   # block new entries once this many stops have been hit this hypothesis
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -164,14 +165,14 @@ def run_strategy(
             _cancel_price = float(stop_entry)
             position["stop_entry"]      = ""
             position["stop_direction"]  = ""
-            position["confirmation_bar"] = {}
+            position["conf_bar_entry"] = {}
             smt_state.save_position(position)
             _reason = "direction-none" if direction == "none" else "direction-changed"
             return _make_signal("cancel-stop-entry", now, _cancel_price, reason=_reason)
 
         if direction == "none":
             return None
-        if position["failed_entries"] > 2:
+        if position["failed_entries"] > MAX_FAILED_ENTRIES:
             return None
 
         _daily = smt_state.load_daily()
@@ -181,7 +182,7 @@ def run_strategy(
             _chop_rng > 0
             and _chop_rng < 150.0
             and _chop_mid_x >= 4
-            and position["failed_entries"] >= 2
+            and position["failed_entries"] >= MAX_FAILED_ENTRIES
         ):
             return None
 
@@ -209,7 +210,7 @@ def run_strategy(
             if pending_stop is not None:
                 stop = float(pending_stop)
             else:
-                conf_bar = position["confirmation_bar"]
+                conf_bar = position["conf_bar_entry"]
                 if conf_bar:
                     # Backward-compat: positions written before pending_stop was added
                     if direction == _DIR_UP:
@@ -242,7 +243,7 @@ def run_strategy(
                 }
                 position["stop_entry"]      = ""
                 position["stop_direction"]  = ""
-                # confirmation_bar intentionally preserved across fill so that after a
+                # conf_bar_entry intentionally preserved across fill so that after a
                 # stop-out the same 5m bar cannot be reused as confirmation for re-entry.
                 smt_state.save_position(position)
                 return _make_signal("stop-entry-filled", now, fill_price, direction=direction, stop=stop)
@@ -258,7 +259,7 @@ def run_strategy(
         opp_5m = _find_last_bar(mnq_1m_recent, now, _opp_dir, _bar_mins, formed_at)
         if opp_5m is not None and (opp_5m["body_high"] - opp_5m["body_low"]) <= MAX_CONFIRMATION_BODY_PTS:
             body_end_price = opp_5m["body_high"] if direction == _DIR_UP else opp_5m["body_low"]
-            current_conf_time = position.get("confirmation_bar", {}).get("time", "")
+            current_conf_time = position.get("conf_bar_entry", {}).get("time", "")
             if opp_5m["time"] != current_conf_time or prefer_market_entry:
                 conf_bar_snap = {
                     "time":      opp_5m["time"],
@@ -304,7 +305,7 @@ def run_strategy(
                         "contracts":  2,
                         "cautious":   "no",
                     }
-                    position["confirmation_bar"] = conf_bar_snap
+                    position["conf_bar_entry"] = conf_bar_snap
                     position["stop_entry"]      = ""
                     position["stop_direction"]  = ""
                     smt_state.save_position(position)
@@ -323,7 +324,7 @@ def run_strategy(
                     return None
                 if direction == _DIR_DOWN and (stop_loss - entry_price) < MIN_STOP_DISTANCE:
                     return None
-                position["confirmation_bar"] = conf_bar_snap
+                position["conf_bar_entry"] = conf_bar_snap
                 kind = "new-stop-entry" if position["stop_entry"] == "" else "move-stop-entry"
                 position["stop_entry"]     = entry_price
                 position["stop_direction"] = direction
@@ -346,7 +347,8 @@ def run_strategy(
     if direction == "none" or direction != _pos_hyp_dir:
         position["active"]            = {}
         position["stop_entry"]       = ""
-        position["confirmation_bar"]  = {}
+        position["conf_bar_entry"]   = {}
+        position["conf_bar_exit"]    = {}
         smt_state.save_position(position)
         _bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
         return _make_signal("market-close", now, _bar_mid, reason="direction-mismatch", close_reason="trend-broken")
@@ -364,7 +366,8 @@ def run_strategy(
         exit_price = stop
         position["active"]            = {}
         position["stop_entry"]       = ""
-        # confirmation_bar intentionally preserved: prevents immediate re-entry on the
+        position["conf_bar_exit"]    = {}
+        # conf_bar_entry intentionally preserved: prevents immediate re-entry on the
         # same bar before the next 5m hypothesis re-evaluation can run.
         position["failed_entries"]    = position.get("failed_entries", 0) + 1
 
@@ -411,7 +414,8 @@ def run_strategy(
             ):
                 position["active"]           = {}
                 position["stop_entry"]      = ""
-                position["confirmation_bar"] = {}
+                position["conf_bar_entry"]  = {}
+                position["conf_bar_exit"]   = {}
                 smt_state.save_position(position)
                 _close_price = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
                 return _make_signal(
@@ -438,7 +442,8 @@ def reset_position_for_session() -> None:
     pos["active"] = {}
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
-    pos["confirmation_bar"] = {}
+    pos["conf_bar_entry"] = {}
+    pos["conf_bar_exit"]  = {}
     pos["failed_entries"] = 0
     smt_state.save_position(pos)
 
@@ -451,7 +456,8 @@ def reset_position_for_new_hypothesis() -> None:
     """
     pos = smt_state.load_position()
     pos["failed_entries"] = 0
-    pos["confirmation_bar"] = {}
+    pos["conf_bar_entry"] = {}
+    pos["conf_bar_exit"]  = {}
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
     smt_state.save_position(pos)

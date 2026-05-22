@@ -49,7 +49,8 @@ DEFAULT_POSITION = {
     "active": {},
     "stop_entry": "",
     "stop_direction": "",
-    "confirmation_bar": {},
+    "conf_bar_entry": {},
+    "conf_bar_exit":  {},
     "pending_stop": None,
     "failed_entries": 0,
     "session_mid_crosses": 0,
@@ -104,9 +105,14 @@ def _load(path: Path, default: dict) -> dict:
         d = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return copy.deepcopy(default)
-    if not default.keys() <= d.keys():
+    # Completely wrong schema (no recognized keys) → return default.
+    if not (default.keys() & d.keys()):
         return copy.deepcopy(default)
-    return d
+    # Forward-compatible merge: new default keys get their default value;
+    # extra keys in the file (e.g. cooldowns) are preserved.
+    merged = copy.deepcopy(default)
+    merged.update(d)
+    return merged
 
 
 def load_global() -> dict:

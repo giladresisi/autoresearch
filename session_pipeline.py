@@ -186,17 +186,17 @@ class SessionPipeline:
                     if not today_mnq_at_open.empty else 0.0
                 )
                 _pos_snap = load_position()
-                _pos_snap["confirmation_bar"] = {}
+                _pos_snap["conf_bar_entry"] = {}
                 _pos_snap["stop_entry"] = ""
                 save_position(_pos_snap)
                 self._emit({
                     "kind":             "trend-broken",
                     "time":             now.isoformat(),
-                    "price":            _last_price,
-                    "broken_direction": _pos_hyp_dir,
                     "direction":        _new_hyp_dir,
+                    "broken_direction": _pos_hyp_dir,
                     "level_name":       "session-restart",
                     "level_price":      "",
+                    "price":            _last_price,
                 })
 
     def on_1m_bar(
@@ -282,16 +282,17 @@ class SessionPipeline:
                         _hyp_snap["direction"] = "none"
                         _smt_state.save_hypothesis(_hyp_snap)
                         _pos = _smt_state.load_position()
-                        _pos["confirmation_bar"] = {}
+                        _pos["conf_bar_entry"] = {}
                         _pos["stop_entry"] = ""
                         _smt_state.save_position(_pos)
                         _tb_sig = {
                             "kind":             "trend-broken",
                             "time":             trend_sig["time"],
-                            "price":            trend_sig["price"],
+                            "direction":        "none",
                             "broken_direction": _hyp_dir,
                             "level_name":       trend_sig.get("level_name", ""),
                             "level_price":      trend_sig.get("level_price", ""),
+                            "price":            trend_sig["price"],
                             "cooldown_active":  True,
                         }
                         for _k in ("bar_low", "bar_high"):
@@ -364,17 +365,17 @@ class SessionPipeline:
                         # trend-broken so the automation path can cancel the PMT order.
                         self._accepted_level_sweeps.clear()
                         _pos = _smt_state.load_position()
-                        _pos["confirmation_bar"] = {}
+                        _pos["conf_bar_entry"] = {}
                         _pos["stop_entry"] = ""
                         _smt_state.save_position(_pos)
                         _tb_sig: dict = {
                             "kind":             "trend-broken",
                             "time":             trend_sig["time"],
-                            "price":            trend_sig["price"],
+                            "direction":        _new_dir,
                             "broken_direction": _hyp_dir,
                             "level_name":       trend_sig.get("level_name", ""),
                             "level_price":      trend_sig.get("level_price", ""),
-                            "direction":        _new_dir,
+                            "price":            trend_sig["price"],
                         }
                         for _k in ("bar_low", "bar_high"):
                             if _k in trend_sig:
@@ -454,11 +455,11 @@ class SessionPipeline:
                 _tb_sig = {
                     "kind":             "trend-broken",
                     "time":             trend_sig["time"],
-                    "price":            trend_sig["price"],
+                    "direction":        _new_dir,
                     "broken_direction": _hyp_dir,
                     "level_name":       "ath",
                     "level_price":      trend_sig.get("all_time_high", ""),
-                    "direction":        _new_dir,
+                    "price":            trend_sig["price"],
                     "bar_high":         trend_sig.get("bar_high", ""),
                     "bar_low":          trend_sig.get("bar_low", ""),
                 }

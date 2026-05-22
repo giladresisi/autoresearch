@@ -217,7 +217,7 @@ def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> No
     _executor.place_close("cancel-stop")
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
-    pos["confirmation_bar"] = {}
+    pos["conf_bar_entry"] = {}
     _save_pos(pos)
     _log({"kind": "cancel-stop-entry", "time": now, "entry_price": entry_price, "reason": reason})
 
@@ -230,7 +230,7 @@ def close_position(price: float, reason: str = "user-requested") -> None:
     pos["active"] = {}
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
-    pos["confirmation_bar"] = {}
+    pos["conf_bar_entry"] = {}
     _save_pos(pos)
     _log({"kind": "market-close", "time": now, "price": float(price), "reason": reason})
 
@@ -338,9 +338,13 @@ def dispatch(sig: dict) -> None:
         if cbp is not None:
             if sig.get("level") == "secondary":
                 # Secondary exit is managed by 1m bar-close check in trend.py.
-                # Move IB stop far from money so wicks never trigger a fill.
+                # Move stop 1000 pts away from money so wicks never trigger a fill.
                 _dir = sig.get("direction", _load_pos().get("active", {}).get("direction", ""))
-                _far = 0.0 if _dir in ("up", "long") else 50000.0
+                _current = float(sig.get("price", 0.0))
+                if _current > 0:
+                    _far = (_current - 1000.0) if _dir in ("up", "long") else (_current + 1000.0)
+                else:
+                    _far = 0.0 if _dir in ("up", "long") else 50000.0
                 update_stop_loss(_far, reason="new-stop-exit")
             else:
                 update_stop_loss(float(cbp), reason="new-stop-exit")
@@ -394,7 +398,7 @@ def dispatch(sig: dict) -> None:
         pos["active"] = {}
         pos["stop_entry"] = ""
         pos["stop_direction"] = ""
-        pos["confirmation_bar"] = {}
+        pos["conf_bar_entry"] = {}
         _save_pos(pos)
         _log(sig)
         return
@@ -430,14 +434,15 @@ def trend_broken() -> dict:
     hypothesis["direction"] = "none"
     save_hypothesis(hypothesis)
 
-    # Clear confirmation_bar in case cancel_stop_entry didn't (no pending stop).
+    # Clear conf_bar_entry in case cancel_stop_entry didn't (no pending stop).
     pos = _load_pos()
-    pos["confirmation_bar"] = {}
+    pos["conf_bar_entry"] = {}
     _save_pos(pos)
 
     event = {
         "kind":             "trend-broken",
         "time":             _now_et(),
+        "direction":        "none",
         "broken_direction": broken_dir,
         "source":           "manual",
     }

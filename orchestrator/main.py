@@ -103,7 +103,7 @@ def _pre_session_init() -> None:
     _check_ib_reachable()
     bar_data_dir = _Path(__file__).resolve().parent.parent / "data"
     try:
-        from data.databento_backfill import merge_session_1s_parquets
+        from data.parquet_maintenance import merge_session_1s_parquets
         merge_session_1s_parquets(bar_data_dir)
     except Exception as exc:
         print(f"[ORCH] WARNING: session 1s merge (crash recovery) failed: {exc}", flush=True)
@@ -439,7 +439,7 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
             # session 1s parquet into main. This runs before pre-session IB restarts so the
             # session file is cleaned up before overnight accumulation begins.
             try:
-                from data.databento_backfill import merge_session_1s_parquets
+                from data.parquet_maintenance import merge_session_1s_parquets
                 merge_session_1s_parquets(bar_data_dir)
                 orch_ch.writeln("[ORCH] 1s session parquets merged into main")
             except Exception as _exc:

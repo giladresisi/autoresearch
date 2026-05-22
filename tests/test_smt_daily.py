@@ -1,4 +1,4 @@
-# tests/test_smt_daily.py
+﻿# tests/test_smt_daily.py
 # Unit tests for daily.py: liquidities computation, ATH update, position reset,
 # hypothesis reset, and FVG unvisited filtering.
 
@@ -311,7 +311,7 @@ class TestPositionReset:
         save_position({
             "active": {"fill_price": 21400.0, "direction": "up"},
             "stop_entry": 21000.0,
-            "confirmation_bar": {"high": 21410.0, "low": 21390.0},
+            "conf_bar_entry": {"high": 21410.0, "low": 21390.0},
             "failed_entries": 2,
         })
 
@@ -321,7 +321,7 @@ class TestPositionReset:
         pos = load_position()
         assert pos["active"] == {}
         assert pos["stop_entry"] == ""
-        assert pos["confirmation_bar"] == {}
+        assert pos["conf_bar_entry"] == {}
         assert pos["failed_entries"] == 0
 
 

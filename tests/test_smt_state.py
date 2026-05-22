@@ -1,4 +1,4 @@
-# tests/test_smt_state.py
+﻿# tests/test_smt_state.py
 # Unit tests for smt_state.py: defaults, round-trips, atomic write, determinism.
 
 import copy
@@ -115,7 +115,8 @@ class TestSaveThenLoadRoundtrip:
             "active": {"fill_price": 21400.0, "direction": "up"},
             "stop_entry": 21395.0,
             "stop_direction": "long",
-            "confirmation_bar": {"high": 21402.0, "low": 21390.0},
+            "conf_bar_entry": {"high": 21402.0, "low": 21390.0},
+            "conf_bar_exit":  {},
             "pending_stop": 21380.0,
             "failed_entries": 1,
             "session_mid_crosses": 0,
