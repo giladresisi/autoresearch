@@ -667,6 +667,26 @@ class IbRealtimeSource:
             pass
 
 
+def _count_expected_1m_bars(start: "pd.Timestamp", end: "pd.Timestamp") -> int:
+    """Count expected 1m bars in [start, end) for CME NQ/MNQ, excluding maintenance and weekends."""
+    if end <= start:
+        return 0
+    idx = pd.date_range(
+        start.floor("1min"), end.floor("1min"),
+        freq="1min", tz="America/New_York", inclusive="left",
+    )
+    if idx.empty:
+        return 0
+    wd = idx.weekday
+    h  = idx.hour
+    active = ~(
+        (h == 17) |
+        ((wd == 5) & (h >= 17)) |
+        ((wd == 6) & (h < 18))
+    )
+    return int(active.sum())
+
+
 def gap_fill_1m_ib(bar_data_dir: Path) -> None:
     """Standalone 1m bar gap-fill from IB: called at orchestrator startup.
 
@@ -724,17 +744,25 @@ def gap_fill_1m_ib(bar_data_dir: Path) -> None:
     mes_new = source.fetch(mes_conid, mes_start.isoformat(), end_str, interval="1m", contract_type="future_by_conid")
 
     bar_data_dir.mkdir(parents=True, exist_ok=True)
-    for instrument, df, new_df, fname in [
-        ("MNQ", mnq_df, mnq_new, "MNQ_1m.parquet"),
-        ("MES", mes_df, mes_new, "MES_1m.parquet"),
+    for instrument, df, new_df, fname, start_ts in [
+        ("MNQ", mnq_df, mnq_new, "MNQ_1m.parquet", mnq_start),
+        ("MES", mes_df, mes_new, "MES_1m.parquet", mes_start),
     ]:
+        actual   = len(new_df) if (new_df is not None and not new_df.empty) else 0
+        expected = _count_expected_1m_bars(start_ts, now)
         if new_df is None or new_df.empty:
             print(f"[gap_fill_1m_ib] {instrument}: 0 new bars", flush=True)
-            continue
-        combined = pd.concat([df, new_df]).sort_index()
-        combined = combined[~combined.index.duplicated(keep="last")]
-        dst = bar_data_dir / fname
-        tmp = dst.with_suffix(".parquet.tmp")
-        combined.to_parquet(tmp, use_dictionary=False)
-        os.replace(tmp, dst)
-        print(f"[gap_fill_1m_ib] {instrument}: +{len(new_df)} bars", flush=True)
+        else:
+            combined = pd.concat([df, new_df]).sort_index()
+            combined = combined[~combined.index.duplicated(keep="last")]
+            dst = bar_data_dir / fname
+            tmp = dst.with_suffix(".parquet.tmp")
+            combined.to_parquet(tmp, use_dictionary=False)
+            os.replace(tmp, dst)
+            print(f"[gap_fill_1m_ib] {instrument}: +{len(new_df)} bars", flush=True)
+        if expected > 5 and actual < int(0.8 * expected):
+            print(
+                f"[gap_fill_1m_ib] WARN: {instrument} incomplete fill — "
+                f"{actual}/{expected} bars ({100 * actual // expected}% coverage)",
+                flush=True,
+            )

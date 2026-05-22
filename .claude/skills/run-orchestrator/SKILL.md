@@ -98,6 +98,7 @@ STARTUP_LOG="$BASE/orchestrator_stdout.log"
 PID_FILE="$BASE/orchestrator.pid"
 
 gap_fill_done=false
+fill_incomplete_reported=false
 session_started=false
 session_ended=false
 daily_done=false
@@ -134,6 +135,12 @@ cur() { tail -n "+$((startup_log_offset+1))" "$STARTUP_LOG" 2>/dev/null; }
 if cur | grep -q "IB 1m gap fill complete"; then
     gap_fill_done=true
     echo "[MONITOR] Gap-fill complete"
+fi
+
+if cur | grep -q "\[gap_fill_1m_ib\] WARN:"; then
+    fill_incomplete_reported=true
+    warn_msg=$(cur | grep "\[gap_fill_1m_ib\] WARN:" | tr '\n' ' ')
+    echo "[MONITOR] Gap-fill incomplete: $warn_msg"
 fi
 
 if cur | grep -q "FATAL"; then
@@ -179,6 +186,11 @@ while true; do
         if cur | grep -q "IB 1m gap fill complete"; then
             gap_fill_done=true
             echo "[MONITOR] Gap-fill complete"
+        fi
+        if [ "$fill_incomplete_reported" = false ] && cur | grep -q "\[gap_fill_1m_ib\] WARN:"; then
+            fill_incomplete_reported=true
+            warn_msg=$(cur | grep "\[gap_fill_1m_ib\] WARN:" | tr '\n' ' ')
+            echo "[MONITOR] Gap-fill incomplete: $warn_msg"
         fi
     fi
 
@@ -242,6 +254,7 @@ As each line arrives from the Monitor, call `PushNotification` for EVERY milesto
 | Monitor output | Push message |
 |----------------|--------------|
 | `[MONITOR] Gap-fill complete` | `Gap-fill complete — pre-session data ready` |
+| `[MONITOR] Gap-fill incomplete: …` | `WARNING: Gap-fill incomplete — <coverage details from message>` |
 | `[MONITOR] Session started …` | `Session started — automation.main running` |
 | `[MONITOR] daily.py complete` | `daily.py complete — liquidities computed` |
 | `[MONITOR] First directed hypothesis: …` | `First hypothesis: <direction> — strategy is live` |
