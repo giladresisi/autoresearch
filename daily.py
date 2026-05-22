@@ -64,16 +64,14 @@ def _session_bars(mnq_1m: pd.DataFrame, session: str, today: datetime.date) -> p
 
 
 def _compute_two(hist_mnq_1m: pd.DataFrame, today: datetime.date) -> Optional[float]:
-    """Return the Open of the first 1m bar of the current futures week.
+    """Return the Open of the Monday 18:00 ET bar for the current trading week (ICT TWO).
 
-    Futures week starts Sunday 18:00 ET (before ISO Monday). ISO week numbering
-    puts Sunday in the *previous* ISO week, so we search across both the current
-    ISO week AND the prior calendar Sunday.
+    Per ICT theory the True Week Open is Monday's 18:00 ET bar — the opening of
+    Monday's overnight futures session, which TradingView labels as the Monday daily open.
 
     Priority:
-      1. Sunday 18:00 ET (prior calendar day if today is Monday, or walk back to
-         the most-recent Sunday).
-      2. Monday 00:00 ET (start of ISO week).
+      1. Monday 18:00 ET of the current ISO week.
+      2. Monday 00:00 ET (midnight) of the current ISO week.
       3. First available bar of the ISO week.
     """
     if hist_mnq_1m.empty:
@@ -84,25 +82,18 @@ def _compute_two(hist_mnq_1m: pd.DataFrame, today: datetime.date) -> Optional[fl
     today_iso_week = today_isocal.week
     today_iso_year = today_isocal.year
 
-    # Compute Monday and Sunday of this futures week.
-    # Futures week opens Sunday 18:00 ET, so "this week's Sunday" is today when today IS Sunday.
-    today_weekday = today_ts.isocalendar().weekday  # 1=Mon … 7=Sun
-    days_since_monday = today_weekday - 1           # 0 on Mon, 6 on Sun
+    # Monday of this ISO week (weekday 1=Mon … 7=Sun)
+    today_weekday = today_ts.isocalendar().weekday
+    days_since_monday = today_weekday - 1  # 0 on Mon, 6 on Sun
     monday_ts = today_ts - pd.Timedelta(days=days_since_monday)
-    if today_weekday == 7:
-        sunday_ts = today_ts  # today is the futures-week open Sunday
-    else:
-        sunday_ts = monday_ts - pd.Timedelta(days=1)
 
-    # Try Sunday 18:00 ET — look in hist_mnq_1m directly (no ISO-week filter needed)
-    sunday_1800 = pd.Timestamp(
-        datetime.datetime(
-            sunday_ts.year, sunday_ts.month, sunday_ts.day, 18, 0, 0,
-        ),
+    # Primary: Monday 18:00 ET
+    monday_1800 = pd.Timestamp(
+        datetime.datetime(monday_ts.year, monday_ts.month, monday_ts.day, 18, 0, 0),
         tz="America/New_York",
     )
-    if sunday_1800 in hist_mnq_1m.index:
-        return float(hist_mnq_1m.loc[sunday_1800, "Open"])
+    if monday_1800 in hist_mnq_1m.index:
+        return float(hist_mnq_1m.loc[monday_1800, "Open"])
 
     # Filter to ISO-week bars for fallback paths
     _iso = hist_mnq_1m.index.isocalendar()
