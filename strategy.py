@@ -21,6 +21,7 @@ _CONF_BAR_MINS     = 5   # default confirmation bar window
 _CONF_BAR_MINS_ATH = 15  # confirmation bar window when above session ATH
 _STOP_WICK_CAP     = 15.0  # max pts a conf-bar wick can extend the stop beyond the body
 MAX_FAILED_ENTRIES = 2   # block new entries once this many stops have been hit this hypothesis
+_O5_FALLBACK_DIST  = 100.0  # O5: use prior window as pseudo-conf when entry range is this far behind price
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -96,6 +97,66 @@ def _entry_bar_cpr_ok(bar: dict, direction: str) -> bool:
     if direction == _DIR_UP:
         return (bar["close"] - bar["low"]) / rng >= _CPR_MIN
     return (bar["high"] - bar["close"]) / rng >= _CPR_MIN
+
+
+def _o5_fallback(
+    hypothesis: dict,
+    direction: str,
+    mnq_bar: dict,
+    mnq_1m_recent: pd.DataFrame,
+    now: datetime,
+    bar_mins: int,
+) -> Optional[dict]:
+    """O5: return the prior bar_mins-window as a pseudo-conf bar when the normal
+    confirmation bar is absent AND all entry ranges are >_O5_FALLBACK_DIST pts
+    behind the current price (unreachable without a major reversal).
+
+    Guard: the current 1m bar must be moving in the hypothesis direction (or be a
+    doji). If price is already reversing at the 1m level, the momentum has turned
+    and O5 would be chasing against it.
+
+    The existing MAX_CONFIRMATION_BODY_PTS check still applies to the returned
+    window, so large momentum candles are still filtered out.
+    """
+    # Current bar must agree with hypothesis direction (dojis are neutral — allowed).
+    bar_close = float(mnq_bar["close"])
+    bar_open  = float(mnq_bar["open"])
+    if direction == _DIR_UP   and bar_close < bar_open:
+        return None
+    if direction == _DIR_DOWN and bar_close > bar_open:
+        return None
+
+    entry_ranges = hypothesis.get("entry_ranges", [])
+    if not entry_ranges:
+        return None
+    if direction == _DIR_UP:
+        highs_behind = [r["high"] for r in entry_ranges if r.get("high", 0) < bar_close]
+        if not highs_behind or (bar_close - max(highs_behind)) < _O5_FALLBACK_DIST:
+            return None
+    else:
+        lows_behind = [r["low"] for r in entry_ranges if r.get("low", 99999) > bar_close]
+        if not lows_behind or (min(lows_behind) - bar_close) < _O5_FALLBACK_DIST:
+            return None
+    if mnq_1m_recent is None or mnq_1m_recent.empty:
+        return None
+    delta        = pd.Timedelta(minutes=bar_mins)
+    period_end   = pd.Timestamp(now).floor(f"{bar_mins}min")
+    period_start = period_end - delta
+    idx = mnq_1m_recent.index
+    sp  = idx.searchsorted(period_start, side="left")
+    ep  = idx.searchsorted(period_end,   side="left")
+    window = mnq_1m_recent.iloc[sp:ep]
+    if window.empty:
+        return None
+    o = float(window.iloc[0]["Open"])
+    c = float(window.iloc[-1]["Close"])
+    return {
+        "time":      period_start.isoformat(),
+        "high":      float(window["High"].max()),
+        "low":       float(window["Low"].min()),
+        "body_high": max(o, c),
+        "body_low":  min(o, c),
+    }
 
 
 def _make_signal(kind: str, now: datetime, price: float, **kwargs) -> dict:
@@ -257,6 +318,8 @@ def run_strategy(
         _opp_dir  = _DIR_UP if direction == _DIR_DOWN else _DIR_DOWN
         _bar_mins = _CONF_BAR_MINS_ATH if _above_session_ath else _CONF_BAR_MINS
         opp_5m = _find_last_bar(mnq_1m_recent, now, _opp_dir, _bar_mins, formed_at)
+        if opp_5m is None:
+            opp_5m = _o5_fallback(hypothesis, direction, mnq_bar, mnq_1m_recent, now, _bar_mins)
         if opp_5m is not None and (opp_5m["body_high"] - opp_5m["body_low"]) <= MAX_CONFIRMATION_BODY_PTS:
             body_end_price = opp_5m["body_high"] if direction == _DIR_UP else opp_5m["body_low"]
             current_conf_time = position.get("conf_bar_entry", {}).get("time", "")
