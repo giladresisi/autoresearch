@@ -796,7 +796,29 @@ def _determine_direction(
                                 _pre_cross_ts, _last_liq_ts, _high_names, check_high=True):
                             r2b_dir = "down"
                         else:
-                            r2b_dir = "up"  # liquidity grab → expect bounce
+                            # Before assuming a bounce, check if a high level (incl.
+                            # london_high) was swept in the True Day before the low grab.
+                            # A prior high sweep means this is bearish continuation, not
+                            # a reversal from discount.
+                            _prior_high_names = {
+                                "day_high", "week_high", "ny_morning_high", "london_high"
+                            }
+                            _pre_low_bars = (
+                                _true_day_bars[_true_day_bars.index < _last_liq_ts]
+                                if _last_liq_ts is not None else pd.DataFrame()
+                            )
+                            _prior_high_swept = False
+                            if len(_pre_low_bars) >= 2:
+                                _pc = _pre_low_bars["Close"].values
+                                _ph = _pre_low_bars["High"].values
+                                for _hn in _prior_high_names:
+                                    _hlp = _liq_price_map.get(_hn)
+                                    if _hlp is None:
+                                        continue
+                                    if ((_pc[:-1] < _hlp) & (_ph[1:] >= _hlp)).any():
+                                        _prior_high_swept = True
+                                        break
+                            r2b_dir = "down" if _prior_high_swept else "up"
             elif _last_liq in _high_names:
                 if not _above_mid:
                     r2b_dir = "down"
@@ -871,22 +893,54 @@ def compute_live_hl_mid(
     today  = now.date()
     result: dict = {}
 
-    # Day: day_high from prior calendar day 18:00 ET; day_low from 19:30 ET (skips
-    # the opening 1.5h which often produces outlier lows detached from the active range).
-    _prior_cal = today - timedelta(days=1)
-    _day_high_start = pd.Timestamp(
+    # Day: full range from prior calendar day 18:00 ET.
+    # The opening 1.5h (18:00–19:30 ET) is skipped from whichever side (high or low) it
+    # distorts, but only when its range is >2x the range of the rest of the day up to the
+    # RTH open. Direction determines which side is the outlier: a big UP move creates an
+    # outlier high (skip from day_high); a big DOWN move creates an outlier low (skip from
+    # day_low). When the 1.5h move is modest relative to the rest of the day it is included
+    # in both.
+    _prior_cal   = today - timedelta(days=1)
+    _day_start   = pd.Timestamp(
         datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 18, 0, 0),
         tz="America/New_York",
     )
-    _day_low_start = pd.Timestamp(
+    _init_end    = pd.Timestamp(
         datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 19, 30, 0),
         tz="America/New_York",
     )
-    _day_high_bars = combined_1m[combined_1m.index >= _day_high_start]
-    _day_low_bars  = combined_1m[combined_1m.index >= _day_low_start]
-    if not _day_high_bars.empty:
-        dh = float(_day_high_bars["High"].max())
-        dl = float(_day_low_bars["Low"].min()) if not _day_low_bars.empty else float(_day_high_bars["Low"].min())
+    _rth_start   = pd.Timestamp(
+        datetime(today.year, today.month, today.day, 9, 30, 0),
+        tz="America/New_York",
+    )
+
+    _init_bars = combined_1m[(combined_1m.index >= _day_start) & (combined_1m.index < _init_end)]
+    _rest_bars = combined_1m[(combined_1m.index >= _init_end) & (combined_1m.index < _rth_start)]
+    _full_bars = combined_1m[combined_1m.index >= _day_start]
+
+    if not _full_bars.empty:
+        skip_init_from_high = False
+        skip_init_from_low  = False
+
+        if not _init_bars.empty and not _rest_bars.empty:
+            init_range = float(_init_bars["High"].max() - _init_bars["Low"].min())
+            rest_range = float(_rest_bars["High"].max() - _rest_bars["Low"].min())
+            if rest_range > 0 and init_range > 2 * rest_range:
+                init_open  = float(_init_bars.iloc[0]["Open"])
+                init_close = float(_init_bars.iloc[-1]["Close"])
+                if init_close > init_open:   # big UP move → outlier high
+                    skip_init_from_high = True
+                else:                        # big DOWN move → outlier low
+                    skip_init_from_low = True
+
+        _high_start = _init_end if skip_init_from_high else _day_start
+        _low_start  = _init_end if skip_init_from_low  else _day_start
+
+        _high_bars = combined_1m[combined_1m.index >= _high_start]
+        _low_bars  = combined_1m[combined_1m.index >= _low_start]
+
+        dh = float(_high_bars["High"].max())
+        dl = float(_low_bars["Low"].min())
         result["day_high"] = dh
         result["day_low"]  = dl
         result["day_mid"]  = (dh + dl) / 2.0
