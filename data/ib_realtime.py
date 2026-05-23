@@ -337,7 +337,7 @@ class IbRealtimeSource:
         self._mnq_1m_df = self._mnq_1m_df[~self._mnq_1m_df.index.duplicated(keep="last")]
         _mnq_snap = self._mnq_1m_df  # capture reference before possible trim
         _mnq_path = self._bar_data_dir / "MNQ_1m.parquet"
-        self._parquet_executor.submit(_mnq_snap.to_parquet, _mnq_path)
+        self._submit_parquet_write(_mnq_snap, _mnq_path)
         # Trim to 14-day window after write is submitted; full history preserved on disk via _mnq_snap
         _cutoff = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=14)
         if (not self._mnq_1m_df.empty
@@ -383,7 +383,7 @@ class IbRealtimeSource:
         self._mes_1m_df = self._mes_1m_df[~self._mes_1m_df.index.duplicated(keep="last")]
         _mes_snap = self._mes_1m_df  # capture reference before possible trim
         _mes_path = self._bar_data_dir / "MES_1m.parquet"
-        self._parquet_executor.submit(_mes_snap.to_parquet, _mes_path)
+        self._submit_parquet_write(_mes_snap, _mes_path)
         # Trim to 14-day window after write is submitted; .copy() breaks view chain so old array is GC'd
         _cutoff = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=14)
         if (not self._mes_1m_df.empty
