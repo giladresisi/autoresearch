@@ -28,6 +28,11 @@ Signal = dict
 
 
 # ---------------------------------------------------------------------------
+# O4: minimum buffer (pts) below fill_price before initial breakeven stop fires.
+# Prevents 0-second stopouts when price oscillates around entry.
+BREAKEVEN_BUFFER_PTS: float = 1.0
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -132,15 +137,20 @@ def _arm_break_price(ref: Optional[pd.Series], direction: str) -> Optional[float
 
 
 def _floored_break_price(
-    ref: Optional[pd.Series], direction: str, fill_price: Optional[float]
+    ref: Optional[pd.Series], direction: str, fill_price: Optional[float],
+    buffer_pts: float = 0.0,
 ) -> Optional[float]:
-    """Like _arm_break_price but floors the result to fill_price so the stop never moves against the position."""
+    """Like _arm_break_price but floors the result so the stop never moves against the position.
+
+    buffer_pts: extra room beyond fill_price (O4 — prevents immediate breakeven stopouts).
+    For longs (up): floor = fill_price - buffer_pts.  For shorts (down): floor = fill_price + buffer_pts.
+    """
     price = _arm_break_price(ref, direction)
     if price is None or not fill_price:
         return price
     if direction == "up":
-        return max(price, fill_price)
-    return min(price, fill_price)
+        return max(price, fill_price - buffer_pts)
+    return min(price, fill_price + buffer_pts)
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +360,7 @@ def run_trend(
                 if _close_beyond(cautious_initial):
                     _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
                     position["active"]["cautious"] = "initial"
-                    position["active"]["cautious_break_price"] = _floored_break_price(_ref5, direction, _fill_price)
+                    position["active"]["cautious_break_price"] = _floored_break_price(_ref5, direction, _fill_price, buffer_pts=BREAKEVEN_BUFFER_PTS)
                     position["conf_bar_exit"] = _ref_bar_to_dict(_ref5)
                     save_position(position)
                     if position["active"]["cautious_break_price"] is None:
@@ -392,7 +402,7 @@ def run_trend(
                 if _opp_close and not _close_beyond(cautious_initial):
                     _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
                     position["active"]["cautious"] = "initial"
-                    position["active"]["cautious_break_price"] = _floored_break_price(_ref5, direction, _fill_price)
+                    position["active"]["cautious_break_price"] = _floored_break_price(_ref5, direction, _fill_price, buffer_pts=BREAKEVEN_BUFFER_PTS)
                     position["conf_bar_exit"] = _ref_bar_to_dict(_ref5)
                     save_position(position)
                     if position["active"]["cautious_break_price"] is None:
@@ -442,7 +452,7 @@ def run_trend(
             # tighter body bound than the stored break price, slide it and notify dispatch
             # to move the IB stop order.
             _trail_ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
-            _trail_price5 = _floored_break_price(_trail_ref5, direction, _fill_price)
+            _trail_price5 = _floored_break_price(_trail_ref5, direction, _fill_price, buffer_pts=BREAKEVEN_BUFFER_PTS)
             _trail_moved = False
             if _trail_price5 is not None:
                 _cur_cbp = active.get("cautious_break_price")
