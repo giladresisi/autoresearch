@@ -34,13 +34,14 @@ def _convert_timestamps_to_et(path: Path) -> None:
                     row[col] = dt.strftime(ts_fmt)
                 except ValueError:
                     pass
-        ts_val = (row.get("Timestamp") or "").strip()
-        if ts_val:
-            try:
-                dt = datetime.datetime.strptime(ts_val, ts_fmt)
-                row["Date"] = f"{dt.month}/{dt.day}/{str(dt.year)[2:]}"
-            except ValueError:
-                pass
+        if "Date" in fieldnames:
+            ts_val = (row.get("Timestamp") or "").strip()
+            if ts_val:
+                try:
+                    dt = datetime.datetime.strptime(ts_val, ts_fmt)
+                    row["Date"] = f"{dt.month}/{dt.day}/{str(dt.year)[2:]}"
+                except ValueError:
+                    pass
     import io as _io
     buf = _io.StringIO()
     writer = _csv.DictWriter(buf, fieldnames=fieldnames)
