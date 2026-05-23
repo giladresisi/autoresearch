@@ -2,11 +2,12 @@
 name: session-analysis
 description: >
   Run after a trading session ends to cross-reference all session data sources
-  (strategy events, PMT alerts, Tradovate fills, 1m bar data) and produce two
-  structured analysis files in sessions/<date>/: discrepancies.md (execution gaps
-  between strategy intent and actual broker fills) and optimizations.md (missed
-  opportunities and strategy improvement ideas). Downloads broker/PMT reports
-  first if they haven't been fetched yet.
+  (strategy events, PMT alerts, Tradovate fills, 1s regression replay, 1m bar data)
+  and produce two structured analysis files in sessions/<date>/: discrepancies.md
+  (execution gaps between strategy intent, regression replay, and actual broker fills)
+  and optimizations.md (missed opportunities and strategy improvement ideas).
+  Downloads broker/PMT reports first if they haven't been fetched yet, then runs
+  the 1s regression.
   Trigger phrases: "analyze the session", "session analysis", "write discrepancies",
   "write optimizations", "analyze yesterday's trades", "what went wrong today",
   "session review", "post-session analysis", "compare strategy vs tradovate",
@@ -45,6 +46,28 @@ If fetching fails, note which files are missing and continue with what's availab
 
 ---
 
+## Step 2.5 — Run 1s regression
+
+Run the 1s backtest replay for the session date. This produces a deterministic
+re-simulation of what the strategy *should* have done given the recorded bar data,
+which is the third comparison axis in the discrepancy analysis.
+
+```python
+from regression import run_regression
+results = run_regression(dates=["<date>"], mode="1s", skip_lock=True)
+print(results)
+```
+
+Output files are written to `data/regression/<date>/`:
+- `events_1s.jsonl` — replay event stream
+- `trades_1s.tsv`   — replay trade ledger
+- `chart_1s.html`   — replay chart (opened automatically)
+
+If the regression fails (e.g. corrupted parquet), note the error and continue —
+the analysis can proceed without it, but flag the gap in the report.
+
+---
+
 ## Step 3 — Spawn analysis subagent
 
 Delegate all the reading, cross-referencing, and writing to a subagent. This keeps the main context clean and lets the subagent focus entirely on the analysis.
@@ -58,6 +81,7 @@ Your job is to cross-reference all session data sources and write two analysis f
 BASE = C:\Users\gilad\projects\auto-co-trader\live
 DATE = <DATE>
 SESSION = <BASE>\sessions\<DATE>
+REGRESSION = <BASE>\data\regression\<DATE>
 
 ---
 DATA SOURCES TO READ (read ALL of them before writing anything):
@@ -103,8 +127,19 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
    Use to verify whether a stop was swept by a wick, whether price continued
    after an exit, and to understand market structure.
 
+9. <REGRESSION>\events_1s.jsonl  (may not exist if regression failed)
+   JSONL event stream from the 1s backtest replay — same format as events.jsonl.
+   This is the deterministic re-simulation: what the strategy logic *would* have
+   done given the recorded 1s bar data, with no latency or async side-effects.
+
+10. <REGRESSION>\trades_1s.tsv  (may not exist if regression failed)
+    TSV trade ledger from the 1s backtest replay — same schema as trades.tsv.
+    Compare against the live trades.tsv to surface logic divergences.
+
 ---
 CROSS-REFERENCE METHODOLOGY:
+
+### A. Live vs Tradovate (execution fidelity)
 
 For each trade in trades.tsv:
   a. Find the matching events.jsonl lines by time and direction
@@ -131,6 +166,37 @@ whether the initial stop was set at or near the fill price.
 For orphaned positions: look for Tradovate fills that don't have a corresponding
 entry in trades.tsv. These arise from cancel/fill race conditions.
 
+### B. Live vs Regression (logic fidelity)
+
+If regression files exist, compare them trade-by-trade and event-by-event against
+the live session. The goal is to make all three sources converge: any divergence
+between live and regression represents a real-time execution artifact that may
+be worth fixing in the strategy or infrastructure.
+
+For each trade pair (matched by entry_time ± 5 seconds and direction):
+  - **Entry price**: flag if |live − regression| > 0.25 pts (1 tick)
+  - **Exit time**: flag if |live − regression| > 60 seconds
+  - **Exit price**: flag if |live − regression| > 0.25 pts (1 tick)
+  - **Exit reason**: flag if different (e.g. "stopped-out" vs "stop-exit")
+  - **Contracts**: note differences but do not flag as a bug (may be a config diff)
+
+For trades present in regression but not in live (or vice versa):
+  Flag as a logic divergence — the real-time system fired (or skipped) a trade
+  that the replay did not, indicating a timing, state, or bar-delivery difference.
+
+For event-level comparison (events.jsonl vs events_1s.jsonl):
+  - Match events by kind + approximate time (± 5 seconds)
+  - Flag price differences > 1 tick on stop placements, entry signals, or exits
+  - Flag any event kind present in one stream but absent in the other
+  - Pay attention to "move-stop-entry" events: count how many iterations occurred
+    live vs in the replay (a difference here reveals bar-timing sensitivity)
+
+Known acceptable differences between live and regression (do NOT flag these):
+  - Sub-second timestamp jitter (< 2s) on the same event
+  - "direction" label format ("long" vs "up") — cosmetic, different code paths
+  - Volume fields — 1s live bars and Databento 1m bars use different feeds
+  - Contract count — regression may use a different default than the live config
+
 ---
 OUTPUT: Write TWO files.
 
@@ -147,16 +213,18 @@ Structure:
 
 ## D<N> — <Short descriptive title>
 
+**Source**: <which comparison revealed this: Live↔Tradovate, Live↔Regression, or all three>
 **Time**: <ISO timestamp>
-**Expected**: <what the strategy intended / what should have happened>
-**Actual**: <what actually happened per Tradovate/PMT logs>
+**Expected**: <what the strategy intended / what the regression produced>
+**Actual**: <what actually happened per live logs / Tradovate>
 **Root cause**: <why it happened — cite specific lines from signals.log or events.jsonl>
 **Suggested fix**: <actionable code change or guard to add>
 
 ---
 ```
 
-Include ALL meaningful discrepancies found. Skip trivial noise (sub-tick rounding).
+Include ALL meaningful discrepancies found. Skip trivial noise (sub-tick rounding,
+cosmetic label differences, known acceptable differences listed above).
 Classify severity in the title: use "[CRITICAL]" if the bug could cause unlimited
 or unintended risk, "[MINOR]" if it's cosmetic or small-impact.
 
@@ -207,7 +275,7 @@ specific timestamps, prices, and order IDs from the actual data — not generic 
 ## Step 4 — Report to user
 
 Once the subagent completes, confirm:
-- Which discrepancies were found (D1, D2... with one-line summaries)
+- Which discrepancies were found (D1, D2... with one-line summaries and source tag)
 - Which optimization themes were identified (O1, O2... with estimated impact)
 - File paths written
 
