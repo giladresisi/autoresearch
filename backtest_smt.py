@@ -1250,7 +1250,13 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         # Pipeline handles state reset, ATH seeding, resamples, and run_daily.
         day_events: list[dict] = []
         pipeline = SessionPipeline(hist_mnq_1m, hist_mes_1m, day_events.append)
-        today_at_open = mnq_1m_today[mnq_1m_today.index <= session_start_ts]
+        # Feed the selected-resolution bars to on_session_start so price-level
+        # computations (TDO, TWO, session H/L, etc.) use the best available data.
+        _mnq_today = (
+            mnq_1s_all[(mnq_1s_all.index >= day_midnight) & (mnq_1s_all.index < next_midnight)]
+            if mode == "1s" else mnq_1m_today
+        )
+        today_at_open = _mnq_today[_mnq_today.index <= session_start_ts]
         pipeline.on_session_start(session_start_ts, today_at_open)
 
         # Save levels snapshot for chart visualisation (after run_daily populates state)
@@ -1307,8 +1313,20 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         else:  # mode == "1s": aggregate 1s bars into running partial 1m bar, call once per second
             _cols      = ["Open", "High", "Low", "Close", "Volume"]
             _empty_1s  = pd.DataFrame(columns=_cols, dtype=float)
-            _pre_mnq   = mnq_all.iloc[_mnq_pos_day:_mnq_pos_sess]
-            _pre_mes   = mes_all.iloc[_mes_pos_day:_mes_pos_sess]
+            # Pre-session context: derive from the selected-resolution source so that
+            # intra-session bar history reflects the same data used for price levels.
+            # Aggregate to 1m for compatibility with the completed-bar accumulator.
+            _agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+            _pre_mnq_src = mnq_1s_all[(mnq_1s_all.index >= day_midnight) & (mnq_1s_all.index < session_start_ts)]
+            _pre_mnq = (
+                _pre_mnq_src.resample("1min", label="left").agg(_agg).dropna(subset=["Open"])
+                if not _pre_mnq_src.empty else mnq_all.iloc[_mnq_pos_day:_mnq_pos_sess]
+            )
+            _pre_mes_src = mes_1s_all[(mes_1s_all.index >= day_midnight) & (mes_1s_all.index < session_start_ts)]
+            _pre_mes = (
+                _pre_mes_src.resample("1min", label="left").agg(_agg).dropna(subset=["Open"])
+                if not _pre_mes_src.empty else mes_all.iloc[_mes_pos_day:_mes_pos_sess]
+            )
             _mes_min_d = {
                 k: grp
                 for k, grp in mes_1s_sess.groupby(mes_1s_sess.index.floor("1min"))
