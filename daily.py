@@ -25,12 +25,12 @@ from hypothesis import compute_live_hl_mid
 # ---------------------------------------------------------------------------
 
 TIME_WINDOWS = {
-    # (start_h, start_m, end_h, end_m)  — midnight-crossing sessions use negative start
-    # We handle asia specially (prior day 18:00 → current 03:00)
-    "asia":       (18, 0,  3,  0),   # 18:00 prior day → 03:00 current day
-    "london":     ( 3, 0,  8,  0),   # 03:00 → 08:00 current day
-    "ny_morning": ( 8, 0, 12,  0),   # 08:00 → 12:00 current day
-    "ny_evening": (12, 0, 17,  0),   # 12:00 → 17:00 current day
+    # (start_h, start_m, end_h, end_m) — four equal 6-hour blocks in ET.
+    # Asia crosses midnight: start = prior calendar day 18:00, end = current day 00:00.
+    "asia":       (18, 0,  0,  0),   # 18:00 prior day → 00:00 current day
+    "london":     ( 0, 0,  6,  0),   # 00:00 → 06:00 current day
+    "ny_morning": ( 6, 0, 12,  0),   # 06:00 → 12:00 current day
+    "ny_evening": (12, 0, 17,  0),   # 12:00 → 17:00 current day (CME maintenance starts 17:00)
 }
 
 
@@ -39,7 +39,7 @@ def _session_bars(mnq_1m: pd.DataFrame, session: str, today: datetime.date) -> p
     start_h, start_m, end_h, end_m = TIME_WINDOWS[session]
 
     if session == "asia":
-        # Prior calendar day 18:00 ET → current day 03:00 ET
+        # Prior calendar day 18:00 ET → current day 00:00 ET (midnight)
         prior_day = today - datetime.timedelta(days=1)
         start_ts = pd.Timestamp(
             datetime.datetime(prior_day.year, prior_day.month, prior_day.day,
