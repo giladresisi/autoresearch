@@ -576,6 +576,7 @@ class IbRealtimeSource:
         from ib_insync import IB, Future, util
         self._load_parquets()
         self._gap_fill_1s_ib()
+        check_parquet_gaps(self._bar_data_dir)
         # Release ~70 MB: history only needed by _gap_fill_1s_ib; live signal path reads parquet
         self._mnq_1s_df = self._empty_bar_df()
         self._mes_1s_df = self._empty_bar_df()
@@ -766,3 +767,84 @@ def gap_fill_1m_ib(bar_data_dir: Path) -> None:
                 f"{actual}/{expected} bars ({100 * actual // expected}% coverage)",
                 flush=True,
             )
+    check_parquet_gaps(bar_data_dir)
+
+
+def _gap_is_expected(start: "pd.Timestamp", gap_min: float) -> bool:
+    """Return True if a gap of gap_min minutes starting at start is a known no-trading window."""
+    et = start.tz_convert("America/New_York")
+    wd = et.weekday()   # 0=Mon … 6=Sun
+    frac_h = et.hour + et.minute / 60.0
+
+    # Weekend: Friday close → Sunday re-open (no data expected at all)
+    if (wd == 4 and frac_h >= 16.75) or wd == 5 or (wd == 6 and frac_h < 18.25):
+        return True
+    # Daily CME maintenance 17:00-18:00 ET plus session-close buffer (16:45-18:15).
+    # Cap at 75 min so a gap that starts in the maintenance window but runs well past
+    # 18:00 (= missing overnight session) is still flagged as unexpected.
+    if 16.75 <= frac_h < 18.25 and gap_min <= 75:
+        return True
+    return False
+
+
+def check_parquet_gaps(bar_data_dir: "Path") -> None:
+    """Scan the 4 main parquets for unexpected gaps in the last 48 h and print findings."""
+    now = pd.Timestamp.now(tz="UTC")
+    cutoff = now - pd.Timedelta(hours=48)
+
+    names_and_files = [
+        ("MNQ_1m", bar_data_dir / "MNQ_1m.parquet"),
+        ("MES_1m", bar_data_dir / "MES_1m.parquet"),
+        ("MNQ_1s", bar_data_dir / "MNQ_1s.parquet"),
+        ("MES_1s", bar_data_dir / "MES_1s.parquet"),
+    ]
+
+    all_ok = True
+    for name, path in names_and_files:
+        if not path.exists():
+            print(f"[gap_check] WARN: {name}: parquet not found", flush=True)
+            all_ok = False
+            continue
+
+        try:
+            df = pd.read_parquet(path)
+        except Exception as exc:
+            print(f"[gap_check] WARN: {name}: could not read parquet — {exc}", flush=True)
+            all_ok = False
+            continue
+
+        if df.empty:
+            print(f"[gap_check] WARN: {name}: parquet is empty", flush=True)
+            all_ok = False
+            continue
+
+        idx = df.index
+        if idx.tz is None:
+            idx = idx.tz_localize("UTC")
+        recent_mask = idx >= cutoff
+        if not recent_mask.any():
+            print(f"[gap_check] WARN: {name}: no bars in last 48 h", flush=True)
+            all_ok = False
+            continue
+
+        recent_idx = idx[recent_mask]
+        gaps: list[tuple] = []
+        for i in range(1, len(recent_idx)):
+            gap_min = (recent_idx[i] - recent_idx[i - 1]).total_seconds() / 60.0
+            if gap_min > 60 and not _gap_is_expected(recent_idx[i - 1], gap_min):
+                gaps.append((recent_idx[i - 1], recent_idx[i], gap_min))
+
+        for start, end, gap_min in gaps[:5]:
+            start_et = start.tz_convert("America/New_York")
+            end_et   = end.tz_convert("America/New_York")
+            print(
+                f"[gap_check] WARN: {name}: {gap_min:.0f}min gap "
+                f"{start_et:%Y-%m-%d %H:%M} -> {end_et:%H:%M ET}",
+                flush=True,
+            )
+            all_ok = False
+        if len(gaps) > 5:
+            print(f"[gap_check] WARN: {name}: ... and {len(gaps) - 5} more gap(s)", flush=True)
+
+    if all_ok:
+        print("[gap_check] OK: all parquets complete — no unexpected gaps found", flush=True)
