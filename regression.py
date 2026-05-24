@@ -151,11 +151,22 @@ def run_regression(
 
         # Plot chart for this date regardless of record/skip-record mode.
         if not no_plot:
-            subprocess.run(
+            import webbrowser
+            _plot_result = subprocess.run(
                 [sys.executable, "data/regression/plot_regression.py", date],
                 check=False,
+                capture_output=True,
+                text=True,
                 env=dict(os.environ, PYTHONPATH=str(Path(__file__).parent)),
             )
+            if _plot_result.stdout:
+                print(_plot_result.stdout, end="")
+            _chart_line = next(
+                (l for l in _plot_result.stdout.splitlines() if l.startswith("Chart:")),
+                None,
+            )
+            if _chart_line:
+                webbrowser.open(Path(_chart_line.split("Chart:", 1)[1].strip()).as_uri())
 
         results[date] = res
 

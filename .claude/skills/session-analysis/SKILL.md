@@ -11,6 +11,8 @@ description: >
   "write optimizations", "analyze yesterday's trades", "what went wrong today",
   "session review", "post-session analysis", "compare strategy vs tradovate",
   "find discrepancies", "find optimization opportunities".
+  Do NOT trigger for: regression runs, backtest runs, plotting charts, "run regression.py",
+  "plot it", "plot the regression", or any request that mentions regression.py or backtest.
 ---
 
 # Session Analysis

@@ -14,7 +14,6 @@ Usage (run from project root):
 
 import json
 import sys
-import webbrowser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -503,4 +502,3 @@ _chart_name = "chart_1s.html" if _run_mode == "1s" else "chart.html"
 out = Path(f"data/regression/{DATE}/{_chart_name}")
 fig.write_html(str(out), include_plotlyjs="cdn")
 print(f"Chart: {out.resolve()}")
-webbrowser.open(out.resolve().as_uri())
