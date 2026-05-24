@@ -1195,10 +1195,6 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
     _smt_state.set_in_memory_mode(True)
 
-    futures = load_futures_data()
-    mnq_all = futures["MNQ"]
-    mes_all = futures["MES"]
-
     if mode == "1s":
         import numpy as _np
         _1s_dir = Path("data")
@@ -1209,8 +1205,16 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             raise FileNotFoundError(
                 "Missing 1s parquets: data/MNQ_1s.parquet and data/MES_1s.parquet required for mode='1s'."
             )
-        mnq_1s_all = pd.read_parquet(_mnq_1s_p)
-        mes_1s_all = pd.read_parquet(_mes_1s_p)
+        mnq_all = pd.read_parquet(_mnq_1s_p)
+        mes_all = pd.read_parquet(_mes_1s_p)
+        # Pre-aggregate to 1m once for hist/FVG/session-level computations in run_daily.
+        _1m_agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+        _mnq_1m_agg = mnq_all.resample("1min", label="left").agg(_1m_agg).dropna(subset=["Open"])
+        _mes_1m_agg = mes_all.resample("1min", label="left").agg(_1m_agg).dropna(subset=["Open"])
+    else:
+        futures = load_futures_data()
+        mnq_all = futures["MNQ"]
+        mes_all = futures["MES"]
 
     business_days = pd.bdate_range(start_date, end_date)
 
@@ -1222,41 +1226,48 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         date = bday.date()
 
         # ------------------------------------------------------------------ #
-        # Per-day index positions (searchsorted avoids O(n) boolean masks)    #
+        # Per-day timestamps                                                   #
         # ------------------------------------------------------------------ #
         day_midnight  = pd.Timestamp(date, tz="America/New_York")
         next_midnight = day_midnight + pd.Timedelta(days=1)
         session_start_ts = pd.Timestamp(f"{date} {_SESSION_OPEN_V2}", tz="America/New_York")
 
-        _mnq_pos_day  = mnq_all.index.searchsorted(day_midnight,      side="left")
-        _mnq_pos_next = mnq_all.index.searchsorted(next_midnight,     side="left")
-        _mnq_pos_sess = mnq_all.index.searchsorted(session_start_ts,  side="left")
-        _mes_pos_day  = mes_all.index.searchsorted(day_midnight,      side="left")
-        _mes_pos_next = mes_all.index.searchsorted(next_midnight,     side="left")
-        _mes_pos_sess = mes_all.index.searchsorted(session_start_ts,  side="left")
-
         # ------------------------------------------------------------------ #
-        # Build per-day slices                                                 #
+        # Build per-day slices — mode-specific source                         #
         # ------------------------------------------------------------------ #
-        mnq_1m_today = mnq_all.iloc[_mnq_pos_day:_mnq_pos_next]
-        mes_1m_today = mes_all.iloc[_mes_pos_day:_mes_pos_next]
+        if mode == "1s":
+            # hist for run_daily comes from the pre-aggregated 1m view of the 1s parquet
+            _mnq_hist_end = _mnq_1m_agg.index.searchsorted(session_start_ts, side="left")
+            _mes_hist_end = _mes_1m_agg.index.searchsorted(session_start_ts, side="left")
+            hist_mnq_1m   = _mnq_1m_agg.iloc[:_mnq_hist_end]
+            hist_mes_1m   = _mes_1m_agg.iloc[:_mes_hist_end]
+            # Raw 1s bars for the current calendar day (used for today_at_open and pre-session context)
+            _mnq_today = mnq_all[(mnq_all.index >= day_midnight) & (mnq_all.index < next_midnight)]
+            if _mnq_today.empty:
+                continue
+            _empty_cols  = ["Open", "High", "Low", "Close", "Volume"]
+            mnq_1m_today = pd.DataFrame(columns=_empty_cols, index=pd.DatetimeIndex([], tz="America/New_York"))
+            mes_1m_today = pd.DataFrame(columns=_empty_cols, index=pd.DatetimeIndex([], tz="America/New_York"))
+        else:
+            _mnq_pos_day  = mnq_all.index.searchsorted(day_midnight,     side="left")
+            _mnq_pos_next = mnq_all.index.searchsorted(next_midnight,    side="left")
+            _mnq_pos_sess = mnq_all.index.searchsorted(session_start_ts, side="left")
+            _mes_pos_day  = mes_all.index.searchsorted(day_midnight,     side="left")
+            _mes_pos_next = mes_all.index.searchsorted(next_midnight,    side="left")
+            _mes_pos_sess = mes_all.index.searchsorted(session_start_ts, side="left")
+            mnq_1m_today  = mnq_all.iloc[_mnq_pos_day:_mnq_pos_next]
+            mes_1m_today  = mes_all.iloc[_mes_pos_day:_mes_pos_next]
+            if mnq_1m_today.empty:
+                continue
+            hist_mnq_1m   = mnq_all.iloc[:_mnq_pos_sess]
+            hist_mes_1m   = mes_all.iloc[:_mes_pos_sess]
+            _mnq_today    = mnq_1m_today
 
-        if mnq_1m_today.empty:
-            continue
-
-        hist_mnq_1m = mnq_all.iloc[:_mnq_pos_sess]
-        hist_mes_1m = mes_all.iloc[:_mes_pos_sess]
+        today_at_open = _mnq_today[_mnq_today.index <= session_start_ts]
 
         # Pipeline handles state reset, ATH seeding, resamples, and run_daily.
         day_events: list[dict] = []
         pipeline = SessionPipeline(hist_mnq_1m, hist_mes_1m, day_events.append)
-        # Feed the selected-resolution bars to on_session_start so price-level
-        # computations (TDO, TWO, session H/L, etc.) use the best available data.
-        _mnq_today = (
-            mnq_1s_all[(mnq_1s_all.index >= day_midnight) & (mnq_1s_all.index < next_midnight)]
-            if mode == "1s" else mnq_1m_today
-        )
-        today_at_open = _mnq_today[_mnq_today.index <= session_start_ts]
         pipeline.on_session_start(session_start_ts, today_at_open)
 
         # Save levels snapshot for chart visualisation (after run_daily populates state)
@@ -1283,11 +1294,11 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         ]
 
         if mode == "1s":
-            mnq_1s_sess = mnq_1s_all[
-                (mnq_1s_all.index >= session_start_ts) & (mnq_1s_all.index < session_end_ts)
+            mnq_1s_sess = mnq_all[
+                (mnq_all.index >= session_start_ts) & (mnq_all.index < session_end_ts)
             ]
-            mes_1s_sess = mes_1s_all[
-                (mes_1s_all.index >= session_start_ts) & (mes_1s_all.index < session_end_ts)
+            mes_1s_sess = mes_all[
+                (mes_all.index >= session_start_ts) & (mes_all.index < session_end_ts)
             ]
             if mnq_1s_sess.empty:
                 continue
@@ -1317,16 +1328,10 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             # intra-session bar history reflects the same data used for price levels.
             # Aggregate to 1m for compatibility with the completed-bar accumulator.
             _agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
-            _pre_mnq_src = mnq_1s_all[(mnq_1s_all.index >= day_midnight) & (mnq_1s_all.index < session_start_ts)]
-            _pre_mnq = (
-                _pre_mnq_src.resample("1min", label="left").agg(_agg).dropna(subset=["Open"])
-                if not _pre_mnq_src.empty else mnq_all.iloc[_mnq_pos_day:_mnq_pos_sess]
-            )
-            _pre_mes_src = mes_1s_all[(mes_1s_all.index >= day_midnight) & (mes_1s_all.index < session_start_ts)]
-            _pre_mes = (
-                _pre_mes_src.resample("1min", label="left").agg(_agg).dropna(subset=["Open"])
-                if not _pre_mes_src.empty else mes_all.iloc[_mes_pos_day:_mes_pos_sess]
-            )
+            _pre_mnq_src = mnq_all[(mnq_all.index >= day_midnight) & (mnq_all.index < session_start_ts)]
+            _pre_mnq     = _pre_mnq_src.resample("1min", label="left").agg(_agg).dropna(subset=["Open"])
+            _pre_mes_src = mes_all[(mes_all.index >= day_midnight) & (mes_all.index < session_start_ts)]
+            _pre_mes     = _pre_mes_src.resample("1min", label="left").agg(_agg).dropna(subset=["Open"])
             _mes_min_d = {
                 k: grp
                 for k, grp in mes_1s_sess.groupby(mes_1s_sess.index.floor("1min"))
