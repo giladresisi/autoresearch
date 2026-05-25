@@ -99,6 +99,7 @@ PID_FILE="$BASE/orchestrator.pid"
 
 gap_fill_done=false
 fill_incomplete_reported=false
+gap_check_reported=false
 session_started=false
 session_ended=false
 daily_done=false
@@ -141,6 +142,12 @@ if cur | grep -q "\[gap_fill_1m_ib\] WARN:"; then
     fill_incomplete_reported=true
     warn_msg=$(cur | grep "\[gap_fill_1m_ib\] WARN:" | tr '\n' ' ')
     echo "[MONITOR] Gap-fill incomplete: $warn_msg"
+fi
+
+if cur | grep -q "\[gap_check\] WARN:"; then
+    gap_check_reported=true
+    warn_msg=$(cur | grep "\[gap_check\] WARN:" | tr '\n' ' ')
+    echo "[MONITOR] Parquet gap detected: $warn_msg"
 fi
 
 if cur | grep -q "FATAL"; then
@@ -191,6 +198,11 @@ while true; do
             fill_incomplete_reported=true
             warn_msg=$(cur | grep "\[gap_fill_1m_ib\] WARN:" | tr '\n' ' ')
             echo "[MONITOR] Gap-fill incomplete: $warn_msg"
+        fi
+        if [ "$gap_check_reported" = false ] && cur | grep -q "\[gap_check\] WARN:"; then
+            gap_check_reported=true
+            warn_msg=$(cur | grep "\[gap_check\] WARN:" | tr '\n' ' ')
+            echo "[MONITOR] Parquet gap detected: $warn_msg"
         fi
     fi
 
@@ -255,6 +267,7 @@ As each line arrives from the Monitor, call `PushNotification` for EVERY milesto
 |----------------|--------------|
 | `[MONITOR] Gap-fill complete` | `Gap-fill complete — pre-session data ready` |
 | `[MONITOR] Gap-fill incomplete: …` | `WARNING: Gap-fill incomplete — <coverage details from message>` |
+| `[MONITOR] Parquet gap detected: …` | `WARNING: Parquet gap(s) found — <details from message>` |
 | `[MONITOR] Session started …` | `Session started — automation.main running` |
 | `[MONITOR] daily.py complete` | `daily.py complete — liquidities computed` |
 | `[MONITOR] First directed hypothesis: …` | `First hypothesis: <direction> — strategy is live` |
