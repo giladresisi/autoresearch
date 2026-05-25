@@ -785,48 +785,108 @@ def _determine_direction(
                 if _above_mid:
                     r2b_dir = "up"
                 else:
-                    # Layer 1: post-sweep upward cross that subsequently failed → bearish
-                    _last_up_ts = _last_mid_cross_after(_last_liq_ts, upward=True)
-                    if _last_up_ts is not None:
-                        r2b_dir = "down"
+                    # Below daily mid after sweeping a low.
+                    # In weekly discount: the sweep is an SSL accumulation event → reversal UP.
+                    # Outside weekly discount: apply the existing layer checks.
+                    if reason["weekly_zone"] == "discount":
+                        r2b_dir = "up"
                     else:
-                        # Layer 2: pre-sweep committed bearish cross (continuation sweep)
-                        _pre_cross_ts = _first_mid_cross_before(_last_liq_ts, upward=False)
-                        if _pre_cross_ts is not None and not _opp_level_touched(
-                                _pre_cross_ts, _last_liq_ts, _high_names, check_high=True):
+                        # Layer 1: post-sweep upward cross that subsequently failed → bearish
+                        _last_up_ts = _last_mid_cross_after(_last_liq_ts, upward=True)
+                        if _last_up_ts is not None:
                             r2b_dir = "down"
                         else:
-                            # Before assuming a bounce, check if a high level (incl.
-                            # london_high) was swept in the True Day before the low grab.
-                            # A prior high sweep means this is bearish continuation, not
-                            # a reversal from discount.
-                            _prior_high_names = {
-                                "day_high", "week_high", "ny_morning_high", "london_high"
-                            }
-                            _pre_low_bars = (
-                                _true_day_bars[_true_day_bars.index < _last_liq_ts]
-                                if _last_liq_ts is not None else pd.DataFrame()
-                            )
-                            _prior_high_swept = False
-                            if len(_pre_low_bars) >= 2:
-                                _pc = _pre_low_bars["Close"].values
-                                _ph = _pre_low_bars["High"].values
-                                for _hn in _prior_high_names:
-                                    _hlp = _liq_price_map.get(_hn)
-                                    if _hlp is None:
-                                        continue
-                                    if ((_pc[:-1] < _hlp) & (_ph[1:] >= _hlp)).any():
-                                        _prior_high_swept = True
-                                        break
-                            r2b_dir = "down" if _prior_high_swept else "up"
+                            # Layer 2: pre-sweep committed bearish cross (continuation sweep)
+                            _pre_cross_ts = _first_mid_cross_before(_last_liq_ts, upward=False)
+                            if _pre_cross_ts is not None and not _opp_level_touched(
+                                    _pre_cross_ts, _last_liq_ts, _high_names, check_high=True):
+                                r2b_dir = "down"
+                            else:
+                                # Before assuming a bounce, check if a high level (incl.
+                                # london_high) was swept in the True Day before the low grab.
+                                # A prior high sweep means this is bearish continuation, not
+                                # a reversal from discount.
+                                _prior_high_names = {
+                                    "day_high", "week_high", "ny_morning_high", "london_high"
+                                }
+                                _pre_low_bars = (
+                                    _true_day_bars[_true_day_bars.index < _last_liq_ts]
+                                    if _last_liq_ts is not None else pd.DataFrame()
+                                )
+                                _prior_high_swept = False
+                                if len(_pre_low_bars) >= 2:
+                                    _pc = _pre_low_bars["Close"].values
+                                    _ph = _pre_low_bars["High"].values
+                                    for _hn in _prior_high_names:
+                                        _hlp = _liq_price_map.get(_hn)
+                                        if _hlp is None:
+                                            continue
+                                        if ((_pc[:-1] < _hlp) & (_ph[1:] >= _hlp)).any():
+                                            _prior_high_swept = True
+                                            break
+                                r2b_dir = "down" if _prior_high_swept else "up"
             elif _last_liq in _high_names:
                 if not _above_mid:
                     r2b_dir = "down"
                 else:
-                    # Symmetric to the low rule: high swept + still above mid → up.
-                    # "High grab → drop" only applies when price confirms by crossing below mid,
-                    # which is already covered by the not _above_mid branch above.
-                    r2b_dir = "up"
+                    # Above daily mid after sweeping a high.
+                    # BSL distribution reversal (→ DOWN) requires weekly premium PLUS the
+                    # context is NOT one of the two false-positive patterns:
+                    #
+                    # False-positive A — ATH expansion: week_high == ATH and the swept level
+                    # IS the week_high.  No prior sell-side structure exists above; this is
+                    # genuine price discovery, not a stop hunt.  → UP (continuation).
+                    #
+                    # False-positive B — Morning sub-weekly high: before 13:00, sweeping a
+                    # day_high or ny_morning_high while in weekly premium is ambiguous.  The
+                    # NY morning (AMD accumulation/manipulation) often sweeps sub-weekly highs
+                    # as part of the initial range expansion, not distribution.  → UP.
+                    # Exception: the actual week_high is always a valid BSL signal regardless
+                    # of time (week_high IS the structural BSL, not an intermediate level).
+                    _wh_price = _liq_price_map.get("week_high")
+                    _ath = global_state.get("all_time_high")
+                    _wh_is_ath = (
+                        _wh_price is not None
+                        and _ath is not None
+                        and abs(float(_wh_price) - float(_ath)) < 0.5
+                    )
+                    _now_tz = pd.Timestamp(now)
+                    if _now_tz.tzinfo is None:
+                        _now_tz = _now_tz.tz_localize("America/New_York")
+                    _is_pm_kill_zone = _now_tz.hour >= 13
+                    # False-positive A (extended): week_high IS the ATH this week →
+                    # any high-level sweep is ATH expansion, not distribution. Covers
+                    # both week_high sweeps AND sub-weekly (ny_morning_high, day_high)
+                    # sweeps on ATH-expansion days where the week itself is making new ATH.
+                    _is_false_pos_ath      = _wh_is_ath
+                    _is_false_pos_morning  = (not _is_pm_kill_zone) and _last_liq != "week_high"
+                    # False-positive C (recovery mode): current price is > 1.2% below the
+                    # session-open ATH (session_ath is seeded at open and never updated
+                    # intraday, unlike all_time_high which tracks the running bar high).
+                    # Using current_close vs session_ath is stable — it doesn't drift as
+                    # price makes new intraday highs (which would shrink a week_high-based
+                    # gap and cause the guard to silently stop firing mid-session).
+                    # Only applied in AM (before 13:00): PM kill-zone sweeps of highs in
+                    # premium are valid BSL distribution signals even during a recovery week.
+                    _session_ath_val = float(
+                        global_state.get("session_ath") or _ath or 0
+                    )
+                    _recovery_gap = (
+                        (_session_ath_val - current_close) / _session_ath_val
+                        if _session_ath_val > current_close > 0
+                        else 0.0
+                    )
+                    _is_false_pos_recovery = (
+                        not _is_pm_kill_zone
+                        and _recovery_gap > 0.012
+                    )
+                    if (reason["weekly_zone"] == "premium"
+                            and not _is_false_pos_ath
+                            and not _is_false_pos_morning
+                            and not _is_false_pos_recovery):
+                        r2b_dir = "down"
+                    else:
+                        r2b_dir = "up"
         if r2b_dir is not None:
             reason["rule"]             = "rule2b"
             reason["last_swept_level"] = _last_liq
