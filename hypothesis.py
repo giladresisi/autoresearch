@@ -878,7 +878,7 @@ def _determine_direction(
                     )
                     _is_false_pos_recovery = (
                         not _is_pm_kill_zone
-                        and _recovery_gap > 0.012
+                        and _recovery_gap > 0.02
                     )
                     if (reason["weekly_zone"] == "premium"
                             and not _is_false_pos_ath
