@@ -9,6 +9,10 @@ import shutil
 import sys
 from pathlib import Path
 
+# When run as a file, Python sets sys.path[0] to scripts/ not the project root,
+# so `data.*` imports fail. Insert the project root explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import pandas as pd
 from dotenv import load_dotenv
 
