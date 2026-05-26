@@ -165,12 +165,13 @@ class IbRealtimeSource:
         self._submit_parquet_write(self._mes_1m_df.copy(), self._bar_data_dir / "MES_1m.parquet")
 
     def _gap_fill_1s_ib(self) -> None:
-        """Fill recent 1s bars from IB: covers what Databento can't serve (last few hours).
+        """Fill recent 1s bars from IB.
 
-        Uses a separate IB connection (client_id + 1) so it doesn't interfere with the
-        main session connection. Called in start() after _load_parquets(), before the
-        main retry loop. Skips instruments with an empty parquet — run seed script first.
+        Uses a separate IB connection (client_id + 1). Retries until all instruments'
+        chunk loops complete without a pacing abort, or a 30-min wall-clock deadline is
+        reached, at which point it raises RuntimeError listing incomplete instruments.
         """
+        import time as _time
         from ib_insync import IB, Contract as _IBContract, util as _util
         now = pd.Timestamp.now(tz="America/New_York")
         end_dt = now - pd.Timedelta(minutes=2)  # avoid requesting in-progress bars
@@ -188,70 +189,90 @@ class IbRealtimeSource:
         if not needs_fill:
             return
 
-        ib = IB()
-        try:
-            ib.connect(self._host, self._port, clientId=self._client_id + 1)
-            for instrument, df_attr, parquet_name, conid in pairs:
-                try:
-                    df = getattr(self, df_attr)
-                    earliest = pd.Timestamp(_1S_EARLIEST, tz="America/New_York")
-                    if df.empty:
-                        start_dt = earliest
-                    else:
-                        start_dt = max(df.index[-1], earliest)
-                    if (end_dt - start_dt).total_seconds() <= 60:
-                        continue
-                    contract = _IBContract(conId=int(conid), exchange="CME")
-                    all_bars: list = []
-                    chunk_end = end_dt
-                    while chunk_end > start_dt:
-                        if self._stopping:
-                            break
-                        chunk_start = max(start_dt, chunk_end - pd.Timedelta(seconds=_IB_1S_CHUNK_SECONDS))
-                        chunk_s = max(1, int((chunk_end - chunk_start).total_seconds()))
-                        bars = ib.reqHistoricalData(
-                            contract,
-                            endDateTime=chunk_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
-                            durationStr=f"{chunk_s} S",
-                            barSizeSetting="1 secs",
-                            whatToShow="TRADES",
-                            useRTH=False,
-                            formatDate=2,
-                            keepUpToDate=False,
-                        )
-                        if not bars:
-                            # IB rejected this chunk — remaining chunks will also fail
-                            print(f"[gap_fill_1s_ib] {instrument}: IB returned no data, aborting", flush=True)
-                            break
-                        all_bars.extend(bars)
-                        chunk_end = chunk_start
-                    if not all_bars:
-                        print(f"[gap_fill_1s_ib] {instrument}: 0 bars returned", flush=True)
-                        continue
-                    new_df = _util.df(all_bars).rename(columns={
-                        "date": "datetime", "open": "Open", "high": "High",
-                        "low": "Low", "close": "Close", "volume": "Volume",
-                    }).set_index("datetime")
-                    if new_df.index.tzinfo is None:
-                        new_df.index = new_df.index.tz_localize("America/New_York")
-                    else:
-                        new_df.index = new_df.index.tz_convert("America/New_York")
-                    combined = pd.concat([df, new_df[["Open", "High", "Low", "Close", "Volume"]]]).sort_index()
-                    combined = combined[~combined.index.duplicated(keep="last")]
-                    setattr(self, df_attr, combined)
-                    self._bar_data_dir.mkdir(parents=True, exist_ok=True)
-                    self._submit_parquet_write(combined.copy(), self._bar_data_dir / parquet_name)
-                    print(f"[gap_fill_1s_ib] {instrument}: +{len(new_df)} 1s bars", flush=True)
-                except Exception as exc:
-                    print(f"[gap_fill_1s_ib] {instrument}: error: {exc}", flush=True)
-        except Exception as exc:
-            print(f"[gap_fill_1s_ib] connect error: {exc}", flush=True)
-        finally:
+        pending = {instr for instr, _, _, _ in pairs}
+        deadline = _time.monotonic() + 30 * 60
+
+        while pending:
+            ib = IB()
             try:
-                if ib.isConnected():
-                    ib.disconnect()
-            except Exception:
-                pass
+                ib.connect(self._host, self._port, clientId=self._client_id + 1)
+                for instrument, df_attr, parquet_name, conid in pairs:
+                    if instrument not in pending:
+                        continue
+                    try:
+                        df = getattr(self, df_attr)
+                        earliest = pd.Timestamp(_1S_EARLIEST, tz="America/New_York")
+                        if df.empty:
+                            start_dt = earliest
+                        else:
+                            start_dt = max(df.index[-1], earliest)
+                        if (end_dt - start_dt).total_seconds() <= 60:
+                            pending.discard(instrument)
+                            continue
+                        contract = _IBContract(conId=int(conid), exchange="CME")
+                        all_bars: list = []
+                        chunk_end = end_dt
+                        completed = True
+                        while chunk_end > start_dt:
+                            if self._stopping:
+                                return
+                            chunk_start = max(start_dt, chunk_end - pd.Timedelta(seconds=_IB_1S_CHUNK_SECONDS))
+                            chunk_s = max(1, int((chunk_end - chunk_start).total_seconds()))
+                            bars = ib.reqHistoricalData(
+                                contract,
+                                endDateTime=chunk_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
+                                durationStr=f"{chunk_s} S",
+                                barSizeSetting="1 secs",
+                                whatToShow="TRADES",
+                                useRTH=False,
+                                formatDate=2,
+                                keepUpToDate=False,
+                            )
+                            if not bars:
+                                print(f"[gap_fill_1s_ib] {instrument}: IB returned no data, aborting", flush=True)
+                                completed = False
+                                break
+                            all_bars.extend(bars)
+                            chunk_end = chunk_start
+                        if not all_bars:
+                            print(f"[gap_fill_1s_ib] {instrument}: 0 bars returned", flush=True)
+                            continue
+                        new_df = _util.df(all_bars).rename(columns={
+                            "date": "datetime", "open": "Open", "high": "High",
+                            "low": "Low", "close": "Close", "volume": "Volume",
+                        }).set_index("datetime")
+                        if new_df.index.tzinfo is None:
+                            new_df.index = new_df.index.tz_localize("America/New_York")
+                        else:
+                            new_df.index = new_df.index.tz_convert("America/New_York")
+                        combined = pd.concat([df, new_df[["Open", "High", "Low", "Close", "Volume"]]]).sort_index()
+                        combined = combined[~combined.index.duplicated(keep="last")]
+                        setattr(self, df_attr, combined)
+                        self._bar_data_dir.mkdir(parents=True, exist_ok=True)
+                        self._submit_parquet_write(combined.copy(), self._bar_data_dir / parquet_name)
+                        print(f"[gap_fill_1s_ib] {instrument}: +{len(new_df)} 1s bars", flush=True)
+                        if completed:
+                            pending.discard(instrument)
+                    except Exception as exc:
+                        print(f"[gap_fill_1s_ib] {instrument}: error: {exc}", flush=True)
+            except Exception as exc:
+                print(f"[gap_fill_1s_ib] connect error: {exc}", flush=True)
+            finally:
+                try:
+                    if ib.isConnected():
+                        ib.disconnect()
+                except Exception:
+                    pass
+
+            if not pending:
+                break
+            if _time.monotonic() >= deadline:
+                raise RuntimeError(f"[gap_fill_1s_ib] 30-min cap reached, still incomplete: {pending}")
+            print(f"[gap_fill_1s_ib] incomplete for {pending} — retrying in 20s", flush=True)
+            for _ in range(20):
+                if self._stopping:
+                    return
+                _time.sleep(1)
 
     def _bar_timestamp(self, bar) -> pd.Timestamp:
         ts = pd.Timestamp(getattr(bar, "date", None) or bar.name)
@@ -576,7 +597,8 @@ class IbRealtimeSource:
         from ib_insync import IB, Future, util
         self._load_parquets()
         self._gap_fill_1s_ib()
-        check_parquet_gaps(self._bar_data_dir)
+        gap_fill_1m_ib(self._bar_data_dir)  # calls check_parquet_gaps internally
+        print("[gap_fill_1m_ib] complete", flush=True)
         # Release ~70 MB: history only needed by _gap_fill_1s_ib; live signal path reads parquet
         self._mnq_1s_df = self._empty_bar_df()
         self._mes_1s_df = self._empty_bar_df()
@@ -689,17 +711,21 @@ def _count_expected_1m_bars(start: "pd.Timestamp", end: "pd.Timestamp") -> int:
 
 
 def gap_fill_1m_ib(bar_data_dir: Path) -> None:
-    """Standalone 1m bar gap-fill from IB: called at orchestrator startup.
+    """1m bar gap-fill from IB.
 
     Reads IB_HOST, IB_PORT, MNQ_CONID, MES_CONID from environment.
     Uses client_id=17 (distinct from all other IB clients in the system).
-    Skips gracefully if required env vars are absent or IB is unreachable.
+    Skips gracefully if required env vars are absent.
 
-    Must be called before IbRealtimeSource.start() — writes directly to the same
-    parquet files the instance's executor will later manage; calling it after start()
-    would bypass the executor's serialization guarantee.
+    Retries instruments that return 0 bars (e.g. IB pacing violation) until all
+    succeed or a 30-min wall-clock deadline is reached, at which point it raises
+    RuntimeError. Instruments that return partial bars are not retried — the WARN
+    line flags incomplete coverage.
+
+    Called from IbRealtimeSource.start() (before real-time subscriptions open) and
+    from orchestrator.main in non-LIVE_TRADING mode.
     """
-    import os
+    import os, time as _time
     from data.sources import IBGatewaySource
 
     host = os.environ.get("IB_HOST", "127.0.0.1")
@@ -711,10 +737,10 @@ def gap_fill_1m_ib(bar_data_dir: Path) -> None:
         return
 
     MAX_LOOKBACK_DAYS = 30
-    GAP_FILL_MAX_DAYS = 2  # IB historical data unreliable beyond ~2 days; Databento fills the rest
 
     now = pd.Timestamp.now(tz="America/New_York")
     today_midnight = now.normalize()
+    end_str = now.isoformat()
 
     def _safe_read(path: Path) -> pd.DataFrame:
         if not path.exists():
@@ -725,48 +751,58 @@ def gap_fill_1m_ib(bar_data_dir: Path) -> None:
             return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
     def _start_ts_for(df: pd.DataFrame) -> pd.Timestamp:
-        gap_days = MAX_LOOKBACK_DAYS if df.empty else GAP_FILL_MAX_DAYS
-        floor = now - pd.Timedelta(days=gap_days)
         if df.empty:
-            return floor
-        return max(min(df.index[-1], today_midnight), floor)
+            return now - pd.Timedelta(days=MAX_LOOKBACK_DAYS)
+        return min(df.index[-1], today_midnight)
 
-    mnq_df = _safe_read(bar_data_dir / "MNQ_1m.parquet")
-    mes_df = _safe_read(bar_data_dir / "MES_1m.parquet")
-    mnq_start = _start_ts_for(mnq_df)
-    mes_start = _start_ts_for(mes_df)
-    end_str = now.isoformat()
-
-    print(f"[gap_fill_1m_ib] MNQ: gap-filling from {mnq_start.isoformat()} ...", flush=True)
-    print(f"[gap_fill_1m_ib] MES: gap-filling from {mes_start.isoformat()} ...", flush=True)
-
-    source = IBGatewaySource(host=host, port=port, client_id=17)
-    mnq_new = source.fetch(mnq_conid, mnq_start.isoformat(), end_str, interval="1m", contract_type="future_by_conid")
-    mes_new = source.fetch(mes_conid, mes_start.isoformat(), end_str, interval="1m", contract_type="future_by_conid")
+    instruments = [
+        ("MNQ", mnq_conid, "MNQ_1m.parquet"),
+        ("MES", mes_conid, "MES_1m.parquet"),
+    ]
 
     bar_data_dir.mkdir(parents=True, exist_ok=True)
-    for instrument, df, new_df, fname, start_ts in [
-        ("MNQ", mnq_df, mnq_new, "MNQ_1m.parquet", mnq_start),
-        ("MES", mes_df, mes_new, "MES_1m.parquet", mes_start),
-    ]:
-        actual   = len(new_df) if (new_df is not None and not new_df.empty) else 0
-        expected = _count_expected_1m_bars(start_ts, now)
-        if new_df is None or new_df.empty:
-            print(f"[gap_fill_1m_ib] {instrument}: 0 new bars", flush=True)
-        else:
-            combined = pd.concat([df, new_df]).sort_index()
-            combined = combined[~combined.index.duplicated(keep="last")]
-            dst = bar_data_dir / fname
-            tmp = dst.with_suffix(".parquet.tmp")
-            combined.to_parquet(tmp, use_dictionary=False)
-            os.replace(tmp, dst)
-            print(f"[gap_fill_1m_ib] {instrument}: +{len(new_df)} bars", flush=True)
-        if expected > 5 and actual < int(0.8 * expected):
-            print(
-                f"[gap_fill_1m_ib] WARN: {instrument} incomplete fill — "
-                f"{actual}/{expected} bars ({100 * actual // expected}% coverage)",
-                flush=True,
-            )
+    pending = {"MNQ", "MES"}
+    deadline = _time.monotonic() + 30 * 60
+
+    while pending:
+        source = IBGatewaySource(host=host, port=port, client_id=17)
+        for instrument, conid, fname in instruments:
+            if instrument not in pending:
+                continue
+            path = bar_data_dir / fname
+            df = _safe_read(path)
+            start_ts = _start_ts_for(df)
+            if (now - start_ts).total_seconds() <= 120:
+                pending.discard(instrument)
+                continue
+            print(f"[gap_fill_1m_ib] {instrument}: gap-filling from {start_ts.isoformat()} ...", flush=True)
+            new_df = source.fetch(conid, start_ts.isoformat(), end_str, interval="1m", contract_type="future_by_conid")
+            actual = len(new_df) if (new_df is not None and not new_df.empty) else 0
+            expected = _count_expected_1m_bars(start_ts, now)
+            if actual == 0:
+                print(f"[gap_fill_1m_ib] {instrument}: 0 new bars", flush=True)
+            else:
+                combined = pd.concat([df, new_df]).sort_index()
+                combined = combined[~combined.index.duplicated(keep="last")]
+                tmp = path.with_suffix(".parquet.tmp")
+                combined.to_parquet(tmp, use_dictionary=False)
+                os.replace(tmp, path)
+                print(f"[gap_fill_1m_ib] {instrument}: +{len(new_df)} bars", flush=True)
+                pending.discard(instrument)
+            if expected > 5 and actual < int(0.8 * expected):
+                print(
+                    f"[gap_fill_1m_ib] WARN: {instrument} incomplete fill — "
+                    f"{actual}/{expected} bars ({100 * actual // expected}% coverage)",
+                    flush=True,
+                )
+
+        if not pending:
+            break
+        if _time.monotonic() >= deadline:
+            raise RuntimeError(f"[gap_fill_1m_ib] 30-min cap reached, still incomplete: {pending}")
+        print(f"[gap_fill_1m_ib] incomplete for {pending} — retrying in 20s", flush=True)
+        _time.sleep(20)
+
     check_parquet_gaps(bar_data_dir)
 
 
