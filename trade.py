@@ -258,6 +258,14 @@ def main() -> None:
             time.sleep(1)
 
         if not resume:
+            # Cancel any live broker stop-entry before wiping position state.
+            # Without this, the new session starts with stop_entry="" and places
+            # a fresh order alongside the stale one still open in Tradovate.
+            _pre_reset_pos = smt_state.load_position()
+            if _pre_reset_pos.get("stop_entry"):
+                import live_orders as _lo
+                _lo.cancel_stop_entry("session-restart", force=True)
+                print("Cancelled pending stop entry before reset")
             pos_path = Path("data") / "position.json"
             pos_path.write_text(json.dumps(smt_state.DEFAULT_POSITION, indent=2))
             print("position.json reset to default")
