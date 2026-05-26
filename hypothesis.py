@@ -876,10 +876,12 @@ def _determine_direction(
                         if _session_ath_val > current_close > 0
                         else 0.0
                     )
-                    _is_false_pos_recovery = (
-                        not _is_pm_kill_zone
-                        and _recovery_gap > 0.012
-                    )
+                    # PM kill zone applies a higher gap threshold (3%) because afternoon
+                    # sweeps of highs in premium during genuine recovery weeks (gap > 3%)
+                    # are still continuation moves, not distribution. The standard 2% AM
+                    # threshold remains unchanged.
+                    _recovery_threshold = 0.03 if _is_pm_kill_zone else 0.02
+                    _is_false_pos_recovery = _recovery_gap > _recovery_threshold
                     if (reason["weekly_zone"] == "premium"
                             and not _is_false_pos_ath
                             and not _is_false_pos_morning

@@ -65,6 +65,14 @@ class SessionPipeline:
         # even when _hyp_formation_price wouldn't (belt-and-suspenders).
         self._accepted_level_sweeps: set[tuple[str, str]] = set()
         self._COOLDOWN_AGGRESSION_PTS = 15.0
+        # Tracks level names (from all liquidity "level" entries) swept at least once since
+        # the last hypothesis direction change.  When a *new* level is crossed for the first
+        # time under the current hypothesis and failed_entries is at the limit, it is
+        # decremented by 1 to allow one additional re-entry attempt.
+        self._swept_levels_since_hyp: set[str] = set()
+        # Cached (name, price) pairs for every "level"-kind liquidity, populated at session
+        # open and used for the per-bar sweep check below.
+        self._ext_levels: list[tuple[str, float]] = []
 
     def on_session_start(
         self,
@@ -98,6 +106,7 @@ class SessionPipeline:
         self._last_hyp_cautious = ("", "")
         self._hyp_formation_price = None
         self._accepted_level_sweeps = set()
+        self._swept_levels_since_hyp = set()
         save_global(_global)
 
         # Reset hypothesis and position only when there is no active trade.
@@ -143,6 +152,11 @@ class SessionPipeline:
         _session_dir.mkdir(parents=True, exist_ok=True)
         _levels_path = _session_dir / "levels.json"
         _daily_state = load_daily()
+        self._ext_levels = [
+            (l["name"], float(l["price"]))
+            for l in _daily_state.get("liquidities", [])
+            if l.get("kind") == "level" and l.get("price") is not None
+        ]
         _levels_path.write_text(
             _json.dumps({
                 "liquidities": _daily_state.get("liquidities", []),
@@ -313,6 +327,7 @@ class SessionPipeline:
                         _hyp_dir = "none"
                         self._hyp_formation_price = None
                         self._accepted_level_sweeps.clear()
+                        self._swept_levels_since_hyp.clear()
                     _level_hyp_divs = []
                 else:
                     _hyp_snap = _smt_state.load_hypothesis()
@@ -364,6 +379,7 @@ class SessionPipeline:
                         # Direction changed — real trend break. Clear pending limits and emit
                         # trend-broken so the automation path can cancel the PMT order.
                         self._accepted_level_sweeps.clear()
+                        self._swept_levels_since_hyp.clear()
                         _pos = _smt_state.load_position()
                         _pos["conf_bar_entry"] = {}
                         _pos["stop_entry"] = ""
@@ -477,6 +493,7 @@ class SessionPipeline:
                     events.append(_cancel_sig)
                 self._hyp_formation_price = None
                 self._accepted_level_sweeps.clear()
+                self._swept_levels_since_hyp.clear()
                 for _d in (_ath_hyp_divs or []):
                     self._emit(_d)
                     if _d.get("kind") == "new-hypothesis":
@@ -534,6 +551,29 @@ class SessionPipeline:
                     self._emit(_cancel_sig)
                     events.append(_cancel_sig)
 
+        # Liquidity-sweep decrement: the first time a named liquidity level is straddled
+        # by the current bar under the current hypothesis direction, and no position is
+        # active, decrement failed_entries by 1 (if at the limit).  This allows one
+        # additional re-entry after each genuinely new liquidity is tapped — covering
+        # today's levels and the prev1/prev2 levels already included in _ext_levels.
+        if _hyp_dir != "none" and self._ext_levels:
+            _xpos = _smt_state.load_position()
+            if not _xpos.get("active"):
+                _xbl = float(mnq_bar_row["Low"])
+                _xbh = float(mnq_bar_row["High"])
+                _xdecremented = False
+                for _xln, _xlp in self._ext_levels:
+                    if _xln in self._swept_levels_since_hyp:
+                        continue
+                    if _xbl <= _xlp <= _xbh:
+                        self._swept_levels_since_hyp.add(_xln)
+                        if not _xdecremented:
+                            _xfe = _xpos.get("failed_entries", 0)
+                            if _xfe >= _strat_mod.MAX_FAILED_ENTRIES:
+                                _xpos["failed_entries"] = _xfe - 1
+                                _smt_state.save_position(_xpos)
+                                _xdecremented = True
+
         _this_5m = now.floor("5min")
         is_5m = (now.minute % 5 == 0) and (_this_5m != self._last_5m_processed)
 
@@ -572,6 +612,7 @@ class SessionPipeline:
             _new_5m_dir = _smt_state.load_hypothesis().get("direction", "none")
             if _new_5m_dir != _hyp_dir:
                 self._accepted_level_sweeps.clear()
+                self._swept_levels_since_hyp.clear()
             _hyp_dir = _new_5m_dir
 
         # Fix #1: run_strategy on every 1m bar; full entry logic only at 5m boundaries.

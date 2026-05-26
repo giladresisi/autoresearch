@@ -295,6 +295,11 @@ def run_trend(
     # Step 3: position is open.
     # ------------------------------------------------------------------
     if active:
+        # Skip mid-minute bars (1s live/backtest): arm and break checks are
+        # once-per-minute events; firing every second produces spurious exits.
+        if pd.Timestamp(now).second != 0:
+            return None
+
         cautious_state = active.get("cautious", "no")
         _fill_price    = float(active.get("fill_price") or 0) or None
 
@@ -553,7 +558,6 @@ def run_trend(
                             save_position(position)
                             _trail_moved = True
 
-                # Break check uses the potentially-updated cautious_break_price.
                 # Secondary exits use bar *close* — intrabar wicks are ignored.
                 _break_price = active.get("cautious_break_price")
                 if _break_price is not None:
