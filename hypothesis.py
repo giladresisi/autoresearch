@@ -17,6 +17,11 @@ CAUTIOUS_MIN_DIST           =  40  # pts — below this secondary distance, skip
 # 50-pt overshoot zone = false positives (38% correct); 20-50pt zone is 80% correct.
 LOW_ARM_DOWN_OVERSHOOT_SUPPRESS_PTS = 50.0
 
+# P8: ATH guard ends at this hour (exclusive). Before this hour → UP (AMD expansion).
+# At or after this hour → eligible for DOWN (distribution/stop-hunt).
+# Set to 13 to restore pre-P8 behavior (original pm_kill_zone boundary).
+P8_ATH_GUARD_HOUR = 12
+
 
 def compute_cautious_prices(
     direction: str,
@@ -873,7 +878,7 @@ def _determine_direction(
                     # sweeps on ATH-expansion days where the week itself is making new ATH.
                     # Fix P1a: ATH guard is AM-only. PM sweeps of ATH-week highs are
                     # stop hunts, not genuine price discovery.
-                    _is_false_pos_ath      = _wh_is_ath and not _is_pm_kill_zone
+                    _is_false_pos_ath      = _wh_is_ath and (_now_tz.hour < P8_ATH_GUARD_HOUR)
                     _is_false_pos_morning  = (not _is_pm_kill_zone) and _last_liq != "week_high"
                     # False-positive C (recovery mode): current price is > 1.2% below the
                     # session-open ATH (session_ath is seeded at open and never updated
@@ -1215,7 +1220,6 @@ def run_hypothesis(
     #     direction="none" is only valid after a trend-broken re-evaluation.
     # (2) Up direction but we are already at or above the recorded ATH — price in uncharted territory.
     # (3) No targets exist in this direction — nothing to trade toward.
-    _pre_veto_direction = direction
     if direction != "none":
         sec_dist = (abs(float(cautious_price_secondary) - current_close)
                     if cautious_price_secondary != "" else 0)
@@ -1225,13 +1229,6 @@ def run_hypothesis(
             direction = "none"
         elif not targets:
             direction = "none"
-
-    # If the veto changed direction to "none", the targets were computed for the
-    # pre-veto direction and must be cleared. Without this, a session_pipeline direction
-    # restore (none → original) inherits stale targets from the wrong side — e.g. UP
-    # targets [week_high, day_high] surviving into a restored DOWN hypothesis.
-    if direction == "none" and _pre_veto_direction != "none":
-        targets = []
 
     # Step 9: entry_ranges — 12hr ago and 1week ago same time anchors.
     # Both anchors fall within hist_mnq_1m (session runs 09:20-17:00 ET; even
