@@ -153,7 +153,7 @@ def run_regression(
         if not no_plot:
             import webbrowser
             _plot_result = subprocess.run(
-                [sys.executable, "data/regression/plot_regression.py", date],
+                [sys.executable, "data/regression/plot_regression.py", date, mode],
                 check=False,
                 capture_output=True,
                 text=True,

@@ -1,73 +1,81 @@
 """
-Generate an interactive HTML chart for a regression date.
-Overlays SMT events, key price levels, and SMT div marks on MNQ 1m candlesticks.
-
-Always plots 1m OHLCV candles from data/MNQ_1m.parquet regardless of run mode,
-since the 1s simulation derives its synthetic bars from the same 1m source data.
+Generate an interactive HTML chart for a regression run.
+Overlays strategy events, key price levels, and SMT div marks on MNQ 1m candlesticks.
+Reads from data/regression/{date}/ — supports both 1m and 1s mode output files.
 
 Usage (run from project root):
-    python data/regression/plot_regression.py                   # reads first date from regression.md
-    python data/regression/plot_regression.py 2026-04-23        # auto-detects 1s or 1m events
-    python data/regression/plot_regression.py 2026-04-23 1s     # force 1s events file
-    python data/regression/plot_regression.py 2026-04-23 1m     # force 1m events file
+    python data/regression/plot_regression.py 2026-05-20        # 1m mode (default)
+    python data/regression/plot_regression.py 2026-05-20 1s     # 1s mode
+
+Output: data/regression/{date}/chart_{mode}.html
+        Prints: Chart: <absolute-path>
 """
 
 import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-
 import pandas as pd
 import plotly.graph_objects as go
-import session_times
 
 
-def _date_from_regression_md() -> str:
-    for raw in Path("regression.md").read_text(encoding="utf-8").splitlines():
-        line = raw.split("#")[0].strip()
-        if line:
-            return line.split(":")[0].strip()
-    raise ValueError("No date found in regression.md")
+DATE = sys.argv[1] if len(sys.argv) > 1 else None
+if DATE is None:
+    print("Usage: plot_regression.py <YYYY-MM-DD> [1m|1s]", file=sys.stderr)
+    sys.exit(1)
 
+MODE = sys.argv[2] if len(sys.argv) > 2 else "1m"
+_SFX = "_1s" if MODE == "1s" else ""
 
-DATE = sys.argv[1] if len(sys.argv) > 1 else _date_from_regression_md()
-_mode_arg = sys.argv[2].lower() if len(sys.argv) > 2 else None
-
+REG_DIR = Path("data") / "regression" / DATE
 MNQ_DOLLARS_PER_POINT_PER_CONTRACT = 2.0
 DEFAULT_CONTRACTS = 2
 
-# ── Price data — always 1m bars (1s sim derives from this same source) ────────
-df = pd.read_parquet("data/MNQ_1m.parquet")
+# ── Price data ─────────────────────────────────────────────────────────────────
+if MODE == "1s":
+    _parquet_1s = Path("data/MNQ_1s.parquet")
+    _parquet_1m = Path("data/MNQ_1m.parquet")
+    if _parquet_1s.exists():
+        _raw = pd.read_parquet(_parquet_1s)
+        _1m_agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+        df = _raw.resample("1min", label="left").agg(_1m_agg).dropna(subset=["Open"])
+    elif _parquet_1m.exists():
+        df = pd.read_parquet(_parquet_1m)
+    else:
+        print("ERROR: neither data/MNQ_1s.parquet nor data/MNQ_1m.parquet found", file=sys.stderr)
+        sys.exit(1)
+else:
+    _parquet_1m = Path("data/MNQ_1m.parquet")
+    if not _parquet_1m.exists():
+        print("ERROR: data/MNQ_1m.parquet not found", file=sys.stderr)
+        sys.exit(1)
+    df = pd.read_parquet(_parquet_1m)
+
 day = df[df.index.date == pd.Timestamp(DATE).date()]
 
-# ── Events — auto-detect 1s vs 1m; prefer 1s when both exist ─────────────────
-_reg_dir = Path(f"data/regression/{DATE}")
-_path_1s = _reg_dir / "events_1s.jsonl"
-_path_1m = _reg_dir / "events.jsonl"
-
-if _mode_arg == "1s":
-    events_path = _path_1s
-    _run_mode = "1s"
-elif _mode_arg == "1m":
-    events_path = _path_1m
-    _run_mode = "1m"
-elif _path_1s.exists():
-    events_path = _path_1s
-    _run_mode = "1s"
-else:
-    events_path = _path_1m
-    _run_mode = "1m"
-
-events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
+# ── Events ────────────────────────────────────────────────────────────────────
+events_path = REG_DIR / f"events{_SFX}.jsonl"
+events = []
+if events_path.exists():
+    for line in events_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            events.append(json.loads(line))
 for e in events:
     e["ts"] = pd.Timestamp(e["time"])
+
+
+def _event_price(e: dict) -> float:
+    return float(e.get("_fill_price") or e.get("price") or
+                 e.get("entry_price") or e.get("new_entry_price") or
+                 e.get("stop_price") or 0.0)
+
 
 EXIT_KINDS = {"stopped-out", "market-close", "end-of-session", "stop-exit"}
 
 # ── Levels ────────────────────────────────────────────────────────────────────
-levels_path = Path(f"data/regression/{DATE}/levels.json")
-levels_data = json.loads(levels_path.read_text()) if levels_path.exists() else {}
+levels_path = REG_DIR / "levels.json"
+levels_data = json.loads(levels_path.read_text(encoding="utf-8")) if levels_path.exists() else {}
 liquidities = levels_data.get("liquidities", [])
 ath = levels_data.get("all_time_high")
 
@@ -83,7 +91,6 @@ if "day_high" in named and "day_low" in named:
 
 all_named = {**named, **mids}
 
-# (label, color, dash, linewidth)
 LEVEL_STYLE: dict[str, tuple] = {
     "ATH":             ("ATH",     "#FF1744", "solid", 2.0),
     "TWO":             ("TWO",     "#00E676", "dash",  1.5),
@@ -108,14 +115,24 @@ LEVEL_PRIORITY = list(LEVEL_STYLE.keys())
 # ── Pair fills to exits ───────────────────────────────────────────────────────
 pairs = []
 pending_fill = None
+_last_order_price: float | None = None
+
 for e in events:
+    if e["kind"] == "new-stop-entry":
+        _last_order_price = float(e.get("entry_price") or e.get("price") or 0)
+    elif e["kind"] == "move-stop-entry":
+        _last_order_price = float(e.get("new_entry_price") or e.get("entry_price") or e.get("price") or 0)
     if e["kind"] in ("stop-entry-filled", "market-entry"):
         pending_fill = e
+        if "price" not in e and _last_order_price:
+            e["_fill_price"] = _last_order_price
+        _last_order_price = None
     elif e["kind"] in EXIT_KINDS and pending_fill is not None:
-        direction_sign = 1 if pending_fill.get("direction", "up") == "up" else -1
-        # Entry slippage: market entries cost more for longs, less for shorts.
+        direction_sign = 1 if pending_fill.get("direction", "up") in ("up", "long") else -1
         entry_slip = float(pending_fill.get("slippage", 0.0))
-        entry_fill_price = pending_fill["price"] + direction_sign * entry_slip
+        raw_entry = float(pending_fill.get("_fill_price") or pending_fill.get("price") or
+                          pending_fill.get("stop_price") or 0.0)
+        entry_fill_price = raw_entry + direction_sign * entry_slip
         slip = float(e.get("slippage", 0.0))
         exit_fill_price = e["price"] - direction_sign * slip
         pnl_pts = round((exit_fill_price - entry_fill_price) * direction_sign, 2)
@@ -131,13 +148,16 @@ if events:
     first_t = min(e["ts"] for e in events) - pd.Timedelta(minutes=30)
     last_t  = max(e["ts"] for e in events) + pd.Timedelta(minutes=30)
 else:
-    _et = "America/New_York"
-    first_t = pd.Timestamp(f"{DATE} {session_times.SESSION_OPEN}", tz=_et)
-    last_t  = pd.Timestamp(f"{DATE} {session_times.SESSION_CLOSE}", tz=_et)
-window  = day[(day.index >= first_t) & (day.index <= last_t)]
+    first_t = pd.Timestamp(f"{DATE} 09:00", tz="America/New_York")
+    last_t  = pd.Timestamp(f"{DATE} 17:00", tz="America/New_York")
 
-price_lo = window["Low"].min()
-price_hi = window["High"].max()
+window = day[(day.index >= first_t) & (day.index <= last_t)]
+
+if window.empty:
+    price_lo, price_hi = 0.0, 1.0
+else:
+    price_lo = window["Low"].min()
+    price_hi = window["High"].max()
 price_margin = (price_hi - price_lo) * 0.08
 
 fig = go.Figure()
@@ -147,13 +167,12 @@ fig.add_trace(go.Candlestick(
     x=window.index,
     open=window["Open"], high=window["High"],
     low=window["Low"],   close=window["Close"],
-    name="MNQ 1m",
+    name=f"MNQ {MODE}",
     increasing_line_color="#26a69a",
     decreasing_line_color="#ef5350",
 ))
 
 # ── Price levels ──────────────────────────────────────────────────────────────
-# Group identical prices to avoid duplicate lines.
 price_to_names: dict[float, list[str]] = {}
 for name, price in all_named.items():
     if price_lo - price_margin <= price <= price_hi + price_margin:
@@ -176,7 +195,7 @@ for price, names in sorted(price_to_names.items()):
         hovertemplate=f"{combined}: {price}<extra></extra>",
     ))
 
-# ── FVG rectangles (only if in visible range) ─────────────────────────────────
+# ── FVG rectangles ────────────────────────────────────────────────────────────
 for liq in liquidities:
     if liq.get("kind") != "fvg":
         continue
@@ -201,8 +220,9 @@ for e in events:
         if pending_t is not None:
             limit_x += [pending_t, e["ts"], None]
             limit_y += [pending_p, pending_p, None]
-        pending_t, pending_p = e["ts"], e["price"]
-    elif e["kind"] in ("stop-entry-filled", "stop-entry-cancelled", "limit-entry-cancelled", "limit-entry-expired", "market-entry"):
+        pending_t = e["ts"]
+        pending_p = float(e.get("entry_price") or e.get("new_entry_price") or e.get("price") or 0)
+    elif e["kind"] in ("stop-entry-filled", "cancel-stop-entry", "market-entry"):
         if pending_t is not None:
             limit_x += [pending_t, e["ts"], None]
             limit_y += [pending_p, pending_p, None]
@@ -275,11 +295,13 @@ _LEVEL_SCOPE = {
     "ATH": "ATH",
 }
 
+
 def _closest_level_name(lv: float) -> str | None:
     if not all_named:
         return None
     closest = min(all_named.items(), key=lambda x: abs(x[1] - lv))
     return closest[0] if abs(closest[1] - lv) <= 10 else None
+
 
 def _div_label(e: dict) -> str:
     tf   = e.get("timeframe", "?")
@@ -293,16 +315,16 @@ def _div_label(e: dict) -> str:
             return f"{tf}{side}{typ}@{lv_name}"
     return f"{tf}{side}{typ}"
 
+
 def _div_hover(e: dict) -> str:
     parts = [
-        f"<b>SMT div</b>",
+        "<b>SMT div</b>",
         f"tf: {e.get('timeframe')}",
         f"type: {e.get('type')}",
         f"side: {e.get('side')}",
         f"time: {e['ts'].strftime('%H:%M:%S')}",
     ]
     mnq_lv = e.get("mnq_div_price")
-    mes_lv = e.get("mes_div_price")
     if mnq_lv is not None:
         parts.append(f"div_price: {mnq_lv}")
         if e.get("type") in ("wick", "body", "wick_sym", "body_sym"):
@@ -311,6 +333,7 @@ def _div_hover(e: dict) -> str:
             if scope:
                 parts.append(f"scope: {scope}")
     return "<br>".join(parts)
+
 
 for side_val, symbol, color in [("bullish", "triangle-up", "#4CAF50"), ("bearish", "triangle-down", "#EF5350")]:
     grp = [e for e in div_events if e.get("side") == side_val]
@@ -330,7 +353,7 @@ for side_val, symbol, color in [("bullish", "triangle-up", "#4CAF50"), ("bearish
         customdata=hover,
     ))
 
-# ── Event markers (exits with P&L, others plain) ─────────────────────────────
+# ── Event markers ─────────────────────────────────────────────────────────────
 EXIT_MARKER_STYLE = {
     "stopped-out":    dict(symbol="x-thin",  color="#F44336", size=14),
     "market-close":   dict(symbol="square",  color="#9E9E9E", size=11),
@@ -338,14 +361,16 @@ EXIT_MARKER_STYLE = {
     "stop-exit":      dict(symbol="diamond", color="#FF9800", size=11),
 }
 OTHER_MARKER_STYLE = {
-    "new-stop-entry":    dict(symbol="triangle-right",      color="#2196F3", size=13),
-    "move-stop-entry":   dict(symbol="triangle-right-open", color="#9C27B0", size=13),
-    "new-stop-exit":     dict(symbol="triangle-left",       color="#FF5722", size=13),
-    "move-stop-exit":    dict(symbol="triangle-left-open",  color="#FF5722", size=13),
-    "stop-entry-filled": dict(symbol="star",                color="#4CAF50", size=17),
-    "market-entry":       dict(symbol="circle",              color="#FF9800", size=15),
-    "trend-broken":       dict(symbol="diamond-open",        color="#FF9800", size=13),
-    "new-hypothesis":     dict(symbol="pentagon",            color="#E040FB", size=15),
+    "new-stop-entry":      dict(symbol="triangle-right",      color="#2196F3", size=13),
+    "move-stop-entry":     dict(symbol="triangle-right-open", color="#9C27B0", size=13),
+    "cancel-stop-entry":   dict(symbol="x-open",              color="#FF9800", size=13),
+    "stop-entry-cancelled":dict(symbol="x-open",              color="#FF9800", size=13),
+    "new-stop-exit":       dict(symbol="triangle-left",       color="#FF5722", size=13),
+    "move-stop-exit":      dict(symbol="triangle-left-open",  color="#FF5722", size=13),
+    "stop-entry-filled":   dict(symbol="star",                color="#4CAF50", size=17),
+    "market-entry":        dict(symbol="circle",              color="#FF9800", size=15),
+    "trend-broken":        dict(symbol="diamond-open",        color="#FF9800", size=13),
+    "new-hypothesis":      dict(symbol="pentagon",            color="#E040FB", size=15),
 }
 
 pnl_by_exit = {(p["exit"]["time"], p["exit"]["kind"]): p for p in pairs}
@@ -391,18 +416,23 @@ for kind, style in OTHER_MARKER_STYLE.items():
         continue
     hover = []
     for e in group:
-        parts = [f"<b>{e['kind']}</b>", f"price: {e['price']}", f"time: {e['ts'].strftime('%H:%M:%S')}"]
+        ep = _event_price(e)
+        parts = [f"<b>{e['kind']}</b>", f"price: {ep}", f"time: {e['ts'].strftime('%H:%M:%S')}"]
         if "direction" in e:
             parts.append(f"direction: {e['direction']}")
-        if "stop" in e:
-            stop = e["stop"]
+        if "entry_price" in e:
+            parts.append(f"entry_price: {e['entry_price']}")
+        if "new_entry_price" in e:
+            parts.append(f"new_entry_price: {e['new_entry_price']}")
+        if "stop" in e or "stop_price" in e:
+            stop = e.get("stop") or e.get("stop_price")
             if kind == "stop-entry-filled":
-                dist = abs(e["price"] - stop)
-                dir_sign = 1 if e.get("direction") == "up" else -1
-                signed = dir_sign * (stop - e["price"])
-                parts.append(f"stop: {stop} ({dist:.2f} pts)")
+                dist = abs(ep - stop) if ep and stop else "?"
+                parts.append(f"stop: {stop} ({dist:.2f} pts)" if isinstance(dist, float) else f"stop: {stop}")
             else:
                 parts.append(f"stop: {stop}")
+        if "reason" in e:
+            parts.append(f"reason: {e['reason']}")
         if kind == "trend-broken":
             if e.get("broken_direction"):
                 parts.append(f"was: {e['broken_direction']}")
@@ -473,7 +503,7 @@ for kind, style in OTHER_MARKER_STYLE.items():
         hover.append("<br>".join(parts))
     fig.add_trace(go.Scatter(
         x=[e["ts"] for e in group],
-        y=[e["price"] for e in group],
+        y=[_event_price(e) for e in group],
         mode="markers", name=kind.replace("-", " "),
         marker=dict(symbol=style["symbol"], color=style["color"],
                     size=style["size"], line=dict(width=2, color=style["color"])),
@@ -481,13 +511,23 @@ for kind, style in OTHER_MARKER_STYLE.items():
         customdata=hover,
     ))
 
-# ── Layout — height scales with session duration ──────────────────────────────
+# ── Layout ────────────────────────────────────────────────────────────────────
 session_hours = (last_t - first_t).total_seconds() / 3600
 chart_height  = max(700, min(1200, int(600 + session_hours * 40)))
 
-_mode_label = f" [{_run_mode}]" if _run_mode == "1s" else ""
+pnl_total = sum(p["pnl_usd"] for p in pairs)
+pnl_str = f"{'+'if pnl_total >= 0 else ''}${pnl_total:.0f}"
+n_trades = len(pairs)
+if events:
+    title = (
+        f"Regression — MNQ {MODE} {DATE} | "
+        f"{n_trades} trade{'s' if n_trades != 1 else ''} | PnL: {pnl_str}"
+    )
+else:
+    title = f"Regression — MNQ {MODE} {DATE} | No events"
+
 fig.update_layout(
-    title=f"SMT Events{_mode_label} — MNQ {DATE} | {len(pairs)} trades | PnL: {'+'if sum(p['pnl_usd'] for p in pairs)>=0 else ''}${sum(p['pnl_usd'] for p in pairs):.0f}",
+    title=title,
     xaxis_title="Time (ET)",
     yaxis_title="Price",
     xaxis_rangeslider_visible=False,
@@ -498,7 +538,7 @@ fig.update_layout(
     hovermode="x unified",
 )
 
-_chart_name = "chart_1s.html" if _run_mode == "1s" else "chart.html"
-out = Path(f"data/regression/{DATE}/{_chart_name}")
+REG_DIR.mkdir(parents=True, exist_ok=True)
+out = REG_DIR / f"chart_{MODE}.html"
 fig.write_html(str(out), include_plotlyjs="cdn")
 print(f"Chart: {out.resolve()}")
