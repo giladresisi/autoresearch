@@ -387,14 +387,6 @@ def run_strategy(
                     return None
                 if direction == _DIR_DOWN and (stop_loss - entry_price) < MIN_STOP_DISTANCE:
                     return None
-                # Veto: entry too close to secondary cautious level — fill would land at
-                # breakeven, leaving no room before the stop snaps back to entry price.
-                _sec_raw = hypothesis.get("cautious_price_secondary", "")
-                if _sec_raw != "":
-                    _dist_to_sec = (float(_sec_raw) - entry_price) if direction == _DIR_UP \
-                                   else (entry_price - float(_sec_raw))
-                    if _dist_to_sec < 10.0:
-                        return None
                 position["conf_bar_entry"] = conf_bar_snap
                 kind = "new-stop-entry" if position["stop_entry"] == "" else "move-stop-entry"
                 position["stop_entry"]     = entry_price
