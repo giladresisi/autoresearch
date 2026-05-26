@@ -29,8 +29,8 @@ files left over by a previous run on the same calendar day.
 | daily.py complete | `[EMIT] daily complete` | Printed by automation.main after run_daily |
 | First directed hypothesis | `"kind": "new-hypothesis"` + `"direction": "up\|down"` | JSON line emitted by automation.main |
 | Startup fatal | `FATAL` | IB unreachable or other hard failure; monitor exits immediately |
-| Orchestrator died | PID snapshotted at startup + `tasklist.exe` | Checked every iteration from startup |
-| automation.main died | PID parsed from `[ORCH] automation.main started (pid=…)` + `tasklist.exe` | Checked every iteration after session start |
+| Orchestrator died | PID snapshotted at startup + `powershell Get-Process` | Checked every iteration from startup |
+| automation.main died | PID parsed from `[ORCH] automation.main started (pid=…)` + `powershell Get-Process` | Checked every iteration after session start |
 
 ## Step 1 — Start the orchestrator via trade.py
 
@@ -86,8 +86,11 @@ Use the `Monitor` tool with `persistent: true` and `timeout_ms: 3600000`.
 anchored to the last `=== RESTART` marker. This guarantees that session files left over
 from an earlier run on the same calendar day never trigger false-positive notifications.
 
-**Critical**: use `tasklist.exe` for process liveness checks. `kill -0` gives false
-negatives for Windows processes when called from Git Bash.
+**Critical**: use `powershell.exe Get-Process` for process liveness checks. Both `kill -0`
+and `tasklist.exe //FI "PID eq …"` give unreliable results for Windows processes when called
+from Git Bash — `tasklist.exe` can return exit code 1 even when the process is alive, causing
+false "died" notifications. `powershell.exe Get-Process -Id <pid> -ErrorAction SilentlyContinue`
+is the only reliable method.
 
 **Race-condition fix**: milestones are checked immediately at startup (before the loop)
 so events that fired between the state-check and the monitor arm are never missed.
@@ -108,15 +111,14 @@ hyp_done=false
 # Snapshot PID before the loop — pid file may be deleted on clean exit
 ORCH_PID=$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null)
 AUTO_PID=""
+last_reported_dead_auto_pid=""
 
 # Returns 0 if the process with the given PID is alive, 1 if dead.
-# Uses tasklist with a PID filter; "no tasks" in output means the process is gone.
+# Uses powershell.exe Get-Process — the only reliable liveness check for Windows
+# processes from Git Bash. tasklist.exe and kill -0 both give false negatives.
 # Works for any process name (python.exe, uv.exe, etc.).
-# CRITICAL: Do NOT grep for "python" or any process name — automation.main is spawned
-# via `uv run python`, so its PID belongs to uv.exe, not python.exe. Always check
-# for "no tasks" (PID absent) rather than matching by name.
 is_alive() {
-    ! tasklist.exe //FI "PID eq $1" //NH 2>/dev/null | grep -qi "no tasks"
+    powershell.exe -NoProfile -Command "if (Get-Process -Id $1 -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" 2>/dev/null
 }
 
 # Find where the current run starts in the stdout log (after last RESTART marker).
@@ -233,9 +235,22 @@ while true; do
         exit 0
     fi
 
+    # Track AUTO_PID updates — orchestrator may restart automation.main with a new PID
+    if [ "$session_started" = true ]; then
+        latest_auto_pid=$(cur | grep "automation.main started" | tail -1 | grep -oE 'pid=[0-9]+' | grep -oE '[0-9]+')
+        if [ -n "$latest_auto_pid" ] && [ "$latest_auto_pid" != "$AUTO_PID" ]; then
+            AUTO_PID=$latest_auto_pid
+            echo "[MONITOR] automation.main restarted by orchestrator (pid=$AUTO_PID)"
+        fi
+    fi
+
     # Keepalive — automation.main: only while session is active (not after clean session-end)
+    # De-duplicate: only report each dead PID once (orchestrator restarts produce a new PID)
     if [ "$session_started" = true ] && [ "$session_ended" = false ] && [ -n "$AUTO_PID" ] && ! is_alive "$AUTO_PID"; then
-        echo "[KEEPALIVE] automation.main (pid=$AUTO_PID) has DIED — orchestrator should restart it"
+        if [ "$AUTO_PID" != "$last_reported_dead_auto_pid" ]; then
+            last_reported_dead_auto_pid=$AUTO_PID
+            echo "[KEEPALIVE] automation.main (pid=$AUTO_PID) has DIED — orchestrator should restart it"
+        fi
     fi
 
     # Downstream milestones — detected from stdout with offset
