@@ -13,6 +13,10 @@ CAUTIOUS_SECONDARY_MAX_DIST = 150  # pts — secondary (1m confirmation) max dis
 CAUTIOUS_INITIAL_MAX_DIST   = 110  # pts — initial (5m confirmation) max distance
 CAUTIOUS_MIN_DIST           =  40  # pts — below this secondary distance, skip the entry
 
+# P2b: suppress LOW-arm DOWN when price is this many points above the swept level.
+# 50-pt overshoot zone = false positives (38% correct); 20-50pt zone is 80% correct.
+LOW_ARM_DOWN_OVERSHOOT_SUPPRESS_PTS = 50.0
+
 
 def compute_cautious_prices(
     direction: str,
@@ -825,6 +829,15 @@ def _determine_direction(
                                             _prior_high_swept = True
                                             break
                                 r2b_dir = "down" if _prior_high_swept else "up"
+                    # Fix P2b: anchor price validation with 50-pt threshold.
+                    # Suppress DOWN only when price is >50 pts above the swept low
+                    # (the 5-20pt and 50+ pt overshoot zones are false positives;
+                    # 20-50pt zone has 80% directional accuracy and is worth keeping).
+                    if r2b_dir == "down":
+                        _anchor_price_val = _liq_price_map.get(_last_liq)
+                        if (_anchor_price_val is not None
+                                and current_close > float(_anchor_price_val) + LOW_ARM_DOWN_OVERSHOOT_SUPPRESS_PTS):
+                            r2b_dir = None
             elif _last_liq in _high_names:
                 if not _above_mid:
                     r2b_dir = "down"
@@ -858,7 +871,9 @@ def _determine_direction(
                     # any high-level sweep is ATH expansion, not distribution. Covers
                     # both week_high sweeps AND sub-weekly (ny_morning_high, day_high)
                     # sweeps on ATH-expansion days where the week itself is making new ATH.
-                    _is_false_pos_ath      = _wh_is_ath
+                    # Fix P1a: ATH guard is AM-only. PM sweeps of ATH-week highs are
+                    # stop hunts, not genuine price discovery.
+                    _is_false_pos_ath      = _wh_is_ath and not _is_pm_kill_zone
                     _is_false_pos_morning  = (not _is_pm_kill_zone) and _last_liq != "week_high"
                     # False-positive C (recovery mode): current price is > 1.2% below the
                     # session-open ATH (session_ath is seeded at open and never updated
