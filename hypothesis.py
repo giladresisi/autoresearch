@@ -1215,6 +1215,7 @@ def run_hypothesis(
     #     direction="none" is only valid after a trend-broken re-evaluation.
     # (2) Up direction but we are already at or above the recorded ATH — price in uncharted territory.
     # (3) No targets exist in this direction — nothing to trade toward.
+    _pre_veto_direction = direction
     if direction != "none":
         sec_dist = (abs(float(cautious_price_secondary) - current_close)
                     if cautious_price_secondary != "" else 0)
@@ -1224,6 +1225,13 @@ def run_hypothesis(
             direction = "none"
         elif not targets:
             direction = "none"
+
+    # If the veto changed direction to "none", the targets were computed for the
+    # pre-veto direction and must be cleared. Without this, a session_pipeline direction
+    # restore (none → original) inherits stale targets from the wrong side — e.g. UP
+    # targets [week_high, day_high] surviving into a restored DOWN hypothesis.
+    if direction == "none" and _pre_veto_direction != "none":
+        targets = []
 
     # Step 9: entry_ranges — 12hr ago and 1week ago same time anchors.
     # Both anchors fall within hist_mnq_1m (session runs 09:20-17:00 ET; even
