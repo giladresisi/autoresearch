@@ -753,6 +753,15 @@ def gap_fill_1m_ib(bar_data_dir: Path) -> None:
     def _start_ts_for(df: pd.DataFrame) -> pd.Timestamp:
         if df.empty:
             return now - pd.Timedelta(days=MAX_LOOKBACK_DAYS)
+        lookback_start = now - pd.Timedelta(days=MAX_LOOKBACK_DAYS)
+        recent = df[df.index >= lookback_start]
+        if recent.empty:
+            return lookback_start
+        idx = recent.index
+        for i in range(1, len(idx)):
+            gap_min = (idx[i] - idx[i - 1]).total_seconds() / 60
+            if gap_min > 90 and not _gap_is_expected(idx[i - 1], gap_min):
+                return idx[i - 1]
         return min(df.index[-1], today_midnight)
 
     instruments = [
@@ -812,8 +821,10 @@ def _gap_is_expected(start: "pd.Timestamp", gap_min: float) -> bool:
     wd = et.weekday()   # 0=Mon … 6=Sun
     frac_h = et.hour + et.minute / 60.0
 
-    # Weekend: Friday close → Sunday re-open (no data expected at all)
-    if (wd == 4 and frac_h >= 16.75) or wd == 5 or (wd == 6 and frac_h < 18.25):
+    # Weekend: Friday close → Sunday re-open (no data expected at all).
+    # Cap at 75 h so a gap that extends past Monday 6 PM (> 3-day holiday weekend)
+    # is still flagged — the Monday overnight session would be missing.
+    if ((wd == 4 and frac_h >= 16.75) or wd == 5 or (wd == 6 and frac_h < 18.25)) and gap_min <= 75 * 60:
         return True
     # Daily CME maintenance 17:00-18:00 ET plus session-close buffer (16:45-18:15).
     # Cap at 75 min so a gap that starts in the maintenance window but runs well past
