@@ -599,6 +599,10 @@ class IbRealtimeSource:
         self._gap_fill_1s_ib()
         gap_fill_1m_ib(self._bar_data_dir)  # calls check_parquet_gaps internally
         print("[gap_fill_1m_ib] complete", flush=True)
+        # Reload 1m dfs so the in-memory state matches the gap-filled parquet files.
+        # Without this, the first live 1m bar write would overwrite any bars added by
+        # gap_fill_1m_ib with the stale df that was loaded before gap-fill ran.
+        self._load_parquets()
         # Release ~70 MB: history only needed by _gap_fill_1s_ib; live signal path reads parquet
         self._mnq_1s_df = self._empty_bar_df()
         self._mes_1s_df = self._empty_bar_df()
