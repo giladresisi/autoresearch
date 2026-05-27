@@ -112,6 +112,13 @@ for e in events:
         if "price" not in e and _last_order_price:
             e["_fill_price"] = _last_order_price
         _last_order_price = None
+    elif e["kind"] in ("cancel-stop-entry", "stop-entry-cancelled"):
+        # Inject last known order price when the event carries no valid price of its own.
+        # cancel-stop-entry (user-requested) often arrives with entry_price=0.0 because
+        # IB may have already torn down the order before reporting its price.
+        if _last_order_price and not float(e.get("price") or e.get("entry_price") or 0):
+            e["_fill_price"] = _last_order_price
+        _last_order_price = None
     elif e["kind"] in EXIT_KINDS and pending_fill is not None:
         direction_sign = 1 if pending_fill.get("direction", "up") in ("up", "long") else -1
         entry_slip = float(pending_fill.get("slippage", 0.0))
@@ -208,7 +215,7 @@ for e in events:
             limit_y += [pending_p, pending_p, None]
         pending_t = e["ts"]
         pending_p = float(e.get("entry_price") or e.get("new_entry_price") or e.get("price") or 0)
-    elif e["kind"] in ("stop-entry-filled", "cancel-stop-entry", "market-entry"):
+    elif e["kind"] in ("stop-entry-filled", "cancel-stop-entry", "stop-entry-cancelled", "market-entry"):
         if pending_t is not None:
             limit_x += [pending_t, e["ts"], None]
             limit_y += [pending_p, pending_p, None]
@@ -345,7 +352,8 @@ EXIT_MARKER_STYLE = {
 OTHER_MARKER_STYLE = {
     "new-stop-entry":    dict(symbol="triangle-right",      color="#2196F3", size=13),
     "move-stop-entry":   dict(symbol="triangle-right-open", color="#9C27B0", size=13),
-    "cancel-stop-entry": dict(symbol="x-open",              color="#FF9800", size=13),
+    "cancel-stop-entry":    dict(symbol="x-open",              color="#FF9800", size=13),
+    "stop-entry-cancelled": dict(symbol="x-open",              color="#FF9800", size=13),
     "new-stop-exit":     dict(symbol="triangle-left",       color="#FF5722", size=13),
     "move-stop-exit":    dict(symbol="triangle-left-open",  color="#FF5722", size=13),
     "stop-entry-filled": dict(symbol="star",                color="#4CAF50", size=17),

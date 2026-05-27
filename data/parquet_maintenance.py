@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 
@@ -51,7 +52,7 @@ def backfill_parquets(
             continue
         combined = pd.concat([existing, df_new]).sort_index()
         combined = combined[~combined.index.duplicated(keep="last")]
-        tmp = path.with_suffix(".parquet.tmp")
+        tmp = path.with_name(f"{path.stem}.{uuid4().hex}.parquet.tmp")
         combined.to_parquet(tmp, use_dictionary=False)
         os.replace(tmp, path)
 
@@ -133,7 +134,7 @@ def backfill_1s_parquets(
             continue
         combined = pd.concat([existing, df_new]).sort_index()
         combined = combined[~combined.index.duplicated(keep="last")]
-        tmp = path.with_suffix(".parquet.tmp")
+        tmp = path.with_name(f"{path.stem}.{uuid4().hex}.parquet.tmp")
         combined.to_parquet(tmp, use_dictionary=False)
         os.replace(tmp, path)
 
@@ -351,7 +352,7 @@ def merge_session_1s_parquets(bar_data_dir: Path) -> None:
             if abort_merge:
                 continue  # skip to next instrument — do NOT write main parquet or delete session
 
-            tmp = main_path.with_suffix(".parquet.tmp")
+            tmp = main_path.with_name(f"{main_path.stem}.{uuid4().hex}.parquet.tmp")
             existing.to_parquet(tmp, use_dictionary=False)
             os.replace(tmp, main_path)
             for session_path in session_files:
