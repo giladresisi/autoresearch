@@ -65,7 +65,8 @@ def run(session_date: datetime.date, *, headed: bool = False) -> list[Path]:
         )
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not headed)
+        # Tradovate renders via WebGL canvas — must run headed on Windows
+        browser = p.chromium.launch(headless=False)
         ctx  = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
         page.set_default_timeout(30_000)
@@ -88,16 +89,29 @@ def run(session_date: datetime.date, *, headed: bool = False) -> list[Path]:
                 page.wait_for_url("**/trading-mode**", timeout=8_000)
             except Exception:
                 pass
-            cookie_btn = page.locator("button:has-text('Accept Cookies')")
-            if cookie_btn.is_visible():
-                cookie_btn.click()
-                page.wait_for_timeout(300)
-            live_btn = page.locator("button:has-text('Access Live')")
-            sim_btn  = page.locator("button:has-text('Access Simulation')")
-            if live_btn.is_visible():
-                live_btn.click()
-            else:
-                sim_btn.click()
+            # Use JS click() to bypass any cookie-banner z-index overlay
+            page.evaluate("""() => {
+                for (const b of document.querySelectorAll('button')) {
+                    if (b.textContent.trim() === 'Accept Cookies') { b.click(); break; }
+                }
+            }""")
+            page.wait_for_timeout(500)
+            # Try clicking any mode-selection element (may not be a <button>)
+            page.evaluate("""() => {
+                const labels = [
+                    'Access Live', 'Start Live Trading',
+                    'Access Simulation', 'Start Simulated Trading',
+                ];
+                for (const el of document.querySelectorAll('button, a, div, span')) {
+                    if (labels.some(l => el.textContent.trim().includes(l))) {
+                        el.click(); break;
+                    }
+                }
+            }""")
+            page.wait_for_timeout(2_000)
+            if "trading-mode" in page.url:
+                # Mode element wasn't a navigating element — go directly to the platform
+                page.goto("https://trader.tradovate.com/", wait_until="domcontentloaded")
             page.wait_for_load_state("domcontentloaded")
 
             # ── Wait for platform; select the correct account ──────────────────
