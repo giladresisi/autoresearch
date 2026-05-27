@@ -522,3 +522,75 @@ def hypothesis() -> list:
         print(f"[live_orders] hypothesis: no hypothesis formed (was {old_dir!r})", flush=True)
 
     return signals or []
+
+
+def _force_hypothesis_for_direction(forced_v2: str) -> None:
+    """Rewrite hypothesis.json for a manually forced direction.
+
+    Called before place_stop_entry / place_market_entry when forced_v2 differs
+    from the current hypothesis direction. Cancels any pending opposite-direction
+    stop entry, then writes a fresh hypothesis with correct cautious prices and
+    mid-cross guard labels so run_trend() doesn't immediately fire trend-broken.
+
+    entry_ranges is left empty — the entry is manual, O5 doesn't apply.
+    """
+    import hypothesis as _hyp_mod
+    from smt_state import load_daily, load_global, load_hypothesis
+
+    hyp           = load_hypothesis()
+    old_direction = hyp.get("direction", "none")
+
+    if forced_v2 == old_direction:
+        return  # already aligned, nothing to do
+
+    # Skip rewrite if a position is already active — rewriting hypothesis while holding
+    # a trade in the opposite direction would cause run_trend() to fire trend-broken
+    # on the next tick, creating a persistent inconsistency.
+    if get_position().get("active"):
+        print("[live_orders] _force_hypothesis_for_direction: active position present, skipping hypothesis rewrite", flush=True)
+        return
+
+    # Cancel any pending stop for the old direction before overwriting hypothesis.
+    cancel_stop_entry(reason="direction-override")
+
+    now          = datetime.datetime.now(_ET)
+    global_state = load_global()
+    daily        = load_daily()
+    liquidities  = daily.get("liquidities", [])
+
+    # current_close from bar_state midpoint (same as _current_price()).
+    current_close = _current_price()
+
+    if current_close == 0.0:
+        print("[live_orders] _force_hypothesis_for_direction: bar_state.json unavailable, skipping hypothesis rewrite", flush=True)
+        return
+
+    # Compute mid labels from daily.json liquidities (no live H/L refresh — what
+    # matters is the label relative to current price, not the intraday extremes).
+    # week_high/low and day_high/low are always kind="level"; FVGs use different names.
+    _liq_map = {l["name"]: l["price"] for l in liquidities if l.get("kind") == "level"}
+    wh, wl = _liq_map.get("week_high"), _liq_map.get("week_low")
+    dh, dl = _liq_map.get("day_high"),  _liq_map.get("day_low")
+    weekly_mid = _hyp_mod.compute_mid_label(current_close, wh, wl) if wh and wl else ""
+    daily_mid  = _hyp_mod.compute_mid_label(current_close, dh, dl) if dh and dl else ""
+
+    signals = _hyp_mod.build_hypothesis_from_direction(
+        forced_v2,
+        now,
+        current_close,
+        liquidities,
+        global_state,
+        old_direction,
+        weekly_mid,
+        daily_mid,
+        last_liquidity    = hyp.get("last_liquidity", ""),
+        divs              = hyp.get("divs", []),
+        direction_reason  = {"rule": "forced_manual"},
+        # hist_mnq_1m not passed → entry_ranges = []
+        skip_veto         = True,
+        skip_position_reset = True,
+    )
+
+    now_str = now.isoformat()
+    for sig in signals:
+        _log(dict(sig, source="manual", time=now_str))
