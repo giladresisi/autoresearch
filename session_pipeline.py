@@ -687,6 +687,10 @@ class SessionPipeline:
             strat_sig.setdefault("direction", _hyp_dir)
             # Emit cancel when strategy's market-entry overwrites a pending limit that
             # was never explicitly cancelled by trend (trend cancel path handled above).
+            # Also mark prefer_market_entry re-entries so live_orders can flatten first —
+            # Tradovate's protective stop may not have settled by the time the market buy arrives.
+            if strat_sig["kind"] == "market-entry" and _prefer_mkt:
+                strat_sig["flatten_first"] = True
             if strat_sig["kind"] == "market-entry" and _prev_stop != "":
                 _cancel_sig = {
                     "kind":      "stop-entry-cancelled",

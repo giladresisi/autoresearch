@@ -298,6 +298,11 @@ def dispatch(sig: dict) -> None:
     if kind == "market-entry":
         stop = sig.get("stop")
         if direction and stop is not None:
+            # flatten_first: set by session_pipeline on prefer_market_entry re-entries.
+            # Sends a synchronous close before the new entry so any open position from a
+            # rapid fill+stop-out that Tradovate hasn't settled yet is cleared first.
+            if sig.get("flatten_first"):
+                _executor.place_close("pre-reentry")
             place_market_entry(direction, float(sig["price"]), float(stop))
         return
 
