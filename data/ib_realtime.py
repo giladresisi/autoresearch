@@ -606,7 +606,7 @@ class IbRealtimeSource:
             )
         print("[gap_fill_1s_ib] complete", flush=True)
         gap_fill_1m_ib(self._bar_data_dir)  # calls check_parquet_gaps internally
-        print("[gap_fill_1m_ib] complete", flush=True)
+        print("[gap_fill_1m_ib] IB 1m gap fill complete", flush=True)
         # Reload 1m dfs so the in-memory state matches the gap-filled parquet files.
         # Without this, the first live 1m bar write would overwrite any bars added by
         # gap_fill_1m_ib with the stale df that was loaded before gap-fill ran.
