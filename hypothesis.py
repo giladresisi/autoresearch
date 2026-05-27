@@ -188,7 +188,7 @@ def _get_liquidity_price(liq: dict) -> float | None:
     return None
 
 
-def _compute_mid_label(current_close: float, high_price: float, low_price: float) -> str:
+def compute_mid_label(current_close: float, high_price: float, low_price: float) -> str:
     """Classify current_close relative to the midpoint of [low_price, high_price].
 
     Returns "mid" if within 10 points of the midpoint; "above" or "below" otherwise.
@@ -1046,6 +1046,141 @@ def compute_live_hl_mid(
     return result
 
 
+def build_hypothesis_from_direction(
+    direction: str,
+    now,
+    current_close: float,
+    liquidities: list,
+    global_state: dict,
+    old_direction: str,
+    weekly_mid: str,
+    daily_mid: str,
+    last_liquidity: str,
+    divs: list,
+    direction_reason: dict,
+    *,
+    hist_mnq_1m: "pd.DataFrame | None" = None,
+    is_fresh_start: bool = False,
+    skip_veto: bool = False,
+    skip_position_reset: bool = False,
+    old_formed_at: str = "",
+) -> list:
+    """Steps 7-11 of the hypothesis pipeline, callable standalone for manual entry.
+
+    When hist_mnq_1m is None, entry_ranges is left empty (manual entries bypass O5).
+    When skip_veto is True, the direction-veto check is skipped entirely.
+    """
+    # Step 7: targets — filter liquidities in direction from current close.
+    targets = []
+    for liq in liquidities:
+        kind = liq.get("kind")
+        if kind == "level":
+            price = liq.get("price")
+            if price is None:
+                continue
+            if direction == "up" and price > current_close:
+                targets.append({"name": liq["name"], "price": price})
+            elif direction == "down" and price < current_close:
+                targets.append({"name": liq["name"], "price": price})
+        elif kind == "fvg":
+            top = liq.get("top")
+            bottom = liq.get("bottom")
+            if top is None or bottom is None:
+                continue
+            if direction == "up" and bottom > current_close:
+                targets.append({"name": liq["name"], "price": bottom})
+            elif direction == "down" and top < current_close:
+                targets.append({"name": liq["name"], "price": top})
+
+    # Step 8: two-tier cautious prices.
+    ath = global_state["all_time_high"]
+    _cp = compute_cautious_prices(direction, current_close, liquidities, ath)
+    cautious_price_initial         = _cp["cautious_price_initial"]
+    cautious_price_initial_level   = _cp["cautious_price_initial_level"]
+    cautious_price_secondary       = _cp["cautious_price_secondary"]
+    cautious_price_secondary_level = _cp["cautious_price_secondary_level"]
+
+    # Step 8b: veto direction when entry conditions are unfavourable.
+    if not skip_veto and direction != "none":
+        sec_dist = (abs(float(cautious_price_secondary) - current_close)
+                    if cautious_price_secondary != "" else 0)
+        if not is_fresh_start and cautious_price_secondary != "" and sec_dist < CAUTIOUS_MIN_DIST:
+            direction = "none"
+        elif direction == "up" and current_close >= ath:
+            direction = "none"
+        elif not targets:
+            direction = "none"
+
+    # Step 9: entry_ranges — 12hr ago and 1week ago same time anchors.
+    # None → entry_ranges = [] (manual entry: position already being placed, O5 bypassed).
+    entry_ranges = []
+    if hist_mnq_1m is not None:
+        ts_now = pd.Timestamp(now)
+        bar_12hr  = _find_nearest_bar(hist_mnq_1m, ts_now - pd.Timedelta(hours=12))
+        bar_1week = _find_nearest_bar(hist_mnq_1m, ts_now - pd.Timedelta(weeks=1))
+        if bar_12hr is not None:
+            entry_ranges.append({"source": "12hr",  "low": bar_12hr["Low"],  "high": bar_12hr["High"]})
+        if bar_1week is not None:
+            entry_ranges.append({"source": "1week", "low": bar_1week["Low"], "high": bar_1week["High"]})
+
+    # Write hypothesis.json
+    if direction != old_direction:
+        formed_at = pd.Timestamp(now).isoformat()
+    else:
+        formed_at = old_formed_at or pd.Timestamp(now).isoformat()
+
+    new_hypothesis = {
+        "direction":                      direction,
+        "formed_at":                      formed_at,
+        "weekly_mid":                     weekly_mid,
+        "daily_mid":                      daily_mid,
+        "last_liquidity":                 last_liquidity,
+        "divs":                           divs,
+        "targets":                        targets,
+        "cautious_price":                 "",
+        "cautious_price_initial":         cautious_price_initial,
+        "cautious_price_initial_level":   cautious_price_initial_level,
+        "cautious_price_secondary":       cautious_price_secondary,
+        "cautious_price_secondary_level": cautious_price_secondary_level,
+        "entry_ranges":                   entry_ranges,
+    }
+    save_hypothesis(new_hypothesis)
+
+    # Step 10: On none -> up/down transition, reset position state.
+    # skip_position_reset=True is passed by the pipeline when it temporarily cleared
+    # direction to "none" for an unbiased level-swept re-evaluation.  In that case the
+    # transition is artificial: failed_entries still resets (level sweep is a fresh
+    # context) but stop_entry and conf_bar_entry are preserved so a pending stop entry
+    # that was set before the sweep survives.
+    if old_direction == "none" and direction != "none":
+        if skip_position_reset:
+            position = load_position()
+            position["failed_entries"] = 0
+            save_position(position)
+        else:
+            _strategy.reset_position_for_new_hypothesis()
+
+    hyp_event = {
+        "kind":          "new-hypothesis",
+        "time":          pd.Timestamp(now).isoformat(),
+        "direction":     direction,
+        "price":         current_close,
+        "weekly_mid":    weekly_mid,
+        "daily_mid":     daily_mid,
+        "last_liquidity": last_liquidity,
+        "targets":       targets,
+        "cautious_price_initial":         cautious_price_initial,
+        "cautious_price_initial_level":   cautious_price_initial_level,
+        "cautious_price_secondary":       cautious_price_secondary,
+        "cautious_price_secondary_level": cautious_price_secondary_level,
+        "entry_ranges":                   entry_ranges,
+        "direction_reason":               direction_reason,
+    }
+    if direction == "none":
+        return divs
+    return [hyp_event] + divs
+
+
 def run_hypothesis(
     now: datetime,
     mnq_1m: pd.DataFrame,
@@ -1144,11 +1279,11 @@ def run_hypothesis(
 
     weekly_mid = ""
     if week_high_price is not None and week_low_price is not None:
-        weekly_mid = _compute_mid_label(current_close, week_high_price, week_low_price)
+        weekly_mid = compute_mid_label(current_close, week_high_price, week_low_price)
 
     daily_mid = ""
     if day_high_price is not None and day_low_price is not None:
-        daily_mid = _compute_mid_label(current_close, day_high_price, day_low_price)
+        daily_mid = compute_mid_label(current_close, day_high_price, day_low_price)
 
     # Step 4: last_liquidity — most recently touched meaningful level (True Day scope).
     _prior_cal = _ts_now.date() - timedelta(days=1)
@@ -1183,130 +1318,11 @@ def run_hypothesis(
             hist_4hr     = hist_4hr,
         )
 
-    # Step 7: targets — filter liquidities in direction from current close.
-    targets = []
-    for liq in liquidities:
-        kind = liq.get("kind")
-        if kind == "level":
-            price = liq.get("price")
-            if price is None:
-                continue
-            if direction == "up" and price > current_close:
-                targets.append({"name": liq["name"], "price": price})
-            elif direction == "down" and price < current_close:
-                targets.append({"name": liq["name"], "price": price})
-        elif kind == "fvg":
-            top = liq.get("top")
-            bottom = liq.get("bottom")
-            if top is None or bottom is None:
-                continue
-            if direction == "up" and bottom > current_close:
-                targets.append({"name": liq["name"], "price": bottom})
-            elif direction == "down" and top < current_close:
-                targets.append({"name": liq["name"], "price": top})
-
-    # Step 8: two-tier cautious prices.
-    ath = global_state["all_time_high"]
-    _cp = compute_cautious_prices(direction, current_close, liquidities, ath)
-    cautious_price_initial         = _cp["cautious_price_initial"]
-    cautious_price_initial_level   = _cp["cautious_price_initial_level"]
-    cautious_price_secondary       = _cp["cautious_price_secondary"]
-    cautious_price_secondary_level = _cp["cautious_price_secondary_level"]
-
-    # Step 8b: veto direction when entry conditions are unfavourable.
-    # (1) Secondary cautious price is too close — not enough room to run.
-    #     Skipped on the first hypothesis of the session (_is_fresh_start): the first
-    #     hypothesis must always have a direction so the pipeline has a bias to work with.
-    #     direction="none" is only valid after a trend-broken re-evaluation.
-    # (2) Up direction but we are already at or above the recorded ATH — price in uncharted territory.
-    # (3) No targets exist in this direction — nothing to trade toward.
-    if direction != "none":
-        sec_dist = (abs(float(cautious_price_secondary) - current_close)
-                    if cautious_price_secondary != "" else 0)
-        if not _is_fresh_start and cautious_price_secondary != "" and sec_dist < CAUTIOUS_MIN_DIST:
-            direction = "none"
-        elif direction == "up" and current_close >= ath:
-            direction = "none"
-        elif not targets:
-            direction = "none"
-
-    # Step 9: entry_ranges — 12hr ago and 1week ago same time anchors.
-    # Both anchors fall within hist_mnq_1m (session runs 09:20-17:00 ET; even
-    # at 17:00, 12h prior = 05:00 ET which is pre-session).
-    ts_now = pd.Timestamp(now)
-    anchor_12hr = ts_now - pd.Timedelta(hours=12)
-    anchor_1week = ts_now - pd.Timedelta(weeks=1)
-
-    entry_ranges = []
-    bar_12hr = _find_nearest_bar(hist_mnq_1m, anchor_12hr)
-    if bar_12hr is not None:
-        entry_ranges.append({
-            "source": "12hr",
-            "low":  bar_12hr["Low"],
-            "high": bar_12hr["High"],
-        })
-
-    bar_1week = _find_nearest_bar(hist_mnq_1m, anchor_1week)
-    if bar_1week is not None:
-        entry_ranges.append({
-            "source": "1week",
-            "low":  bar_1week["Low"],
-            "high": bar_1week["High"],
-        })
-
-    # Write hypothesis.json
-    if direction != old_direction:
-        formed_at = pd.Timestamp(now).isoformat()
-    else:
-        formed_at = hypothesis.get("formed_at", pd.Timestamp(now).isoformat())
-
-    new_hypothesis = {
-        "direction":                     direction,
-        "formed_at":                     formed_at,
-        "weekly_mid":                    weekly_mid,
-        "daily_mid":                     daily_mid,
-        "last_liquidity":                last_liquidity,
-        "divs":                          divs,
-        "targets":                       targets,
-        "cautious_price":                "",
-        "cautious_price_initial":        cautious_price_initial,
-        "cautious_price_initial_level":  cautious_price_initial_level,
-        "cautious_price_secondary":      cautious_price_secondary,
-        "cautious_price_secondary_level": cautious_price_secondary_level,
-        "entry_ranges":                  entry_ranges,
-    }
-    save_hypothesis(new_hypothesis)
-
-    # Step 10: On none -> up/down transition, reset position state.
-    # skip_position_reset=True is passed by the pipeline when it temporarily cleared
-    # direction to "none" for an unbiased level-swept re-evaluation.  In that case the
-    # transition is artificial: failed_entries still resets (level sweep is a fresh
-    # context) but stop_entry and conf_bar_entry are preserved so a pending stop entry
-    # that was set before the sweep survives.
-    if old_direction == "none" and direction != "none":
-        if skip_position_reset:
-            position = load_position()
-            position["failed_entries"] = 0
-            save_position(position)
-        else:
-            _strategy.reset_position_for_new_hypothesis()
-
-    hyp_event = {
-        "kind":          "new-hypothesis",
-        "time":          pd.Timestamp(now).isoformat(),
-        "direction":     direction,
-        "price":         current_close,
-        "weekly_mid":    weekly_mid,
-        "daily_mid":     daily_mid,
-        "last_liquidity": last_liquidity,
-        "targets":       targets,
-        "cautious_price_initial":        cautious_price_initial,
-        "cautious_price_initial_level":  cautious_price_initial_level,
-        "cautious_price_secondary":      cautious_price_secondary,
-        "cautious_price_secondary_level": cautious_price_secondary_level,
-        "entry_ranges":                  entry_ranges,
-        "direction_reason":              direction_reason,
-    }
-    if direction == "none":
-        return divs
-    return [hyp_event] + divs
+    return build_hypothesis_from_direction(
+        direction, now, current_close, liquidities, global_state,
+        old_direction, weekly_mid, daily_mid, last_liquidity, divs, direction_reason,
+        hist_mnq_1m=hist_mnq_1m,
+        is_fresh_start=_is_fresh_start,
+        skip_position_reset=skip_position_reset,
+        old_formed_at=hypothesis.get("formed_at", ""),
+    )

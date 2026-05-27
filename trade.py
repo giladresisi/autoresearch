@@ -146,6 +146,8 @@ def main() -> None:
             what = "active position" if pos.get("active") else "pending stop entry"
             print(f"ERROR: position.json already has a {what} — use --force to override")
             sys.exit(1)
+        forced_v2 = "up" if direction == "long" else "down"
+        live_orders._force_hypothesis_for_direction(forced_v2)
         if len(args) >= 2:
             entry_price = float(args[1])
             if len(args) >= 3:

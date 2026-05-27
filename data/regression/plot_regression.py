@@ -11,12 +11,15 @@ Output: data/regression/{date}/chart_{mode}.html
         Prints: Chart: <absolute-path>
 """
 
+import datetime
 import json
 import sys
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
+
+from session_times import SESSION_OPEN, SESSION_CLOSE
 
 
 DATE = sys.argv[1] if len(sys.argv) > 1 else None
@@ -51,7 +54,11 @@ else:
         sys.exit(1)
     df = pd.read_parquet(_parquet_1m)
 
-day = df[df.index.date == pd.Timestamp(DATE).date()]
+# Session spans SESSION_OPEN on the previous calendar day to SESSION_CLOSE on DATE.
+_prev_date     = pd.Timestamp(DATE).date() - datetime.timedelta(days=1)
+_session_start = pd.Timestamp(f"{_prev_date} {SESSION_OPEN}", tz="America/New_York")
+_session_end   = pd.Timestamp(f"{DATE} {SESSION_CLOSE}",      tz="America/New_York")
+day = df[(df.index >= _session_start) & (df.index < _session_end)]
 
 # ── Events ────────────────────────────────────────────────────────────────────
 events_path = REG_DIR / f"events{_SFX}.jsonl"
@@ -148,8 +155,8 @@ if events:
     first_t = min(e["ts"] for e in events) - pd.Timedelta(minutes=30)
     last_t  = max(e["ts"] for e in events) + pd.Timedelta(minutes=30)
 else:
-    first_t = pd.Timestamp(f"{DATE} 09:00", tz="America/New_York")
-    last_t  = pd.Timestamp(f"{DATE} 17:00", tz="America/New_York")
+    first_t = _session_start
+    last_t  = _session_end
 
 window = day[(day.index >= first_t) & (day.index <= last_t)]
 
