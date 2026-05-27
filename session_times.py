@@ -10,7 +10,7 @@ SESSION_CLOSE = datetime.time(17, 0)  # 17:00 ET (maintenance window 17:00–18:
 # activity (hypotheses, stop/limit management, exits) runs unrestricted.
 # Format: "HH:MM-HH:MM" using 24-hour clock.  Ranges that cross midnight are
 # supported (e.g. "22:00-02:00").  Leave the list empty to block all entries.
-ENTRY_ALLOWED_WINDOWS: list[str] = ["01:00-04:00","09:35-11:00","12:00-15:00","23:00-00:00"]
+ENTRY_ALLOWED_WINDOWS: list[str] = ["01:00-04:00","09:30-11:00","12:00-15:00","23:00-00:00"]
 
 
 def is_entry_allowed(t: datetime.time) -> bool:
