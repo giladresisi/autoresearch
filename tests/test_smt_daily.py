@@ -1,11 +1,12 @@
-﻿# tests/test_smt_daily.py
-# Unit tests for daily.py: liquidities computation, ATH update, position reset,
-# hypothesis reset, and FVG unvisited filtering.
+# tests/test_smt_daily.py
+# Unit tests for daily.py run_daily_fixed: fixed-for-the-day liquidities
+# (TDO, TWO, prev2-day levels, unvisited 1hr/4hr FVGs), ATH update, and
+# estimated_dir/opposite_premove. run_daily_fixed performs NO hypothesis or
+# position resets.
 
 from __future__ import annotations
 
 import datetime
-import json
 
 import numpy as np
 import pandas as pd
@@ -22,8 +23,7 @@ from smt_state import (
     save_position,
 )
 
-import daily as daily_mod
-from daily import run_daily
+from daily import run_daily_fixed
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +90,11 @@ def _make_empty_hourly() -> pd.DataFrame:
     )
 
 
+def _empty_4hr() -> pd.DataFrame:
+    """Empty 4hr frame (no FVGs)."""
+    return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+
+
 # ---------------------------------------------------------------------------
 # Isolation fixture: redirect all four smt_state paths into tmp_path
 # ---------------------------------------------------------------------------
@@ -111,15 +116,12 @@ def _isolate(tmp_path, monkeypatch):
 def standard_day():
     """
     Produce a standard fixture day (2026-04-27, Monday) with enough bars to
-    exercise all session windows and at least one 1hr FVG.
+    exercise TDO/TWO/prev-day levels and at least one 1hr FVG.
 
-    Returns (now, mnq_1m, hist_mnq_1m, hist_hourly_mnq).
+    Returns (now, today, hist_mnq_1m, hist_1hr, hist_4hr).
     """
     now = _now("2026-04-27", 9, 20)
-
-    # Today's 1m bars: 09:00 → 17:00 ET (480 bars)
-    mnq_1m = make_bars("2026-04-27 09:00:00", periods=480, freq="1min",
-                       base_price=21000.0)
+    today = now.date()
 
     # hist_mnq_1m: Sunday 18:00 ET overnight (futures week start) + prior days
     hist_overnight = make_bars("2026-04-26 18:00:00", periods=900, freq="1min",
@@ -132,13 +134,13 @@ def standard_day():
     hist_mnq_1m = pd.concat([hist_thu, hist_fri, hist_overnight]).sort_index()
     hist_mnq_1m = hist_mnq_1m[~hist_mnq_1m.index.duplicated(keep="last")]
 
-    # Build hist_hourly_mnq with a bullish FVG at bars[0..2]:
+    # Build hist_1hr with a bullish FVG at bars[0..2]:
     #   bar[0].High=21000, bar[2].Low=21020 → gap [21000, 21020]
     idx_1h = _drange("2026-04-25 09:00:00", 10, "h")
     highs = [21000.0, 21010.0, 21025.0] + [21015.0] * 7
     lows  = [20995.0, 20998.0, 21020.0] + [21005.0] * 7  # bar[2].Low=21020 > bar[0].High=21000
 
-    hist_hourly_mnq = pd.DataFrame(
+    hist_1hr = pd.DataFrame(
         {
             "Open":   [21000.0] * 10,
             "High":   highs,
@@ -149,51 +151,76 @@ def standard_day():
         index=idx_1h,
     )
 
-    return now, mnq_1m, hist_mnq_1m, hist_hourly_mnq
+    hist_4hr = _empty_4hr()
+
+    return now, today, hist_mnq_1m, hist_1hr, hist_4hr
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Tests: fixed liquidity names
 # ---------------------------------------------------------------------------
 
-class TestWritesAllRequiredLiquidityNames:
-    def test_writes_all_required_liquidity_names(self, standard_day):
-        now, mnq_1m, hist_mnq_1m, hist_hourly_mnq = standard_day
-        run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly_mnq)
+class TestWritesFixedLiquidityNames:
+    def test_writes_tdo_two_prev_levels_and_fvg(self, standard_day):
+        now, today, hist_mnq_1m, hist_1hr, hist_4hr = standard_day
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
 
         daily = load_daily()
         liq_names = {entry["name"] for entry in daily["liquidities"]}
 
-        required_names = {
-            "TDO", "TWO",
-            "week_high", "week_low",
-            "day_high", "day_low",
-            "asia_high", "asia_low",
-            "london_high", "london_low",
-            "ny_morning_high", "ny_morning_low",
-            "ny_evening_high", "ny_evening_low",
-        }
+        # Fixed-for-the-day reference levels run_daily_fixed always computes.
+        required_names = {"TDO", "TWO"}
         for name in required_names:
             assert name in liq_names, f"Missing liquidity: {name}"
 
-        # At least one fvg_* entry
+        # Prior trading days: prev1 (Friday 2026-04-24) high/low/TDO present.
+        assert "prev1_day_high" in liq_names
+        assert "prev1_day_low" in liq_names
+
+        # At least one fvg_* entry (the bullish 1hr FVG in the fixture).
         fvg_names = [n for n in liq_names if n.startswith("fvg_")]
         assert len(fvg_names) >= 1, "Expected at least one fvg_* entry in liquidities"
 
+    def test_does_not_write_dynamic_levels(self, standard_day):
+        """run_daily_fixed must NOT write day/week/session H/L (those are per-bar now)."""
+        now, today, hist_mnq_1m, hist_1hr, hist_4hr = standard_day
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
+
+        daily = load_daily()
+        liq_names = {entry["name"] for entry in daily["liquidities"]}
+
+        for forbidden in (
+            "day_high", "day_low", "week_high", "week_low",
+            "asia_high", "asia_low", "london_high", "london_low",
+            "ny_morning_high", "ny_morning_low",
+            "ny_evening_high", "ny_evening_low",
+        ):
+            assert forbidden not in liq_names, (
+                f"run_daily_fixed should not write dynamic level {forbidden}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Tests: TWO (True Week Open)
+# ---------------------------------------------------------------------------
 
 class TestTWOIsFirstBarOfWeek:
-    def test_two_is_first_1m_bar_open_of_week(self):
-        """TWO should be the Open of the Sunday 18:00 ET bar (first bar of futures week)."""
+    def test_two_is_monday_1800_bar_open_of_week(self):
+        """TWO should be the Open of the Monday 18:00 ET bar (futures True Week Open)."""
         now = _now("2026-04-27", 9, 20)
+        today = now.date()
 
-        # Sunday 2026-04-26 18:00 ET is the futures-week open
+        # Monday 2026-04-27 18:00 ET is the True Week Open per _compute_two.
         expected_open = 21050.0
 
-        # Build hist_mnq_1m starting at Sunday 18:00 (960 1m bars ≈ 16 hours)
-        hist_idx = _drange("2026-04-26 18:00:00", 960, "1min")
+        # Build hist_mnq_1m spanning the week start through Monday 18:00+.
+        # Start Sunday 18:00 so the futures week is fully represented, with
+        # the Monday 18:00 bar carrying the special open.
+        hist_idx = _drange("2026-04-26 18:00:00", 1500, "1min")
         n = len(hist_idx)
         opens = np.full(n, 21000.0)
-        opens[0] = expected_open  # Sunday 18:00 bar has the special open
+        monday_1800 = pd.Timestamp("2026-04-27 18:00:00", tz="America/New_York")
+        opens[hist_idx.get_loc(monday_1800)] = expected_open
         hist_mnq_1m = pd.DataFrame(
             {
                 "Open":   opens,
@@ -205,13 +232,10 @@ class TestTWOIsFirstBarOfWeek:
             index=hist_idx,
         )
 
-        # Today's bars (minimal)
-        mnq_1m = make_bars("2026-04-27 09:00:00", periods=30, base_price=21000.0)
+        hist_1hr = _make_empty_hourly()
+        hist_4hr = _empty_4hr()
 
-        # Minimal hourly bars (no FVG needed for this test)
-        hist_hourly = _make_empty_hourly()
-
-        run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly)
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
 
         daily = load_daily()
         liq_map = {e["name"]: e for e in daily["liquidities"]}
@@ -220,12 +244,13 @@ class TestTWOIsFirstBarOfWeek:
             f"TWO.price={liq_map['TWO']['price']}, expected {expected_open}"
         )
 
-    def test_two_fallback_to_monday_when_sunday_absent(self):
-        """If Sunday 18:00 bar is absent, TWO uses Monday 00:00 ET bar."""
+    def test_two_fallback_to_monday_midnight_when_1800_absent(self):
+        """If Monday 18:00 bar is absent, TWO uses Monday 00:00 ET bar."""
         now = _now("2026-04-27", 9, 20)
+        today = now.date()
         expected_open = 21060.0
 
-        # hist starts Monday 00:00 (no Sunday 18:00)
+        # hist starts Monday 00:00 (no Monday 18:00 in range)
         hist_idx = _drange("2026-04-27 00:00:00", 600, "1min")
         n = len(hist_idx)
         opens = np.full(n, 21000.0)
@@ -241,10 +266,10 @@ class TestTWOIsFirstBarOfWeek:
             index=hist_idx,
         )
 
-        mnq_1m = make_bars("2026-04-27 09:00:00", periods=30, base_price=21000.0)
-        hist_hourly = _make_empty_hourly()
+        hist_1hr = _make_empty_hourly()
+        hist_4hr = _empty_4hr()
 
-        run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly)
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
 
         daily = load_daily()
         liq_map = {e["name"]: e for e in daily["liquidities"]}
@@ -252,42 +277,53 @@ class TestTWOIsFirstBarOfWeek:
         assert liq_map["TWO"]["price"] == expected_open
 
 
+# ---------------------------------------------------------------------------
+# Tests: all-time high update in global.json
+# ---------------------------------------------------------------------------
+
 class TestAllTimeHighUpdate:
     def _make_minimal(self, base_price: float = 21000.0, high_offset: float = 5.0):
         now = _now("2026-04-27", 9, 20)
-        mnq_1m = make_bars("2026-04-27 09:00:00", periods=60,
-                           base_price=base_price, high_offset=high_offset, low_offset=5.0)
-        hist_mnq_1m = make_bars("2026-04-27 00:00:00", periods=60, base_price=base_price)
-        hist_hourly = _make_empty_hourly()
-        return now, mnq_1m, hist_mnq_1m, hist_hourly
+        today = now.date()
+        hist_mnq_1m = make_bars("2026-04-27 00:00:00", periods=60,
+                                base_price=base_price, high_offset=high_offset,
+                                low_offset=5.0)
+        hist_1hr = _make_empty_hourly()
+        hist_4hr = _empty_4hr()
+        return now, today, hist_mnq_1m, hist_1hr, hist_4hr
 
     def test_all_time_high_updates_when_today_higher(self):
         save_global({"all_time_high": 100.0, "confidence": "medium", "trend": "up"})
-        now, mnq_1m, hist_mnq_1m, hist_hourly = self._make_minimal(
+        now, today, hist_mnq_1m, hist_1hr, hist_4hr = self._make_minimal(
             base_price=200.0, high_offset=5.0
-        )  # day_high = 205
-        run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly)
+        )  # hist high = 205
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
         g = load_global()
         assert g["all_time_high"] == 205.0
 
     def test_all_time_high_unchanged_when_today_lower(self):
         save_global({"all_time_high": 100.0, "confidence": "medium", "trend": "up"})
-        now, mnq_1m, hist_mnq_1m, hist_hourly = self._make_minimal(
+        now, today, hist_mnq_1m, hist_1hr, hist_4hr = self._make_minimal(
             base_price=45.0, high_offset=5.0
-        )  # day_high = 50
-        run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly)
+        )  # hist high = 50
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
         g = load_global()
         assert g["all_time_high"] == 100.0
 
+
+# ---------------------------------------------------------------------------
+# Tests: estimated_dir / opposite_premove
+# ---------------------------------------------------------------------------
 
 class TestEstimatedDirAndOppositePremove:
     def _run_with_global_trend(self, trend: str):
         save_global({"all_time_high": 0.0, "confidence": "medium", "trend": trend})
         now = _now("2026-04-27", 9, 20)
-        mnq_1m = make_bars("2026-04-27 09:00:00", periods=60)
+        today = now.date()
         hist_mnq_1m = make_bars("2026-04-27 00:00:00", periods=60)
-        hist_hourly = _make_empty_hourly()
-        run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly)
+        hist_1hr = _make_empty_hourly()
+        hist_4hr = _empty_4hr()
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
 
     def test_estimated_dir_copied_from_global_trend_up(self):
         self._run_with_global_trend("up")
@@ -305,70 +341,113 @@ class TestEstimatedDirAndOppositePremove:
         assert daily["opposite_premove"] == "no"
 
 
-class TestPositionReset:
-    def test_position_per_session_fields_reset(self, standard_day):
-        # Preset position.json with non-default values
-        save_position({
-            "active": {"fill_price": 21400.0, "direction": "up"},
-            "stop_entry": 21000.0,
-            "conf_bar_entry": {"high": 21410.0, "low": 21390.0},
-            "failed_entries": 2,
-        })
+# ---------------------------------------------------------------------------
+# Tests: run_daily_fixed performs NO resets
+# ---------------------------------------------------------------------------
 
-        now, mnq_1m, hist_mnq_1m, hist_hourly_mnq = standard_day
-        run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly_mnq)
-
-        pos = load_position()
-        assert pos["active"] == {}
-        assert pos["stop_entry"] == ""
-        assert pos["conf_bar_entry"] == {}
-        assert pos["failed_entries"] == 0
-
-
-class TestHypothesisReset:
-    def test_hypothesis_direction_set_to_none(self, standard_day):
-        # Preset hypothesis with direction="up"
+class TestNoResets:
+    def test_run_daily_fixed_does_not_reset_hypothesis(self, standard_day):
         save_hypothesis({
             "direction": "up",
             "weekly_mid": "above",
             "daily_mid": "mid",
             "last_liquidity": "day_low",
-            "divs": [],
-            "targets": [],
-            "cautious_price": "",
-            "entry_ranges": [],
-        })
-
-        now, mnq_1m, hist_mnq_1m, hist_hourly_mnq = standard_day
-        run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly_mnq)
-
-        hyp = load_hypothesis()
-        assert hyp["direction"] == "none"
-
-    def test_hypothesis_other_fields_untouched(self, standard_day):
-        """run_daily should only set direction='none'; other fields stay as-is."""
-        save_hypothesis({
-            "direction": "up",
-            "weekly_mid": "above",
-            "daily_mid": "mid",
-            "last_liquidity": "day_high",
             "divs": [{"type": "wick"}],
             "targets": [{"name": "week_high", "price": 21450.0}],
             "cautious_price": "21410.0",
-            "entry_ranges": [{"source": "12hr", "low": 100.0, "high": 110.0}],
+            "entry_ranges": [],
         })
 
-        now, mnq_1m, hist_mnq_1m, hist_hourly_mnq = standard_day
-        run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly_mnq)
+        now, today, hist_mnq_1m, hist_1hr, hist_4hr = standard_day
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
 
         hyp = load_hypothesis()
-        assert hyp["direction"] == "none"
+        assert hyp["direction"] == "up"
         assert hyp["weekly_mid"] == "above"
         assert hyp["daily_mid"] == "mid"
-        assert hyp["last_liquidity"] == "day_high"
+        assert hyp["last_liquidity"] == "day_low"
         assert len(hyp["divs"]) == 1
         assert len(hyp["targets"]) == 1
 
+    def test_run_daily_fixed_does_not_reset_position(self, standard_day):
+        save_position({
+            "active": {"fill_price": 21400.0, "direction": "up"},
+            "stop_entry": 21000.0,
+            "stop_direction": "up",
+            "conf_bar_entry": {"high": 21410.0, "low": 21390.0},
+            "conf_bar_exit": {},
+            "pending_stop": None,
+            "failed_entries": 2,
+            "session_mid_crosses": 1,
+        })
+
+        now, today, hist_mnq_1m, hist_1hr, hist_4hr = standard_day
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
+
+        pos = load_position()
+        assert pos["active"] == {"fill_price": 21400.0, "direction": "up"}
+        assert pos["stop_entry"] == 21000.0
+        assert pos["conf_bar_entry"] == {"high": 21410.0, "low": 21390.0}
+        assert pos["failed_entries"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Tests: 4hr FVG detection
+# ---------------------------------------------------------------------------
+
+class TestFourHourFvgDetection:
+    def test_run_daily_fixed_4hr_fvg_detected(self):
+        """A bullish 3-bar 4hr FVG is detected and written to liquidities."""
+        now = _now("2026-04-27", 9, 20)
+        today = now.date()
+
+        # 4hr bars with a bullish FVG: bar[2].Low(21120) > bar[0].High(21100)
+        #   → gap bottom=21100, top=21120
+        idx_4hr = _drange("2026-04-25 00:00:00", 3, "4h")
+        hist_4hr = pd.DataFrame(
+            {
+                "Open":  [21090.0, 21105.0, 21118.0],
+                "High":  [21100.0, 21110.0, 21130.0],
+                "Low":   [21080.0, 21100.0, 21120.0],
+                "Close": [21095.0, 21108.0, 21125.0],
+                "Volume": [100.0] * 3,
+            },
+            index=idx_4hr,
+        )
+
+        # hist_1hr with no FVG so the only fvg_* entry comes from hist_4hr.
+        hist_1hr = _make_empty_hourly()
+
+        # hist_mnq_1m minimal so TDO/TWO can be computed; no bar fills the 4hr gap.
+        idx_1m = _drange("2026-04-27 00:00:00", 60, "1min")
+        hist_mnq_1m = pd.DataFrame(
+            {
+                "Open":  np.full(60, 21000.0),
+                "High":  np.full(60, 21005.0),
+                "Low":   np.full(60, 20995.0),
+                "Close": np.full(60, 21001.0),
+                "Volume": np.ones(60),
+            },
+            index=idx_1m,
+        )
+
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
+
+        state = load_daily()
+        fvgs = [l for l in state["liquidities"] if l.get("kind") == "fvg"]
+        assert len(fvgs) >= 1, f"Expected at least 1 FVG, got {fvgs}"
+
+        bull_fvg = next(
+            (f for f in fvgs if abs(f.get("bottom", 0) - 21100.0) < 1.0), None
+        )
+        assert bull_fvg is not None, f"No bullish 4hr FVG found in {fvgs}"
+        assert bull_fvg["top"] == pytest.approx(21120.0, abs=0.1)
+        assert bull_fvg["bottom"] == pytest.approx(21100.0, abs=0.1)
+
+
+# ---------------------------------------------------------------------------
+# Tests: unvisited FVG filtering
+# ---------------------------------------------------------------------------
 
 class TestUnvisitedFvgFilter:
     def test_unvisited_fvg_filter_excludes_filled_gaps(self):
@@ -380,16 +459,16 @@ class TestUnvisitedFvgFilter:
         Only FVG2 should appear in liquidities.
         """
         now = _now("2026-04-27", 9, 20)
+        today = now.date()
 
         # 1hr bars (6 bars starting 2026-04-25 09:00 ET)
         # FVG1: bars[2].Low(21020) > bars[0].High(21000) → bullish gap [21000, 21020]
         # FVG2: bars[5].Low(21120) > bars[3].High(21100) → bullish gap [21100, 21120]
-        # Using exactly 6 bars prevents any additional 3-bar triple-bar scan beyond bar[3..5].
         idx_1h = _drange("2026-04-25 09:00:00", 6, "h")
         highs = [21000.0, 21010.0, 21025.0, 21100.0, 21110.0, 21125.0]
         lows  = [20995.0, 20998.0, 21020.0, 21095.0, 21098.0, 21120.0]
 
-        hist_hourly = pd.DataFrame(
+        hist_1hr = pd.DataFrame(
             {
                 "Open":   [21000.0] * 6,
                 "High":   highs,
@@ -406,7 +485,6 @@ class TestUnvisitedFvgFilter:
         fvg2_formation_ts = idx_1h[5]
 
         # After FVG1 formation: a 1m bar that FILLS FVG1 (re-enters [21000, 21020])
-        # High=21012 >= 21000(bottom), Low=20999 <= 21020(top) → fills FVG1
         fill_ts = fvg1_formation_ts + pd.Timedelta(minutes=5)
         fill_bar = pd.DataFrame(
             {"Open": [21010.0], "High": [21012.0], "Low": [20999.0],
@@ -429,7 +507,9 @@ class TestUnvisitedFvgFilter:
         hist_mnq_1m = pd.concat([fill_bar, safe_bar, today_1m]).sort_index()
         hist_mnq_1m = hist_mnq_1m[~hist_mnq_1m.index.duplicated(keep="last")]
 
-        run_daily(now, today_1m, hist_mnq_1m, hist_hourly)
+        hist_4hr = _empty_4hr()
+
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
 
         daily = load_daily()
         fvg_entries = [e for e in daily["liquidities"] if e["name"].startswith("fvg_")]

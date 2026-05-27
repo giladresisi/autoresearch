@@ -20,7 +20,12 @@ import smt_state
 # ---------------------------------------------------------------------------
 
 def _make_1m_bars(date_str: str, n: int = 60, base_price: float = 21000.0) -> pd.DataFrame:
-    """Build a synthetic 1m OHLCV DataFrame (tz-aware ET) with n bars starting at 09:20."""
+    """Build a synthetic 1m OHLCV DataFrame (tz-aware ET) with n bars starting at 09:20.
+
+    These tests pin the backtest session open to 09:20 (see _SESSION_OPEN_V2 patch in
+    each test) so the same-date 09:20 → 16:00 window captures these bars. 09:20 is a
+    5m boundary, so bar 0 fires the 5m dispatch path; bar 1 (09:21) is a non-5m bar.
+    """
     tz = "America/New_York"
     start = pd.Timestamp(f"{date_str} 09:20:00", tz=tz)
     idx = pd.date_range(start, periods=n, freq="1min")
@@ -54,7 +59,7 @@ def test_5m_dispatch_order_is_trend_then_hypothesis_then_strategy(
     """At a 5m boundary, dispatch order must be: trend → hypothesis → strategy."""
     call_order: list[str] = []
 
-    def fake_run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly_mnq):
+    def fake_run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today):
         pass  # no-op
 
     def fake_run_hypothesis(now, mnq_1m, mes_1m, hist_mnq_1m, hist_mes_1m, **kwargs):
@@ -65,15 +70,15 @@ def test_5m_dispatch_order_is_trend_then_hypothesis_then_strategy(
         call_order.append("trend")
         return None
 
-    def fake_run_strategy(now, mnq_5m_bar, mnq_1m_recent, fill_check_only=False):
+    def fake_run_strategy(now, mnq_5m_bar, mnq_1m_recent, fill_check_only=False, **kwargs):
         call_order.append("strategy")
         return None
 
     date_str = "2025-11-14"
     tz = "America/New_York"
 
-    # Build enough bars so bar 4 (index) lands on a 5m boundary (09:24 → 09:25 is at minute 25, %5==0).
-    # Start at 09:20 (minute=20, 20%5==0 → first bar IS a 5m boundary), so bar at 09:20 triggers.
+    # Bars start at 09:20 (minute=20, 20%5==0 → first bar IS a 5m boundary), so the bar
+    # at 09:20 triggers the trend → hypothesis → strategy dispatch path.
     mnq_bars = _make_1m_bars(date_str, n=10)
     mes_bars = _make_1m_bars(date_str, n=10)
 
@@ -84,7 +89,7 @@ def test_5m_dispatch_order_is_trend_then_hypothesis_then_strategy(
     import strategy as _strat_mod
     import trend as _trend_mod
 
-    monkeypatch.setattr(_daily_mod, "run_daily", fake_run_daily)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", fake_run_daily_fixed)
     monkeypatch.setattr(_hyp_mod,  "run_hypothesis", fake_run_hypothesis)
     monkeypatch.setattr(_trend_mod, "run_trend", fake_run_trend)
     monkeypatch.setattr(_strat_mod, "run_strategy", fake_run_strategy)
@@ -104,21 +109,29 @@ def test_5m_dispatch_order_is_trend_then_hypothesis_then_strategy(
     import strategy_smt as _smt
     monkeypatch.setattr(_smt, "load_futures_data", lambda: futures_data)
 
+    # Pin the backtest session open to 09:20 so the same-date 09:20 → 16:00 window
+    # captures the synthetic bars (the live SESSION_OPEN is the overnight 18:00).
+    monkeypatch.setattr(_bt, "_SESSION_OPEN_V2", "09:20:00")
+
     run_backtest_v2(date_str, date_str, write_events=False)
 
-    # Find the first 5m boundary call group: hypothesis must precede trend, trend precede strategy.
-    hyp_indices   = [i for i, v in enumerate(call_order) if v == "hypothesis"]
+    # on_session_start runs hypothesis once before the per-bar loop begins; that leading
+    # call is not part of any bar's dispatch. Anchor on the first per-bar dispatch by
+    # taking the first trend call (trend runs first inside on_1m_bar) and only consider
+    # hypothesis/strategy calls that occur after it.
     trend_indices = [i for i, v in enumerate(call_order) if v == "trend"]
-    strat_indices = [i for i, v in enumerate(call_order) if v == "strategy"]
-
-    assert hyp_indices,   "run_hypothesis was never called"
     assert trend_indices, "run_trend was never called on a 5m boundary"
-    assert strat_indices, "run_strategy was never called on a 5m boundary"
-
-    # For the first 5m boundary: trend index < hypothesis index < strategy index
-    first_hyp   = hyp_indices[0]
     first_trend = trend_indices[0]
-    first_strat = strat_indices[0]
+
+    hyp_after_trend   = [i for i, v in enumerate(call_order) if v == "hypothesis" and i > first_trend]
+    strat_after_trend = [i for i, v in enumerate(call_order) if v == "strategy"   and i > first_trend]
+
+    assert hyp_after_trend,   "run_hypothesis was never called after trend on a 5m boundary"
+    assert strat_after_trend, "run_strategy was never called after trend on a 5m boundary"
+
+    # Within the first per-bar dispatch: trend < hypothesis < strategy.
+    first_hyp   = hyp_after_trend[0]
+    first_strat = strat_after_trend[0]
 
     assert first_trend < first_hyp, (
         f"trend (pos {first_trend}) must fire before hypothesis (pos {first_hyp})"
@@ -136,7 +149,7 @@ def test_1m_only_dispatches_trend(tmp_path, monkeypatch, _isolate_state):
     """For a non-5m boundary bar, only run_trend is called (not hypothesis, not strategy)."""
     calls: dict[str, int] = {"hypothesis": 0, "trend": 0, "strategy": 0, "daily": 0}
 
-    def fake_run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly_mnq):
+    def fake_run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today):
         calls["daily"] += 1
 
     def fake_run_hypothesis(now, mnq_1m, mes_1m, hist_mnq_1m, hist_mes_1m, **kwargs):
@@ -147,7 +160,7 @@ def test_1m_only_dispatches_trend(tmp_path, monkeypatch, _isolate_state):
         calls["trend"] += 1
         return None
 
-    def fake_run_strategy(now, mnq_5m_bar, mnq_1m_recent, fill_check_only=False):
+    def fake_run_strategy(now, mnq_5m_bar, mnq_1m_recent, fill_check_only=False, **kwargs):
         calls["strategy"] += 1
         return None
 
@@ -165,19 +178,25 @@ def test_1m_only_dispatches_trend(tmp_path, monkeypatch, _isolate_state):
     import trend as _trend_mod
     import strategy_smt as _smt
 
-    monkeypatch.setattr(_daily_mod, "run_daily", fake_run_daily)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", fake_run_daily_fixed)
     monkeypatch.setattr(_hyp_mod,  "run_hypothesis", fake_run_hypothesis)
     monkeypatch.setattr(_trend_mod, "run_trend", fake_run_trend)
     monkeypatch.setattr(_strat_mod, "run_strategy", fake_run_strategy)
     monkeypatch.setattr(_smt, "load_futures_data", lambda: futures_data)
 
+    import backtest_smt as _bt
     from backtest_smt import run_backtest_v2
+    # Pin the backtest session open to 09:20 so the same-date 09:20 → 16:00 window
+    # captures the synthetic bars (the live SESSION_OPEN is the overnight 18:00).
+    monkeypatch.setattr(_bt, "_SESSION_OPEN_V2", "09:20:00")
     run_backtest_v2(date_str, date_str, write_events=False)
 
     # There is 1 5m-boundary bar (09:20) and 1 non-5m bar (09:21).
-    # trend and strategy fire on every bar; hypothesis only on 5m boundaries.
-    assert calls["hypothesis"] == 1, (
-        f"hypothesis should be called once (only at 5m boundary), got {calls['hypothesis']}"
+    # trend and strategy fire on every bar; hypothesis fires once at on_session_start
+    # plus once on the 5m-boundary bar.
+    assert calls["hypothesis"] == 2, (
+        f"hypothesis should be called twice (on_session_start + 5m boundary), "
+        f"got {calls['hypothesis']}"
     )
     assert calls["trend"] == 2, (
         f"trend should be called for every bar (2 bars), got {calls['trend']}"

@@ -72,7 +72,7 @@ def test_init_pipeline_is_none(DispatcherCls):
 
 def test_on_1m_bar_before_session_start_is_noop(DispatcherCls, monkeypatch, _isolate_state):
     import daily as _daily_mod
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
 
     d = DispatcherCls()
     hist = _make_1m_bars("2025-11-13 09:20", n=5)
@@ -88,7 +88,7 @@ def test_on_1m_bar_before_session_start_is_noop(DispatcherCls, monkeypatch, _iso
 
 def test_on_session_start_creates_pipeline(_isolate_state, DispatcherCls, monkeypatch):
     import daily as _daily_mod
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
 
     hist = _make_1m_bars("2025-11-13 09:20", n=10)
     now = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
@@ -111,7 +111,7 @@ def test_on_session_start_idempotent_same_day(_isolate_state, DispatcherCls, mon
     import daily as _daily_mod
     def _fake_run_daily(*a, **kw):
         call_count["n"] += 1
-    monkeypatch.setattr(_daily_mod, "run_daily", _fake_run_daily)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", _fake_run_daily)
 
     hist = _make_1m_bars("2025-11-13 09:20", n=5)
     now1 = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
@@ -132,7 +132,7 @@ def test_on_session_start_idempotent_same_day(_isolate_state, DispatcherCls, mon
 
 def test_on_session_start_resets_on_new_day(_isolate_state, DispatcherCls, monkeypatch):
     import daily as _daily_mod
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
 
     hist = _make_1m_bars("2025-11-13 09:20", n=5)
     day1 = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
@@ -157,7 +157,7 @@ def test_on_1m_bar_delegates_to_pipeline(_isolate_state, DispatcherCls, monkeypa
     import trend as _trend_mod
     import strategy as _strat_mod
     import hypothesis as _hyp_mod
-    monkeypatch.setattr(_daily_mod, "run_daily",       lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
     monkeypatch.setattr(_trend_mod, "run_trend",       lambda *a, **kw: None)
     monkeypatch.setattr(_strat_mod, "run_strategy",    lambda *a, **kw: None)
     monkeypatch.setattr(_hyp_mod,   "run_hypothesis",  lambda *a, **kw: [])
@@ -189,7 +189,7 @@ def test_on_1m_bar_passes_fresh_dfs_not_stale(_isolate_state, DispatcherCls, mon
     import trend as _trend_mod
     import strategy as _strat_mod
     import hypothesis as _hyp_mod
-    monkeypatch.setattr(_daily_mod, "run_daily",      lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
     monkeypatch.setattr(_hyp_mod,   "run_hypothesis", lambda *a, **kw: [])
     monkeypatch.setattr(_trend_mod, "run_trend",      lambda *a, **kw: None)
 
@@ -227,7 +227,7 @@ def test_on_1m_bar_slices_today_bars(_isolate_state, DispatcherCls, monkeypatch)
     import trend as _trend_mod
     import strategy as _strat_mod
     import hypothesis as _hyp_mod
-    monkeypatch.setattr(_daily_mod, "run_daily",      lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
     monkeypatch.setattr(_trend_mod, "run_trend",      lambda *a, **kw: None)
     monkeypatch.setattr(_hyp_mod,   "run_hypothesis", lambda *a, **kw: [])
 
@@ -253,3 +253,33 @@ def test_on_1m_bar_slices_today_bars(_isolate_state, DispatcherCls, monkeypatch)
     # recent should only contain today's bars up to now_bar
     recent = captured[0]
     assert all(ts.date() == pd.Timestamp("2025-11-14").date() for ts in recent.index)
+
+
+# ---------------------------------------------------------------------------
+# Test 9: FORCE_RESET env var is forwarded to pipeline.on_session_start
+# ---------------------------------------------------------------------------
+
+def test_force_reset_env_var_passed_to_pipeline(_isolate_state, DispatcherCls, monkeypatch):
+    """FORCE_RESET=true causes pipeline.on_session_start to be called with force_reset=True."""
+    monkeypatch.setenv("FORCE_RESET", "true")
+
+    captured: dict = {}
+
+    class _FakePipeline:
+        def __init__(self, *a, **kw):
+            pass
+
+        def on_session_start(self, now, today_mnq_at_open, force_reset=False):
+            captured["force_reset"] = force_reset
+
+    import session_pipeline as _sp_mod
+    monkeypatch.setattr(_sp_mod, "SessionPipeline", _FakePipeline)
+
+    hist = _make_1m_bars("2025-11-13 09:20", n=5)
+    now = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+
+    # _force_reset is read in __init__, so construct after setting the env var.
+    d = DispatcherCls()
+    d.on_session_start(now, hist, hist)
+
+    assert captured.get("force_reset") is True

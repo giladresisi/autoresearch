@@ -956,6 +956,7 @@ class SmtV2Dispatcher:
     def __init__(self) -> None:
         self._pipeline = None
         self._session_date = None
+        self._force_reset = os.environ.get("FORCE_RESET", "").lower() == "true"
 
     def on_session_start(self, now: pd.Timestamp, mnq_1m_df: pd.DataFrame, mes_1m_df: pd.DataFrame) -> None:
         """Initialize pipeline with current history snapshot and seed session state.
@@ -971,7 +972,7 @@ class SmtV2Dispatcher:
         today_at_open = mnq_1m_df[
             (mnq_1m_df.index.date == today) & (mnq_1m_df.index <= now)
         ]
-        self._pipeline.on_session_start(now, today_at_open)
+        self._pipeline.on_session_start(now, today_at_open, force_reset=self._force_reset)
         print(f"[EMIT] daily complete date={today}", flush=True)
         self._session_date = today
 
