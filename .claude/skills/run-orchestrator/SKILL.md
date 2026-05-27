@@ -55,27 +55,30 @@ uv run python trade.py start --force   # adjust flags per user request
 After the start command succeeds, report the session window status:
 
 ```powershell
-uv run python -c "
+$tmp = "$env:TEMP\session_status.py"; @'
 from session_times import SESSION_OPEN, SESSION_CLOSE
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-now = datetime.now(tz=ZoneInfo('America/New_York'))
-open_today  = now.replace(hour=SESSION_OPEN.hour,  minute=SESSION_OPEN.minute,  second=0, microsecond=0)
-close_today = now.replace(hour=SESSION_CLOSE.hour, minute=SESSION_CLOSE.minute, second=0, microsecond=0)
-if open_today <= now < close_today:
-    diff = close_today - now
+now = datetime.now(tz=ZoneInfo("America/New_York"))
+t = now.time()
+# Overnight session: SESSION_OPEN (18:00) > SESSION_CLOSE (17:00)
+# Active when t >= SESSION_OPEN (evening) or t < SESSION_CLOSE (post-midnight)
+if t >= SESSION_OPEN or t < SESSION_CLOSE:
+    if t < SESSION_CLOSE:
+        close_dt = now.replace(hour=SESSION_CLOSE.hour, minute=SESSION_CLOSE.minute, second=0, microsecond=0)
+    else:
+        close_dt = (now + timedelta(days=1)).replace(hour=SESSION_CLOSE.hour, minute=SESSION_CLOSE.minute, second=0, microsecond=0)
+    diff = close_dt - now
     h, m = divmod(int(diff.total_seconds()) // 60, 60)
-    print(f'Session window ACTIVE — closes at {SESSION_CLOSE.strftime(\"%H:%M\")} ET (in {h}h {m}m)')
-elif now < open_today:
-    diff = open_today - now
-    h, m = divmod(int(diff.total_seconds()) // 60, 60)
-    print(f'Pre-session — opens at {SESSION_OPEN.strftime(\"%H:%M\")} ET today (in {h}h {m}m)')
+    print("Session window ACTIVE - closes at %s ET (in %dh %dm)" % (SESSION_CLOSE.strftime("%H:%M"), h, m))
 else:
-    open_tomorrow = open_today + timedelta(days=1)
-    diff = open_tomorrow - now
+    open_dt = now.replace(hour=SESSION_OPEN.hour, minute=SESSION_OPEN.minute, second=0, microsecond=0)
+    if now >= open_dt:
+        open_dt += timedelta(days=1)
+    diff = open_dt - now
     h, m = divmod(int(diff.total_seconds()) // 60, 60)
-    print(f'Post-session — next session opens at {SESSION_OPEN.strftime(\"%H:%M\")} ET tomorrow (in {h}h {m}m)')
-"
+    print("Pre-session - opens at %s ET (in %dh %dm)" % (SESSION_OPEN.strftime("%H:%M"), h, m))
+'@ | Out-File -FilePath $tmp -Encoding ascii; uv run python $tmp; Remove-Item $tmp
 ```
 
 ## Step 2 — Arm the persistent Monitor
