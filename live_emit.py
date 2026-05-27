@@ -5,4 +5,4 @@ import json
 
 def emit_v2_signal(sig: dict) -> None:
     """Print a v2 signal dict as a JSON line to stdout."""
-    print(json.dumps(sig, sort_keys=True), flush=True)
+    print(json.dumps(sig), flush=True)

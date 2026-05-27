@@ -72,6 +72,9 @@ class JsonlFileSink:
             if kind is not None:
                 stamped["kind"] = kind
             stamped["time"] = _et_now()
+            for _pf in ("direction", "side"):
+                if _pf in obj:
+                    stamped[_pf] = obj.pop(_pf)
             stamped.update(sorted(obj.items()))
             with open(self._path, "a", encoding="utf-8") as f:
                 f.write(_json.dumps(stamped) + "\n")
