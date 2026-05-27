@@ -1,6 +1,7 @@
 # daily.py
-# Once per session at 09:20 ET: compute daily.json liquidities, update global.json,
-# reset per-session position.json fields, set hypothesis.direction = "none".
+# Once per session at 09:20 ET: compute the fixed-for-the-day levels into daily.json
+# (TDO, TWO, prior-day highs/lows, unvisited 1hr/4hr FVGs) and update global.json's
+# all-time high. Performs no hypothesis or position resets — those are handled elsewhere.
 
 from __future__ import annotations
 
@@ -12,11 +13,8 @@ import pandas as pd
 from smt_state import (
     load_global, save_global,
     load_daily, save_daily,
-    load_hypothesis, save_hypothesis,
 )
-import strategy as _strategy
 from strategy_smt import compute_tdo
-from hypothesis import compute_live_hl_mid
 
 # ---------------------------------------------------------------------------
 # Session time windows (ET local times, naive — compared against .time())
@@ -196,29 +194,23 @@ def _detect_fvgs(
     return result
 
 
-def run_daily(
+def run_daily_fixed(
     now: datetime.datetime,
-    mnq_1m: pd.DataFrame,
     hist_mnq_1m: pd.DataFrame,
-    hist_hourly_mnq: pd.DataFrame,
-    reset_hypothesis: bool = True,
-    reset_position: bool = True,
+    hist_1hr: pd.DataFrame,
+    hist_4hr: pd.DataFrame,
+    today: datetime.date,
 ) -> None:
-    """Once-per-session entry point called at 09:20 ET.
+    """Once-per-session entry point: compute the fixed-for-the-day levels.
 
     Parameters
     ----------
-    now           : current wall-clock / bar time (tz-aware, ET)
-    mnq_1m        : 1m bars for today's session (tz-aware ET index)
-    hist_mnq_1m   : historical 1m bars (multiple prior days + current week)
-    hist_hourly_mnq: 1hr bars over last ~3 trading days (for FVG scan)
+    now         : current wall-clock / bar time (tz-aware, ET)
+    hist_mnq_1m : historical 1m bars (multiple prior days + current week)
+    hist_1hr    : 1hr bars over recent trading days (for FVG scan)
+    hist_4hr    : 4hr bars over recent trading days (for FVG scan)
+    today       : the trading date these levels apply to
     """
-    today = now.date()
-
-    # ------------------------------------------------------------------ #
-    # Step 1: read existing daily.json (recomputed anyway, kept for ref)  #
-    # ------------------------------------------------------------------ #
-    _daily = load_daily()  # noqa: not used after this
 
     # ------------------------------------------------------------------ #
     # Step 2: compute liquidities                                          #
@@ -226,118 +218,59 @@ def run_daily(
     liquidities: list[dict] = []
 
     # TDO — True Day Open via strategy_smt helper
-    tdo_price = compute_tdo(mnq_1m, today)
-    if tdo_price is None and not hist_mnq_1m.empty:
-        tdo_price = compute_tdo(hist_mnq_1m, today)
+    tdo_price = compute_tdo(hist_mnq_1m, today)
     if tdo_price is not None:
         liquidities.append({"name": "TDO", "kind": "level", "price": float(tdo_price)})
 
     # TWO — True Week Open (inline)
-    # Combine hist_mnq_1m and mnq_1m for the current-week lookup
-    combined_1m = pd.concat([hist_mnq_1m, mnq_1m]).sort_index()
-    combined_1m = combined_1m[~combined_1m.index.duplicated(keep="last")]
-    two_price = _compute_two(combined_1m, today)
+    two_price = _compute_two(hist_mnq_1m, today)
     if two_price is not None:
         liquidities.append({"name": "TWO", "kind": "level", "price": float(two_price)})
-
-    # week / day high, low, mid — delegated to compute_live_hl_mid (shared with hypothesis.py).
-    _now_ts = pd.Timestamp(now)
-    if _now_ts.tzinfo is None:
-        _now_ts = _now_ts.tz_localize("America/New_York")
-    else:
-        _now_ts = _now_ts.tz_convert("America/New_York")
-    _live_hl = compute_live_hl_mid(combined_1m, _now_ts)
-
-    # Fallback for day: if no bars from overnight start, try the calendar-date filter.
-    if "day_high" not in _live_hl:
-        _fb = combined_1m[combined_1m.index.date == today]
-        if not _fb.empty:
-            _dh, _dl = float(_fb["High"].max()), float(_fb["Low"].min())
-            _live_hl.update({"day_high": _dh, "day_low": _dl, "day_mid": (_dh + _dl) / 2.0})
-
-    for _name in ("week_high", "week_low", "week_mid", "day_high", "day_low", "day_mid"):
-        if _name in _live_hl:
-            liquidities.append({"name": _name, "kind": "level", "price": _live_hl[_name]})
 
     # Prior 2 trading days: high, low, TDO
     for i, prior_date in enumerate(_last_n_trading_dates(today, 2), start=1):
         _pmid = pd.Timestamp(prior_date, tz="America/New_York")
-        _ps = combined_1m.index.searchsorted(_pmid,                             side="left")
-        _pe = combined_1m.index.searchsorted(_pmid + pd.Timedelta(days=1),      side="left")
-        prior_bars = combined_1m.iloc[_ps:_pe]
+        _ps = hist_mnq_1m.index.searchsorted(_pmid,                        side="left")
+        _pe = hist_mnq_1m.index.searchsorted(_pmid + pd.Timedelta(days=1), side="left")
+        prior_bars = hist_mnq_1m.iloc[_ps:_pe]
         if not prior_bars.empty:
             liquidities.append({"name": f"prev{i}_day_high", "kind": "level",
                                 "price": float(prior_bars["High"].max())})
             liquidities.append({"name": f"prev{i}_day_low", "kind": "level",
                                 "price": float(prior_bars["Low"].min())})
-        prior_tdo = compute_tdo(combined_1m, prior_date)
+        prior_tdo = compute_tdo(hist_mnq_1m, prior_date)
         if prior_tdo is not None:
             liquidities.append({"name": f"prev{i}_TDO", "kind": "level",
                                 "price": float(prior_tdo)})
 
-    # Session highs/lows — use combined_1m so we can look back into hist for asia
-    for session in ("asia", "london", "ny_morning", "ny_evening"):
-        session_bars = _session_bars(combined_1m, session, today)
-        if not session_bars.empty:
-            liquidities.append({
-                "name": f"{session}_high",
-                "kind": "level",
-                "price": float(session_bars["High"].max()),
-            })
-            liquidities.append({
-                "name": f"{session}_low",
-                "kind": "level",
-                "price": float(session_bars["Low"].min()),
-            })
-
     # Recent unvisited 1hr FVGs
-    fvgs = _detect_fvgs(hist_hourly_mnq, combined_1m)
+    fvgs = _detect_fvgs(hist_1hr, hist_mnq_1m)
     liquidities.extend(fvgs)
+    # Recent unvisited 4hr FVGs
+    fvgs_4hr = _detect_fvgs(hist_4hr, hist_mnq_1m)
+    liquidities.extend(fvgs_4hr)
 
     # ------------------------------------------------------------------ #
     # Step 3: update global.json all_time_high if today's high exceeds it #
     # ------------------------------------------------------------------ #
     global_state = load_global()
     _hist_ath = float(hist_mnq_1m["High"].max()) if not hist_mnq_1m.empty else 0.0
-    _today_ath = float(mnq_1m["High"].max()) if not mnq_1m.empty else 0.0
-    global_state["all_time_high"] = max(_hist_ath, _today_ath, float(global_state.get("all_time_high", 0.0)))
+    global_state["all_time_high"] = max(_hist_ath, float(global_state.get("all_time_high", 0.0)))
     save_global(global_state)
 
     # ------------------------------------------------------------------ #
     # Step 4 + 5: estimated_dir and opposite_premove (TBD hardcoded)      #
     # ------------------------------------------------------------------ #
-    estimated_dir = global_state["trend"]  # TBD
+    estimated_dir = global_state.get("trend", "up")  # TBD
     opposite_premove = "no"                # TBD
 
     # ------------------------------------------------------------------ #
     # Write daily.json                                                     #
     # ------------------------------------------------------------------ #
-    _overnight_range = 0.0
-    if "day_high" in _live_hl and "day_low" in _live_hl:
-        _overnight_range = _live_hl["day_high"] - _live_hl["day_low"]
-
     daily_state = {
         "formed_at": now.isoformat() if hasattr(now, "isoformat") else str(now),
         "liquidities": liquidities,
         "estimated_dir": estimated_dir,
         "opposite_premove": opposite_premove,
-        "overnight_range": _overnight_range,
     }
     save_daily(daily_state)
-
-    # ------------------------------------------------------------------ #
-    # Step 6: hypothesis.json.direction = "none"                          #
-    # Skipped when restarting with an active position — direction is      #
-    # preserved so the strategy can keep managing the open trade.         #
-    # ------------------------------------------------------------------ #
-    if reset_hypothesis:
-        hyp = load_hypothesis()
-        hyp["direction"] = "none"
-        save_hypothesis(hyp)
-
-    # ------------------------------------------------------------------ #
-    # Step 7: reset position.json per-session fields                      #
-    # Skipped when restarting with an active position.                    #
-    # ------------------------------------------------------------------ #
-    if reset_position:
-        _strategy.reset_position_for_session()

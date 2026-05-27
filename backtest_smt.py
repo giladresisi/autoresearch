@@ -1268,7 +1268,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         # Pipeline handles state reset, ATH seeding, resamples, and run_daily.
         day_events: list[dict] = []
         pipeline = SessionPipeline(hist_mnq_1m, hist_mes_1m, day_events.append)
-        pipeline.on_session_start(session_start_ts, today_at_open)
+        pipeline.on_session_start(session_start_ts, today_at_open, force_reset=True)
 
         # Save levels snapshot for chart visualisation (after run_daily populates state)
         if write_events:

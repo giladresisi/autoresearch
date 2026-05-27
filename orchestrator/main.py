@@ -1,4 +1,5 @@
-# Run as: uv run python -m orchestrator.main [--summary] [--check-parquets] [--create-empty-parquets]
+# Run as: uv run python -m orchestrator.main [--summary] [--force] [--check-parquets] [--create-empty-parquets]
+# --force: reset hypothesis direction and position state at session start.
 # IMPORTANT: always use 'uv run python' (not bare 'python') so the command resolves to the
 # project venv. Bare 'python' may resolve to system Python which lacks project dependencies.
 #
@@ -377,7 +378,7 @@ def _kill_stale_orchestrator() -> None:
     _PIDFILE.write_text(str(current_pid))
 
 
-def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> None:
+def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_reset: bool = False) -> None:
     """Main daemon loop. Ctrl+C exits cleanly; subprocess is terminated if active."""
     _kill_stale_orchestrator()
     if not skip_summary and summarizer is None:
@@ -434,7 +435,8 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False) -> Non
             else:
                 signal_cmd = _SIGNAL_SMT
             print(f"[orchestrator] mode={'LIVE_TRADING' if LIVE_TRADING else 'signal'}", flush=True)
-            result = ProcessManager(signal_cmd, relay, orch_ch).run_session(today)
+            _extra = {"FORCE_RESET": "true"} if force_reset else None
+            result = ProcessManager(signal_cmd, relay, orch_ch, extra_env=_extra).run_session(today)
             # Post-session: fill the ~2-min gap (gap-fill end → first session tick) and merge
             # session 1s parquet into main. This runs before pre-session IB restarts so the
             # session file is cleaned up before overnight accumulation begins.
@@ -499,4 +501,4 @@ if __name__ == "__main__":
     elif "--create-empty-parquets" in sys.argv:
         _cli_create_empty_parquets()
     else:
-        run(skip_summary="--summary" not in sys.argv)
+        run(skip_summary="--summary" not in sys.argv, force_reset="--force" in sys.argv)

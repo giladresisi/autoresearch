@@ -101,11 +101,10 @@ def _make_pre_session_hist(
     start_time="2026-04-26 18:00:00",
     n=5,
 ) -> pd.DataFrame:
-    """Pre-session bars that anchor day/week H/L for compute_live_hl_mid.
+    """Pre-session bars providing historical context for the hypothesis.
 
-    Without these, compute_live_hl_mid only sees the tiny session range and
-    collapses day/week H/L to within a few points of the current price, which
-    triggers the cautious-min-dist veto and sets direction='none'.
+    Day/week H/L now come directly from daily.json (set per test), but these
+    bars are still supplied so the hist DataFrame spans a realistic window.
     """
     return _make_1m_bars(
         [150.0] * n, [week_high] * n, [week_low] * n, [150.0] * n,
@@ -119,8 +118,8 @@ def _call_with_nullmocks(now, mnq_1m, mes_1m, hist_mnq_1m=None, hist_mes_1m=None
         # 1-week-ago bars (for entry_ranges anchor)
         week_ago = _make_1m_bars([100] * 5, [101] * 5, [99] * 5, [100] * 5,
                                   start_time="2026-04-20 10:00:00")
-        # Pre-session bars with the default week H/L so compute_live_hl_mid keeps
-        # day/week highs at 200 and lows at 100 (matching _make_default_daily defaults).
+        # Pre-session bars matching the _make_default_daily defaults (highs at 200,
+        # lows at 100) so the hist window is consistent with daily.json.
         pre_sess = _make_pre_session_hist()
         hist_mnq_1m = pd.concat([week_ago, pre_sess]).sort_index()
     if hist_mes_1m is None:
@@ -309,16 +308,11 @@ def test_weekly_mid_within_tolerance():
 
 def test_daily_mid_same_three_branches():
     """daily_mid must classify above/mid/below using day_high and day_low."""
-    # compute_live_hl_mid derives day_high from bars >= prev-day 18:00 ET and day_low
-    # from bars >= prev-day 19:30 ET.  The default pre-session hist only covers 18:00–18:04,
-    # so session bars (Low ≈ close-1) dominate day_low.  We anchor day_low=100 by injecting
-    # a 19:30 bar with Low=100 so day_mid = (200+100)/2 = 150 regardless of session close.
+    # day_high/day_low come straight from daily.json (set below to 180/120 → mid=150).
     week_ago = _make_1m_bars([100] * 5, [101] * 5, [99] * 5, [100] * 5,
                               start_time="2026-04-20 10:00:00")
-    pre_sess = _make_pre_session_hist()   # 18:00–18:04 ET, High=200 anchors day_high
-    anchor_1930 = _make_1m_bars([100.0], [200.0], [100.0], [100.0],
-                                 start_time="2026-04-26 19:30:00")
-    hist_mnq_1m = pd.concat([week_ago, pre_sess, anchor_1930]).sort_index()
+    pre_sess = _make_pre_session_hist()
+    hist_mnq_1m = pd.concat([week_ago, pre_sess]).sort_index()
 
     for close_price, expected in [
         (170.0, "above"),   # 170-150=20 > 10 → above
@@ -370,14 +364,12 @@ def test_last_liquidity_picks_most_recent_meaningful():
 
     now = _make_now(time_str="10:10:00")
 
-    # compute_live_hl_mid overwrites daily.json levels with live values derived from
-    # hist + session bars.  The default _call_with_nullmocks hist includes pre-session
-    # bars with high=200 and low=100, so the live day_high=200 and day_low=100.
-    # Session bars must touch those live levels (200 / 100) for _find_last_liquidity
-    # to detect crossings.
+    # day_high/day_low come from daily.json (180 / 120).  Session bars sweep
+    # up to 200 and down to 100, crossing both levels so _find_last_liquidity
+    # detects the day_low touch first (bars 0-4) then the day_high touch (bars 5-9).
     opens  = [150.0] * 5 + [170.0] * 5
-    highs  = [155.0] * 5 + [200.0] * 5   # Bar 5-9 touch live day_high=200
-    lows   = [100.0] * 5 + [165.0] * 5   # Bar 0-4 touch live day_low=100
+    highs  = [155.0] * 5 + [200.0] * 5   # Bars 5-9 cross day_high=180
+    lows   = [100.0] * 5 + [165.0] * 5   # Bars 0-4 cross day_low=120
     closes = [152.0] * 5 + [175.0] * 5
 
     mnq_1m = _make_1m_bars(opens, highs, lows, closes,
@@ -390,13 +382,11 @@ def test_last_liquidity_picks_most_recent_meaningful():
     _call_with_nullmocks(now, mnq_1m, mes_1m)
 
     h = load_hypothesis()
-    # On a Monday the true-day and the true-week share the same 18:00 ET start,
-    # so compute_live_hl_mid gives week_high == day_high == 200.  _find_last_liquidity
-    # picks the first level to reach the tie-breaking index; in the default liquidities
-    # ordering week_high is iterated before day_high and takes the tie.  Either name is
-    # semantically correct: both represent the same level (the session high at 200).
+    # The session bars sweep up to 200, crossing both day_high (180) and week_high
+    # (200) from daily.json.  _find_last_liquidity may pick either high-level depending
+    # on the tie-breaking index; both are semantically a high-side liquidity touch.
     assert h["last_liquidity"] in ("day_high", "week_high"), (
-        f"last_liquidity should be a high-level (day_high or week_high, both at 200), "
+        f"last_liquidity should be a high-level (day_high or week_high), "
         f"got {h['last_liquidity']!r}"
     )
 
@@ -489,8 +479,7 @@ def test_direction_hardcoded_up():
 def test_targets_filtered_by_direction_for_levels():
     """Level targets must be filtered to the correct side of current_close.
 
-    After compute_live_hl_mid the live day/week H/L are derived from bar data
-    (pre-session high=200, low=100).  Whatever direction the ICT rules produce,
+    Day/week H/L come from daily.json.  Whatever direction the ICT rules produce,
     every level target must lie on the correct side:
       up   → target price > current_close
       down → target price < current_close
@@ -759,9 +748,9 @@ def test_confidence_high_direction_reason_is_global_confidence_high():
     from smt_state import DEFAULT_HYPOTHESIS as _DH
 
     # Capture the event returned by run_hypothesis.
-    # Pre-session bars are required so compute_live_hl_mid establishes week_high=200,
-    # keeping the secondary cautious price (200) 50 pts from close (150) and
-    # avoiding the CAUTIOUS_MIN_DIST=40 veto that would silence the event.
+    # daily.json week_high=200 keeps the secondary cautious price (200) 50 pts
+    # from close (150), avoiding the CAUTIOUS_MIN_DIST=40 veto that would
+    # otherwise silence the event.
     with patch("hypothesis.detect_smt_divergence", return_value=None):
         with patch("hypothesis.detect_smt_fill", return_value=None):
             week_ago = _make_1m_bars([100] * 5, [101] * 5, [99] * 5, [100] * 5,

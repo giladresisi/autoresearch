@@ -47,7 +47,7 @@ def _isolate_state(tmp_path, monkeypatch):
 def test_on_session_start_seeds_ath_from_history(_isolate_state, monkeypatch):
     """Fix #2: on_session_start seeds all_time_high from hist_mnq_1m["High"].max()."""
     import daily as _daily_mod
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
 
     hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5, base=25000.0)
     # _make_1m_bars sets High = base + 10, so max High = 25010.0
@@ -65,18 +65,21 @@ def test_on_session_start_seeds_ath_from_history(_isolate_state, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_on_session_start_resets_state_files(_isolate_state, monkeypatch):
-    """on_session_start resets daily, hypothesis, and position to their DEFAULT values."""
+    """on_session_start(force_reset=True) resets hypothesis and position to DEFAULT values."""
     import daily as _daily_mod
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    import hypothesis as _hyp_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    # run_daily_fixed is mocked, so daily.json is never repopulated; the real
+    # run_hypothesis is mocked out so it cannot mutate hypothesis away from DEFAULT.
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
 
     hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
     hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
 
     pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
     now = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
-    pipeline.on_session_start(now, _make_1m_bars("2025-11-14 09:20", n=1))
+    pipeline.on_session_start(now, _make_1m_bars("2025-11-14 09:20", n=1), force_reset=True)
 
-    assert smt_state.load_daily() == smt_state.DEFAULT_DAILY
     assert smt_state.load_hypothesis() == smt_state.DEFAULT_HYPOTHESIS
     assert smt_state.load_position() == smt_state.DEFAULT_POSITION
 
@@ -88,7 +91,7 @@ def test_on_session_start_resets_state_files(_isolate_state, monkeypatch):
 def test_on_session_start_computes_hourly_resamples(_isolate_state, monkeypatch):
     """Fix #5: _hist_1hr is non-empty and contains only bars within 14 days of now."""
     import daily as _daily_mod
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
 
     # 5 days × 8 hours × 60 min: all within 14-day window
     hist_mnq = _make_1m_bars("2025-11-07 09:00", n=60 * 8 * 5)
@@ -105,18 +108,26 @@ def test_on_session_start_computes_hourly_resamples(_isolate_state, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# Test 4: run_daily receives the today_at_open bars (≤ 09:20)
+# Test 4: run_daily_fixed receives hist bars + hist_1hr/hist_4hr resamples
 # ---------------------------------------------------------------------------
 
 def test_on_session_start_calls_run_daily_with_filtered_bars(_isolate_state, monkeypatch):
-    """Fix #6: run_daily is called with today_mnq_at_open (bars ≤ 09:20), not all-day bars."""
+    """run_daily_fixed is called with (now, hist_mnq_1m, hist_1hr, hist_4hr, today).
+
+    The new signature no longer receives today's bars; it operates on history only.
+    """
     import daily as _daily_mod
+    import hypothesis as _hyp_mod
 
     captured = []
-    def fake_run_daily(now, mnq_1m, hist_mnq_1m, hist_hourly_mnq):
-        captured.append({"mnq_1m": mnq_1m, "hist_hourly": hist_hourly_mnq})
+    def fake_run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today):
+        captured.append({
+            "now": now, "hist_mnq_1m": hist_mnq_1m,
+            "hist_1hr": hist_1hr, "hist_4hr": hist_4hr, "today": today,
+        })
 
-    monkeypatch.setattr(_daily_mod, "run_daily", fake_run_daily)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", fake_run_daily_fixed)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
 
     hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
     hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
@@ -127,10 +138,11 @@ def test_on_session_start_calls_run_daily_with_filtered_bars(_isolate_state, mon
     pipeline.on_session_start(now, today_at_open)
 
     assert len(captured) == 1
-    # run_daily should receive exactly the today_at_open slice
-    assert captured[0]["mnq_1m"].equals(today_at_open)
-    # hist_hourly should be the 14d-windowed resample (a DataFrame)
-    assert isinstance(captured[0]["hist_hourly"], pd.DataFrame)
+    # run_daily_fixed receives the historical 1m bars (not today's), plus resamples.
+    assert captured[0]["hist_mnq_1m"].equals(hist_mnq)
+    assert isinstance(captured[0]["hist_1hr"], pd.DataFrame)
+    assert isinstance(captured[0]["hist_4hr"], pd.DataFrame)
+    assert captured[0]["today"] == now.date()
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +157,7 @@ def test_on_1m_bar_calls_trend_every_bar(_isolate_state, monkeypatch):
     import strategy as _strat_mod
 
     trend_calls = []
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
     monkeypatch.setattr(_trend_mod, "run_trend", lambda now, bar, recent: trend_calls.append(now) or None)
     monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
     monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
@@ -180,7 +192,7 @@ def test_on_1m_bar_calls_hypothesis_only_on_5m(_isolate_state, monkeypatch):
     import strategy as _strat_mod
 
     hyp_calls = []
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
     monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
     monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: hyp_calls.append(True) or None)
     monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
@@ -191,6 +203,8 @@ def test_on_1m_bar_calls_hypothesis_only_on_5m(_isolate_state, monkeypatch):
 
     now_sess = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
     pipeline.on_session_start(now_sess, _make_1m_bars("2025-11-14 09:20", n=1))
+    # on_session_start runs hypothesis once itself; clear so we count only per-bar calls.
+    hyp_calls.clear()
 
     today_mnq = _make_1m_bars("2025-11-14 09:20", n=10)
     today_mes = _make_1m_bars("2025-11-14 09:20", n=10)
@@ -215,7 +229,7 @@ def test_on_1m_bar_calls_strategy_every_bar(_isolate_state, monkeypatch):
     import strategy as _strat_mod
 
     strat_calls = []
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
     monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
     monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
     monkeypatch.setattr(_strat_mod, "run_strategy", lambda now, bar, recent, **kw: strat_calls.append(now) or None)
@@ -250,7 +264,7 @@ def test_on_1m_bar_bar_dict_has_body_fields(_isolate_state, monkeypatch):
     import strategy as _strat_mod
 
     captured_dicts = []
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
     monkeypatch.setattr(_trend_mod, "run_trend", lambda now, bar_dict, recent: captured_dicts.append(bar_dict) or None)
     monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
     monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
@@ -289,7 +303,7 @@ def test_on_1m_bar_recent_includes_midnight_bars(_isolate_state, monkeypatch):
     import strategy as _strat_mod
 
     captured_recents = []
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
     monkeypatch.setattr(_trend_mod, "run_trend",
                         lambda now, bar_dict, recent: captured_recents.append(recent) or None)
     monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
@@ -332,7 +346,7 @@ def test_on_1m_bar_hypothesis_receives_hist_resamples(_isolate_state, monkeypatc
         captured_kwargs.append(kwargs)
         return None
 
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
     monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
     monkeypatch.setattr(_hyp_mod, "run_hypothesis", fake_hyp)
     monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
@@ -343,6 +357,8 @@ def test_on_1m_bar_hypothesis_receives_hist_resamples(_isolate_state, monkeypatc
 
     now_sess = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
     pipeline.on_session_start(now_sess, _make_1m_bars("2025-11-14 09:20", n=1))
+    # on_session_start runs hypothesis once itself; clear so we inspect only per-bar calls.
+    captured_kwargs.clear()
 
     today_mnq = _make_1m_bars("2025-11-14 09:20", n=5)
     today_mes = _make_1m_bars("2025-11-14 09:20", n=5)
@@ -373,7 +389,7 @@ def test_on_1m_bar_emits_events_via_callback(_isolate_state, monkeypatch):
     fake_trend_event = {"kind": "trend-signal", "price": 21000.0}
     fake_strat_event = {"kind": "market-entry", "price": 21005.0}
 
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
     monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: fake_trend_event)
     monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
     monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: fake_strat_event)
@@ -434,7 +450,7 @@ def test_on_1m_bar_skips_if_daily_not_triggered(_isolate_state, monkeypatch):
 def test_ath_gate_uses_seeded_ath_not_zero(_isolate_state, monkeypatch):
     """Fix #2: all_time_high in global state is set from hist_mnq, not the DEFAULT 0.0."""
     import daily as _daily_mod
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
 
     hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5, base=25000.0)
     hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
@@ -455,7 +471,7 @@ def test_ath_gate_uses_seeded_ath_not_zero(_isolate_state, monkeypatch):
 def test_hourly_resample_excludes_volume(_isolate_state, monkeypatch):
     """Fix #5: _hist_1hr columns must not include 'Volume'."""
     import daily as _daily_mod
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
 
     hist_mnq = _make_1m_bars("2025-11-07 09:00", n=60 * 8 * 5)
     hist_mes = _make_1m_bars("2025-11-07 09:00", n=5)
@@ -474,7 +490,7 @@ def test_hourly_resample_excludes_volume(_isolate_state, monkeypatch):
 def test_hourly_resample_label_left(_isolate_state, monkeypatch):
     """Fix #5: _hist_1hr timestamps are left-aligned (label="left"), not right-aligned."""
     import daily as _daily_mod
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
 
     # Bars at 09:00–09:59 ET — with label="left" the bar should be labeled 09:00, not 10:00
     hist_mnq = _make_1m_bars("2025-11-13 09:00", n=60)
@@ -501,7 +517,7 @@ def test_hourly_resample_label_left(_isolate_state, monkeypatch):
 def test_on_session_start_writes_levels_json(_isolate_state, monkeypatch, tmp_path):
     """on_session_start creates sessions/{date}/levels.json with liquidities and all_time_high."""
     import daily as _daily_mod
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
     monkeypatch.chdir(tmp_path)
 
     hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5, base=21000.0)
@@ -521,14 +537,20 @@ def test_on_session_start_writes_levels_json(_isolate_state, monkeypatch, tmp_pa
 
 
 # ---------------------------------------------------------------------------
-# Test 17: on_session_start does not overwrite levels.json on restart
+# Test 17: on_session_start rewrites levels.json on restart (run_daily reruns)
 # ---------------------------------------------------------------------------
 
-def test_on_session_start_levels_json_not_overwritten_on_restart(_isolate_state, monkeypatch, tmp_path):
-    """levels.json is written on first call; mtime unchanged on second call same day."""
+def test_on_session_start_levels_json_rewritten_on_restart(_isolate_state, monkeypatch, tmp_path):
+    """levels.json is rewritten on a mid-session restart and remains valid.
+
+    The redesign always reruns the daily/startup liquidity computation on restart,
+    so levels.json is overwritten (no skip-if-exists guard).
+    """
     import daily as _daily_mod
+    import hypothesis as _hyp_mod
     import json
-    monkeypatch.setattr(_daily_mod, "run_daily", lambda *a, **kw: None)
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
     monkeypatch.chdir(tmp_path)
 
     hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
@@ -542,14 +564,229 @@ def test_on_session_start_levels_json_not_overwritten_on_restart(_isolate_state,
 
     levels_path = tmp_path / "sessions" / "2025-11-14" / "levels.json"
     assert levels_path.exists()
-    mtime_first = levels_path.stat().st_mtime
 
-    # Second call (simulates mid-session restart on same date)
-    # run_daily always reruns on restart; levels.json is always overwritten.
+    # Second call (simulates mid-session restart on same date).
     pipeline2 = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
     pipeline2.on_session_start(now, _make_1m_bars("2025-11-14 09:20", n=1))
 
-    mtime_second = levels_path.stat().st_mtime
-    assert mtime_second == mtime_first, (
-        "levels.json must not be overwritten when it already exists (mid-session restart)"
+    # File still present and parseable with the expected schema after rewrite.
+    assert levels_path.exists()
+    data = json.loads(levels_path.read_text(encoding="utf-8"))
+    assert "liquidities" in data
+    assert "all_time_high" in data
+
+
+# ---------------------------------------------------------------------------
+# Test 18: on_daily_or_startup seeds session_ath from hist max
+# ---------------------------------------------------------------------------
+
+def test_on_daily_or_startup_seeds_session_ath(_isolate_state, monkeypatch):
+    """on_daily_or_startup seeds global.json session_ath from hist_mnq High max."""
+    import daily as _daily_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+
+    # _make_1m_bars sets High = base + 10, so max High = 25010.0
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5, base=25000.0)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    now = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+    pipeline.on_daily_or_startup(now, _make_1m_bars("2025-11-14 09:20", n=1))
+
+    assert smt_state.load_global()["session_ath"] == 25010.0
+    # The instance attribute mirrors the persisted value.
+    assert pipeline._session_ath == 25010.0
+
+
+# ---------------------------------------------------------------------------
+# Test 19: 09:20 ET bar gate re-fires on_daily_or_startup once per day
+# ---------------------------------------------------------------------------
+
+def test_0920_gate_calls_on_daily_or_startup(_isolate_state, monkeypatch):
+    """on_1m_bar at 09:20 ET fires on_daily_or_startup once for a new day, not on 09:21."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    hist_mnq = _make_1m_bars("2025-11-12 09:20", n=5)
+    hist_mes = _make_1m_bars("2025-11-12 09:20", n=5)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+
+    # Session starts on 2025-11-13 (prior day), so _last_daily_date = 2025-11-13.
+    prior = pd.Timestamp("2025-11-13 09:20", tz="America/New_York")
+    pipeline.on_session_start(prior, _make_1m_bars("2025-11-13 09:20", n=1), force_reset=True)
+
+    # Spy on on_daily_or_startup AFTER session start so the session-start call is excluded.
+    daily_calls: list[pd.Timestamp] = []
+    _orig = pipeline.on_daily_or_startup
+    def _spy(now, today_mnq):
+        daily_calls.append(now)
+        return _orig(now, today_mnq)
+    monkeypatch.setattr(pipeline, "on_daily_or_startup", _spy)
+
+    today_mnq = _make_1m_bars("2025-11-14 09:20", n=10)
+    today_mes = _make_1m_bars("2025-11-14 09:20", n=10)
+    bar = _bar_row()
+
+    # 09:20 on the NEW day → gate fires on_daily_or_startup once.
+    pipeline.on_1m_bar(pd.Timestamp("2025-11-14 09:20", tz="America/New_York"), bar, bar, today_mnq, today_mes)
+    assert len(daily_calls) == 1, "09:20 bar on a new day must trigger on_daily_or_startup"
+
+    # 09:21 same day → no re-trigger.
+    pipeline.on_1m_bar(pd.Timestamp("2025-11-14 09:21", tz="America/New_York"), bar, bar, today_mnq, today_mes)
+    assert len(daily_calls) == 1, "09:21 must NOT re-trigger on_daily_or_startup"
+
+
+# ---------------------------------------------------------------------------
+# Test 20: per-bar update raises day_high when today's bars exceed stored high
+# ---------------------------------------------------------------------------
+
+def test_per_bar_updates_day_high(_isolate_state, monkeypatch):
+    """on_1m_bar updates day_high in daily.json when today's bars exceed the stored high."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+
+    now_sess = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+    pipeline.on_session_start(now_sess, _make_1m_bars("2025-11-14 09:20", n=1), force_reset=True)
+
+    # Force the stored day_high down to a known low value.
+    _state = smt_state.load_daily()
+    _liq = _state["liquidities"]
+    _dh = next((l for l in _liq if l["name"] == "day_high"), None)
+    if _dh is None:
+        _liq.append({"name": "day_high", "kind": "level", "price": 1.0})
+    else:
+        _dh["price"] = 1.0
+    _state["liquidities"] = _liq
+    smt_state.save_daily(_state)
+
+    # Today's bars contain a high of base + 10 = 30010.0, well above the forced 1.0.
+    today_mnq = _make_1m_bars("2025-11-14 09:21", n=2, base=30000.0)
+    today_mes = _make_1m_bars("2025-11-14 09:21", n=2, base=30000.0)
+    bar = pd.Series({"Open": 30000.0, "High": 30010.0, "Low": 29990.0, "Close": 30001.0})
+
+    # 09:21 is not a 5m boundary and not the 09:20 gate → no daily rebuild.
+    pipeline.on_1m_bar(pd.Timestamp("2025-11-14 09:21", tz="America/New_York"),
+                       bar, bar, today_mnq, today_mes)
+
+    _liq2 = smt_state.load_daily()["liquidities"]
+    _dh2 = next((l for l in _liq2 if l["name"] == "day_high"), None)
+    assert _dh2 is not None, "day_high level must exist after per-bar update"
+    assert _dh2["price"] == 30010.0, f"day_high should rise to today's max High, got {_dh2['price']}"
+
+
+# ---------------------------------------------------------------------------
+# Test 21: per-bar prunes a visited FVG from daily.json
+# ---------------------------------------------------------------------------
+
+def test_per_bar_fvg_visited_prune(_isolate_state, monkeypatch):
+    """on_1m_bar removes an FVG from daily.json when the bar enters the FVG zone."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+
+    now_sess = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+    pipeline.on_session_start(now_sess, _make_1m_bars("2025-11-14 09:20", n=1), force_reset=True)
+
+    # Insert an FVG zone [bottom=21000, top=21020].
+    _state = smt_state.load_daily()
+    _state["liquidities"].append(
+        {"name": "fvg_test_bull", "kind": "fvg", "top": 21020.0, "bottom": 21000.0}
+    )
+    smt_state.save_daily(_state)
+
+    today_mnq = _make_1m_bars("2025-11-14 09:21", n=2)
+    today_mes = _make_1m_bars("2025-11-14 09:21", n=2)
+    # Bar straddles the FVG zone: High >= bottom and Low <= top.
+    bar = pd.Series({"Open": 21005.0, "High": 21015.0, "Low": 21005.0, "Close": 21010.0})
+
+    pipeline.on_1m_bar(pd.Timestamp("2025-11-14 09:21", tz="America/New_York"),
+                       bar, bar, today_mnq, today_mes)
+
+    _liq2 = smt_state.load_daily()["liquidities"]
+    _names = [l["name"] for l in _liq2]
+    assert "fvg_test_bull" not in _names, "visited FVG must be pruned from daily.json"
+
+
+# ---------------------------------------------------------------------------
+# Test 22: force_reset=True resets hypothesis direction
+# ---------------------------------------------------------------------------
+
+def test_force_reset_true_resets_hypothesis(_isolate_state, monkeypatch):
+    """on_session_start(force_reset=True) resets hypothesis direction away from a prior 'up'."""
+    import daily as _daily_mod
+    import hypothesis as _hyp_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    # run_hypothesis mocked out so it cannot repopulate direction after the reset.
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+
+    # Pre-seed an active 'up' hypothesis.
+    _hyp = smt_state.load_hypothesis()
+    _hyp["direction"] = "up"
+    smt_state.save_hypothesis(_hyp)
+
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+
+    now = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+    pipeline.on_session_start(now, _make_1m_bars("2025-11-14 09:20", n=1), force_reset=True)
+
+    assert smt_state.load_hypothesis()["direction"] == smt_state.DEFAULT_HYPOTHESIS["direction"]
+    assert smt_state.load_hypothesis()["direction"] == "none"
+
+
+# ---------------------------------------------------------------------------
+# Test 23: force_reset=False preserves an existing hypothesis direction
+# ---------------------------------------------------------------------------
+
+def test_force_reset_false_preserves_hypothesis(_isolate_state, monkeypatch):
+    """on_session_start(force_reset=False) does not reset hypothesis to DEFAULT.
+
+    run_hypothesis is mocked to a no-op so it cannot re-derive direction; with no
+    explicit reset the pre-existing 'up' direction must survive.
+    """
+    import daily as _daily_mod
+    import hypothesis as _hyp_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+
+    # Pre-seed an active 'up' hypothesis.
+    _hyp = smt_state.load_hypothesis()
+    _hyp["direction"] = "up"
+    smt_state.save_hypothesis(_hyp)
+
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+
+    now = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+    pipeline.on_session_start(now, _make_1m_bars("2025-11-14 09:20", n=1), force_reset=False)
+
+    assert smt_state.load_hypothesis()["direction"] == "up", (
+        "force_reset=False must preserve the existing hypothesis direction"
     )

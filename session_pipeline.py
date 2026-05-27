@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import datetime
 from typing import Callable
 
 import pandas as pd
@@ -73,47 +74,28 @@ class SessionPipeline:
         # Cached (name, price) pairs for every "level"-kind liquidity, populated at session
         # open and used for the per-bar sweep check below.
         self._ext_levels: list[tuple[str, float]] = []
+        self._last_daily_date: "datetime.date | None" = None
+        self._last_daily_minute: "pd.Timestamp | None" = None
 
-    def on_session_start(
-        self,
-        now: pd.Timestamp,
-        today_mnq_at_open: pd.DataFrame,
-    ) -> None:
-        """Seed ATH, reset state, compute resamples, call run_daily. Call once at session open."""
-        # Deferred import: tests monkeypatch smt_state path attributes before calling this
-        # method, so importing at module level would capture the un-patched paths too early.
+    def on_daily_or_startup(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> None:
+        """Compute fixed reference liquidities and seed ATH. Called on startup and at 09:20 ET daily."""
         from smt_state import (
-            DEFAULT_DAILY, DEFAULT_GLOBAL, DEFAULT_HYPOTHESIS, DEFAULT_POSITION,
-            load_daily, load_global, load_position, save_daily, save_global, save_hypothesis, save_position,
+            DEFAULT_DAILY, DEFAULT_GLOBAL,
+            load_daily, load_global, save_daily, save_global,
         )
+        from hypothesis import compute_live_hl_mid
+        from daily import _session_bars
 
-        # Check for an active position before resetting any state. If one exists we
-        # preserve hypothesis direction and position so the strategy can keep managing
-        # the trade; daily.py still reruns (fresh liquidities) but skips its resets.
-        _has_active = bool(load_position().get("active"))
-
-        # Fix #2: Seed all_time_high from full historical high so downstream
-        # code (ATH gate, strategy) never sees the DEFAULT 0.0 on the first run.
+        # Seed all_time_high and session_ath from historical bars.
         _global = load_global()
         if not self._hist_mnq_1m.empty:
             _hist_ath = float(self._hist_mnq_1m["High"].max())
-            _global["all_time_high"] = max(_global["all_time_high"], _hist_ath)
-            # session_ath is fixed at open — never updated intraday.
+            _global["all_time_high"] = max(_global.get("all_time_high", 0.0), _hist_ath)
             _global["session_ath"] = _hist_ath
             self._session_ath = _hist_ath
         else:
             self._session_ath = None
-        self._last_hyp_cautious = ("", "")
-        self._hyp_formation_price = None
-        self._accepted_level_sweeps = set()
-        self._swept_levels_since_hyp = set()
         save_global(_global)
-
-        # Reset hypothesis and position only when there is no active trade.
-        # With an open position we keep both so the strategy resumes management.
-        if not _has_active:
-            save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
-            save_position(copy.deepcopy(DEFAULT_POSITION))
 
         # Fix #5: Unified hourly resample — 14-day window, label="left", no Volume.
         _agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
@@ -134,18 +116,45 @@ class SessionPipeline:
             self._hist_1hr = pd.DataFrame(columns=list(_agg))
             self._hist_4hr = pd.DataFrame(columns=list(_agg))
 
-        # Always rerun daily.py for fresh liquidities — covers both first-run and any
-        # restart (mid-session or post-session). Resets are skipped when a position is
-        # active so direction and position state are preserved for continued management.
+        # Reset daily.json and recompute fixed levels.
         save_daily(copy.deepcopy(DEFAULT_DAILY))
-        _daily_mod.run_daily(
-            now, today_mnq_at_open, self._hist_mnq_1m, self._hist_1hr,
-            reset_hypothesis=not _has_active,
-            reset_position=not _has_active,
+        _daily_mod.run_daily_fixed(
+            now, self._hist_mnq_1m, self._hist_1hr, self._hist_4hr, now.date()
         )
-        self._daily_triggered = True
 
-        # Write levels.json snapshot for plot_session.py — always updated when daily reruns.
+        # Seed initial day/week/session levels from combined hist + today bars.
+        _state = load_daily()
+        _liq = _state.get("liquidities", [])
+        _combined = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
+        _combined = _combined[~_combined.index.duplicated(keep="last")]
+        _now_ts = now
+        if _now_ts.tzinfo is None:
+            _now_ts = _now_ts.tz_localize("America/New_York")
+        _live = compute_live_hl_mid(_combined, _now_ts)
+        for _name in ("week_high", "week_low", "week_mid", "day_high", "day_low", "day_mid"):
+            if _name in _live:
+                _existing = next((l for l in _liq if l["name"] == _name), None)
+                if _existing:
+                    _existing["price"] = _live[_name]
+                else:
+                    _liq.append({"name": _name, "kind": "level", "price": _live[_name]})
+        # Seed session highs/lows from completed sessions in combined bars.
+        _today = now.date()
+        for _sess in ("asia", "london", "ny_morning", "ny_evening"):
+            _sbars = _session_bars(_combined, _sess, _today)
+            if not _sbars.empty:
+                for _suffix, _col in (("high", "High"), ("low", "Low")):
+                    _key = f"{_sess}_{_suffix}"
+                    _price = float(_sbars[_col].max() if _suffix == "high" else _sbars[_col].min())
+                    _ex = next((l for l in _liq if l["name"] == _key), None)
+                    if _ex:
+                        _ex["price"] = _price
+                    else:
+                        _liq.append({"name": _key, "kind": "level", "price": _price})
+        _state["liquidities"] = _liq
+        save_daily(_state)
+
+        # Write levels.json snapshot for plot_session.py.
         import json as _json
         from pathlib import Path as _Path
         _session_dir = _Path("sessions") / (_smt_state._SESSION_DATE or str(now.date()))
@@ -165,36 +174,66 @@ class SessionPipeline:
             encoding="utf-8",
         )
 
-        # Run hypothesis immediately so direction is populated before the first 5m bar.
+        self._last_daily_date = now.date()
+
+    def on_session_start(
+        self,
+        now: pd.Timestamp,
+        today_mnq_at_open: pd.DataFrame,
+        force_reset: bool = False,
+    ) -> None:
+        """Call once at session open. Computes liquidities and optionally resets state."""
+        from smt_state import (
+            DEFAULT_HYPOTHESIS, DEFAULT_POSITION,
+            load_position, save_hypothesis, save_position,
+        )
+
+        # Reset per-hypothesis tracking state on every session start.
+        self._last_hyp_cautious = ("", "")
+        self._hyp_formation_price = None
+        self._accepted_level_sweeps = set()
+        self._swept_levels_since_hyp = set()
+
+        # Always run the daily/startup liquidity computation.
+        self.on_daily_or_startup(now, today_mnq_at_open)
+        self._daily_triggered = True
+
+        # Reset hypothesis and position only when explicitly forced.
+        if force_reset:
+            save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
+            save_position(copy.deepcopy(DEFAULT_POSITION))
+            # Run first hypothesis so direction is populated immediately after force-reset.
+            _init_hyp_divs = _hyp_mod.run_hypothesis(
+                now, today_mnq_at_open, self._hist_mes_1m,
+                self._hist_mnq_1m, self._hist_mes_1m,
+                hist_1hr=self._hist_1hr, hist_4hr=self._hist_4hr,
+            )
+            for _d in (_init_hyp_divs or []):
+                self._emit(_d)
+            return
+
+        # No force_reset: run hypothesis to populate direction, then reconcile with active position.
         _init_hyp_divs = _hyp_mod.run_hypothesis(
-            now,
-            today_mnq_at_open,
-            self._hist_mes_1m,
-            self._hist_mnq_1m,
-            self._hist_mes_1m,
-            hist_1hr=self._hist_1hr,
-            hist_4hr=self._hist_4hr,
+            now, today_mnq_at_open, self._hist_mes_1m,
+            self._hist_mnq_1m, self._hist_mes_1m,
+            hist_1hr=self._hist_1hr, hist_4hr=self._hist_4hr,
         )
         for _d in (_init_hyp_divs or []):
             self._emit(_d)
 
         # Reconcile hypothesis direction with any active position.
+        _has_active = bool(load_position().get("active"))
         if _has_active:
             _active = load_position().get("active", {})
             _pos_dir = _active.get("direction", "")
-            # Map position vocabulary (long/short) to hypothesis vocabulary (up/down).
             _pos_hyp_dir = "down" if _pos_dir == "short" else ("up" if _pos_dir == "long" else "none")
             _new_hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
 
             if _new_hyp_dir == "none":
-                # Hypothesis indeterminate — seed direction from position so strategy
-                # continues managing; trend.py will override if market moves against it.
                 _hyp_snap = _smt_state.load_hypothesis()
                 _hyp_snap["direction"] = _pos_hyp_dir
                 _smt_state.save_hypothesis(_hyp_snap)
             elif _new_hyp_dir != _pos_hyp_dir:
-                # Direction conflict — emit trend-broken immediately so automation closes
-                # the position before any bar processing begins.
                 _last_price = (
                     float(today_mnq_at_open.iloc[-1]["Close"])
                     if not today_mnq_at_open.empty else 0.0
@@ -224,6 +263,14 @@ class SessionPipeline:
         """Process one completed 1m bar. Returns list of emitted event dicts."""
         if not self._daily_triggered:
             return []
+
+        # 09:20 ET daily trigger: re-run on_daily_or_startup once per calendar day.
+        _bar_floor = now.floor("1min")
+        if (now.hour == 9 and now.minute == 20
+                and _bar_floor != self._last_daily_minute
+                and now.date() != self._last_daily_date):
+            self._last_daily_minute = _bar_floor
+            self.on_daily_or_startup(now, today_mnq)
 
         _o = float(mnq_bar_row["Open"])
         _h = float(mnq_bar_row["High"])
@@ -574,6 +621,10 @@ class SessionPipeline:
                                 _smt_state.save_position(_xpos)
                                 _xdecremented = True
 
+        # Per-bar: update session/day/week H/L and prune visited FVGs.
+        _liq_events = self._update_dynamic_liquidities(now, mnq_bar_row, today_mnq)
+        events.extend(_liq_events)
+
         _this_5m = now.floor("5min")
         is_5m = (now.minute % 5 == 0) and (_this_5m != self._last_5m_processed)
 
@@ -688,6 +739,174 @@ class SessionPipeline:
 
         self._write_bar_state(now, today_mnq)
         return events
+
+    def _update_dynamic_liquidities(
+        self,
+        now: pd.Timestamp,
+        mnq_bar_row: pd.Series,
+        today_mnq: pd.DataFrame,
+    ) -> list[dict]:
+        """Update session/day/week H/L and FVG state in daily.json on every bar."""
+        from daily import _session_bars, _detect_fvgs, TIME_WINDOWS
+
+        _state = _smt_state.load_daily()
+        _liq = _state.get("liquidities", [])
+        _liq_map = {l["name"]: l for l in _liq}
+
+        _bar_high = float(mnq_bar_row["High"])
+        _bar_low  = float(mnq_bar_row["Low"])
+        _changed: list[str] = []
+        _liq_events: list[dict] = []
+
+        # Helper: update a named level, track change.
+        def _set(name: str, price: float, kind: str = "level") -> None:
+            if name in _liq_map:
+                if abs(_liq_map[name].get("price", 0) - price) > 1e-9:
+                    _old = _liq_map[name].get("price")
+                    _liq_map[name]["price"] = price
+                    _changed.append(name)
+                    _liq_events.append({
+                        "kind": "liquidity-updated",
+                        "time": now.isoformat(),
+                        "name": name,
+                        "old_price": _old,
+                        "price": price,
+                    })
+            else:
+                _new_entry = {"name": name, "kind": kind, "price": price}
+                _liq_map[name] = _new_entry
+                _liq.append(_new_entry)
+                _changed.append(name)
+                _liq_events.append({
+                    "kind": "liquidity-updated",
+                    "time": now.isoformat(),
+                    "name": name,
+                    "old_price": None,
+                    "price": price,
+                })
+
+        # ── Day H/L ──────────────────────────────────────────────────────────
+        _today_bars = today_mnq[today_mnq.index <= now]
+        if not _today_bars.empty:
+            _dh = float(_today_bars["High"].max())
+            _dl = float(_today_bars["Low"].min())
+            _dm = (_dh + _dl) / 2.0
+            _set("day_high", _dh)
+            _set("day_low",  _dl)
+            _set("day_mid",  _dm)
+
+        # ── Week H/L ───────────────────────────────────────────────────────────
+        _week_start = self._week_start_ts(now.date())
+        _combined_week = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
+        _combined_week = _combined_week[~_combined_week.index.duplicated(keep="last")]
+        _week_bars = _combined_week[
+            (_combined_week.index >= _week_start) & (_combined_week.index <= now)
+        ]
+        if not _week_bars.empty:
+            _wh = float(_week_bars["High"].max())
+            _wl = float(_week_bars["Low"].min())
+            _wm = (_wh + _wl) / 2.0
+            _set("week_high", _wh)
+            _set("week_low",  _wl)
+            _set("week_mid",  _wm)
+
+        # ── Active session H/L ─────────────────────────────────────────────────
+        _hour, _minute = now.hour, now.minute
+        _t = _hour * 60 + _minute
+        if _t >= 18 * 60:
+            _active_sess = "asia"
+        elif _t < 6 * 60:
+            _active_sess = "london"
+        elif _t < 12 * 60:
+            _active_sess = "ny_morning"
+        elif _t < 17 * 60:
+            _active_sess = "ny_evening"
+        else:
+            _active_sess = None  # maintenance 17:00-18:00
+
+        if _active_sess is not None:
+            # Asia crosses midnight: 18:00 prior calendar day → 00:00 current day.
+            # For bars in 18:00–00:00 ET, now.date() is still the prior day, so
+            # _session_bars needs tomorrow as its `today` to build the correct window.
+            _sess_today = (
+                now.date() + datetime.timedelta(days=1)
+                if _active_sess == "asia"
+                else now.date()
+            )
+            _sbars = _session_bars(_combined_week, _active_sess, _sess_today)
+            if not _sbars.empty:
+                _sh = float(_sbars["High"].max())
+                _sl = float(_sbars["Low"].min())
+                _set(f"{_active_sess}_high", _sh)
+                _set(f"{_active_sess}_low", _sl)
+
+        # ── FVG visited prune ──────────────────────────────────────────────────
+        _to_remove = []
+        for _l in _liq:
+            if _l.get("kind") != "fvg":
+                continue
+            _ftop = _l.get("top")
+            _fbot = _l.get("bottom")
+            if _ftop is None or _fbot is None:
+                continue
+            # Bar straddles the FVG zone → visited
+            if _bar_high >= _fbot and _bar_low <= _ftop:
+                _to_remove.append(_l["name"])
+
+        if _to_remove:
+            _liq[:] = [l for l in _liq if l["name"] not in _to_remove]
+            # Rebuild map after removal
+            _liq_map = {l["name"]: l for l in _liq}
+            for _removed in _to_remove:
+                _liq_events.append({
+                    "kind": "liquidity-updated",
+                    "time": now.isoformat(),
+                    "name": _removed,
+                    "old_price": None,
+                    "price": None,
+                    "visited": True,
+                })
+
+        # ── New FVG detection at hour/4hr boundaries ────────────────────────────
+        if now.minute == 0 and self._hist_1hr is not None:
+            _new_1hr = _detect_fvgs(self._hist_1hr, today_mnq)
+            for _f in _new_1hr:
+                if _f["name"] not in _liq_map:
+                    _liq.append(_f)
+                    _liq_map[_f["name"]] = _f
+                    _changed.append(_f["name"])
+
+        if now.minute == 0 and now.hour % 4 == 0 and self._hist_4hr is not None:
+            _new_4hr = _detect_fvgs(self._hist_4hr, today_mnq)
+            for _f in _new_4hr:
+                if _f["name"] not in _liq_map:
+                    _liq.append(_f)
+                    _liq_map[_f["name"]] = _f
+                    _changed.append(_f["name"])
+
+        if _changed or _to_remove:
+            _state["liquidities"] = list(_liq_map.values())
+            _smt_state.save_daily(_state)
+            # Keep _ext_levels current for the sweep check.
+            self._ext_levels = [
+                (l["name"], float(l["price"]))
+                for l in _state["liquidities"]
+                if l.get("kind") == "level" and l.get("price") is not None
+            ]
+
+        for _ev in _liq_events:
+            self._emit(_ev)
+
+        return _liq_events
+
+    def _week_start_ts(self, today: "datetime.date") -> pd.Timestamp:
+        """Return Monday 18:00 ET of the current ISO week (start of futures week)."""
+        days_since_monday = today.isocalendar().weekday - 1
+        monday = today - datetime.timedelta(days=days_since_monday)
+        return pd.Timestamp(
+            datetime.datetime(monday.year, monday.month, monday.day, 18, 0),
+            tz="America/New_York",
+        )
 
     def _write_bar_state(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> None:
         current_5m = now.floor("5min")

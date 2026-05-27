@@ -1240,7 +1240,6 @@ def run_hypothesis(
 
     current_close = bar["Close"]
 
-    # Resolve _ts_now early — needed for live bar recomputation below.
     _ts_now = pd.Timestamp(now)
     if _ts_now.tzinfo is None:
         _ts_now = _ts_now.tz_localize("America/New_York")
@@ -1250,16 +1249,6 @@ def run_hypothesis(
     # Step 3: Compute weekly_mid and daily_mid.
     daily = load_daily()
     liquidities = daily.get("liquidities", [])
-
-    # Refresh day/week high, low, mid from live bars.
-    # daily.json is frozen at 09:20; the NY-session open sets new extremes that
-    # must be reflected in the mid calculation used for hypothesis direction.
-    _combined_live = pd.concat([hist_mnq_1m, mnq_1m])
-    _combined_live = _combined_live[~_combined_live.index.duplicated(keep="last")].sort_index()
-    _live_hl = compute_live_hl_mid(_combined_live, _ts_now)
-    for _liq in liquidities:
-        if _liq.get("kind") == "level" and _liq["name"] in _live_hl:
-            _liq["price"] = _live_hl[_liq["name"]]
 
     week_high_price = None
     week_low_price = None

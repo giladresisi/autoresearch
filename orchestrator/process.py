@@ -1,6 +1,7 @@
 # orchestrator/process.py
 # Manages the signal_smt.py subprocess lifecycle: spawn, stdout relay, restart-on-crash, and scheduled stop.
 import datetime
+import os
 import subprocess
 import sys
 import threading
@@ -21,10 +22,11 @@ _POLL_INTERVAL_S = 0.5
 
 
 class ProcessManager:
-    def __init__(self, script_path: Path | list, relay: SessionRelay, log_channel: OutputChannel) -> None:
+    def __init__(self, script_path: Path | list, relay: SessionRelay, log_channel: OutputChannel, extra_env: dict | None = None) -> None:
         self._script = script_path
         self._relay = relay
         self._log = log_channel
+        self._extra_env = extra_env
 
     def _process_name(self) -> str:
         if isinstance(self._script, list):
@@ -77,6 +79,7 @@ class ProcessManager:
             cmd = self._script
         else:
             cmd = [sys.executable, str(self._script)]
+        _env = {**os.environ, **self._extra_env} if self._extra_env else None
         return subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -84,6 +87,7 @@ class ProcessManager:
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=_env,
         )
 
     def _monitor(self, proc: subprocess.Popen) -> str:

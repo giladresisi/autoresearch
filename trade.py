@@ -13,9 +13,8 @@ Usage:
   python trade.py trend-broken           # Reset hypothesis direction and log trend-broken
   python trade.py hypothesis             # Force a fresh hypothesis evaluation right now
   python trade.py start                  # Start orchestrator (resets position.json)
-  python trade.py start --resume         # Start orchestrator, keep position.json as-is
   python trade.py start --summary        # Start orchestrator with LLM-based summary enabled
-  python trade.py start --force          # Restart orchestrator without prompting if already running
+  python trade.py start --force          # Reset hypothesis direction and position state (start fresh)
   python trade.py terminate              # Kill orchestrator and automation.main
 
 Add --force / -f to bypass position.json state checks and override broker state:
@@ -237,40 +236,22 @@ def main() -> None:
         live_orders.hypothesis()
 
     elif cmd == "start":
-        import json
+        import os
         import subprocess
         import time
         from datetime import datetime
         from pathlib import Path
 
-        resume = "--resume" in raw_args or "-r" in raw_args
         summary = "--summary" in raw_args
 
         # Check if orchestrator is already running
         existing_pid = _orchestrator_pid()
         if existing_pid is not None:
-            if not force:
-                ans = input(f"Orchestrator already running (pid={existing_pid}). Restart? [y/N] ").strip().lower()
-                if ans != "y":
-                    print("Aborted.")
-                    sys.exit(0)
+            print(f"Killing existing orchestrator (pid={existing_pid})...")
             killed = _terminate_all()
             for k in killed:
                 print(f"Killed {k}")
             time.sleep(1)
-
-        if not resume:
-            # Cancel any live broker stop-entry before wiping position state.
-            # Without this, the new session starts with stop_entry="" and places
-            # a fresh order alongside the stale one still open in Tradovate.
-            _pre_reset_pos = smt_state.load_position()
-            if _pre_reset_pos.get("stop_entry"):
-                import live_orders as _lo
-                _lo.cancel_stop_entry("session-restart", force=True)
-                print("Cancelled pending stop entry before reset")
-            pos_path = Path("data") / "position.json"
-            pos_path.write_text(json.dumps(smt_state.DEFAULT_POSITION, indent=2))
-            print("position.json reset to default")
 
         stdout_log = Path("orchestrator_stdout.log")
         stderr_log = Path("orchestrator_stderr.log")
@@ -283,6 +264,7 @@ def main() -> None:
             orch_cmd.append("--summary")
 
         CREATE_NO_WINDOW = 0x08000000
+        _popen_env = {**os.environ, "FORCE_RESET": "true"} if force else None
         with open(stdout_log, "a", encoding="utf-8") as out_f, \
              open(stderr_log, "a", encoding="utf-8") as err_f:
             subprocess.Popen(
@@ -290,6 +272,7 @@ def main() -> None:
                 stdout=out_f,
                 stderr=err_f,
                 creationflags=CREATE_NO_WINDOW,
+                env=_popen_env,
             )
 
         time.sleep(3)
@@ -297,8 +280,6 @@ def main() -> None:
         new_pid = _orchestrator_pid()
         if new_pid:
             print(f"Orchestrator started pid={new_pid}")
-            if resume:
-                print("Resume mode: position.json unchanged")
             if summary:
                 print("LLM summary enabled")
         else:
