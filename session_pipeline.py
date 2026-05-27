@@ -900,11 +900,19 @@ class SessionPipeline:
         return _liq_events
 
     def _week_start_ts(self, today: "datetime.date") -> pd.Timestamp:
-        """Return Monday 18:00 ET of the current ISO week (start of futures week)."""
-        days_since_monday = today.isocalendar().weekday - 1
-        monday = today - datetime.timedelta(days=days_since_monday)
+        """Return Sunday 18:00 ET preceding the current ISO week (CME futures week open).
+
+        The CME equity-index futures week opens Sunday 18:00 ET (17:00 CT).
+        Using Monday 18:00 ET would miss Sunday evening + all of Monday's session,
+        causing week_high/week_low to diverge from TradingView's weekly candle.
+        """
+        # ISO weekday: Mon=1 … Sun=7.  Days back to the preceding Sunday:
+        days_since_sunday = today.isocalendar().weekday  # Mon→1, Tue→2, … Sun→7→0 mod 7
+        if days_since_sunday == 7:
+            days_since_sunday = 0
+        sunday = today - datetime.timedelta(days=days_since_sunday)
         return pd.Timestamp(
-            datetime.datetime(monday.year, monday.month, monday.day, 18, 0),
+            datetime.datetime(sunday.year, sunday.month, sunday.day, 18, 0),
             tz="America/New_York",
         )
 
