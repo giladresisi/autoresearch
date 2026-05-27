@@ -622,8 +622,7 @@ class SessionPipeline:
                                 _xdecremented = True
 
         # Per-bar: update session/day/week H/L and prune visited FVGs.
-        _liq_events = self._update_dynamic_liquidities(now, mnq_bar_row, today_mnq)
-        events.extend(_liq_events)
+        self._update_dynamic_liquidities(now, mnq_bar_row, today_mnq)
 
         _this_5m = now.floor("5min")
         is_5m = (now.minute % 5 == 0) and (_this_5m != self._last_5m_processed)
@@ -897,9 +896,6 @@ class SessionPipeline:
                 for l in _state["liquidities"]
                 if l.get("kind") == "level" and l.get("price") is not None
             ]
-
-        for _ev in _liq_events:
-            self._emit(_ev)
 
         return _liq_events
 

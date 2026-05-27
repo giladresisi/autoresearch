@@ -232,7 +232,9 @@ def close_position(price: float, reason: str = "user-requested") -> None:
     pos["stop_direction"] = ""
     pos["conf_bar_entry"] = {}
     _save_pos(pos)
-    _log({"kind": "market-close", "time": now, "price": float(price), "reason": reason})
+    # Fall back to current bar mid when caller passes 0.0 (e.g. trade.py close).
+    resolved_price = float(price) if float(price) != 0.0 else _current_price()
+    _log({"kind": "market-close", "time": now, "price": resolved_price, "reason": reason})
 
 
 def update_stop_loss(stop_price: float, reason: str = "user-requested", direction: str | None = None) -> None:
