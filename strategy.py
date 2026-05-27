@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -201,9 +201,19 @@ def run_strategy(
     # Section 2: No active position                                        #
     # ------------------------------------------------------------------ #
     if not position["active"]:
-        # Block entries before session open — pre-open bars are hypothesis-formation only.
-        if now.time() < session_times.SESSION_OPEN:
-            return None
+        # Cancel any unfilled stop entry at the first bar after an entry window closes.
+        _prev_bar_time = (now - timedelta(minutes=5)).time()
+        if (
+            not session_times.is_entry_allowed(now.time())
+            and session_times.is_entry_allowed(_prev_bar_time)
+            and position["stop_entry"] != ""
+        ):
+            _cancel_price = float(position["stop_entry"])
+            position["stop_entry"]     = ""
+            position["stop_direction"] = ""
+            position["conf_bar_entry"] = {}
+            smt_state.save_position(position)
+            return _make_signal("cancel-stop-entry", now, _cancel_price, reason="entry-window-closed")
 
         # confidence=high: global conviction active — no automatic entries (limit or market).
         _global = smt_state.load_global()
@@ -339,6 +349,8 @@ def run_strategy(
                     approach = bar_open - body_end_price
 
                 if approach < _MARKET_ENTRY_THRESHOLD or prefer_market_entry:
+                    if not session_times.is_entry_allowed(now.time()):
+                        return None
                     bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
                     if direction == _DIR_UP:
                         stop = max(float(opp_5m["low"]), float(opp_5m["body_low"]) - _STOP_WICK_CAP)
@@ -388,6 +400,8 @@ def run_strategy(
                 if direction == _DIR_DOWN and (stop_loss - entry_price) < MIN_STOP_DISTANCE:
                     return None
                 position["conf_bar_entry"] = conf_bar_snap
+                if position["stop_entry"] == "" and not session_times.is_entry_allowed(now.time()):
+                    return None
                 kind = "new-stop-entry" if position["stop_entry"] == "" else "move-stop-entry"
                 position["stop_entry"]     = entry_price
                 position["stop_direction"] = direction
