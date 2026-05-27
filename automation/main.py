@@ -156,10 +156,7 @@ def _on_bar(bar, mes_partial) -> None:
     if _smtv2_dispatcher is None:
         return
     _bar_ts = _bar_timestamp(bar)
-    if _bar_ts.time() < SESSION_OPEN:
-        return
-
-    if _bar_ts.time() >= SESSION_CLOSE:
+    if SESSION_CLOSE <= _bar_ts.time() < SESSION_OPEN:
         import live_orders as _lo_sc
         if _lo_sc.has_pending_entry():
             _lo_sc.cancel_stop_entry("session-end")
@@ -1095,11 +1092,11 @@ def main() -> None:
 
         # Step 1: V2 dispatcher session init — run_daily fires inside on_session_start.
         # Must precede generate() so liquidities in daily.json are fresh.
-        if _smtv2_dispatcher is not None and bar_time >= SESSION_OPEN:
+        if _smtv2_dispatcher is not None and (bar_time >= SESSION_OPEN or bar_time < SESSION_CLOSE):
             _smtv2_dispatcher.on_session_start(_bar_ts_v2, _mnq_df, _mes_df)
 
         # Step 2: V1 only — HypothesisManager.generate writes data/sessions/{date}/hypothesis.json.
-        if _hypothesis_manager is not None and not _hypothesis_generated and bar_time >= SESSION_OPEN:
+        if _hypothesis_manager is not None and not _hypothesis_generated and (bar_time >= SESSION_OPEN or bar_time < SESSION_CLOSE):
             _hypothesis_manager._mnq_1m_df = _mnq_df
             _hypothesis_manager._hist_mnq_df = _mnq_df
             try:
