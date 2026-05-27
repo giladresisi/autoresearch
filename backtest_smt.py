@@ -11,7 +11,7 @@ import pandas as pd
 
 from hypothesis_smt import compute_hypothesis_context
 import strategy_smt
-from session_times import SESSION_OPEN as _SESSION_OPEN_V2
+from session_times import SESSION_OPEN as _SESSION_OPEN_V2, SESSION_CLOSE as _SESSION_CLOSE_V2
 from execution.simulated import SimulatedBrokerExecutor
 from strategy_smt import (
     _BarRow,
@@ -1227,10 +1227,12 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
         # ------------------------------------------------------------------ #
         # Per-day timestamps                                                   #
+        # Session spans SESSION_OPEN on the previous calendar day to          #
+        # SESSION_CLOSE on date (e.g. 18:00 prev day → 17:00 today).         #
         # ------------------------------------------------------------------ #
-        day_midnight  = pd.Timestamp(date, tz="America/New_York")
-        next_midnight = day_midnight + pd.Timedelta(days=1)
-        session_start_ts = pd.Timestamp(f"{date} {_SESSION_OPEN_V2}", tz="America/New_York")
+        _prev_date       = date - datetime.timedelta(days=1)
+        session_start_ts = pd.Timestamp(f"{_prev_date} {_SESSION_OPEN_V2}", tz="America/New_York")
+        session_end_ts   = pd.Timestamp(f"{date} {_SESSION_CLOSE_V2}",      tz="America/New_York")
 
         # ------------------------------------------------------------------ #
         # Build per-day slices — mode-specific source                         #
@@ -1241,22 +1243,20 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             _mes_hist_end = _mes_1m_agg.index.searchsorted(session_start_ts, side="left")
             hist_mnq_1m   = _mnq_1m_agg.iloc[:_mnq_hist_end]
             hist_mes_1m   = _mes_1m_agg.iloc[:_mes_hist_end]
-            # Raw 1s bars for the current calendar day (used for today_at_open and pre-session context)
-            _mnq_today = mnq_all[(mnq_all.index >= day_midnight) & (mnq_all.index < next_midnight)]
+            # Raw 1s bars spanning the full session window (18:00 prev day → 17:00 today)
+            _mnq_today = mnq_all[(mnq_all.index >= session_start_ts) & (mnq_all.index < session_end_ts)]
             if _mnq_today.empty:
                 continue
             _empty_cols  = ["Open", "High", "Low", "Close", "Volume"]
             mnq_1m_today = pd.DataFrame(columns=_empty_cols, index=pd.DatetimeIndex([], tz="America/New_York"))
             mes_1m_today = pd.DataFrame(columns=_empty_cols, index=pd.DatetimeIndex([], tz="America/New_York"))
         else:
-            _mnq_pos_day  = mnq_all.index.searchsorted(day_midnight,     side="left")
-            _mnq_pos_next = mnq_all.index.searchsorted(next_midnight,    side="left")
             _mnq_pos_sess = mnq_all.index.searchsorted(session_start_ts, side="left")
-            _mes_pos_day  = mes_all.index.searchsorted(day_midnight,     side="left")
-            _mes_pos_next = mes_all.index.searchsorted(next_midnight,    side="left")
+            _mnq_pos_end  = mnq_all.index.searchsorted(session_end_ts,   side="left")
             _mes_pos_sess = mes_all.index.searchsorted(session_start_ts, side="left")
-            mnq_1m_today  = mnq_all.iloc[_mnq_pos_day:_mnq_pos_next]
-            mes_1m_today  = mes_all.iloc[_mes_pos_day:_mes_pos_next]
+            _mes_pos_end  = mes_all.index.searchsorted(session_end_ts,   side="left")
+            mnq_1m_today  = mnq_all.iloc[_mnq_pos_sess:_mnq_pos_end]
+            mes_1m_today  = mes_all.iloc[_mes_pos_sess:_mes_pos_end]
             if mnq_1m_today.empty:
                 continue
             hist_mnq_1m   = mnq_all.iloc[:_mnq_pos_sess]
@@ -1282,10 +1282,8 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             _lvl_path.write_text(_json.dumps(_levels_snap, indent=2), encoding="utf-8")
 
         # ------------------------------------------------------------------ #
-        # Define 09:20–16:00 session window                                    #
+        # Session bar views (already bounded by session_start/end_ts above)   #
         # ------------------------------------------------------------------ #
-        session_end_ts = pd.Timestamp(f"{date} 16:00:00", tz="America/New_York")
-
         mnq_session_bars = mnq_1m_today[
             (mnq_1m_today.index >= session_start_ts) & (mnq_1m_today.index < session_end_ts)
         ]
@@ -1328,10 +1326,10 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             # intra-session bar history reflects the same data used for price levels.
             # Aggregate to 1m for compatibility with the completed-bar accumulator.
             _agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
-            _pre_mnq_src = mnq_all[(mnq_all.index >= day_midnight) & (mnq_all.index < session_start_ts)]
-            _pre_mnq     = _pre_mnq_src.resample("1min", label="left").agg(_agg).dropna(subset=["Open"])
-            _pre_mes_src = mes_all[(mes_all.index >= day_midnight) & (mes_all.index < session_start_ts)]
-            _pre_mes     = _pre_mes_src.resample("1min", label="left").agg(_agg).dropna(subset=["Open"])
+            # Session starts at 18:00 on the previous day — no intraday pre-session window.
+            # Completed session minutes accumulate in _done_mnq/_done_mes as the loop runs.
+            _pre_mnq = _empty_1s.copy()
+            _pre_mes = _empty_1s.copy()
             _mes_min_d = {
                 k: grp
                 for k, grp in mes_1s_sess.groupby(mes_1s_sess.index.floor("1min"))
@@ -1343,13 +1341,10 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                 _mes_min = _mes_min_d.get(_bar_ts, _empty_1s)
                 _mes_has = not _mes_min.empty
 
-                # Today context: pre-session 1m + completed session minutes
-                _base_mnq = pd.concat([_pre_mnq] + _done_mnq) if _done_mnq else (
-                    _pre_mnq if not _pre_mnq.empty else _empty_1s
-                )
-                _base_mes = pd.concat([_pre_mes] + _done_mes) if _done_mes else (
-                    _pre_mes if not _pre_mes.empty else _empty_1s
-                )
+                # Today context: completed session minutes (_pre_mnq/_pre_mes are always
+                # empty for overnight sessions, so concat them only when non-empty).
+                _base_mnq = pd.concat(_done_mnq) if _done_mnq else _empty_1s
+                _base_mes = pd.concat(_done_mes) if _done_mes else _empty_1s
                 _bv_mnq = _base_mnq[_cols].values if not _base_mnq.empty else _np.empty((0, 5))
                 _bv_mes = _base_mes[_cols].values if not _base_mes.empty else _np.empty((0, 5))
                 _pidx   = pd.DatetimeIndex([_bar_ts], tz="America/New_York")
