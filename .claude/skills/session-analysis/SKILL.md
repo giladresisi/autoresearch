@@ -138,6 +138,15 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
     TSV trade ledger from the 1s backtest replay — same schema as trades.tsv.
     Compare against the live trades.tsv to surface logic divergences.
 
+11. <SESSION>\comments.md  (may not exist)
+    Free-form analyst notes written during or after the session. Contains
+    explanations for known anomalies (e.g. double-position incidents, manual
+    interventions, broker issues) that would otherwise appear as unexplained
+    discrepancies in the data. READ THIS BEFORE drawing conclusions — if
+    something looks like a bug but is already explained here, do not flag it
+    as a new discrepancy. Quote the relevant comment section when dismissing
+    an apparent anomaly.
+
 ---
 CROSS-REFERENCE METHODOLOGY:
 
