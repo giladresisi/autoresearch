@@ -37,11 +37,14 @@ day = df[df.index.date == pd.Timestamp(DATE).date()]
 # ── Events ────────────────────────────────────────────────────────────────────
 events_path = SESSION_DIR / "events.jsonl"
 events = []
+_SKIP_KINDS = {"liquidity-updated"}  # high-frequency housekeeping events, not plotted
 if events_path.exists():
     for line in events_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line:
-            events.append(json.loads(line))
+            e = json.loads(line)
+            if e.get("kind") not in _SKIP_KINDS:
+                events.append(e)
 for e in events:
     e["ts"] = pd.Timestamp(e["time"])
 
