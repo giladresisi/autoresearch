@@ -3,9 +3,12 @@ Generate an interactive HTML chart for a live trading session.
 Overlays strategy events, key price levels, and SMT div marks on MNQ 1m candlesticks.
 Reads from sessions/{date}/ — works mid-session (no events yet = shows bars + levels only).
 
+The DATE argument is the TH (Asia/Bangkok) session date, which identifies the CME session
+that opened at 18:00 ET on (DATE - 1 day) and closed at 17:00 ET on DATE.
+
 Usage (run from automation root):
-    python plot_session.py                # today's session
-    python plot_session.py 2026-05-06    # specific date
+    python plot_session.py                # today's session (TH timezone)
+    python plot_session.py 2026-05-28    # session that closed at 17:00 ET on 2026-05-28
 
 Output: sessions/{date}/chart_{HH-MM}.html (timestamped at time of request)
 """
@@ -20,9 +23,15 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import plotly.graph_objects as go
 
+from session_times import session_date_str
 
-DATE = sys.argv[1] if len(sys.argv) > 1 else str(datetime.date.today())
-_NOW_ET = datetime.datetime.now(tz=ZoneInfo("America/New_York"))
+_ET = ZoneInfo("America/New_York")
+
+# DATE = TH session date = ET close date.
+# Default: current session date in TH timezone.
+DATE = sys.argv[1] if len(sys.argv) > 1 else session_date_str()
+
+_NOW_ET = datetime.datetime.now(tz=_ET)
 _REQUEST_TIME = _NOW_ET.strftime("%H-%M")
 _REQUEST_TIME_LABEL = _NOW_ET.strftime("%H:%M ET")
 
@@ -31,8 +40,28 @@ MNQ_DOLLARS_PER_POINT_PER_CONTRACT = 2.0
 DEFAULT_CONTRACTS = 2
 
 # ── Price data ────────────────────────────────────────────────────────────────
+# Session spans 18:00 ET on (DATE - 1 day) to 17:00 ET on DATE.
+# DATE is treated as the ET close date (TH session date = ET close date in summer).
+_session_close_date = datetime.date.fromisoformat(DATE)
+_session_open_date = _session_close_date - datetime.timedelta(days=1)
+_session_start = pd.Timestamp(
+    datetime.datetime(_session_open_date.year, _session_open_date.month,
+                      _session_open_date.day, 18, 0),
+    tz=_ET,
+)
+_session_end = pd.Timestamp(
+    datetime.datetime(_session_close_date.year, _session_close_date.month,
+                      _session_close_date.day, 17, 0),
+    tz=_ET,
+)
+
 df = pd.read_parquet("data/MNQ_1m.parquet")
-day = df[df.index.date == pd.Timestamp(DATE).date()]
+# Ensure tz-aware comparison
+if df.index.tz is None:
+    df.index = df.index.tz_localize(_ET)
+else:
+    df.index = df.index.tz_convert(_ET)
+day = df[(df.index >= _session_start) & (df.index <= _session_end)]
 
 # ── Events ────────────────────────────────────────────────────────────────────
 events_path = SESSION_DIR / "events.jsonl"

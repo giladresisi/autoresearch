@@ -789,21 +789,24 @@ class SessionPipeline:
                 })
 
         # ── Day H/L ──────────────────────────────────────────────────────────
-        _today_bars = today_mnq[today_mnq.index <= now]
-        if not _today_bars.empty:
-            _dh = float(_today_bars["High"].max())
-            _dl = float(_today_bars["Low"].min())
+        # today_mnq is filtered from CME session open (18:00 ET) so no further
+        # trimming is needed — the full overnight range is already present.
+        _day_bars = today_mnq[today_mnq.index <= now]
+        if not _day_bars.empty:
+            _dh = float(_day_bars["High"].max())
+            _dl = float(_day_bars["Low"].min())
             _dm = (_dh + _dl) / 2.0
             _set("day_high", _dh)
             _set("day_low",  _dl)
             _set("day_mid",  _dm)
 
         # ── Week H/L ───────────────────────────────────────────────────────────
+        # Week may span multiple sessions; need hist bars for earlier days.
         _week_start = self._week_start_ts(now.date())
-        _combined_week = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
-        _combined_week = _combined_week[~_combined_week.index.duplicated(keep="last")]
-        _week_bars = _combined_week[
-            (_combined_week.index >= _week_start) & (_combined_week.index <= now)
+        _combined_hist = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
+        _combined_hist = _combined_hist[~_combined_hist.index.duplicated(keep="last")]
+        _week_bars = _combined_hist[
+            (_combined_hist.index >= _week_start) & (_combined_hist.index <= now)
         ]
         if not _week_bars.empty:
             _wh = float(_week_bars["High"].max())
@@ -836,7 +839,7 @@ class SessionPipeline:
                 if _active_sess == "asia"
                 else now.date()
             )
-            _sbars = _session_bars(_combined_week, _active_sess, _sess_today)
+            _sbars = _session_bars(_combined_hist, _active_sess, _sess_today)
             if not _sbars.empty:
                 _sh = float(_sbars["High"].max())
                 _sl = float(_sbars["Low"].min())
@@ -898,6 +901,21 @@ class SessionPipeline:
             ]
 
         return _liq_events
+
+    def _day_start_ts(self, now: pd.Timestamp) -> pd.Timestamp:
+        """Return 18:00 ET on the date the current CME futures session opened.
+
+        After 18:00 ET today the new session opened today at 18:00.
+        Before 18:00 ET the session opened yesterday at 18:00.
+        """
+        now_et = now.tz_convert("America/New_York") if now.tzinfo else now.tz_localize("America/New_York")
+        d = now_et.date()
+        if now_et.hour < 18:
+            d -= datetime.timedelta(days=1)
+        return pd.Timestamp(
+            datetime.datetime(d.year, d.month, d.day, 18, 0),
+            tz="America/New_York",
+        )
 
     def _week_start_ts(self, today: "datetime.date") -> pd.Timestamp:
         """Return Sunday 18:00 ET preceding the current ISO week (CME futures week open).
