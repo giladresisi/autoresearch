@@ -374,15 +374,37 @@ def run_trend(
                             "price": position["active"]["cautious_break_price"], "level": "initial",
                             "cautious_break_price": position["active"]["cautious_break_price"]}
                 else:
-                    # wick-only reach of initial: wait for 1m arm-confirm bar
+                    # wick-only: move stop to midpoint between original stop and initial target
                     position["active"]["cautious"] = "initial_surpassed"
+                    _orig_stop = active.get("stop")
+                    if _orig_stop is not None and cautious_initial is not None:
+                        _mid_cbp = (float(_orig_stop) + cautious_initial) / 2.0
+                        position["active"]["cautious_break_price"] = _mid_cbp
                     save_position(position)
+                    _mid_cbp_val = position["active"].get("cautious_break_price")
+                    if _mid_cbp_val is not None:
+                        return {"kind": "new-stop-exit", "time": now.isoformat(),
+                                "price": float(_mid_cbp_val), "level": "initial_mid",
+                                "cautious_break_price": float(_mid_cbp_val)}
                     return None
 
             return None
 
         # ---- 3a2: initial surpassed — wait for 1m arm-confirm bar ----------
         if cautious_state == "initial_surpassed":
+            # Break check for the midpoint stop placed on wick-touch.
+            _break_price = active.get("cautious_break_price")
+            if _break_price is not None:
+                _broke = (bar_high > float(_break_price)) if direction == "down" \
+                         else (bar_low  < float(_break_price))
+                if _broke:
+                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                    save_position(position)
+                    save_hypothesis(hypothesis)
+                    return {"kind": "stop-exit", "time": now.isoformat(),
+                            "price": float(_break_price), "reason": "cautious-initial-break",
+                            "close_reason": _cr1}
+
             # If secondary was reached this bar, upgrade immediately.
             if cautious_secondary is not None and _surpassed(cautious_secondary):
                 if _close_beyond(cautious_secondary):
@@ -406,15 +428,20 @@ def run_trend(
                 _opp_close = (bar_close < bar_open) if direction == "up" else (bar_close > bar_open)
                 if _opp_close and not _close_beyond(cautious_initial):
                     _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
+                    _new_cbp = _floored_break_price(_ref5, direction, _fill_price, buffer_pts=BREAKEVEN_BUFFER_PTS)
+                    _cur_cbp = active.get("cautious_break_price")
+                    # Only tighten — never loosen the midpoint stop placed on wick-touch.
+                    if _new_cbp is not None and (_cur_cbp is None or
+                            (direction == "up"   and _new_cbp > float(_cur_cbp)) or
+                            (direction == "down" and _new_cbp < float(_cur_cbp))):
+                        position["active"]["cautious_break_price"] = _new_cbp
                     position["active"]["cautious"] = "initial"
-                    position["active"]["cautious_break_price"] = _floored_break_price(_ref5, direction, _fill_price, buffer_pts=BREAKEVEN_BUFFER_PTS)
                     position["conf_bar_exit"] = _ref_bar_to_dict(_ref5)
                     save_position(position)
                     if position["active"]["cautious_break_price"] is None:
                         return None  # deferred: trail will arm once price clears entry
                     _cbp = float(position["active"]["cautious_break_price"])
                     # If the arm-confirm bar itself breaches the break price, exit immediately.
-                    # In 1s live the next tick fires the break check; this aligns 1m regression.
                     _already_broke = (bar_high > _cbp) if direction == "down" else (bar_low < _cbp)
                     if _already_broke:
                         _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
@@ -423,7 +450,8 @@ def run_trend(
                         return {"kind": "stop-exit", "time": now.isoformat(),
                                 "price": _cbp, "reason": "cautious-initial-break",
                                 "close_reason": _cr1}
-                    return {"kind": "new-stop-exit", "time": now.isoformat(),
+                    _kind = "move-stop-exit" if _cur_cbp is not None else "new-stop-exit"
+                    return {"kind": _kind, "time": now.isoformat(),
                             "price": _cbp, "level": "initial",
                             "cautious_break_price": _cbp}
 

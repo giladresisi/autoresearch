@@ -167,16 +167,24 @@ class TestCautiousArming:
         pos = load_position()
         assert pos["active"]["cautious"] == "initial"
 
-    def test_cautious_rejected_long_close_below(self):
+    def test_cautious_wick_only_sets_midpoint_stop(self):
         """direction=up, bar.high>=cautious_price_initial BUT close<cautious_price_initial
-        → wick-only reach of initial level: no rejection, returns None."""
+        → wick-only: stop moved to midpoint between original stop and initial target."""
         from trend import run_trend
+        from smt_state import load_position
 
         self._setup_active_cautious_no(direction="up", cautious_price=110.0)
         bar = make_1m_bar(open_=100, high=112, low=98, close=109)
         recent = make_recent_bars(closes=[100, 109], opens=[99, 100])
         result = run_trend(NOW, bar, recent)
-        assert result is None
+        # stop=95, cautious_initial=110 → midpoint=102.5
+        assert result is not None
+        assert result["kind"] == "new-stop-exit"
+        assert result["level"] == "initial_mid"
+        assert result["cautious_break_price"] == 102.5
+        pos = load_position()
+        assert pos["active"]["cautious"] == "initial_surpassed"
+        assert pos["active"]["cautious_break_price"] == 102.5
 
     def test_cautious_arming_short_close_beyond(self):
         """direction=down, bar.low<=cautious_price AND close<cautious_price → cautious-armed (initial)."""
