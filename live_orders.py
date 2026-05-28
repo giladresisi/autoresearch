@@ -118,6 +118,7 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> N
         "entry_price": entry_price,
         "stop_price": stop_price,
         "stop_fill_bars": 1,
+        "current_price": _current_price(),
     }
     _executor.place_entry(pmt_signal, None)
     pos = _load_pos()
@@ -188,6 +189,7 @@ def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: st
         "entry_price": new_entry_price,
         "stop_price": new_stop_price,
         "stop_fill_bars": 1,
+        "current_price": _current_price(),
     }
     _executor.modify_stop_entry(old_pmt, new_pmt, None)
     pos["stop_entry"] = str(new_entry_price)
