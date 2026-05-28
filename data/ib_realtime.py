@@ -98,8 +98,12 @@ class IbRealtimeSource:
         """Submit an atomic parquet write to the executor (write-to-tmp then os.replace)."""
         def _write(snap=df, dst=path):
             tmp = dst.with_name(f"{dst.stem}.{uuid4().hex}.parquet.tmp")
-            snap.to_parquet(tmp, use_dictionary=False)
-            os.replace(tmp, dst)
+            try:
+                snap.to_parquet(tmp, use_dictionary=False)
+                os.replace(tmp, dst)
+            except Exception as exc:
+                print(f"[parquet_write] ERROR writing {dst.name}: {exc}", flush=True)
+                raise
         self._parquet_executor.submit(_write)
 
     def _load_parquets(self) -> None:
@@ -568,6 +572,13 @@ class IbRealtimeSource:
             self._mes_1m_df = self._mes_1m_df[~self._mes_1m_df.index.duplicated(keep="last")]
             self._submit_parquet_write(self._mes_1m_df.copy(), self._bar_data_dir / "MES_1m.parquet")
         self._flush_1s_pending_to_session_file(instrument)
+        # Cross-flush: also flush the other instrument's pending at every 1m boundary.
+        # MES ticks (reqMktData) can arrive in large batches whose timestamps collapse to
+        # the same wall-clock second, preventing _update_tick_accumulator from ever
+        # finalising a bar. Piggybacking on MNQ boundaries (which always fire) ensures
+        # the MES session parquet is written even when MES tick timing is unfavourable.
+        other = "MES" if instrument == "MNQ" else "MNQ"
+        self._flush_1s_pending_to_session_file(other)
         _set_bar_data(self._mnq_1m_df, self._mes_1m_df)
         if instrument == "MNQ" and self._on_bar_1m_complete is not None:
             from types import SimpleNamespace
@@ -690,6 +701,19 @@ class IbRealtimeSource:
             pass
         # Flush 1s bars from the last partial minute to the session file; event loop is
         # stopped and disconnected by this point so pending lists are stable.
+        # First, move any in-progress partial-second bar into the pending list so it
+        # is captured even if the event loop was stopped mid-second.
+        for instrument, tick_bar_attr, pending_attr in (
+            ("MNQ", "_mnq_tick_bar", "_mnq_1s_pending"),
+            ("MES", "_mes_tick_bar", "_mes_1s_pending"),
+        ):
+            try:
+                tick_bar = getattr(self, tick_bar_attr)
+                if tick_bar is not None:
+                    getattr(self, pending_attr).append(tick_bar)
+                    setattr(self, tick_bar_attr, None)
+            except Exception:
+                pass
         for instrument in ("MNQ", "MES"):
             try:
                 self._flush_1s_pending_to_session_file(instrument)
