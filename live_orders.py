@@ -353,6 +353,8 @@ def dispatch(sig: dict) -> None:
         if cbp is None:
             cbp = _load_pos().get("active", {}).get("cautious_break_price")
         if cbp is not None:
+            _lname = sig.get("level_name", "")
+            _reason = f"new-stop-exit:{sig.get('level', '')}" + (f":{_lname}" if _lname else "")
             if sig.get("level") == "secondary":
                 # Secondary exit is managed by 1m bar-close check in trend.py.
                 # Move stop 1000 pts away from money so wicks never trigger a fill.
@@ -362,20 +364,22 @@ def dispatch(sig: dict) -> None:
                     _far = (_current - 1000.0) if _dir in ("up", "long") else (_current + 1000.0)
                 else:
                     _far = 0.0 if _dir in ("up", "long") else 50000.0
-                update_stop_loss(_far, reason="new-stop-exit")
+                update_stop_loss(_far, reason=_reason)
             else:
-                update_stop_loss(float(cbp), reason="new-stop-exit")
+                update_stop_loss(float(cbp), reason=_reason)
         _log(sig)
         return
 
     if kind == "move-stop-exit":
         cbp = sig.get("cautious_break_price")
         if cbp is not None:
+            _lname = sig.get("level_name", "")
+            _reason = f"move-stop-exit:{sig.get('level', '')}" + (f":{_lname}" if _lname else "")
             if sig.get("level") == "secondary":
                 # IB stop already at 0/50000 for secondary — no update needed.
                 pass
             else:
-                update_stop_loss(float(cbp), reason="move-stop-exit")
+                update_stop_loss(float(cbp), reason=_reason)
         _log(sig)
         return
 

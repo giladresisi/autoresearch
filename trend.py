@@ -353,7 +353,7 @@ def run_trend(
                     if position["active"]["cautious_break_price"] is None:
                         return None
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
-                            "price": _sec_cbp, "level": "secondary",
+                            "price": _sec_cbp, "level": "secondary", "level_name": _lv2,
                             "cautious_break_price": _sec_cbp}
                 else:
                     # wick-only reach of secondary: wait for 1m arm-confirm bar
@@ -371,7 +371,7 @@ def run_trend(
                     if position["active"]["cautious_break_price"] is None:
                         return None  # deferred: trail will arm once price clears entry
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
-                            "price": position["active"]["cautious_break_price"], "level": "initial",
+                            "price": position["active"]["cautious_break_price"], "level": "initial", "level_name": _lv1,
                             "cautious_break_price": position["active"]["cautious_break_price"]}
                 else:
                     # wick-only: move stop to midpoint between original stop and initial target
@@ -384,7 +384,7 @@ def run_trend(
                     _mid_cbp_val = position["active"].get("cautious_break_price")
                     if _mid_cbp_val is not None:
                         return {"kind": "new-stop-exit", "time": now.isoformat(),
-                                "price": float(_mid_cbp_val), "level": "initial_mid",
+                                "price": float(_mid_cbp_val), "level": "initial_mid", "level_name": _lv1,
                                 "cautious_break_price": float(_mid_cbp_val)}
                     return None
 
@@ -417,7 +417,7 @@ def run_trend(
                     if position["active"]["cautious_break_price"] is None:
                         return None
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
-                            "price": _sec_cbp, "level": "secondary",
+                            "price": _sec_cbp, "level": "secondary", "level_name": _lv2,
                             "cautious_break_price": _sec_cbp}
                 else:
                     position["active"]["cautious"] = "secondary_surpassed"
@@ -452,7 +452,7 @@ def run_trend(
                                 "close_reason": _cr1}
                     _kind = "move-stop-exit" if _cur_cbp is not None else "new-stop-exit"
                     return {"kind": _kind, "time": now.isoformat(),
-                            "price": _cbp, "level": "initial",
+                            "price": _cbp, "level": "initial", "level_name": _lv1,
                             "cautious_break_price": _cbp}
 
             return None
@@ -473,7 +473,7 @@ def run_trend(
                         return None
                     return {"kind": "move-stop-exit" if _had_prior_stop else "new-stop-exit",
                             "time": now.isoformat(),
-                            "price": _sec_cbp, "level": "secondary",
+                            "price": _sec_cbp, "level": "secondary", "level_name": _lv2,
                             "cautious_break_price": _sec_cbp}
                 else:
                     # wick-only reach of secondary: wait for 1m arm-confirm bar
@@ -514,7 +514,7 @@ def run_trend(
             if _trail_moved:
                 return {"kind": "move-stop-exit", "time": now.isoformat(),
                         "price": bar_close, "cautious_break_price": active["cautious_break_price"],
-                        "level": "initial"}
+                        "level": "initial", "level_name": _lv1}
 
             return None
 
@@ -534,7 +534,7 @@ def run_trend(
                         return None
                     return {"kind": "move-stop-exit" if _had_prior_stop else "new-stop-exit",
                             "time": now.isoformat(),
-                            "price": _sec_cbp, "level": "secondary",
+                            "price": _sec_cbp, "level": "secondary", "level_name": _lv2,
                             "cautious_break_price": _sec_cbp}
             return None
 
@@ -602,7 +602,7 @@ def run_trend(
                 if _trail_moved:
                     return {"kind": "move-stop-exit", "time": now.isoformat(),
                             "price": bar_close, "cautious_break_price": active["cautious_break_price"],
-                            "level": "secondary"}
+                            "level": "secondary", "level_name": _lv2}
 
         return None
 
