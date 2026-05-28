@@ -30,7 +30,12 @@ Signal = dict
 # ---------------------------------------------------------------------------
 # O4: minimum buffer (pts) below fill_price before initial breakeven stop fires.
 # Prevents 0-second stopouts when price oscillates around entry.
-BREAKEVEN_BUFFER_PTS: float = 1.0
+BREAKEVEN_BUFFER_PTS: float = 5.0
+
+# Minimum distance (pts) between fill price and initial cautious level before
+# any initial-level stop update fires (full arm OR wick-only midpoint).
+# When the initial target is this close, touching it doesn't confirm the move.
+INITIAL_STOP_MIN_DIST_PTS: float = 50.0
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -362,6 +367,9 @@ def run_trend(
                     return None
 
             if cautious_initial is not None and _surpassed(cautious_initial):
+                _initial_dist = abs(cautious_initial - _fill_price) if _fill_price else float("inf")
+                if _initial_dist < INITIAL_STOP_MIN_DIST_PTS:
+                    return None  # initial level too close to entry — let original stop stand
                 if _close_beyond(cautious_initial):
                     _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
                     position["active"]["cautious"] = "initial"
@@ -426,7 +434,9 @@ def run_trend(
 
             if cautious_initial is not None:
                 _opp_close = (bar_close < bar_open) if direction == "up" else (bar_close > bar_open)
-                if _opp_close and not _close_beyond(cautious_initial):
+                # Arm break-even on a confirmed close beyond the initial level OR on an
+                # opposite-close pullback bar — both give a structural 5-min reference bar.
+                if _close_beyond(cautious_initial) or _opp_close:
                     _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
                     _new_cbp = _floored_break_price(_ref5, direction, _fill_price, buffer_pts=BREAKEVEN_BUFFER_PTS)
                     _cur_cbp = active.get("cautious_break_price")
