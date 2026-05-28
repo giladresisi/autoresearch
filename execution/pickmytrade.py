@@ -10,6 +10,7 @@ import zoneinfo
 
 import httpx
 
+import session_times
 from execution.protocol import FillRecord, BarRow, assumed_fill_price
 
 _ET = zoneinfo.ZoneInfo("America/New_York")
@@ -42,6 +43,9 @@ class PickMyTradeExecutor:
         self._order_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="pmt-order"
         )
+        # True iff the most recent stop/market entry was actually sent to the broker.
+        # False when the order was suppressed by the entry-window gate.
+        self._entry_is_live: bool = False
 
     def start(self) -> None:
         if not self._webhook_url or not self._api_key:
@@ -89,8 +93,6 @@ class PickMyTradeExecutor:
             # No price field: PMT uses the latest close price as the market price
             payload = self._build_payload(data, order_type="MKT", sl=stop_price)
             order_type = "market"
-        # Fire-and-forget: bar callback returns immediately; HTTP runs in background thread
-        self._order_pool.submit(self._post_order, order_id, payload)
         # Extract bar_time in ET for time-based slippage decision
         if bar is not None and hasattr(bar, "name") and bar.name is not None:
             _bar_ts = bar.name
@@ -103,17 +105,33 @@ class PickMyTradeExecutor:
             direction, order_type, entry_price, self._entry_slip_ticks, self._tick_size,
             bar_time=_bar_time,
         )
+        session_date = str(bar.name.date()) if hasattr(bar, "name") and bar.name is not None else ""
+
+        # Block outside entry windows — return identical FillRecord shape so callers are unaffected
+        if not session_times.is_entry_allowed(datetime.datetime.now(_ET).time()):
+            print(f"[PMT] entry window blocked — not sending {order_id}", flush=True)
+            self._entry_is_live = False
+            return FillRecord(
+                order_id=order_id, symbol=self._symbol, direction=direction,
+                order_type=order_type, requested_price=entry_price,
+                fill_price=round(fill_price, 4),
+                fill_time=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                contracts=self._contracts, status="blocked", session_date=session_date,
+            )
+
+        # flatten_first: synchronously close any existing position before entering
+        if signal.get("flatten_first"):
+            self.place_close("pre-reentry")
+
+        # Fire-and-forget: bar callback returns immediately; HTTP runs in background thread
+        self._order_pool.submit(self._post_order, order_id, payload)
+        self._entry_is_live = True
         return FillRecord(
-            order_id=order_id,
-            symbol=self._symbol,
-            direction=direction,
-            order_type=order_type,
-            requested_price=entry_price,
+            order_id=order_id, symbol=self._symbol, direction=direction,
+            order_type=order_type, requested_price=entry_price,
             fill_price=round(fill_price, 4),
             fill_time=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            contracts=self._contracts,
-            status="filled",
-            session_date=str(bar.name.date()) if hasattr(bar, "name") and bar.name is not None else "",
+            contracts=self._contracts, status="filled", session_date=session_date,
         )
 
     def update_stop_loss(self, position: dict, bar: BarRow) -> tuple:
@@ -139,6 +157,7 @@ class PickMyTradeExecutor:
     def place_close(self, label: str = "close") -> None:
         order_id = f"pmt-{uuid.uuid4().hex[:8]}"
         payload = self._build_payload("close")
+        self._entry_is_live = False
         # Synchronous — callers can sequence follow-up requests after this returns
         self._post_order(order_id, payload)
 
@@ -147,6 +166,14 @@ class PickMyTradeExecutor:
         return None
 
     def modify_stop_entry(self, old_signal: dict, new_signal: dict, bar: BarRow) -> None:
+        if not self._entry_is_live:
+            # Entry was never sent to broker — window was closed when it was placed
+            if session_times.is_entry_allowed(datetime.datetime.now(_ET).time()):
+                # Window just opened — place fresh entry (no existing broker order to cancel)
+                self.place_entry(new_signal, bar)
+            else:
+                print("[PMT] entry window blocked — not modifying unplaced stop entry", flush=True)
+            return
         # Step 1: synchronously cancel the unfilled stop entry
         self.place_close(label="modify_cancel")
         # Step 2: fire new STP order via thread pool
@@ -157,6 +184,7 @@ class PickMyTradeExecutor:
         stop_price = float(new_signal.get("stop_price", 0.0))
         payload = self._build_payload(data, order_type="STP", price=entry_price, sl=stop_price)
         self._order_pool.submit(self._post_order, order_id, payload)
+        self._entry_is_live = True
 
     def _post_order(self, order_id: str, payload: dict) -> tuple:
         headers = {"Content-Type": "application/json"}

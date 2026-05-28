@@ -275,7 +275,7 @@ def run_strategy(
             (direction == _DIR_UP   and float(mnq_bar["high"]) >= _entry_f) or
             (direction == _DIR_DOWN and float(mnq_bar["low"])  <= _entry_f)
         )
-        if stop_entry != "" and _entry_reached:
+        if stop_entry != "" and _entry_reached and not position.get("stop_entry_unplaced"):
             fill_price   = float(stop_entry)
             pending_stop = position.get("pending_stop")
             if pending_stop is not None:

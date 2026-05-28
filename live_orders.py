@@ -14,7 +14,6 @@ from pathlib import Path
 import pandas as pd
 
 from dotenv import load_dotenv
-import session_times
 load_dotenv()
 
 _LIVE = os.getenv("LIVE_TRADING", "false").lower() == "true"
@@ -125,6 +124,10 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> N
     pos["stop_entry"] = str(entry_price)
     pos["stop_direction"] = "up" if direction == "long" else "down"
     pos["pending_stop"] = stop_price
+    if not getattr(_executor, "_entry_is_live", True):
+        pos["stop_entry_unplaced"] = True
+    else:
+        pos.pop("stop_entry_unplaced", None)
     _save_pos(pos)
     _log({"kind": "new-stop-entry", "time": now, "direction": direction,
           "entry_price": entry_price, "stop_price": stop_price})
@@ -139,15 +142,19 @@ def _current_price() -> float:
     return 0.0
 
 
-def place_market_entry(direction: str, entry_price: float, stop_price: float) -> None:
+def place_market_entry(direction: str, entry_price: float, stop_price: float, *, flatten_first: bool = False) -> None:
     """Enter at market with stop. Logs, dispatches MKT+sl, writes active to position.json."""
     now = _now_et()
     pmt_signal = {
         "direction": direction,
         "entry_price": entry_price,
         "stop_price": stop_price,
+        "flatten_first": flatten_first,
     }
     _executor.place_entry(pmt_signal, None)
+    if not getattr(_executor, "_entry_is_live", True):
+        # Entry was blocked by window gate — don't update position state or log
+        return
     fill_price = entry_price if entry_price != 0.0 else _current_price()
     pos = _load_pos()
     pos["active"] = {
@@ -185,6 +192,8 @@ def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: st
     _executor.modify_stop_entry(old_pmt, new_pmt, None)
     pos["stop_entry"] = str(new_entry_price)
     pos["pending_stop"] = new_stop_price
+    if getattr(_executor, "_entry_is_live", True):
+        pos.pop("stop_entry_unplaced", None)
     _save_pos(pos)
     _log({"kind": "move-stop-entry", "time": now, "direction": direction,
           "new_entry_price": new_entry_price, "new_stop_price": new_stop_price,
@@ -215,10 +224,12 @@ def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> No
         return
     now = _now_et()
     entry_price = float(pos["stop_entry"]) if pos.get("stop_entry") else 0.0
-    _executor.place_close("cancel-stop")
+    if getattr(_executor, "_entry_is_live", True):
+        _executor.place_close("cancel-stop")
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
     pos["conf_bar_entry"] = {}
+    pos.pop("stop_entry_unplaced", None)
     _save_pos(pos)
     _log({"kind": "cancel-stop-entry", "time": now, "entry_price": entry_price, "reason": reason})
 
@@ -257,14 +268,6 @@ def update_stop_loss(stop_price: float, reason: str = "user-requested", directio
 # Pipeline dispatch — single entry point for all automatic signals
 # ---------------------------------------------------------------------------
 
-def _sig_et_time(sig: dict) -> datetime.time:
-    """Return the signal bar time as an ET time for entry-window checks."""
-    try:
-        return pd.Timestamp(sig["time"]).tz_convert(_ET).time()
-    except Exception:
-        return datetime.datetime.now(_ET).time()
-
-
 def dispatch(sig: dict) -> None:
     """Route a pipeline signal to log + executor. Called by SmtV2Dispatcher._emit().
 
@@ -280,17 +283,7 @@ def dispatch(sig: dict) -> None:
     if kind == "new-stop-entry":
         stop = sig.get("stop")
         if direction and stop is not None:
-            if session_times.is_entry_allowed(_sig_et_time(sig)):
-                place_stop_entry(direction, float(sig["price"]), float(stop))
-            else:
-                # Outside entry window: log the signal but skip the broker.
-                # Undo the stop_entry state written by strategy.py; keep conf_bar_entry
-                # so the dedup check prevents re-emitting the same conf bar next tick.
-                _pos = _load_pos()
-                _pos["stop_entry"] = ""
-                _pos["stop_direction"] = ""
-                _save_pos(_pos)
-                _log(sig)
+            place_stop_entry(direction, float(sig["price"]), float(stop))
         if sig.get("time"):
             try:
                 _entry_sent_bar_time = pd.Timestamp(sig["time"])
@@ -319,23 +312,8 @@ def dispatch(sig: dict) -> None:
     if kind == "market-entry":
         stop = sig.get("stop")
         if direction and stop is not None:
-            if session_times.is_entry_allowed(_sig_et_time(sig)):
-                # flatten_first: set by session_pipeline on prefer_market_entry re-entries.
-                # Sends a synchronous close before the new entry so any open position from a
-                # rapid fill+stop-out that Tradovate hasn't settled yet is cleared first.
-                if sig.get("flatten_first"):
-                    _executor.place_close("pre-reentry")
-                place_market_entry(direction, float(sig["price"]), float(stop))
-            else:
-                # Outside entry window: log the signal but skip the broker.
-                # Undo the active position written by strategy.py; keep conf_bar_entry
-                # so the dedup check prevents re-emitting the same conf bar next tick.
-                _pos = _load_pos()
-                _pos["active"] = {}
-                _pos["stop_entry"] = ""
-                _pos["stop_direction"] = ""
-                _save_pos(_pos)
-                _log(sig)
+            place_market_entry(direction, float(sig["price"]), float(stop),
+                               flatten_first=bool(sig.get("flatten_first")))
         return
 
     if kind == "market-close":
@@ -399,9 +377,27 @@ def dispatch(sig: dict) -> None:
         _log(sig)
         return
 
+    if kind == "cancel-stop-entry":
+        # Emitted by strategy.py on direction change or window close. Falls through to
+        # log-only normally, but must also clear the unplaced flag when set.
+        _pos = _load_pos()
+        if _pos.get("stop_entry_unplaced"):
+            _pos.pop("stop_entry_unplaced", None)
+            _save_pos(_pos)
+        _log(sig)
+        return
+
     if kind == "stop-entry-cancelled":
-        # position.json already cleared by the pipeline before emitting this signal;
-        # bypass the stop_entry guard and send the broker cancel directly.
+        # Emitted by session_pipeline when a market-entry overwrites a pending stop.
+        # position.json already cleared by the pipeline before emitting this signal.
+        _pos = _load_pos()
+        if _pos.get("stop_entry_unplaced"):
+            # Entry was never placed at broker — log only, no cancel needed.
+            _pos.pop("stop_entry_unplaced", None)
+            _save_pos(_pos)
+            _log(sig)
+            return
+        # Normal path: entry was live at broker, cancel it.
         if _entry_sent_bar_time is not None and sig.get("time"):
             try:
                 _cancel_ts = pd.Timestamp(sig["time"])
