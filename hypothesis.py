@@ -12,6 +12,8 @@ import pandas as pd
 CAUTIOUS_SECONDARY_MAX_DIST = 150  # pts — secondary (1m confirmation) max distance
 CAUTIOUS_INITIAL_MAX_DIST   = 110  # pts — initial (5m confirmation) max distance
 CAUTIOUS_MIN_DIST           =  40  # pts — below this secondary distance, skip the entry
+CAUTIOUS_INITIAL_OFFSET_PTS   = 2.0  # pts — initial cautious target set this much closer than the level
+CAUTIOUS_SECONDARY_OFFSET_PTS = 5.0  # pts — secondary cautious target set this much closer than the level
 
 # P2b: suppress LOW-arm DOWN when price is this many points above the swept level.
 # 50-pt overshoot zone = false positives (38% correct); 20-50pt zone is 80% correct.
@@ -60,21 +62,24 @@ def compute_cautious_prices(
     if _cautious_all:
         _sec = max(_cautious_all, key=lambda x: x[0]) if direction == "up" \
                else min(_cautious_all, key=lambda x: x[0])
-        cautious_price_secondary       = _sec[0]
+        cautious_price_secondary       = _sec[0] - CAUTIOUS_SECONDARY_OFFSET_PTS if direction == "up" \
+                                         else _sec[0] + CAUTIOUS_SECONDARY_OFFSET_PTS
         cautious_price_secondary_level = _sec[1]
 
+        # Filter using raw level price so the offset doesn't shrink the candidate pool.
         if direction == "up":
             _init_candidates = [(p, n) for p, n in _cautious_all
-                                if p < cautious_price_secondary and p <= current_close + CAUTIOUS_INITIAL_MAX_DIST]
+                                if p < _sec[0] and p <= current_close + CAUTIOUS_INITIAL_MAX_DIST]
         else:
             _init_candidates = [(p, n) for p, n in _cautious_all
-                                if p > cautious_price_secondary and p >= current_close - CAUTIOUS_INITIAL_MAX_DIST]
+                                if p > _sec[0] and p >= current_close - CAUTIOUS_INITIAL_MAX_DIST]
 
         if _init_candidates:
             _ini = max(_init_candidates, key=lambda x: x[0]) if direction == "up" \
                    else min(_init_candidates, key=lambda x: x[0])
             if abs(_ini[0] - current_close) >= CAUTIOUS_MIN_DIST:
-                cautious_price_initial       = _ini[0]
+                cautious_price_initial       = _ini[0] - CAUTIOUS_INITIAL_OFFSET_PTS if direction == "up" \
+                                               else _ini[0] + CAUTIOUS_INITIAL_OFFSET_PTS
                 cautious_price_initial_level = _ini[1]
             else:
                 _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
@@ -107,7 +112,8 @@ def compute_cautious_prices(
         if _terminal_candidates:
             _sec = max(_terminal_candidates, key=lambda x: x[0]) if direction == "down" \
                    else min(_terminal_candidates, key=lambda x: x[0])
-            cautious_price_secondary       = _sec[0]
+            cautious_price_secondary       = _sec[0] - CAUTIOUS_SECONDARY_OFFSET_PTS if direction == "up" \
+                                             else _sec[0] + CAUTIOUS_SECONDARY_OFFSET_PTS
             cautious_price_secondary_level = _sec[1]
             _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
             if _syn_dist >= CAUTIOUS_MIN_DIST:
