@@ -10,6 +10,8 @@ _IB_1S_CHUNK_SECONDS = 1800
 _1S_EARLIEST = "2026-05-01"
 
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
@@ -37,6 +39,9 @@ class IbRealtimeSource:
         max_retries: int = 10,
         retry_delay_s: int = 15,
         on_bar_1m_complete: Callable | None = None,
+        watchdog_timeout_s: int = 120,
+        watchdog_termination_grace_s: int = 30,
+        comments_path: Path | None = None,
     ) -> None:
         self._host           = host
         self._port           = port
@@ -70,6 +75,12 @@ class IbRealtimeSource:
         # max_workers=1 prevents concurrent writes to the same file.
         self._parquet_executor    = ThreadPoolExecutor(max_workers=1, thread_name_prefix="parq")
         self._last_seed_count: dict[str, int] = {"MNQ": 0, "MES": 0}
+        self._watchdog_timeout_s: int = watchdog_timeout_s
+        self._watchdog_termination_grace_s: int = watchdog_termination_grace_s
+        self._comments_path: Path | None = comments_path
+        self._last_data_ts: float = 0.0
+        self._watchdog_thread: threading.Thread | None = None
+        self._ib_connectivity_lost: bool = False  # tracks 1100/1102 cycle for comment dedup
 
     @property
     def mnq_1m_df(self) -> pd.DataFrame:
@@ -469,6 +480,7 @@ class IbRealtimeSource:
         self._mnq_partial_1m = self._update_partial_1m(self._mnq_partial_1m, t.price, t.size, minute_ts)
 
     def _on_mnq_mkt_data(self, ticker) -> None:
+        self._last_data_ts = time.monotonic()
         import math as _math
         for tick in ticker.ticks:
             if tick.tickType != 4:
@@ -645,8 +657,14 @@ class IbRealtimeSource:
 
                 # Detect gateway-initiated disconnects (not our own stop() call).
                 self._ib.disconnectedEvent += self._on_gateway_disconnect
+                self._ib.errorEvent += self._on_ib_error
                 self._ib.connect(self._host, self._port, clientId=self._client_id)
                 self._setup_subscriptions(mnq_contract, mes_contract)
+                self._last_data_ts = time.monotonic()
+                self._watchdog_thread = threading.Thread(
+                    target=self._watchdog_loop, daemon=True, name="ib-watchdog"
+                )
+                self._watchdog_thread.start()
                 util.run()
                 if self._stopping:
                     break  # deliberate stop() call — exit retry loop without error
@@ -675,6 +693,107 @@ class IbRealtimeSource:
                 self._ib.disconnect()
         except Exception:
             pass
+
+    def _write_session_comment(self, text: str) -> None:
+        if self._comments_path is None:
+            return
+        ts = pd.Timestamp.now(tz="America/New_York")
+        needs_newline = self._comments_path.exists() and self._comments_path.stat().st_size > 0
+        prefix = "\n" if needs_newline else ""
+        entry = f"{prefix}## {ts.strftime('%Y-%m-%d %H:%M:%S ET')}\n{text}\n"
+        try:
+            self._comments_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._comments_path, "a", encoding="utf-8") as f:
+                f.write(entry)
+        except Exception as exc:
+            print(f"[ib-watchdog] WARNING: could not write comment: {exc}", flush=True)
+
+    def _watchdog_loop(self) -> None:
+        while not self._stopping:
+            time.sleep(5)
+            if self._stopping:
+                break
+            elapsed = time.monotonic() - self._last_data_ts
+            if elapsed < self._watchdog_timeout_s:
+                continue
+
+            # Phase 1: zombie detected — log and enter recovery window
+            now_et = pd.Timestamp.now(tz="America/New_York")
+            last_data_et = now_et - pd.Timedelta(seconds=elapsed)
+            print(
+                f"[ib-watchdog] No data for {elapsed:.0f}s -- "
+                f"zombie suspected, waiting {self._watchdog_termination_grace_s}s for recovery",
+                flush=True,
+            )
+            self._write_session_comment(
+                f"IB zombie suspected -- no data for {elapsed:.0f}s "
+                f"(last data ~{last_data_et.strftime('%H:%M:%S ET')}). "
+                f"Waiting {self._watchdog_termination_grace_s}s for IB to recover."
+            )
+
+            # Phase 2: recovery window
+            grace_start = time.monotonic()
+            recovered = False
+            while time.monotonic() - grace_start < self._watchdog_termination_grace_s:
+                time.sleep(1)
+                if self._stopping:
+                    return
+                if time.monotonic() - self._last_data_ts < self._watchdog_timeout_s:
+                    recovered = True
+                    break
+
+            if recovered:
+                reconnect_et = pd.Timestamp.now(tz="America/New_York")
+                print(
+                    f"[ib-watchdog] IB recovered — data resumed after ~{elapsed:.0f}s gap",
+                    flush=True,
+                )
+                self._write_session_comment(
+                    f"IB recovered at {reconnect_et.strftime('%H:%M:%S ET')} "
+                    f"after ~{elapsed:.0f}s gap "
+                    f"({last_data_et.strftime('%H:%M:%S')} - {reconnect_et.strftime('%H:%M:%S ET')}). "
+                    "Gap-fill required for this period."
+                )
+                # continue outer loop — watchdog stays active
+            else:
+                terminate_et = pd.Timestamp.now(tz="America/New_York")
+                print(
+                    f"[ib-watchdog] No recovery after {self._watchdog_termination_grace_s}s -- "
+                    "treating connection as zombie, stopping event loop",
+                    flush=True,
+                )
+                self._write_session_comment(
+                    f"IB terminated at {terminate_et.strftime('%H:%M:%S ET')} "
+                    f"after {self._watchdog_termination_grace_s}s grace period. "
+                    f"Gap-fill required for "
+                    f"{last_data_et.strftime('%H:%M:%S')} - {terminate_et.strftime('%H:%M:%S ET')}. "
+                    "Process exiting with code 2."
+                )
+                self._disconnected_by_gateway = True
+                if self._event_loop is not None:
+                    self._event_loop.call_soon_threadsafe(self._event_loop.stop)
+                break
+
+    def _on_ib_error(self, reqId: int, errorCode: int, errorString: str, contract=None, exception=None) -> None:
+        """Callback wired to ib.errorEvent — logs IB connectivity events to comments.md.
+
+        Only writes on the first 1100 per loss cycle (deduplicates repeated 1100s) and on 1102.
+        All other error codes are ignored here; ib_insync prints them to stdout already.
+        """
+        if errorCode == 1100 and not self._ib_connectivity_lost:
+            self._ib_connectivity_lost = True
+            now_et = pd.Timestamp.now(tz="America/New_York")
+            self._write_session_comment(
+                f"IB connectivity lost (error 1100) at {now_et.strftime('%H:%M:%S ET')} — "
+                f"watchdog monitoring data flow; {self._watchdog_timeout_s}s timeout."
+            )
+        elif errorCode == 1102 and self._ib_connectivity_lost:
+            self._ib_connectivity_lost = False
+            now_et = pd.Timestamp.now(tz="America/New_York")
+            self._write_session_comment(
+                f"IB connectivity restored (error 1102) at {now_et.strftime('%H:%M:%S ET')} — "
+                f"data flow determines watchdog recovery (not this API callback)."
+            )
 
     def _on_gateway_disconnect(self) -> None:
         """Callback wired to ib.disconnectedEvent — fires when the gateway closes the connection.

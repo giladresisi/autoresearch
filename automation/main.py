@@ -62,8 +62,10 @@ GAP_FILL_MAX_DAYS    = 14  # covers long weekends and occasional missed days
 MNQ_PNL_PER_POINT    = 2.0
 
 # ── Reconnect settings ────────────────────────────────────────────────────────
-MAX_RETRIES   = 10
-RETRY_DELAY_S = 15
+MAX_RETRIES                    = 10
+RETRY_DELAY_S                  = 15
+WATCHDOG_TIMEOUT_S             = 120  # 2 minutes without IB data → declare zombie
+WATCHDOG_TERMINATION_GRACE_S   = 30   # grace window for IB to recover before exiting
 
 # ── Data paths ───────────────────────────────────────────────────────────────
 BAR_DATA_DIR = Path("data")
@@ -1125,6 +1127,9 @@ def main() -> None:
         on_bar=_on_bar,
         max_retries=MAX_RETRIES, retry_delay_s=RETRY_DELAY_S,
         on_bar_1m_complete=_on_bar_1m_complete,
+        watchdog_timeout_s=WATCHDOG_TIMEOUT_S,
+        watchdog_termination_grace_s=WATCHDOG_TERMINATION_GRACE_S,
+        comments_path=SESSIONS_DIR / today_str / "comments.md",
     )
 
     _executor.start()

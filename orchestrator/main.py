@@ -463,7 +463,8 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
             if result == "ib_disconnected":
                 orch_ch.writeln(
                     "[ORCH] *** IB Gateway disconnected. Restart IB Gateway, then relaunch "
-                    "the orchestrator. All positions have been closed. ***"
+                    "the orchestrator. automation.main attempted a hard close; verify position "
+                    "state before restarting. ***"
                 )
                 sys.exit(3)
             # Post-session: accumulate overnight bars while sleeping until next session
@@ -479,6 +480,22 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
         print("\n[ORCH] Shutting down.", flush=True)
         _stop_pre_session_ib(_pre_src, _pre_thr)
         sys.exit(0)
+    except Exception as _exc:
+        # Unhandled exception in the main orchestrator loop — log full traceback before dying.
+        try:
+            _crash = Path(__file__).resolve().parent.parent / "orchestrator_crash.log"
+            _ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(_crash, "a", encoding="utf-8") as _f:
+                _f.write(f"=== MAIN THREAD CRASH {_ts} ===\n")
+                _traceback.print_exc(file=_f)
+                _f.write("\n")
+        except Exception:
+            pass
+        print(
+            f"\n[ORCH] *** UNHANDLED EXCEPTION: {_exc!r} ***\n{_traceback.format_exc()}",
+            flush=True,
+        )
+        raise
     finally:
         try:
             if _PIDFILE.exists() and _PIDFILE.read_text().strip() == str(_os.getpid()):

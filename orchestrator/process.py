@@ -77,6 +77,17 @@ class ProcessManager:
                 self._log.writeln(f"[ORCH] Interrupt received — terminating {name}")
                 self._terminate(proc)
             raise
+        finally:
+            # Guarantee: no subprocess survives an unexpected orchestrator exit.
+            # All normal exit paths (scheduled_stop, ib_disconnected, unexpected_exit×2)
+            # already terminate or confirm proc is dead before returning.  This catches
+            # any unhandled exception that escapes the loop, preventing an orphan
+            # automation.main process that would trade with no supervision.
+            if proc is not None and proc.poll() is None:
+                self._log.writeln(
+                    f"[ORCH] *** Emergency termination of {name} — orchestrator exiting unexpectedly ***"
+                )
+                self._terminate(proc)
 
     def _spawn(self) -> subprocess.Popen:
         if isinstance(self._script, list):
