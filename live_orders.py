@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from dotenv import load_dotenv
+import session_times
 load_dotenv()
 
 _LIVE = os.getenv("LIVE_TRADING", "false").lower() == "true"
@@ -256,6 +257,14 @@ def update_stop_loss(stop_price: float, reason: str = "user-requested", directio
 # Pipeline dispatch — single entry point for all automatic signals
 # ---------------------------------------------------------------------------
 
+def _sig_et_time(sig: dict) -> datetime.time:
+    """Return the signal bar time as an ET time for entry-window checks."""
+    try:
+        return pd.Timestamp(sig["time"]).tz_convert(_ET).time()
+    except Exception:
+        return datetime.datetime.now(_ET).time()
+
+
 def dispatch(sig: dict) -> None:
     """Route a pipeline signal to log + executor. Called by SmtV2Dispatcher._emit().
 
@@ -271,7 +280,17 @@ def dispatch(sig: dict) -> None:
     if kind == "new-stop-entry":
         stop = sig.get("stop")
         if direction and stop is not None:
-            place_stop_entry(direction, float(sig["price"]), float(stop))
+            if session_times.is_entry_allowed(_sig_et_time(sig)):
+                place_stop_entry(direction, float(sig["price"]), float(stop))
+            else:
+                # Outside entry window: log the signal but skip the broker.
+                # Undo the stop_entry state written by strategy.py; keep conf_bar_entry
+                # so the dedup check prevents re-emitting the same conf bar next tick.
+                _pos = _load_pos()
+                _pos["stop_entry"] = ""
+                _pos["stop_direction"] = ""
+                _save_pos(_pos)
+                _log(sig)
         if sig.get("time"):
             try:
                 _entry_sent_bar_time = pd.Timestamp(sig["time"])
@@ -300,12 +319,23 @@ def dispatch(sig: dict) -> None:
     if kind == "market-entry":
         stop = sig.get("stop")
         if direction and stop is not None:
-            # flatten_first: set by session_pipeline on prefer_market_entry re-entries.
-            # Sends a synchronous close before the new entry so any open position from a
-            # rapid fill+stop-out that Tradovate hasn't settled yet is cleared first.
-            if sig.get("flatten_first"):
-                _executor.place_close("pre-reentry")
-            place_market_entry(direction, float(sig["price"]), float(stop))
+            if session_times.is_entry_allowed(_sig_et_time(sig)):
+                # flatten_first: set by session_pipeline on prefer_market_entry re-entries.
+                # Sends a synchronous close before the new entry so any open position from a
+                # rapid fill+stop-out that Tradovate hasn't settled yet is cleared first.
+                if sig.get("flatten_first"):
+                    _executor.place_close("pre-reentry")
+                place_market_entry(direction, float(sig["price"]), float(stop))
+            else:
+                # Outside entry window: log the signal but skip the broker.
+                # Undo the active position written by strategy.py; keep conf_bar_entry
+                # so the dedup check prevents re-emitting the same conf bar next tick.
+                _pos = _load_pos()
+                _pos["active"] = {}
+                _pos["stop_entry"] = ""
+                _pos["stop_direction"] = ""
+                _save_pos(_pos)
+                _log(sig)
         return
 
     if kind == "market-close":

@@ -349,8 +349,6 @@ def run_strategy(
                     approach = bar_open - body_end_price
 
                 if approach < _MARKET_ENTRY_THRESHOLD or prefer_market_entry:
-                    if not session_times.is_entry_allowed(now.time()):
-                        return None
                     bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
                     if direction == _DIR_UP:
                         stop = max(float(opp_5m["low"]), float(opp_5m["body_low"]) - _STOP_WICK_CAP)
@@ -400,8 +398,6 @@ def run_strategy(
                 if direction == _DIR_DOWN and (stop_loss - entry_price) < MIN_STOP_DISTANCE:
                     return None
                 position["conf_bar_entry"] = conf_bar_snap
-                if position["stop_entry"] == "" and not session_times.is_entry_allowed(now.time()):
-                    return None
                 kind = "new-stop-entry" if position["stop_entry"] == "" else "move-stop-entry"
                 position["stop_entry"]     = entry_price
                 position["stop_direction"] = direction
