@@ -9,12 +9,17 @@ from typing import Callable
 
 import pandas as pd
 
+from zoneinfo import ZoneInfo
+
 import daily as _daily_mod
 import hypothesis as _hyp_mod
 import smt_state as _smt_state
 import strategy as _strat_mod
 import trend as _trend_mod
+from session_times import is_entry_allowed
 from smt_state import save_bar_state
+
+_ET = ZoneInfo("America/New_York")
 
 
 class SessionPipeline:
@@ -76,6 +81,9 @@ class SessionPipeline:
         self._ext_levels: list[tuple[str, float]] = []
         self._last_daily_date: "datetime.date | None" = None
         self._last_daily_minute: "pd.Timestamp | None" = None
+        # Tracks whether the previous bar was inside an entry-allowed window.
+        # Used to detect window-entry events and clear ghost positions.
+        self._was_in_window: "bool | None" = None
 
     def on_daily_or_startup(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> None:
         """Compute fixed reference liquidities and seed ATH. Called on startup and at 09:20 ET daily."""
@@ -288,6 +296,44 @@ class SessionPipeline:
         recent = today_mnq[today_mnq.index <= now]
 
         events: list[dict] = []
+
+        # Window-entry guard: if a position was opened outside any entry window and we
+        # just crossed into an allowed window, treat it as a market-close (log only —
+        # no PMT order sent) so the strategy re-evaluates cleanly from a flat state.
+        _now_et = now.tz_convert(_ET) if now.tzinfo else now
+        _now_in_window = is_entry_allowed(_now_et.time())
+        if self._was_in_window is not None and not self._was_in_window and _now_in_window:
+            _ghost_pos = _smt_state.load_position()
+            _ghost_active = _ghost_pos.get("active", {})
+            if _ghost_active:
+                _open_time_str = _ghost_active.get("time", "")
+                _opened_outside = False
+                if _open_time_str:
+                    try:
+                        _open_ts = pd.Timestamp(_open_time_str)
+                        _open_et = _open_ts.tz_convert(_ET) if _open_ts.tzinfo else _open_ts
+                        _opened_outside = not is_entry_allowed(_open_et.time())
+                    except Exception:
+                        pass
+                if _opened_outside:
+                    _ghost_evt: dict = {
+                        "kind":      "market-close",
+                        "time":      now.isoformat(),
+                        "price":     float(_ghost_active.get("fill_price", 0)),
+                        "reason":    "window-entered",
+                        "direction": _ghost_active.get("direction", ""),
+                        "source":    "strategy",
+                    }
+                    _ghost_hyp = _smt_state.load_hypothesis()
+                    _ghost_pos["active"] = {}
+                    _ghost_pos["stop_entry"] = ""
+                    _ghost_pos["conf_bar_exit"] = {}
+                    _ghost_hyp["direction"] = "none"
+                    _smt_state.save_position(_ghost_pos)
+                    _smt_state.save_hypothesis(_ghost_hyp)
+                    self._emit(_ghost_evt)
+                    events.append(_ghost_evt)
+        self._was_in_window = _now_in_window
 
         # Snapshot direction before any module can mutate hypothesis state — ensures
         # terminal output and executor receive the same direction for every signal this bar.
