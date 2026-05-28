@@ -578,6 +578,16 @@ class IbRealtimeSource:
         # finalising a bar. Piggybacking on MNQ boundaries (which always fire) ensures
         # the MES session parquet is written even when MES tick timing is unfavourable.
         other = "MES" if instrument == "MNQ" else "MNQ"
+        # Finalize the other instrument's in-progress tick bar before flushing pending.
+        # Without this, the partial-second bar in _mes_tick_bar/_mnq_tick_bar is never
+        # appended to pending when tick timestamps collapse (all ticks share same lastTime),
+        # so only bars that happened to cross a second boundary naturally are ever written.
+        other_tick_attr    = "_mes_tick_bar"    if instrument == "MNQ" else "_mnq_tick_bar"
+        other_pending_attr = "_mes_1s_pending"  if instrument == "MNQ" else "_mnq_1s_pending"
+        other_tick_bar = getattr(self, other_tick_attr)
+        if other_tick_bar is not None:
+            getattr(self, other_pending_attr).append(other_tick_bar)
+            setattr(self, other_tick_attr, None)
         self._flush_1s_pending_to_session_file(other)
         _set_bar_data(self._mnq_1m_df, self._mes_1m_df)
         if instrument == "MNQ" and self._on_bar_1m_complete is not None:
