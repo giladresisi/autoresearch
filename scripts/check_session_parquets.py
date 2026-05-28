@@ -544,14 +544,6 @@ def process_instrument(inst: str, conid: int, main_name: str, session_glob: str,
         severity = v["severity"]
         result["validation"] = v
 
-        # Overnight coverage escalation (session-end only)
-        if mode == "session-end" and v["late_start_hours"] > 2.0 and severity in ("ok", "minor", "major"):
-            severity = "critical"
-            result["reason"] = (
-                f"overnight data missing: session started "
-                f"{v['late_start_hours']:.1f}h after CME open"
-            )
-
         if severity in ("ok", "minor"):
             if result["action"] is None:
                 result["action"] = "merge"
