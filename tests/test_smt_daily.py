@@ -276,6 +276,86 @@ class TestTWOIsFirstBarOfWeek:
         assert "TWO" in liq_map
         assert liq_map["TWO"]["price"] == expected_open
 
+    def test_two_monday_session_before_1800_uses_last_weeks_two(self):
+        """Monday session before 18:00 ET: TWO falls back to last week's Monday 18:00 bar."""
+        # Monday 2026-04-27 at 21:00 ET = Monday's Asia session (before Monday 18:00 bar exists
+        # for THIS week, since now < Monday 18:00 ET of next week — but more precisely this
+        # test simulates: it's Monday 2026-04-27 at 21:00 ET, this week's Monday 18:00 bar
+        # doesn't exist in hist yet, so we expect last week's Monday 18:00 bar to be used).
+        # Use Monday 2026-05-04 as the session date (Asia session = Sunday evening in ET).
+        # "now" is Sunday 2026-05-03 at 21:00 ET (Monday's Asia session in CME terms).
+        # today (cme_session_date) = 2026-05-04 (Monday).
+        now = _now("2026-05-03", 21, 0)  # Sunday 21:00 ET = Monday's Asia session
+        today = datetime.date(2026, 5, 4)  # Monday
+
+        prev_two_open = 21075.0
+
+        # hist contains last week's Monday 18:00 bar (2026-04-27 18:00) but NOT this week's
+        hist_idx = _drange("2026-04-27 18:00:00", 1560, "1min")  # ~26h, ends before Mon 2026-05-04 18:00
+        n = len(hist_idx)
+        opens = np.full(n, 21000.0)
+        prev_mon_1800 = pd.Timestamp("2026-04-27 18:00:00", tz="America/New_York")
+        opens[hist_idx.get_loc(prev_mon_1800)] = prev_two_open
+        hist_mnq_1m = pd.DataFrame(
+            {
+                "Open":   opens,
+                "High":   np.full(n, 21010.0),
+                "Low":    np.full(n, 20990.0),
+                "Close":  np.full(n, 21001.0),
+                "Volume": np.ones(n),
+            },
+            index=hist_idx,
+        )
+
+        hist_1hr = _make_empty_hourly()
+        hist_4hr = _empty_4hr()
+
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
+
+        daily = load_daily()
+        liq_map = {e["name"]: e for e in daily["liquidities"]}
+        assert "TWO" in liq_map, "TWO missing from liquidities"
+        assert liq_map["TWO"]["price"] == prev_two_open, (
+            f"TWO.price={liq_map['TWO']['price']}, expected {prev_two_open} (last week's TWO)"
+        )
+
+    def test_two_monday_after_1800_uses_this_weeks_two(self):
+        """Monday session after 18:00 ET: TWO uses this week's Monday 18:00 bar."""
+        # Once Monday 18:00 ET has passed and the bar exists, use it (not last week's).
+        now = _now("2026-04-27", 18, 5)  # Monday 18:05 ET — after the 18:00 bar
+        today = now.date()
+        this_two_open = 21090.0
+
+        hist_idx = _drange("2026-04-20 18:00:00", 14405, "1min")  # 2 weeks
+        n = len(hist_idx)
+        opens = np.full(n, 21000.0)
+        this_mon_1800 = pd.Timestamp("2026-04-27 18:00:00", tz="America/New_York")
+        opens[hist_idx.get_loc(this_mon_1800)] = this_two_open
+        prev_mon_1800 = pd.Timestamp("2026-04-20 18:00:00", tz="America/New_York")
+        opens[hist_idx.get_loc(prev_mon_1800)] = 20900.0  # different value — should NOT be used
+        hist_mnq_1m = pd.DataFrame(
+            {
+                "Open":   opens,
+                "High":   np.full(n, 21010.0),
+                "Low":    np.full(n, 20990.0),
+                "Close":  np.full(n, 21001.0),
+                "Volume": np.ones(n),
+            },
+            index=hist_idx,
+        )
+
+        hist_1hr = _make_empty_hourly()
+        hist_4hr = _empty_4hr()
+
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
+
+        daily = load_daily()
+        liq_map = {e["name"]: e for e in daily["liquidities"]}
+        assert "TWO" in liq_map
+        assert liq_map["TWO"]["price"] == this_two_open, (
+            f"TWO.price={liq_map['TWO']['price']}, expected {this_two_open} (this week's TWO)"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: all-time high update in global.json
