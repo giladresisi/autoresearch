@@ -774,3 +774,66 @@ def test_compute_live_hl_mid_wednesday_session_uses_sunday():
         f"Wednesday session week_high should start from Sunday 18:00 ({sun_high}), got {result['week_high']}"
     )
     assert result["week_high"] < fri_high, "Wednesday session should NOT include prev Friday bar"
+
+
+# ---------------------------------------------------------------------------
+# Tests for prev_day H/L CME-session boundary (prior_date-1 18:00 → prior_date 17:00 ET)
+# ---------------------------------------------------------------------------
+
+class TestPrevDayHighLowCMESessionBoundary:
+    """prev1/2_day_high/low must use CME session boundaries, not calendar midnight."""
+
+    def _run(self, hist_mnq_1m: pd.DataFrame) -> dict:
+        now = _now("2026-04-27", 9, 20)
+        today = now.date()
+        hist_1hr = _make_empty_hourly()
+        hist_4hr = _empty_4hr()
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
+        return {e["name"]: e["price"] for e in load_daily()["liquidities"]}
+
+    def test_evening_bars_excluded_from_prev_day_high(self):
+        """Bars after 17:00 ET on prior_date belong to the next CME session and must not
+        inflate prev1_day_high."""
+        # Friday RTH bars — inside the Fri CME session window (Thu 18:00 → Fri 17:00)
+        fri_rth = make_bars("2026-04-24 09:00:00", periods=480, freq="1min",
+                            base_price=20900.0, high_offset=5.0)  # high = 20905
+
+        # Friday EVENING bars — first bars of the SAT/next CME session; must be excluded
+        fri_eve = make_bars("2026-04-24 18:00:00", periods=120, freq="1min",
+                            base_price=21500.0, high_offset=50.0)  # high = 21550 — must NOT appear
+
+        # Sunday overnight bars for today's (Monday) session
+        sun = make_bars("2026-04-26 18:00:00", periods=900, freq="1min", base_price=21000.0)
+
+        hist = pd.concat([fri_rth, fri_eve, sun]).sort_index()
+        hist = hist[~hist.index.duplicated(keep="last")]
+
+        liq = self._run(hist)
+        assert "prev1_day_high" in liq
+        assert liq["prev1_day_high"] == pytest.approx(20905.0), (
+            f"Expected 20905 (Fri RTH only), got {liq['prev1_day_high']} — "
+            "Friday evening bars must not leak into prev1_day window"
+        )
+
+    def test_overnight_bars_included_in_prev_day_high(self):
+        """Bars from (prior_date-1) 18:00 ET are part of the prior CME session and must
+        be included in prev1_day_high even though they fall on the previous calendar date."""
+        # Thursday EVENING bars — part of the Friday CME session (Thu 18:00 → Fri 17:00)
+        thu_eve = make_bars("2026-04-23 18:00:00", periods=120, freq="1min",
+                            base_price=21200.0, high_offset=50.0)  # high = 21250 — must be included
+
+        # Friday RTH bars (lower)
+        fri_rth = make_bars("2026-04-24 09:00:00", periods=480, freq="1min",
+                            base_price=20900.0, high_offset=5.0)  # high = 20905
+
+        # Sunday overnight for today's (Monday) session
+        sun = make_bars("2026-04-26 18:00:00", periods=900, freq="1min", base_price=21000.0)
+
+        hist = pd.concat([thu_eve, fri_rth, sun]).sort_index()
+        hist = hist[~hist.index.duplicated(keep="last")]
+
+        liq = self._run(hist)
+        assert "prev1_day_high" in liq
+        assert liq["prev1_day_high"] == pytest.approx(21250.0), (
+            f"Expected 21250 (Thu eve = part of Fri CME session), got {liq['prev1_day_high']}"
+        )

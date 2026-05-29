@@ -247,10 +247,14 @@ def run_daily_fixed(
         liquidities.append({"name": "TWO", "kind": "level", "price": float(two_price)})
 
     # Prior 2 trading days: high, low, TDO
+    # Window = CME session: (prior_date-1) 18:00 ET → prior_date 17:00 ET.
+    # Midnight-to-midnight would include the evening bars of the NEXT session.
     for i, prior_date in enumerate(_last_n_trading_dates(today, 2), start=1):
-        _pmid = pd.Timestamp(prior_date, tz="America/New_York")
-        _ps = hist_mnq_1m.index.searchsorted(_pmid,                        side="left")
-        _pe = hist_mnq_1m.index.searchsorted(_pmid + pd.Timedelta(days=1), side="left")
+        _pmid  = pd.Timestamp(prior_date, tz="America/New_York")
+        _ps_dt = _pmid - pd.Timedelta(hours=6)   # prior_date-1 18:00 ET
+        _pe_dt = _pmid + pd.Timedelta(hours=17)  # prior_date   17:00 ET
+        _ps = hist_mnq_1m.index.searchsorted(_ps_dt, side="left")
+        _pe = hist_mnq_1m.index.searchsorted(_pe_dt, side="left")
         prior_bars = hist_mnq_1m.iloc[_ps:_pe]
         if not prior_bars.empty:
             liquidities.append({"name": f"prev{i}_day_high", "kind": "level",
