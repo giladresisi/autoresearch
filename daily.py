@@ -61,16 +61,22 @@ def _session_bars(mnq_1m: pd.DataFrame, session: str, today: datetime.date) -> p
     return mnq_1m[(mnq_1m.index >= start_ts) & (mnq_1m.index < end_ts)]
 
 
-def _compute_two(hist_mnq_1m: pd.DataFrame, today: datetime.date) -> Optional[float]:
+def _compute_two(
+    hist_mnq_1m: pd.DataFrame,
+    today: datetime.date,
+    now: Optional[datetime.datetime] = None,
+) -> Optional[float]:
     """Return the Open of the Monday 18:00 ET bar for the current trading week (ICT TWO).
 
     Per ICT theory the True Week Open is Monday's 18:00 ET bar — the opening of
     Monday's overnight futures session, which TradingView labels as the Monday daily open.
 
     Priority:
-      1. Monday 18:00 ET of the current ISO week.
-      2. Monday 00:00 ET (midnight) of the current ISO week.
-      3. First available bar of the ISO week.
+      1. Monday 18:00 ET of the current ISO week (when the bar exists).
+      2. If it's Monday's session and Monday 18:00 ET hasn't occurred yet (now < monday_1800),
+         use last week's Monday 18:00 ET as the TWO proxy.
+      3. Monday 00:00 ET (midnight) of the current ISO week.
+      4. First available bar of the ISO week.
     """
     if hist_mnq_1m.empty:
         return None
@@ -92,6 +98,19 @@ def _compute_two(hist_mnq_1m: pd.DataFrame, today: datetime.date) -> Optional[fl
     )
     if monday_1800 in hist_mnq_1m.index:
         return float(hist_mnq_1m.loc[monday_1800, "Open"])
+
+    # Monday session before 18:00 ET: Monday 18:00 bar doesn't exist yet.
+    # Use last week's Monday 18:00 ET (previous TWO) as the proxy.
+    if now is not None and now < monday_1800:
+        prev_monday_ts = monday_ts - pd.Timedelta(days=7)
+        prev_monday_1800 = pd.Timestamp(
+            datetime.datetime(
+                prev_monday_ts.year, prev_monday_ts.month, prev_monday_ts.day, 18, 0, 0
+            ),
+            tz="America/New_York",
+        )
+        if prev_monday_1800 in hist_mnq_1m.index:
+            return float(hist_mnq_1m.loc[prev_monday_1800, "Open"])
 
     # Filter to ISO-week bars for fallback paths
     _iso = hist_mnq_1m.index.isocalendar()
@@ -223,15 +242,19 @@ def run_daily_fixed(
         liquidities.append({"name": "TDO", "kind": "level", "price": float(tdo_price)})
 
     # TWO — True Week Open (inline)
-    two_price = _compute_two(hist_mnq_1m, today)
+    two_price = _compute_two(hist_mnq_1m, today, now)
     if two_price is not None:
         liquidities.append({"name": "TWO", "kind": "level", "price": float(two_price)})
 
     # Prior 2 trading days: high, low, TDO
+    # Window = CME session: (prior_date-1) 18:00 ET → prior_date 17:00 ET.
+    # Midnight-to-midnight would include the evening bars of the NEXT session.
     for i, prior_date in enumerate(_last_n_trading_dates(today, 2), start=1):
-        _pmid = pd.Timestamp(prior_date, tz="America/New_York")
-        _ps = hist_mnq_1m.index.searchsorted(_pmid,                        side="left")
-        _pe = hist_mnq_1m.index.searchsorted(_pmid + pd.Timedelta(days=1), side="left")
+        _pmid  = pd.Timestamp(prior_date, tz="America/New_York")
+        _ps_dt = _pmid - pd.Timedelta(hours=6)   # prior_date-1 18:00 ET
+        _pe_dt = _pmid + pd.Timedelta(hours=17)  # prior_date   17:00 ET
+        _ps = hist_mnq_1m.index.searchsorted(_ps_dt, side="left")
+        _pe = hist_mnq_1m.index.searchsorted(_pe_dt, side="left")
         prior_bars = hist_mnq_1m.iloc[_ps:_pe]
         if not prior_bars.empty:
             liquidities.append({"name": f"prev{i}_day_high", "kind": "level",

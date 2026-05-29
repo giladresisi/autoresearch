@@ -544,14 +544,6 @@ def process_instrument(inst: str, conid: int, main_name: str, session_glob: str,
         severity = v["severity"]
         result["validation"] = v
 
-        # Overnight coverage escalation (session-end only)
-        if mode == "session-end" and v["late_start_hours"] > 2.0 and severity in ("ok", "minor", "major"):
-            severity = "critical"
-            result["reason"] = (
-                f"overnight data missing: session started "
-                f"{v['late_start_hours']:.1f}h after CME open"
-            )
-
         if severity in ("ok", "minor"):
             if result["action"] is None:
                 result["action"] = "merge"
@@ -585,25 +577,7 @@ def process_instrument(inst: str, conid: int, main_name: str, session_glob: str,
 
         result["severity"] = severity
 
-    # Merge all repaired session files into main in one call
-    if not dry_run:
-        try:
-            from data.parquet_maintenance import merge_session_1s_parquets
-            merge_session_1s_parquets(DATA_DIR)
-            result["merge_success"] = True
-            result["backup_written"] = False
-            if main_path.exists():
-                backup_main(main_path)
-                result["backup_written"] = True
-            merged_df = _safe_read(main_path)
-            if merged_df is not None and not merged_df.empty:
-                result["merged_rows"] = len(merged_df)
-        except Exception as exc:
-            result["merge_success"] = False
-            result["reason"] = str(exc)
-    else:
-        result["merge_success"] = None  # dry-run: not executed
-
+    result["merge_success"] = None  # populated by main() after all instruments processed
     return result
 
 
@@ -651,10 +625,42 @@ def main():
                 inst, conid, main_name, session_glob, args.mode, args.dry_run, ib
             )
             report["instruments"][inst] = result
-
             if result.get("action") not in (None, "skip"):
                 exit_code = max(exit_code, 1)
-            if result.get("merge_success") is False:
+
+        # Single merge after all instruments are repaired.  Calling merge_session_1s_parquets
+        # once here (rather than inside process_instrument) prevents the first instrument's
+        # merge from deleting the second instrument's session file before it is processed,
+        # which would produce a false "no session file" / "skip" for the second instrument.
+        needs_merge = any(
+            r.get("action") not in (None, "skip")
+            for r in report["instruments"].values()
+        )
+        if needs_merge and not args.dry_run:
+            try:
+                from data.parquet_maintenance import merge_session_1s_parquets
+                merge_session_1s_parquets(DATA_DIR)
+                for _inst, _conid, _main_name, _session_glob in INSTRUMENTS:
+                    r = report["instruments"][_inst]
+                    if r.get("action") not in (None, "skip"):
+                        r["merge_success"] = True
+                        _main_path = DATA_DIR / _main_name
+                        if _main_path.exists():
+                            backup_main(_main_path)
+                            r["backup_written"] = True
+                        _merged_df = _safe_read(_main_path)
+                        if _merged_df is not None and not _merged_df.empty:
+                            r["merged_rows"] = len(_merged_df)
+            except Exception as _exc:
+                for _inst, _, _, _ in INSTRUMENTS:
+                    r = report["instruments"][_inst]
+                    if r.get("action") not in (None, "skip") and r.get("merge_success") is None:
+                        r["merge_success"] = False
+                        if "reason" not in r:
+                            r["reason"] = str(_exc)
+
+        for _inst in report["instruments"]:
+            if report["instruments"][_inst].get("merge_success") is False:
                 exit_code = max(exit_code, 2)
 
         report["instruments_1m"] = {}

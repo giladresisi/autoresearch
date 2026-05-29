@@ -118,12 +118,17 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> N
         "entry_price": entry_price,
         "stop_price": stop_price,
         "stop_fill_bars": 1,
+        "current_price": _current_price(),
     }
     _executor.place_entry(pmt_signal, None)
     pos = _load_pos()
     pos["stop_entry"] = str(entry_price)
     pos["stop_direction"] = "up" if direction == "long" else "down"
     pos["pending_stop"] = stop_price
+    if not getattr(_executor, "_entry_is_live", True):
+        pos["stop_entry_unplaced"] = True
+    else:
+        pos.pop("stop_entry_unplaced", None)
     _save_pos(pos)
     _log({"kind": "new-stop-entry", "time": now, "direction": direction,
           "entry_price": entry_price, "stop_price": stop_price})
@@ -138,15 +143,19 @@ def _current_price() -> float:
     return 0.0
 
 
-def place_market_entry(direction: str, entry_price: float, stop_price: float) -> None:
+def place_market_entry(direction: str, entry_price: float, stop_price: float, *, flatten_first: bool = False) -> None:
     """Enter at market with stop. Logs, dispatches MKT+sl, writes active to position.json."""
     now = _now_et()
     pmt_signal = {
         "direction": direction,
         "entry_price": entry_price,
         "stop_price": stop_price,
+        "flatten_first": flatten_first,
     }
     _executor.place_entry(pmt_signal, None)
+    if not getattr(_executor, "_entry_is_live", True):
+        # Entry was blocked by window gate — don't update position state or log
+        return
     fill_price = entry_price if entry_price != 0.0 else _current_price()
     pos = _load_pos()
     pos["active"] = {
@@ -180,10 +189,13 @@ def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: st
         "entry_price": new_entry_price,
         "stop_price": new_stop_price,
         "stop_fill_bars": 1,
+        "current_price": _current_price(),
     }
     _executor.modify_stop_entry(old_pmt, new_pmt, None)
     pos["stop_entry"] = str(new_entry_price)
     pos["pending_stop"] = new_stop_price
+    if getattr(_executor, "_entry_is_live", True):
+        pos.pop("stop_entry_unplaced", None)
     _save_pos(pos)
     _log({"kind": "move-stop-entry", "time": now, "direction": direction,
           "new_entry_price": new_entry_price, "new_stop_price": new_stop_price,
@@ -214,10 +226,12 @@ def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> No
         return
     now = _now_et()
     entry_price = float(pos["stop_entry"]) if pos.get("stop_entry") else 0.0
-    _executor.place_close("cancel-stop")
+    if getattr(_executor, "_entry_is_live", True):
+        _executor.place_close("cancel-stop")
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
     pos["conf_bar_entry"] = {}
+    pos.pop("stop_entry_unplaced", None)
     _save_pos(pos)
     _log({"kind": "cancel-stop-entry", "time": now, "entry_price": entry_price, "reason": reason})
 
@@ -232,7 +246,9 @@ def close_position(price: float, reason: str = "user-requested") -> None:
     pos["stop_direction"] = ""
     pos["conf_bar_entry"] = {}
     _save_pos(pos)
-    _log({"kind": "market-close", "time": now, "price": float(price), "reason": reason})
+    # Fall back to current bar mid when caller passes 0.0 (e.g. trade.py close).
+    resolved_price = float(price) if float(price) != 0.0 else _current_price()
+    _log({"kind": "market-close", "time": now, "price": resolved_price, "reason": reason})
 
 
 def update_stop_loss(stop_price: float, reason: str = "user-requested", direction: str | None = None) -> None:
@@ -298,7 +314,8 @@ def dispatch(sig: dict) -> None:
     if kind == "market-entry":
         stop = sig.get("stop")
         if direction and stop is not None:
-            place_market_entry(direction, float(sig["price"]), float(stop))
+            place_market_entry(direction, float(sig["price"]), float(stop),
+                               flatten_first=bool(sig.get("flatten_first")))
         return
 
     if kind == "market-close":
@@ -336,6 +353,8 @@ def dispatch(sig: dict) -> None:
         if cbp is None:
             cbp = _load_pos().get("active", {}).get("cautious_break_price")
         if cbp is not None:
+            _lname = sig.get("level_name", "")
+            _reason = f"new-stop-exit:{sig.get('level', '')}" + (f":{_lname}" if _lname else "")
             if sig.get("level") == "secondary":
                 # Secondary exit is managed by 1m bar-close check in trend.py.
                 # Move stop 1000 pts away from money so wicks never trigger a fill.
@@ -345,26 +364,46 @@ def dispatch(sig: dict) -> None:
                     _far = (_current - 1000.0) if _dir in ("up", "long") else (_current + 1000.0)
                 else:
                     _far = 0.0 if _dir in ("up", "long") else 50000.0
-                update_stop_loss(_far, reason="new-stop-exit")
+                update_stop_loss(_far, reason=_reason)
             else:
-                update_stop_loss(float(cbp), reason="new-stop-exit")
+                update_stop_loss(float(cbp), reason=_reason)
         _log(sig)
         return
 
     if kind == "move-stop-exit":
         cbp = sig.get("cautious_break_price")
         if cbp is not None:
+            _lname = sig.get("level_name", "")
+            _reason = f"move-stop-exit:{sig.get('level', '')}" + (f":{_lname}" if _lname else "")
             if sig.get("level") == "secondary":
                 # IB stop already at 0/50000 for secondary — no update needed.
                 pass
             else:
-                update_stop_loss(float(cbp), reason="move-stop-exit")
+                update_stop_loss(float(cbp), reason=_reason)
+        _log(sig)
+        return
+
+    if kind == "cancel-stop-entry":
+        # Emitted by strategy.py on direction change or window close. Falls through to
+        # log-only normally, but must also clear the unplaced flag when set.
+        _pos = _load_pos()
+        if _pos.get("stop_entry_unplaced"):
+            _pos.pop("stop_entry_unplaced", None)
+            _save_pos(_pos)
         _log(sig)
         return
 
     if kind == "stop-entry-cancelled":
-        # position.json already cleared by the pipeline before emitting this signal;
-        # bypass the stop_entry guard and send the broker cancel directly.
+        # Emitted by session_pipeline when a market-entry overwrites a pending stop.
+        # position.json already cleared by the pipeline before emitting this signal.
+        _pos = _load_pos()
+        if _pos.get("stop_entry_unplaced"):
+            # Entry was never placed at broker — log only, no cancel needed.
+            _pos.pop("stop_entry_unplaced", None)
+            _save_pos(_pos)
+            _log(sig)
+            return
+        # Normal path: entry was live at broker, cancel it.
         if _entry_sent_bar_time is not None and sig.get("time"):
             try:
                 _cancel_ts = pd.Timestamp(sig["time"])

@@ -29,6 +29,8 @@ files left over by a previous run on the same calendar day.
 | daily.py complete | `[EMIT] daily complete` | Printed by automation.main after run_daily |
 | First directed hypothesis | `"kind": "new-hypothesis"` + `"direction": "up\|down"` | JSON line emitted by automation.main |
 | Startup fatal | `FATAL` | IB unreachable or other hard failure; monitor exits immediately |
+| IB zombie suspected | `[ib-watchdog] No data for` | Bar feed silent; 30s recovery window open |
+| IB watchdog killed | `[ib-watchdog] No recovery after` | Watchdog killed connection as zombie; orchestrator will restart |
 | Orchestrator died | PID snapshotted at startup + `powershell Get-Process` | Checked every iteration from startup |
 | automation.main died | PID parsed from `[ORCH] automation.main started (pid=…)` + `powershell Get-Process` | Checked every iteration after session start |
 
@@ -110,6 +112,8 @@ session_started=false
 session_ended=false
 daily_done=false
 hyp_done=false
+ib_zombie_suspected=false
+ib_watchdog_killed=false
 
 # Snapshot PID before the loop — pid file may be deleted on clean exit
 ORCH_PID=$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null)
@@ -161,6 +165,16 @@ if cur | grep -q "FATAL"; then
     exit 0
 fi
 
+if cur | grep -q "\[ib-watchdog\] No data for"; then
+    ib_zombie_suspected=true
+    echo "[MONITOR] IB watchdog: zombie suspected — no bar data received"
+fi
+
+if cur | grep -q "\[ib-watchdog\] No recovery after"; then
+    ib_watchdog_killed=true
+    echo "[KEEPALIVE] IB watchdog: connection killed as zombie — orchestrator restarting"
+fi
+
 if cur | grep -q "automation.main started"; then
     session_started=true
     AUTO_PID=$(cur | grep "automation.main started" | tail -1 | grep -oE 'pid=[0-9]+' | grep -oE '[0-9]+')
@@ -187,6 +201,16 @@ fi
 
 while true; do
     sleep 5
+
+    # IB watchdog events — checked every iteration regardless of session state
+    if [ "$ib_zombie_suspected" = false ] && cur | grep -q "\[ib-watchdog\] No data for"; then
+        ib_zombie_suspected=true
+        echo "[MONITOR] IB watchdog: zombie suspected — no bar data received"
+    fi
+    if [ "$ib_watchdog_killed" = false ] && cur | grep -q "\[ib-watchdog\] No recovery after"; then
+        ib_watchdog_killed=true
+        echo "[KEEPALIVE] IB watchdog: connection killed as zombie — orchestrator restarting"
+    fi
 
     # Gap-fill and FATAL — both detected from stdout with offset
     if [ "$gap_fill_done" = false ]; then
@@ -289,6 +313,9 @@ As each line arrives from the Monitor, call `PushNotification` for EVERY milesto
 | `[MONITOR] Session started …` | `Session started — automation.main running` |
 | `[MONITOR] daily.py complete` | `daily.py complete — liquidities computed` |
 | `[MONITOR] First directed hypothesis: …` | `First hypothesis: <direction> — strategy is live` |
+| `[MONITOR] automation.main restarted by orchestrator …` | `automation.main restarted (pid=…) — session resuming` |
+| `[MONITOR] IB watchdog: zombie suspected …` | `WARNING: IB zombie suspected — no bar data; 30s recovery window open` |
+| `[KEEPALIVE] IB watchdog: connection killed …` | `WARNING: IB watchdog killed zombie connection — orchestrator restarting` |
 | `[KEEPALIVE] Orchestrator startup FATAL: …` | `CRITICAL: Orchestrator failed at startup — <first line of FATAL message>` |
 | `[KEEPALIVE] Orchestrator … died before session start …` | `CRITICAL: Orchestrator died before session start — check stdout log` |
 | `[KEEPALIVE] Orchestrator … has DIED` | `CRITICAL: Orchestrator died during session` |

@@ -5,13 +5,20 @@
 
 import copy
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
+from session_times import cme_session_start as _cme_session_start
+
+_ET = ZoneInfo("America/New_York")
+
 CAUTIOUS_SECONDARY_MAX_DIST = 150  # pts — secondary (1m confirmation) max distance
 CAUTIOUS_INITIAL_MAX_DIST   = 110  # pts — initial (5m confirmation) max distance
 CAUTIOUS_MIN_DIST           =  40  # pts — below this secondary distance, skip the entry
+CAUTIOUS_INITIAL_OFFSET_PTS   = 2.0  # pts — initial cautious target set this much closer than the level
+CAUTIOUS_SECONDARY_OFFSET_PTS = 5.0  # pts — secondary cautious target set this much closer than the level
 
 # P2b: suppress LOW-arm DOWN when price is this many points above the swept level.
 # 50-pt overshoot zone = false positives (38% correct); 20-50pt zone is 80% correct.
@@ -60,21 +67,24 @@ def compute_cautious_prices(
     if _cautious_all:
         _sec = max(_cautious_all, key=lambda x: x[0]) if direction == "up" \
                else min(_cautious_all, key=lambda x: x[0])
-        cautious_price_secondary       = _sec[0]
+        cautious_price_secondary       = _sec[0] - CAUTIOUS_SECONDARY_OFFSET_PTS if direction == "up" \
+                                         else _sec[0] + CAUTIOUS_SECONDARY_OFFSET_PTS
         cautious_price_secondary_level = _sec[1]
 
+        # Filter using raw level price so the offset doesn't shrink the candidate pool.
         if direction == "up":
             _init_candidates = [(p, n) for p, n in _cautious_all
-                                if p < cautious_price_secondary and p <= current_close + CAUTIOUS_INITIAL_MAX_DIST]
+                                if p < _sec[0] and p <= current_close + CAUTIOUS_INITIAL_MAX_DIST]
         else:
             _init_candidates = [(p, n) for p, n in _cautious_all
-                                if p > cautious_price_secondary and p >= current_close - CAUTIOUS_INITIAL_MAX_DIST]
+                                if p > _sec[0] and p >= current_close - CAUTIOUS_INITIAL_MAX_DIST]
 
         if _init_candidates:
             _ini = max(_init_candidates, key=lambda x: x[0]) if direction == "up" \
                    else min(_init_candidates, key=lambda x: x[0])
             if abs(_ini[0] - current_close) >= CAUTIOUS_MIN_DIST:
-                cautious_price_initial       = _ini[0]
+                cautious_price_initial       = _ini[0] - CAUTIOUS_INITIAL_OFFSET_PTS if direction == "up" \
+                                               else _ini[0] + CAUTIOUS_INITIAL_OFFSET_PTS
                 cautious_price_initial_level = _ini[1]
             else:
                 _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
@@ -107,7 +117,8 @@ def compute_cautious_prices(
         if _terminal_candidates:
             _sec = max(_terminal_candidates, key=lambda x: x[0]) if direction == "down" \
                    else min(_terminal_candidates, key=lambda x: x[0])
-            cautious_price_secondary       = _sec[0]
+            cautious_price_secondary       = _sec[0] - CAUTIOUS_SECONDARY_OFFSET_PTS if direction == "up" \
+                                             else _sec[0] + CAUTIOUS_SECONDARY_OFFSET_PTS
             cautious_price_secondary_level = _sec[1]
             _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
             if _syn_dist >= CAUTIOUS_MIN_DIST:
@@ -975,20 +986,39 @@ def compute_live_hl_mid(
     today  = now.date()
     result: dict = {}
 
-    # Day: full range from prior calendar day 18:00 ET.
+    # Day: range from the current CME futures session open (18:00 ET) or earlier.
+    # After 18:00 ET the new session opened today; before 18:00 ET it opened yesterday.
     # The opening 1.5h (18:00–19:30 ET) is skipped from whichever side (high or low) it
     # distorts, but only when its range is >2x the range of the rest of the day up to the
     # RTH open. Direction determines which side is the outlier: a big UP move creates an
     # outlier high (skip from day_high); a big DOWN move creates an outlier low (skip from
     # day_low). When the 1.5h move is modest relative to the rest of the day it is included
     # in both.
-    _prior_cal   = today - timedelta(days=1)
-    _day_start   = pd.Timestamp(
-        datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 18, 0, 0),
+    #
+    # During Asia (now.hour >= 18) and London (now.hour < 6): extend the lookback to
+    # 06:00 ET on the session-open day (yesterday's NY morning start) because today's
+    # midnight open is either absent (Asia) or very recent (London) and the extra context
+    # from the previous NY session improves H/L accuracy.
+    # From 06:00 ET onwards (NY morning+): use only the current CME session (18:00 ET+).
+    _day_open_cal = today if now.hour >= 18 else today - timedelta(days=1)
+    if now.hour >= 18 or now.hour < 6:
+        _day_start = pd.Timestamp(
+            datetime(_day_open_cal.year, _day_open_cal.month, _day_open_cal.day, 6, 0, 0),
+            tz="America/New_York",
+        )
+    else:
+        _day_start = pd.Timestamp(
+            datetime(_day_open_cal.year, _day_open_cal.month, _day_open_cal.day, 18, 0, 0),
+            tz="America/New_York",
+        )
+    # CME Asia session open is always 18:00 ET — outlier check covers the first 1.5h
+    # regardless of whether _day_start extends further back to 06:00 ET.
+    _asia_open   = pd.Timestamp(
+        datetime(_day_open_cal.year, _day_open_cal.month, _day_open_cal.day, 18, 0, 0),
         tz="America/New_York",
     )
     _init_end    = pd.Timestamp(
-        datetime(_prior_cal.year, _prior_cal.month, _prior_cal.day, 19, 30, 0),
+        datetime(_day_open_cal.year, _day_open_cal.month, _day_open_cal.day, 19, 30, 0),
         tz="America/New_York",
     )
     _rth_start   = pd.Timestamp(
@@ -996,7 +1026,7 @@ def compute_live_hl_mid(
         tz="America/New_York",
     )
 
-    _init_bars = combined_1m[(combined_1m.index >= _day_start) & (combined_1m.index < _init_end)]
+    _init_bars = combined_1m[(combined_1m.index >= _asia_open) & (combined_1m.index < _init_end)]
     _rest_bars = combined_1m[(combined_1m.index >= _init_end) & (combined_1m.index < _rth_start)]
     _full_bars = combined_1m[combined_1m.index >= _day_start]
 
@@ -1027,12 +1057,21 @@ def compute_live_hl_mid(
         result["day_low"]  = dl
         result["day_mid"]  = (dh + dl) / 2.0
 
-    # Week: Sunday 18:00 ET (futures week open)
-    _today_wd  = now.isocalendar().weekday          # 1=Mon … 7=Sun
-    _monday    = today - timedelta(days=_today_wd - 1)
-    _sunday    = today if _today_wd == 7 else _monday - timedelta(days=1)
+    # Week H/L start — extended lookback on Mon/Tue sessions, standard from Wed+.
+    # Session-open day (ET) drives the choice: Sunday = Monday session, Monday = Tuesday, etc.
+    # Monday session  → prev Thursday 18:00 ET (capture Sun/Mon pre-week range)
+    # Tuesday session → prev Friday  18:00 ET  (capture Mon Asia range)
+    # Wednesday+      → Sunday 18:00 ET (standard CME week open)
+    _session_open_wd = _day_open_cal.weekday()  # Mon=0, Tue=1, ..., Sun=6
+    if _session_open_wd == 6:  # Sunday → Monday session
+        _week_anchor = _day_open_cal - timedelta(days=3)   # prev Thursday
+    elif _session_open_wd == 0:  # Monday → Tuesday session
+        _week_anchor = _day_open_cal - timedelta(days=3)   # prev Friday
+    else:
+        _days_to_sunday = (_session_open_wd + 1) % 7
+        _week_anchor = _day_open_cal - timedelta(days=_days_to_sunday)
     _week_start = pd.Timestamp(
-        datetime(_sunday.year, _sunday.month, _sunday.day, 18, 0, 0),
+        datetime(_week_anchor.year, _week_anchor.month, _week_anchor.day, 18, 0, 0),
         tz="America/New_York",
     )
     _week_bars = combined_1m[combined_1m.index >= _week_start]
@@ -1287,7 +1326,32 @@ def run_hypothesis(
     last_liquidity, _ = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_hyp_pre_session)
 
     # Step 5: divs — SMT divergences at 15m and 30m.
-    divs = _compute_divs(mnq_1m, mes_1m)
+    # Before NY morning (09:30 ET), extend the bar window back to the prior NY
+    # evening session (12:00–18:00 ET on the session-open day) so that SMTs
+    # against yesterday's afternoon lows/highs are detectable during Asia and
+    # London. From 09:30 ET onward the current session window is long enough
+    # that extending back to yesterday adds noise without value.
+    _now_et = now.astimezone(_ET) if getattr(now, "tzinfo", None) else now
+    _pre_ny_morning = _now_et.hour < 9 or (_now_et.hour == 9 and _now_et.minute < 30)
+    if _pre_ny_morning and not hist_mnq_1m.empty and not mnq_1m.empty:
+        _sess_open   = pd.Timestamp(_cme_session_start(now))
+        _ny_eve_start = _sess_open - pd.Timedelta(hours=6)  # 12:00 ET on session-open day
+        _prior_mnq = hist_mnq_1m[
+            (hist_mnq_1m.index >= _ny_eve_start) & (hist_mnq_1m.index < _sess_open)
+        ]
+        _prior_mes = hist_mes_1m[
+            (hist_mes_1m.index >= _ny_eve_start) & (hist_mes_1m.index < _sess_open)
+        ] if not hist_mes_1m.empty else pd.DataFrame()
+        if not _prior_mnq.empty:
+            _div_mnq = pd.concat([_prior_mnq, mnq_1m]).sort_index()
+            _div_mnq = _div_mnq[~_div_mnq.index.duplicated(keep="last")]
+            _div_mes = pd.concat([_prior_mes, mes_1m]).sort_index() if not _prior_mes.empty else mes_1m
+            _div_mes = _div_mes[~_div_mes.index.duplicated(keep="last")]
+            divs = _compute_divs(_div_mnq, _div_mes)
+        else:
+            divs = _compute_divs(mnq_1m, mes_1m)
+    else:
+        divs = _compute_divs(mnq_1m, mes_1m)
 
     # Step 6: direction — determined by ICT rules (see direction.md).
     # confidence=high overrides all rules: direction follows the global trend unconditionally.

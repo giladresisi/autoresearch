@@ -33,8 +33,12 @@ class ProcessManager:
             return self._script[-1]
         return self._script.name
 
-    def run_session(self, date: datetime.date) -> str | None:
+    def run_session(self, date: datetime.date, grace_end_dt: datetime.datetime | None = None) -> str | None:
         """Kill any stale instance of this subprocess, spawn fresh, relay output, restart once on unexpected exit.
+
+        grace_end_dt: datetime when the session ends (SESSION_CLOSE the *next* calendar day when
+        the session opened after 18:00 ET today).  If None, falls back to time-only comparison
+        against SESSION_CLOSE — which is wrong for evening sessions but kept for safety.
 
         Returns "ib_disconnected" if automation exited with code 2; None otherwise.
         """
@@ -46,7 +50,7 @@ class ProcessManager:
             while True:
                 proc = self._spawn()
                 self._log.writeln(f"[ORCH] {name} started (pid={proc.pid})")
-                exit_reason = self._monitor(proc)
+                exit_reason = self._monitor(proc, grace_end_dt=grace_end_dt)
                 if exit_reason == "scheduled_stop":
                     self._log.writeln("[ORCH] Session ended — sending terminate signal")
                     self._terminate(proc)
@@ -66,13 +70,24 @@ class ProcessManager:
                     self._log.writeln(
                         f"[ORCH] *** {name} exited again (code={proc.returncode}) — NOT restarting; waiting for session end ***"
                     )
-                    self._wait_until_grace_end()
+                    self._wait_until_grace_end(grace_end_dt=grace_end_dt)
                     return None
         except KeyboardInterrupt:
             if proc is not None and proc.poll() is None:
                 self._log.writeln(f"[ORCH] Interrupt received — terminating {name}")
                 self._terminate(proc)
             raise
+        finally:
+            # Guarantee: no subprocess survives an unexpected orchestrator exit.
+            # All normal exit paths (scheduled_stop, ib_disconnected, unexpected_exit×2)
+            # already terminate or confirm proc is dead before returning.  This catches
+            # any unhandled exception that escapes the loop, preventing an orphan
+            # automation.main process that would trade with no supervision.
+            if proc is not None and proc.poll() is None:
+                self._log.writeln(
+                    f"[ORCH] *** Emergency termination of {name} — orchestrator exiting unexpectedly ***"
+                )
+                self._terminate(proc)
 
     def _spawn(self) -> subprocess.Popen:
         if isinstance(self._script, list):
@@ -90,8 +105,8 @@ class ProcessManager:
             env=_env,
         )
 
-    def _monitor(self, proc: subprocess.Popen) -> str:
-        """Read stdout in a thread; poll for exit or 13:35 ET in main thread.
+    def _monitor(self, proc: subprocess.Popen, grace_end_dt: datetime.datetime | None = None) -> str:
+        """Read stdout in a thread; poll for exit or session end in main thread.
 
         Returns "scheduled_stop", "ib_disconnected" (exit code 2), or "unexpected_exit".
         """
@@ -107,7 +122,10 @@ class ProcessManager:
                     return "ib_disconnected"
                 return "unexpected_exit"
             now = datetime.datetime.now(tz=_ET)
-            if now.time() >= _SESSION_GRACE_END:
+            if grace_end_dt is not None:
+                if now >= grace_end_dt:
+                    return "scheduled_stop"
+            elif now.time() >= _SESSION_GRACE_END:
                 return "scheduled_stop"
             time.sleep(_POLL_INTERVAL_S)
 
@@ -123,8 +141,14 @@ class ProcessManager:
             self._log.writeln("[ORCH] SIGTERM timeout — killing process")
             proc.kill()
 
-    def _wait_until_grace_end(self) -> None:
-        while datetime.datetime.now(tz=_ET).time() < _SESSION_GRACE_END:
+    def _wait_until_grace_end(self, grace_end_dt: datetime.datetime | None = None) -> None:
+        while True:
+            now = datetime.datetime.now(tz=_ET)
+            if grace_end_dt is not None:
+                if now >= grace_end_dt:
+                    break
+            elif now.time() >= _SESSION_GRACE_END:
+                break
             time.sleep(30)
 
 

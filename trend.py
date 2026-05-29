@@ -30,7 +30,12 @@ Signal = dict
 # ---------------------------------------------------------------------------
 # O4: minimum buffer (pts) below fill_price before initial breakeven stop fires.
 # Prevents 0-second stopouts when price oscillates around entry.
-BREAKEVEN_BUFFER_PTS: float = 1.0
+BREAKEVEN_BUFFER_PTS: float = 5.0
+
+# Minimum distance (pts) between fill price and initial cautious level before
+# any initial-level stop update fires (full arm OR wick-only midpoint).
+# When the initial target is this close, touching it doesn't confirm the move.
+INITIAL_STOP_MIN_DIST_PTS: float = 50.0
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -353,7 +358,7 @@ def run_trend(
                     if position["active"]["cautious_break_price"] is None:
                         return None
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
-                            "price": _sec_cbp, "level": "secondary",
+                            "price": _sec_cbp, "level": "secondary", "level_name": _lv2,
                             "cautious_break_price": _sec_cbp}
                 else:
                     # wick-only reach of secondary: wait for 1m arm-confirm bar
@@ -362,6 +367,9 @@ def run_trend(
                     return None
 
             if cautious_initial is not None and _surpassed(cautious_initial):
+                _initial_dist = abs(cautious_initial - _fill_price) if _fill_price else float("inf")
+                if _initial_dist < INITIAL_STOP_MIN_DIST_PTS:
+                    return None  # initial level too close to entry — let original stop stand
                 if _close_beyond(cautious_initial):
                     _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
                     position["active"]["cautious"] = "initial"
@@ -371,18 +379,40 @@ def run_trend(
                     if position["active"]["cautious_break_price"] is None:
                         return None  # deferred: trail will arm once price clears entry
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
-                            "price": position["active"]["cautious_break_price"], "level": "initial",
+                            "price": position["active"]["cautious_break_price"], "level": "initial", "level_name": _lv1,
                             "cautious_break_price": position["active"]["cautious_break_price"]}
                 else:
-                    # wick-only reach of initial: wait for 1m arm-confirm bar
+                    # wick-only: move stop to midpoint between original stop and initial target
                     position["active"]["cautious"] = "initial_surpassed"
+                    _orig_stop = active.get("stop")
+                    if _orig_stop is not None and cautious_initial is not None:
+                        _mid_cbp = (float(_orig_stop) + cautious_initial) / 2.0
+                        position["active"]["cautious_break_price"] = _mid_cbp
                     save_position(position)
+                    _mid_cbp_val = position["active"].get("cautious_break_price")
+                    if _mid_cbp_val is not None:
+                        return {"kind": "new-stop-exit", "time": now.isoformat(),
+                                "price": float(_mid_cbp_val), "level": "initial_mid", "level_name": _lv1,
+                                "cautious_break_price": float(_mid_cbp_val)}
                     return None
 
             return None
 
         # ---- 3a2: initial surpassed — wait for 1m arm-confirm bar ----------
         if cautious_state == "initial_surpassed":
+            # Break check for the midpoint stop placed on wick-touch.
+            _break_price = active.get("cautious_break_price")
+            if _break_price is not None:
+                _broke = (bar_high > float(_break_price)) if direction == "down" \
+                         else (bar_low  < float(_break_price))
+                if _broke:
+                    _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+                    save_position(position)
+                    save_hypothesis(hypothesis)
+                    return {"kind": "stop-exit", "time": now.isoformat(),
+                            "price": float(_break_price), "reason": "cautious-initial-break",
+                            "close_reason": _cr1}
+
             # If secondary was reached this bar, upgrade immediately.
             if cautious_secondary is not None and _surpassed(cautious_secondary):
                 if _close_beyond(cautious_secondary):
@@ -395,7 +425,7 @@ def run_trend(
                     if position["active"]["cautious_break_price"] is None:
                         return None
                     return {"kind": "new-stop-exit", "time": now.isoformat(),
-                            "price": _sec_cbp, "level": "secondary",
+                            "price": _sec_cbp, "level": "secondary", "level_name": _lv2,
                             "cautious_break_price": _sec_cbp}
                 else:
                     position["active"]["cautious"] = "secondary_surpassed"
@@ -404,17 +434,24 @@ def run_trend(
 
             if cautious_initial is not None:
                 _opp_close = (bar_close < bar_open) if direction == "up" else (bar_close > bar_open)
-                if _opp_close and not _close_beyond(cautious_initial):
+                # Arm break-even on a confirmed close beyond the initial level OR on an
+                # opposite-close pullback bar — both give a structural 5-min reference bar.
+                if _close_beyond(cautious_initial) or _opp_close:
                     _ref5 = _last_same_dir_ref_bar(mnq_1m_recent, bar_time_str, direction, period_minutes=5)
+                    _new_cbp = _floored_break_price(_ref5, direction, _fill_price, buffer_pts=BREAKEVEN_BUFFER_PTS)
+                    _cur_cbp = active.get("cautious_break_price")
+                    # Only tighten — never loosen the midpoint stop placed on wick-touch.
+                    if _new_cbp is not None and (_cur_cbp is None or
+                            (direction == "up"   and _new_cbp > float(_cur_cbp)) or
+                            (direction == "down" and _new_cbp < float(_cur_cbp))):
+                        position["active"]["cautious_break_price"] = _new_cbp
                     position["active"]["cautious"] = "initial"
-                    position["active"]["cautious_break_price"] = _floored_break_price(_ref5, direction, _fill_price, buffer_pts=BREAKEVEN_BUFFER_PTS)
                     position["conf_bar_exit"] = _ref_bar_to_dict(_ref5)
                     save_position(position)
                     if position["active"]["cautious_break_price"] is None:
                         return None  # deferred: trail will arm once price clears entry
                     _cbp = float(position["active"]["cautious_break_price"])
                     # If the arm-confirm bar itself breaches the break price, exit immediately.
-                    # In 1s live the next tick fires the break check; this aligns 1m regression.
                     _already_broke = (bar_high > _cbp) if direction == "down" else (bar_low < _cbp)
                     if _already_broke:
                         _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
@@ -423,8 +460,9 @@ def run_trend(
                         return {"kind": "stop-exit", "time": now.isoformat(),
                                 "price": _cbp, "reason": "cautious-initial-break",
                                 "close_reason": _cr1}
-                    return {"kind": "new-stop-exit", "time": now.isoformat(),
-                            "price": _cbp, "level": "initial",
+                    _kind = "move-stop-exit" if _cur_cbp is not None else "new-stop-exit"
+                    return {"kind": _kind, "time": now.isoformat(),
+                            "price": _cbp, "level": "initial", "level_name": _lv1,
                             "cautious_break_price": _cbp}
 
             return None
@@ -445,7 +483,7 @@ def run_trend(
                         return None
                     return {"kind": "move-stop-exit" if _had_prior_stop else "new-stop-exit",
                             "time": now.isoformat(),
-                            "price": _sec_cbp, "level": "secondary",
+                            "price": _sec_cbp, "level": "secondary", "level_name": _lv2,
                             "cautious_break_price": _sec_cbp}
                 else:
                     # wick-only reach of secondary: wait for 1m arm-confirm bar
@@ -486,7 +524,7 @@ def run_trend(
             if _trail_moved:
                 return {"kind": "move-stop-exit", "time": now.isoformat(),
                         "price": bar_close, "cautious_break_price": active["cautious_break_price"],
-                        "level": "initial"}
+                        "level": "initial", "level_name": _lv1}
 
             return None
 
@@ -506,7 +544,7 @@ def run_trend(
                         return None
                     return {"kind": "move-stop-exit" if _had_prior_stop else "new-stop-exit",
                             "time": now.isoformat(),
-                            "price": _sec_cbp, "level": "secondary",
+                            "price": _sec_cbp, "level": "secondary", "level_name": _lv2,
                             "cautious_break_price": _sec_cbp}
             return None
 
@@ -574,7 +612,7 @@ def run_trend(
                 if _trail_moved:
                     return {"kind": "move-stop-exit", "time": now.isoformat(),
                             "price": bar_close, "cautious_break_price": active["cautious_break_price"],
-                            "level": "secondary"}
+                            "level": "secondary", "level_name": _lv2}
 
         return None
 

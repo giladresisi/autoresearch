@@ -9,12 +9,17 @@ from typing import Callable
 
 import pandas as pd
 
+from zoneinfo import ZoneInfo
+
 import daily as _daily_mod
 import hypothesis as _hyp_mod
 import smt_state as _smt_state
 import strategy as _strat_mod
 import trend as _trend_mod
+from session_times import is_entry_allowed, cme_session_start as _cme_session_start
 from smt_state import save_bar_state
+
+_ET = ZoneInfo("America/New_York")
 
 
 class SessionPipeline:
@@ -76,6 +81,9 @@ class SessionPipeline:
         self._ext_levels: list[tuple[str, float]] = []
         self._last_daily_date: "datetime.date | None" = None
         self._last_daily_minute: "pd.Timestamp | None" = None
+        # Tracks whether the previous bar was inside an entry-allowed window.
+        # Used to detect window-entry events and clear ghost positions.
+        self._was_in_window: "bool | None" = None
 
     def on_daily_or_startup(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> None:
         """Compute fixed reference liquidities and seed ATH. Called on startup and at 09:20 ET daily."""
@@ -116,17 +124,20 @@ class SessionPipeline:
             self._hist_1hr = pd.DataFrame(columns=list(_agg))
             self._hist_4hr = pd.DataFrame(columns=list(_agg))
 
+        # Combine hist + today before run_daily_fixed so the midnight bar (00:00 ET)
+        # is available when this fires at the London session start trigger.
+        _combined = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
+        _combined = _combined[~_combined.index.duplicated(keep="last")]
+
         # Reset daily.json and recompute fixed levels.
         save_daily(copy.deepcopy(DEFAULT_DAILY))
         _daily_mod.run_daily_fixed(
-            now, self._hist_mnq_1m, self._hist_1hr, self._hist_4hr, now.date()
+            now, _combined, self._hist_1hr, self._hist_4hr, now.date()
         )
 
-        # Seed initial day/week/session levels from combined hist + today bars.
+        # Seed initial day/week/session levels from combined bars.
         _state = load_daily()
         _liq = _state.get("liquidities", [])
-        _combined = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
-        _combined = _combined[~_combined.index.duplicated(keep="last")]
         _now_ts = now
         if _now_ts.tzinfo is None:
             _now_ts = _now_ts.tz_localize("America/New_York")
@@ -264,9 +275,15 @@ class SessionPipeline:
         if not self._daily_triggered:
             return []
 
-        # 09:20 ET daily trigger: re-run on_daily_or_startup once per calendar day.
+        # Re-run daily level computation at two transitions per CME session day.
+        # 00:00 ET (London session start): today's midnight open is now available as TDO,
+        #   replacing the prior-day proxy used during the Asia session.
+        # 09:20 ET (NY pre-market): FVGs and session H/L are stable for the RTH session.
+        # Only one fires per calendar date — whichever comes first sets _last_daily_date.
         _bar_floor = now.floor("1min")
-        if (now.hour == 9 and now.minute == 20
+        _is_midnight = (now.hour == 0 and now.minute == 0)
+        _is_0920    = (now.hour == 9 and now.minute == 20)
+        if ((_is_midnight or _is_0920)
                 and _bar_floor != self._last_daily_minute
                 and now.date() != self._last_daily_date):
             self._last_daily_minute = _bar_floor
@@ -288,6 +305,44 @@ class SessionPipeline:
         recent = today_mnq[today_mnq.index <= now]
 
         events: list[dict] = []
+
+        # Window-entry guard: if a position was opened outside any entry window and we
+        # just crossed into an allowed window, treat it as a market-close (log only —
+        # no PMT order sent) so the strategy re-evaluates cleanly from a flat state.
+        _now_et = now.tz_convert(_ET) if now.tzinfo else now
+        _now_in_window = is_entry_allowed(_now_et.time())
+        if self._was_in_window is not None and not self._was_in_window and _now_in_window:
+            _ghost_pos = _smt_state.load_position()
+            _ghost_active = _ghost_pos.get("active", {})
+            if _ghost_active:
+                _open_time_str = _ghost_active.get("time", "")
+                _opened_outside = False
+                if _open_time_str:
+                    try:
+                        _open_ts = pd.Timestamp(_open_time_str)
+                        _open_et = _open_ts.tz_convert(_ET) if _open_ts.tzinfo else _open_ts
+                        _opened_outside = not is_entry_allowed(_open_et.time())
+                    except Exception:
+                        pass
+                if _opened_outside:
+                    _ghost_evt: dict = {
+                        "kind":      "market-close",
+                        "time":      now.isoformat(),
+                        "price":     float(_ghost_active.get("fill_price", 0)),
+                        "reason":    "window-entered",
+                        "direction": _ghost_active.get("direction", ""),
+                        "source":    "strategy",
+                    }
+                    _ghost_hyp = _smt_state.load_hypothesis()
+                    _ghost_pos["active"] = {}
+                    _ghost_pos["stop_entry"] = ""
+                    _ghost_pos["conf_bar_exit"] = {}
+                    _ghost_hyp["direction"] = "none"
+                    _smt_state.save_position(_ghost_pos)
+                    _smt_state.save_hypothesis(_ghost_hyp)
+                    self._emit(_ghost_evt)
+                    events.append(_ghost_evt)
+        self._was_in_window = _now_in_window
 
         # Snapshot direction before any module can mutate hypothesis state — ensures
         # terminal output and executor receive the same direction for every signal this bar.
@@ -622,8 +677,7 @@ class SessionPipeline:
                                 _xdecremented = True
 
         # Per-bar: update session/day/week H/L and prune visited FVGs.
-        _liq_events = self._update_dynamic_liquidities(now, mnq_bar_row, today_mnq)
-        events.extend(_liq_events)
+        self._update_dynamic_liquidities(now, mnq_bar_row, today_mnq)
 
         _this_5m = now.floor("5min")
         is_5m = (now.minute % 5 == 0) and (_this_5m != self._last_5m_processed)
@@ -687,6 +741,10 @@ class SessionPipeline:
             strat_sig.setdefault("direction", _hyp_dir)
             # Emit cancel when strategy's market-entry overwrites a pending limit that
             # was never explicitly cancelled by trend (trend cancel path handled above).
+            # Also mark prefer_market_entry re-entries so live_orders can flatten first —
+            # Tradovate's protective stop may not have settled by the time the market buy arrives.
+            if strat_sig["kind"] == "market-entry" and _prefer_mkt:
+                strat_sig["flatten_first"] = True
             if strat_sig["kind"] == "market-entry" and _prev_stop != "":
                 _cancel_sig = {
                     "kind":      "stop-entry-cancelled",
@@ -786,21 +844,37 @@ class SessionPipeline:
                 })
 
         # ── Day H/L ──────────────────────────────────────────────────────────
-        _today_bars = today_mnq[today_mnq.index <= now]
-        if not _today_bars.empty:
-            _dh = float(_today_bars["High"].max())
-            _dl = float(_today_bars["Low"].min())
+        # During Asia (≥18:00 ET) and London (<06:00 ET), extend the day H/L
+        # lookback to 06:00 ET on the session-open day (yesterday's NY morning
+        # start, 12 h before 18:00 ET) using hist bars. From 06:00 ET onwards
+        # (NY morning+) use only the current CME session (today_mnq, 18:00 ET+).
+        _now_hour = now.hour
+        if _now_hour >= 18 or _now_hour < 6:
+            _sess_open_day = _cme_session_start(now).date()
+            _day_start_ts = pd.Timestamp(
+                datetime.datetime(_sess_open_day.year, _sess_open_day.month, _sess_open_day.day, 6, 0),
+                tz="America/New_York",
+            )
+            _day_hist = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
+            _day_hist = _day_hist[~_day_hist.index.duplicated(keep="last")]
+            _day_bars = _day_hist[(_day_hist.index >= _day_start_ts) & (_day_hist.index <= now)]
+        else:
+            _day_bars = today_mnq[today_mnq.index <= now]
+        if not _day_bars.empty:
+            _dh = float(_day_bars["High"].max())
+            _dl = float(_day_bars["Low"].min())
             _dm = (_dh + _dl) / 2.0
             _set("day_high", _dh)
             _set("day_low",  _dl)
             _set("day_mid",  _dm)
 
         # ── Week H/L ───────────────────────────────────────────────────────────
-        _week_start = self._week_start_ts(now.date())
-        _combined_week = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
-        _combined_week = _combined_week[~_combined_week.index.duplicated(keep="last")]
-        _week_bars = _combined_week[
-            (_combined_week.index >= _week_start) & (_combined_week.index <= now)
+        # Week may span multiple sessions; need hist bars for earlier days.
+        _week_start = self._week_start_ts(now)
+        _combined_hist = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
+        _combined_hist = _combined_hist[~_combined_hist.index.duplicated(keep="last")]
+        _week_bars = _combined_hist[
+            (_combined_hist.index >= _week_start) & (_combined_hist.index <= now)
         ]
         if not _week_bars.empty:
             _wh = float(_week_bars["High"].max())
@@ -833,7 +907,7 @@ class SessionPipeline:
                 if _active_sess == "asia"
                 else now.date()
             )
-            _sbars = _session_bars(_combined_week, _active_sess, _sess_today)
+            _sbars = _session_bars(_combined_hist, _active_sess, _sess_today)
             if not _sbars.empty:
                 _sh = float(_sbars["High"].max())
                 _sl = float(_sbars["Low"].min())
@@ -894,17 +968,43 @@ class SessionPipeline:
                 if l.get("kind") == "level" and l.get("price") is not None
             ]
 
-        for _ev in _liq_events:
-            self._emit(_ev)
-
         return _liq_events
 
-    def _week_start_ts(self, today: "datetime.date") -> pd.Timestamp:
-        """Return Monday 18:00 ET of the current ISO week (start of futures week)."""
-        days_since_monday = today.isocalendar().weekday - 1
-        monday = today - datetime.timedelta(days=days_since_monday)
+    def _day_start_ts(self, now: pd.Timestamp) -> pd.Timestamp:
+        """Return 18:00 ET on the date the current CME futures session opened.
+
+        After 18:00 ET today the new session opened today at 18:00.
+        Before 18:00 ET the session opened yesterday at 18:00.
+        """
+        now_et = now.tz_convert("America/New_York") if now.tzinfo else now.tz_localize("America/New_York")
+        d = now_et.date()
+        if now_et.hour < 18:
+            d -= datetime.timedelta(days=1)
         return pd.Timestamp(
-            datetime.datetime(monday.year, monday.month, monday.day, 18, 0),
+            datetime.datetime(d.year, d.month, d.day, 18, 0),
+            tz="America/New_York",
+        )
+
+    def _week_start_ts(self, now: pd.Timestamp) -> pd.Timestamp:
+        """Return the extended week-H/L start for the CME session containing `now`.
+
+        Monday session  (session-open = Sunday) → prev Thursday 18:00 ET
+        Tuesday session (session-open = Monday) → prev Friday   18:00 ET
+        Wednesday+      → standard Sunday 18:00 ET (CME week open)
+        """
+        today = now.date()
+        _session_open = today if now.hour >= 18 else today - datetime.timedelta(days=1)
+        _wd = _session_open.weekday()  # Mon=0, Tue=1, ..., Sun=6
+
+        if _wd == 6:  # Sunday → Monday session
+            _anchor = _session_open - datetime.timedelta(days=3)   # prev Thursday
+        elif _wd == 0:  # Monday → Tuesday session
+            _anchor = _session_open - datetime.timedelta(days=3)   # prev Friday
+        else:
+            _days_to_sunday = (_wd + 1) % 7
+            _anchor = _session_open - datetime.timedelta(days=_days_to_sunday)
+        return pd.Timestamp(
+            datetime.datetime(_anchor.year, _anchor.month, _anchor.day, 18, 0),
             tz="America/New_York",
         )
 

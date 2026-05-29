@@ -1241,8 +1241,12 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             # hist for run_daily comes from the pre-aggregated 1m view of the 1s parquet
             _mnq_hist_end = _mnq_1m_agg.index.searchsorted(session_start_ts, side="left")
             _mes_hist_end = _mes_1m_agg.index.searchsorted(session_start_ts, side="left")
-            hist_mnq_1m   = _mnq_1m_agg.iloc[:_mnq_hist_end]
-            hist_mes_1m   = _mes_1m_agg.iloc[:_mes_hist_end]
+            # Limit history to 60 days to keep _update_dynamic_liquidities fast in 1s mode
+            _hist_cutoff  = session_start_ts - pd.Timedelta(days=60)
+            _mnq_hist_start = _mnq_1m_agg.index.searchsorted(_hist_cutoff, side="left")
+            _mes_hist_start = _mes_1m_agg.index.searchsorted(_hist_cutoff, side="left")
+            hist_mnq_1m   = _mnq_1m_agg.iloc[_mnq_hist_start:_mnq_hist_end]
+            hist_mes_1m   = _mes_1m_agg.iloc[_mes_hist_start:_mes_hist_end]
             # Raw 1s bars spanning the full session window (18:00 prev day → 17:00 today)
             _mnq_today = mnq_all[(mnq_all.index >= session_start_ts) & (mnq_all.index < session_end_ts)]
             if _mnq_today.empty:

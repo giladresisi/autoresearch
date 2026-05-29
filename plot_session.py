@@ -3,9 +3,12 @@ Generate an interactive HTML chart for a live trading session.
 Overlays strategy events, key price levels, and SMT div marks on MNQ 1m candlesticks.
 Reads from sessions/{date}/ — works mid-session (no events yet = shows bars + levels only).
 
+The DATE argument is the TH (Asia/Bangkok) session date, which identifies the CME session
+that opened at 18:00 ET on (DATE - 1 day) and closed at 17:00 ET on DATE.
+
 Usage (run from automation root):
-    python plot_session.py                # today's session
-    python plot_session.py 2026-05-06    # specific date
+    python plot_session.py                # today's session (TH timezone)
+    python plot_session.py 2026-05-28    # session that closed at 17:00 ET on 2026-05-28
 
 Output: sessions/{date}/chart_{HH-MM}.html (timestamped at time of request)
 """
@@ -20,9 +23,15 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import plotly.graph_objects as go
 
+from session_times import session_date_str
 
-DATE = sys.argv[1] if len(sys.argv) > 1 else str(datetime.date.today())
-_NOW_ET = datetime.datetime.now(tz=ZoneInfo("America/New_York"))
+_ET = ZoneInfo("America/New_York")
+
+# DATE = TH session date = ET close date.
+# Default: current session date in TH timezone.
+DATE = sys.argv[1] if len(sys.argv) > 1 else session_date_str()
+
+_NOW_ET = datetime.datetime.now(tz=_ET)
 _REQUEST_TIME = _NOW_ET.strftime("%H-%M")
 _REQUEST_TIME_LABEL = _NOW_ET.strftime("%H:%M ET")
 
@@ -31,17 +40,40 @@ MNQ_DOLLARS_PER_POINT_PER_CONTRACT = 2.0
 DEFAULT_CONTRACTS = 2
 
 # ── Price data ────────────────────────────────────────────────────────────────
+# Session spans 18:00 ET on (DATE - 1 day) to 17:00 ET on DATE.
+# DATE is treated as the ET close date (TH session date = ET close date in summer).
+_session_close_date = datetime.date.fromisoformat(DATE)
+_session_open_date = _session_close_date - datetime.timedelta(days=1)
+_session_start = pd.Timestamp(
+    datetime.datetime(_session_open_date.year, _session_open_date.month,
+                      _session_open_date.day, 18, 0),
+    tz=_ET,
+)
+_session_end = pd.Timestamp(
+    datetime.datetime(_session_close_date.year, _session_close_date.month,
+                      _session_close_date.day, 17, 0),
+    tz=_ET,
+)
+
 df = pd.read_parquet("data/MNQ_1m.parquet")
-day = df[df.index.date == pd.Timestamp(DATE).date()]
+# Ensure tz-aware comparison
+if df.index.tz is None:
+    df.index = df.index.tz_localize(_ET)
+else:
+    df.index = df.index.tz_convert(_ET)
+day = df[(df.index >= _session_start) & (df.index <= _session_end)]
 
 # ── Events ────────────────────────────────────────────────────────────────────
 events_path = SESSION_DIR / "events.jsonl"
 events = []
+_SKIP_KINDS = {"liquidity-updated"}  # high-frequency housekeeping events, not plotted
 if events_path.exists():
     for line in events_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line:
-            events.append(json.loads(line))
+            e = json.loads(line)
+            if e.get("kind") not in _SKIP_KINDS:
+                events.append(e)
 for e in events:
     e["ts"] = pd.Timestamp(e["time"])
 
@@ -354,9 +386,10 @@ OTHER_MARKER_STYLE = {
     "move-stop-entry":   dict(symbol="triangle-right-open", color="#9C27B0", size=13),
     "cancel-stop-entry":    dict(symbol="x-open",              color="#FF9800", size=13),
     "stop-entry-cancelled": dict(symbol="x-open",              color="#FF9800", size=13),
-    "new-stop-exit":     dict(symbol="triangle-left",       color="#FF5722", size=13),
-    "move-stop-exit":    dict(symbol="triangle-left-open",  color="#FF5722", size=13),
-    "stop-entry-filled": dict(symbol="star",                color="#4CAF50", size=17),
+    "new-stop-exit":      dict(symbol="triangle-left",       color="#FF5722", size=13),
+    "move-stop-exit":     dict(symbol="triangle-left-open",  color="#FF5722", size=13),
+    "update-stop-loss":   dict(symbol="triangle-down-open",  color="#78909C", size=12),
+    "stop-entry-filled":  dict(symbol="star",                color="#4CAF50", size=17),
     "market-entry":       dict(symbol="circle",              color="#FF9800", size=15),
     "trend-broken":       dict(symbol="diamond-open",        color="#FF9800", size=13),
     "new-hypothesis":     dict(symbol="pentagon",            color="#E040FB", size=15),
@@ -414,7 +447,7 @@ for kind, style in OTHER_MARKER_STYLE.items():
             parts.append(f"entry_price: {e['entry_price']}")
         if "new_entry_price" in e:
             parts.append(f"new_entry_price: {e['new_entry_price']}")
-        if "stop" in e or "stop_price" in e:
+        if ("stop" in e or "stop_price" in e) and kind != "update-stop-loss":
             stop = e.get("stop") or e.get("stop_price")
             if kind == "stop-entry-filled":
                 dist = abs(ep - stop) if ep and stop else "?"
@@ -423,6 +456,13 @@ for kind, style in OTHER_MARKER_STYLE.items():
                 parts.append(f"stop: {stop}")
         if "reason" in e:
             parts.append(f"reason: {e['reason']}")
+        if kind in ("new-stop-exit", "move-stop-exit", "update-stop-loss"):
+            if e.get("level"):
+                parts.append(f"level: {e['level']}")
+            if e.get("level_name"):
+                parts.append(f"level_name: {e['level_name']}")
+            if e.get("cautious_break_price"):
+                parts.append(f"cautious_break_price: {e['cautious_break_price']}")
         if kind == "trend-broken":
             if e.get("broken_direction"):
                 parts.append(f"was: {e['broken_direction']}")

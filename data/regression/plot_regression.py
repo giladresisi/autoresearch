@@ -374,6 +374,7 @@ OTHER_MARKER_STYLE = {
     "stop-entry-cancelled":dict(symbol="x-open",              color="#FF9800", size=13),
     "new-stop-exit":       dict(symbol="triangle-left",       color="#FF5722", size=13),
     "move-stop-exit":      dict(symbol="triangle-left-open",  color="#FF5722", size=13),
+    "update-stop-loss":    dict(symbol="triangle-down-open",  color="#78909C", size=12),
     "stop-entry-filled":   dict(symbol="star",                color="#4CAF50", size=17),
     "market-entry":        dict(symbol="circle",              color="#FF9800", size=15),
     "trend-broken":        dict(symbol="diamond-open",        color="#FF9800", size=13),
@@ -431,7 +432,7 @@ for kind, style in OTHER_MARKER_STYLE.items():
             parts.append(f"entry_price: {e['entry_price']}")
         if "new_entry_price" in e:
             parts.append(f"new_entry_price: {e['new_entry_price']}")
-        if "stop" in e or "stop_price" in e:
+        if ("stop" in e or "stop_price" in e) and kind != "update-stop-loss":
             stop = e.get("stop") or e.get("stop_price")
             if kind == "stop-entry-filled":
                 dist = abs(ep - stop) if ep and stop else "?"
@@ -440,6 +441,13 @@ for kind, style in OTHER_MARKER_STYLE.items():
                 parts.append(f"stop: {stop}")
         if "reason" in e:
             parts.append(f"reason: {e['reason']}")
+        if kind in ("new-stop-exit", "move-stop-exit", "update-stop-loss"):
+            if e.get("level"):
+                parts.append(f"level: {e['level']}")
+            if e.get("level_name"):
+                parts.append(f"level_name: {e['level_name']}")
+            if e.get("cautious_break_price"):
+                parts.append(f"cautious_break_price: {e['cautious_break_price']}")
         if kind == "trend-broken":
             if e.get("broken_direction"):
                 parts.append(f"was: {e['broken_direction']}")

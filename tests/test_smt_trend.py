@@ -158,34 +158,45 @@ class TestCautiousArming:
         from trend import run_trend
         from smt_state import load_position
 
-        self._setup_active_cautious_no(direction="up", cautious_price=110.0)
-        bar = make_1m_bar(open_=100, high=112, low=98, close=111)
-        recent = make_recent_bars(closes=[100, 111], opens=[99, 100])
+        # cautious_price must be >= fill_price + INITIAL_STOP_MIN_DIST_PTS (50 pts)
+        self._setup_active_cautious_no(direction="up", cautious_price=160.0)
+        bar = make_1m_bar(open_=100, high=162, low=98, close=161)
+        recent = make_recent_bars(closes=[100, 161], opens=[99, 100])
         result = run_trend(NOW, bar, recent)
         assert result is not None
         assert result["kind"] == "new-stop-exit"
         pos = load_position()
         assert pos["active"]["cautious"] == "initial"
 
-    def test_cautious_rejected_long_close_below(self):
+    def test_cautious_wick_only_sets_midpoint_stop(self):
         """direction=up, bar.high>=cautious_price_initial BUT close<cautious_price_initial
-        → wick-only reach of initial level: no rejection, returns None."""
+        → wick-only: stop moved to midpoint between original stop and initial target."""
         from trend import run_trend
+        from smt_state import load_position
 
-        self._setup_active_cautious_no(direction="up", cautious_price=110.0)
-        bar = make_1m_bar(open_=100, high=112, low=98, close=109)
-        recent = make_recent_bars(closes=[100, 109], opens=[99, 100])
+        # cautious_price must be >= fill_price + INITIAL_STOP_MIN_DIST_PTS (50 pts)
+        self._setup_active_cautious_no(direction="up", cautious_price=160.0)
+        bar = make_1m_bar(open_=100, high=162, low=98, close=159)
+        recent = make_recent_bars(closes=[100, 159], opens=[99, 100])
         result = run_trend(NOW, bar, recent)
-        assert result is None
+        # stop=95, cautious_initial=160 → midpoint=127.5
+        assert result is not None
+        assert result["kind"] == "new-stop-exit"
+        assert result["level"] == "initial_mid"
+        assert result["cautious_break_price"] == 127.5
+        pos = load_position()
+        assert pos["active"]["cautious"] == "initial_surpassed"
+        assert pos["active"]["cautious_break_price"] == 127.5
 
     def test_cautious_arming_short_close_beyond(self):
         """direction=down, bar.low<=cautious_price AND close<cautious_price → cautious-armed (initial)."""
         from trend import run_trend
         from smt_state import load_position
 
-        self._setup_active_cautious_no(direction="down", cautious_price=90.0)
-        bar = make_1m_bar(open_=95, high=97, low=88, close=89)
-        recent = make_recent_bars(closes=[95, 89], opens=[96, 95])
+        # cautious_price must be <= fill_price - INITIAL_STOP_MIN_DIST_PTS (50 pts)
+        self._setup_active_cautious_no(direction="down", cautious_price=40.0)
+        bar = make_1m_bar(open_=95, high=97, low=38, close=39)
+        recent = make_recent_bars(closes=[95, 39], opens=[96, 95])
         result = run_trend(NOW, bar, recent)
         assert result is not None
         assert result["kind"] == "new-stop-exit"
@@ -386,7 +397,7 @@ class TestSignalShape:
 
         hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
         hyp["direction"] = "up"
-        hyp["cautious_price_initial"] = "110"
+        hyp["cautious_price_initial"] = "160"
         save_hypothesis(hyp)
 
         pos = copy.deepcopy(DEFAULT_POSITION)
@@ -396,7 +407,7 @@ class TestSignalShape:
         save_daily(_daily_with_levels([]))
 
         # Trigger cautious-armed
-        bar = make_1m_bar(open_=100, high=112, low=98, close=111)
+        bar = make_1m_bar(open_=100, high=162, low=98, close=161)
         recent = make_recent_bars(closes=[100, 111], opens=[99, 100])
         signal = run_trend(NOW, bar, recent)
         assert signal is not None

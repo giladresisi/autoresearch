@@ -51,7 +51,7 @@ MNQ_CONID = os.environ.get("MNQ_CONID", "")
 MES_CONID = os.environ.get("MES_CONID", "")
 
 # ── Session window ───────────────────────────────────────────────────────────
-from session_times import SESSION_OPEN, SESSION_CLOSE  # noqa: E402
+from session_times import SESSION_OPEN, SESSION_CLOSE, cme_session_date, cme_session_start, session_date_str  # noqa: E402
 SIGNAL_SESSION_END = SESSION_CLOSE   # ET: no new signals / force-close after this time
 
 # ── Trade configuration ───────────────────────────────────────────────────────
@@ -62,8 +62,10 @@ GAP_FILL_MAX_DAYS    = 14  # covers long weekends and occasional missed days
 MNQ_PNL_PER_POINT    = 2.0
 
 # ── Reconnect settings ────────────────────────────────────────────────────────
-MAX_RETRIES   = 10
-RETRY_DELAY_S = 15
+MAX_RETRIES                    = 10
+RETRY_DELAY_S                  = 15
+WATCHDOG_TIMEOUT_S             = 120  # 2 minutes without IB data → declare zombie
+WATCHDOG_TERMINATION_GRACE_S   = 30   # grace window for IB to recover before exiting
 
 # ── Data paths ───────────────────────────────────────────────────────────────
 BAR_DATA_DIR = Path("data")
@@ -180,9 +182,12 @@ def _on_bar(bar, mes_partial) -> None:
         "Close": bar.Close, "Volume": bar.Volume,
     })
 
-    # Build today_mnq: completed bars + the current partial minute as its last row.
+    # Build today_mnq: completed bars from CME session open + the current partial minute.
+    # Filter from 18:00 ET on the session-open day so overnight bars aren't excluded
+    # when the calendar date rolls past midnight ET.
     _today = _bar_ts.date()
-    _today_mnq_base = _mnq_df[_mnq_df.index.date == _today]
+    _cme_start = pd.Timestamp(cme_session_start(_bar_ts))
+    _today_mnq_base = _mnq_df[_mnq_df.index >= _cme_start]
     _minute_ts = _bar_ts.floor("1min")
     _partial_mnq = pd.DataFrame(
         [[bar.Open, bar.High, bar.Low, bar.Close, bar.Volume]],
@@ -196,7 +201,7 @@ def _on_bar(bar, mes_partial) -> None:
         today_mnq.loc[_minute_ts] = _partial_mnq.iloc[0]
 
     # Build mes_bar_row and today_mes from the MES partial accumulator.
-    _today_mes_base = _mes_df[_mes_df.index.date == _today]
+    _today_mes_base = _mes_df[_mes_df.index >= _cme_start]
     if mes_partial is not None:
         mes_bar_row = pd.Series({
             "Open": mes_partial["open"], "High": mes_partial["high"],
@@ -961,16 +966,19 @@ class SmtV2Dispatcher:
     def on_session_start(self, now: pd.Timestamp, mnq_1m_df: pd.DataFrame, mes_1m_df: pd.DataFrame) -> None:
         """Initialize pipeline with current history snapshot and seed session state.
 
-        Idempotent per trading day: repeated calls on the same date are ignored so
-        the caller can safely call this on every bar at/after 09:20.
+        Idempotent per CME session: repeated calls within the same CME session are
+        ignored so the caller can safely call this on every bar at/after 09:20.
+        Uses TH session date so the pipeline is NOT re-initialised when the ET
+        calendar date rolls past midnight during an overnight session.
         """
-        today = now.date()
+        today = cme_session_date(now)
         if today == self._session_date:
             return
         from session_pipeline import SessionPipeline
         self._pipeline = SessionPipeline(mnq_1m_df, mes_1m_df, self._emit)
+        _cme_start = pd.Timestamp(cme_session_start(now))
         today_at_open = mnq_1m_df[
-            (mnq_1m_df.index.date == today) & (mnq_1m_df.index <= now)
+            (mnq_1m_df.index >= _cme_start) & (mnq_1m_df.index <= now)
         ]
         self._pipeline.on_session_start(now, today_at_open, force_reset=self._force_reset)
         print(f"[EMIT] daily complete date={today}", flush=True)
@@ -986,10 +994,10 @@ class SmtV2Dispatcher:
     ) -> None:
         if self._pipeline is None:
             return
-        # today_mnq is all bars received so far today; in live execution this equals ≤ now
-        # since future bars don't exist yet.
-        today_mnq = mnq_1m_df[mnq_1m_df.index.date == now.date()]
-        today_mes = mes_1m_df[mes_1m_df.index.date == now.date()]
+        # today_mnq = all bars in the current CME session (from 18:00 ET session open).
+        _cme_start = pd.Timestamp(cme_session_start(now))
+        today_mnq = mnq_1m_df[mnq_1m_df.index >= _cme_start]
+        today_mes = mes_1m_df[mes_1m_df.index >= _cme_start]
         self._pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
 
     def _emit(self, sig: dict) -> None:
@@ -1046,7 +1054,7 @@ def main() -> None:
     if missing:
         raise RuntimeError(f"Missing required env vars: {missing}")
 
-    today_str = pd.Timestamp.now(tz="America/New_York").strftime("%Y-%m-%d")
+    today_str = session_date_str()
     (SESSIONS_DIR / today_str).mkdir(parents=True, exist_ok=True)
     import live_orders as _lo_mod, smt_state as _smt_state_mod
     _lo_mod.set_session_date(today_str)
@@ -1119,6 +1127,9 @@ def main() -> None:
         on_bar=_on_bar,
         max_retries=MAX_RETRIES, retry_delay_s=RETRY_DELAY_S,
         on_bar_1m_complete=_on_bar_1m_complete,
+        watchdog_timeout_s=WATCHDOG_TIMEOUT_S,
+        watchdog_termination_grace_s=WATCHDOG_TERMINATION_GRACE_S,
+        comments_path=SESSIONS_DIR / today_str / "comments.md",
     )
 
     _executor.start()

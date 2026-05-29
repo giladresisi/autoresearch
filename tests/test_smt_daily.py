@@ -276,6 +276,86 @@ class TestTWOIsFirstBarOfWeek:
         assert "TWO" in liq_map
         assert liq_map["TWO"]["price"] == expected_open
 
+    def test_two_monday_session_before_1800_uses_last_weeks_two(self):
+        """Monday session before 18:00 ET: TWO falls back to last week's Monday 18:00 bar."""
+        # Monday 2026-04-27 at 21:00 ET = Monday's Asia session (before Monday 18:00 bar exists
+        # for THIS week, since now < Monday 18:00 ET of next week — but more precisely this
+        # test simulates: it's Monday 2026-04-27 at 21:00 ET, this week's Monday 18:00 bar
+        # doesn't exist in hist yet, so we expect last week's Monday 18:00 bar to be used).
+        # Use Monday 2026-05-04 as the session date (Asia session = Sunday evening in ET).
+        # "now" is Sunday 2026-05-03 at 21:00 ET (Monday's Asia session in CME terms).
+        # today (cme_session_date) = 2026-05-04 (Monday).
+        now = _now("2026-05-03", 21, 0)  # Sunday 21:00 ET = Monday's Asia session
+        today = datetime.date(2026, 5, 4)  # Monday
+
+        prev_two_open = 21075.0
+
+        # hist contains last week's Monday 18:00 bar (2026-04-27 18:00) but NOT this week's
+        hist_idx = _drange("2026-04-27 18:00:00", 1560, "1min")  # ~26h, ends before Mon 2026-05-04 18:00
+        n = len(hist_idx)
+        opens = np.full(n, 21000.0)
+        prev_mon_1800 = pd.Timestamp("2026-04-27 18:00:00", tz="America/New_York")
+        opens[hist_idx.get_loc(prev_mon_1800)] = prev_two_open
+        hist_mnq_1m = pd.DataFrame(
+            {
+                "Open":   opens,
+                "High":   np.full(n, 21010.0),
+                "Low":    np.full(n, 20990.0),
+                "Close":  np.full(n, 21001.0),
+                "Volume": np.ones(n),
+            },
+            index=hist_idx,
+        )
+
+        hist_1hr = _make_empty_hourly()
+        hist_4hr = _empty_4hr()
+
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
+
+        daily = load_daily()
+        liq_map = {e["name"]: e for e in daily["liquidities"]}
+        assert "TWO" in liq_map, "TWO missing from liquidities"
+        assert liq_map["TWO"]["price"] == prev_two_open, (
+            f"TWO.price={liq_map['TWO']['price']}, expected {prev_two_open} (last week's TWO)"
+        )
+
+    def test_two_monday_after_1800_uses_this_weeks_two(self):
+        """Monday session after 18:00 ET: TWO uses this week's Monday 18:00 bar."""
+        # Once Monday 18:00 ET has passed and the bar exists, use it (not last week's).
+        now = _now("2026-04-27", 18, 5)  # Monday 18:05 ET — after the 18:00 bar
+        today = now.date()
+        this_two_open = 21090.0
+
+        hist_idx = _drange("2026-04-20 18:00:00", 14405, "1min")  # 2 weeks
+        n = len(hist_idx)
+        opens = np.full(n, 21000.0)
+        this_mon_1800 = pd.Timestamp("2026-04-27 18:00:00", tz="America/New_York")
+        opens[hist_idx.get_loc(this_mon_1800)] = this_two_open
+        prev_mon_1800 = pd.Timestamp("2026-04-20 18:00:00", tz="America/New_York")
+        opens[hist_idx.get_loc(prev_mon_1800)] = 20900.0  # different value — should NOT be used
+        hist_mnq_1m = pd.DataFrame(
+            {
+                "Open":   opens,
+                "High":   np.full(n, 21010.0),
+                "Low":    np.full(n, 20990.0),
+                "Close":  np.full(n, 21001.0),
+                "Volume": np.ones(n),
+            },
+            index=hist_idx,
+        )
+
+        hist_1hr = _make_empty_hourly()
+        hist_4hr = _empty_4hr()
+
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
+
+        daily = load_daily()
+        liq_map = {e["name"]: e for e in daily["liquidities"]}
+        assert "TWO" in liq_map
+        assert liq_map["TWO"]["price"] == this_two_open, (
+            f"TWO.price={liq_map['TWO']['price']}, expected {this_two_open} (this week's TWO)"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: all-time high update in global.json
@@ -523,3 +603,237 @@ class TestUnvisitedFvgFilter:
         surviving = fvg_entries[0]
         assert surviving["bottom"] == 21100.0
         assert surviving["top"] == 21120.0
+
+
+# ---------------------------------------------------------------------------
+# Tests for compute_live_hl_mid: extended day H/L lookback during Asia/London
+# ---------------------------------------------------------------------------
+
+def test_compute_live_hl_mid_asia_extends_to_0600():
+    """During Asia session (≥18:00 ET) day_high includes bars back to 06:00 ET."""
+    from hypothesis import compute_live_hl_mid
+
+    idx = pd.date_range("2025-11-13 06:00", periods=4, freq="6h", tz="America/New_York")
+    # Bar at 06:00 has extreme High=25000; bar at 18:00 starts the Asia session
+    bars = pd.DataFrame({
+        "Open":  [21000.0] * 4,
+        "High":  [25000.0, 21010.0, 21010.0, 21010.0],
+        "Low":   [20990.0] * 4,
+        "Close": [21002.0] * 4,
+    }, index=idx)
+
+    now = pd.Timestamp("2025-11-13 21:00", tz="America/New_York")  # Asia session
+    result = compute_live_hl_mid(bars, now)
+
+    assert "day_high" in result
+    assert result["day_high"] == 25000.0, (
+        f"Asia session day_high should include 06:00 ET bar (25000), got {result['day_high']}"
+    )
+
+
+def test_compute_live_hl_mid_london_extends_to_0600():
+    """During London session (<06:00 ET) day_high includes bars back to 06:00 ET previous day."""
+    from hypothesis import compute_live_hl_mid
+
+    # Bars: session-open day 06:00, 12:00, 18:00 (Asia start), then 00:00 next day (London)
+    idx = pd.DatetimeIndex([
+        pd.Timestamp("2025-11-13 06:00", tz="America/New_York"),  # prev NY morning
+        pd.Timestamp("2025-11-13 18:00", tz="America/New_York"),  # Asia start
+        pd.Timestamp("2025-11-14 00:00", tz="America/New_York"),  # London start
+        pd.Timestamp("2025-11-14 03:00", tz="America/New_York"),  # mid London
+    ])
+    bars = pd.DataFrame({
+        "Open":  [21000.0] * 4,
+        "High":  [25000.0, 21010.0, 21010.0, 21010.0],
+        "Low":   [20990.0] * 4,
+        "Close": [21002.0] * 4,
+    }, index=idx)
+
+    now = pd.Timestamp("2025-11-14 03:00", tz="America/New_York")  # London session
+    result = compute_live_hl_mid(bars, now)
+
+    assert "day_high" in result
+    assert result["day_high"] == 25000.0, (
+        f"London session day_high should include 06:00 ET bar (25000), got {result['day_high']}"
+    )
+
+
+def test_compute_live_hl_mid_ny_morning_excludes_0600():
+    """During NY morning (06:00–18:00 ET) day_high starts at 18:00 ET, 06:00 excluded."""
+    from hypothesis import compute_live_hl_mid
+
+    idx = pd.DatetimeIndex([
+        pd.Timestamp("2025-11-13 06:00", tz="America/New_York"),  # prev NY morning — excluded
+        pd.Timestamp("2025-11-13 18:00", tz="America/New_York"),  # Asia start
+        pd.Timestamp("2025-11-14 00:00", tz="America/New_York"),  # London
+        pd.Timestamp("2025-11-14 09:00", tz="America/New_York"),  # NY morning
+    ])
+    bars = pd.DataFrame({
+        "Open":  [21000.0] * 4,
+        "High":  [25000.0, 21010.0, 21010.0, 21010.0],
+        "Low":   [20990.0] * 4,
+        "Close": [21002.0] * 4,
+    }, index=idx)
+
+    now = pd.Timestamp("2025-11-14 09:00", tz="America/New_York")  # NY morning
+    result = compute_live_hl_mid(bars, now)
+
+    assert "day_high" in result
+    assert result["day_high"] < 25000.0, (
+        f"NY morning day_high should NOT include 06:00 ET bar (25000), got {result['day_high']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for compute_live_hl_mid: extended week H/L lookback on Mon/Tue sessions
+# ---------------------------------------------------------------------------
+
+def _make_week_bars(
+    prev_thu_bar: tuple,  # (timestamp_str, high)
+    *extra_bars: tuple,   # additional (timestamp_str, high) pairs
+) -> pd.DataFrame:
+    """Build a DataFrame with a low bar count; each entry sets a distinct High."""
+    ts_list = [prev_thu_bar[0]] + [b[0] for b in extra_bars]
+    high_list = [prev_thu_bar[1]] + [b[1] for b in extra_bars]
+    idx = pd.DatetimeIndex([pd.Timestamp(t, tz="America/New_York") for t in ts_list])
+    n = len(idx)
+    return pd.DataFrame(
+        {
+            "Open":   np.full(n, 21000.0),
+            "High":   np.array(high_list, dtype=float),
+            "Low":    np.full(n, 20990.0),
+            "Close":  np.full(n, 21001.0),
+            "Volume": np.ones(n),
+        },
+        index=idx,
+    )
+
+
+def test_compute_live_hl_mid_monday_session_uses_prev_thursday():
+    """Monday session (Asia, 21:00 ET Sunday): week_high should include prev Thursday 18:00 bar."""
+    from hypothesis import compute_live_hl_mid
+
+    # 2025-11-10 is a Monday. Session opens Sunday 2025-11-09 18:00 ET.
+    # prev Thursday = 2025-11-06
+    thu_high = 25000.0
+    bars = _make_week_bars(
+        ("2025-11-06 18:00", thu_high),     # prev Thursday 18:00 ET — should be included
+        ("2025-11-09 18:00", 21010.0),       # Sunday (session open)
+        ("2025-11-09 21:00", 21005.0),       # Asia session bar
+    )
+    now = pd.Timestamp("2025-11-09 21:00", tz="America/New_York")  # Sunday 21:00 = Monday session
+    result = compute_live_hl_mid(bars, now)
+
+    assert "week_high" in result
+    assert result["week_high"] == thu_high, (
+        f"Monday session week_high should include prev Thu bar (25000), got {result['week_high']}"
+    )
+
+
+def test_compute_live_hl_mid_tuesday_session_uses_prev_friday():
+    """Tuesday session (Asia, 21:00 ET Monday): week_high should include prev Friday 18:00 bar."""
+    from hypothesis import compute_live_hl_mid
+
+    # 2025-11-11 is a Tuesday. Session opens Monday 2025-11-10 18:00 ET.
+    # prev Friday = 2025-11-07
+    fri_high = 25000.0
+    bars = _make_week_bars(
+        ("2025-11-07 18:00", fri_high),      # prev Friday 18:00 ET — should be included
+        ("2025-11-09 18:00", 21010.0),        # Sunday
+        ("2025-11-10 18:00", 21005.0),        # Monday (session open for Tuesday)
+        ("2025-11-10 21:00", 21003.0),        # Monday Asia
+    )
+    now = pd.Timestamp("2025-11-10 21:00", tz="America/New_York")  # Monday 21:00 = Tuesday session
+    result = compute_live_hl_mid(bars, now)
+
+    assert "week_high" in result
+    assert result["week_high"] == fri_high, (
+        f"Tuesday session week_high should include prev Fri bar (25000), got {result['week_high']}"
+    )
+
+
+def test_compute_live_hl_mid_wednesday_session_uses_sunday():
+    """Wednesday session: week_high starts at Sunday 18:00 ET, prev-week bars excluded."""
+    from hypothesis import compute_live_hl_mid
+
+    # 2025-11-12 is a Wednesday. Session opens Tuesday 2025-11-11 18:00 ET.
+    # Standard Sunday = 2025-11-09 18:00 ET. Prev Friday should NOT be included.
+    fri_high = 25000.0
+    sun_high = 21015.0
+    bars = _make_week_bars(
+        ("2025-11-07 18:00", fri_high),       # prev Friday — should NOT be included
+        ("2025-11-09 18:00", sun_high),        # Sunday 18:00 (CME week open) — first included
+        ("2025-11-11 18:00", 21005.0),         # Tuesday (session open for Wednesday)
+        ("2025-11-11 21:00", 21003.0),
+    )
+    now = pd.Timestamp("2025-11-11 21:00", tz="America/New_York")  # Tuesday 21:00 = Wednesday session
+    result = compute_live_hl_mid(bars, now)
+
+    assert "week_high" in result
+    assert result["week_high"] == sun_high, (
+        f"Wednesday session week_high should start from Sunday 18:00 ({sun_high}), got {result['week_high']}"
+    )
+    assert result["week_high"] < fri_high, "Wednesday session should NOT include prev Friday bar"
+
+
+# ---------------------------------------------------------------------------
+# Tests for prev_day H/L CME-session boundary (prior_date-1 18:00 → prior_date 17:00 ET)
+# ---------------------------------------------------------------------------
+
+class TestPrevDayHighLowCMESessionBoundary:
+    """prev1/2_day_high/low must use CME session boundaries, not calendar midnight."""
+
+    def _run(self, hist_mnq_1m: pd.DataFrame) -> dict:
+        now = _now("2026-04-27", 9, 20)
+        today = now.date()
+        hist_1hr = _make_empty_hourly()
+        hist_4hr = _empty_4hr()
+        run_daily_fixed(now, hist_mnq_1m, hist_1hr, hist_4hr, today)
+        return {e["name"]: e["price"] for e in load_daily()["liquidities"]}
+
+    def test_evening_bars_excluded_from_prev_day_high(self):
+        """Bars after 17:00 ET on prior_date belong to the next CME session and must not
+        inflate prev1_day_high."""
+        # Friday RTH bars — inside the Fri CME session window (Thu 18:00 → Fri 17:00)
+        fri_rth = make_bars("2026-04-24 09:00:00", periods=480, freq="1min",
+                            base_price=20900.0, high_offset=5.0)  # high = 20905
+
+        # Friday EVENING bars — first bars of the SAT/next CME session; must be excluded
+        fri_eve = make_bars("2026-04-24 18:00:00", periods=120, freq="1min",
+                            base_price=21500.0, high_offset=50.0)  # high = 21550 — must NOT appear
+
+        # Sunday overnight bars for today's (Monday) session
+        sun = make_bars("2026-04-26 18:00:00", periods=900, freq="1min", base_price=21000.0)
+
+        hist = pd.concat([fri_rth, fri_eve, sun]).sort_index()
+        hist = hist[~hist.index.duplicated(keep="last")]
+
+        liq = self._run(hist)
+        assert "prev1_day_high" in liq
+        assert liq["prev1_day_high"] == pytest.approx(20905.0), (
+            f"Expected 20905 (Fri RTH only), got {liq['prev1_day_high']} — "
+            "Friday evening bars must not leak into prev1_day window"
+        )
+
+    def test_overnight_bars_included_in_prev_day_high(self):
+        """Bars from (prior_date-1) 18:00 ET are part of the prior CME session and must
+        be included in prev1_day_high even though they fall on the previous calendar date."""
+        # Thursday EVENING bars — part of the Friday CME session (Thu 18:00 → Fri 17:00)
+        thu_eve = make_bars("2026-04-23 18:00:00", periods=120, freq="1min",
+                            base_price=21200.0, high_offset=50.0)  # high = 21250 — must be included
+
+        # Friday RTH bars (lower)
+        fri_rth = make_bars("2026-04-24 09:00:00", periods=480, freq="1min",
+                            base_price=20900.0, high_offset=5.0)  # high = 20905
+
+        # Sunday overnight for today's (Monday) session
+        sun = make_bars("2026-04-26 18:00:00", periods=900, freq="1min", base_price=21000.0)
+
+        hist = pd.concat([thu_eve, fri_rth, sun]).sort_index()
+        hist = hist[~hist.index.duplicated(keep="last")]
+
+        liq = self._run(hist)
+        assert "prev1_day_high" in liq
+        assert liq["prev1_day_high"] == pytest.approx(21250.0), (
+            f"Expected 21250 (Thu eve = part of Fri CME session), got {liq['prev1_day_high']}"
+        )

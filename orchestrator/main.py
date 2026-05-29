@@ -403,6 +403,16 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
             session_open_dt = datetime.datetime.combine(today, _SESSION_OPEN_V2).replace(tzinfo=_ET)
             grace_end_dt    = datetime.datetime.combine(today, _SESSION_CLOSE_V2).replace(tzinfo=_ET)
 
+            # CME session opens at SESSION_OPEN (18:00) and closes at SESSION_CLOSE (17:00)
+            # the *next* calendar day.  After 18:00 ET, grace_end_dt must be advanced to
+            # tomorrow — otherwise any time between 17:00 and midnight is mis-classified as
+            # "session over" and the orchestrator sleeps until the next NYSE open instead of
+            # running the live session that already started at 18:00.
+            if now >= session_open_dt:
+                grace_end_dt = datetime.datetime.combine(
+                    today + datetime.timedelta(days=1), _SESSION_CLOSE_V2
+                ).replace(tzinfo=_ET)
+
             if now < session_open_dt:
                 if LIVE_TRADING:
                     # automation.main starts immediately: it connects to IB, gap-fills, and
@@ -436,7 +446,7 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
                 signal_cmd = _SIGNAL_SMT
             print(f"[orchestrator] mode={'LIVE_TRADING' if LIVE_TRADING else 'signal'}", flush=True)
             _extra = {"FORCE_RESET": "true"} if force_reset else None
-            result = ProcessManager(signal_cmd, relay, orch_ch, extra_env=_extra).run_session(today)
+            result = ProcessManager(signal_cmd, relay, orch_ch, extra_env=_extra).run_session(today, grace_end_dt=grace_end_dt)
             # Post-session: fill the ~2-min gap (gap-fill end → first session tick) and merge
             # session 1s parquet into main. This runs before pre-session IB restarts so the
             # session file is cleaned up before overnight accumulation begins.
@@ -453,7 +463,8 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
             if result == "ib_disconnected":
                 orch_ch.writeln(
                     "[ORCH] *** IB Gateway disconnected. Restart IB Gateway, then relaunch "
-                    "the orchestrator. All positions have been closed. ***"
+                    "the orchestrator. automation.main attempted a hard close; verify position "
+                    "state before restarting. ***"
                 )
                 sys.exit(3)
             # Post-session: accumulate overnight bars while sleeping until next session
@@ -469,6 +480,22 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
         print("\n[ORCH] Shutting down.", flush=True)
         _stop_pre_session_ib(_pre_src, _pre_thr)
         sys.exit(0)
+    except Exception as _exc:
+        # Unhandled exception in the main orchestrator loop — log full traceback before dying.
+        try:
+            _crash = Path(__file__).resolve().parent.parent / "orchestrator_crash.log"
+            _ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(_crash, "a", encoding="utf-8") as _f:
+                _f.write(f"=== MAIN THREAD CRASH {_ts} ===\n")
+                _traceback.print_exc(file=_f)
+                _f.write("\n")
+        except Exception:
+            pass
+        print(
+            f"\n[ORCH] *** UNHANDLED EXCEPTION: {_exc!r} ***\n{_traceback.format_exc()}",
+            flush=True,
+        )
+        raise
     finally:
         try:
             if _PIDFILE.exists() and _PIDFILE.read_text().strip() == str(_os.getpid()):
