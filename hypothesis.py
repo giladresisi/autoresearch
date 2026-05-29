@@ -5,9 +5,14 @@
 
 import copy
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+
+from session_times import cme_session_start as _cme_session_start
+
+_ET = ZoneInfo("America/New_York")
 
 CAUTIOUS_SECONDARY_MAX_DIST = 150  # pts — secondary (1m confirmation) max distance
 CAUTIOUS_INITIAL_MAX_DIST   = 110  # pts — initial (5m confirmation) max distance
@@ -1294,7 +1299,32 @@ def run_hypothesis(
     last_liquidity, _ = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_hyp_pre_session)
 
     # Step 5: divs — SMT divergences at 15m and 30m.
-    divs = _compute_divs(mnq_1m, mes_1m)
+    # Before NY morning (09:30 ET), extend the bar window back to the prior NY
+    # evening session (12:00–18:00 ET on the session-open day) so that SMTs
+    # against yesterday's afternoon lows/highs are detectable during Asia and
+    # London. From 09:30 ET onward the current session window is long enough
+    # that extending back to yesterday adds noise without value.
+    _now_et = now.astimezone(_ET) if getattr(now, "tzinfo", None) else now
+    _pre_ny_morning = _now_et.hour < 9 or (_now_et.hour == 9 and _now_et.minute < 30)
+    if _pre_ny_morning and not hist_mnq_1m.empty and not mnq_1m.empty:
+        _sess_open   = pd.Timestamp(_cme_session_start(now))
+        _ny_eve_start = _sess_open - pd.Timedelta(hours=6)  # 12:00 ET on session-open day
+        _prior_mnq = hist_mnq_1m[
+            (hist_mnq_1m.index >= _ny_eve_start) & (hist_mnq_1m.index < _sess_open)
+        ]
+        _prior_mes = hist_mes_1m[
+            (hist_mes_1m.index >= _ny_eve_start) & (hist_mes_1m.index < _sess_open)
+        ] if not hist_mes_1m.empty else pd.DataFrame()
+        if not _prior_mnq.empty:
+            _div_mnq = pd.concat([_prior_mnq, mnq_1m]).sort_index()
+            _div_mnq = _div_mnq[~_div_mnq.index.duplicated(keep="last")]
+            _div_mes = pd.concat([_prior_mes, mes_1m]).sort_index() if not _prior_mes.empty else mes_1m
+            _div_mes = _div_mes[~_div_mes.index.duplicated(keep="last")]
+            divs = _compute_divs(_div_mnq, _div_mes)
+        else:
+            divs = _compute_divs(mnq_1m, mes_1m)
+    else:
+        divs = _compute_divs(mnq_1m, mes_1m)
 
     # Step 6: direction — determined by ICT rules (see direction.md).
     # confidence=high overrides all rules: direction follows the global trend unconditionally.
