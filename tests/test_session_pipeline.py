@@ -962,3 +962,49 @@ def test_per_bar_day_hl_ny_morning_excludes_previous_ny_morning(_isolate_state, 
     assert _dh["price"] < 25000.0, (
         f"NY morning day_high should NOT include 06:00 ET hist bar, got {_dh['price']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 28-30: _week_start_ts — extended lookback for Mon/Tue sessions
+# ---------------------------------------------------------------------------
+
+def _pipeline_for_week_ts_test():
+    """Minimal pipeline fixture; state isolation not needed for pure _week_start_ts tests."""
+    import daily as _daily_mod
+    hist = _make_1m_bars("2025-11-10 00:00", n=1)
+    pipeline = SessionPipeline.__new__(SessionPipeline)
+    pipeline._hist_mnq_1m = hist
+    pipeline._hist_mes_1m = hist
+    pipeline._hist_1hr = hist
+    pipeline._hist_4hr = hist
+    return pipeline
+
+
+def test_week_start_ts_monday_session_uses_prev_thursday():
+    """Monday session (Sunday 21:00 ET): _week_start_ts returns prev Thursday 18:00 ET."""
+    pipeline = _pipeline_for_week_ts_test()
+    # Sunday 2025-11-09 21:00 ET = start of Monday's CME session
+    now = pd.Timestamp("2025-11-09 21:00", tz="America/New_York")
+    result = pipeline._week_start_ts(now)
+    expected = pd.Timestamp("2025-11-06 18:00", tz="America/New_York")  # prev Thursday
+    assert result == expected, f"Monday session week start expected {expected}, got {result}"
+
+
+def test_week_start_ts_tuesday_session_uses_prev_friday():
+    """Tuesday session (Monday 21:00 ET): _week_start_ts returns prev Friday 18:00 ET."""
+    pipeline = _pipeline_for_week_ts_test()
+    # Monday 2025-11-10 21:00 ET = start of Tuesday's CME session
+    now = pd.Timestamp("2025-11-10 21:00", tz="America/New_York")
+    result = pipeline._week_start_ts(now)
+    expected = pd.Timestamp("2025-11-07 18:00", tz="America/New_York")  # prev Friday
+    assert result == expected, f"Tuesday session week start expected {expected}, got {result}"
+
+
+def test_week_start_ts_wednesday_session_uses_this_sunday():
+    """Wednesday session (Tuesday 21:00 ET): _week_start_ts returns Sunday 18:00 ET."""
+    pipeline = _pipeline_for_week_ts_test()
+    # Tuesday 2025-11-11 21:00 ET = start of Wednesday's CME session
+    now = pd.Timestamp("2025-11-11 21:00", tz="America/New_York")
+    result = pipeline._week_start_ts(now)
+    expected = pd.Timestamp("2025-11-09 18:00", tz="America/New_York")  # this Sunday
+    assert result == expected, f"Wednesday session week start expected {expected}, got {result}"

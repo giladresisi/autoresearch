@@ -1057,12 +1057,21 @@ def compute_live_hl_mid(
         result["day_low"]  = dl
         result["day_mid"]  = (dh + dl) / 2.0
 
-    # Week: Sunday 18:00 ET (futures week open)
-    _today_wd  = now.isocalendar().weekday          # 1=Mon … 7=Sun
-    _monday    = today - timedelta(days=_today_wd - 1)
-    _sunday    = today if _today_wd == 7 else _monday - timedelta(days=1)
+    # Week H/L start — extended lookback on Mon/Tue sessions, standard from Wed+.
+    # Session-open day (ET) drives the choice: Sunday = Monday session, Monday = Tuesday, etc.
+    # Monday session  → prev Thursday 18:00 ET (capture Sun/Mon pre-week range)
+    # Tuesday session → prev Friday  18:00 ET  (capture Mon Asia range)
+    # Wednesday+      → Sunday 18:00 ET (standard CME week open)
+    _session_open_wd = _day_open_cal.weekday()  # Mon=0, Tue=1, ..., Sun=6
+    if _session_open_wd == 6:  # Sunday → Monday session
+        _week_anchor = _day_open_cal - timedelta(days=3)   # prev Thursday
+    elif _session_open_wd == 0:  # Monday → Tuesday session
+        _week_anchor = _day_open_cal - timedelta(days=3)   # prev Friday
+    else:
+        _days_to_sunday = (_session_open_wd + 1) % 7
+        _week_anchor = _day_open_cal - timedelta(days=_days_to_sunday)
     _week_start = pd.Timestamp(
-        datetime(_sunday.year, _sunday.month, _sunday.day, 18, 0, 0),
+        datetime(_week_anchor.year, _week_anchor.month, _week_anchor.day, 18, 0, 0),
         tz="America/New_York",
     )
     _week_bars = combined_1m[combined_1m.index >= _week_start]

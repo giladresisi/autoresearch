@@ -682,3 +682,95 @@ def test_compute_live_hl_mid_ny_morning_excludes_0600():
     assert result["day_high"] < 25000.0, (
         f"NY morning day_high should NOT include 06:00 ET bar (25000), got {result['day_high']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests for compute_live_hl_mid: extended week H/L lookback on Mon/Tue sessions
+# ---------------------------------------------------------------------------
+
+def _make_week_bars(
+    prev_thu_bar: tuple,  # (timestamp_str, high)
+    *extra_bars: tuple,   # additional (timestamp_str, high) pairs
+) -> pd.DataFrame:
+    """Build a DataFrame with a low bar count; each entry sets a distinct High."""
+    ts_list = [prev_thu_bar[0]] + [b[0] for b in extra_bars]
+    high_list = [prev_thu_bar[1]] + [b[1] for b in extra_bars]
+    idx = pd.DatetimeIndex([pd.Timestamp(t, tz="America/New_York") for t in ts_list])
+    n = len(idx)
+    return pd.DataFrame(
+        {
+            "Open":   np.full(n, 21000.0),
+            "High":   np.array(high_list, dtype=float),
+            "Low":    np.full(n, 20990.0),
+            "Close":  np.full(n, 21001.0),
+            "Volume": np.ones(n),
+        },
+        index=idx,
+    )
+
+
+def test_compute_live_hl_mid_monday_session_uses_prev_thursday():
+    """Monday session (Asia, 21:00 ET Sunday): week_high should include prev Thursday 18:00 bar."""
+    from hypothesis import compute_live_hl_mid
+
+    # 2025-11-10 is a Monday. Session opens Sunday 2025-11-09 18:00 ET.
+    # prev Thursday = 2025-11-06
+    thu_high = 25000.0
+    bars = _make_week_bars(
+        ("2025-11-06 18:00", thu_high),     # prev Thursday 18:00 ET — should be included
+        ("2025-11-09 18:00", 21010.0),       # Sunday (session open)
+        ("2025-11-09 21:00", 21005.0),       # Asia session bar
+    )
+    now = pd.Timestamp("2025-11-09 21:00", tz="America/New_York")  # Sunday 21:00 = Monday session
+    result = compute_live_hl_mid(bars, now)
+
+    assert "week_high" in result
+    assert result["week_high"] == thu_high, (
+        f"Monday session week_high should include prev Thu bar (25000), got {result['week_high']}"
+    )
+
+
+def test_compute_live_hl_mid_tuesday_session_uses_prev_friday():
+    """Tuesday session (Asia, 21:00 ET Monday): week_high should include prev Friday 18:00 bar."""
+    from hypothesis import compute_live_hl_mid
+
+    # 2025-11-11 is a Tuesday. Session opens Monday 2025-11-10 18:00 ET.
+    # prev Friday = 2025-11-07
+    fri_high = 25000.0
+    bars = _make_week_bars(
+        ("2025-11-07 18:00", fri_high),      # prev Friday 18:00 ET — should be included
+        ("2025-11-09 18:00", 21010.0),        # Sunday
+        ("2025-11-10 18:00", 21005.0),        # Monday (session open for Tuesday)
+        ("2025-11-10 21:00", 21003.0),        # Monday Asia
+    )
+    now = pd.Timestamp("2025-11-10 21:00", tz="America/New_York")  # Monday 21:00 = Tuesday session
+    result = compute_live_hl_mid(bars, now)
+
+    assert "week_high" in result
+    assert result["week_high"] == fri_high, (
+        f"Tuesday session week_high should include prev Fri bar (25000), got {result['week_high']}"
+    )
+
+
+def test_compute_live_hl_mid_wednesday_session_uses_sunday():
+    """Wednesday session: week_high starts at Sunday 18:00 ET, prev-week bars excluded."""
+    from hypothesis import compute_live_hl_mid
+
+    # 2025-11-12 is a Wednesday. Session opens Tuesday 2025-11-11 18:00 ET.
+    # Standard Sunday = 2025-11-09 18:00 ET. Prev Friday should NOT be included.
+    fri_high = 25000.0
+    sun_high = 21015.0
+    bars = _make_week_bars(
+        ("2025-11-07 18:00", fri_high),       # prev Friday — should NOT be included
+        ("2025-11-09 18:00", sun_high),        # Sunday 18:00 (CME week open) — first included
+        ("2025-11-11 18:00", 21005.0),         # Tuesday (session open for Wednesday)
+        ("2025-11-11 21:00", 21003.0),
+    )
+    now = pd.Timestamp("2025-11-11 21:00", tz="America/New_York")  # Tuesday 21:00 = Wednesday session
+    result = compute_live_hl_mid(bars, now)
+
+    assert "week_high" in result
+    assert result["week_high"] == sun_high, (
+        f"Wednesday session week_high should start from Sunday 18:00 ({sun_high}), got {result['week_high']}"
+    )
+    assert result["week_high"] < fri_high, "Wednesday session should NOT include prev Friday bar"

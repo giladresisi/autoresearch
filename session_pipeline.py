@@ -870,7 +870,7 @@ class SessionPipeline:
 
         # ── Week H/L ───────────────────────────────────────────────────────────
         # Week may span multiple sessions; need hist bars for earlier days.
-        _week_start = self._week_start_ts(now.date())
+        _week_start = self._week_start_ts(now)
         _combined_hist = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
         _combined_hist = _combined_hist[~_combined_hist.index.duplicated(keep="last")]
         _week_bars = _combined_hist[
@@ -985,20 +985,26 @@ class SessionPipeline:
             tz="America/New_York",
         )
 
-    def _week_start_ts(self, today: "datetime.date") -> pd.Timestamp:
-        """Return Sunday 18:00 ET preceding the current ISO week (CME futures week open).
+    def _week_start_ts(self, now: pd.Timestamp) -> pd.Timestamp:
+        """Return the extended week-H/L start for the CME session containing `now`.
 
-        The CME equity-index futures week opens Sunday 18:00 ET (17:00 CT).
-        Using Monday 18:00 ET would miss Sunday evening + all of Monday's session,
-        causing week_high/week_low to diverge from TradingView's weekly candle.
+        Monday session  (session-open = Sunday) → prev Thursday 18:00 ET
+        Tuesday session (session-open = Monday) → prev Friday   18:00 ET
+        Wednesday+      → standard Sunday 18:00 ET (CME week open)
         """
-        # ISO weekday: Mon=1 … Sun=7.  Days back to the preceding Sunday:
-        days_since_sunday = today.isocalendar().weekday  # Mon→1, Tue→2, … Sun→7→0 mod 7
-        if days_since_sunday == 7:
-            days_since_sunday = 0
-        sunday = today - datetime.timedelta(days=days_since_sunday)
+        today = now.date()
+        _session_open = today if now.hour >= 18 else today - datetime.timedelta(days=1)
+        _wd = _session_open.weekday()  # Mon=0, Tue=1, ..., Sun=6
+
+        if _wd == 6:  # Sunday → Monday session
+            _anchor = _session_open - datetime.timedelta(days=3)   # prev Thursday
+        elif _wd == 0:  # Monday → Tuesday session
+            _anchor = _session_open - datetime.timedelta(days=3)   # prev Friday
+        else:
+            _days_to_sunday = (_wd + 1) % 7
+            _anchor = _session_open - datetime.timedelta(days=_days_to_sunday)
         return pd.Timestamp(
-            datetime.datetime(sunday.year, sunday.month, sunday.day, 18, 0),
+            datetime.datetime(_anchor.year, _anchor.month, _anchor.day, 18, 0),
             tz="America/New_York",
         )
 
