@@ -141,7 +141,9 @@ for e in events:
         _last_order_price = float(e.get("new_entry_price") or e.get("entry_price") or e.get("price") or 0)
     if e["kind"] in ("stop-entry-filled", "market-entry"):
         pending_fill = e
-        if "price" not in e and _last_order_price:
+        # Only inject _fill_price from the pending stop order if the event has neither
+        # a direct price nor an entry_price (market-entry always carries entry_price).
+        if "price" not in e and not e.get("entry_price") and _last_order_price:
             e["_fill_price"] = _last_order_price
         _last_order_price = None
     elif e["kind"] in ("cancel-stop-entry", "stop-entry-cancelled"):
@@ -155,7 +157,7 @@ for e in events:
         direction_sign = 1 if pending_fill.get("direction", "up") in ("up", "long") else -1
         entry_slip = float(pending_fill.get("slippage", 0.0))
         raw_entry = float(pending_fill.get("_fill_price") or pending_fill.get("price") or
-                          pending_fill.get("stop_price") or 0.0)
+                          pending_fill.get("entry_price") or pending_fill.get("stop_price") or 0.0)
         entry_fill_price = raw_entry + direction_sign * entry_slip
         slip = float(e.get("slippage", 0.0))
         exit_fill_price = e["price"] - direction_sign * slip
@@ -177,6 +179,30 @@ else:
     last_t  = pd.Timestamp(f"{DATE} 17:00", tz="America/New_York")
 
 window = day[(day.index >= first_t) & (day.index <= last_t)]
+
+# Snap event timestamps to the nearest prior bar so markers land exactly on candles.
+# Events have sub-second offsets (e.g. 23:45:06) that fall between 1-minute bar boundaries,
+# causing Plotly to float the marker in empty space between candles.
+_bar_idx = window.index
+def _snap_to_bar(ts: pd.Timestamp) -> pd.Timestamp:
+    if _bar_idx.empty:
+        return ts
+    pos = _bar_idx.searchsorted(ts, side="right") - 1
+    return _bar_idx[max(0, pos)]
+
+def _snap_price_to_bar(ts_bar: pd.Timestamp, price: float) -> float:
+    """Clamp price to bar's [Low, High] so markers sit on the candle rather than floating."""
+    if window.empty or ts_bar not in window.index:
+        return price
+    bar = window.loc[ts_bar]
+    if price > bar["High"]:
+        return float(bar["High"])
+    if price < bar["Low"]:
+        return float(bar["Low"])
+    return price
+
+for _e in events:
+    _e["ts_bar"] = _snap_to_bar(_e["ts"])
 
 if window.empty:
     price_lo, price_hi = 0.0, 1.0
@@ -243,13 +269,13 @@ pending_t = pending_p = None
 for e in events:
     if e["kind"] in ("new-stop-entry", "move-stop-entry"):
         if pending_t is not None:
-            limit_x += [pending_t, e["ts"], None]
+            limit_x += [pending_t, e["ts_bar"], None]
             limit_y += [pending_p, pending_p, None]
-        pending_t = e["ts"]
+        pending_t = e["ts_bar"]
         pending_p = float(e.get("entry_price") or e.get("new_entry_price") or e.get("price") or 0)
     elif e["kind"] in ("stop-entry-filled", "cancel-stop-entry", "stop-entry-cancelled", "market-entry"):
         if pending_t is not None:
-            limit_x += [pending_t, e["ts"], None]
+            limit_x += [pending_t, e["ts_bar"], None]
             limit_y += [pending_p, pending_p, None]
         pending_t = pending_p = None
 
@@ -267,7 +293,7 @@ for p in pairs:
     stop_price = p["fill"].get("stop")
     if stop_price is None:
         continue
-    stop_x += [p["fill"]["ts"], p["exit"]["ts"], None]
+    stop_x += [p["fill"]["ts_bar"], p["exit"]["ts_bar"], None]
     stop_y += [stop_price, stop_price, None]
 
 if stop_x:
@@ -284,7 +310,7 @@ for p in pairs:
     stop_price = p["fill"].get("stop")
     if stop_price is None:
         continue
-    sp_x.append(p["fill"]["ts"])
+    sp_x.append(p["fill"]["ts_bar"])
     sp_y.append(stop_price)
     sp_hover.append(f"<b>stop placed</b><br>level: {stop_price}<br>time: {p['fill']['ts'].strftime('%H:%M:%S')}")
 
@@ -300,7 +326,7 @@ if sp_x:
 for p in pairs:
     color = "#4CAF50" if p["pnl_pts"] >= 0 else "#EF5350"
     fig.add_trace(go.Scatter(
-        x=[p["fill"]["ts"], p["exit"]["ts"]],
+        x=[p["fill"]["ts_bar"], p["exit"]["ts_bar"]],
         y=[p["entry_fill_price"], p["exit_fill_price"]],
         mode="lines", name="position",
         line=dict(color=color, width=2),
@@ -362,7 +388,7 @@ for side_val, symbol, color in [("bullish", "triangle-up", "#4CAF50"), ("bearish
         continue
     hover = [_div_hover(e) for e in grp]
     fig.add_trace(go.Scatter(
-        x=[e["ts"] for e in grp],
+        x=[e["ts_bar"] for e in grp],
         y=[e["price"] for e in grp],
         mode="markers+text",
         name=f"SMT div {side_val[:4]}",
@@ -420,7 +446,7 @@ for kind, style in EXIT_MARKER_STYLE.items():
         hover.append("<br>".join(parts))
 
     fig.add_trace(go.Scatter(
-        x=[e["ts"] for e in group],
+        x=[e["ts_bar"] for e in group],
         y=[e["price"] for e in group],
         mode="markers+text",
         name=kind.replace("-", " "),
@@ -531,9 +557,19 @@ for kind, style in OTHER_MARKER_STYLE.items():
                         f"→ {dr.get('combined_score', '?')}"
                     )
         hover.append("<br>".join(parts))
+    _price_snap_kinds = {
+        "new-stop-entry", "move-stop-entry",
+        "cancel-stop-entry", "stop-entry-cancelled",
+        "new-hypothesis", "trend-broken",
+        "market-entry", "stop-entry-filled",
+    }
+    if kind in _price_snap_kinds:
+        ys = [_snap_price_to_bar(e["ts_bar"], _event_price(e)) for e in group]
+    else:
+        ys = [_event_price(e) for e in group]
     fig.add_trace(go.Scatter(
-        x=[e["ts"] for e in group],
-        y=[_event_price(e) for e in group],
+        x=[e["ts_bar"] for e in group],
+        y=ys,
         mode="markers", name=kind.replace("-", " "),
         marker=dict(symbol=style["symbol"], color=style["color"],
                     size=style["size"], line=dict(width=2, color=style["color"])),
@@ -557,6 +593,7 @@ fig.update_layout(
     xaxis_title="Time (ET)",
     yaxis_title="Price",
     xaxis_rangeslider_visible=False,
+    xaxis_type="date",
     template="plotly_dark",
     height=chart_height,
     legend=dict(orientation="h", yanchor="bottom", y=-0.22),
