@@ -16,7 +16,7 @@ import hypothesis as _hyp_mod
 import smt_state as _smt_state
 import strategy as _strat_mod
 import trend as _trend_mod
-from session_times import is_entry_allowed
+from session_times import is_entry_allowed, cme_session_start as _cme_session_start
 from smt_state import save_bar_state
 
 _ET = ZoneInfo("America/New_York")
@@ -124,17 +124,20 @@ class SessionPipeline:
             self._hist_1hr = pd.DataFrame(columns=list(_agg))
             self._hist_4hr = pd.DataFrame(columns=list(_agg))
 
+        # Combine hist + today before run_daily_fixed so the midnight bar (00:00 ET)
+        # is available when this fires at the London session start trigger.
+        _combined = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
+        _combined = _combined[~_combined.index.duplicated(keep="last")]
+
         # Reset daily.json and recompute fixed levels.
         save_daily(copy.deepcopy(DEFAULT_DAILY))
         _daily_mod.run_daily_fixed(
-            now, self._hist_mnq_1m, self._hist_1hr, self._hist_4hr, now.date()
+            now, _combined, self._hist_1hr, self._hist_4hr, now.date()
         )
 
-        # Seed initial day/week/session levels from combined hist + today bars.
+        # Seed initial day/week/session levels from combined bars.
         _state = load_daily()
         _liq = _state.get("liquidities", [])
-        _combined = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
-        _combined = _combined[~_combined.index.duplicated(keep="last")]
         _now_ts = now
         if _now_ts.tzinfo is None:
             _now_ts = _now_ts.tz_localize("America/New_York")
@@ -272,9 +275,15 @@ class SessionPipeline:
         if not self._daily_triggered:
             return []
 
-        # 09:20 ET daily trigger: re-run on_daily_or_startup once per calendar day.
+        # Re-run daily level computation at two transitions per CME session day.
+        # 00:00 ET (London session start): today's midnight open is now available as TDO,
+        #   replacing the prior-day proxy used during the Asia session.
+        # 09:20 ET (NY pre-market): FVGs and session H/L are stable for the RTH session.
+        # Only one fires per calendar date — whichever comes first sets _last_daily_date.
         _bar_floor = now.floor("1min")
-        if (now.hour == 9 and now.minute == 20
+        _is_midnight = (now.hour == 0 and now.minute == 0)
+        _is_0920    = (now.hour == 9 and now.minute == 20)
+        if ((_is_midnight or _is_0920)
                 and _bar_floor != self._last_daily_minute
                 and now.date() != self._last_daily_date):
             self._last_daily_minute = _bar_floor

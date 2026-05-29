@@ -112,9 +112,8 @@ def test_on_session_start_computes_hourly_resamples(_isolate_state, monkeypatch)
 # ---------------------------------------------------------------------------
 
 def test_on_session_start_calls_run_daily_with_filtered_bars(_isolate_state, monkeypatch):
-    """run_daily_fixed is called with (now, hist_mnq_1m, hist_1hr, hist_4hr, today).
-
-    The new signature no longer receives today's bars; it operates on history only.
+    """run_daily_fixed is called with hist+today combined bars so the midnight bar
+    is available for TDO lookup at the London session start trigger.
     """
     import daily as _daily_mod
     import hypothesis as _hyp_mod
@@ -138,8 +137,10 @@ def test_on_session_start_calls_run_daily_with_filtered_bars(_isolate_state, mon
     pipeline.on_session_start(now, today_at_open)
 
     assert len(captured) == 1
-    # run_daily_fixed receives the historical 1m bars (not today's), plus resamples.
-    assert captured[0]["hist_mnq_1m"].equals(hist_mnq)
+    # run_daily_fixed receives hist+today combined so midnight bar is available for TDO.
+    combined = pd.concat([hist_mnq, today_at_open]).sort_index()
+    combined = combined[~combined.index.duplicated(keep="last")]
+    assert captured[0]["hist_mnq_1m"].equals(combined)
     assert isinstance(captured[0]["hist_1hr"], pd.DataFrame)
     assert isinstance(captured[0]["hist_4hr"], pd.DataFrame)
     assert captured[0]["today"] == now.date()
@@ -790,3 +791,84 @@ def test_force_reset_false_preserves_hypothesis(_isolate_state, monkeypatch):
     assert smt_state.load_hypothesis()["direction"] == "up", (
         "force_reset=False must preserve the existing hypothesis direction"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 24: midnight (00:00 ET) triggers on_daily_or_startup
+# ---------------------------------------------------------------------------
+
+def test_midnight_triggers_daily_recompute(_isolate_state, monkeypatch):
+    """00:00 ET fires on_daily_or_startup so TDO updates to today's midnight open."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+
+    # Session starts on 2025-11-13 (date after ET midnight = 2025-11-13)
+    now_sess = pd.Timestamp("2025-11-13 18:00", tz="America/New_York")
+    pipeline.on_session_start(now_sess, _make_1m_bars("2025-11-13 18:00", n=1), force_reset=True)
+    assert pipeline._last_daily_date == now_sess.date()
+
+    # At 00:00 ET the next day (2025-11-14), trigger should fire
+    midnight_bar = _make_1m_bars("2025-11-14 00:00", n=1)
+    bar = _bar_row()
+    now_mid = pd.Timestamp("2025-11-14 00:00", tz="America/New_York")
+    today_mnq_mid = _make_1m_bars("2025-11-13 18:00", n=3)
+    pipeline.on_1m_bar(now_mid, bar, bar, today_mnq_mid, today_mnq_mid)
+
+    assert pipeline._last_daily_date == now_mid.date(), (
+        "midnight trigger should update _last_daily_date to the new calendar date"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 25: 09:20 ET does NOT re-trigger if midnight already fired on same date
+# ---------------------------------------------------------------------------
+
+def test_0920_skipped_if_midnight_already_ran(_isolate_state, monkeypatch):
+    """After midnight trigger sets _last_daily_date to today, 09:20 ET is suppressed."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+
+    call_count = [0]
+    def counting_run_daily_fixed(*a, **kw):
+        call_count[0] += 1
+
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", counting_run_daily_fixed)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+
+    # Session start on 2025-11-13 → first call (count=1)
+    now_sess = pd.Timestamp("2025-11-13 18:00", tz="America/New_York")
+    pipeline.on_session_start(now_sess, _make_1m_bars("2025-11-13 18:00", n=1), force_reset=True)
+    assert call_count[0] == 1
+
+    # Midnight trigger on 2025-11-14 → second call (count=2)
+    bar = _bar_row()
+    now_mid = pd.Timestamp("2025-11-14 00:00", tz="America/New_York")
+    pipeline.on_1m_bar(now_mid, bar, bar,
+                       _make_1m_bars("2025-11-13 18:00", n=3),
+                       _make_1m_bars("2025-11-13 18:00", n=3))
+    assert call_count[0] == 2
+
+    # 09:20 ET on same date → should NOT fire again
+    now_0920 = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+    pipeline.on_1m_bar(now_0920, bar, bar,
+                       _make_1m_bars("2025-11-14 09:00", n=20),
+                       _make_1m_bars("2025-11-14 09:00", n=20))
+    assert call_count[0] == 2, "09:20 ET trigger must be suppressed when midnight already ran"
