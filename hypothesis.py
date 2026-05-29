@@ -986,7 +986,7 @@ def compute_live_hl_mid(
     today  = now.date()
     result: dict = {}
 
-    # Day: full range from the current CME futures session open (18:00 ET).
+    # Day: range from the current CME futures session open (18:00 ET) or earlier.
     # After 18:00 ET the new session opened today; before 18:00 ET it opened yesterday.
     # The opening 1.5h (18:00–19:30 ET) is skipped from whichever side (high or low) it
     # distorts, but only when its range is >2x the range of the rest of the day up to the
@@ -994,8 +994,26 @@ def compute_live_hl_mid(
     # outlier high (skip from day_high); a big DOWN move creates an outlier low (skip from
     # day_low). When the 1.5h move is modest relative to the rest of the day it is included
     # in both.
+    #
+    # During Asia (now.hour >= 18) and London (now.hour < 6): extend the lookback to
+    # 06:00 ET on the session-open day (yesterday's NY morning start) because today's
+    # midnight open is either absent (Asia) or very recent (London) and the extra context
+    # from the previous NY session improves H/L accuracy.
+    # From 06:00 ET onwards (NY morning+): use only the current CME session (18:00 ET+).
     _day_open_cal = today if now.hour >= 18 else today - timedelta(days=1)
-    _day_start   = pd.Timestamp(
+    if now.hour >= 18 or now.hour < 6:
+        _day_start = pd.Timestamp(
+            datetime(_day_open_cal.year, _day_open_cal.month, _day_open_cal.day, 6, 0, 0),
+            tz="America/New_York",
+        )
+    else:
+        _day_start = pd.Timestamp(
+            datetime(_day_open_cal.year, _day_open_cal.month, _day_open_cal.day, 18, 0, 0),
+            tz="America/New_York",
+        )
+    # CME Asia session open is always 18:00 ET — outlier check covers the first 1.5h
+    # regardless of whether _day_start extends further back to 06:00 ET.
+    _asia_open   = pd.Timestamp(
         datetime(_day_open_cal.year, _day_open_cal.month, _day_open_cal.day, 18, 0, 0),
         tz="America/New_York",
     )
@@ -1008,7 +1026,7 @@ def compute_live_hl_mid(
         tz="America/New_York",
     )
 
-    _init_bars = combined_1m[(combined_1m.index >= _day_start) & (combined_1m.index < _init_end)]
+    _init_bars = combined_1m[(combined_1m.index >= _asia_open) & (combined_1m.index < _init_end)]
     _rest_bars = combined_1m[(combined_1m.index >= _init_end) & (combined_1m.index < _rth_start)]
     _full_bars = combined_1m[combined_1m.index >= _day_start]
 

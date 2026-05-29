@@ -872,3 +872,93 @@ def test_0920_skipped_if_midnight_already_ran(_isolate_state, monkeypatch):
                        _make_1m_bars("2025-11-14 09:00", n=20),
                        _make_1m_bars("2025-11-14 09:00", n=20))
     assert call_count[0] == 2, "09:20 ET trigger must be suppressed when midnight already ran"
+
+
+# ---------------------------------------------------------------------------
+# Test 26: per-bar day H/L uses extended lookback during Asia session
+# ---------------------------------------------------------------------------
+
+def test_per_bar_day_hl_asia_extends_to_previous_ny_morning(_isolate_state, monkeypatch):
+    """During Asia session (≥18:00 ET), day H/L lookback reaches back to 06:00 ET."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    # hist bar at 06:00 ET with an extreme high — should be included in day_high
+    hist_bars_base = pd.date_range("2025-11-13 06:00", periods=2, freq="1h", tz="America/New_York")
+    hist_mnq = pd.DataFrame({
+        "Open":   [21000.0, 21000.0],
+        "High":   [25000.0, 21010.0],  # 25000 at 06:00 ET — extreme hist bar
+        "Low":    [20990.0, 20990.0],
+        "Close":  [21002.0, 21002.0],
+        "Volume": [100, 100],
+    }, index=hist_bars_base)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    now_sess = pd.Timestamp("2025-11-13 18:00", tz="America/New_York")
+    pipeline.on_session_start(now_sess, _make_1m_bars("2025-11-13 18:00", n=1), force_reset=True)
+
+    # On a bar at 21:00 ET (Asia session) — hist extreme at 06:00 ET should be included
+    now = pd.Timestamp("2025-11-13 21:00", tz="America/New_York")
+    today_mnq = _make_1m_bars("2025-11-13 18:00", n=3, base=21000.0)  # high = 21010
+    bar = _bar_row(base=21000.0)
+    pipeline.on_1m_bar(now, bar, bar, today_mnq, today_mnq)
+
+    _liq = smt_state.load_daily()["liquidities"]
+    _dh = next((l for l in _liq if l["name"] == "day_high"), None)
+    assert _dh is not None, "day_high must be set"
+    assert _dh["price"] == 25000.0, (
+        f"Asia session day_high should include 06:00 ET hist bar (25000), got {_dh['price']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 27: per-bar day H/L uses standard (18:00 ET) lookback during NY morning
+# ---------------------------------------------------------------------------
+
+def test_per_bar_day_hl_ny_morning_excludes_previous_ny_morning(_isolate_state, monkeypatch):
+    """From 06:00 ET onwards (NY morning), day H/L lookback starts at 18:00 ET only."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    # hist bar at 06:00 ET with an extreme high — must be EXCLUDED during NY morning
+    hist_bars_base = pd.date_range("2025-11-13 06:00", periods=2, freq="1h", tz="America/New_York")
+    hist_mnq = pd.DataFrame({
+        "Open":   [21000.0, 21000.0],
+        "High":   [25000.0, 21010.0],
+        "Low":    [20990.0, 20990.0],
+        "Close":  [21002.0, 21002.0],
+        "Volume": [100, 100],
+    }, index=hist_bars_base)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    # Session actually started the previous evening; for this test use a
+    # mid-session force_reset at 18:00 ET on 2025-11-13.
+    now_sess = pd.Timestamp("2025-11-13 18:00", tz="America/New_York")
+    pipeline.on_session_start(now_sess, _make_1m_bars("2025-11-13 18:00", n=1), force_reset=True)
+
+    # Bar at 09:00 ET next day (NY morning) — hist extreme at 06:00 ET should be EXCLUDED
+    now = pd.Timestamp("2025-11-14 09:00", tz="America/New_York")
+    today_mnq = _make_1m_bars("2025-11-13 18:00", n=3, base=21000.0)  # high = 21010
+    bar = _bar_row(base=21000.0)
+    pipeline.on_1m_bar(now, bar, bar, today_mnq, today_mnq)
+
+    _liq = smt_state.load_daily()["liquidities"]
+    _dh = next((l for l in _liq if l["name"] == "day_high"), None)
+    assert _dh is not None, "day_high must be set"
+    assert _dh["price"] < 25000.0, (
+        f"NY morning day_high should NOT include 06:00 ET hist bar, got {_dh['price']}"
+    )

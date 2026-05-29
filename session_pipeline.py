@@ -844,9 +844,22 @@ class SessionPipeline:
                 })
 
         # ── Day H/L ──────────────────────────────────────────────────────────
-        # today_mnq is filtered from CME session open (18:00 ET) so no further
-        # trimming is needed — the full overnight range is already present.
-        _day_bars = today_mnq[today_mnq.index <= now]
+        # During Asia (≥18:00 ET) and London (<06:00 ET), extend the day H/L
+        # lookback to 06:00 ET on the session-open day (yesterday's NY morning
+        # start, 12 h before 18:00 ET) using hist bars. From 06:00 ET onwards
+        # (NY morning+) use only the current CME session (today_mnq, 18:00 ET+).
+        _now_hour = now.hour
+        if _now_hour >= 18 or _now_hour < 6:
+            _sess_open_day = _cme_session_start(now).date()
+            _day_start_ts = pd.Timestamp(
+                datetime.datetime(_sess_open_day.year, _sess_open_day.month, _sess_open_day.day, 6, 0),
+                tz="America/New_York",
+            )
+            _day_hist = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
+            _day_hist = _day_hist[~_day_hist.index.duplicated(keep="last")]
+            _day_bars = _day_hist[(_day_hist.index >= _day_start_ts) & (_day_hist.index <= now)]
+        else:
+            _day_bars = today_mnq[today_mnq.index <= now]
         if not _day_bars.empty:
             _dh = float(_day_bars["High"].max())
             _dl = float(_day_bars["Low"].min())

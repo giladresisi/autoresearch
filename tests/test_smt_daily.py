@@ -523,3 +523,82 @@ class TestUnvisitedFvgFilter:
         surviving = fvg_entries[0]
         assert surviving["bottom"] == 21100.0
         assert surviving["top"] == 21120.0
+
+
+# ---------------------------------------------------------------------------
+# Tests for compute_live_hl_mid: extended day H/L lookback during Asia/London
+# ---------------------------------------------------------------------------
+
+def test_compute_live_hl_mid_asia_extends_to_0600():
+    """During Asia session (≥18:00 ET) day_high includes bars back to 06:00 ET."""
+    from hypothesis import compute_live_hl_mid
+
+    idx = pd.date_range("2025-11-13 06:00", periods=4, freq="6h", tz="America/New_York")
+    # Bar at 06:00 has extreme High=25000; bar at 18:00 starts the Asia session
+    bars = pd.DataFrame({
+        "Open":  [21000.0] * 4,
+        "High":  [25000.0, 21010.0, 21010.0, 21010.0],
+        "Low":   [20990.0] * 4,
+        "Close": [21002.0] * 4,
+    }, index=idx)
+
+    now = pd.Timestamp("2025-11-13 21:00", tz="America/New_York")  # Asia session
+    result = compute_live_hl_mid(bars, now)
+
+    assert "day_high" in result
+    assert result["day_high"] == 25000.0, (
+        f"Asia session day_high should include 06:00 ET bar (25000), got {result['day_high']}"
+    )
+
+
+def test_compute_live_hl_mid_london_extends_to_0600():
+    """During London session (<06:00 ET) day_high includes bars back to 06:00 ET previous day."""
+    from hypothesis import compute_live_hl_mid
+
+    # Bars: session-open day 06:00, 12:00, 18:00 (Asia start), then 00:00 next day (London)
+    idx = pd.DatetimeIndex([
+        pd.Timestamp("2025-11-13 06:00", tz="America/New_York"),  # prev NY morning
+        pd.Timestamp("2025-11-13 18:00", tz="America/New_York"),  # Asia start
+        pd.Timestamp("2025-11-14 00:00", tz="America/New_York"),  # London start
+        pd.Timestamp("2025-11-14 03:00", tz="America/New_York"),  # mid London
+    ])
+    bars = pd.DataFrame({
+        "Open":  [21000.0] * 4,
+        "High":  [25000.0, 21010.0, 21010.0, 21010.0],
+        "Low":   [20990.0] * 4,
+        "Close": [21002.0] * 4,
+    }, index=idx)
+
+    now = pd.Timestamp("2025-11-14 03:00", tz="America/New_York")  # London session
+    result = compute_live_hl_mid(bars, now)
+
+    assert "day_high" in result
+    assert result["day_high"] == 25000.0, (
+        f"London session day_high should include 06:00 ET bar (25000), got {result['day_high']}"
+    )
+
+
+def test_compute_live_hl_mid_ny_morning_excludes_0600():
+    """During NY morning (06:00–18:00 ET) day_high starts at 18:00 ET, 06:00 excluded."""
+    from hypothesis import compute_live_hl_mid
+
+    idx = pd.DatetimeIndex([
+        pd.Timestamp("2025-11-13 06:00", tz="America/New_York"),  # prev NY morning — excluded
+        pd.Timestamp("2025-11-13 18:00", tz="America/New_York"),  # Asia start
+        pd.Timestamp("2025-11-14 00:00", tz="America/New_York"),  # London
+        pd.Timestamp("2025-11-14 09:00", tz="America/New_York"),  # NY morning
+    ])
+    bars = pd.DataFrame({
+        "Open":  [21000.0] * 4,
+        "High":  [25000.0, 21010.0, 21010.0, 21010.0],
+        "Low":   [20990.0] * 4,
+        "Close": [21002.0] * 4,
+    }, index=idx)
+
+    now = pd.Timestamp("2025-11-14 09:00", tz="America/New_York")  # NY morning
+    result = compute_live_hl_mid(bars, now)
+
+    assert "day_high" in result
+    assert result["day_high"] < 25000.0, (
+        f"NY morning day_high should NOT include 06:00 ET bar (25000), got {result['day_high']}"
+    )
