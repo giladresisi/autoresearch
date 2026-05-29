@@ -220,6 +220,17 @@ def _atexit_clean_exit() -> None:
 
 _atexit.register(_atexit_clean_exit)
 
+# Prevent Windows Modern Standby / idle sleep from suspending this process or dropping
+# network connections while the orchestrator is running.  Without this, the Mediatek WiFi
+# driver enters deep sleep on idle-timeout, tears down TCP connections to IB Gateway, and
+# kills this process — leaving automation.main as an orphan with no supervision.
+# ES_CONTINUOUS (0x80000000) | ES_SYSTEM_REQUIRED (0x00000001) = 0x80000001
+try:
+    import ctypes as _ctypes
+    _ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)
+except Exception:
+    pass
+
 
 def _thread_excepthook(args) -> None:
     """Write unhandled thread exceptions to orchestrator_crash.log."""
