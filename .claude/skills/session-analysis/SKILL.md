@@ -147,6 +147,27 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
     as a new discrepancy. Quote the relevant comment section when dismissing
     an apparent anomaly.
 
+12. Git commits made during the session window
+    Run this command to list commits that landed while the session was live
+    (18:00 ET the calendar day before DATE through 17:00 ET on DATE):
+
+    ```bash
+    git -C <BASE> log --oneline --after="<DATE_MINUS_1>T18:00:00-04:00" \
+        --before="<DATE>T17:00:00-04:00" --reverse
+    ```
+    where DATE_MINUS_1 is DATE minus one calendar day (e.g. 2026-05-28 for
+    a DATE of 2026-05-29).
+
+    For each commit hash, also fetch the full message:
+    ```bash
+    git -C <BASE> show --stat --format="%H %s%n%b" <hash>
+    ```
+
+    These commits represent strategy/infrastructure changes that were deployed
+    mid-session AFTER the live run already occurred but are baked into the
+    regression replay (which always runs on the current codebase).  They are
+    the primary reason a regression trade may differ from the live trade.
+
 ---
 CROSS-REFERENCE METHODOLOGY:
 
@@ -208,6 +229,48 @@ Known acceptable differences between live and regression (do NOT flag these):
   - Volume fields — 1s live bars and Databento 1m bars use different feeds
   - Contract count — regression may use a different default than the live config
 
+### C. Commit context — connecting mid-session commits to divergences
+
+This section reconciles the divergences found in section B against the commits
+collected in data source #12.  Run it AFTER completing section B.
+
+**Step C1 — Match divergences to commits**
+
+For each live↔regression divergence found in section B (trade present only in
+regression, trade with a different entry/exit, or event that fired in regression
+but not live):
+
+  a. Read every mid-session commit message and its changed files.
+  b. Ask: could this commit have caused or explained the divergence?
+     Indicators: the commit touches a code path relevant to the divergence
+     (e.g. a commit that unblocks O5 entries → regression now takes a market
+     entry that was blocked during the live run), or the commit message
+     explicitly mentions the scenario (e.g. "allow O5 when retries exhausted").
+  c. If a match is found, annotate the divergence with:
+     `Explained by commit <short-hash>: "<commit subject>"`
+     Briefly state why the commit explains the difference (one sentence).
+  d. If no commit explains the divergence, leave it unannotated — it is a
+     genuine live/regression discrepancy that needs its own investigation.
+
+**Step C2 — Check whether targeted commits actually fixed their stated issue**
+
+For each mid-session commit whose message implies a specific fix or improvement
+(e.g. "fix entry blocked after ATH rejection", "allow gap-through when retries
+exhausted", "unblock DOWN hypothesis at ATH"):
+
+  a. Identify what the commit was intended to fix or enable.
+  b. Find the specific session scenario the commit targets
+     (e.g. "no DOWN entry after ATH tag at 10:05") in the regression output.
+  c. Verify whether the regression shows the fix taking effect:
+     - If YES: note it as RESOLVED in the output (commit fixed it as intended).
+     - If NO: flag it as UNRESOLVED — the commit exists but the issue still
+       appears in the regression.  Describe concretely what the regression
+       showed instead of the expected fixed behavior.
+  d. "Implied fixes": even if the commit message is generic (e.g. "refactor
+     ATH confirmation logic"), if the analyst can reasonably infer the intent
+     from the changed code AND the session had a relevant occurrence, apply the
+     same RESOLVED / UNRESOLVED check.
+
 ---
 OUTPUT: Write TWO files.
 
@@ -229,7 +292,25 @@ Structure:
 **Expected**: <what the strategy intended / what the regression produced>
 **Actual**: <what actually happened per live logs / Tradovate>
 **Root cause**: <why it happened — cite specific lines from signals.log or events.jsonl>
-**Suggested fix**: <actionable code change or guard to add>
+**Commit context**: <"Explained by commit <hash>: <subject>" if a mid-session commit
+    caused this divergence, otherwise omit this field entirely>
+**Suggested fix**: <actionable code change or guard to add; omit if commit already fixed it>
+
+---
+
+## Mid-Session Commits — Impact Summary
+
+List every commit from data source #12.  For each:
+
+### <short-hash> — <commit subject>
+
+**Intent**: <what the commit was meant to fix or enable — inferred from message + diff>
+**Session scenario**: <which specific occurrence in this session it targets>
+**Regression result**: RESOLVED — <what the regression now shows, confirming the fix>
+              OR
+              UNRESOLVED — <what the regression showed instead; describe the gap concretely>
+**Divergences explained**: <list D-numbers whose live↔regression difference this commit
+    accounts for, or "none">
 
 ---
 ```
@@ -238,6 +319,8 @@ Include ALL meaningful discrepancies found. Skip trivial noise (sub-tick roundin
 cosmetic label differences, known acceptable differences listed above).
 Classify severity in the title: use "[CRITICAL]" if the bug could cause unlimited
 or unintended risk, "[MINOR]" if it's cosmetic or small-impact.
+The "Mid-Session Commits" section is required whenever data source #12 returns at
+least one commit.  If there are no mid-session commits, omit the section entirely.
 
 ### File 2: <SESSION>\optimizations.md
 
@@ -264,7 +347,8 @@ Structure:
 ### O<N> — <Theme name>: <one-line description> — [High/Medium/Low]
 
 **Pattern**: <describe the recurring behavior and cite the supporting findings>
-**Suggested fix**: <concrete change to the strategy logic>
+**Suggested fix**: <concrete change to the strategy logic; if a mid-session commit
+    already addresses this, write "Already addressed by commit <hash>" instead>
 **Supporting findings**: <list of F-numbers that back this up>
 **Estimated session impact**: <estimated additional P&L if the fix had been applied>
 
