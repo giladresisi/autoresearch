@@ -87,14 +87,21 @@ def run(session_date: datetime.date, *, headed: bool = False, count: int = 100) 
             else:
                 start_loc = page.locator("[name='day']").get_by_text(start_day, exact=True).first
 
-            start_loc.click()
+            # Dismiss any live-chat overlay that intercepts pointer events on the calendar.
+            page.evaluate("""
+                const el = document.querySelector('.circleChatBubble, [title="Live chat button"]');
+                if (el) el.style.display = 'none';
+            """)
+
+            # Use dispatch_event to bypass any remaining pointer interception.
+            start_loc.dispatch_event("click")
             page.wait_for_timeout(200)
-            start_loc.click()
+            start_loc.dispatch_event("click")
             page.wait_for_timeout(200)
             page.screenshot(path=str(out_dir / "pmt_cal_after_start.png"))
 
             # today is always in the right (current month) calendar
-            page.locator("[name='day']").get_by_text(end_day, exact=True).last.click()
+            page.locator("[name='day']").get_by_text(end_day, exact=True).last.dispatch_event("click")
             page.wait_for_timeout(300)
             page.screenshot(path=str(out_dir / "pmt_cal_after_end.png"))
 

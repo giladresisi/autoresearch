@@ -96,7 +96,7 @@ class PickMyTradeExecutor:
                 (direction == "short" and _current <= entry_price + 5.0)
             )
             if _too_close:
-                print(f"[PMT] STP→MKT: entry {entry_price} within 5pts of market {_current}", flush=True)
+                print(f"[PMT] STP->MKT: entry {entry_price} within 5pts of market {_current}", flush=True)
                 payload = self._build_payload(data, order_type="MKT", sl=stop_price)
                 order_type = "market"
             else:
