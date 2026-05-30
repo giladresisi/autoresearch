@@ -144,6 +144,32 @@ class IbRealtimeSource:
                     pass
                 setattr(self, attr, empty)
 
+        # Re-hydrate session DFs from any session file written by a prior run this day.
+        # Without this, each automation.main restart starts _mnq/mes_1s_session_df empty,
+        # and the first live flush overwrites the existing session file with only the new
+        # run's bars — silently discarding bars written by all prior runs.
+        # Concretely: on the 2026-05-29 session, multiple restarts caused each new run to
+        # overwrite the MNQ session file.  The last short-lived run wrote nothing (no 1m
+        # boundary crossed before session end), leaving no session file for merge.
+        for sess_attr, inst in (("_mnq_1s_session_df", "MNQ"), ("_mes_1s_session_df", "MES")):
+            session_path = self._bar_data_dir / f"{inst}_1s_session_{self._session_date}.parquet"
+            if not session_path.exists():
+                continue
+            try:
+                existing = pd.read_parquet(session_path)
+                if not existing.empty:
+                    setattr(self, sess_attr, existing)
+                    print(
+                        f"[IbRealtimeSource] Resumed session file {session_path.name} "
+                        f"({len(existing)} bars)",
+                        flush=True,
+                    )
+            except Exception as exc:
+                print(
+                    f"[IbRealtimeSource] WARNING: could not resume {session_path.name}: {exc}",
+                    flush=True,
+                )
+
     def _gap_fill(self) -> None:
         from data.sources import IBGatewaySource
         MAX_LOOKBACK_DAYS = 30
