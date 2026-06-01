@@ -22,6 +22,24 @@ from smt_state import save_bar_state
 _ET = ZoneInfo("America/New_York")
 
 
+def _mmax(a: "float | None", b: "float | None") -> "float | None":
+    """max of two optional floats (None acts as 'no value')."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if a >= b else b
+
+
+def _mmin(a: "float | None", b: "float | None") -> "float | None":
+    """min of two optional floats (None acts as 'no value')."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if a <= b else b
+
+
 class SessionPipeline:
     """Dispatches daily → trend → hypothesis → strategy for one trading session.
 
@@ -94,6 +112,17 @@ class SessionPipeline:
         # cache a small (8-day) tail once and concat that with today_mnq each bar instead of
         # re-concatenating + re-sorting the full 60-day hist on every one of ~80k bars.
         self._dyn_hist_tail: "pd.DataFrame | None" = None
+        # Day/week H/L are running max/min over windows whose start is fixed for the whole
+        # session: the constant hist contribution [window_start, session_start) is computed
+        # once (keyed by window start) and combined with today_mnq's small max/min each bar,
+        # avoiding a per-bar boolean mask over the ~11k-row combined frame.
+        self._dyn_day_key: "pd.Timestamp | None" = None
+        self._dyn_day_hl: "tuple[float | None, float | None]" = (None, None)
+        self._dyn_week_key: "pd.Timestamp | None" = None
+        self._dyn_week_hl: "tuple[float | None, float | None]" = (None, None)
+        # Constant 18:00–session-open hist sliver (the ~5 pre-18:05 bars the asia session
+        # window needs); concatenated with today_mnq to feed _session_bars a small frame.
+        self._dyn_sliver18: "pd.DataFrame | None" = None
 
     def on_daily_or_startup(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> None:
         """Compute fixed reference liquidities and seed ATH. Called on startup and at 09:20 ET daily."""
@@ -833,18 +862,19 @@ class SessionPipeline:
         _changed: list[str] = []
         _liq_events: list[dict] = []
 
-        # Combined hist+today frame, built once per bar. _hist_mnq_1m is constant and
-        # strictly precedes today_mnq, so a cached 8-day tail (covers the widest lookback:
-        # week H/L ≤5d, day H/L to 06:00) concatenated with today_mnq is — without any
-        # sort/dedup, since the two are disjoint and individually sorted — identical to the
-        # old pd.concat([full 60-day hist, today_mnq]).sort_index() done twice per bar.
+        # _hist_mnq_1m is constant per session and strictly precedes today_mnq, so cache an
+        # 8-day tail once (covers the widest lookback: week H/L ≤5d, day H/L to 06:00).
         if self._dyn_hist_tail is None:
             _tail_cut = _cme_session_start(now) - pd.Timedelta(days=8)
             self._dyn_hist_tail = self._hist_mnq_1m[self._hist_mnq_1m.index >= _tail_cut]
-        _combined_hist = (
-            pd.concat([self._dyn_hist_tail, today_mnq])
-            if not self._dyn_hist_tail.empty else today_mnq
-        )
+        _tail = self._dyn_hist_tail
+
+        # today_mnq rows are all <= now (last is the running partial bar), so its plain
+        # max/min IS the [session_start, now] window extreme — shared by day + week below.
+        _th_vals = today_mnq["High"].values
+        _tl_vals = today_mnq["Low"].values
+        _today_hi = float(_th_vals.max()) if len(_th_vals) else None
+        _today_lo = float(_tl_vals.min()) if len(_tl_vals) else None
 
         # Helper: update a named level, track change.
         def _set(name: str, price: float, kind: str = "level") -> None:
@@ -885,30 +915,42 @@ class SessionPipeline:
                 datetime.datetime(_sess_open_day.year, _sess_open_day.month, _sess_open_day.day, 6, 0),
                 tz="America/New_York",
             )
-            _day_bars = _combined_hist[(_combined_hist.index >= _day_start_ts) & (_combined_hist.index <= now)]
+            # Constant hist contribution [day_start, session_start) — recompute only when
+            # the (session-stable) day_start changes.
+            if self._dyn_day_key != _day_start_ts:
+                self._dyn_day_key = _day_start_ts
+                _dh_hist = _tail[_tail.index >= _day_start_ts]
+                self._dyn_day_hl = (
+                    (float(_dh_hist["High"].values.max()), float(_dh_hist["Low"].values.min()))
+                    if not _dh_hist.empty else (None, None)
+                )
+            _dh = _mmax(self._dyn_day_hl[0], _today_hi)
+            _dl = _mmin(self._dyn_day_hl[1], _today_lo)
         else:
-            _day_bars = today_mnq[today_mnq.index <= now]
-        if not _day_bars.empty:
-            _dh = float(_day_bars["High"].max())
-            _dl = float(_day_bars["Low"].min())
-            _dm = (_dh + _dl) / 2.0
+            _dh = _today_hi
+            _dl = _today_lo
+        if _dh is not None and _dl is not None:
             _set("day_high", _dh)
             _set("day_low",  _dl)
-            _set("day_mid",  _dm)
+            _set("day_mid",  (_dh + _dl) / 2.0)
 
         # ── Week H/L ───────────────────────────────────────────────────────────
-        # Week may span multiple sessions; need hist bars for earlier days.
+        # Week may span multiple sessions; the constant hist contribution
+        # [week_start, session_start) is computed once and combined with today's extreme.
         _week_start = self._week_start_ts(now)
-        _week_bars = _combined_hist[
-            (_combined_hist.index >= _week_start) & (_combined_hist.index <= now)
-        ]
-        if not _week_bars.empty:
-            _wh = float(_week_bars["High"].max())
-            _wl = float(_week_bars["Low"].min())
-            _wm = (_wh + _wl) / 2.0
+        if self._dyn_week_key != _week_start:
+            self._dyn_week_key = _week_start
+            _wh_hist = _tail[_tail.index >= _week_start]
+            self._dyn_week_hl = (
+                (float(_wh_hist["High"].values.max()), float(_wh_hist["Low"].values.min()))
+                if not _wh_hist.empty else (None, None)
+            )
+        _wh = _mmax(self._dyn_week_hl[0], _today_hi)
+        _wl = _mmin(self._dyn_week_hl[1], _today_lo)
+        if _wh is not None and _wl is not None:
             _set("week_high", _wh)
             _set("week_low",  _wl)
-            _set("week_mid",  _wm)
+            _set("week_mid",  (_wh + _wl) / 2.0)
 
         # ── Active session H/L ─────────────────────────────────────────────────
         _hour, _minute = now.hour, now.minute
@@ -933,7 +975,18 @@ class SessionPipeline:
                 if _active_sess == "asia"
                 else now.date()
             )
-            _sbars = _session_bars(_combined_hist, _active_sess, _sess_today)
+            # Only the asia window (18:00–00:00) reaches before session open; it needs the
+            # ~5 pre-18:05 hist bars. Feed _session_bars that constant sliver + today_mnq
+            # instead of the full combined frame — every active-session window is otherwise
+            # contained in today_mnq.
+            if self._dyn_sliver18 is None:
+                _s18 = pd.Timestamp(_cme_session_start(now))
+                self._dyn_sliver18 = _tail[_tail.index >= _s18]
+            _sess_src = (
+                pd.concat([self._dyn_sliver18, today_mnq])
+                if not self._dyn_sliver18.empty else today_mnq
+            )
+            _sbars = _session_bars(_sess_src, _active_sess, _sess_today)
             if not _sbars.empty:
                 _sh = float(_sbars["High"].max())
                 _sl = float(_sbars["Low"].min())
