@@ -89,6 +89,11 @@ class SessionPipeline:
         # keyed by current_5m and rewrite only the per-bar "time" field.
         self._bar_state_5m: pd.Timestamp | None = None
         self._bar_state_vals: "tuple[float | None, float | None]" = (None, None)
+        # Dynamic-liquidity hist tail: _hist_mnq_1m is constant per session and strictly
+        # before today_mnq. _update_dynamic_liquidities only ever looks back ~1 week, so we
+        # cache a small (8-day) tail once and concat that with today_mnq each bar instead of
+        # re-concatenating + re-sorting the full 60-day hist on every one of ~80k bars.
+        self._dyn_hist_tail: "pd.DataFrame | None" = None
 
     def on_daily_or_startup(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> None:
         """Compute fixed reference liquidities and seed ATH. Called on startup and at 09:20 ET daily."""
@@ -828,6 +833,19 @@ class SessionPipeline:
         _changed: list[str] = []
         _liq_events: list[dict] = []
 
+        # Combined hist+today frame, built once per bar. _hist_mnq_1m is constant and
+        # strictly precedes today_mnq, so a cached 8-day tail (covers the widest lookback:
+        # week H/L ≤5d, day H/L to 06:00) concatenated with today_mnq is — without any
+        # sort/dedup, since the two are disjoint and individually sorted — identical to the
+        # old pd.concat([full 60-day hist, today_mnq]).sort_index() done twice per bar.
+        if self._dyn_hist_tail is None:
+            _tail_cut = _cme_session_start(now) - pd.Timedelta(days=8)
+            self._dyn_hist_tail = self._hist_mnq_1m[self._hist_mnq_1m.index >= _tail_cut]
+        _combined_hist = (
+            pd.concat([self._dyn_hist_tail, today_mnq])
+            if not self._dyn_hist_tail.empty else today_mnq
+        )
+
         # Helper: update a named level, track change.
         def _set(name: str, price: float, kind: str = "level") -> None:
             if name in _liq_map:
@@ -867,9 +885,7 @@ class SessionPipeline:
                 datetime.datetime(_sess_open_day.year, _sess_open_day.month, _sess_open_day.day, 6, 0),
                 tz="America/New_York",
             )
-            _day_hist = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
-            _day_hist = _day_hist[~_day_hist.index.duplicated(keep="last")]
-            _day_bars = _day_hist[(_day_hist.index >= _day_start_ts) & (_day_hist.index <= now)]
+            _day_bars = _combined_hist[(_combined_hist.index >= _day_start_ts) & (_combined_hist.index <= now)]
         else:
             _day_bars = today_mnq[today_mnq.index <= now]
         if not _day_bars.empty:
@@ -883,8 +899,6 @@ class SessionPipeline:
         # ── Week H/L ───────────────────────────────────────────────────────────
         # Week may span multiple sessions; need hist bars for earlier days.
         _week_start = self._week_start_ts(now)
-        _combined_hist = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
-        _combined_hist = _combined_hist[~_combined_hist.index.duplicated(keep="last")]
         _week_bars = _combined_hist[
             (_combined_hist.index >= _week_start) & (_combined_hist.index <= now)
         ]
