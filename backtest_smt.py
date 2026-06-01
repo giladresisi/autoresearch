@@ -1325,35 +1325,43 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
         else:  # mode == "1s": aggregate 1s bars into running partial 1m bar, call once per second
             _cols      = ["Open", "High", "Low", "Close", "Volume"]
+            _cols_idx  = pd.Index(_cols)   # prebuilt once; avoids per-second column-Index construction
             _empty_1s  = pd.DataFrame(columns=_cols, dtype=float)
             # Pre-session context: derive from the selected-resolution source so that
             # intra-session bar history reflects the same data used for price levels.
             # Aggregate to 1m for compatibility with the completed-bar accumulator.
             _agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
             # Session starts at 18:00 on the previous day — no intraday pre-session window.
-            # Completed session minutes accumulate in _done_mnq/_done_mes as the loop runs.
+            # Completed session minutes accumulate in the running base accumulators below.
             _pre_mnq = _empty_1s.copy()
             _pre_mes = _empty_1s.copy()
             _mes_min_d = {
                 k: grp
                 for k, grp in mes_1s_sess.groupby(mes_1s_sess.index.floor("1min"))
             } if not mes_1s_sess.empty else {}
-            _done_mnq: list[pd.DataFrame] = []
-            _done_mes: list[pd.DataFrame] = []
+            # Incremental base accumulators (replaces per-minute pd.concat, which was
+            # O(n^2): each minute re-concatenated the full list of completed minutes).
+            # Carry values as numpy arrays and the index as a DatetimeIndex, appending
+            # one completed-minute row per minute. Produces byte-identical inputs.
+            _tz = "America/New_York"
+            _base_vals_mnq = (_pre_mnq[_cols].values.astype(float).copy()
+                              if not _pre_mnq.empty else _np.empty((0, 5), dtype=float))
+            _base_vals_mes = (_pre_mes[_cols].values.astype(float).copy()
+                              if not _pre_mes.empty else _np.empty((0, 5), dtype=float))
+            _base_idx_mnq = _pre_mnq.index if not _pre_mnq.empty else pd.DatetimeIndex([], tz=_tz)
+            _base_idx_mes = _pre_mes.index if not _pre_mes.empty else pd.DatetimeIndex([], tz=_tz)
 
             for _bar_ts, _mnq_min in mnq_1s_sess.groupby(mnq_1s_sess.index.floor("1min")):
                 _mes_min = _mes_min_d.get(_bar_ts, _empty_1s)
                 _mes_has = not _mes_min.empty
 
-                # Today context: completed session minutes (_pre_mnq/_pre_mes are always
-                # empty for overnight sessions, so concat them only when non-empty).
-                _base_mnq = pd.concat(_done_mnq) if _done_mnq else _empty_1s
-                _base_mes = pd.concat(_done_mes) if _done_mes else _empty_1s
-                _bv_mnq = _base_mnq[_cols].values if not _base_mnq.empty else _np.empty((0, 5))
-                _bv_mes = _base_mes[_cols].values if not _base_mes.empty else _np.empty((0, 5))
-                _pidx   = pd.DatetimeIndex([_bar_ts], tz="America/New_York")
-                _idx_mnq = _base_mnq.index.append(_pidx)
-                _idx_mes = _base_mes.index.append(_pidx)
+                # Today context: pre-session 1m (empty for overnight sessions) + the
+                # completed session minutes carried in the running base accumulators.
+                _bv_mnq  = _base_vals_mnq
+                _bv_mes  = _base_vals_mes
+                _pidx    = pd.DatetimeIndex([_bar_ts], tz=_tz)
+                _idx_mnq = _base_idx_mnq.append(_pidx)
+                _idx_mes = _base_idx_mes.append(_pidx)
                 _nb_mnq = len(_bv_mnq); _nb_mes = len(_bv_mes)
                 _fm = _np.empty((_nb_mnq + 1, 5), dtype=float)
                 _fe = _np.empty((_nb_mes + 1, 5), dtype=float)
@@ -1387,31 +1395,33 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                 for _si in range(len(_mnq_min)):
                     _now = _mnq_min.index[_si]
                     _h = _mcH[_si]; _l = _mcL[_si]; _c = _mC[_si]; _v = _mcV[_si]
-                    _mnq_row = pd.Series({"Open": _mo, "High": _mH[_si], "Low": _mL[_si], "Close": _c, "Volume": _v})
+                    # Plain dicts: on_1m_bar only does mapping access on these rows and
+                    # never forwards them — building pd.Series per second was pure overhead.
+                    _mnq_row = {"Open": _mo, "High": _mH[_si], "Low": _mL[_si], "Close": _c, "Volume": _v}
                     _j = int(_np.searchsorted(_ets, _mts[_si], side="right")) - 1
                     if _j >= 0:
                         _eh = _ecH[_j]; _el = _ecL[_j]; _ec = _eC[_j]; _ev = _ecV[_j]
                     else:
                         _eh = _eo; _el = _eo; _ec = _eo; _ev = 0.0
-                    _mes_row = pd.Series({"Open": _eo, "High": _eh, "Low": _el, "Close": _ec, "Volume": _ev})
+                    _mes_row = {"Open": _eo, "High": _eh, "Low": _el, "Close": _ec, "Volume": _ev}
                     _fm[_nb_mnq] = [_mo, _mH[_si], _mL[_si], _c, _v]
                     _fe[_nb_mes] = [_eo, _eh, _el, _ec, _ev]
-                    _today_mnq = pd.DataFrame(_fm, index=_idx_mnq, columns=_cols)
-                    _today_mes = pd.DataFrame(_fe, index=_idx_mes, columns=_cols)
+                    _today_mnq = pd.DataFrame(_fm, index=_idx_mnq, columns=_cols_idx)
+                    _today_mes = pd.DataFrame(_fe, index=_idx_mes, columns=_cols_idx)
                     _before = len(day_events)
                     pipeline.on_1m_bar(_now, _mnq_row, _mes_row, _today_mnq, _today_mes)
                     _annotate_slippage(day_events[_before:], V2_MARKET_CLOSE_SLIPPAGE_PTS)
 
-                _done_mnq.append(pd.DataFrame(
-                    [[_mo, _mcH[-1], _mcL[-1], _mC[-1], _mcV[-1]]], columns=_cols, index=_pidx,
-                ))
+                # Append this completed minute's 1m bar to the running base accumulators.
+                _row_mnq = _np.array([[_mo, _mcH[-1], _mcL[-1], _mC[-1], _mcV[-1]]], dtype=float)
+                _base_vals_mnq = _np.vstack((_base_vals_mnq, _row_mnq)) if _base_vals_mnq.size else _row_mnq
+                _base_idx_mnq = _idx_mnq
                 _lj = len(_mes_min) - 1
-                _done_mes.append(pd.DataFrame(
-                    [[_eo,
-                      _ecH[_lj] if _mes_has else _eo, _ecL[_lj] if _mes_has else _eo,
-                      _eC[_lj]  if _mes_has else _eo, _ecV[_lj] if _mes_has else 0.0]],
-                    columns=_cols, index=_pidx,
-                ))
+                _row_mes = _np.array([[_eo,
+                    _ecH[_lj] if _mes_has else _eo, _ecL[_lj] if _mes_has else _eo,
+                    _eC[_lj]  if _mes_has else _eo, _ecV[_lj] if _mes_has else 0.0]], dtype=float)
+                _base_vals_mes = _np.vstack((_base_vals_mes, _row_mes)) if _base_vals_mes.size else _row_mes
+                _base_idx_mes = _idx_mes
 
         # ------------------------------------------------------------------ #
         # Emit end-of-session event if a position is still open               #
