@@ -1,33 +1,13 @@
 # session_times.py
 # Single source of truth for V2 trading session window times (America/New_York).
 import datetime
-import json
-import os
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 _ET = ZoneInfo("America/New_York")
 _TH = ZoneInfo("Asia/Bangkok")
 
-SESSION_OPEN  = datetime.time(18, 0)  # 18:00 ET on the previous trading day
-SESSION_CLOSE = datetime.time(17, 0)  # 17:00 ET (maintenance window 17:00–18:00)
-
-# Mutable runtime config — edit session_config.json while the orchestrator is
-# running; changes are picked up on the next is_entry_allowed() call.
-_CONFIG_PATH = Path(__file__).with_name("session_config.json")
-_config_cache: dict = {"mtime": None, "windows": []}
-
-
-def _get_entry_windows() -> list[str]:
-    try:
-        mt = _CONFIG_PATH.stat().st_mtime
-        if mt != _config_cache["mtime"]:
-            data = json.loads(_CONFIG_PATH.read_text())
-            _config_cache["mtime"] = mt
-            _config_cache["windows"] = data.get("entry_allowed_windows", [])
-    except Exception:
-        pass
-    return _config_cache["windows"]
+SESSION_OPEN  = datetime.time(18, 5)   # 18:05 ET on the previous trading day
+SESSION_CLOSE = datetime.time(16, 55)  # 16:55 ET (maintenance window 16:55–18:05)
 
 
 def cme_session_date(ts: datetime.datetime) -> datetime.date:
@@ -71,15 +51,13 @@ def cme_session_start(ts: datetime.datetime) -> datetime.datetime:
 
 
 def is_entry_allowed(t: datetime.time) -> bool:
-    """Return True if time t falls within any entry_allowed_windows interval."""
-    for window in _get_entry_windows():
-        start_str, end_str = window.split("-")
-        start = datetime.time(int(start_str[:2]), int(start_str[3:]))
-        end   = datetime.time(int(end_str[:2]), int(end_str[3:]))
-        if start <= end:
-            if start <= t < end:
-                return True
-        else:  # window crosses midnight
-            if t >= start or t < end:
-                return True
-    return False
+    """Entry-window gating is disabled — entries are unrestricted within the session.
+
+    The configurable entry-allowed-windows feature was retired: the processed session
+    window (SESSION_OPEN..SESSION_CLOSE = 18:05..16:55 ET) now *is* the allowed window,
+    so per-bar gating is redundant. Kept as an always-True shim so existing callers in
+    strategy.py / session_pipeline.py / execution paths keep working without change.
+    Removing the per-call session_config.json stat() also eliminated a large 1s-mode
+    backtest cost (~33s/day from ~125k stat syscalls).
+    """
+    return True
