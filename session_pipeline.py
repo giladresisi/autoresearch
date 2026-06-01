@@ -84,6 +84,11 @@ class SessionPipeline:
         # Tracks whether the previous bar was inside an entry-allowed window.
         # Used to detect window-entry events and clear ghost positions.
         self._was_in_window: "bool | None" = None
+        # bar_state cache: the [prev_5m, current_5m) window is constant within a 5m
+        # block, so the potential-stop values only change once per block. Cache them
+        # keyed by current_5m and rewrite only the per-bar "time" field.
+        self._bar_state_5m: pd.Timestamp | None = None
+        self._bar_state_vals: "tuple[float | None, float | None]" = (None, None)
 
     def on_daily_or_startup(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> None:
         """Compute fixed reference liquidities and seed ATH. Called on startup and at 09:20 ET daily."""
@@ -302,7 +307,14 @@ class SessionPipeline:
         }
 
         # Fix #7: recent = all-day bars from midnight up to now.
-        recent = today_mnq[today_mnq.index <= now]
+        # today_mnq is already built so its last bar is <= now (both 1m and 1s callers),
+        # making the mask a full-copy no-op in the common case. Skip the copy then —
+        # run_trend / run_strategy treat recent strictly read-only.
+        _tm_idx = today_mnq.index
+        if len(_tm_idx) == 0 or _tm_idx[-1] <= now:
+            recent = today_mnq
+        else:
+            recent = today_mnq[_tm_idx <= now]
 
         events: list[dict] = []
 
@@ -1010,21 +1022,28 @@ class SessionPipeline:
 
     def _write_bar_state(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> None:
         current_5m = now.floor("5min")
-        prev_5m = current_5m - pd.Timedelta(minutes=5)
-        window = today_mnq[(today_mnq.index >= prev_5m) & (today_mnq.index < current_5m)]
-        if window.empty:
-            save_bar_state({"time": now.isoformat(),
-                            "potential_stop_long": None,
-                            "potential_stop_short": None})
-            return
-        bar_open  = float(window.iloc[0]["Open"])
-        bar_close = float(window.iloc[-1]["Close"])
-        bar_high  = float(window["High"].max())
-        bar_low   = float(window["Low"].min())
-        body_high = max(bar_open, bar_close)
-        body_low  = min(bar_open, bar_close)
+        # Within a 5m block the [prev_5m, current_5m) window holds only completed,
+        # immutable prior-block bars — recompute the stops once per block, then reuse.
+        if current_5m != self._bar_state_5m:
+            self._bar_state_5m = current_5m
+            prev_5m = current_5m - pd.Timedelta(minutes=5)
+            window = today_mnq[(today_mnq.index >= prev_5m) & (today_mnq.index < current_5m)]
+            if window.empty:
+                self._bar_state_vals = (None, None)
+            else:
+                bar_open  = float(window.iloc[0]["Open"])
+                bar_close = float(window.iloc[-1]["Close"])
+                bar_high  = float(window["High"].max())
+                bar_low   = float(window["Low"].min())
+                body_high = max(bar_open, bar_close)
+                body_low  = min(bar_open, bar_close)
+                self._bar_state_vals = (
+                    round(max(bar_low,  body_low  - self._STOP_WICK_CAP), 4),
+                    round(min(bar_high, body_high + self._STOP_WICK_CAP), 4),
+                )
+        _pl, _ps = self._bar_state_vals
         save_bar_state({
             "time": now.isoformat(),
-            "potential_stop_long":  round(max(bar_low,  body_low  - self._STOP_WICK_CAP), 4),
-            "potential_stop_short": round(min(bar_high, body_high + self._STOP_WICK_CAP), 4),
+            "potential_stop_long":  _pl,
+            "potential_stop_short": _ps,
         })
