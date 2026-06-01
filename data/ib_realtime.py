@@ -22,6 +22,40 @@ import pandas as pd
 from strategy_smt import set_bar_data as _set_bar_data
 
 
+def _next_trading_open(ts: "pd.Timestamp") -> "pd.Timestamp":
+    """Return ts if it falls within CME Globex trading hours for MNQ/MES, else the
+    next session-open timestamp (skipping weekends and the daily maintenance break).
+
+    Used by the 1s gap-fill to advance over non-trading windows WITHOUT issuing IB
+    requests. Without this, a forward fill that starts before a weekend walks ~49h of
+    closed market 30-min-chunk-by-chunk; IB returns stale prior-session bars for each
+    closed-window endDateTime, so the request count blows past IB's 60-per-10-min
+    pacing limit before the real post-reopen data is ever reached.
+
+    CME Globex schedule (ET):
+      Opens:       Sunday 18:00
+      Daily break: 17:00-18:00 Mon-Thu
+      Weekend:     Friday 17:00 through Sunday 18:00
+    """
+    ts_et = ts.tz_convert("America/New_York")
+    dow = ts_et.weekday()  # 0=Mon .. 4=Fri, 5=Sat, 6=Sun
+    t = ts_et.hour * 3600 + ts_et.minute * 60 + ts_et.second
+
+    CLOSE = 17 * 3600
+    OPEN = 18 * 3600
+
+    in_wknd = (dow == 4 and t >= CLOSE) or dow == 5 or (dow == 6 and t < OPEN)
+    in_break = (dow <= 3) and (CLOSE <= t < OPEN)  # Mon-Thu maintenance hour
+
+    if in_wknd:
+        days_to_sun = (6 - dow) % 7
+        sun = (ts_et + pd.Timedelta(days=days_to_sun)).normalize()
+        return sun + pd.Timedelta(hours=18)
+    if in_break:
+        return ts_et.normalize() + pd.Timedelta(hours=18)
+    return ts_et
+
+
 class IbGatewayDisconnectedError(Exception):
     """Raised when IB Gateway closes the connection (not a transient network error)."""
 
@@ -246,11 +280,20 @@ class IbRealtimeSource:
                     all_bars: list = []
                     chunk_start = start_dt
                     consecutive_skips = 0
+                    requested_any = False
                     while chunk_start < now:
                         if self._stopping:
                             break
+                        # Skip weekends and the daily maintenance break without issuing
+                        # IB requests — closed-window endDateTimes return stale prior-session
+                        # bars that waste the pacing budget (see _next_trading_open).
+                        adj = _next_trading_open(chunk_start)
+                        if adj > chunk_start:
+                            chunk_start = adj
+                            continue
                         chunk_end = min(chunk_start + pd.Timedelta(seconds=_IB_1S_CHUNK_SECONDS), now)
                         chunk_s = max(1, int((chunk_end - chunk_start).total_seconds()))
+                        requested_any = True
                         bars = ib.reqHistoricalData(
                             contract,
                             endDateTime=chunk_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
@@ -287,8 +330,13 @@ class IbRealtimeSource:
                         chunk_start = chunk_end
 
                     if not all_bars:
-                        print(f"[gap_fill_1s_ib] {instrument}: 0 bars returned — IB unavailable", flush=True)
-                        all_filled = False
+                        if not requested_any:
+                            # Entire fill window was non-trading (e.g. started over a
+                            # weekend) — nothing to fill, not an IB failure.
+                            print(f"[gap_fill_1s_ib] {instrument}: market closed across fill window — nothing to fill", flush=True)
+                        else:
+                            print(f"[gap_fill_1s_ib] {instrument}: 0 bars returned — IB unavailable", flush=True)
+                            all_filled = False
                         continue
                     new_df = _util.df(all_bars).rename(columns={
                         "date": "datetime", "open": "Open", "high": "High",
