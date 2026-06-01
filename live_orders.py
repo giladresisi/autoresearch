@@ -66,13 +66,16 @@ def _now_et() -> str:
 def _log(event: dict) -> None:
     """Append one JSON line to sessions/{today}/events.jsonl.
 
-    kind and time are always written first; remaining fields follow alphabetically.
+    kind and time are always written first, followed by direction when present;
+    remaining fields follow alphabetically.
     """
     today = _SESSION_DATE or datetime.datetime.now(_ET).date().isoformat()
     path = Path("sessions") / today / "events.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     ordered: dict = {"kind": event.get("kind", ""), "time": event.get("time", "")}
-    ordered.update(sorted((k, v) for k, v in event.items() if k not in ("kind", "time")))
+    if "direction" in event:
+        ordered["direction"] = event["direction"]
+    ordered.update(sorted((k, v) for k, v in event.items() if k not in ("kind", "time", "direction")))
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(ordered) + "\n")
 
