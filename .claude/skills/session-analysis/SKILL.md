@@ -7,7 +7,7 @@ description: >
   (execution gaps between strategy intent, regression replay, and actual broker fills)
   and optimizations.md (missed opportunities and strategy improvement ideas).
   Downloads broker/PMT reports first if they haven't been fetched yet, then runs
-  the 1s regression.
+  the 1s regression, and plots both the live session and the 1s regression replay.
   Trigger phrases: "analyze the session", "session analysis", "write discrepancies",
   "write optimizations", "analyze yesterday's trades", "what went wrong today",
   "session review", "post-session analysis", "compare strategy vs tradovate",
@@ -67,6 +67,32 @@ Output files are written to `data/regression/<date>/`:
 
 If the regression fails (e.g. corrupted parquet), note the error and continue —
 the analysis can proceed without it, but flag the gap in the report.
+
+---
+
+## Step 2.6 — Plot the live session AND the 1s regression (both, every run)
+
+After the regression completes, generate BOTH charts so the live run and the
+deterministic replay can be compared side by side. This double plot is a required
+output of every session-analysis run.
+
+1. **Live session chart** — what actually happened in the live run:
+   ```bash
+   python plot_session.py <date>
+   ```
+   Writes and opens `sessions/<date>/chart.html`.
+
+2. **1s regression replay chart** — the re-simulation produced in Step 2.5.
+   `plot_regression.py` imports root modules (e.g. `session_times`), so the project
+   root must be on `PYTHONPATH` (running it by file path alone fails with
+   `ModuleNotFoundError`). From the project root:
+   ```powershell
+   $env:PYTHONPATH = (Get-Location).Path; python data\regression\plot_regression.py <date>
+   ```
+   Writes and opens the regression chart (`chart_1m.html`) under `data/regression/<date>/`.
+
+If either plot command fails, note the error and continue — the analysis files
+(Step 3) do not depend on the charts. Report both chart paths in the final summary.
 
 ---
 

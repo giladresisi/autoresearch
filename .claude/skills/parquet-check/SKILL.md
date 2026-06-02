@@ -23,6 +23,35 @@ backs up the result. Runs fully autonomously once invoked — no confirmation pr
 | User/agent says orchestrator is starting / pre-session | `orchestrator-start` |
 | Ambiguous | Ask: "Is this a session-end check or a pre-session orchestrator-start check?" |
 
+## Step 0 — Verify IB is active (REQUIRED in `session-end` mode)
+
+In `session-end` mode the engine fills the small gaps between the prior main 1s
+data and the session 1s files **via IB** before merging into the main parquets. If
+IB is not active, the merge proceeds WITHOUT that gap-fill and leaves seams baked
+into the main parquets. To prevent that, this skill MUST confirm IB is reachable
+**before running the engine** — and refuse to run if it is not.
+
+Run the connectivity check:
+
+```powershell
+uv run python -c "import os,socket; from dotenv import load_dotenv; load_dotenv(); h=os.getenv('IB_HOST','127.0.0.1'); p=int(os.getenv('IB_PORT','4002')); s=socket.socket(); s.settimeout(3);
+try:
+    s.connect((h,p)); s.close(); print(f'IB_OK {h}:{p}')
+except Exception as e:
+    print(f'IB_DOWN {h}:{p} ({e})')"
+```
+
+- Output contains **`IB_OK`** → proceed to Step 1.
+- Output contains **`IB_DOWN`** → **STOP. Do NOT run the engine.** Notify the user
+  and end the skill:
+  > "IB Gateway is not active (cannot connect to `<host>:<port>`). The session-end
+  > merge needs IB to fill the small 1s gaps before merging into the main parquets,
+  > otherwise the seams get baked in permanently. Please activate IB Gateway, then
+  > re-run the parquet-check."
+
+This gate applies to **`session-end` mode only**. In `orchestrator-start` mode the
+orchestrator brings IB up itself, so skip this check and go straight to Step 1.
+
 ## Step 1 — Run the engine
 
 ```powershell
