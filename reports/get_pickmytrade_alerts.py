@@ -66,8 +66,14 @@ def run(session_date: datetime.date, *, headed: bool = False, count: int = 100) 
             export_btn.wait_for(timeout=20_000)
 
             # ── Date range via calendar picker ────────────────────────────────
-            # Calendar shows [prev month | current month].
-            # Double-click session_date to set it as start; single-click today to set end.
+            # The picker (shadcn Calendar / react-day-picker) shows two adjacent
+            # months [N | N+1]; the starting month depends on PMT's *persisted* prior
+            # range, and each pane renders adjacent-month spillover days (class
+            # `day-outside`). Selecting by raw day text (.first/.last) grabs the wrong
+            # month — most visibly on the 1st, where e.g. the July-1 spillover cell
+            # sits in the June pane and `.last` picks it. Robust, any-date approach:
+            # navigate the wanted month into the LEFT pane (stable nav aria-labels),
+            # then click the first in-month (non-spillover) cell with that day number.
             today = datetime.date.today()
 
             date_btn = page.get_by_role("button").filter(
@@ -75,17 +81,36 @@ def run(session_date: datetime.date, *, headed: bool = False, count: int = 100) 
             ).first
             date_btn.click()
             page.wait_for_timeout(300)
-            page.screenshot(path=str(out_dir / "pmt_cal_1_opened.png"))
 
-            start_day = str(session_date.day)
-            end_day   = str(today.day)
+            _month_re = re.compile(
+                r'^(January|February|March|April|May|June|July|August|September'
+                r'|October|November|December)\s+\d{4}$'
+            )
 
-            # session_date is in the current month → right calendar (.last)
-            # session_date is in the previous month → left calendar (.first)
-            if session_date.month == today.month:
-                start_loc = page.locator("[name='day']").get_by_text(start_day, exact=True).last
-            else:
-                start_loc = page.locator("[name='day']").get_by_text(start_day, exact=True).first
+            def _visible_months() -> list:
+                return page.get_by_text(_month_re).all_inner_texts()
+
+            def _ensure_left_month(target: datetime.date) -> None:
+                """Navigate prev/next until target's month is the LEFT (first) pane."""
+                want = target.strftime("%B %Y")
+                for _ in range(15):
+                    months = _visible_months()
+                    if not months or months[0] == want:
+                        return
+                    cur_left = datetime.datetime.strptime(months[0], "%B %Y").date()
+                    btn = ("Go to previous month"
+                           if cur_left.replace(day=1) > target.replace(day=1)
+                           else "Go to next month")
+                    page.get_by_role("button", name=btn).click()
+                    page.wait_for_timeout(250)
+
+            def _day_cell(target: datetime.date):
+                _ensure_left_month(target)
+                # target month is the LEFT pane → its in-month (non-spillover) days
+                # come first in DOM, so the first such cell is unambiguous.
+                return page.locator("button[name='day']:not(.day-outside)").get_by_text(
+                    str(target.day), exact=True
+                ).first
 
             # Dismiss any live-chat overlay that intercepts pointer events on the calendar.
             page.evaluate("""
@@ -93,15 +118,14 @@ def run(session_date: datetime.date, *, headed: bool = False, count: int = 100) 
                 if (el) el.style.display = 'none';
             """)
 
-            # Use dispatch_event to bypass any remaining pointer interception.
-            start_loc.dispatch_event("click")
+            # Double-click start to set it, single-click end (matches PMT range behaviour).
+            start_cell = _day_cell(session_date)
+            start_cell.dispatch_event("click")
             page.wait_for_timeout(200)
-            start_loc.dispatch_event("click")
+            start_cell.dispatch_event("click")
             page.wait_for_timeout(200)
-            page.screenshot(path=str(out_dir / "pmt_cal_after_start.png"))
 
-            # today is always in the right (current month) calendar
-            page.locator("[name='day']").get_by_text(end_day, exact=True).last.dispatch_event("click")
+            _day_cell(today).dispatch_event("click")
             page.wait_for_timeout(300)
             page.screenshot(path=str(out_dir / "pmt_cal_after_end.png"))
 
