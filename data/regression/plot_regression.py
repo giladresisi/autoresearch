@@ -374,7 +374,9 @@ OTHER_MARKER_STYLE = {
     "stop-entry-cancelled":dict(symbol="x-open",              color="#FF9800", size=13),
     "new-stop-exit":       dict(symbol="triangle-left",       color="#FF5722", size=13),
     "move-stop-exit":      dict(symbol="triangle-left-open",  color="#FF5722", size=13),
-    "update-stop-loss":    dict(symbol="triangle-down-open",  color="#78909C", size=12),
+    # update-stop-loss intentionally omitted (see plot_session.py): broker-side echo of
+    # new-stop-exit/move-stop-exit, parked ±1000 pts away on the secondary cautious to
+    # disable the hard stop — plotting it at stop_price blows out the y-axis.
     "stop-entry-filled":   dict(symbol="star",                color="#4CAF50", size=17),
     "market-entry":        dict(symbol="circle",              color="#FF9800", size=15),
     "trend-broken":        dict(symbol="diamond-open",        color="#FF9800", size=13),
