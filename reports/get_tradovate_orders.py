@@ -202,17 +202,31 @@ def _set_custom_range(modal, page, session_date: datetime.date) -> None:
 
 def _download_csv(modal, page, out_path: Path) -> None:
     """Click Download CSV; if no records exist, write an empty file instead."""
-    # "TOTAL: 0 records" means the button is a no-op — skip the download
+    # Wait for the report grid to finish rendering after the Go click.
     total_loc = modal.locator("text=/TOTAL:/i")
-    if total_loc.count() and "0 record" in (total_loc.first.text_content() or "").lower():
-        out_path.write_text("")
-        return
     try:
-        with page.expect_download(timeout=15_000) as dl:
-            modal.get_by_role("button", name="Download CSV").click()
-        dl.value.save_as(out_path)
+        total_loc.first.wait_for(timeout=15_000)
     except Exception:
-        out_path.write_text("")
+        pass
+    # On a tab switch the grid briefly shows a stale/transient "TOTAL: 0 records"
+    # before the real rows load. Checking it once (and short-circuiting) is what made
+    # Orders and Position History fail in alternation. Instead, fold the 0-records
+    # check INTO a retry loop: let the grid settle, and only treat 0-records as final
+    # if it persists for the whole loop. Records present → download (with retries for
+    # the export race); genuinely empty → empty file.
+    for _ in range(4):
+        page.wait_for_timeout(1_200)
+        txt = (total_loc.first.text_content() or "").lower() if total_loc.count() else ""
+        if "0 record" in txt:
+            continue  # likely a transient load state — re-check next pass
+        try:
+            with page.expect_download(timeout=12_000) as dl:
+                modal.get_by_role("button", name="Download CSV").click()
+            dl.value.save_as(out_path)
+            return
+        except Exception:
+            page.wait_for_timeout(1_500)
+    out_path.write_text("")
 
 
 def main():

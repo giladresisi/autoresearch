@@ -66,13 +66,16 @@ def _now_et() -> str:
 def _log(event: dict) -> None:
     """Append one JSON line to sessions/{today}/events.jsonl.
 
-    kind and time are always written first; remaining fields follow alphabetically.
+    kind and time are always written first, followed by direction when present;
+    remaining fields follow alphabetically.
     """
     today = _SESSION_DATE or datetime.datetime.now(_ET).date().isoformat()
     path = Path("sessions") / today / "events.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     ordered: dict = {"kind": event.get("kind", ""), "time": event.get("time", "")}
-    ordered.update(sorted((k, v) for k, v in event.items() if k not in ("kind", "time")))
+    if "direction" in event:
+        ordered["direction"] = event["direction"]
+    ordered.update(sorted((k, v) for k, v in event.items() if k not in ("kind", "time", "direction")))
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(ordered) + "\n")
 
@@ -135,11 +138,27 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> N
 
 
 def _current_price() -> float:
-    """Estimate current market price from the last bar_state midpoint."""
+    """Estimate current market price from the last bar_state midpoint.
+
+    Falls back to the most recent MNQ parquet bar close when bar_state is missing or
+    incomplete — e.g. an ad-hoc/manual close issued from a process other than the live
+    automation (which is what writes bar_state.json). Without this fallback such a
+    close logs price 0.0 even though a valid market price is available on disk.
+    """
     from smt_state import load_bar_state
     bar = load_bar_state()
     if bar and "potential_stop_long" in bar and "potential_stop_short" in bar:
         return (float(bar["potential_stop_long"]) + float(bar["potential_stop_short"])) / 2.0
+    # Fallback: last completed bar close from the main parquets (1s preferred — freshest).
+    for _name in ("MNQ_1s.parquet", "MNQ_1m.parquet"):
+        try:
+            _p = Path("data") / _name
+            if _p.exists():
+                _df = pd.read_parquet(_p, columns=["Close"])
+                if not _df.empty:
+                    return float(_df["Close"].iloc[-1])
+        except Exception:
+            continue
     return 0.0
 
 

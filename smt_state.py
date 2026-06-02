@@ -180,7 +180,13 @@ def save_position(d: dict) -> None:
 
 def bar_state_path(date_str: str | None = None) -> Path:
     import datetime as _dt
-    d = date_str or _SESSION_DATE or _dt.date.today().isoformat()
+    import zoneinfo as _zi
+    # Resolve to the ET date (matching the ET-named session folders and live_orders),
+    # NOT the naive local date. A standalone process (e.g. trade.py) on a machine whose
+    # local clock runs ahead of ET would otherwise pick the wrong day's folder once the
+    # local date has rolled over but the ET session date has not (after ~13:00 ET for a
+    # UTC+7 clock) — which made an ad-hoc close read no bar_state and log price 0.0.
+    d = date_str or _SESSION_DATE or _dt.datetime.now(_zi.ZoneInfo("America/New_York")).date().isoformat()
     return Path("sessions") / d / "bar_state.json"
 
 
