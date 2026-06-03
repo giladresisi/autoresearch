@@ -12,7 +12,7 @@ Usage:
   python trade.py close                  # Market close active position
   python trade.py trend-broken           # Reset hypothesis direction and log trend-broken
   python trade.py hypothesis             # Force a fresh hypothesis evaluation right now
-  python trade.py start                  # Start orchestrator (resets position.json)
+  python trade.py start                  # Start orchestrator (keeps position.json; resumes & reconciles any open position)
   python trade.py start --summary        # Start orchestrator with LLM-based summary enabled
   python trade.py start --force          # Reset hypothesis direction and position state (start fresh)
   python trade.py terminate              # Kill orchestrator and automation.main
