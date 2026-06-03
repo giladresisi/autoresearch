@@ -267,7 +267,8 @@ def run_strategy(
         MAX_CONFIRMATION_BODY_PTS = 25.0  # reject momentum/reversal bars as confirmation
         # STP->MKT downgrade safety (see feature.md). Keep STP_MKT_PROXIMITY_PTS in sync
         # with the executor's downgrade threshold in execution/pickmytrade.py::place_entry.
-        STP_MKT_PROXIMITY_PTS = 5.0    # entry within this of market -> executor sends MKT
+        STP_MKT_PROXIMITY_PTS      = 5.0    # entry within this of market -> executor sends MKT
+        MKT_FILL_MIN_STOP_DISTANCE = 10.0   # min stop distance from the EXPECTED market fill (tune via backtest)
 
         # 2.4 Fill check runs FIRST so a limit that fills on the same bar as a new
         # confirmation bar is detected rather than overwritten by a move-limit signal.
@@ -422,7 +423,9 @@ def run_strategy(
                 )
                 if will_market_fill:
                     expected_fill = bar_mid
-                    risk = abs(stop_loss - entry_price)
+                    # Fix 2: floor the stop distance from the expected fill at
+                    # MKT_FILL_MIN_STOP_DISTANCE to absorb async send-time drift.
+                    risk = max(abs(stop_loss - entry_price), MKT_FILL_MIN_STOP_DISTANCE)
                     if direction == _DIR_UP:
                         stop_loss = expected_fill - risk
                     else:

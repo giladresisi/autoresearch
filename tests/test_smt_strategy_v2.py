@@ -628,6 +628,27 @@ class TestStopEntryMktDowngradeSafety:
         assert pos["stop_entry"] == pytest.approx(207.5)
         assert pos["pending_stop"] == pytest.approx(195.5)
 
+    # --- Fix 2: floor the re-anchored stop at MKT_FILL_MIN_STOP_DISTANCE -----
+
+    def test_fix2_floor_widens_stop_when_risk_below_floor(self):
+        """SHORT: intended risk (7) < MKT_FILL_MIN_STOP_DISTANCE -> stop distance from
+        bar_mid equals the floor (10), not the smaller intended risk."""
+        write_hypothesis(direction="down")
+        write_position()
+        # opp body_low=194, body_high=196, high=197 -> stop_loss=min(197,211)=197
+        # bar_open=200 -> entry_price=min(194,190)=190 ; risk=|197-190|=7 (< floor 10)
+        # bar high=200 low=185 -> bar_mid=192.5, within 5 of entry 190 -> will market-fill
+        bar = make_5m_bar(open_=200.0, high=200.0, low=185.0, close=190.0)
+        recent = make_opp_1m_recent("down", open_=194.0, close_=196.0, high=197.0, low=190.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is not None
+        assert result["price"] == pytest.approx(192.5)
+        assert result["stop"] == pytest.approx(202.5), "stop = bar_mid + floor(10)"
+        assert abs(result["stop"] - result["price"]) == pytest.approx(10.0), (
+            "stop distance from market fill must equal MKT_FILL_MIN_STOP_DISTANCE"
+        )
+
     # --- Regression: far resting stop entries are untouched ------------------
 
     def test_far_resting_stop_entry_unchanged(self):
