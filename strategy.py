@@ -317,6 +317,13 @@ def run_strategy(
                 # conf_bar_entry intentionally preserved across fill so that after a
                 # stop-out the same 5m bar cannot be reused as confirmation for re-entry.
                 smt_state.save_position(position)
+                # Addendum 4: re-anchor the cautious ladder to the ACTUAL fill price so
+                # protection targets stay relevant when the fill lands far from formation.
+                import hypothesis as _hyp_mod
+                _hyp_mod.recompute_cautious_for_fill(
+                    hypothesis, fill_price,
+                    _daily.get("liquidities", []), _global.get("all_time_high"))
+                smt_state.save_hypothesis(hypothesis)
                 return _make_signal("stop-entry-filled", now, fill_price, direction=direction, stop=stop)
 
         if fill_check_only:
@@ -382,6 +389,12 @@ def run_strategy(
                     position["stop_entry"]      = ""
                     position["stop_direction"]  = ""
                     smt_state.save_position(position)
+                    # Addendum 4: re-anchor the cautious ladder to the ACTUAL fill price.
+                    import hypothesis as _hyp_mod
+                    _hyp_mod.recompute_cautious_for_fill(
+                        hypothesis, bar_mid,
+                        _daily.get("liquidities", []), _global.get("all_time_high"))
+                    smt_state.save_hypothesis(hypothesis)
                     return _make_signal("market-entry", now, bar_mid, direction=direction, stop=stop)
 
                 # Push entry away from current price if the natural level is too close.
