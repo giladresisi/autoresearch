@@ -574,3 +574,134 @@ class TestStopEntryMinApproach:
         assert result["price"] == pytest.approx(190.0), (
             f"entry should be pushed to bar_open-10=190, got {result['price']}"
         )
+
+
+class TestStopEntryMktDowngradeSafety:
+    """STP->MKT downgrade safety (feature.md fixes 1-3).
+
+    When a stop entry would be market-filled by the executor (entry within
+    STP_MKT_PROXIMITY_PTS of bar_mid), the strategy must re-anchor the protective
+    stop to the expected market fill (bar_mid) so the stop survives async drift,
+    and record entry_price = bar_mid so position.json matches the market fill.
+    Far (non-proximity) resting stop entries must be unchanged.
+    """
+
+    # --- Fix 1: re-anchor stop to expected market fill -----------------------
+
+    def test_fix1_short_anchors_stop_to_bar_mid_plus_risk(self):
+        """SHORT: bar_mid within proximity above the sell entry -> stop = bar_mid + risk,
+        entry = bar_mid. Intended risk = |stop_loss - entry_price| = |202 - 190| = 12."""
+        write_hypothesis(direction="down")
+        write_position()
+        # bar_open=200; opp(bullish) body_low=194 -> entry_price=min(194,190)=190
+        # opp_high=202 -> stop_loss=min(202, 198+15)=202 ; risk=12
+        # bar high=200 low=185 -> bar_mid=192.5, within 5 of entry 190 -> will market-fill
+        bar = make_5m_bar(open_=200.0, high=200.0, low=185.0, close=190.0)
+        recent = make_opp_1m_recent("down", open_=194.0, close_=198.0, high=202.0, low=190.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is not None
+        assert result["kind"] in ("new-stop-entry", "move-stop-entry")
+        assert result["price"] == pytest.approx(192.5), "entry re-anchored to bar_mid"
+        assert result["stop"] == pytest.approx(204.5), "stop = bar_mid(192.5) + risk(12)"
+        pos = smt_state.load_position()
+        assert pos["stop_entry"] == pytest.approx(192.5)
+        assert pos["pending_stop"] == pytest.approx(204.5)
+
+    def test_fix1_long_anchors_stop_to_bar_mid_minus_risk(self):
+        """LONG mirror: bar_mid within proximity below the buy entry -> stop = bar_mid - risk,
+        entry = bar_mid. risk = |stop_loss - entry_price| = |198 - 210| = 12."""
+        write_hypothesis(direction="up")
+        write_position()
+        # bar_open=200; opp(bearish) body_high=206 -> entry_price=max(206,210)=210
+        # opp_low=198 -> stop_loss=max(198, 202-15)=198 ; risk=12
+        # bar high=215 low=200 -> bar_mid=207.5, within 5 of entry 210 -> will market-fill
+        bar = make_5m_bar(open_=200.0, high=215.0, low=200.0, close=210.0)
+        recent = make_opp_1m_recent("up", open_=206.0, close_=202.0, high=210.0, low=198.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is not None
+        assert result["kind"] in ("new-stop-entry", "move-stop-entry")
+        assert result["price"] == pytest.approx(207.5), "entry re-anchored to bar_mid"
+        assert result["stop"] == pytest.approx(195.5), "stop = bar_mid(207.5) - risk(12)"
+        pos = smt_state.load_position()
+        assert pos["stop_entry"] == pytest.approx(207.5)
+        assert pos["pending_stop"] == pytest.approx(195.5)
+
+    # --- Fix 2: floor the re-anchored stop at MKT_FILL_MIN_STOP_DISTANCE -----
+
+    def test_fix2_floor_widens_stop_when_risk_below_floor(self):
+        """SHORT: intended risk (7) < MKT_FILL_MIN_STOP_DISTANCE -> stop distance from
+        bar_mid equals the floor (10), not the smaller intended risk."""
+        write_hypothesis(direction="down")
+        write_position()
+        # opp body_low=194, body_high=196, high=197 -> stop_loss=min(197,211)=197
+        # bar_open=200 -> entry_price=min(194,190)=190 ; risk=|197-190|=7 (< floor 10)
+        # bar high=200 low=185 -> bar_mid=192.5, within 5 of entry 190 -> will market-fill
+        bar = make_5m_bar(open_=200.0, high=200.0, low=185.0, close=190.0)
+        recent = make_opp_1m_recent("down", open_=194.0, close_=196.0, high=197.0, low=190.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is not None
+        assert result["price"] == pytest.approx(192.5)
+        assert result["stop"] == pytest.approx(202.5), "stop = bar_mid + floor(10)"
+        assert abs(result["stop"] - result["price"]) == pytest.approx(10.0), (
+            "stop distance from market fill must equal MKT_FILL_MIN_STOP_DISTANCE"
+        )
+
+    # --- Fix 3: skip the chase when market ran past the intended entry -------
+
+    def test_fix3_short_skips_when_market_ran_below_entry(self):
+        """SHORT: bar_mid more than MAX_ENTRY_CHASE_PTS below the sell entry -> no signal."""
+        write_hypothesis(direction="down")
+        write_position()
+        # entry_price=min(194,190)=190 ; bar high=185 low=170 -> bar_mid=177.5
+        # 177.5 < 190 - 10 -> chase guard fires
+        bar = make_5m_bar(open_=200.0, high=185.0, low=170.0, close=175.0)
+        recent = make_opp_1m_recent("down", open_=194.0, close_=198.0, high=202.0, low=190.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is None, "market ran > MAX_ENTRY_CHASE_PTS past entry -> skip"
+
+    def test_fix3_long_skips_when_market_ran_above_entry(self):
+        """LONG: bar_mid more than MAX_ENTRY_CHASE_PTS above the buy entry -> no signal."""
+        write_hypothesis(direction="up")
+        write_position()
+        # entry_price=max(206,210)=210 ; bar high=240 low=205 -> bar_mid=222.5
+        # 222.5 > 210 + 10 -> chase guard fires
+        bar = make_5m_bar(open_=200.0, high=240.0, low=205.0, close=230.0)
+        recent = make_opp_1m_recent("up", open_=206.0, close_=202.0, high=210.0, low=198.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is None, "market ran > MAX_ENTRY_CHASE_PTS past entry -> skip"
+
+    # --- Regression: far resting stop entries are untouched ------------------
+
+    def test_far_resting_stop_entry_unchanged(self):
+        """SHORT, bar_mid well outside proximity -> entry/stop unchanged vs current behavior."""
+        write_hypothesis(direction="down")
+        write_position()
+        # entry_price=min(194,190)=190 ; stop_loss=min(202,213)=202 (as Fix1 case)
+        # bar high=220 low=200 -> bar_mid=210 ; 210 <= 190+5? no -> no re-anchor, no chase-skip
+        bar = make_5m_bar(open_=200.0, high=220.0, low=200.0, close=205.0)
+        recent = make_opp_1m_recent("down", open_=194.0, close_=198.0, high=202.0, low=190.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is not None
+        assert result["kind"] in ("new-stop-entry", "move-stop-entry")
+        assert result["price"] == pytest.approx(190.0), "far entry unchanged"
+        assert result["stop"] == pytest.approx(202.0), "far stop unchanged"
+
+    def test_proximity_entry_still_rejected_when_anchored_stop_too_close(self):
+        """Non-proximity entry whose natural stop is < MIN_STOP_DISTANCE returns None
+        (the existing relative-to-entry check at lines 409/411 still fires)."""
+        write_hypothesis(direction="down")
+        write_position()
+        # opp bar range tiny: body_low=194, body_high=196, high=197 -> stop_loss=197
+        # bar_open=210 -> entry_price=min(194,200)=194 ; stop_loss-entry=197-194=3 < 5
+        # bar high=215 low=205 -> bar_mid=210 ; 210<=194+5? no -> no re-anchor -> reject
+        bar = make_5m_bar(open_=210.0, high=215.0, low=205.0, close=208.0)
+        recent = make_opp_1m_recent("down", open_=194.0, close_=196.0, high=197.0, low=190.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is None, "stop within MIN_STOP_DISTANCE of entry must reject"
