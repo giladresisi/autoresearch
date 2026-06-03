@@ -211,6 +211,14 @@ For each trade in trades.tsv:
 
 For stop-loss sanity: if |sent_stop_price - entry_price| > 500 points,
 flag as a likely digit-transposition error. The normal stop range is 30–200 pts.
+EXCEPTION — the secondary-cautious parked stop (do NOT flag): once a position
+reaches the secondary cautious level, the broker stop is deliberately parked
+≈1000 pts away from the money (−1000 for longs, +1000 for shorts) so wicks can
+never trigger a fill — the real exit from that point is the 1m opposite-close
+check in trend.py, not the hard stop (see live_orders.py:377-386). So an
+`update_sl` sent right after a `new-stop-exit`/`move-stop-exit` event whose
+`level` is `"secondary"`, with a value ≈ `cautious_break_price ∓ 1000`, is the
+intentional parked backstop, NOT a transposition. Treat it as expected behavior.
 
 For slippage tracking:
   - Entry slippage = (Tradovate fill) − (strategy's assumed entry in trades.tsv).
