@@ -135,6 +135,34 @@ def compute_cautious_prices(
         "cautious_price_secondary_level": cautious_price_secondary_level,
     }
 
+
+def recompute_cautious_for_fill(
+    hypothesis: dict,
+    fill_price: float,
+    liquidities: list,
+    ath,
+) -> dict:
+    """Re-anchor the two-tier cautious ladder to the *actual fill price* (Addendum 4).
+
+    `compute_cautious_prices` runs once at hypothesis formation, anchored to the
+    formation `current_close`. When the entry fills far from that price (e.g. a short
+    that fills 97 pts above formation), the stored ladder is stale/unreachable and
+    protection never arms — the position then rides unmanaged. Calling this at fill
+    re-derives the cautious levels against the fill so the targets stay relevant and
+    up-to-date. Direction / liquidities / ATH are unchanged; only the cautious price
+    fields are overwritten. Mutates and returns the hypothesis dict. No-op unless the
+    direction is up/down.
+    """
+    direction = hypothesis.get("direction")
+    if direction not in ("up", "down"):
+        return hypothesis
+    cp = compute_cautious_prices(direction, float(fill_price), liquidities, ath)
+    hypothesis["cautious_price_initial"]         = cp["cautious_price_initial"]
+    hypothesis["cautious_price_initial_level"]   = cp["cautious_price_initial_level"]
+    hypothesis["cautious_price_secondary"]       = cp["cautious_price_secondary"]
+    hypothesis["cautious_price_secondary_level"] = cp["cautious_price_secondary_level"]
+    return hypothesis
+
 LIQUIDITY_APPROACH_DIST    = 100   # pts — Rule 2: "nearly approaching" radius
 NEAR_EXTREME_DIST          =  75   # pts — Rule 3a: proximity boost to daily extreme
 MOMENTUM_BARS              =   5   # 1m bars — Rule 2: recent momentum window
