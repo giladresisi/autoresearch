@@ -649,6 +649,32 @@ class TestStopEntryMktDowngradeSafety:
             "stop distance from market fill must equal MKT_FILL_MIN_STOP_DISTANCE"
         )
 
+    # --- Fix 3: skip the chase when market ran past the intended entry -------
+
+    def test_fix3_short_skips_when_market_ran_below_entry(self):
+        """SHORT: bar_mid more than MAX_ENTRY_CHASE_PTS below the sell entry -> no signal."""
+        write_hypothesis(direction="down")
+        write_position()
+        # entry_price=min(194,190)=190 ; bar high=185 low=170 -> bar_mid=177.5
+        # 177.5 < 190 - 10 -> chase guard fires
+        bar = make_5m_bar(open_=200.0, high=185.0, low=170.0, close=175.0)
+        recent = make_opp_1m_recent("down", open_=194.0, close_=198.0, high=202.0, low=190.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is None, "market ran > MAX_ENTRY_CHASE_PTS past entry -> skip"
+
+    def test_fix3_long_skips_when_market_ran_above_entry(self):
+        """LONG: bar_mid more than MAX_ENTRY_CHASE_PTS above the buy entry -> no signal."""
+        write_hypothesis(direction="up")
+        write_position()
+        # entry_price=max(206,210)=210 ; bar high=240 low=205 -> bar_mid=222.5
+        # 222.5 > 210 + 10 -> chase guard fires
+        bar = make_5m_bar(open_=200.0, high=240.0, low=205.0, close=230.0)
+        recent = make_opp_1m_recent("up", open_=206.0, close_=202.0, high=210.0, low=198.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is None, "market ran > MAX_ENTRY_CHASE_PTS past entry -> skip"
+
     # --- Regression: far resting stop entries are untouched ------------------
 
     def test_far_resting_stop_entry_unchanged(self):

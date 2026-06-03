@@ -269,6 +269,7 @@ def run_strategy(
         # with the executor's downgrade threshold in execution/pickmytrade.py::place_entry.
         STP_MKT_PROXIMITY_PTS      = 5.0    # entry within this of market -> executor sends MKT
         MKT_FILL_MIN_STOP_DISTANCE = 10.0   # min stop distance from the EXPECTED market fill (tune via backtest)
+        MAX_ENTRY_CHASE_PTS        = 10.0   # skip entry if market already ran this far past it (tune via backtest)
 
         # 2.4 Fill check runs FIRST so a limit that fills on the same bar as a new
         # confirmation bar is detected rather than overwritten by a move-limit signal.
@@ -417,6 +418,13 @@ def run_strategy(
                 # position.json matches the market fill and the checks below measure the stop
                 # distance from the fill.
                 bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
+                # Fix 3: don't chase -- if the market has already run past the intended
+                # entry on the trigger side by more than MAX_ENTRY_CHASE_PTS, a market fill
+                # would land far worse than planned and the setup has already moved on.
+                if direction == _DIR_UP   and bar_mid > entry_price + MAX_ENTRY_CHASE_PTS:
+                    return None
+                if direction == _DIR_DOWN and bar_mid < entry_price - MAX_ENTRY_CHASE_PTS:
+                    return None
                 will_market_fill = (
                     (direction == _DIR_UP   and bar_mid >= entry_price - STP_MKT_PROXIMITY_PTS) or
                     (direction == _DIR_DOWN and bar_mid <= entry_price + STP_MKT_PROXIMITY_PTS)
