@@ -919,6 +919,57 @@ def test_per_bar_day_hl_asia_extends_to_previous_ny_morning(_isolate_state, monk
 
 
 # ---------------------------------------------------------------------------
+# Test 26b: per-bar day H/L during London looks back to prior NY evening (12:00 ET)
+# ---------------------------------------------------------------------------
+
+def test_per_bar_day_hl_london_extends_to_prev_ny_evening(_isolate_state, monkeypatch):
+    """During London session (<06:00 ET), day H/L lookback reaches back to 12:00 ET
+    (prior NY evening open) — 2 sessions back — and EXCLUDES the prior NY morning
+    (06:00 ET) extreme."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    # hist bars: 06:00 ET (prior NY morning, EXCLUDED) extreme 25000;
+    #            12:00 ET (prior NY evening, INCLUDED) 23000
+    hist_idx = pd.DatetimeIndex([
+        pd.Timestamp("2025-11-13 06:00", tz="America/New_York"),
+        pd.Timestamp("2025-11-13 12:00", tz="America/New_York"),
+    ])
+    hist_mnq = pd.DataFrame({
+        "Open":   [21000.0, 21000.0],
+        "High":   [25000.0, 23000.0],   # 25000 @06:00 excluded, 23000 @12:00 included
+        "Low":    [20990.0, 20990.0],
+        "Close":  [21002.0, 21002.0],
+        "Volume": [100, 100],
+    }, index=hist_idx)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    now_sess = pd.Timestamp("2025-11-13 18:00", tz="America/New_York")
+    pipeline.on_session_start(now_sess, _make_1m_bars("2025-11-13 18:00", n=1), force_reset=True)
+
+    # Bar at 03:00 ET next day (London) — 06:00 extreme EXCLUDED, 12:00 (23000) INCLUDED
+    now = pd.Timestamp("2025-11-14 03:00", tz="America/New_York")
+    today_mnq = _make_1m_bars("2025-11-13 18:00", n=3, base=21000.0)  # high = 21010
+    bar = _bar_row(base=21000.0)
+    pipeline.on_1m_bar(now, bar, bar, today_mnq, today_mnq)
+
+    _liq = smt_state.load_daily()["liquidities"]
+    _dh = next((l for l in _liq if l["name"] == "day_high"), None)
+    assert _dh is not None, "day_high must be set"
+    assert _dh["price"] == 23000.0, (
+        f"London day_high should look back to 12:00 ET (23000) and exclude the 06:00 ET "
+        f"bar (25000), got {_dh['price']}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 27: per-bar day H/L uses standard (18:00 ET) lookback during NY morning
 # ---------------------------------------------------------------------------
 

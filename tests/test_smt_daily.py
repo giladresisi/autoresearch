@@ -631,30 +631,34 @@ def test_compute_live_hl_mid_asia_extends_to_0600():
     )
 
 
-def test_compute_live_hl_mid_london_extends_to_0600():
-    """During London session (<06:00 ET) day_high includes bars back to 06:00 ET previous day."""
+def test_compute_live_hl_mid_london_extends_to_prev_ny_evening():
+    """During London session (<06:00 ET) day_high looks back to 12:00 ET (prior NY evening
+    open) — 2 sessions back — and EXCLUDES the prior NY morning (06:00 ET)."""
     from hypothesis import compute_live_hl_mid
 
-    # Bars: session-open day 06:00, 12:00, 18:00 (Asia start), then 00:00 next day (London)
+    # Bars: session-open day 06:00 (prior NY morning), 12:00 (prior NY evening), 18:00
+    # (Asia start), then 00:00 / 03:00 next day (London).
     idx = pd.DatetimeIndex([
-        pd.Timestamp("2025-11-13 06:00", tz="America/New_York"),  # prev NY morning
+        pd.Timestamp("2025-11-13 06:00", tz="America/New_York"),  # prior NY morning — EXCLUDED
+        pd.Timestamp("2025-11-13 12:00", tz="America/New_York"),  # prior NY evening — INCLUDED
         pd.Timestamp("2025-11-13 18:00", tz="America/New_York"),  # Asia start
         pd.Timestamp("2025-11-14 00:00", tz="America/New_York"),  # London start
         pd.Timestamp("2025-11-14 03:00", tz="America/New_York"),  # mid London
     ])
     bars = pd.DataFrame({
-        "Open":  [21000.0] * 4,
-        "High":  [25000.0, 21010.0, 21010.0, 21010.0],
-        "Low":   [20990.0] * 4,
-        "Close": [21002.0] * 4,
+        "Open":  [21000.0] * 5,
+        "High":  [25000.0, 23000.0, 21010.0, 21010.0, 21010.0],
+        "Low":   [20990.0] * 5,
+        "Close": [21002.0] * 5,
     }, index=idx)
 
     now = pd.Timestamp("2025-11-14 03:00", tz="America/New_York")  # London session
     result = compute_live_hl_mid(bars, now)
 
     assert "day_high" in result
-    assert result["day_high"] == 25000.0, (
-        f"London session day_high should include 06:00 ET bar (25000), got {result['day_high']}"
+    assert result["day_high"] == 23000.0, (
+        f"London day_high should look back to 12:00 ET (prior NY evening, 23000) and exclude "
+        f"the 06:00 ET bar (25000), got {result['day_high']}"
     )
 
 
