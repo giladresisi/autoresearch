@@ -87,8 +87,17 @@ and why the automatic fix failed (check `reason` field in the JSON).
 **If `repair_success = false`**: escalate — backup was not found or was unreadable, or
 the 1s session file had critical quality. Manual intervention required.
 
-**If `exit_code = 3`**: script error; read `check_session_stderr.log`, report the raw
-error to the user.
+**Exit codes** — the script's exit code reflects what happened, not success/failure on its own.
+Always judge success from `merge_success` / `repair_success`, not the exit code:
+- **`exit_code = 0`**: no action taken (everything already healthy, nothing merged/repaired).
+- **`exit_code = 1`**: **benign — a merge/repair action was performed.** This is the normal
+  result of a successful session-end merge (any instrument with `action` other than
+  `skip`/null bumps the code to 1). NOT an error; treat as success when `merge_success` /
+  `repair_success` are `true`.
+- **`exit_code = 2`**: a 1s merge or 1m repair **failed** — escalate (see the failure
+  guidance above; check the `reason` field).
+- **`exit_code = 3`**: script error; read `check_session_stderr.log`, report the raw
+  error to the user.
 
 ## Step 3 — LLM severity judgment for ambiguous cases
 
