@@ -7,6 +7,7 @@ from __future__ import annotations
 import datetime
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -77,6 +78,109 @@ def test_place_stop_entry_logs_and_syncs(_in_tmp, _mock_today):
     assert len(events) == 1
     assert events[0]["kind"] == "new-stop-entry"
     assert events[0]["direction"] == "long"
+
+
+# ---------------------------------------------------------------------------
+# Test 1b: STP->MKT downgrade fills immediately (records active, recomputes cautious)
+# ---------------------------------------------------------------------------
+
+def test_place_stop_entry_downgrade_fills_immediately(_in_tmp, _mock_today):
+    """When the executor downgrades STP->MKT (entry within 5pts of market), the broker
+    fills immediately, so place_stop_entry must record an active position right away —
+    not a pending stop_entry — and re-anchor the cautious ladder to the fill price."""
+    empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
+                 "conf_bar_entry": {}, "failed_entries": 0}
+    mock_executor = MagicMock()
+    mock_executor.place_entry.return_value = SimpleNamespace(order_type="market")
+    mock_executor._entry_is_live = True
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=empty_pos), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)), \
+         patch("smt_state.load_hypothesis", return_value={"direction": "up"}), \
+         patch("smt_state.load_daily", return_value={"liquidities": []}), \
+         patch("smt_state.load_global", return_value={"all_time_high": 21000.0}), \
+         patch("smt_state.save_hypothesis") as mock_save_hyp, \
+         patch("hypothesis.recompute_cautious_for_fill") as mock_recompute:
+        live_orders.place_stop_entry("long", 19850.0, 19820.0)
+
+    # Active position recorded immediately — no pending stop_entry left behind
+    assert saved["active"]["direction"] == "long"
+    assert saved["active"]["fill_price"] == pytest.approx(19850.0)
+    assert saved["active"]["stop"] == pytest.approx(19820.0)
+    assert saved["active"]["contracts"] == 2
+    assert saved["active"]["cautious"] == "no"
+    assert saved["active"]["source"] == "strategy"
+    assert saved["stop_entry"] == ""
+    assert saved["stop_direction"] == ""
+
+    # Cautious ladder re-anchored to the fill price (Addendum 4)
+    mock_recompute.assert_called_once()
+    assert mock_recompute.call_args.args[1] == pytest.approx(19850.0)
+    mock_save_hyp.assert_called_once()
+
+    # stop-entry-filled is logged (NOT new-stop-entry)
+    events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
+    assert len(events) == 1
+    assert events[0]["kind"] == "stop-entry-filled"
+    assert events[0]["direction"] == "long"
+    assert events[0]["price"] == pytest.approx(19850.0)
+    assert events[0]["stop_price"] == pytest.approx(19820.0)
+
+
+# ---------------------------------------------------------------------------
+# Test 1c: a real resting STP (no downgrade) stays a pending stop_entry
+# ---------------------------------------------------------------------------
+
+def test_place_stop_entry_real_stop_stays_pending(_in_tmp, _mock_today):
+    empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
+                 "conf_bar_entry": {}, "failed_entries": 0}
+    mock_executor = MagicMock()
+    mock_executor.place_entry.return_value = SimpleNamespace(order_type="stop")
+    mock_executor._entry_is_live = True
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=empty_pos), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
+        live_orders.place_stop_entry("long", 19850.0, 19820.0)
+
+    # Pending stop_entry written; no active position
+    assert saved["stop_entry"] == "19850.0"
+    assert saved["stop_direction"] == "up"
+    assert saved["pending_stop"] == pytest.approx(19820.0)
+    assert saved["active"] == {}
+
+    events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
+    assert len(events) == 1
+    assert events[0]["kind"] == "new-stop-entry"
+
+
+# ---------------------------------------------------------------------------
+# Test 1d: downgrade while the entry window is blocked → no immediate fill
+# ---------------------------------------------------------------------------
+
+def test_place_stop_entry_downgrade_blocked_no_fill(_in_tmp, _mock_today):
+    """If the entry window gate blocked the order (_entry_is_live False), nothing was
+    sent to the broker — so we must NOT record an active fill even though the order
+    would have downgraded. It stays a pending (unplaced) stop_entry."""
+    empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
+                 "conf_bar_entry": {}, "failed_entries": 0}
+    mock_executor = MagicMock()
+    mock_executor.place_entry.return_value = SimpleNamespace(order_type="market")
+    mock_executor._entry_is_live = False
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=empty_pos), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
+        live_orders.place_stop_entry("long", 19850.0, 19820.0)
+
+    assert saved["active"] == {}
+    assert saved["stop_entry"] == "19850.0"
+    assert saved["stop_entry_unplaced"] is True
+
+    events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
+    assert len(events) == 1
+    assert events[0]["kind"] == "new-stop-entry"
 
 
 # ---------------------------------------------------------------------------
