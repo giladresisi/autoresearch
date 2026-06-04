@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pandas as pd
 
+import smt_state
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -49,10 +51,9 @@ _fill_bar_time: "pd.Timestamp | None" = None
 _cancel_bar_time: "pd.Timestamp | None" = None
 _pending_close_after: "pd.Timestamp | None" = None
 
-# Manual entry pause (trade.py pause/resume). Sentinel file: presence = paused.
-# Decoupled from position.json (which is rewritten constantly by multiple writers).
-# When paused, dispatch() suppresses new automatic entries; exits stay active.
-_PAUSE_FLAG = Path("data") / "paused"
+# Manual entry pause (trade.py pause/resume). Canonical flag + is_paused() live in
+# smt_state so both this dispatch gate and the live pipeline's entry gate share one source.
+_PAUSE_FLAG = smt_state.PAUSE_PATH
 
 
 def set_session_date(d: str) -> None:
@@ -116,7 +117,7 @@ def has_pending_entry() -> bool:
 
 def is_paused() -> bool:
     """True if a manual entry pause is in effect (new automatic entries suppressed)."""
-    return _PAUSE_FLAG.exists()
+    return smt_state.is_paused()
 
 
 def pause() -> bool:

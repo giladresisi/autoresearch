@@ -1059,3 +1059,64 @@ def test_week_start_ts_wednesday_session_uses_this_sunday():
     result = pipeline._week_start_ts(now)
     expected = pd.Timestamp("2025-11-09 18:00", tz="America/New_York")  # this Sunday
     assert result == expected, f"Wednesday session week start expected {expected}, got {result}"
+
+
+# ---------------------------------------------------------------------------
+# Pause: entry-side strategy gate (skip run_strategy when paused AND flat)
+# ---------------------------------------------------------------------------
+
+def _stub_pipeline_deps(monkeypatch):
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+
+
+def test_on_1m_bar_skips_strategy_when_paused_and_flat(_isolate_state, monkeypatch):
+    """Paused + flat: the entry-side strategy is skipped entirely (no phantom state churn)."""
+    import strategy as _strat_mod
+    _stub_pipeline_deps(monkeypatch)
+    strat_calls = []
+    monkeypatch.setattr(_strat_mod, "run_strategy",
+                        lambda now, bar, recent, **kw: strat_calls.append(now) or None)
+    monkeypatch.setattr(smt_state, "is_paused", lambda: True)
+
+    pipeline = SessionPipeline(_make_1m_bars("2025-11-13 09:20", n=5),
+                               _make_1m_bars("2025-11-13 09:20", n=5), lambda e: None)
+    pipeline.on_session_start(pd.Timestamp("2025-11-14 09:20", tz="America/New_York"),
+                              _make_1m_bars("2025-11-14 09:20", n=1))
+    # position is flat (default after on_session_start)
+    today_mnq = _make_1m_bars("2025-11-14 09:20", n=10)
+    bar = _bar_row()
+    pipeline.on_1m_bar(pd.Timestamp("2025-11-14 09:20", tz="America/New_York"), bar, bar, today_mnq, today_mnq)
+    pipeline.on_1m_bar(pd.Timestamp("2025-11-14 09:21", tz="America/New_York"), bar, bar, today_mnq, today_mnq)
+
+    assert strat_calls == [], "paused + flat must skip run_strategy entirely"
+
+
+def test_on_1m_bar_runs_strategy_when_paused_but_active(_isolate_state, monkeypatch):
+    """Paused but holding a real active position: run_strategy still runs so exits are managed."""
+    import strategy as _strat_mod
+    _stub_pipeline_deps(monkeypatch)
+    strat_calls = []
+    monkeypatch.setattr(_strat_mod, "run_strategy",
+                        lambda now, bar, recent, **kw: strat_calls.append(now) or None)
+    monkeypatch.setattr(smt_state, "is_paused", lambda: True)
+
+    pipeline = SessionPipeline(_make_1m_bars("2025-11-13 09:20", n=5),
+                               _make_1m_bars("2025-11-13 09:20", n=5), lambda e: None)
+    pipeline.on_session_start(pd.Timestamp("2025-11-14 09:20", tz="America/New_York"),
+                              _make_1m_bars("2025-11-14 09:20", n=1))
+    # Set a real active position — exits must still be managed while paused.
+    _pos = smt_state.load_position()
+    _pos["active"] = {"direction": "long", "fill_price": 21000.0, "stop": 20980.0,
+                      "contracts": 2, "cautious": "no"}
+    smt_state.save_position(_pos)
+
+    today_mnq = _make_1m_bars("2025-11-14 09:20", n=10)
+    bar = _bar_row()
+    pipeline.on_1m_bar(pd.Timestamp("2025-11-14 09:20", tz="America/New_York"), bar, bar, today_mnq, today_mnq)
+
+    assert len(strat_calls) == 1, "paused + active must still call run_strategy (management/exits)"
