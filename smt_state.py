@@ -36,6 +36,7 @@ GLOBAL_PATH     = DATA_DIR / "global.json"
 DAILY_PATH      = DATA_DIR / "daily.json"
 HYPOTHESIS_PATH = DATA_DIR / "hypothesis.json"
 POSITION_PATH   = DATA_DIR / "position.json"
+PAUSE_PATH      = DATA_DIR / "paused"   # manual entry-pause sentinel (trade.py pause/resume)
 
 # Session date locked at startup (ET date, YYYY-MM-DD). Set via set_session_date().
 _SESSION_DATE: str = ""
@@ -176,6 +177,19 @@ def load_position() -> dict:
 
 def save_position(d: dict) -> None:
     _atomic_write(POSITION_PATH, d)
+
+
+def is_paused() -> bool:
+    """True if a manual entry pause is in effect (the data/paused sentinel exists).
+
+    Always False in in-memory (backtest) mode — pause is a live-execution control and must
+    never affect backtests, which never create the sentinel anyway.
+    """
+    if _IN_MEMORY:
+        return False
+    # Resolve from DATA_DIR dynamically so test fixtures that redirect DATA_DIR to a tmp dir
+    # (and never create the sentinel) automatically see "not paused".
+    return (DATA_DIR / "paused").exists()
 
 
 def bar_state_path(date_str: str | None = None) -> Path:

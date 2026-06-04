@@ -780,9 +780,17 @@ class SessionPipeline:
             self._force_entry_eval_after = None
             _prefer_mkt = self._force_market_entry
             self._force_market_entry = False
-        strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent,
-                                             fill_check_only=not _run_full_entry,
-                                             prefer_market_entry=_prefer_mkt)
+        # Pause (entry-side): while paused, suppress ALL entry-side strategy work when flat —
+        # not just the broker dispatch. run_strategy writes stop_entry/active to position.json
+        # directly and can fill-detect a stale stop_entry into a *phantom* position, so it must
+        # be skipped entirely when there is no active position. A real active position is still
+        # managed (run_strategy Section 3 runs) so exits keep working.
+        if _smt_state.is_paused() and not _smt_state.load_position().get("active"):
+            strat_sig = None
+        else:
+            strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent,
+                                                 fill_check_only=not _run_full_entry,
+                                                 prefer_market_entry=_prefer_mkt)
         if strat_sig is not None:
             strat_sig.setdefault("direction", _hyp_dir)
             # Emit cancel when strategy's market-entry overwrites a pending limit that

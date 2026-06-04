@@ -201,3 +201,25 @@ class TestHypothesisCache:
         load_position()
         assert smt_state._hyp_cache_valid is False
         assert smt_state._hyp_cache is None
+
+
+# ---------------------------------------------------------------------------
+# is_paused: manual entry-pause sentinel (resolved from DATA_DIR; inert in backtest)
+# ---------------------------------------------------------------------------
+
+def test_is_paused_reflects_sentinel(tmp_path, monkeypatch):
+    monkeypatch.setattr(smt_state, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(smt_state, "_IN_MEMORY", False)
+    assert smt_state.is_paused() is False
+    (tmp_path / "paused").write_text("x")
+    assert smt_state.is_paused() is True
+
+
+def test_is_paused_false_in_memory_mode(tmp_path, monkeypatch):
+    """Pause must never affect backtests (in-memory mode), even if a sentinel exists on disk."""
+    monkeypatch.setattr(smt_state, "DATA_DIR", tmp_path)
+    (tmp_path / "paused").write_text("x")
+    monkeypatch.setattr(smt_state, "_IN_MEMORY", True)
+    assert smt_state.is_paused() is False
+    monkeypatch.setattr(smt_state, "_IN_MEMORY", False)
+    assert smt_state.is_paused() is True
