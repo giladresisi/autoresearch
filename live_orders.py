@@ -113,7 +113,7 @@ def has_pending_entry() -> bool:
 # Unified API — each function: log → executor → sync position.json
 # ---------------------------------------------------------------------------
 
-def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> None:
+def place_stop_entry(direction: str, entry_price: float, stop_price: float, *, source: str = "strategy") -> None:
     """Place unfilled stop entry. Logs, dispatches STP order, writes stop_entry to position.json."""
     now = _now_et()
     pmt_signal = {
@@ -128,6 +128,7 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> N
     pos["stop_entry"] = str(entry_price)
     pos["stop_direction"] = "up" if direction == "long" else "down"
     pos["pending_stop"] = stop_price
+    pos["stop_entry_source"] = source
     if not getattr(_executor, "_entry_is_live", True):
         pos["stop_entry_unplaced"] = True
     else:
@@ -162,7 +163,7 @@ def _current_price() -> float:
     return 0.0
 
 
-def place_market_entry(direction: str, entry_price: float, stop_price: float, *, flatten_first: bool = False) -> None:
+def place_market_entry(direction: str, entry_price: float, stop_price: float, *, flatten_first: bool = False, source: str = "strategy") -> None:
     """Enter at market with stop. Logs, dispatches MKT+sl, writes active to position.json."""
     now = _now_et()
     pmt_signal = {
@@ -184,9 +185,11 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float, *,
         "cautious": "no",
         "contracts": 2,
         "time": now,
+        "source": source,
     }
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
+    pos.pop("stop_entry_source", None)
     _save_pos(pos)
     _log({"kind": "market-entry", "time": now, "direction": direction,
           "entry_price": entry_price, "stop_price": stop_price})
@@ -251,6 +254,7 @@ def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> No
     pos["stop_direction"] = ""
     pos["conf_bar_entry"] = {}
     pos.pop("stop_entry_unplaced", None)
+    pos.pop("stop_entry_source", None)
     _save_pos(pos)
     _log({"kind": "cancel-stop-entry", "time": now, "entry_price": entry_price, "reason": reason})
 

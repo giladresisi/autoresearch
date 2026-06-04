@@ -42,7 +42,7 @@ def test_up_market_reads_bar_state(monkeypatch, capsys):
     }
     _run_trade(["up"], monkeypatch, mock_lo, mock_smt)
 
-    mock_lo.place_market_entry.assert_called_once_with("long", 0.0, 27000.0)
+    mock_lo.place_market_entry.assert_called_once_with("long", 0.0, 27000.0, source="manual")
     out = capsys.readouterr().out
     assert "Market LONG" in out
     assert "27000" in out
@@ -95,7 +95,7 @@ def test_up_stop_entry_places_stp(monkeypatch, capsys):
     # Explicit sl_price as third argv arg
     _run_trade(["up", "27000", "26950"], monkeypatch, mock_lo, mock_smt)
 
-    mock_lo.place_stop_entry.assert_called_once_with("long", 27000.0, 26950.0)
+    mock_lo.place_stop_entry.assert_called_once_with("long", 27000.0, 26950.0, source="manual")
     out = capsys.readouterr().out
     assert "Stop entry LONG" in out
     assert "27000" in out
@@ -116,7 +116,7 @@ def test_up_stop_entry_reads_sl_from_bar_state(monkeypatch, capsys):
     }
     _run_trade(["up", "27000"], monkeypatch, mock_lo, mock_smt)
 
-    mock_lo.place_stop_entry.assert_called_once_with("long", 27000.0, 26900.0)
+    mock_lo.place_stop_entry.assert_called_once_with("long", 27000.0, 26900.0, source="manual")
     out = capsys.readouterr().out
     assert "Stop entry LONG" in out
 
@@ -136,7 +136,7 @@ def test_down_market_uses_potential_stop_short(monkeypatch, capsys):
     }
     _run_trade(["down"], monkeypatch, mock_lo, mock_smt)
 
-    mock_lo.place_market_entry.assert_called_once_with("short", 0.0, 27150.0)
+    mock_lo.place_market_entry.assert_called_once_with("short", 0.0, 27150.0, source="manual")
     out = capsys.readouterr().out
     assert "Market SHORT" in out
 
@@ -154,7 +154,7 @@ def test_down_stop_entry_places_stp(monkeypatch, capsys):
     # Explicit sl_price as third argv arg
     _run_trade(["down", "27000", "27050"], monkeypatch, mock_lo, mock_smt)
 
-    mock_lo.place_stop_entry.assert_called_once_with("short", 27000.0, 27050.0)
+    mock_lo.place_stop_entry.assert_called_once_with("short", 27000.0, 27050.0, source="manual")
     out = capsys.readouterr().out
     assert "Stop entry SHORT" in out
 

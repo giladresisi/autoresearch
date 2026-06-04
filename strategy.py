@@ -316,9 +316,13 @@ def run_strategy(
                     "stop":       stop,
                     "contracts":  2,
                     "cautious":   "no",
+                    # Carry the manual/strategy tag from the stop entry through the fill
+                    # so manual positions stay exempt from the direction-mismatch close.
+                    "source":     position.get("stop_entry_source", "strategy"),
                 }
                 position["stop_entry"]      = ""
                 position["stop_direction"]  = ""
+                position.pop("stop_entry_source", None)
                 # conf_bar_entry intentionally preserved across fill so that after a
                 # stop-out the same 5m bar cannot be reused as confirmation for re-entry.
                 smt_state.save_position(position)
@@ -464,6 +468,11 @@ def run_strategy(
     _pos_dir = active.get("direction", "")
     _pos_hyp_dir = "up" if _pos_dir == "long" else ("down" if _pos_dir == "short" else _pos_dir)
     if direction == "none" or direction != _pos_hyp_dir:
+        # D7: a manually-entered position (trade.py up/down) is discretionary — the strategy
+        # must not auto-flatten or manage it on a direction mismatch. Leave it entirely to
+        # the user / its own broker stop. (Otherwise a manual long is auto-closed in ~0.4s.)
+        if active.get("source") == "manual":
+            return None
         position["active"]            = {}
         position["stop_entry"]       = ""
         position["conf_bar_entry"]   = {}

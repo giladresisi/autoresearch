@@ -164,7 +164,7 @@ def main() -> None:
                 sl_price = float(_sl)
             label = "LONG" if direction == "long" else "SHORT"
             print(f"Stop entry {label} at {entry_price} | S/L: {sl_price}")
-            live_orders.place_stop_entry(direction, entry_price, sl_price)
+            live_orders.place_stop_entry(direction, entry_price, sl_price, source="manual")
         else:
             bar_state = smt_state.load_bar_state()
             if bar_state is None:
@@ -177,7 +177,7 @@ def main() -> None:
                 sys.exit(1)
             label = "LONG" if direction == "long" else "SHORT"
             print(f"Market {label} | S/L: {stop}")
-            live_orders.place_market_entry(direction, 0.0, float(stop))
+            live_orders.place_market_entry(direction, 0.0, float(stop), source="manual")
 
     elif cmd == "cancel":
         pos = live_orders.get_position()

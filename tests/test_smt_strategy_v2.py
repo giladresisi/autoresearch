@@ -403,6 +403,23 @@ class TestActivePosition:
         pos = smt_state.load_position()
         assert pos["active"] == {}
 
+    def test_in_position_manual_entry_exempt_from_direction_mismatch_close(self):
+        """D7: a manual position (source='manual') is NOT auto-closed on a direction
+        mismatch — discretionary trades are left to the user / their own broker stop."""
+        write_hypothesis(direction="down")
+        write_position(active={
+            "time": NOW.isoformat(), "fill_price": 100.0, "direction": "up",
+            "stop": 95.0, "contracts": 2, "cautious": "no", "source": "manual",
+        })
+        bar = make_5m_bar(open_=101.0, high=105.0, low=98.0, close=103.0)
+        result = run_strategy(NOW, bar, make_empty_1m_recent())
+
+        # No market-close fires; the manual position is preserved untouched.
+        assert result is None
+        pos = smt_state.load_position()
+        assert pos["active"].get("source") == "manual"
+        assert pos["active"].get("direction") == "up"
+
     def test_in_position_stop_crossed_emits_stopped_out_and_increments_failed(self):
         """LONG: bar.low <= stop → stopped-out, failed_entries incremented."""
         write_hypothesis(direction="up")
