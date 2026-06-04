@@ -904,15 +904,17 @@ class SessionPipeline:
                 })
 
         # ── Day H/L ──────────────────────────────────────────────────────────
-        # During Asia (≥18:00 ET) and London (<06:00 ET), extend the day H/L
-        # lookback to 06:00 ET on the session-open day (yesterday's NY morning
-        # start, 12 h before 18:00 ET) using hist bars. From 06:00 ET onwards
-        # (NY morning+) use only the current CME session (today_mnq, 18:00 ET+).
+        # Early sessions extend the day H/L lookback ~2 sessions back using hist bars,
+        # starting on the session-open day at:
+        #   Asia   (≥18:00 ET): 06:00 ET — prior NY morning open
+        #   London (<06:00 ET): 12:00 ET — prior NY evening open
+        # From 06:00 ET onwards (NY morning+) use only the current CME session (today_mnq).
         _now_hour = now.hour
         if _now_hour >= 18 or _now_hour < 6:
             _sess_open_day = _cme_session_start(now).date()
+            _ext_hour = 6 if _now_hour >= 18 else 12   # Asia→prior NY morning; London→prior NY evening
             _day_start_ts = pd.Timestamp(
-                datetime.datetime(_sess_open_day.year, _sess_open_day.month, _sess_open_day.day, 6, 0),
+                datetime.datetime(_sess_open_day.year, _sess_open_day.month, _sess_open_day.day, _ext_hour, 0),
                 tz="America/New_York",
             )
             # Constant hist contribution [day_start, session_start) — recompute only when

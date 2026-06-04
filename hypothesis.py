@@ -1023,22 +1023,24 @@ def compute_live_hl_mid(
     # day_low). When the 1.5h move is modest relative to the rest of the day it is included
     # in both.
     #
-    # During Asia (now.hour >= 18) and London (now.hour < 6): extend the lookback to
-    # 06:00 ET on the session-open day (yesterday's NY morning start) because today's
-    # midnight open is either absent (Asia) or very recent (London) and the extra context
-    # from the previous NY session improves H/L accuracy.
-    # From 06:00 ET onwards (NY morning+): use only the current CME session (18:00 ET+).
+    # Early sessions extend the lookback ~2 sessions back for extra context; later sessions
+    # use only the current CME session. The window starts on the session-open day at:
+    #   Asia   (now.hour >= 18): 06:00 ET — prior NY morning open  (2 sessions back from Asia)
+    #   London (now.hour < 6):   12:00 ET — prior NY evening open   (2 sessions back from London)
+    #   NY morning+ (6..18):     18:00 ET — current CME session open
+    # London no longer reaches the prior NY morning (06:00 ET); both early sessions now look
+    # exactly 2 sessions back from their own start.
     _day_open_cal = today if now.hour >= 18 else today - timedelta(days=1)
-    if now.hour >= 18 or now.hour < 6:
-        _day_start = pd.Timestamp(
-            datetime(_day_open_cal.year, _day_open_cal.month, _day_open_cal.day, 6, 0, 0),
-            tz="America/New_York",
-        )
+    if now.hour >= 18:
+        _day_start_hour = 6     # Asia   → prior NY morning open
+    elif now.hour < 6:
+        _day_start_hour = 12    # London → prior NY evening open
     else:
-        _day_start = pd.Timestamp(
-            datetime(_day_open_cal.year, _day_open_cal.month, _day_open_cal.day, 18, 0, 0),
-            tz="America/New_York",
-        )
+        _day_start_hour = 18    # NY morning+ → current CME session open
+    _day_start = pd.Timestamp(
+        datetime(_day_open_cal.year, _day_open_cal.month, _day_open_cal.day, _day_start_hour, 0, 0),
+        tz="America/New_York",
+    )
     # CME Asia session open is always 18:00 ET — outlier check covers the first 1.5h
     # regardless of whether _day_start extends further back to 06:00 ET.
     _asia_open   = pd.Timestamp(

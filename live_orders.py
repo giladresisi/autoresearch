@@ -49,6 +49,11 @@ _fill_bar_time: "pd.Timestamp | None" = None
 _cancel_bar_time: "pd.Timestamp | None" = None
 _pending_close_after: "pd.Timestamp | None" = None
 
+# Manual entry pause (trade.py pause/resume). Sentinel file: presence = paused.
+# Decoupled from position.json (which is rewritten constantly by multiple writers).
+# When paused, dispatch() suppresses new automatic entries; exits stay active.
+_PAUSE_FLAG = Path("data") / "paused"
+
 
 def set_session_date(d: str) -> None:
     global _SESSION_DATE
@@ -107,6 +112,30 @@ def has_active_position() -> bool:
 def has_pending_entry() -> bool:
     """True if position.json shows an unfilled stop entry order."""
     return bool(_load_pos().get("stop_entry"))
+
+
+def is_paused() -> bool:
+    """True if a manual entry pause is in effect (new automatic entries suppressed)."""
+    return _PAUSE_FLAG.exists()
+
+
+def pause() -> bool:
+    """Engage the manual entry pause. Idempotent: returns False (no-op) if already paused."""
+    if _PAUSE_FLAG.exists():
+        return False
+    _PAUSE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+    _PAUSE_FLAG.write_text(_now_et(), encoding="utf-8")
+    _log({"kind": "paused", "time": _now_et()})
+    return True
+
+
+def resume() -> bool:
+    """Lift the manual entry pause. Idempotent: returns False (no-op) if not paused."""
+    if not _PAUSE_FLAG.exists():
+        return False
+    _PAUSE_FLAG.unlink()
+    _log({"kind": "resumed", "time": _now_et()})
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -257,10 +286,19 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float, *,
           "entry_price": entry_price, "stop_price": stop_price})
 
 
-def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: str) -> None:
-    """Cancel existing unfilled stop entry and replace. Reads old entry_price from position.json."""
+def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: str, *, force: bool = False) -> None:
+    """Cancel existing unfilled stop entry and replace. Reads old entry_price from position.json.
+
+    Gated on no-open-position: the executor cancels the resting STP via a PMT ``close``,
+    which is blanket (it also flattens any open position). To avoid flattening a real
+    trade, skip when position.json shows an active position unless ``force=True``.
+    """
     now = _now_et()
     pos = _load_pos()
+    if not force and pos.get("active"):
+        print("[live_orders] move_stop_entry: active position present — NOT moving the stop entry "
+              "(PMT 'close' would flatten the open position). Pass force=True to override.", flush=True)
+        return
     old_entry = float(pos["stop_entry"]) if pos.get("stop_entry") else new_entry_price
     old_pmt = {
         "direction": direction,
@@ -304,9 +342,19 @@ def stop_entry_filled(direction: str, stop_price: float, fill_price: float = 0.0
 
 
 def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> None:
-    """Cancel pending stop entry. No-op if stop_entry is empty (unless force=True). Logs, dispatches close, clears position.json."""
+    """Cancel pending stop entry. No-op if stop_entry is empty (unless force=True). Logs, dispatches close, clears position.json.
+
+    Gated on no-open-position: PMT ``close`` (used to cancel the resting STP) is blanket
+    and would also flatten any open position. Skip when position.json shows an active
+    position unless ``force=True`` (force WILL flatten the open position).
+    """
     pos = _load_pos()
     if not force and not pos.get("stop_entry"):
+        return
+    if not force and pos.get("active"):
+        print("[live_orders] cancel_stop_entry: active position present — NOT sending 'close' to "
+              "cancel the stop entry (PMT 'close' would flatten the open position). Pass "
+              "force=True to cancel anyway (this WILL flatten the open position).", flush=True)
         return
     now = _now_et()
     entry_price = float(pos["stop_entry"]) if pos.get("stop_entry") else 0.0
@@ -366,6 +414,11 @@ def dispatch(sig: dict) -> None:
     kind = sig.get("kind")
     direction_v2 = sig.get("direction", "none")
     direction = "long" if direction_v2 == "up" else ("short" if direction_v2 == "down" else None)
+
+    # Manual pause: suppress new automatic entries while keeping all exits/management active.
+    # Only the three entry kinds are blocked; fills, exits, stop moves and cancels pass through.
+    if kind in ("new-stop-entry", "move-stop-entry", "market-entry") and is_paused():
+        return
 
     if kind == "new-stop-entry":
         stop = sig.get("stop")
