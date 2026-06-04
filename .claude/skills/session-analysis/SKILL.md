@@ -3,7 +3,8 @@ name: session-analysis
 description: >
   Run after a trading session ends to cross-reference all session data sources
   (strategy events, PMT alerts, Tradovate fills, 1s regression replay, 1m bar data)
-  and produce two structured analysis files in sessions/<date>/: discrepancies.md
+  and produce two structured analysis files in the session folder
+  (`<global>/sessions/<date>/`): discrepancies.md
   (execution gaps between strategy intent, regression replay, and actual broker fills)
   and optimizations.md (missed opportunities and strategy improvement ideas).
   Downloads broker/PMT reports first if they haven't been fetched yet, then runs
@@ -23,21 +24,33 @@ Intended to be run once after a session ends and reports have been (or will be) 
 
 ---
 
+## Path conventions
+
+- **Sessions** live in the machine-global sessions root: `<global>/sessions/<date>/`,
+  where `<global>` is env `ACT_GLOBAL_DIR` (default `~/projects/auto-co-trader/global`).
+  Resolve it with `paths.sessions_dir()` (`import paths; paths.sessions_dir() / "<date>"`).
+- **Regression** outputs are worktree-local, per-run:
+  `regression/<date>/<HH-MM-SS>/` (one timestamped folder per run; `HH-MM-SS` is the
+  TH/Asia-Bangkok start time). Per-date A/B **baselines** live at
+  `regression/<date>/baseline/`. Resolve the run root with `paths.regression_dir()`.
+  For analysis, use the **latest** run folder for the date (most-recent `HH-MM-SS`),
+  or the run you just produced in Step 2.5.
+
 ## Step 1 — Determine session date
 
 If the user provided a date (e.g. "analyze 2026-05-21"), use it. Otherwise use yesterday's date in `YYYY-MM-DD` format.
 
-Check that `sessions/<date>/` exists. If it doesn't, stop:
+Check that `<global>/sessions/<date>/` exists (`paths.sessions_dir() / "<date>"`). If it doesn't, stop:
 > "No session directory found for `<date>`. Please verify the date."
 
 ---
 
 ## Step 2 — Ensure reports are downloaded
 
-Check whether all three broker/PMT CSV files exist:
-- `sessions/<date>/tradovate_orders.csv`
-- `sessions/<date>/tradovate_position_history.csv`
-- `sessions/<date>/pickmytrade_alerts.csv`
+Check whether all three broker/PMT CSV files exist (under `<global>/sessions/<date>/`):
+- `<global>/sessions/<date>/tradovate_orders.csv`
+- `<global>/sessions/<date>/tradovate_position_history.csv`
+- `<global>/sessions/<date>/pickmytrade_alerts.csv`
 
 If any are missing, run the get-reports skill now (follow its instructions exactly):
 ```bash
@@ -60,7 +73,9 @@ results = run_regression(dates=["<date>"], mode="1s", skip_lock=True)
 print(results)
 ```
 
-Output files are written to `data/regression/<date>/`:
+Output files are written to a fresh per-run folder `regression/<date>/<HH-MM-SS>/`
+(worktree-local; `HH-MM-SS` is the TH start time). Note the run folder this call
+created — it is the one to read in Step 3:
 - `events_1s.jsonl` — replay event stream
 - `trades_1s.tsv`   — replay trade ledger
 - `chart_1s.html`   — replay chart (opened automatically)
@@ -80,7 +95,7 @@ output of every session-analysis run.
    ```bash
    python plot_session.py <date>
    ```
-   Writes and opens `sessions/<date>/chart.html`.
+   Writes and opens `<global>/sessions/<date>/chart.html`.
 
 2. **1s regression replay chart** — the re-simulation produced in Step 2.5.
    `plot_regression.py` imports root modules (e.g. `session_times`), so the project
@@ -89,7 +104,8 @@ output of every session-analysis run.
    ```powershell
    $env:PYTHONPATH = (Get-Location).Path; python data\regression\plot_regression.py <date>
    ```
-   Writes and opens the regression chart (`chart_1m.html`) under `data/regression/<date>/`.
+   Writes and opens the regression chart (`chart_1m.html`) inside the run folder
+   produced in Step 2.5 (`regression/<date>/<HH-MM-SS>/`).
 
 If either plot command fails, note the error and continue — the analysis files
 (Step 3) do not depend on the charts. Report both chart paths in the final summary.
@@ -100,16 +116,20 @@ If either plot command fails, note the error and continue — the analysis files
 
 Delegate all the reading, cross-referencing, and writing to a subagent. This keeps the main context clean and lets the subagent focus entirely on the analysis.
 
-Use the general-purpose subagent with this prompt (filling in `<DATE>` and `<BASE>`):
+Use the general-purpose subagent with this prompt. Fill in `<DATE>`, `<BASE>` (the
+worktree root), `<GLOBAL>` (env `ACT_GLOBAL_DIR`, default
+`~/projects/auto-co-trader/global` — resolve with `paths.global_root()`), and `<RUN>`
+(the regression run folder produced in Step 2.5, e.g. `<BASE>\regression\<DATE>\<HH-MM-SS>`):
 
 ```
 You are a trading session analyst for an automated MNQ futures strategy.
 Your job is to cross-reference all session data sources and write two analysis files.
 
-BASE = C:\Users\gilad\projects\auto-co-trader\live
+BASE = C:\Users\gilad\projects\auto-co-trader\live           # the worktree root
+GLOBAL = <GLOBAL>                                            # ACT_GLOBAL_DIR; default ~/projects/auto-co-trader/global
 DATE = <DATE>
-SESSION = <BASE>\sessions\<DATE>
-REGRESSION = <BASE>\data\regression\<DATE>
+SESSION = <GLOBAL>\sessions\<DATE>
+REGRESSION = <RUN>                                           # <BASE>\regression\<DATE>\<HH-MM-SS> (the run from Step 2.5)
 
 ---
 DATA SOURCES TO READ (read ALL of them before writing anything):
@@ -149,8 +169,8 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
    Price levels computed at session open: TDO, TWO, week_high, week_low, day_high,
    day_low, day_mid, etc. Use these for context when evaluating targets/stops.
 
-8. <BASE>\data\MNQ_1m.parquet
-   Read with pandas: pd.read_parquet("<BASE>/data/MNQ_1m.parquet")
+8. <GLOBAL>\data\main\MNQ_1m.parquet
+   Read with pandas: pd.read_parquet("<GLOBAL>/data/main/MNQ_1m.parquet")
    Filter to the session date for bar-by-bar price context (OHLCV).
    Use to verify whether a stop was swept by a wick, whether price continued
    after an exit, and to understand market structure.

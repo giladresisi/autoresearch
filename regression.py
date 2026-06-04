@@ -8,14 +8,49 @@
 # --update-baseline: overwrite baseline with current run output.
 
 import argparse
+import datetime
 import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+import paths
+
+
+def _git_version() -> str:
+    """Short commit + dirty flag for the run's info.md (best-effort; never raises)."""
+    try:
+        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True, check=False).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain"],
+                               capture_output=True, text=True, check=False).stdout.strip()
+        return f"{head or 'unknown'}{' (dirty)' if dirty else ''}"
+    except Exception:
+        return "unknown"
+
+
+def _write_run_info(run_dir: Path, date: str, mode: str,
+                    started: datetime.datetime, baseline_ref: str) -> None:
+    """Write a minimal info.md recording what produced this run's outputs.
+
+    Fields are intentionally minimal for now; the full schema is user-specified later.
+    """
+    th_start = started.astimezone(ZoneInfo("Asia/Bangkok")).strftime("%H-%M-%S")
+    (run_dir / "info.md").write_text(
+        f"# Regression run\n\n"
+        f"- date: {date}\n"
+        f"- mode: {mode}\n"
+        f"- th_start: {th_start}\n"
+        f"- code_version: {_git_version()}\n"
+        f"- baseline_ref: {baseline_ref}\n\n"
+        f"<!-- TODO: full info.md field schema to be specified later. -->\n",
+        encoding="utf-8",
+    )
 
 
 def _parse_date_tokens(tokens: list[str]) -> list[str]:
@@ -94,21 +129,28 @@ def run_regression(
         dates = _parse_regression_md(regression_md_path)
     results: dict[str, dict] = {}
     _sfx = "_1s" if mode == "1s" else ""
+    # One run timestamp for the whole invocation so every date's outputs share a stamp.
+    started = datetime.datetime.now(ZoneInfo("America/New_York"))
 
     for date in dates:
-        result = run_backtest_v2(date, date, write_events=True, mode=mode)
+        result = run_backtest_v2(date, date, write_events=True, mode=mode, started=started)
         trades  = result.get("trades", [])
         events  = result.get("events", [])
         metrics = result.get("metrics", {})
 
-        reg_dir     = Path("data") / "regression" / date
-        events_path = reg_dir / f"events{_sfx}.jsonl"
-        trades_path = reg_dir / f"trades{_sfx}.tsv"
-        bl_events   = reg_dir / f"baseline_events{_sfx}.jsonl"
-        bl_trades   = reg_dir / f"baseline_trades{_sfx}.tsv"
+        # Run outputs go in a per-run timestamped folder; baselines live at a stable
+        # <regression>/<date>/baseline/ so A/B baselines survive across runs.
+        run_dir     = paths.regression_run_dir(date, started)
+        bl_dir      = paths.regression_dir() / date / "baseline"
+        bl_dir.mkdir(parents=True, exist_ok=True)
+        events_path = run_dir / f"events{_sfx}.jsonl"
+        trades_path = run_dir / f"trades{_sfx}.tsv"
+        bl_events   = bl_dir / f"baseline_events{_sfx}.jsonl"
+        bl_trades   = bl_dir / f"baseline_trades{_sfx}.tsv"
 
         _write_events_jsonl(events_path, events)
         _write_trades_tsv(trades_path, trades)
+        _write_run_info(run_dir, date, mode, started, baseline_ref=str(bl_dir))
 
         if record:
             shutil.copy2(events_path, bl_events)
@@ -153,7 +195,7 @@ def run_regression(
         if not no_plot:
             import webbrowser
             _plot_result = subprocess.run(
-                [sys.executable, "data/regression/plot_regression.py", date, mode],
+                [sys.executable, "data/regression/plot_regression.py", date, mode, str(run_dir)],
                 check=False,
                 capture_output=True,
                 text=True,

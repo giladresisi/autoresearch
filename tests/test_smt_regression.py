@@ -104,11 +104,8 @@ def real_parquet_available(_parquet_slices):
 def _redirect_state(tmp_path, monkeypatch, _parquet_slices):
     """Redirect smt_state paths so regression writes go to tmp_path."""
     import smt_state
-    monkeypatch.setattr(smt_state, "DATA_DIR",        tmp_path)
-    monkeypatch.setattr(smt_state, "GLOBAL_PATH",     tmp_path / "global.json")
-    monkeypatch.setattr(smt_state, "DAILY_PATH",      tmp_path / "daily.json")
-    monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
-    monkeypatch.setattr(smt_state, "POSITION_PATH",   tmp_path / "position.json")
+    import paths
+    monkeypatch.setattr(paths, "_STATE_DIR", tmp_path)
     # regression.py uses Path("data") relative to cwd; redirect via chdir.
     monkeypatch.chdir(tmp_path)
     tmp_data = tmp_path / "data"

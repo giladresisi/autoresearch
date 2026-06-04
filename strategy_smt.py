@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 
+import paths
+
 # Cache directory for futures parquet files.
 FUTURES_CACHE_DIR = os.environ.get(
     "FUTURES_CACHE_DIR",
@@ -669,18 +671,20 @@ def load_futures_data() -> dict[str, pd.DataFrame]:
     """Load MNQ and MES futures parquets.
 
     Checks in priority order:
-      1. data/{ticker}_{interval}.parquet             — primary store
-      2. data/{ticker}.parquet                        — legacy no-interval name
-      3. FUTURES_CACHE_DIR/{interval}/{ticker}.parquet — IB ephemeral cache
+      1. <main>/{ticker}_{interval}.parquet           — promoted production store
+      2. <main>/{ticker}.parquet                      — legacy no-interval name
+      3. FUTURES_CACHE_DIR/{interval}/{ticker}.parquet — IB ephemeral cache fallback
+    where <main> = paths.data_main_dir() (backtest read source; never the live append dir).
     Returns {"MNQ": df, "MES": df} with tz-aware ET DatetimeIndex.
     Raises FileNotFoundError if parquets are missing (run prepare_futures_1m.py).
     """
     manifest = _load_futures_manifest()
     interval = manifest.get("fetch_interval", "1m")
+    _main = paths.data_main_dir()
     result: dict[str, pd.DataFrame] = {}
     for ticker in ["MNQ", "MES"]:
-        primary_path    = Path("data") / f"{ticker}_{interval}.parquet"
-        fallback_path   = Path("data") / f"{ticker}.parquet"
+        primary_path    = _main / f"{ticker}_{interval}.parquet"
+        fallback_path   = _main / f"{ticker}.parquet"
         ib_path         = Path(FUTURES_CACHE_DIR) / interval / f"{ticker}.parquet"
         if primary_path.exists():
             path = primary_path

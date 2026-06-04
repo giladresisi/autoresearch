@@ -83,17 +83,17 @@ def make_opp_1m_recent(
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     """Redirect all four smt_state paths into a fresh tmp_path for each test."""
-    monkeypatch.setattr(smt_state, "DATA_DIR",        tmp_path)
-    monkeypatch.setattr(smt_state, "GLOBAL_PATH",     tmp_path / "global.json")
+    import paths
+    monkeypatch.setattr(paths, "_STATE_DIR", tmp_path)
+    # bar_state.json resolves under paths.sessions_dir() (global root) — isolate it too
+    # so tests that chdir + write tmp_path/sessions/<date>/bar_state.json are read back.
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
     # Write global.json with confidence="medium" so existing tests are unaffected
     # by the new confidence="high" entry-blocking branch in strategy.py.
     (tmp_path / "global.json").write_text(
         '{"all_time_high": 0.0, "confidence": "medium", "trend": "up"}',
         encoding="utf-8",
     )
-    monkeypatch.setattr(smt_state, "DAILY_PATH",      tmp_path / "daily.json")
-    monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
-    monkeypatch.setattr(smt_state, "POSITION_PATH",   tmp_path / "position.json")
 
 
 def write_hypothesis(direction="none", **kwargs):

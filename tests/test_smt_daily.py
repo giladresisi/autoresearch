@@ -101,11 +101,8 @@ def _empty_4hr() -> pd.DataFrame:
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    monkeypatch.setattr(smt_state, "DATA_DIR",        tmp_path)
-    monkeypatch.setattr(smt_state, "GLOBAL_PATH",     tmp_path / "global.json")
-    monkeypatch.setattr(smt_state, "DAILY_PATH",      tmp_path / "daily.json")
-    monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
-    monkeypatch.setattr(smt_state, "POSITION_PATH",   tmp_path / "position.json")
+    import paths
+    monkeypatch.setattr(paths, "_STATE_DIR", tmp_path)
 
 
 # ---------------------------------------------------------------------------

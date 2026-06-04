@@ -20,7 +20,9 @@ from session_pipeline import SessionPipeline
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    """chdir to tmp_path so sessions/{date}/bar_state.json lands inside the test dir."""
+    """Point the global dir (and cwd) at tmp_path so sessions/{date}/bar_state.json —
+    now resolved via paths.sessions_dir() — lands inside the test dir."""
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     yield tmp_path
 

@@ -16,6 +16,8 @@ import pandas as pd
 import smt_state
 
 from dotenv import load_dotenv
+
+import paths
 load_dotenv()
 
 _LIVE = os.getenv("LIVE_TRADING", "false").lower() == "true"
@@ -97,7 +99,7 @@ def _log(event: dict) -> None:
     remaining fields follow alphabetically.
     """
     today = _SESSION_DATE or datetime.datetime.now(_ET).date().isoformat()
-    path = Path("sessions") / today / "events.jsonl"
+    path = paths.sessions_dir() / today / "events.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     ordered: dict = {"kind": event.get("kind", ""), "time": event.get("time", "")}
     if "direction" in event:
@@ -267,10 +269,11 @@ def _current_price() -> float:
     bar = load_bar_state()
     if bar and "potential_stop_long" in bar and "potential_stop_short" in bar:
         return (float(bar["potential_stop_long"]) + float(bar["potential_stop_short"])) / 2.0
-    # Fallback: last completed bar close from the main parquets (1s preferred — freshest).
+    # Fallback: last completed bar close from the live parquets (1s preferred — freshest).
+    # Live append target — the orchestrator writes today's bars here during a session.
     for _name in ("MNQ_1s.parquet", "MNQ_1m.parquet"):
         try:
-            _p = Path("data") / _name
+            _p = paths.data_live_dir() / _name
             if _p.exists():
                 _df = pd.read_parquet(_p, columns=["Close"])
                 if not _df.empty:
@@ -684,7 +687,6 @@ def hypothesis() -> list:
         python trade.py hypothesis
     """
     import pandas as pd
-    from pathlib import Path as _Path
     import hypothesis as _hyp_mod
     from smt_state import load_hypothesis, save_hypothesis
 
@@ -698,8 +700,8 @@ def hypothesis() -> list:
     hyp["direction"] = "none"
     save_hypothesis(hyp)
 
-    mnq_path = _Path("data/MNQ_1m.parquet")
-    mes_path = _Path("data/MES_1m.parquet")
+    mnq_path = paths.data_live_dir() / "MNQ_1m.parquet"
+    mes_path = paths.data_live_dir() / "MES_1m.parquet"
     if not mnq_path.exists() or not mes_path.exists():
         print("[live_orders] hypothesis: bar parquets not found — is the orchestrator running?", flush=True)
         return []

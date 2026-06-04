@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 
+import paths
+
 
 def _fast_copy(obj):
     """Deep-copy a JSON-shaped structure ~5-8x faster than copy.deepcopy.
@@ -31,11 +33,20 @@ def _fast_copy(obj):
         return tuple(_fast_copy(v) for v in obj)
     return copy.deepcopy(obj)
 
+# The four state files resolve under paths.state_dir() AT CALL TIME, so a mid-run
+# paths.set_state_dir(...) takes effect immediately: live points the prefix at the
+# session folder, a backtest at its per-run folder. Functions (not constants) are the
+# whole point — a captured constant would freeze the prefix at import time.
+def _global_path() -> Path:     return paths.state_dir() / "global.json"
+def _daily_path() -> Path:      return paths.state_dir() / "daily.json"
+def _hypothesis_path() -> Path: return paths.state_dir() / "hypothesis.json"
+def _position_path() -> Path:   return paths.state_dir() / "position.json"
+
+# Manual entry-pause sentinel (trade.py pause/resume). Unlike the four state JSONs above,
+# this is a manual cross-process control flag (not per-session strategy state), so it
+# stays at the legacy worktree-local data/ path rather than moving under state_dir().
+# DATA_DIR is retained because is_paused() reconstructs the path from it dynamically.
 DATA_DIR        = Path("data")
-GLOBAL_PATH     = DATA_DIR / "global.json"
-DAILY_PATH      = DATA_DIR / "daily.json"
-HYPOTHESIS_PATH = DATA_DIR / "hypothesis.json"
-POSITION_PATH   = DATA_DIR / "position.json"
 PAUSE_PATH      = DATA_DIR / "paused"   # manual entry-pause sentinel (trade.py pause/resume)
 
 # Session date locked at startup (ET date, YYYY-MM-DD). Set via set_session_date().
@@ -97,6 +108,69 @@ def set_in_memory_mode(enabled: bool) -> None:
     _STORE.clear()
 
 
+def reset_in_memory() -> None:
+    """Clear the in-memory store + hypothesis cache without toggling the mode flag.
+
+    Called at the start of each backtest run/date so a fresh state_dir starts from a
+    clean slate and never inherits the previous run's _STORE entries.
+    """
+    global _hyp_cache, _hyp_cache_valid
+    _hyp_cache = None
+    _hyp_cache_valid = False
+    _STORE.clear()
+
+
+def seed_global_from_prior() -> None:
+    """Live only: carry all_time_high forward across the now per-session state folders.
+
+    Each live session's global.json starts fresh, so without this the dynamic ATH would
+    reset every session. Scans the most recent prior session's global.json under
+    paths.sessions_dir() and seeds the current session's ATH if higher. No-op in
+    in-memory (backtest) mode — backtests must stay deterministic/isolated. Never raises.
+    """
+    if _IN_MEMORY:
+        return
+    try:
+        cur = paths.state_dir().resolve()
+        root = paths.sessions_dir()
+        best = 0.0
+        if root.exists():
+            for child in root.iterdir():
+                if not child.is_dir() or child.resolve() == cur:
+                    continue
+                gp = child / "global.json"
+                if not gp.exists():
+                    continue
+                try:
+                    ath = float(json.loads(gp.read_text(encoding="utf-8")).get("all_time_high", 0.0) or 0.0)
+                except (json.JSONDecodeError, OSError, TypeError, ValueError):
+                    continue
+                best = max(best, ath)
+        if best > 0.0:
+            g = load_global()
+            if best > float(g.get("all_time_high", 0.0) or 0.0):
+                g["all_time_high"] = best
+                save_global(g)
+    except Exception:
+        return
+
+
+def final_snapshot() -> None:
+    """Dump the four state files for the current state_dir() to disk as real JSON.
+
+    Used by backtests (which run in-memory) to leave one inspectable snapshot of the
+    final state in the per-run folder. No-op for files never written this run.
+    """
+    target = paths.state_dir()
+    for name in ("global.json", "daily.json", "hypothesis.json", "position.json"):
+        data = _STORE.get(str(target / name))
+        if data is None:
+            continue
+        (target / name).write_text(
+            json.dumps(data, indent=2, sort_keys=True), encoding="utf-8"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -137,26 +211,26 @@ def _load(path: Path, default: dict) -> dict:
 
 
 def load_global() -> dict:
-    return _load(GLOBAL_PATH, DEFAULT_GLOBAL)
+    return _load(_global_path(), DEFAULT_GLOBAL)
 
 
 def save_global(d: dict) -> None:
-    _atomic_write(GLOBAL_PATH, d)
+    _atomic_write(_global_path(), d)
 
 
 def load_daily() -> dict:
-    return _load(DAILY_PATH, DEFAULT_DAILY)
+    return _load(_daily_path(), DEFAULT_DAILY)
 
 
 def save_daily(d: dict) -> None:
-    _atomic_write(DAILY_PATH, d)
+    _atomic_write(_daily_path(), d)
 
 
 def load_hypothesis() -> dict:
     global _hyp_cache, _hyp_cache_valid
     if not _IN_MEMORY and _hyp_cache_valid and _hyp_cache is not None:
         return _fast_copy(_hyp_cache)
-    result = _load(HYPOTHESIS_PATH, DEFAULT_HYPOTHESIS)
+    result = _load(_hypothesis_path(), DEFAULT_HYPOTHESIS)
     if not _IN_MEMORY:
         _hyp_cache = _fast_copy(result)
         _hyp_cache_valid = True
@@ -165,18 +239,18 @@ def load_hypothesis() -> dict:
 
 def save_hypothesis(d: dict) -> None:
     global _hyp_cache, _hyp_cache_valid
-    _atomic_write(HYPOTHESIS_PATH, d)
+    _atomic_write(_hypothesis_path(), d)
     if not _IN_MEMORY:
         _hyp_cache = _fast_copy(d)
         _hyp_cache_valid = True  # write-through: cache the new value immediately
 
 
 def load_position() -> dict:
-    return _load(POSITION_PATH, DEFAULT_POSITION)
+    return _load(_position_path(), DEFAULT_POSITION)
 
 
 def save_position(d: dict) -> None:
-    _atomic_write(POSITION_PATH, d)
+    _atomic_write(_position_path(), d)
 
 
 def is_paused() -> bool:
@@ -201,7 +275,7 @@ def bar_state_path(date_str: str | None = None) -> Path:
     # local date has rolled over but the ET session date has not (after ~13:00 ET for a
     # UTC+7 clock) — which made an ad-hoc close read no bar_state and log price 0.0.
     d = date_str or _SESSION_DATE or _dt.datetime.now(_zi.ZoneInfo("America/New_York")).date().isoformat()
-    return Path("sessions") / d / "bar_state.json"
+    return paths.sessions_dir() / d / "bar_state.json"
 
 
 def save_bar_state(data: dict, date_str: str | None = None) -> None:

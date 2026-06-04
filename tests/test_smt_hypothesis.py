@@ -29,11 +29,8 @@ from hypothesis import run_hypothesis
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     """Redirect all four smt_state paths into a fresh tmp_path for each test."""
-    monkeypatch.setattr(smt_state, "DATA_DIR",        tmp_path)
-    monkeypatch.setattr(smt_state, "GLOBAL_PATH",     tmp_path / "global.json")
-    monkeypatch.setattr(smt_state, "DAILY_PATH",      tmp_path / "daily.json")
-    monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
-    monkeypatch.setattr(smt_state, "POSITION_PATH",   tmp_path / "position.json")
+    import paths
+    monkeypatch.setattr(paths, "_STATE_DIR", tmp_path)
     # Clear the process-level hypothesis cache so a previous test's saved hypothesis
     # does not bleed into this test via the in-memory cache.
     monkeypatch.setattr(smt_state, "_hyp_cache_valid", False)

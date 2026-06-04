@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
+import paths
 from hypothesis_smt import compute_hypothesis_context
 import strategy_smt
 from session_times import SESSION_OPEN as _SESSION_OPEN_V2, SESSION_CLOSE as _SESSION_CLOSE_V2
@@ -433,7 +434,7 @@ def run_backtest(
     _position_id          = 0    # monotonic counter; shared by partial + final records of same position
 
     # Load 5m historical for hypothesis direction (deterministic, no API calls)
-    _hist_mnq_path = Path("data/MNQ.parquet")
+    _hist_mnq_path = paths.data_main_dir() / "MNQ.parquet"
     _hist_mnq_df = pd.read_parquet(_hist_mnq_path) if _hist_mnq_path.exists() else pd.DataFrame(
         columns=["Open", "High", "Low", "Close", "Volume"]
     )
@@ -1174,16 +1175,22 @@ def _build_5m_bar_v2(session_bars: "pd.DataFrame", bar_ts: "pd.Timestamp") -> "d
     }
 
 
-def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True, mode: str = "1m") -> dict:
+def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True,
+                    mode: str = "1m", started: "datetime.datetime | None" = None) -> dict:
     """SMT v2 backtest: dispatches daily/hypothesis/trend/strategy per bar.
 
     Self-contained — does not use any globals from the existing run_backtest path.
     State JSON files are reset at the start of each day.
 
-    mode="1m" (default): one pipeline call per completed 1m bar from data/MNQ_1m.parquet.
+    mode="1m" (default): one pipeline call per completed 1m bar from <main>/MNQ_1m.parquet.
     mode="1s": aggregates 1s bars into a running partial 1m bar and calls pipeline once per
-               second, simulating live per-tick behavior. Requires data/MNQ_1s.parquet and
-               data/MES_1s.parquet. Writes events_1s.jsonl / trades_1s.tsv.
+               second, simulating live per-tick behavior. Requires <main>/MNQ_1s.parquet and
+               <main>/MES_1s.parquet (with the FUTURES_CACHE_DIR 1s cache as fallback).
+               Writes events_1s.jsonl / trades_1s.tsv.
+
+    started: run start time used to name the per-run regression output folder
+             (paths.regression_run_dir). Defaults to now (ET) so direct callers and a
+             multi-date regression run group all their per-date outputs under one stamp.
 
     Returns a dict with keys: trades, events, metrics.
     """
@@ -1193,11 +1200,19 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
     from session_pipeline import SessionPipeline
     from strategy_smt import load_futures_data
 
+    # One stamp for the whole run so every date's outputs share a run folder name.
+    if started is None:
+        from zoneinfo import ZoneInfo as _ZI
+        started = datetime.datetime.now(_ZI("America/New_York"))
+
     _smt_state.set_in_memory_mode(True)
+    # Per-date set_state_dir below mutates the module-global prefix; remember the caller's
+    # so we never leak a backtest's per-run folder into live/test module state.
+    _prev_state_dir = paths._STATE_DIR
 
     if mode == "1s":
         import numpy as _np
-        _1s_dir = Path("data")
+        _1s_dir = paths.data_main_dir()
         _1s_cache = Path(FUTURES_CACHE_DIR) / "1s"
         _mnq_1s_p = (_1s_dir / "MNQ_1s.parquet") if (_1s_dir / "MNQ_1s.parquet").exists() else (_1s_cache / "MNQ.parquet")
         _mes_1s_p = (_1s_dir / "MES_1s.parquet") if (_1s_dir / "MES_1s.parquet").exists() else (_1s_cache / "MES.parquet")
@@ -1224,6 +1239,13 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
     for bday in business_days:
         date = bday.date()
+
+        # Isolate this date's state in its own per-run folder and start from a clean
+        # in-memory store, so parallel/repeated runs never collide and one final
+        # snapshot of the four state JSONs can be dumped per date (see final_snapshot).
+        _run_dir = paths.regression_run_dir(str(date), started)
+        paths.set_state_dir(_run_dir)
+        _smt_state.reset_in_memory()
 
         # ------------------------------------------------------------------ #
         # Per-day timestamps                                                   #
@@ -1281,8 +1303,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                 "liquidities":  _ld().get("liquidities", []),
                 "all_time_high": _lg().get("all_time_high"),
             }
-            _lvl_path = Path(f"data/regression/{date}") / "levels.json"
-            _lvl_path.parent.mkdir(parents=True, exist_ok=True)
+            _lvl_path = _run_dir / "levels.json"
             _lvl_path.write_text(_json.dumps(_levels_snap, indent=2), encoding="utf-8")
 
         # ------------------------------------------------------------------ #
@@ -1485,9 +1506,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         # Write per-day outputs                                                 #
         # ------------------------------------------------------------------ #
         if write_events:
-            import os as _os
-            out_dir = Path(f"data/regression/{date}")
-            out_dir.mkdir(parents=True, exist_ok=True)
+            out_dir = _run_dir
             _sfx = "_1s" if mode == "1s" else ""
 
             events_path = out_dir / f"events{_sfx}.jsonl"
@@ -1508,10 +1527,14 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                     w.writeheader()
                     w.writerows(day_trades)
 
+            # One inspectable snapshot of the day's final state into the per-run folder.
+            _smt_state.final_snapshot()
+
     # ------------------------------------------------------------------ #
     # Aggregate metrics                                                     #
     # ------------------------------------------------------------------ #
     _smt_state.set_in_memory_mode(False)
+    paths.set_state_dir(_prev_state_dir)  # restore caller's prefix (no leak)
     stats = _compute_metrics_v2(all_trades, equity_curve_v2)
 
     return {

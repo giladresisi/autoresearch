@@ -28,9 +28,18 @@ def _read_events(sessions_dir: Path, date: str) -> list[dict]:
     return [json.loads(line) for line in lines if line.strip()]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_global_dir(tmp_path, monkeypatch):
+    """Session events + bar_state now resolve under paths.sessions_dir() (global root).
+    Point it at tmp_path for EVERY test so none read the real machine-global session
+    data (a stray real bar_state.json would otherwise leak into _session_mid_price)."""
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
+
+
 @pytest.fixture()
 def _in_tmp(tmp_path, monkeypatch):
-    """chdir to tmp_path so Path('sessions/...') lands in tmp_path."""
+    """chdir to tmp_path so Path('sessions/...') and cwd-relative state land in tmp_path.
+    With _isolate_global_dir above, paths.sessions_dir() == tmp_path/sessions too."""
     monkeypatch.chdir(tmp_path)
     return tmp_path
 

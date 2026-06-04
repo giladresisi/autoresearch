@@ -25,22 +25,21 @@ from smt_state import (
     save_position,
 )
 
+# 4th element is the bare filename; the state dir is redirected to tmp_path by _isolate,
+# so the four JSONs resolve to tmp_path/<filename>.
 _LOAD_SAVE_PAIRS = [
-    (load_global,     save_global,     DEFAULT_GLOBAL,     smt_state.GLOBAL_PATH),
-    (load_daily,      save_daily,      DEFAULT_DAILY,      smt_state.DAILY_PATH),
-    (load_hypothesis, save_hypothesis, DEFAULT_HYPOTHESIS, smt_state.HYPOTHESIS_PATH),
-    (load_position,   save_position,   DEFAULT_POSITION,   smt_state.POSITION_PATH),
+    (load_global,     save_global,     DEFAULT_GLOBAL,     "global.json"),
+    (load_daily,      save_daily,      DEFAULT_DAILY,      "daily.json"),
+    (load_hypothesis, save_hypothesis, DEFAULT_HYPOTHESIS, "hypothesis.json"),
+    (load_position,   save_position,   DEFAULT_POSITION,   "position.json"),
 ]
 
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    """Redirect all four state paths into a fresh tmp_path for each test."""
-    monkeypatch.setattr(smt_state, "DATA_DIR",        tmp_path)
-    monkeypatch.setattr(smt_state, "GLOBAL_PATH",     tmp_path / "global.json")
-    monkeypatch.setattr(smt_state, "DAILY_PATH",      tmp_path / "daily.json")
-    monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
-    monkeypatch.setattr(smt_state, "POSITION_PATH",   tmp_path / "position.json")
+    """Redirect the state-dir prefix into a fresh tmp_path for each test."""
+    import paths
+    monkeypatch.setattr(paths, "_STATE_DIR", tmp_path)
     # Reset hypothesis cache and in-memory flag so tests don't bleed state into each other
     monkeypatch.setattr(smt_state, "_hyp_cache",       None)
     monkeypatch.setattr(smt_state, "_hyp_cache_valid", False)
@@ -64,14 +63,14 @@ class TestLoadReturnsDefaultWhenSchemaMismatch:
     @pytest.mark.parametrize("load_fn,save_fn,default,path_attr", _LOAD_SAVE_PAIRS)
     def test_bad_file_returns_default(self, load_fn, save_fn, default, path_attr, tmp_path):
         # Write a file with only an unrecognized key (missing all required keys)
-        bad_path = tmp_path / path_attr.name
+        bad_path = tmp_path / path_attr
         bad_path.write_text(json.dumps({"foo": 1}), encoding="utf-8")
         result = load_fn()
         assert result == default
 
     @pytest.mark.parametrize("load_fn,save_fn,default,path_attr", _LOAD_SAVE_PAIRS)
     def test_bad_file_left_on_disk(self, load_fn, save_fn, default, path_attr, tmp_path):
-        bad_path = tmp_path / path_attr.name
+        bad_path = tmp_path / path_attr
         bad_path.write_text(json.dumps({"foo": 1}), encoding="utf-8")
         load_fn()
         # Original bad file must still be present (load does not overwrite)

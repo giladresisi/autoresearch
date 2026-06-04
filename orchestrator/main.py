@@ -30,11 +30,14 @@ from orchestrator.scheduler import get_et_now, is_trading_day, next_session_open
 from orchestrator.summarizer import Summarizer
 from session_times import SESSION_OPEN as _SESSION_OPEN_V2, SESSION_CLOSE as _SESSION_CLOSE_V2
 
+import paths
+
 LIVE_TRADING = _os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
 _ET = ZoneInfo("America/New_York")
 _SIGNAL_SMT = Path(__file__).parent.parent / "signal_smt.py"
-_SESSIONS_DIR = Path(__file__).parent.parent / "sessions"
+# Live sessions live in the machine-global folder so every worktree can see them.
+_SESSIONS_DIR = paths.sessions_dir()
 
 
 def _make_session_channels(date: datetime.date) -> tuple[OutputChannel, OutputChannel]:
@@ -100,9 +103,8 @@ def _pre_session_init() -> None:
     All backfill is IB-only. Databento disabled: retroactive roll adjustments cause
     price discontinuities in append-only parquets.
     """
-    from pathlib import Path as _Path
     _check_ib_reachable()
-    bar_data_dir = _Path(__file__).resolve().parent.parent / "data"
+    bar_data_dir = paths.data_live_dir()
     try:
         from data.parquet_maintenance import merge_session_1s_parquets
         merge_session_1s_parquets(bar_data_dir)
@@ -174,7 +176,7 @@ def _cli_check_parquets() -> None:
     whether to call --create-empty-parquets or ask the user to copy files.
     """
     import json
-    bar_data_dir = Path(__file__).resolve().parent.parent / "data"
+    bar_data_dir = paths.data_live_dir()
     required = ["MNQ_1m.parquet", "MES_1m.parquet", "MNQ_1s.parquet", "MES_1s.parquet"]
     missing = [f for f in required if not (bar_data_dir / f).exists()]
     print(json.dumps({"missing": missing}), flush=True)
@@ -188,7 +190,7 @@ def _cli_create_empty_parquets() -> None:
     --check-parquets.  Skips files that already exist.
     """
     import pandas as _pd
-    bar_data_dir = Path(__file__).resolve().parent.parent / "data"
+    bar_data_dir = paths.data_live_dir()
     required = ["MNQ_1m.parquet", "MES_1m.parquet", "MNQ_1s.parquet", "MES_1s.parquet"]
     empty = _pd.DataFrame(
         columns=["Open", "High", "Low", "Close", "Volume"],
@@ -407,7 +409,7 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
     _kill_stale_orchestrator()
     if not skip_summary and summarizer is None:
         summarizer = Summarizer()
-    bar_data_dir = Path(__file__).resolve().parent.parent / "data"
+    bar_data_dir = paths.data_live_dir()
     _check_parquet_files(bar_data_dir)
     _pre_src = None
     _pre_thr = None
@@ -464,12 +466,21 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
             # Run session (no pre-session IB during session — subprocess owns the IB connection)
             signal_ch, orch_ch = _make_session_channels(today)
             relay = SessionRelay(signal_ch)
+            # This session's state JSONs live in its session folder. Resolve the dir once
+            # here and hand the SAME path to the subprocess via ACT_STATE_DIR so both
+            # processes agree by construction — the session-end position check below must
+            # read exactly what the subprocess wrote (a date mismatch would miss an open
+            # position at close).
+            _session_state_dir = _SESSIONS_DIR / today.isoformat()
+            paths.set_state_dir(_session_state_dir)
             if LIVE_TRADING:
                 signal_cmd = ["uv", "run", "python", "-m", "automation.main"]
             else:
                 signal_cmd = _SIGNAL_SMT
             print(f"[orchestrator] mode={'LIVE_TRADING' if LIVE_TRADING else 'signal'}", flush=True)
-            _extra = {"FORCE_RESET": "true"} if force_reset else None
+            _extra = {"ACT_STATE_DIR": str(_session_state_dir)}
+            if force_reset:
+                _extra["FORCE_RESET"] = "true"
             result = ProcessManager(signal_cmd, relay, orch_ch, extra_env=_extra).run_session(today, grace_end_dt=grace_end_dt)
             # Post-session: fill the ~2-min gap (gap-fill end → first session tick) and merge
             # session 1s parquet into main. This runs before pre-session IB restarts so the

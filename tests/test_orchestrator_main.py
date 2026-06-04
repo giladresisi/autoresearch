@@ -18,6 +18,14 @@ from orchestrator.main import (
 _ET = ZoneInfo("America/New_York")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_global_dir(tmp_path, monkeypatch):
+    """bar_data_dir / sessions now resolve under paths.*_dir() (global root). Point it at
+    a per-test tmp dir so run()/_start_pre_session_ib/_check_parquet_files never touch the
+    real machine-global data — which made some run() tests non-deterministic."""
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
+
+
 def _dt(hour, minute=0, date=None):
     """Helper: return an ET datetime for a specific time on 2026-04-21 (Tuesday, trading day)."""
     if date is None:
@@ -357,11 +365,16 @@ def test_check_parquet_files_invalid_input_loops(tmp_path):
 # _cli_check_parquets tests
 # ---------------------------------------------------------------------------
 
-def test_cli_check_parquets_exits_0_when_all_present(tmp_path, capsys):
-    """--check-parquets exits 0 and reports empty missing list when all files exist."""
+def test_cli_check_parquets_exits_0_when_all_present(tmp_path, capsys, monkeypatch):
+    """--check-parquets exits 0 and reports empty missing list when all files exist.
+
+    The orchestrator's parquets now live in paths.data_live_dir() (the live append
+    target), so point ACT_GLOBAL_DIR at tmp_path and write the files under data/live.
+    """
     import json, pandas as pd
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
+    data_dir = tmp_path / "data" / "live"
+    data_dir.mkdir(parents=True)
     empty = pd.DataFrame(
         columns=["Open", "High", "Low", "Close", "Volume"],
         index=pd.DatetimeIndex([], tz="America/New_York"),
@@ -370,8 +383,7 @@ def test_cli_check_parquets_exits_0_when_all_present(tmp_path, capsys):
     for fname in ["MNQ_1m.parquet", "MES_1m.parquet", "MNQ_1s.parquet", "MES_1s.parquet"]:
         empty.to_parquet(data_dir / fname)
 
-    with patch("orchestrator.main.__file__", str(tmp_path / "orchestrator" / "main.py")), \
-         pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(SystemExit) as exc_info:
         _cli_check_parquets()
 
     assert exc_info.value.code == 0
@@ -379,13 +391,12 @@ def test_cli_check_parquets_exits_0_when_all_present(tmp_path, capsys):
     assert data == {"missing": []}
 
 
-def test_cli_check_parquets_exits_1_when_files_missing(tmp_path, capsys):
-    """--check-parquets exits 1 and lists missing files in JSON when data/ is empty."""
+def test_cli_check_parquets_exits_1_when_files_missing(tmp_path, capsys, monkeypatch):
+    """--check-parquets exits 1 and lists missing files in JSON when data/live is empty."""
     import json
-    (tmp_path / "data").mkdir()  # empty data dir — no parquets
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))  # data/live is empty -> all missing
 
-    with patch("orchestrator.main.__file__", str(tmp_path / "orchestrator" / "main.py")), \
-         pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(SystemExit) as exc_info:
         _cli_check_parquets()
 
     assert exc_info.value.code == 1
@@ -395,17 +406,16 @@ def test_cli_check_parquets_exits_1_when_files_missing(tmp_path, capsys):
     }
 
 
-def test_cli_create_empty_parquets_creates_all_missing(tmp_path, capsys):
-    """--create-empty-parquets creates all 4 files when none exist."""
+def test_cli_create_empty_parquets_creates_all_missing(tmp_path, capsys, monkeypatch):
+    """--create-empty-parquets creates all 4 files (under data/live) when none exist."""
     import pandas as pd
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
 
-    with patch("orchestrator.main.__file__",
-               str(tmp_path / "orchestrator" / "main.py")):
-        with pytest.raises(SystemExit) as exc_info:
-            _cli_create_empty_parquets()
+    with pytest.raises(SystemExit) as exc_info:
+        _cli_create_empty_parquets()
 
     assert exc_info.value.code == 0
-    data_dir = tmp_path / "data"
+    data_dir = tmp_path / "data" / "live"
     for fname in ["MNQ_1m.parquet", "MES_1m.parquet", "MNQ_1s.parquet", "MES_1s.parquet"]:
         assert (data_dir / fname).exists()
         df = pd.read_parquet(data_dir / fname)

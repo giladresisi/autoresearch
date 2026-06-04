@@ -85,11 +85,8 @@ def _daily_with_levels(levels: list[dict]) -> dict:
 @pytest.fixture(autouse=True)
 def redirect_paths(tmp_path, monkeypatch):
     """Redirect all smt_state path constants to tmp_path so tests are isolated."""
-    monkeypatch.setattr(smt_state, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(smt_state, "GLOBAL_PATH", tmp_path / "global.json")
-    monkeypatch.setattr(smt_state, "DAILY_PATH", tmp_path / "daily.json")
-    monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
-    monkeypatch.setattr(smt_state, "POSITION_PATH", tmp_path / "position.json")
+    import paths
+    monkeypatch.setattr(paths, "_STATE_DIR", tmp_path)
     monkeypatch.setattr(smt_state, "_hyp_cache_valid", False)
 
     # trend.py imports these at the top of each call; we must also patch the

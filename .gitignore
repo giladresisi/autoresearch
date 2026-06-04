@@ -36,9 +36,11 @@ tests/fixtures/*.parquet
 .env
 
 # Live session logs (real trading data, not committed)
+# LEGACY: live sessions now live in <global>/sessions/ (outside any worktree); kept harmless.
 sessions/
 
 # Parquet data files (large, not committed)
+# LEGACY: production parquets now live in <global>/data/{main,live}/; kept harmless.
 data/*.parquet
 data/historical/*.parquet
 data/realtime/*.parquet
@@ -48,9 +50,13 @@ data/realtime/*.parquet
 trades.tsv
 
 # SMT v2 regression outputs (baselines are local, not committed)
+# New worktree-root regression output dir (paths.regression_dir(), per-run subfolders).
+regression/
+# LEGACY: pre-restructure regression outputs (now under worktree-root regression/); harmless.
 data/regression/*/
 
 # SMT v2 runtime state files (ephemeral, not committed)
+# LEGACY: state JSONs now resolve under paths.state_dir() (session / per-run folder); harmless.
 data/*.json
 
 # Orchestrator runtime files

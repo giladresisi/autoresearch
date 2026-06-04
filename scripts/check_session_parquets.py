@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 from dotenv import load_dotenv
 
+import paths
+
 load_dotenv()
 
 HOST      = os.environ.get("IB_HOST", "127.0.0.1")
@@ -37,7 +39,10 @@ LARGE_GAP_THRESHOLD    = pd.Timedelta("60min")
 BAD_ROW_MINOR_FRAC     = 0.01
 BAD_ROW_CRITICAL_FRAC  = 0.05
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+# Live session files + live parquets now live in the machine-global live dir; the
+# script reads/repairs/merges there. A successful session-end merge then PROMOTES the
+# validated parquets live -> main (see promote_live_to_main).
+DATA_DIR = paths.data_live_dir()
 
 INSTRUMENTS = [
     ("MNQ", MNQ_CONID, "MNQ_1s.parquet", "MNQ_1s_session_*.parquet"),
@@ -299,6 +304,42 @@ def backup_main(main_path: Path) -> None:
     bak = main_path.with_suffix(".parquet.bak")
     shutil.copy2(main_path, bak)
     print(f"[check] Backed up {main_path.name} -> {main_path.name}.bak", file=sys.stderr)
+
+
+# Parquet filenames promoted live -> main after a successful session-end merge.
+PROMOTE_NAMES = ["MNQ_1m.parquet", "MES_1m.parquet", "MNQ_1s.parquet", "MES_1s.parquet"]
+
+
+def promote_live_to_main() -> dict:
+    """Promote validated parquets from data_live_dir() to data_main_dir().
+
+    This is the FINAL step after a successful session-end merge: the live parquets
+    have just been validated + merged, so they are copied into the backtest read
+    source (main). The prior main file is backed up to <name>.parquet.bak first, and
+    the copy is atomic (write to a .tmp in the main dir, then os.replace).
+
+    Returns a per-file status dict for the JSON report.
+    """
+    live_dir = paths.data_live_dir()
+    main_dir = paths.data_main_dir()
+    promoted: dict = {}
+
+    for name in PROMOTE_NAMES:
+        src = live_dir / name
+        if not src.exists():
+            continue
+        dst = main_dir / name
+        # Back up the existing main file before overwriting it.
+        if dst.exists():
+            shutil.copy2(dst, dst.with_suffix(".parquet.bak"))
+        # Atomic copy: stage into the main dir, then os.replace onto the target.
+        tmp = dst.with_suffix(".parquet.promote.tmp")
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+        promoted[name] = "ok"
+        print(f"[check] Promoted {name} live -> main", file=sys.stderr)
+
+    return promoted
 
 
 def targeted_fill(ib, contract, session_path: Path, unexpected_gaps: list, session_df: pd.DataFrame) -> pd.DataFrame:
@@ -661,6 +702,27 @@ def main():
 
         for _inst in report["instruments"]:
             if report["instruments"][_inst].get("merge_success") is False:
+                exit_code = max(exit_code, 2)
+
+        # ── Final step: promote validated live parquets -> main ──────────────────
+        # Only after a SUCCESSFUL session-end merge. The live parquets have just been
+        # validated + merged; main is the backtest read source and lags by one session.
+        report["promotion"] = None
+        merge_succeeded = any(
+            r.get("merge_success") is True for r in report["instruments"].values()
+        )
+        if (
+            args.mode == "session-end"
+            and not args.dry_run
+            and merge_succeeded
+        ):
+            try:
+                report["promotion"] = {
+                    "promote_success": True,
+                    "promoted": promote_live_to_main(),
+                }
+            except Exception as _exc:
+                report["promotion"] = {"promote_success": False, "reason": str(_exc)}
                 exit_code = max(exit_code, 2)
 
         report["instruments_1m"] = {}
