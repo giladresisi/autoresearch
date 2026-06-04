@@ -732,19 +732,44 @@ class TestStopEntryMktDowngradeSafety:
         assert result["price"] == pytest.approx(190.0), "far entry unchanged"
         assert result["stop"] == pytest.approx(202.0), "far stop unchanged"
 
-    def test_proximity_entry_still_rejected_when_anchored_stop_too_close(self):
-        """Un-reached entry whose natural stop is < MIN_STOP_DISTANCE returns None
-        (the existing relative-to-entry check still fires)."""
+    def test_proximity_entry_widens_stop_to_floor_when_anchored_stop_too_close(self):
+        """Un-reached resting entry whose natural stop is < MKT_FILL_MIN_STOP_DISTANCE is
+        WIDENED to the floor (10 pts from the trigger), not rejected. A resting stop entry
+        fills at its trigger as a market/STP order, so it gets the same stop floor as the
+        market path (incident 2026-06-04: tight resting stops stopped out on the entry bar)."""
         write_hypothesis(direction="down")
         write_position()
         # opp bar range tiny: body_low=194, body_high=196, high=197 -> stop_loss=197
-        # bar_open=210 -> entry_price=min(194,200)=194 ; stop_loss-entry=197-194=3 < 5
-        # bar high=215 low=205 -> bar_mid=210 ; 210<=194? no -> no re-anchor -> reject
+        # bar_open=210 -> entry_price=min(194,200)=194 ; natural risk=197-194=3 (< floor 10)
+        # bar high=215 low=205 -> bar_mid=210 ; 210<=194? no -> resting -> widen stop to 194+10=204
         bar = make_5m_bar(open_=210.0, high=215.0, low=205.0, close=208.0)
         recent = make_opp_1m_recent("down", open_=194.0, close_=196.0, high=197.0, low=190.0)
         result = run_strategy(NOW, bar, recent)
 
-        assert result is None, "stop within MIN_STOP_DISTANCE of entry must reject"
+        assert result is not None
+        assert result["kind"] in ("new-stop-entry", "move-stop-entry")
+        assert result["price"] == pytest.approx(194.0), "entry unchanged (resting trigger)"
+        assert result["stop"] == pytest.approx(204.0), "stop widened to the 10pt floor"
+        assert abs(result["stop"] - result["price"]) == pytest.approx(10.0)
+
+    def test_resting_stop_in_5_to_10_band_widens_to_floor(self):
+        """LONG: a resting stop entry whose natural stop is in the 5-10 pt band (previously
+        accepted AS-IS, the 2026-06-04 instant-stop-out band) is now widened to the 10 pt
+        floor — modelling entries placed ~6-7 pts off the conf low that stopped out on entry."""
+        write_hypothesis(direction="up")
+        write_position()
+        # opp(bearish): body_high=115 (entry), body_low=110, low=108 -> stop_loss=max(108,95)=108
+        # bar_open=100 -> entry_price=max(115, 110)=115 ; natural risk=115-108=7 (5<7<10)
+        # bar high=110 low=90 -> bar_mid=100 < entry 115 -> resting -> widen stop to 115-10=105
+        bar = make_5m_bar(open_=100.0, high=110.0, low=90.0, close=103.0)
+        recent = make_opp_1m_recent("up", open_=115.0, close_=110.0, high=116.0, low=108.0)
+        result = run_strategy(NOW, bar, recent)
+
+        assert result is not None
+        assert result["kind"] in ("new-stop-entry", "move-stop-entry")
+        assert result["price"] == pytest.approx(115.0)
+        assert result["stop"] == pytest.approx(105.0), "7pt natural stop widened to 10pt floor"
+        assert abs(result["stop"] - result["price"]) == pytest.approx(10.0)
 
     # --- R1: will_market_fill mirror — downgrade only when trigger reached ----
 

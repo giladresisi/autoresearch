@@ -523,27 +523,29 @@ def run_strategy(
                     return None
                 if direction == _DIR_DOWN and bar_mid < entry_price - MAX_ENTRY_CHASE_PTS:
                     return None
-                # R1: mirror the live STP->MKT downgrade — market-fill only when the trigger is
-                # actually reached/passed (no near-side proximity slack). A stop whose trigger
-                # is still ahead of bar_mid rests legally and is left as a resting stop_entry.
+                # R1: mirror the live STP->MKT downgrade — the executor market-fills the moment
+                # the market reaches the trigger (pickmytrade.place_entry); below the trigger the
+                # stop rests legally as a resting stop_entry.
                 will_market_fill = (
                     (direction == _DIR_UP   and bar_mid >= entry_price) or
                     (direction == _DIR_DOWN and bar_mid <= entry_price)
                 )
-                if will_market_fill:
-                    expected_fill = bar_mid
-                    # Fix 2: floor the stop distance from the expected fill at
-                    # MKT_FILL_MIN_STOP_DISTANCE to absorb async send-time drift.
-                    risk = max(abs(stop_loss - entry_price), MKT_FILL_MIN_STOP_DISTANCE)
-                    if direction == _DIR_UP:
-                        stop_loss = expected_fill - risk
-                    else:
-                        stop_loss = expected_fill + risk
-                    entry_price = expected_fill
-                if direction == _DIR_UP and (entry_price - stop_loss) < MIN_STOP_DISTANCE:
-                    return None
-                if direction == _DIR_DOWN and (stop_loss - entry_price) < MIN_STOP_DISTANCE:
-                    return None
+                # A stop entry ultimately fills AT its trigger as a market/STP order — whether the
+                # executor downgrades it to MKT now (will_market_fill) or it triggers on a later
+                # tick. So the protective stop must clear MKT_FILL_MIN_STOP_DISTANCE from the
+                # (expected) fill on BOTH branches: re-anchor to the expected fill (bar_mid when
+                # the trigger is already reached, else the trigger itself) and floor the risk.
+                # A conf-bar stop sitting a few pts under the trigger otherwise leaves almost no
+                # room and stops out on the entry bar (incident 2026-06-04: resting stop entries
+                # placed 5-6 pts off the conf low, instant stop-out). Mirrors the market path's
+                # floor; max() only ever widens — a far conf-bar stop is left untouched.
+                expected_fill = bar_mid if will_market_fill else entry_price
+                risk = max(abs(stop_loss - entry_price), MKT_FILL_MIN_STOP_DISTANCE)
+                if direction == _DIR_UP:
+                    stop_loss = expected_fill - risk
+                else:
+                    stop_loss = expected_fill + risk
+                entry_price = expected_fill
                 # R2 headroom gate (o5-only, stop-entry path): reject before the o5 pseudo-conf
                 # is persisted as conf_bar. Measured from the resting/expected entry to its stop.
                 if _conf_is_o5 and not _headroom_ok(entry_price, stop_loss, direction, _liq, _targets):

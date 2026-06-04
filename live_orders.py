@@ -55,6 +55,27 @@ _pending_close_after: "pd.Timestamp | None" = None
 # smt_state so both this dispatch gate and the live pipeline's entry gate share one source.
 _PAUSE_FLAG = smt_state.PAUSE_PATH
 
+# Live-execution safety net mirroring strategy.MKT_FILL_MIN_STOP_DISTANCE: a stop entry the
+# executor downgrades to MKT fills at market, which can land closer to the protective stop than
+# planned — guarantee at least this many points between the fill and the stop so a downgrade fill
+# (or any caller) is never sent with a near-zero-risk stop (incident 2026-06-04). The strategy
+# already floors this on the backtested path; this is defence-in-depth at the dispatch boundary.
+# Keep in sync with strategy.MKT_FILL_MIN_STOP_DISTANCE. Live-only: never reached in backtest.
+_MIN_FILL_STOP_DISTANCE = 10.0
+
+
+def _floor_stop_distance(direction: str, entry_price: float, stop_price: float) -> float:
+    """Widen `stop_price` so it is at least _MIN_FILL_STOP_DISTANCE from `entry_price`.
+
+    Only ever widens (never tightens a structurally-farther stop). Mirrors the strategy's
+    market-fill floor so a downgrade-filled stop entry can't be left with a near-zero stop.
+    """
+    if direction == "long" and (entry_price - stop_price) < _MIN_FILL_STOP_DISTANCE:
+        return entry_price - _MIN_FILL_STOP_DISTANCE
+    if direction == "short" and (stop_price - entry_price) < _MIN_FILL_STOP_DISTANCE:
+        return entry_price + _MIN_FILL_STOP_DISTANCE
+    return stop_price
+
 
 def set_session_date(d: str) -> None:
     global _SESSION_DATE
@@ -154,6 +175,10 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float, *, s
     leaving the broker long while position.json shows flat. See incident 2026-06-04.
     """
     now = _now_et()
+    # Safety net: guarantee the protective stop clears _MIN_FILL_STOP_DISTANCE from the entry
+    # before the order (and its broker SL) is sent — a downgrade fill must never rest on a
+    # near-zero-risk stop (incident 2026-06-04). Only widens; far stops are untouched.
+    stop_price = _floor_stop_distance(direction, entry_price, stop_price)
     pmt_signal = {
         "direction": direction,
         "entry_price": entry_price,

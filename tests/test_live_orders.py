@@ -81,6 +81,50 @@ def test_place_stop_entry_logs_and_syncs(_in_tmp, _mock_today):
 
 
 # ---------------------------------------------------------------------------
+# Test 1a-floor: too-tight stop is widened to _MIN_FILL_STOP_DISTANCE before send
+# ---------------------------------------------------------------------------
+
+def test_place_stop_entry_floors_too_tight_stop(_in_tmp, _mock_today):
+    """A stop closer than _MIN_FILL_STOP_DISTANCE to the entry is widened to the floor
+    BEFORE the order is sent — so both the broker SL and position.json clear the floor
+    (incident 2026-06-04: ~3-6 pt stops filled and stopped out on the entry bar)."""
+    empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
+                 "conf_bar_entry": {}, "failed_entries": 0}
+    mock_executor = MagicMock()
+    mock_executor.place_entry.return_value = SimpleNamespace(order_type="stop")
+    mock_executor._entry_is_live = True
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=empty_pos), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
+        # long, entry 19850, stop 19847 → only 3 pts; must widen to 19850 - 10 = 19840
+        live_orders.place_stop_entry("long", 19850.0, 19847.0)
+
+    pmt_signal = mock_executor.place_entry.call_args.args[0]
+    assert pmt_signal["stop_price"] == pytest.approx(19840.0), "broker SL widened to floor"
+    assert saved["pending_stop"] == pytest.approx(19840.0), "position.json stop widened to floor"
+
+
+def test_place_stop_entry_far_stop_unchanged(_in_tmp, _mock_today):
+    """A stop already farther than the floor is left exactly as-is (floor only widens)."""
+    empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
+                 "conf_bar_entry": {}, "failed_entries": 0}
+    mock_executor = MagicMock()
+    mock_executor.place_entry.return_value = SimpleNamespace(order_type="stop")
+    mock_executor._entry_is_live = True
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=empty_pos), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
+        # short, entry 19850, stop 19880 → 30 pts (> floor); unchanged
+        live_orders.place_stop_entry("short", 19850.0, 19880.0)
+
+    pmt_signal = mock_executor.place_entry.call_args.args[0]
+    assert pmt_signal["stop_price"] == pytest.approx(19880.0)
+    assert saved["pending_stop"] == pytest.approx(19880.0)
+
+
+# ---------------------------------------------------------------------------
 # Test 1b: STP->MKT downgrade fills immediately (records active, recomputes cautious)
 # ---------------------------------------------------------------------------
 
