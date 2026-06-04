@@ -25,6 +25,16 @@ def _dt(hour, minute=0, date=None):
     return datetime.datetime(date.year, date.month, date.day, hour, minute, tzinfo=_ET)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_orchestrator_kill(monkeypatch):
+    """SAFETY: every test here calls run(), which calls the REAL _kill_stale_orchestrator — a
+    machine-wide process scan that would terminate a live orchestrator (including one running in
+    another worktree). Patch it out for the whole module so no test ever runs the real kill.
+    The worktree-scoping of _kill_stale_orchestrator itself is covered in
+    test_orchestrator_kill_scope.py (which does NOT call run())."""
+    monkeypatch.setattr("orchestrator.main._kill_stale_orchestrator", lambda: None)
+
+
 
 def test_main_after_grace_end_skips_to_next_day():
     mock_summarizer = MagicMock()
@@ -49,7 +59,7 @@ def test_main_session_dirs_created(tmp_path):
     sessions_dir = tmp_path / "sessions"
 
     # When ProcessManager.run_session is called, verify the session dir already exists
-    def assert_dir_exists(date):
+    def assert_dir_exists(date, **kwargs):  # run_session now also passes grace_end_dt=
         assert (sessions_dir / "2026-04-21").exists()
     mock_pm_instance.run_session.side_effect = assert_dir_exists
 

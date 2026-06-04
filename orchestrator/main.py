@@ -354,13 +354,18 @@ _PIDFILE = Path(__file__).resolve().parent.parent / "orchestrator.pid"
 
 
 def _kill_stale_orchestrator() -> None:
-    """Kill any stale orchestrator.main Python process, then record our own PID.
+    """Kill any stale orchestrator.main Python process FROM THIS WORKTREE, then record our PID.
 
-    Scans all Python processes for 'orchestrator.main' in their command line,
-    excluding our own process and its direct parent (the background-task wrapper
-    whose cmdline also contains 'orchestrator.main').  PID file is written last
-    so that a competing zombie that races us here will overwrite it — we detect
-    that case on the scan instead.
+    Scans Python processes for 'orchestrator.main' in their command line, excluding our own
+    process and its direct parent (the background-task wrapper whose cmdline also contains
+    'orchestrator.main').
+
+    **Worktree-scoped:** only a process whose working directory is *this* worktree's root is
+    terminated. A sibling worktree's (possibly LIVE) orchestrator is never killed — an
+    unscoped machine-wide kill here was the root cause of cross-worktree orchestrator deaths
+    (e.g. a test that calls run() in another worktree). Candidates whose cwd can't be read are
+    left alone rather than risk killing a foreign process. PID file is written last so that a
+    competing zombie that races us here will overwrite it.
     """
     import psutil
     current_pid = _os.getpid()
@@ -369,6 +374,7 @@ def _kill_stale_orchestrator() -> None:
     except psutil.NoSuchProcess:
         parent_pid = None
     protected = {current_pid, parent_pid} if parent_pid else {current_pid}
+    worktree_root = Path(__file__).resolve().parent.parent
 
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
@@ -377,13 +383,20 @@ def _kill_stale_orchestrator() -> None:
             if proc.pid in protected:
                 continue
             cmdline = proc.info.get("cmdline") or []
-            if any("orchestrator.main" in arg for arg in cmdline):
-                print(f"[orchestrator] Killing stale orchestrator (pid={proc.pid})", flush=True)
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except psutil.TimeoutExpired:
-                    proc.kill()
+            if not any("orchestrator.main" in arg for arg in cmdline):
+                continue
+            # Worktree scoping: never terminate an orchestrator from another worktree.
+            try:
+                if Path(proc.cwd()).resolve() != worktree_root:
+                    continue
+            except (psutil.Error, OSError):
+                continue  # cwd unreadable → don't risk killing a foreign process
+            print(f"[orchestrator] Killing stale orchestrator (pid={proc.pid})", flush=True)
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except psutil.TimeoutExpired:
+                proc.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     _PIDFILE.write_text(str(current_pid))

@@ -62,13 +62,28 @@ def _orchestrator_pid() -> int | None:
         return None
 
 
+def _proc_in_worktree(proc, root) -> bool:
+    """True only if `proc`'s working directory resolves to this worktree's root.
+
+    Returns False when the cwd is unreadable or belongs to another worktree — so the kill scans
+    below never terminate a sibling worktree's (possibly live) orchestrator/automation.main. An
+    unscoped machine-wide kill here was the root cause of cross-worktree orchestrator deaths."""
+    import psutil
+    from pathlib import Path
+    try:
+        return Path(proc.cwd()).resolve() == root
+    except (psutil.Error, OSError):
+        return False
+
+
 def _terminate_all() -> list[str]:
     """Gracefully stop orchestrator (cancelMktData + IB disconnect + parquet flush), then kill
-    automation.main. Returns list of killed/stopped descriptions."""
+    automation.main — **scoped to THIS worktree**. Returns list of killed/stopped descriptions."""
     import psutil
     from pathlib import Path
 
     killed = []
+    worktree_root = Path(__file__).resolve().parent
 
     pid_file = Path("orchestrator.pid")
     stop_file = Path("orchestrator_stop.req")
@@ -101,7 +116,7 @@ def _terminate_all() -> list[str]:
             if proc.info.get("name", "").lower() != "powershell.exe":
                 continue
             cmdline = " ".join(proc.info.get("cmdline") or [])
-            if "orchestrator.main" in cmdline:
+            if "orchestrator.main" in cmdline and _proc_in_worktree(proc, worktree_root):
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)
@@ -116,7 +131,7 @@ def _terminate_all() -> list[str]:
             if proc.info.get("name", "").lower() not in ("python.exe", "python"):
                 continue
             cmdline = proc.info.get("cmdline") or []
-            if any("automation.main" in arg for arg in cmdline):
+            if any("automation.main" in arg for arg in cmdline) and _proc_in_worktree(proc, worktree_root):
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)
