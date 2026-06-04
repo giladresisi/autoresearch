@@ -12,7 +12,7 @@ Usage:
   python trade.py close                  # Market close active position
   python trade.py trend-broken           # Reset hypothesis direction and log trend-broken
   python trade.py hypothesis             # Force a fresh hypothesis evaluation right now
-  python trade.py start                  # Start orchestrator (resets position.json)
+  python trade.py start                  # Start orchestrator (keeps position.json; resumes & reconciles any open position)
   python trade.py start --summary        # Start orchestrator with LLM-based summary enabled
   python trade.py start --force          # Reset hypothesis direction and position state (start fresh)
   python trade.py terminate              # Kill orchestrator and automation.main
@@ -164,7 +164,7 @@ def main() -> None:
                 sl_price = float(_sl)
             label = "LONG" if direction == "long" else "SHORT"
             print(f"Stop entry {label} at {entry_price} | S/L: {sl_price}")
-            live_orders.place_stop_entry(direction, entry_price, sl_price)
+            live_orders.place_stop_entry(direction, entry_price, sl_price, source="manual")
         else:
             bar_state = smt_state.load_bar_state()
             if bar_state is None:
@@ -177,7 +177,7 @@ def main() -> None:
                 sys.exit(1)
             label = "LONG" if direction == "long" else "SHORT"
             print(f"Market {label} | S/L: {stop}")
-            live_orders.place_market_entry(direction, 0.0, float(stop))
+            live_orders.place_market_entry(direction, 0.0, float(stop), source="manual")
 
     elif cmd == "cancel":
         pos = live_orders.get_position()

@@ -113,8 +113,16 @@ def has_pending_entry() -> bool:
 # Unified API — each function: log → executor → sync position.json
 # ---------------------------------------------------------------------------
 
-def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> None:
-    """Place unfilled stop entry. Logs, dispatches STP order, writes stop_entry to position.json."""
+def place_stop_entry(direction: str, entry_price: float, stop_price: float, *, source: str = "strategy") -> None:
+    """Place unfilled stop entry. Logs, dispatches STP order, writes stop_entry to position.json.
+
+    If the executor downgrades the STP to a market order (entry within 5 pts of the
+    market price), the broker fills immediately. In that case we record the fill in
+    strategy state right away (see _register_downgraded_fill) instead of leaving a
+    pending stop_entry — otherwise the bar-based fill detector might never confirm it
+    (price downgrade-filled below the entry level and may never reach it on a later bar),
+    leaving the broker long while position.json shows flat. See incident 2026-06-04.
+    """
     now = _now_et()
     pmt_signal = {
         "direction": direction,
@@ -123,18 +131,73 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float) -> N
         "stop_fill_bars": 1,
         "current_price": _current_price(),
     }
-    _executor.place_entry(pmt_signal, None)
+    rec = _executor.place_entry(pmt_signal, None)
+    entry_live = getattr(_executor, "_entry_is_live", True)
+    if entry_live and getattr(rec, "order_type", None) == "market":
+        _register_downgraded_fill(direction, entry_price, stop_price, source, now)
+        return
     pos = _load_pos()
     pos["stop_entry"] = str(entry_price)
     pos["stop_direction"] = "up" if direction == "long" else "down"
     pos["pending_stop"] = stop_price
-    if not getattr(_executor, "_entry_is_live", True):
+    pos["stop_entry_source"] = source
+    if not entry_live:
         pos["stop_entry_unplaced"] = True
     else:
         pos.pop("stop_entry_unplaced", None)
     _save_pos(pos)
     _log({"kind": "new-stop-entry", "time": now, "direction": direction,
           "entry_price": entry_price, "stop_price": stop_price})
+
+
+def _register_downgraded_fill(direction: str, entry_price: float, stop_price: float,
+                              source: str, now: str) -> None:
+    """Record an immediate fill after the executor downgraded an STP entry to MKT.
+
+    Mirrors the strategy's stop-entry fill transition (strategy.py): set active, clear
+    the pending stop entry, re-anchor the cautious ladder to the fill price (Addendum 4),
+    and log stop-entry-filled — all at dispatch time, since the broker already filled.
+    """
+    pos = _load_pos()
+    pos["active"] = {
+        "time": now,
+        "fill_price": entry_price,
+        "direction": direction,
+        "stop": stop_price,
+        "contracts": 2,
+        "cautious": "no",
+        "source": source,
+    }
+    pos["stop_entry"] = ""
+    pos["stop_direction"] = ""
+    pos.pop("stop_entry_source", None)
+    pos.pop("stop_entry_unplaced", None)
+    _save_pos(pos)
+    _recompute_cautious_at_fill(float(entry_price))
+    _log({"kind": "stop-entry-filled", "time": now, "direction": direction,
+          "price": entry_price, "stop_price": stop_price})
+
+
+def _recompute_cautious_at_fill(fill_price: float) -> None:
+    """Re-anchor the cautious ladder in hypothesis.json to the actual fill price.
+
+    The new-stop-entry path never recomputes cautious (only the strategy's own fill
+    paths do), so on an immediate downgrade-fill we must do it here. Best-effort: a
+    failure must not block the fill from being recorded.
+    """
+    try:
+        import smt_state
+        import hypothesis as _hyp_mod
+        hyp = smt_state.load_hypothesis()
+        if not hyp:
+            return
+        dly = smt_state.load_daily() or {}
+        glb = smt_state.load_global() or {}
+        _hyp_mod.recompute_cautious_for_fill(
+            hyp, fill_price, dly.get("liquidities", []), glb.get("all_time_high"))
+        smt_state.save_hypothesis(hyp)
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[live_orders] cautious recompute after downgrade fill failed: {exc}", flush=True)
 
 
 def _current_price() -> float:
@@ -162,7 +225,7 @@ def _current_price() -> float:
     return 0.0
 
 
-def place_market_entry(direction: str, entry_price: float, stop_price: float, *, flatten_first: bool = False) -> None:
+def place_market_entry(direction: str, entry_price: float, stop_price: float, *, flatten_first: bool = False, source: str = "strategy") -> None:
     """Enter at market with stop. Logs, dispatches MKT+sl, writes active to position.json."""
     now = _now_et()
     pmt_signal = {
@@ -184,9 +247,11 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float, *,
         "cautious": "no",
         "contracts": 2,
         "time": now,
+        "source": source,
     }
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
+    pos.pop("stop_entry_source", None)
     _save_pos(pos)
     _log({"kind": "market-entry", "time": now, "direction": direction,
           "entry_price": entry_price, "stop_price": stop_price})
@@ -251,6 +316,7 @@ def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> No
     pos["stop_direction"] = ""
     pos["conf_bar_entry"] = {}
     pos.pop("stop_entry_unplaced", None)
+    pos.pop("stop_entry_source", None)
     _save_pos(pos)
     _log({"kind": "cancel-stop-entry", "time": now, "entry_price": entry_price, "reason": reason})
 
