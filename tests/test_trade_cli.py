@@ -294,3 +294,76 @@ def test_update_sl_fails_when_no_price_arg(monkeypatch, capsys):
         _run_trade(["update-sl"], monkeypatch, mock_lo, mock_smt)
     assert exc.value.code == 1
     mock_lo.update_stop_loss.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# pause / resume commands
+# ---------------------------------------------------------------------------
+
+def test_pause_command_engages(monkeypatch, capsys):
+    mock_lo = MagicMock()
+    mock_lo.pause.return_value = True
+    _run_trade(["pause"], monkeypatch, mock_lo, MagicMock())
+    mock_lo.pause.assert_called_once()
+    assert "Paused" in capsys.readouterr().out
+
+
+def test_pause_command_already_paused(monkeypatch, capsys):
+    mock_lo = MagicMock()
+    mock_lo.pause.return_value = False
+    _run_trade(["pause"], monkeypatch, mock_lo, MagicMock())
+    assert "Already paused" in capsys.readouterr().out
+
+
+def test_resume_command_lifts(monkeypatch, capsys):
+    mock_lo = MagicMock()
+    mock_lo.resume.return_value = True
+    _run_trade(["resume"], monkeypatch, mock_lo, MagicMock())
+    mock_lo.resume.assert_called_once()
+    assert "Resumed" in capsys.readouterr().out
+
+
+def test_resume_command_already_running(monkeypatch, capsys):
+    mock_lo = MagicMock()
+    mock_lo.resume.return_value = False
+    _run_trade(["resume"], monkeypatch, mock_lo, MagicMock())
+    assert "Already running" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# start --pause / --resume
+# ---------------------------------------------------------------------------
+
+def test_start_pause_and_resume_mutually_exclusive(monkeypatch, capsys):
+    """--pause and --resume together → error exit before any launch."""
+    mock_lo = MagicMock()
+    with pytest.raises(SystemExit) as exc:
+        _run_trade(["start", "--pause", "--resume"], monkeypatch, mock_lo, MagicMock())
+    assert exc.value.code == 1
+    assert "mutually exclusive" in capsys.readouterr().out
+    mock_lo.pause.assert_not_called()
+    mock_lo.resume.assert_not_called()
+
+
+def test_start_pause_engages_pause_then_launches(monkeypatch, tmp_path, capsys):
+    """start --pause engages pause() and proceeds to launch the orchestrator."""
+    import subprocess as _subp
+    import time as _time
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(_subp, "Popen", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(_time, "sleep", lambda *a, **k: None)
+
+    mock_lo = MagicMock()
+    mock_lo.pause.return_value = True
+    monkeypatch.setattr(sys, "argv", ["trade.py", "start", "--pause"])
+    monkeypatch.setitem(sys.modules, "live_orders", mock_lo)
+    monkeypatch.setitem(sys.modules, "smt_state", MagicMock())
+    if "trade" in sys.modules:
+        del sys.modules["trade"]
+    trade = importlib.import_module("trade")
+    monkeypatch.setattr(trade, "_orchestrator_pid", lambda: None)
+
+    trade.main()
+
+    mock_lo.pause.assert_called_once()
+    assert "paused mode" in capsys.readouterr().out.lower()

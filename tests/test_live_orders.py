@@ -693,3 +693,71 @@ def test_d8_market_close_noop_pending_if_no_prior_cancel(_in_tmp, _mock_today):
 
     call_args_list = [call.args[0] for call in mock_executor.place_close.call_args_list]
     assert "close" in call_args_list
+
+
+# ---------------------------------------------------------------------------
+# Pause / resume: manual entry lever
+# ---------------------------------------------------------------------------
+
+def test_pause_resume_idempotent(_in_tmp, _mock_today):
+    """pause()/resume() toggle the flag and log once; repeating the same state is a no-op."""
+    assert live_orders.is_paused() is False
+    assert live_orders.pause() is True            # engaged
+    assert live_orders.is_paused() is True
+    assert live_orders.pause() is False           # already paused → no-op
+    assert live_orders.resume() is True           # lifted
+    assert live_orders.is_paused() is False
+    assert live_orders.resume() is False          # already running → no-op
+
+    # Only the two state changes log events (the no-ops log nothing).
+    events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
+    assert [e["kind"] for e in events] == ["paused", "resumed"]
+
+
+def test_dispatch_suppresses_entries_when_paused(_in_tmp, _mock_today):
+    """While paused, dispatch drops the three entry kinds — nothing reaches the broker."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    live_orders.pause()
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=dict(_POS_EMPTY)), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({"kind": "new-stop-entry", "time": _T0,
+                              "direction": "up", "price": 19900.0, "stop": 19870.0})
+        live_orders.dispatch({"kind": "market-entry", "time": _T0,
+                              "direction": "up", "price": 19900.0, "stop": 19870.0})
+        live_orders.dispatch({"kind": "move-stop-entry", "time": _T0,
+                              "direction": "up", "price": 19910.0, "stop": 19870.0})
+
+    mock_executor.place_entry.assert_not_called()
+    mock_executor.modify_stop_entry.assert_not_called()
+
+
+def test_dispatch_allows_exits_when_paused(_in_tmp, _mock_today):
+    """While paused, exits/management still dispatch — only entries are blocked."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    live_orders.pause()
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=dict(_POS_ACTIVE)), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({"kind": "stop-exit", "time": _T0,
+                              "direction": "up", "price": 19900.0})
+
+    mock_executor.place_close.assert_called_once_with("close")
+
+
+def test_dispatch_allows_entries_when_not_paused(_in_tmp, _mock_today):
+    """Regression: with no pause flag, entry kinds dispatch to the broker normally."""
+    _reset_guard_state()
+    mock_executor = MagicMock()
+    mock_executor.place_entry.return_value = SimpleNamespace(order_type="stop")
+    mock_executor._entry_is_live = True
+    assert live_orders.is_paused() is False
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=dict(_POS_EMPTY)), \
+         patch("smt_state.save_position"):
+        live_orders.dispatch({"kind": "new-stop-entry", "time": _T0,
+                              "direction": "up", "price": 19900.0, "stop": 19870.0})
+
+    mock_executor.place_entry.assert_called_once()

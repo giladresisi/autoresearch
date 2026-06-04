@@ -12,9 +12,13 @@ Usage:
   python trade.py close                  # Market close active position
   python trade.py trend-broken           # Reset hypothesis direction and log trend-broken
   python trade.py hypothesis             # Force a fresh hypothesis evaluation right now
+  python trade.py pause                  # Suppress new automatic entries (exits stay active)
+  python trade.py resume                 # Re-enable automatic entries
   python trade.py start                  # Start orchestrator (keeps position.json; resumes & reconciles any open position)
   python trade.py start --summary        # Start orchestrator with LLM-based summary enabled
   python trade.py start --force          # Reset hypothesis direction and position state (start fresh)
+  python trade.py start --pause          # Start with automatic entries paused (creates data/paused; start continues regardless)
+  python trade.py start --resume         # Start with automatic entries enabled (clears data/paused; start continues regardless)
   python trade.py terminate              # Kill orchestrator and automation.main
 
 Add --force / -f to bypass position.json state checks and override broker state:
@@ -229,6 +233,18 @@ def main() -> None:
         print(f"Market close | direction: {direction}")
         live_orders.close_position(0.0, "user-requested")
 
+    elif cmd == "pause":
+        if live_orders.pause():
+            print("Paused — new automatic entries suppressed (exits still active)")
+        else:
+            print("Already paused")
+
+    elif cmd == "resume":
+        if live_orders.resume():
+            print("Resumed — automatic entries re-enabled")
+        else:
+            print("Already running (not paused)")
+
     elif cmd == "trend-broken":
         live_orders.trend_broken()
 
@@ -243,6 +259,30 @@ def main() -> None:
         from pathlib import Path
 
         summary = "--summary" in raw_args
+
+        # Optional pause/resume of automatic entries from the moment the orchestrator
+        # starts. Independent of --force (different concern). The start proceeds either
+        # way; if the data/paused flag already matched the requested mode it just says so.
+        start_pause = "--pause" in raw_args
+        start_resume = "--resume" in raw_args
+        if start_pause and start_resume:
+            print("ERROR: --pause and --resume are mutually exclusive")
+            sys.exit(1)
+        if start_pause or start_resume:
+            # Stamp the session date so the paused/resumed event lands in the session
+            # folder the orchestrator will use (matches its session_date_str()).
+            from session_times import session_date_str
+            live_orders.set_session_date(session_date_str())
+            if start_pause:
+                if live_orders.pause():
+                    print("Starting in paused mode — new automatic entries suppressed until resume")
+                else:
+                    print("Already paused — starting in paused mode")
+            else:
+                if live_orders.resume():
+                    print("Starting in resumed mode — automatic entries enabled")
+                else:
+                    print("Already resumed — starting normally")
 
         # Check if orchestrator is already running
         existing_pid = _orchestrator_pid()

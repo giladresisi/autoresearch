@@ -49,6 +49,11 @@ _fill_bar_time: "pd.Timestamp | None" = None
 _cancel_bar_time: "pd.Timestamp | None" = None
 _pending_close_after: "pd.Timestamp | None" = None
 
+# Manual entry pause (trade.py pause/resume). Sentinel file: presence = paused.
+# Decoupled from position.json (which is rewritten constantly by multiple writers).
+# When paused, dispatch() suppresses new automatic entries; exits stay active.
+_PAUSE_FLAG = Path("data") / "paused"
+
 
 def set_session_date(d: str) -> None:
     global _SESSION_DATE
@@ -107,6 +112,30 @@ def has_active_position() -> bool:
 def has_pending_entry() -> bool:
     """True if position.json shows an unfilled stop entry order."""
     return bool(_load_pos().get("stop_entry"))
+
+
+def is_paused() -> bool:
+    """True if a manual entry pause is in effect (new automatic entries suppressed)."""
+    return _PAUSE_FLAG.exists()
+
+
+def pause() -> bool:
+    """Engage the manual entry pause. Idempotent: returns False (no-op) if already paused."""
+    if _PAUSE_FLAG.exists():
+        return False
+    _PAUSE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+    _PAUSE_FLAG.write_text(_now_et(), encoding="utf-8")
+    _log({"kind": "paused", "time": _now_et()})
+    return True
+
+
+def resume() -> bool:
+    """Lift the manual entry pause. Idempotent: returns False (no-op) if not paused."""
+    if not _PAUSE_FLAG.exists():
+        return False
+    _PAUSE_FLAG.unlink()
+    _log({"kind": "resumed", "time": _now_et()})
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +395,11 @@ def dispatch(sig: dict) -> None:
     kind = sig.get("kind")
     direction_v2 = sig.get("direction", "none")
     direction = "long" if direction_v2 == "up" else ("short" if direction_v2 == "down" else None)
+
+    # Manual pause: suppress new automatic entries while keeping all exits/management active.
+    # Only the three entry kinds are blocked; fills, exits, stop moves and cancels pass through.
+    if kind in ("new-stop-entry", "move-stop-entry", "market-entry") and is_paused():
+        return
 
     if kind == "new-stop-entry":
         stop = sig.get("stop")
