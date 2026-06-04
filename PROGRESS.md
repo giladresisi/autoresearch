@@ -1,6 +1,22 @@
 ﻿# PROGRESS
 
 
+## Feature: Gate chop-zone market entries (o5-fallback + STP→MKT) into the mid/equilibrium zone
+### Planning Phase
+**Status**: ✅ Implemented (unstaged; merge gated on broader backtest + user approval)
+**Started**: 2026-06-04
+**Plan File**: `.agents/plans/gate-chop-zone-market-entries.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/gate-chop-zone-market-entries.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics
+
+---
+
+
 ## Feature: Daily Liquidity Refresh Redesign
 ### Planning Phase
 **Status**: ✅ Complete
