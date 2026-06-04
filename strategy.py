@@ -22,6 +22,8 @@ _CONF_BAR_MINS_ATH = 15  # confirmation bar window when above session ATH
 _STOP_WICK_CAP     = 15.0  # max pts a conf-bar wick can extend the stop beyond the body
 MAX_FAILED_ENTRIES = 2   # block new entries once this many stops have been hit this hypothesis
 _O5_FALLBACK_DIST  = 100.0  # O5: use prior window as pseudo-conf when entry range is this far behind price
+MIN_HEADROOM_PTS   = 10.0   # min room from entry to nearest opposing level; entries with less are
+                            # gated (reward:risk floor — see _headroom_ok; tune via backtest)
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -159,6 +161,74 @@ def _o5_fallback(
     }
 
 
+# ---------------------------------------------------------------------------
+# Headroom / mid-zone gating helpers (R2/R3)
+# ---------------------------------------------------------------------------
+
+def _session_mids(liquidities: list) -> "tuple[float | None, float | None]":
+    """Return (daily_mid, weekly_mid) from level liquidities, or None per axis if a bound
+    is missing. Single source of truth for the mid derivation also used in Section 3."""
+    _liq_map = {l["name"]: l["price"] for l in (liquidities or [])
+                if l.get("kind") == "level"}
+    _dh, _dl = _liq_map.get("day_high"),  _liq_map.get("day_low")
+    _wh, _wl = _liq_map.get("week_high"), _liq_map.get("week_low")
+    daily_mid  = (_dh + _dl) / 2.0 if _dh is not None and _dl is not None else None
+    weekly_mid = (_wh + _wl) / 2.0 if _wh is not None and _wl is not None else None
+    return daily_mid, weekly_mid
+
+
+def _first_target_ahead(entry: float, direction: str, targets: list) -> "float | None":
+    """Nearest hypothesis-target price strictly ahead of `entry` in `direction`."""
+    ahead = []
+    for t in (targets or []):
+        price = t.get("price")
+        if price is None:
+            continue
+        if direction == _DIR_UP and price > entry:
+            ahead.append(price)
+        elif direction == _DIR_DOWN and price < entry:
+            ahead.append(price)
+    if not ahead:
+        return None
+    # "Nearest ahead" = smallest for up (just above), largest for down (just below).
+    return min(ahead) if direction == _DIR_UP else max(ahead)
+
+
+def _nearest_opposing_level(entry: float, direction: str, daily_mid, weekly_mid,
+                            targets: list) -> "float | None":
+    """Nearest of {daily_mid, weekly_mid, first target ahead} that lies AHEAD of `entry`
+    in `direction` (up: level > entry; down: level < entry). None if none ahead."""
+    candidates = []
+    for lvl in (daily_mid, weekly_mid, _first_target_ahead(entry, direction, targets)):
+        if lvl is None:
+            continue
+        if direction == _DIR_UP and lvl > entry:
+            candidates.append(lvl)
+        elif direction == _DIR_DOWN and lvl < entry:
+            candidates.append(lvl)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda lvl: abs(lvl - entry))
+
+
+def _headroom_ok(entry: float, stop: float, direction: str, liquidities: list,
+                 targets: list) -> bool:
+    """True if the prospective entry has room to run (R3).
+
+    headroom = distance from `entry` to the nearest opposing level ahead;
+    risk     = abs(entry - stop).
+    Passes when there is NO opposing level ahead (open road), else requires
+    headroom >= max(risk, MIN_HEADROOM_PTS) — i.e. reward:risk >= ~1 with a fixed floor.
+    """
+    daily_mid, weekly_mid = _session_mids(liquidities)
+    lvl = _nearest_opposing_level(entry, direction, daily_mid, weekly_mid, targets)
+    if lvl is None:
+        return True
+    headroom = abs(lvl - entry)
+    risk = abs(entry - stop)
+    return headroom >= max(risk, MIN_HEADROOM_PTS)
+
+
 def _make_signal(kind: str, now: datetime, price: float, **kwargs) -> dict:
     """Build a JSON-serialisable signal dict."""
     sig: dict = {
@@ -265,9 +335,12 @@ def run_strategy(
         # further away in the intended direction so the order reaches the exchange with room to spare.
         MIN_APPROACH_PTS = 10.0
         MAX_CONFIRMATION_BODY_PTS = 25.0  # reject momentum/reversal bars as confirmation
-        # STP->MKT downgrade safety (see feature.md). Keep STP_MKT_PROXIMITY_PTS in sync
-        # with the executor's downgrade threshold in execution/pickmytrade.py::place_entry.
-        STP_MKT_PROXIMITY_PTS      = 5.0    # entry within this of market -> executor sends MKT
+        # STP->MKT downgrade safety (see feature.md). After R1 the downgrade keys off the
+        # TRIGGER itself, not a proximity band: a stop market-fills only once bar_mid has
+        # reached/passed entry_price. STP_MKT_PROXIMITY_PTS is retained as the documented
+        # live<->backtest contract anchor (kept in sync with execution/pickmytrade.py) but no
+        # longer slackens the will_market_fill condition below.
+        STP_MKT_PROXIMITY_PTS      = 5.0    # legacy proximity band — R1 removed its use in will_market_fill
         MKT_FILL_MIN_STOP_DISTANCE = 10.0   # min stop distance from the EXPECTED market fill (tune via backtest)
         MAX_ENTRY_CHASE_PTS        = 10.0   # skip entry if market already ran this far past it (tune via backtest)
 
@@ -344,8 +417,23 @@ def run_strategy(
         _opp_dir  = _DIR_UP if direction == _DIR_DOWN else _DIR_DOWN
         _bar_mins = _CONF_BAR_MINS_ATH if _above_session_ath else _CONF_BAR_MINS
         opp_5m = _find_last_bar(mnq_1m_recent, now, _opp_dir, _bar_mins, formed_at)
+        # _conf_is_o5: the confirmation bar came from the same-bar o5 pseudo-conf fallback
+        # (not a real completed opposite 5m bar). Drives the R2 gate and conf attribution.
+        _conf_is_o5 = False
         if opp_5m is None:
             opp_5m = _o5_fallback(hypothesis, direction, mnq_bar, mnq_1m_recent, now, _bar_mins)
+            _conf_is_o5 = opp_5m is not None
+        # Shared inputs for the headroom gate (R2/R3) and confirmation-path attribution.
+        _liq      = _daily.get("liquidities", [])
+        _targets  = hypothesis.get("targets", [])
+        _conf_tag = "o5" if _conf_is_o5 else "normal"
+
+        def _gated(price: float, reason: str) -> dict:
+            """Emit a side-effect-free entry-gated signal (no position mutation).
+            Unknown kind to live_orders.dispatch_order -> log-only, never a broker order."""
+            return _make_signal("entry-gated", now, price,
+                                direction=direction, gated=reason, conf=_conf_tag)
+
         if opp_5m is not None and (opp_5m["body_high"] - opp_5m["body_low"]) <= MAX_CONFIRMATION_BODY_PTS:
             body_end_price = opp_5m["body_high"] if direction == _DIR_UP else opp_5m["body_low"]
             current_conf_time = position.get("conf_bar_entry", {}).get("time", "")
@@ -386,6 +474,12 @@ def run_strategy(
                             return None
                     if not _entry_bar_cpr_ok(mnq_bar, direction):
                         return None
+                    # R2 headroom gate (o5-only): reject same-bar o5 pseudo-conf market entries
+                    # with no room to run to the nearest opposing level, so the pseudo-conf never
+                    # becomes a persisted conf_bar. Scoped to o5 only — backtest showed a general
+                    # headroom gate over-rejects legitimate breakouts that run through a mid.
+                    if _conf_is_o5 and not _headroom_ok(bar_mid, stop, direction, _liq, _targets):
+                        return _gated(bar_mid, "r2-o5-no-headroom")
                     position["active"] = {
                         "time":       mnq_bar["time"],
                         "fill_price": bar_mid,
@@ -404,7 +498,8 @@ def run_strategy(
                         hypothesis, bar_mid,
                         _daily.get("liquidities", []), _global.get("all_time_high"))
                     smt_state.save_hypothesis(hypothesis)
-                    return _make_signal("market-entry", now, bar_mid, direction=direction, stop=stop)
+                    return _make_signal("market-entry", now, bar_mid, direction=direction,
+                                        stop=stop, conf=_conf_tag)
 
                 # Push entry away from current price if the natural level is too close.
                 if direction == _DIR_UP:
@@ -415,12 +510,11 @@ def run_strategy(
                     stop_loss = max(float(opp_5m["low"]), float(opp_5m["body_low"]) - _STOP_WICK_CAP)
                 else:
                     stop_loss = min(float(opp_5m["high"]), float(opp_5m["body_high"]) + _STOP_WICK_CAP)
-                # Fix 1: if the executor will market-fill this (entry within
-                # STP_MKT_PROXIMITY_PTS of bar_mid), treat bar_mid as the expected fill and
-                # re-anchor the protective stop to it using the trade's intended risk, so the
-                # stop survives the STP->MKT downgrade. Record entry_price = expected fill so
-                # position.json matches the market fill and the checks below measure the stop
-                # distance from the fill.
+                # Fix 1: if the executor will market-fill this (bar_mid has reached/passed the
+                # trigger — R1), treat bar_mid as the expected fill and re-anchor the protective
+                # stop to it using the trade's intended risk, so the stop survives the STP->MKT
+                # downgrade. Record entry_price = expected fill so position.json matches the market
+                # fill and the checks below measure the stop distance from the fill.
                 bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
                 # Fix 3: don't chase -- if the market has already run past the intended
                 # entry on the trigger side by more than MAX_ENTRY_CHASE_PTS, a market fill
@@ -429,9 +523,12 @@ def run_strategy(
                     return None
                 if direction == _DIR_DOWN and bar_mid < entry_price - MAX_ENTRY_CHASE_PTS:
                     return None
+                # R1: mirror the live STP->MKT downgrade — market-fill only when the trigger is
+                # actually reached/passed (no near-side proximity slack). A stop whose trigger
+                # is still ahead of bar_mid rests legally and is left as a resting stop_entry.
                 will_market_fill = (
-                    (direction == _DIR_UP   and bar_mid >= entry_price - STP_MKT_PROXIMITY_PTS) or
-                    (direction == _DIR_DOWN and bar_mid <= entry_price + STP_MKT_PROXIMITY_PTS)
+                    (direction == _DIR_UP   and bar_mid >= entry_price) or
+                    (direction == _DIR_DOWN and bar_mid <= entry_price)
                 )
                 if will_market_fill:
                     expected_fill = bar_mid
@@ -447,13 +544,17 @@ def run_strategy(
                     return None
                 if direction == _DIR_DOWN and (stop_loss - entry_price) < MIN_STOP_DISTANCE:
                     return None
+                # R2 headroom gate (o5-only, stop-entry path): reject before the o5 pseudo-conf
+                # is persisted as conf_bar. Measured from the resting/expected entry to its stop.
+                if _conf_is_o5 and not _headroom_ok(entry_price, stop_loss, direction, _liq, _targets):
+                    return _gated(entry_price, "r2-o5-no-headroom")
                 position["conf_bar_entry"] = conf_bar_snap
                 kind = "new-stop-entry" if position["stop_entry"] == "" else "move-stop-entry"
                 position["stop_entry"]     = entry_price
                 position["stop_direction"] = direction
                 position["pending_stop"]   = stop_loss
                 smt_state.save_position(position)
-                return _make_signal(kind, now, entry_price, stop=stop_loss)
+                return _make_signal(kind, now, entry_price, stop=stop_loss, conf=_conf_tag)
 
         # Nothing triggered
         return None
@@ -503,14 +604,7 @@ def run_strategy(
         # structural signals that the directional thesis has genuinely inverted.
         # Stops on the same side of both mids are noise and skip the re-run.
         _daily = smt_state.load_daily()
-        _liq_map = {l["name"]: l["price"] for l in _daily.get("liquidities", [])
-                    if l.get("kind") == "level"}
-        _dh = _liq_map.get("day_high")
-        _dl = _liq_map.get("day_low")
-        _daily_mid = (_dh + _dl) / 2.0 if _dh is not None and _dl is not None else None
-        _wh = _liq_map.get("week_high")
-        _wl = _liq_map.get("week_low")
-        _weekly_mid = (_wh + _wl) / 2.0 if _wh is not None and _wl is not None else None
+        _daily_mid, _weekly_mid = _session_mids(_daily.get("liquidities", []))
         _stop_crossed_daily = _daily_mid is not None and (
             (active_dir == _DIR_UP   and float(exit_price) < _daily_mid) or
             (active_dir == _DIR_DOWN and float(exit_price) > _daily_mid)

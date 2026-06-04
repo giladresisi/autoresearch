@@ -102,6 +102,60 @@ def test_place_entry_stop_posts_stop_order():
     assert payload["price"] == sig["entry_price"]
 
 
+# ---------------------------------------------------------------------------
+# R1: STP->MKT downgrade only when the trigger is actually reached.
+# The returned FillRecord.order_type reflects the downgrade decision (it is set
+# before the entry-window check and preserved on every return path), so these
+# assertions are independent of the wall-clock entry window.
+# ---------------------------------------------------------------------------
+
+def _stop_signal(direction: str, entry_price: float, current_price: float) -> dict:
+    """A stop entry (stop_fill_bars set) carrying the current market price."""
+    return {
+        "direction":     direction,
+        "entry_price":   entry_price,
+        "stop_price":    entry_price - 20.0 if direction == "long" else entry_price + 20.0,
+        "stop_fill_bars": 3,
+        "current_price": current_price,
+    }
+
+
+def test_r1_long_below_trigger_stays_stop():
+    # LONG stop, market BELOW the trigger (the 00:30 case) -> NOT downgraded, rests as STP.
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    rec = ex.place_entry(_stop_signal("long", entry_price=30498.5, current_price=30495.6), _bar())
+    _drain(ex)
+    assert rec.order_type == "stop"
+
+
+def test_r1_long_at_or_above_trigger_downgrades():
+    # LONG stop, market AT/ABOVE the trigger -> Tradovate would reject the resting stop -> MKT.
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    rec = ex.place_entry(_stop_signal("long", entry_price=30498.5, current_price=30499.0), _bar())
+    _drain(ex)
+    assert rec.order_type == "market"
+
+
+def test_r1_short_above_trigger_stays_stop():
+    # SHORT stop, market ABOVE the trigger -> NOT downgraded, rests as STP.
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    rec = ex.place_entry(_stop_signal("short", entry_price=30532.25, current_price=30536.0), _bar())
+    _drain(ex)
+    assert rec.order_type == "stop"
+
+
+def test_r1_short_at_or_below_trigger_downgrades():
+    # SHORT stop, market AT/BELOW the trigger -> MKT.
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    rec = ex.place_entry(_stop_signal("short", entry_price=30532.25, current_price=30532.25), _bar())
+    _drain(ex)
+    assert rec.order_type == "market"
+
+
 def test_gtd_in_second_present_on_market_order():
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())

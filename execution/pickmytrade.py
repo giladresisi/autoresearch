@@ -87,16 +87,18 @@ class PickMyTradeExecutor:
         stop_price = float(signal["stop_price"]) if signal.get("stop_price") is not None else 0.0
         is_stop = signal.get("stop_fill_bars") is not None or signal.get("limit_fill_bars") is not None
         if is_stop:
-            # Downgrade STP → MKT if entry is within 5 pts of current market price.
-            # Tradovate rejects stop orders whose trigger is at or past the market price;
-            # a 5-pt buffer catches near-miss cases where the order would fill immediately.
+            # Downgrade STP → MKT only when the market has reached/passed the trigger (R1).
+            # Tradovate rejects a stop order whose trigger is at or past the market price (it
+            # would fill immediately as a market order) — that is the only case that must go MKT.
+            # A stop whose trigger is still ahead of the market (un-reached) rests legally and
+            # must NOT be downgraded, or we enter the breakout before it confirms.
             _current = float(signal.get("current_price", 0.0))
-            _too_close = _current > 0 and (
-                (direction == "long"  and _current >= entry_price - 5.0) or
-                (direction == "short" and _current <= entry_price + 5.0)
+            _trigger_reached = _current > 0 and (
+                (direction == "long"  and _current >= entry_price) or
+                (direction == "short" and _current <= entry_price)
             )
-            if _too_close:
-                print(f"[PMT] STP->MKT: entry {entry_price} within 5pts of market {_current}", flush=True)
+            if _trigger_reached:
+                print(f"[PMT] STP->MKT: trigger {entry_price} reached by market {_current}", flush=True)
                 payload = self._build_payload(data, order_type="MKT", sl=stop_price)
                 order_type = "market"
             else:
