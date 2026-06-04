@@ -208,7 +208,7 @@ def main() -> None:
             sys.exit(1)
         pending_stop = float(pos.get("pending_stop") or 0.0)
         print(f"Moving stop entry -> {new_price} | direction: {direction} | S/L: {pending_stop}")
-        live_orders.move_stop_entry(new_price, pending_stop, direction)
+        live_orders.move_stop_entry(new_price, pending_stop, direction, force=force)
 
     elif cmd == "update-sl":
         if len(args) < 2:

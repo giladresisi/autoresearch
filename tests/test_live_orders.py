@@ -351,6 +351,65 @@ def test_cancel_stop_entry_clears_position(_in_tmp, _mock_today):
 
 
 # ---------------------------------------------------------------------------
+# Test 6b: cancel/move are gated on no-open-position (PMT 'close' is blanket)
+# ---------------------------------------------------------------------------
+
+def _pos_with_active_and_stop_entry():
+    return {"active": {"direction": "long", "fill_price": 19850.0, "stop": 19820.0,
+                       "contracts": 2, "cautious": "no"},
+            "stop_entry": "19900.0", "stop_direction": "up", "conf_bar_entry": {},
+            "failed_entries": 0}
+
+
+def test_cancel_stop_entry_skips_close_when_active(_in_tmp, _mock_today):
+    """Open position present: cancel must NOT send the blanket 'close' (it would flatten
+    the position). No order sent, no state change."""
+    mock_executor = MagicMock()
+    mock_executor._entry_is_live = True
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_pos_with_active_and_stop_entry()), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
+        live_orders.cancel_stop_entry("user-requested")
+
+    mock_executor.place_close.assert_not_called()
+    assert saved == {}
+
+
+def test_cancel_stop_entry_force_closes_when_active(_in_tmp, _mock_today):
+    """force=True overrides the gate: the 'close' is sent (and WILL flatten the position)."""
+    mock_executor = MagicMock()
+    mock_executor._entry_is_live = True
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_pos_with_active_and_stop_entry()), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
+        live_orders.cancel_stop_entry("user-requested", force=True)
+
+    mock_executor.place_close.assert_called_once_with("cancel-stop")
+    assert saved["stop_entry"] == ""
+
+
+def test_move_stop_entry_skips_when_active_unless_forced(_in_tmp, _mock_today):
+    """Open position present: move must NOT call modify_stop_entry (its 'close' would
+    flatten the position) unless force=True."""
+    mock_executor = MagicMock()
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_pos_with_active_and_stop_entry()), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
+        live_orders.move_stop_entry(19950.0, 19870.0, "long")
+    mock_executor.modify_stop_entry.assert_not_called()
+    assert saved == {}
+
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=_pos_with_active_and_stop_entry()), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
+        live_orders.move_stop_entry(19950.0, 19870.0, "long", force=True)
+    mock_executor.modify_stop_entry.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Test 7: close_position clears active and other fields
 # ---------------------------------------------------------------------------
 

@@ -222,7 +222,7 @@ def test_move_calls_move_stop_entry(monkeypatch, capsys):
     mock_smt = MagicMock()
     _run_trade(["move", "28000"], monkeypatch, mock_lo, mock_smt)
 
-    mock_lo.move_stop_entry.assert_called_once_with(28000.0, 0.0, "long")
+    mock_lo.move_stop_entry.assert_called_once_with(28000.0, 0.0, "long", force=False)
 
 
 # ---------------------------------------------------------------------------
