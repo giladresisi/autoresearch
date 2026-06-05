@@ -55,6 +55,27 @@ _pending_close_after: "pd.Timestamp | None" = None
 # smt_state so both this dispatch gate and the live pipeline's entry gate share one source.
 _PAUSE_FLAG = smt_state.PAUSE_PATH
 
+# Live-execution safety net mirroring strategy.MKT_FILL_MIN_STOP_DISTANCE: a stop entry the
+# executor downgrades to MKT fills at market, which can land closer to the protective stop than
+# planned — guarantee at least this many points between the fill and the stop so a downgrade fill
+# (or any caller) is never sent with a near-zero-risk stop (incident 2026-06-04). The strategy
+# already floors this on the backtested path; this is defence-in-depth at the dispatch boundary.
+# Keep in sync with strategy.MKT_FILL_MIN_STOP_DISTANCE. Live-only: never reached in backtest.
+_MIN_FILL_STOP_DISTANCE = 10.0
+
+
+def _floor_stop_distance(direction: str, entry_price: float, stop_price: float) -> float:
+    """Widen `stop_price` so it is at least _MIN_FILL_STOP_DISTANCE from `entry_price`.
+
+    Only ever widens (never tightens a structurally-farther stop). Mirrors the strategy's
+    market-fill floor so a downgrade-filled stop entry can't be left with a near-zero stop.
+    """
+    if direction == "long" and (entry_price - stop_price) < _MIN_FILL_STOP_DISTANCE:
+        return entry_price - _MIN_FILL_STOP_DISTANCE
+    if direction == "short" and (stop_price - entry_price) < _MIN_FILL_STOP_DISTANCE:
+        return entry_price + _MIN_FILL_STOP_DISTANCE
+    return stop_price
+
 
 def set_session_date(d: str) -> None:
     global _SESSION_DATE
@@ -154,6 +175,10 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float, *, s
     leaving the broker long while position.json shows flat. See incident 2026-06-04.
     """
     now = _now_et()
+    # Safety net: guarantee the protective stop clears _MIN_FILL_STOP_DISTANCE from the entry
+    # before the order (and its broker SL) is sent — a downgrade fill must never rest on a
+    # near-zero-risk stop (incident 2026-06-04). Only widens; far stops are untouched.
+    stop_price = _floor_stop_distance(direction, entry_price, stop_price)
     pmt_signal = {
         "direction": direction,
         "entry_price": entry_price,
@@ -258,6 +283,16 @@ def _current_price() -> float:
 def place_market_entry(direction: str, entry_price: float, stop_price: float, *, flatten_first: bool = False, source: str = "strategy") -> None:
     """Enter at market with stop. Logs, dispatches MKT+sl, writes active to position.json."""
     now = _now_et()
+    # Safety net (mirrors place_stop_entry): anchor the protective stop to the assumed fill
+    # and guarantee it clears _MIN_FILL_STOP_DISTANCE on the protective side BEFORE the order
+    # is sent. A market fill must never carry a stop at/beyond the fill — Tradovate rejects an
+    # invalid stop leg (long stop ≥ fill / short stop ≤ fill), leaving the entry naked — nor a
+    # near-zero stop that the entry bar instantly trips (incident 2026-06-04: manual `trade.py
+    # up` filled then immediately stopped out / had its S/L leg rejected). The fill anchor is
+    # entry_price when given, else the current market price (manual entries pass entry 0.0);
+    # anchoring to 0.0 would defeat the floor. Only widens; far stops are untouched.
+    fill_price = entry_price if entry_price != 0.0 else _current_price()
+    stop_price = _floor_stop_distance(direction, fill_price, stop_price)
     pmt_signal = {
         "direction": direction,
         "entry_price": entry_price,
@@ -268,7 +303,6 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float, *,
     if not getattr(_executor, "_entry_is_live", True):
         # Entry was blocked by window gate — don't update position state or log
         return
-    fill_price = entry_price if entry_price != 0.0 else _current_price()
     pos = _load_pos()
     pos["active"] = {
         "direction": direction,
@@ -359,7 +393,13 @@ def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> No
         return
     now = _now_et()
     entry_price = float(pos["stop_entry"]) if pos.get("stop_entry") else 0.0
-    if getattr(_executor, "_entry_is_live", True):
+    # Send the broker cancel whenever the entry was actually placed at the broker. Gate on the
+    # PERSISTED stop_entry_unplaced flag (cross-process truth), NOT the executor's per-process
+    # _entry_is_live — that flag is only True in the process that sent the entry (the
+    # orchestrator), so a `trade.py cancel` from a separate CLI process saw it False and never
+    # cancelled, leaving a working STP order at the broker while position.json showed it gone
+    # (incident 2026-06-04 09:05). Mirrors the stop-entry-cancelled dispatch path.
+    if not pos.get("stop_entry_unplaced"):
         _executor.place_close("cancel-stop")
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
