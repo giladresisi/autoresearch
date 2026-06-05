@@ -3,10 +3,24 @@
 import argparse
 import datetime
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
+
+# Repo root on sys.path so `import paths` works when run as `python reports/<script>.py`
+# (sys.path[0] is the script's own folder, not the cwd).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import paths
+
+
+def _sessions_dir() -> Path:
+    """Session root: SESSIONS_DIR env override, else the machine-global live sessions
+    root (paths.sessions_dir()). The old default ("sessions", worktree-local) predates
+    the global path restructure and never matches where the orchestrator writes."""
+    env = os.getenv("SESSIONS_DIR")
+    return Path(env) if env else paths.sessions_dir()
 
 
 def _fmt(d: datetime.date) -> str:
@@ -56,8 +70,7 @@ def run(session_date: datetime.date, *, headed: bool = False) -> list[Path]:
     password   = os.environ["TRADOVATE_PASSWORD"]
     account_id = os.environ["TRADING_ACCOUNT_IDS"].split(",")[0].strip()
 
-    sessions_dir = Path(os.getenv("SESSIONS_DIR", "sessions"))
-    out_dir = sessions_dir / session_date.isoformat()
+    out_dir = _sessions_dir() / session_date.isoformat()
     if not out_dir.exists():
         raise FileNotFoundError(
             f"Session directory '{out_dir}' does not exist — "
