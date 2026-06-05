@@ -31,12 +31,14 @@ def _bar_row(base: float = 21000.0) -> pd.Series:
 
 @pytest.fixture()
 def _isolate_state(tmp_path, monkeypatch):
-    """Redirect all smt_state paths to tmp_path; disable in-memory mode."""
-    monkeypatch.setattr(smt_state, "DATA_DIR",        tmp_path)
-    monkeypatch.setattr(smt_state, "GLOBAL_PATH",     tmp_path / "global.json")
-    monkeypatch.setattr(smt_state, "DAILY_PATH",      tmp_path / "daily.json")
-    monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
-    monkeypatch.setattr(smt_state, "POSITION_PATH",   tmp_path / "position.json")
+    """Redirect all smt_state paths to tmp_path; disable in-memory mode.
+
+    Also point ACT_GLOBAL_DIR at tmp_path: the live path of on_session_start sets the
+    state dir to sessions_dir()/<date> (so state + levels.json land in the session
+    folder) and seed_global_from_prior() scans sessions_dir() — both must be isolated."""
+    import paths
+    monkeypatch.setattr(paths, "_STATE_DIR", tmp_path)
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
     monkeypatch.setattr(smt_state, "_IN_MEMORY",      False)
 
 

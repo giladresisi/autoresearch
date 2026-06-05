@@ -71,7 +71,7 @@ live_orders.manual_close(price=<current_price>)
 Replace `<current_price>` with the approximate current MNQ price (used for the log entry; PMT determines the actual fill).
 
 This:
-1. Appends a `market-close` event to `sessions/{today}/events.jsonl` with `source: "manual"`
+1. Appends a `market-close` event to `<global>/sessions/{today}/events.jsonl` with `source: "manual"`
 2. Sends a market close order to the executor (PMT in live mode, simulated in paper mode)
 3. Clears `position.json` — sets `active = {}`, clears `limit_entry`, `limit_direction`, `confirmation_bar`
 
@@ -88,7 +88,7 @@ live_orders.manual_cancel_limit()
 
 This:
 1. Reads `position.json` to find the limit price
-2. Appends a `cancel-limit-entry` event to `sessions/{today}/events.jsonl`
+2. Appends a `cancel-limit-entry` event to `<global>/sessions/{today}/events.jsonl`
 3. Sends a cancel/close order to the executor
 4. Clears limit fields in `position.json`
 
@@ -110,7 +110,7 @@ Or for a specific date:
 python plot_session.py 2026-05-06
 ```
 
-Generates `sessions/{date}/chart.html` and opens it in the browser. Shows:
+Generates `<global>/sessions/{date}/chart.html` and opens it in the browser. Shows:
 - MNQ 1m candlesticks
 - All price levels from the daily computation (TDO, TWO, week/day H/L/mid, session highs/lows, FVGs)
 - All events: limit placements, fills, entries, stops, closes, SMT divergences, hypotheses
@@ -125,9 +125,9 @@ Works mid-session with no events yet — shows bars and levels only.
 
 ```python
 import json, datetime
-from pathlib import Path
+import paths
 today = datetime.date.today().isoformat()
-path = Path(f"sessions/{today}/events.jsonl")
+path = paths.sessions_dir() / today / "events.jsonl"   # <global>/sessions/<date>/events.jsonl
 if path.exists():
     for line in path.read_text().splitlines():
         e = json.loads(line)
@@ -140,8 +140,12 @@ else:
 
 ## Session file structure
 
+Sessions live in the machine-global sessions root (`<global>/sessions/`, env
+`ACT_GLOBAL_DIR`, default `~/projects/auto-co-trader/global/sessions`; resolve with
+`paths.sessions_dir()`):
+
 ```
-sessions/{date}/
+<global>/sessions/{date}/
 ├── signals.log      # Raw stdout from automation process
 ├── events.jsonl     # Structured events, append-mode, survives orchestrator restarts
 ├── levels.json      # Liquidities + ATH snapshot written at session open (09:20 ET)

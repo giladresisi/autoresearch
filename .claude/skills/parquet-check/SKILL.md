@@ -76,6 +76,17 @@ Use `--dry-run` if the user wants validation only without any data changes.
 **If `merge_success = false`**: escalate — tell the user what manual steps are needed
 and why the automatic fix failed (check `reason` field in the JSON).
 
+**Promotion (session-end only) — `promotion` block.** After a SUCCESSFUL session-end
+merge, the script's FINAL step promotes the validated parquets from the live data dir
+(`<global>/data/live`) to the backtest read source (`<global>/data/main`): for each
+`<inst>_1m.parquet` / `<inst>_1s.parquet` present in live it backs up the existing main
+file to `<name>.parquet.bak`, then atomically copies live → main. The `promotion` field:
+- `promote_success: true` + `promoted: {<name>: "ok", ...}` — live→main promotion done.
+- `promote_success: false` + `reason` — promotion failed; main was NOT updated (escalate).
+- `null` — no promotion attempted (dry-run, orchestrator-start mode, or no successful merge).
+
+This promotion runs only in `session-end` mode; `orchestrator-start` never promotes.
+
 **1m parquets** — for each instrument in `instruments_1m`:
 - `action`: ok / repair_from_backup
 - `repair_success`: true / false / null (null = dry-run or healthy)

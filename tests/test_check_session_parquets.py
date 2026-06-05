@@ -792,3 +792,75 @@ class TestMainEntryPoint:
                     main()
 
         assert exc_info.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# TestPromoteLiveToMain
+# ---------------------------------------------------------------------------
+
+class TestPromoteLiveToMain:
+    """Covers promote_live_to_main(): the final live->main promotion step after a
+    successful session-end merge. ACT_GLOBAL_DIR points paths.* at a tmp tree so the
+    live/main dirs are isolated."""
+
+    def _write_parquet(self, path: Path, close: float):
+        idx = pd.DatetimeIndex([
+            pd.Timestamp("2026-05-20 09:30:00", tz="America/New_York") + pd.Timedelta(seconds=i)
+            for i in range(3)
+        ])
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": close, "Volume": 100.0,
+        }, index=idx)
+        df.to_parquet(path)
+
+    def test_promote_copies_and_backs_up(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path / "global"))
+        import importlib
+        import paths
+        importlib.reload(paths)
+        # Re-import the script module so its DATA_DIR / paths reference the patched env.
+        import scripts.check_session_parquets as csp
+        importlib.reload(csp)
+
+        live_dir = paths.data_live_dir()
+        main_dir = paths.data_main_dir()
+
+        # Live has fresh (post-merge) parquets; main has a stale prior version.
+        self._write_parquet(live_dir / "MNQ_1m.parquet", close=28000.0)
+        self._write_parquet(live_dir / "MNQ_1s.parquet", close=28001.0)
+        self._write_parquet(main_dir / "MNQ_1m.parquet", close=27000.0)  # stale prior main
+
+        result = csp.promote_live_to_main()
+
+        assert result.get("MNQ_1m.parquet") == "ok"
+        assert result.get("MNQ_1s.parquet") == "ok"
+
+        # main now reflects the live (promoted) data
+        promoted_1m = pd.read_parquet(main_dir / "MNQ_1m.parquet")
+        assert promoted_1m["Close"].iloc[0] == 28000.0
+        # 1s file (no prior main) was created
+        assert (main_dir / "MNQ_1s.parquet").exists()
+        # prior main was backed up before being overwritten
+        bak = pd.read_parquet(main_dir / "MNQ_1m.parquet.bak")
+        assert bak["Close"].iloc[0] == 27000.0
+        # no stray temp file left behind
+        assert not (main_dir / "MNQ_1m.parquet.promote.tmp").exists()
+
+    def test_promote_skips_missing_live_files(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path / "global"))
+        import importlib
+        import paths
+        importlib.reload(paths)
+        import scripts.check_session_parquets as csp
+        importlib.reload(csp)
+
+        live_dir = paths.data_live_dir()
+        # Only MES_1m present in live; the others are absent and must be skipped silently.
+        self._write_parquet(live_dir / "MES_1m.parquet", close=6000.0)
+
+        result = csp.promote_live_to_main()
+
+        assert result == {"MES_1m.parquet": "ok"}
+        assert (paths.data_main_dir() / "MES_1m.parquet").exists()
+        assert not (paths.data_main_dir() / "MNQ_1m.parquet").exists()

@@ -16,6 +16,21 @@
 
 ---
 
+## Feature: Global Path Restructure for Parallel Backtesting
+### Status: ✅ Complete
+**Started**: 2026-06-04
+**Plan File**: `.agents/plans/global-path-restructure.md`
+**Worktree**: `global-restructure` (branched from `live`)
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/global-path-restructure.md`
+- Detailed implementation summary (5 waves, 11/11 tasks)
+- Divergences and resolutions (5; mostly environmental/scoped + 1 known follow-up)
+- Test results and metrics (33 new tests; 1042 passed / 27 pre-existing failures / 0 new)
+- Coverage gaps with severity + recommended follow-ups
+
+---
 
 ## Feature: Daily Liquidity Refresh Redesign
 ### Planning Phase

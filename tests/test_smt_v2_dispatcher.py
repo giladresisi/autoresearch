@@ -36,11 +36,11 @@ def _bar_row(base: float = 21000.0) -> pd.Series:
 
 @pytest.fixture()
 def _isolate_state(tmp_path, monkeypatch):
-    monkeypatch.setattr(smt_state, "DATA_DIR",        tmp_path)
-    monkeypatch.setattr(smt_state, "GLOBAL_PATH",     tmp_path / "global.json")
-    monkeypatch.setattr(smt_state, "DAILY_PATH",      tmp_path / "daily.json")
-    monkeypatch.setattr(smt_state, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
-    monkeypatch.setattr(smt_state, "POSITION_PATH",   tmp_path / "position.json")
+    import paths
+    monkeypatch.setattr(paths, "_STATE_DIR", tmp_path)
+    # Isolate the global sessions dir too so the live path's seed_global_from_prior()
+    # never reads the real machine-global session data.
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
     monkeypatch.setattr(smt_state, "_IN_MEMORY",      False)
 
 

@@ -54,6 +54,22 @@ Choose flags based on the user's request:
 uv run python trade.py start --force   # adjust flags per user request
 ```
 
+### Record the running commit (once, at session start)
+
+Immediately after the start command succeeds, record the running commit into the
+current session's `comments.md` so post-session analysis knows which code version
+produced the session. The session folder is `paths.sessions_dir()/<date>/` (the
+machine-global sessions root, env `ACT_GLOBAL_DIR`). Do this exactly once at startup:
+
+```powershell
+uv run python -c "import paths; from scripts.commit_note import write_commit_note; from session_times import session_date_str; write_commit_note(paths.sessions_dir() / session_date_str() / 'comments.md')"
+```
+
+`write_commit_note` derives the short SHA, subject, and dirty flag from git and appends
+a single `- Running commit: <short-sha> \"<subject>\" (dirty)` line (it never overwrites
+existing comments and never raises). Skip it on a `--resume` restart of an already-open
+session if the note is already present for the day.
+
 After the start command succeeds, report the session window status:
 
 ```powershell

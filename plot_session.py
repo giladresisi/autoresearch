@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import plotly.graph_objects as go
 
+import paths
 from session_times import session_date_str
 
 _ET = ZoneInfo("America/New_York")
@@ -35,7 +36,7 @@ _NOW_ET = datetime.datetime.now(tz=_ET)
 _REQUEST_TIME = _NOW_ET.strftime("%H-%M")
 _REQUEST_TIME_LABEL = _NOW_ET.strftime("%H:%M ET")
 
-SESSION_DIR = Path(f"sessions/{DATE}")
+SESSION_DIR = paths.sessions_dir() / DATE
 MNQ_DOLLARS_PER_POINT_PER_CONTRACT = 2.0
 DEFAULT_CONTRACTS = 2
 
@@ -55,7 +56,7 @@ _session_end = pd.Timestamp(
     tz=_ET,
 )
 
-df = pd.read_parquet("data/MNQ_1m.parquet")
+df = pd.read_parquet(paths.data_main_dir() / "MNQ_1m.parquet")
 # Ensure tz-aware comparison
 if df.index.tz is None:
     df.index = df.index.tz_localize(_ET)

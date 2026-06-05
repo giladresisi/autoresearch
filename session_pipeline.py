@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import copy
 import datetime
+import os
 from typing import Callable
 
 import pandas as pd
 
 from zoneinfo import ZoneInfo
 
+import paths
 import daily as _daily_mod
 import hypothesis as _hyp_mod
 import smt_state as _smt_state
@@ -133,6 +135,11 @@ class SessionPipeline:
         from hypothesis import compute_live_hl_mid
         from daily import _session_bars
 
+        # Cross-session ATH continuity: per-session global.json starts fresh, so carry the
+        # dynamic all_time_high forward from the prior session before seeding from hist.
+        # No-op in backtest (in-memory) mode — keeps backtests deterministic.
+        _smt_state.seed_global_from_prior()
+
         # Seed all_time_high and session_ath from historical bars.
         _global = load_global()
         if not self._hist_mnq_1m.empty:
@@ -204,12 +211,11 @@ class SessionPipeline:
         _state["liquidities"] = _liq
         save_daily(_state)
 
-        # Write levels.json snapshot for plot_session.py.
+        # Write levels.json snapshot for plot_session.py / regression plots. Lands under
+        # the current state prefix: the session folder for live, the per-run folder for
+        # backtests — so a backtest never pollutes the shared live sessions area.
         import json as _json
-        from pathlib import Path as _Path
-        _session_dir = _Path("sessions") / (_smt_state._SESSION_DATE or str(now.date()))
-        _session_dir.mkdir(parents=True, exist_ok=True)
-        _levels_path = _session_dir / "levels.json"
+        _levels_path = paths.state_dir() / "levels.json"
         _daily_state = load_daily()
         self._ext_levels = [
             (l["name"], float(l["price"]))
@@ -237,6 +243,20 @@ class SessionPipeline:
             DEFAULT_HYPOTHESIS, DEFAULT_POSITION,
             load_position, save_hypothesis, save_position,
         )
+
+        # Live (not in-memory): route the four state JSONs into the session folder so the
+        # live writer never shares state files across worktrees. The orchestrator passes
+        # ACT_STATE_DIR to this subprocess so BOTH processes resolve the identical folder
+        # (guaranteed agreement, no independent date computation). Standalone runs fall
+        # back to sessions/<date>. Backtests (in-memory) keep the state_dir set by the
+        # backtest harness (per-run folder) — do not override it here.
+        if not _smt_state._IN_MEMORY:
+            _env_state = os.environ.get("ACT_STATE_DIR")
+            if _env_state:
+                paths.set_state_dir(_env_state)
+            else:
+                _d = _smt_state._SESSION_DATE or str(now.date())
+                paths.set_state_dir(paths.sessions_dir() / _d)
 
         # Reset per-hypothesis tracking state on every session start.
         self._last_hyp_cautious = ("", "")

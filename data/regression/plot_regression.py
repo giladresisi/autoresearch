@@ -19,25 +19,36 @@ from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
 
+import paths
 from session_times import SESSION_OPEN, SESSION_CLOSE
 
 
 DATE = sys.argv[1] if len(sys.argv) > 1 else None
 if DATE is None:
-    print("Usage: plot_regression.py <YYYY-MM-DD> [1m|1s]", file=sys.stderr)
+    print("Usage: plot_regression.py <YYYY-MM-DD> [1m|1s] [run_dir]", file=sys.stderr)
     sys.exit(1)
 
 MODE = sys.argv[2] if len(sys.argv) > 2 else "1m"
 _SFX = "_1s" if MODE == "1s" else ""
 
-REG_DIR = Path("data") / "regression" / DATE
+# Output/read dir: the per-run folder passed by regression.py (argv[3]); when run
+# standalone, fall back to the latest run folder for the date (else the date folder).
+if len(sys.argv) > 3 and sys.argv[3]:
+    REG_DIR = Path(sys.argv[3])
+else:
+    _date_dir = paths.regression_dir() / DATE
+    _runs = sorted(p for p in _date_dir.glob("*") if p.is_dir() and p.name != "baseline") \
+        if _date_dir.exists() else []
+    REG_DIR = _runs[-1] if _runs else _date_dir
 MNQ_DOLLARS_PER_POINT_PER_CONTRACT = 2.0
 DEFAULT_CONTRACTS = 2
 
 # ── Price data ─────────────────────────────────────────────────────────────────
+# Price parquets are read from the backtest "main" store (never the live append dir).
+_main = paths.data_main_dir()
 if MODE == "1s":
-    _parquet_1s = Path("data/MNQ_1s.parquet")
-    _parquet_1m = Path("data/MNQ_1m.parquet")
+    _parquet_1s = _main / "MNQ_1s.parquet"
+    _parquet_1m = _main / "MNQ_1m.parquet"
     if _parquet_1s.exists():
         _raw = pd.read_parquet(_parquet_1s)
         _1m_agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
@@ -45,12 +56,12 @@ if MODE == "1s":
     elif _parquet_1m.exists():
         df = pd.read_parquet(_parquet_1m)
     else:
-        print("ERROR: neither data/MNQ_1s.parquet nor data/MNQ_1m.parquet found", file=sys.stderr)
+        print(f"ERROR: neither {_parquet_1s} nor {_parquet_1m} found", file=sys.stderr)
         sys.exit(1)
 else:
-    _parquet_1m = Path("data/MNQ_1m.parquet")
+    _parquet_1m = _main / "MNQ_1m.parquet"
     if not _parquet_1m.exists():
-        print("ERROR: data/MNQ_1m.parquet not found", file=sys.stderr)
+        print(f"ERROR: {_parquet_1m} not found", file=sys.stderr)
         sys.exit(1)
     df = pd.read_parquet(_parquet_1m)
 

@@ -16,6 +16,8 @@ import pandas as pd
 import smt_state
 
 from dotenv import load_dotenv
+
+import paths
 load_dotenv()
 
 _LIVE = os.getenv("LIVE_TRADING", "false").lower() == "true"
@@ -51,9 +53,10 @@ _fill_bar_time: "pd.Timestamp | None" = None
 _cancel_bar_time: "pd.Timestamp | None" = None
 _pending_close_after: "pd.Timestamp | None" = None
 
-# Manual entry pause (trade.py pause/resume). Canonical flag + is_paused() live in
-# smt_state so both this dispatch gate and the live pipeline's entry gate share one source.
-_PAUSE_FLAG = smt_state.PAUSE_PATH
+# Manual entry pause (trade.py pause/resume). Canonical flag path + is_paused() live in
+# smt_state so this dispatch gate, the live pipeline's entry gate, and trade.py share one
+# source. Resolved at call time via smt_state.pause_path() (the session folder is not known
+# at import), so pause()/resume() below call it rather than capturing a frozen constant.
 
 # Live-execution safety net mirroring strategy.MKT_FILL_MIN_STOP_DISTANCE: a stop entry the
 # executor downgrades to MKT fills at market, which can land closer to the protective stop than
@@ -97,7 +100,7 @@ def _log(event: dict) -> None:
     remaining fields follow alphabetically.
     """
     today = _SESSION_DATE or datetime.datetime.now(_ET).date().isoformat()
-    path = Path("sessions") / today / "events.jsonl"
+    path = paths.sessions_dir() / today / "events.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     ordered: dict = {"kind": event.get("kind", ""), "time": event.get("time", "")}
     if "direction" in event:
@@ -143,19 +146,21 @@ def is_paused() -> bool:
 
 def pause() -> bool:
     """Engage the manual entry pause. Idempotent: returns False (no-op) if already paused."""
-    if _PAUSE_FLAG.exists():
+    flag = smt_state.pause_path()
+    if flag.exists():
         return False
-    _PAUSE_FLAG.parent.mkdir(parents=True, exist_ok=True)
-    _PAUSE_FLAG.write_text(_now_et(), encoding="utf-8")
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.write_text(_now_et(), encoding="utf-8")
     _log({"kind": "paused", "time": _now_et()})
     return True
 
 
 def resume() -> bool:
     """Lift the manual entry pause. Idempotent: returns False (no-op) if not paused."""
-    if not _PAUSE_FLAG.exists():
+    flag = smt_state.pause_path()
+    if not flag.exists():
         return False
-    _PAUSE_FLAG.unlink()
+    flag.unlink()
     _log({"kind": "resumed", "time": _now_et()})
     return True
 
@@ -267,10 +272,11 @@ def _current_price() -> float:
     bar = load_bar_state()
     if bar and "potential_stop_long" in bar and "potential_stop_short" in bar:
         return (float(bar["potential_stop_long"]) + float(bar["potential_stop_short"])) / 2.0
-    # Fallback: last completed bar close from the main parquets (1s preferred — freshest).
+    # Fallback: last completed bar close from the live parquets (1s preferred — freshest).
+    # Live append target — the orchestrator writes today's bars here during a session.
     for _name in ("MNQ_1s.parquet", "MNQ_1m.parquet"):
         try:
-            _p = Path("data") / _name
+            _p = paths.data_live_dir() / _name
             if _p.exists():
                 _df = pd.read_parquet(_p, columns=["Close"])
                 if not _df.empty:
@@ -684,7 +690,6 @@ def hypothesis() -> list:
         python trade.py hypothesis
     """
     import pandas as pd
-    from pathlib import Path as _Path
     import hypothesis as _hyp_mod
     from smt_state import load_hypothesis, save_hypothesis
 
@@ -698,8 +703,8 @@ def hypothesis() -> list:
     hyp["direction"] = "none"
     save_hypothesis(hyp)
 
-    mnq_path = _Path("data/MNQ_1m.parquet")
-    mes_path = _Path("data/MES_1m.parquet")
+    mnq_path = paths.data_live_dir() / "MNQ_1m.parquet"
+    mes_path = paths.data_live_dir() / "MES_1m.parquet"
     if not mnq_path.exists() or not mes_path.exists():
         print("[live_orders] hypothesis: bar parquets not found — is the orchestrator running?", flush=True)
         return []

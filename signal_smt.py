@@ -62,8 +62,14 @@ MAX_RETRIES   = 10
 RETRY_DELAY_S = 15
 
 # ── Data paths ───────────────────────────────────────────────────────────────
-BAR_DATA_DIR = Path("data")
-POSITION_FILE = BAR_DATA_DIR / "live_position.json"
+import paths  # noqa: E402
+# Live session bars append to the machine-global live store so the orchestrator's
+# post-session merge + parquet-check promotion (which read data_live_dir()) see them,
+# and so backtest readers (data_main_dir()) never share the file being written.
+BAR_DATA_DIR = paths.data_live_dir()
+# live_position.json is this process's internal live-position tracker (not a parquet,
+# not read cross-process) — keep it worktree-local.
+POSITION_FILE = Path("data") / "live_position.json"
 
 # ── Module-level state (set in main()) ───────────────────────────────────────
 _ib_source: IbRealtimeSource | None = None
