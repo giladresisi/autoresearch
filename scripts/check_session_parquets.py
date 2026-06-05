@@ -42,7 +42,7 @@ BAD_ROW_CRITICAL_FRAC  = 0.05
 # Live session files + live parquets now live in the machine-global live dir; the
 # script reads/repairs/merges there. A successful session-end merge then PROMOTES the
 # validated parquets live -> main (see promote_live_to_main).
-DATA_DIR = paths.data_live_dir()
+DATA_DIR = paths.general_live_dir()
 
 INSTRUMENTS = [
     ("MNQ", MNQ_CONID, "MNQ_1s.parquet", "MNQ_1s_session_*.parquet"),
@@ -311,7 +311,7 @@ PROMOTE_NAMES = ["MNQ_1m.parquet", "MES_1m.parquet", "MNQ_1s.parquet", "MES_1s.p
 
 
 def promote_live_to_main() -> dict:
-    """Promote validated parquets from data_live_dir() to data_main_dir().
+    """Promote validated parquets from general_live_dir() to general_main_dir().
 
     This is the FINAL step after a successful session-end merge: the live parquets
     have just been validated + merged, so they are copied into the backtest read
@@ -320,8 +320,8 @@ def promote_live_to_main() -> dict:
 
     Returns a per-file status dict for the JSON report.
     """
-    live_dir = paths.data_live_dir()
-    main_dir = paths.data_main_dir()
+    live_dir = paths.general_live_dir()
+    main_dir = paths.general_main_dir()
     promoted: dict = {}
 
     for name in PROMOTE_NAMES:

@@ -102,10 +102,10 @@ output of every session-analysis run.
    root must be on `PYTHONPATH` (running it by file path alone fails with
    `ModuleNotFoundError`). From the project root:
    ```powershell
-   $env:PYTHONPATH = (Get-Location).Path; python data\regression\plot_regression.py <date>
+   $env:PYTHONPATH = (Get-Location).Path; python regression\plot_regression.py <date>
    ```
    Writes and opens the regression chart (`chart_1m.html`) inside the run folder
-   produced in Step 2.5 (`regression/<date>/<HH-MM-SS>/`).
+   produced in Step 2.5 (`regression/sessions/<date>/<HH-MM-SS>/`).
 
 If either plot command fails, note the error and continue — the analysis files
 (Step 3) do not depend on the charts. Report both chart paths in the final summary.

@@ -368,12 +368,12 @@ def test_check_parquet_files_invalid_input_loops(tmp_path):
 def test_cli_check_parquets_exits_0_when_all_present(tmp_path, capsys, monkeypatch):
     """--check-parquets exits 0 and reports empty missing list when all files exist.
 
-    The orchestrator's parquets now live in paths.data_live_dir() (the live append
-    target), so point ACT_GLOBAL_DIR at tmp_path and write the files under data/live.
+    The orchestrator's parquets now live in paths.general_live_dir() (the live append
+    target), so point ACT_GLOBAL_DIR at tmp_path and write the files under general/live.
     """
     import json, pandas as pd
     monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
-    data_dir = tmp_path / "data" / "live"
+    data_dir = tmp_path / "general" / "live"
     data_dir.mkdir(parents=True)
     empty = pd.DataFrame(
         columns=["Open", "High", "Low", "Close", "Volume"],
@@ -392,9 +392,9 @@ def test_cli_check_parquets_exits_0_when_all_present(tmp_path, capsys, monkeypat
 
 
 def test_cli_check_parquets_exits_1_when_files_missing(tmp_path, capsys, monkeypatch):
-    """--check-parquets exits 1 and lists missing files in JSON when data/live is empty."""
+    """--check-parquets exits 1 and lists missing files in JSON when general/live is empty."""
     import json
-    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))  # data/live is empty -> all missing
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))  # general/live is empty -> all missing
 
     with pytest.raises(SystemExit) as exc_info:
         _cli_check_parquets()
@@ -407,7 +407,7 @@ def test_cli_check_parquets_exits_1_when_files_missing(tmp_path, capsys, monkeyp
 
 
 def test_cli_create_empty_parquets_creates_all_missing(tmp_path, capsys, monkeypatch):
-    """--create-empty-parquets creates all 4 files (under data/live) when none exist."""
+    """--create-empty-parquets creates all 4 files (under general/live) when none exist."""
     import pandas as pd
     monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
 
@@ -415,7 +415,7 @@ def test_cli_create_empty_parquets_creates_all_missing(tmp_path, capsys, monkeyp
         _cli_create_empty_parquets()
 
     assert exc_info.value.code == 0
-    data_dir = tmp_path / "data" / "live"
+    data_dir = tmp_path / "general" / "live"
     for fname in ["MNQ_1m.parquet", "MES_1m.parquet", "MNQ_1s.parquet", "MES_1s.parquet"]:
         assert (data_dir / fname).exists()
         df = pd.read_parquet(data_dir / fname)

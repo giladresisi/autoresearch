@@ -1,13 +1,13 @@
 """
 Generate an interactive HTML chart for a regression run.
 Overlays strategy events, key price levels, and SMT div marks on MNQ 1m candlesticks.
-Reads from data/regression/{date}/ — supports both 1m and 1s mode output files.
+Reads from regression/sessions/{date}/ — supports both 1m and 1s mode output files.
 
 Usage (run from project root):
-    python data/regression/plot_regression.py 2026-05-20        # 1m mode (default)
-    python data/regression/plot_regression.py 2026-05-20 1s     # 1s mode
+    python regression/plot_regression.py 2026-05-20        # 1m mode (default)
+    python regression/plot_regression.py 2026-05-20 1s     # 1s mode
 
-Output: data/regression/{date}/chart_{mode}.html
+Output: regression/sessions/{date}/<run>/chart_{mode}.html
         Prints: Chart: <absolute-path>
 """
 
@@ -36,7 +36,7 @@ _SFX = "_1s" if MODE == "1s" else ""
 if len(sys.argv) > 3 and sys.argv[3]:
     REG_DIR = Path(sys.argv[3])
 else:
-    _date_dir = paths.regression_dir() / DATE
+    _date_dir = paths.regression_sessions_dir() / DATE
     _runs = sorted(p for p in _date_dir.glob("*") if p.is_dir() and p.name != "baseline") \
         if _date_dir.exists() else []
     REG_DIR = _runs[-1] if _runs else _date_dir
@@ -45,7 +45,7 @@ DEFAULT_CONTRACTS = 2
 
 # ── Price data ─────────────────────────────────────────────────────────────────
 # Price parquets are read from the backtest "main" store (never the live append dir).
-_main = paths.data_main_dir()
+_main = paths.general_main_dir()
 if MODE == "1s":
     _parquet_1s = _main / "MNQ_1s.parquet"
     _parquet_1m = _main / "MNQ_1m.parquet"

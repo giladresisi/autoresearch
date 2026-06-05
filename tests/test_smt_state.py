@@ -37,13 +37,24 @@ _LOAD_SAVE_PAIRS = [
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    """Redirect the state-dir prefix into a fresh tmp_path for each test."""
+    """Redirect the state-dir prefix into a fresh tmp_path for each test, and isolate the
+    global root so global.json (which lives in general_live_dir() in live/disk mode) never
+    touches the real machine-global folder."""
     import paths
     monkeypatch.setattr(paths, "_STATE_DIR", tmp_path)
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path / "_global"))
     # Reset hypothesis cache and in-memory flag so tests don't bleed state into each other
     monkeypatch.setattr(smt_state, "_hyp_cache",       None)
     monkeypatch.setattr(smt_state, "_hyp_cache_valid", False)
     monkeypatch.setattr(smt_state, "_IN_MEMORY",       False)
+
+
+def _state_path(filename):
+    """Where a given state file lands under the test's isolated dirs: global.json lives in
+    general_live_dir() (live/disk mode); daily/hypothesis/position under state_dir()."""
+    import paths
+    base = paths.general_live_dir() if filename == "global.json" else paths.state_dir()
+    return base / filename
 
 
 class TestLoadReturnsDefaultWhenMissing:
@@ -63,14 +74,14 @@ class TestLoadReturnsDefaultWhenSchemaMismatch:
     @pytest.mark.parametrize("load_fn,save_fn,default,path_attr", _LOAD_SAVE_PAIRS)
     def test_bad_file_returns_default(self, load_fn, save_fn, default, path_attr, tmp_path):
         # Write a file with only an unrecognized key (missing all required keys)
-        bad_path = tmp_path / path_attr
+        bad_path = _state_path(path_attr)
         bad_path.write_text(json.dumps({"foo": 1}), encoding="utf-8")
         result = load_fn()
         assert result == default
 
     @pytest.mark.parametrize("load_fn,save_fn,default,path_attr", _LOAD_SAVE_PAIRS)
     def test_bad_file_left_on_disk(self, load_fn, save_fn, default, path_attr, tmp_path):
-        bad_path = tmp_path / path_attr
+        bad_path = _state_path(path_attr)
         bad_path.write_text(json.dumps({"foo": 1}), encoding="utf-8")
         load_fn()
         # Original bad file must still be present (load does not overwrite)
@@ -143,7 +154,7 @@ class TestSaveIsAtomic:
                 save_global({"all_time_high": 999.0, "trend": "down"})
 
         # Main file must not exist (or if .tmp exists, that's acceptable)
-        assert not (tmp_path / "global.json").exists()
+        assert not _state_path("global.json").exists()
 
 
 class TestSaveUsesSortKeysForDeterminism:
@@ -152,10 +163,10 @@ class TestSaveUsesSortKeysForDeterminism:
         d_b = {"all_time_high": 21500.0, "trend": "up"}
 
         save_global(d_a)
-        bytes_a = (tmp_path / "global.json").read_bytes()
+        bytes_a = _state_path("global.json").read_bytes()
 
         save_global(d_b)
-        bytes_b = (tmp_path / "global.json").read_bytes()
+        bytes_b = _state_path("global.json").read_bytes()
 
         assert bytes_a == bytes_b
 
@@ -203,14 +214,14 @@ class TestHypothesisCache:
 
 
 # ---------------------------------------------------------------------------
-# is_paused: manual entry-pause sentinel (resolved under sessions/<date>; inert in backtest)
+# is_paused: manual entry-pause sentinel (resolved in general_live_dir(); inert in backtest)
 # ---------------------------------------------------------------------------
 
 def _make_pause_sentinel(tmp_path, monkeypatch):
-    """Point sessions_dir() at tmp, fix the session date, and return the sentinel path
-    (where smt_state.pause_path() resolves) so a test can create/inspect it."""
+    """Point the global root at tmp and return the sentinel path (where
+    smt_state.pause_path() resolves: general_live_dir()/paused) so a test can
+    create/inspect it. The pause flag is no longer per-session."""
     monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
-    monkeypatch.setattr(smt_state, "_SESSION_DATE", "2026-01-15")
     return smt_state.pause_path()
 
 

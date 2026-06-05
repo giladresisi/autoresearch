@@ -30,7 +30,8 @@ def _fake_backtest(*_a, **_kw):
 
 
 def _run_subdirs(reg_root):
-    date_dir = reg_root / _DATE
+    # Per-date run folders now live under <regression>/sessions/<date>/.
+    date_dir = reg_root / "sessions" / _DATE
     return sorted(p for p in date_dir.glob("*") if p.is_dir() and p.name != "baseline")
 
 
@@ -59,10 +60,10 @@ def test_baseline_lives_in_stable_baseline_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("ACT_REGRESSION_DIR", str(tmp_path / "reg"))
     monkeypatch.setattr("backtest_smt.run_backtest_v2", _fake_backtest)
 
-    # record=True writes the baseline; it must land at <date>/baseline/, not in a run folder.
+    # record=True writes the baseline; it must land at sessions/<date>/baseline/, not a run folder.
     regression.run_regression(dates=[_DATE], mode="1s", no_plot=True, record=True)
 
-    bl = tmp_path / "reg" / _DATE / "baseline"
+    bl = tmp_path / "reg" / "sessions" / _DATE / "baseline"
     assert (bl / "baseline_events_1s.jsonl").exists()
     assert (bl / "baseline_trades_1s.tsv").exists()
 

@@ -362,8 +362,13 @@ def test_start_pause_engages_pause_then_launches(monkeypatch, tmp_path, capsys):
         del sys.modules["trade"]
     trade = importlib.import_module("trade")
     monkeypatch.setattr(trade, "_orchestrator_pid", lambda: None)
+    # start now ALWAYS sweeps (even with no pid file) — mock it so the test doesn't scan
+    # real processes, and assert the sweep is invoked regardless of pid-file state (Bug 1).
+    terminate_mock = MagicMock(return_value=[])
+    monkeypatch.setattr(trade, "_terminate_all", terminate_mock)
 
     trade.main()
 
+    terminate_mock.assert_called_once()
     mock_lo.pause.assert_called_once()
     assert "paused mode" in capsys.readouterr().out.lower()

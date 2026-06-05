@@ -47,11 +47,15 @@ def _resolve_direction(pos_dir: str, extra_arg: str | None) -> str | None:
 
 
 def _orchestrator_pid() -> int | None:
-    """Return the live orchestrator PID from orchestrator.pid, or None if not running."""
-    import psutil
-    from pathlib import Path
+    """Return the live orchestrator PID from orchestrator.pid, or None if not running.
 
-    pid_file = Path("orchestrator.pid")
+    The PID file lives in the shared general live folder (paths.general_live_dir()), the one
+    canonical location for the single live orchestrator (alongside global.json / the pause
+    sentinel)."""
+    import psutil
+    import paths
+
+    pid_file = paths.general_live_dir() / "orchestrator.pid"
     if not pid_file.exists():
         return None
     try:
@@ -80,32 +84,38 @@ def _terminate_all() -> list[str]:
     """Gracefully stop orchestrator (cancelMktData + IB disconnect + parquet flush), then kill
     automation.main — **scoped to THIS worktree**. Returns list of killed/stopped descriptions."""
     import psutil
+    import paths
     from pathlib import Path
 
     killed = []
     worktree_root = Path(__file__).resolve().parent
 
-    pid_file = Path("orchestrator.pid")
+    # PID file lives in the shared general live folder (one canonical live orchestrator).
+    pid_file = paths.general_live_dir() / "orchestrator.pid"
     stop_file = Path("orchestrator_stop.req")
     if pid_file.exists():
         try:
             orch_pid = int(pid_file.read_text().strip())
             try:
                 p = psutil.Process(orch_pid)
-                # Write stop sentinel so the orchestrator's sleep loop wakes, calls
-                # source.stop() (cancelMktData + IB disconnect + parquet flush), then exits.
-                stop_file.write_text("stop")
-                try:
-                    p.wait(timeout=20)
-                    killed.append(f"orchestrator pid={orch_pid} (graceful)")
-                except psutil.TimeoutExpired:
-                    # Orchestrator didn't exit in time — hard kill as fallback.
+                # The PID file is shared across worktrees; only stop the orchestrator if it
+                # belongs to THIS worktree. A sibling worktree's (possibly LIVE) orchestrator
+                # must never be stopped from here (same scoping the scans below enforce).
+                if _proc_in_worktree(p, worktree_root):
+                    # Write stop sentinel so the orchestrator's sleep loop wakes, calls
+                    # source.stop() (cancelMktData + IB disconnect + parquet flush), then exits.
+                    stop_file.write_text("stop")
                     try:
-                        stop_file.unlink()
-                    except OSError:
-                        pass
-                    p.kill()
-                    killed.append(f"orchestrator pid={orch_pid} (force-killed after timeout)")
+                        p.wait(timeout=20)
+                        killed.append(f"orchestrator pid={orch_pid} (graceful)")
+                    except psutil.TimeoutExpired:
+                        # Orchestrator didn't exit in time — hard kill as fallback.
+                        try:
+                            stop_file.unlink()
+                        except OSError:
+                            pass
+                        p.kill()
+                        killed.append(f"orchestrator pid={orch_pid} (force-killed after timeout)")
             except psutil.NoSuchProcess:
                 killed.append(f"orchestrator pid={orch_pid} (already dead)")
         except (ValueError, OSError):
@@ -123,6 +133,26 @@ def _terminate_all() -> list[str]:
                 except psutil.TimeoutExpired:
                     proc.kill()
                 killed.append(f"powershell wrapper pid={proc.pid}")
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    # Orphaned orchestrator.main Python processes scoped to THIS worktree. The pid-file
+    # branch above gracefully stops the *tracked* orchestrator; this catches an orphan whose
+    # pid is NOT in the file (crash-loop / stale-or-missing pid file) that would otherwise
+    # survive a fresh start and run a second live orchestrator. Killed before automation.main
+    # so a surviving orchestrator can't respawn a child mid-sweep.
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if proc.info.get("name", "").lower() not in ("python.exe", "python"):
+                continue
+            cmdline = proc.info.get("cmdline") or []
+            if any("orchestrator.main" in arg for arg in cmdline) and _proc_in_worktree(proc, worktree_root):
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                killed.append(f"orchestrator.main pid={proc.pid}")
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
@@ -299,11 +329,16 @@ def main() -> None:
                 else:
                     print("Already resumed — starting normally")
 
-        # Check if orchestrator is already running
+        # Always sweep for an existing/orphaned orchestrator + automation.main in THIS
+        # worktree before launching — even when the pid file is missing or stale. A
+        # crash-looped orphan whose pid is not in the file must never survive a fresh start
+        # (that produced duplicate live orchestrators). _terminate_all is worktree-scoped, so
+        # a sibling worktree's live run is never touched.
         existing_pid = _orchestrator_pid()
         if existing_pid is not None:
             print(f"Killing existing orchestrator (pid={existing_pid})...")
-            killed = _terminate_all()
+        killed = _terminate_all()
+        if killed:
             for k in killed:
                 print(f"Killed {k}")
             time.sleep(1)

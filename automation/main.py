@@ -70,9 +70,9 @@ WATCHDOG_TERMINATION_GRACE_S   = 30   # grace window for IB to recover before ex
 # ── Data paths ───────────────────────────────────────────────────────────────
 import paths  # noqa: E402
 # Live session bars append to the machine-global live store so the orchestrator's
-# post-session merge + parquet-check promotion (data_live_dir()) see them, and backtest
-# readers (data_main_dir()) never share the file being written.
-BAR_DATA_DIR = paths.data_live_dir()
+# post-session merge + parquet-check promotion (general_live_dir()) see them, and backtest
+# readers (general_main_dir()) never share the file being written.
+BAR_DATA_DIR = paths.general_live_dir()
 # Internal live-position tracker (not a parquet, not read cross-process) — worktree-local.
 POSITION_FILE = Path("data") / "live_position.json"
 # Session artifacts (comments.md, etc.) go to the global sessions dir, matching the

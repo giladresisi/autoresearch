@@ -9,7 +9,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import paths
 import regression
+
+
+def _baseline_paths(date: str = "2025-11-14"):
+    """Regression baseline locations after the path restructure: baselines live at
+    paths.regression_sessions_dir()/<date>/baseline/ (run outputs go in per-run folders)."""
+    bl = paths.regression_sessions_dir() / date / "baseline"
+    return bl / "baseline_events.jsonl", bl / "baseline_trades.tsv"
 
 # Parquet slices are cached here (gitignored). Generated once per machine from the full
 # data/ parquets so the fixture always copies a small window instead of the full history.
@@ -102,18 +110,22 @@ def real_parquet_available(_parquet_slices):
 
 @pytest.fixture(autouse=True)
 def _redirect_state(tmp_path, monkeypatch, _parquet_slices):
-    """Redirect smt_state paths so regression writes go to tmp_path."""
-    import smt_state
-    import paths
+    """Isolate every path regression touches into tmp_path.
+
+    Post path-restructure: the backtest reads 1m parquets from paths.general_main_dir()
+    and regression writes baselines under paths.regression_sessions_dir()/<date>/baseline/. Point
+    ACT_GLOBAL_DIR + ACT_REGRESSION_DIR at tmp_path (env, so subprocess CLI tests inherit it)
+    and seed the parquet slices into general_main_dir() so the run is deterministic and never
+    reads the real machine-global production data."""
     monkeypatch.setattr(paths, "_STATE_DIR", tmp_path)
-    # regression.py uses Path("data") relative to cwd; redirect via chdir.
     monkeypatch.chdir(tmp_path)
-    tmp_data = tmp_path / "data"
-    tmp_data.mkdir(exist_ok=True)
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path / "global"))
+    monkeypatch.setenv("ACT_REGRESSION_DIR", str(tmp_path / "regression"))
     if _parquet_slices:
         import shutil
+        main_dir = paths.general_main_dir()
         for name, slice_path in _parquet_slices.items():
-            shutil.copy2(slice_path, tmp_data / name)
+            shutil.copy2(slice_path, main_dir / name)
 
 
 def test_run_regression_pass_when_baselines_match(tmp_path, real_parquet_available):
@@ -133,7 +145,7 @@ def test_run_regression_fail_when_events_differ(tmp_path, real_parquet_available
     # Create baselines
     regression.run_regression(str(md), update_baseline=True)
     # Corrupt the baseline events file
-    bl_events = tmp_path / "data" / "regression" / "2025-11-14" / "baseline_events.jsonl"
+    bl_events, _ = _baseline_paths()
     if bl_events.exists():
         original = bl_events.read_text(encoding="utf-8")
         bl_events.write_text("CORRUPTED\n" + original, encoding="utf-8")
@@ -151,7 +163,7 @@ def test_run_regression_fail_when_trades_differ(tmp_path, real_parquet_available
     # Create baselines
     regression.run_regression(str(md), update_baseline=True)
     # Corrupt the baseline trades file
-    bl_trades = tmp_path / "data" / "regression" / "2025-11-14" / "baseline_trades.tsv"
+    _, bl_trades = _baseline_paths()
     if bl_trades.exists():
         bl_trades.write_text("CORRUPTED HEADER\nrow1\n", encoding="utf-8")
     else:
@@ -170,8 +182,7 @@ def test_update_baseline_overwrites_and_skips_diff(tmp_path, real_parquet_availa
     r2 = regression.run_regression(str(md), update_baseline=True)
     assert r2["2025-11-14"].get("updated") is True
     # Verify baseline files exist
-    bl_events = tmp_path / "data" / "regression" / "2025-11-14" / "baseline_events.jsonl"
-    bl_trades  = tmp_path / "data" / "regression" / "2025-11-14" / "baseline_trades.tsv"
+    bl_events, bl_trades = _baseline_paths()
     assert bl_events.exists()
     assert bl_trades.exists()
 
@@ -198,7 +209,7 @@ def test_cli_exit_code_one_on_fail(tmp_path, real_parquet_available):
     # Update baselines first
     regression.run_regression(str(md), update_baseline=True)
     # Corrupt baseline events
-    bl_events = tmp_path / "data" / "regression" / "2025-11-14" / "baseline_events.jsonl"
+    bl_events, _ = _baseline_paths()
     if not bl_events.exists():
         bl_events.parent.mkdir(parents=True, exist_ok=True)
         bl_events.write_text('{"kind":"fake"}\n', encoding="utf-8")

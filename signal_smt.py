@@ -64,9 +64,9 @@ RETRY_DELAY_S = 15
 # ── Data paths ───────────────────────────────────────────────────────────────
 import paths  # noqa: E402
 # Live session bars append to the machine-global live store so the orchestrator's
-# post-session merge + parquet-check promotion (which read data_live_dir()) see them,
-# and so backtest readers (data_main_dir()) never share the file being written.
-BAR_DATA_DIR = paths.data_live_dir()
+# post-session merge + parquet-check promotion (which read general_live_dir()) see them,
+# and so backtest readers (general_main_dir()) never share the file being written.
+BAR_DATA_DIR = paths.general_live_dir()
 # live_position.json is this process's internal live-position tracker (not a parquet,
 # not read cross-process) — keep it worktree-local.
 POSITION_FILE = Path("data") / "live_position.json"
