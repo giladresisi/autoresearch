@@ -234,8 +234,16 @@ def _register_downgraded_fill(direction: str, entry_price: float, stop_price: fl
     pos.pop("stop_entry_unplaced", None)
     _save_pos(pos)
     _recompute_cautious_at_fill(float(entry_price))
+    # Align events.jsonl with signals.log. The strategy emitted a `new-stop-entry`, but the
+    # broker instantly downgraded it STP->MKT and filled the same instant — so on this path
+    # events.jsonl would otherwise show a standalone `stop-entry-filled` with no originating
+    # `new-stop-entry` (signals.log has the placement; events.jsonl did not). Log the
+    # placement too, then the fill, both tagged `stp_mkt_downgrade` so the immediate-downgrade
+    # origin is explicit (and so the fill is distinguishable from a later bar-based fill).
+    _log({"kind": "new-stop-entry", "time": now, "direction": direction,
+          "entry_price": entry_price, "stop_price": stop_price, "stp_mkt_downgrade": True})
     _log({"kind": "stop-entry-filled", "time": now, "direction": direction,
-          "price": entry_price, "stop_price": stop_price})
+          "price": entry_price, "stop_price": stop_price, "stp_mkt_downgrade": True})
 
 
 def _recompute_cautious_at_fill(fill_price: float) -> None:

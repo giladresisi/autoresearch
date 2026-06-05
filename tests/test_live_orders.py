@@ -172,13 +172,21 @@ def test_place_stop_entry_downgrade_fills_immediately(_in_tmp, _mock_today):
     assert mock_recompute.call_args.args[1] == pytest.approx(19850.0)
     mock_save_hyp.assert_called_once()
 
-    # stop-entry-filled is logged (NOT new-stop-entry)
+    # events.jsonl mirrors signals.log on the instant STP->MKT downgrade: the placement
+    # (new-stop-entry) AND the fill (stop-entry-filled) are both logged, both tagged
+    # stp_mkt_downgrade so the immediate-downgrade origin is explicit.
     events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
-    assert len(events) == 1
-    assert events[0]["kind"] == "stop-entry-filled"
+    assert len(events) == 2
+    assert events[0]["kind"] == "new-stop-entry"
     assert events[0]["direction"] == "long"
-    assert events[0]["price"] == pytest.approx(19850.0)
+    assert events[0]["entry_price"] == pytest.approx(19850.0)
     assert events[0]["stop_price"] == pytest.approx(19820.0)
+    assert events[0]["stp_mkt_downgrade"] is True
+    assert events[1]["kind"] == "stop-entry-filled"
+    assert events[1]["direction"] == "long"
+    assert events[1]["price"] == pytest.approx(19850.0)
+    assert events[1]["stop_price"] == pytest.approx(19820.0)
+    assert events[1]["stp_mkt_downgrade"] is True
 
 
 # ---------------------------------------------------------------------------
