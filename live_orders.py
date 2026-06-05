@@ -393,7 +393,13 @@ def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> No
         return
     now = _now_et()
     entry_price = float(pos["stop_entry"]) if pos.get("stop_entry") else 0.0
-    if getattr(_executor, "_entry_is_live", True):
+    # Send the broker cancel whenever the entry was actually placed at the broker. Gate on the
+    # PERSISTED stop_entry_unplaced flag (cross-process truth), NOT the executor's per-process
+    # _entry_is_live — that flag is only True in the process that sent the entry (the
+    # orchestrator), so a `trade.py cancel` from a separate CLI process saw it False and never
+    # cancelled, leaving a working STP order at the broker while position.json showed it gone
+    # (incident 2026-06-04 09:05). Mirrors the stop-entry-cancelled dispatch path.
+    if not pos.get("stop_entry_unplaced"):
         _executor.place_close("cancel-stop")
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""

@@ -539,6 +539,49 @@ def test_move_stop_entry_skips_when_active_unless_forced(_in_tmp, _mock_today):
 
 
 # ---------------------------------------------------------------------------
+# Test 6c (D3): cancel reaches the broker regardless of the per-process entry flag
+# ---------------------------------------------------------------------------
+
+def test_cancel_stop_entry_sends_broker_cancel_when_entry_not_live_in_process(_in_tmp, _mock_today):
+    """D3: `trade.py cancel` runs in a CLI process that did NOT send the entry, so the PMT
+    executor's per-process `_entry_is_live` is False — but the working STP order is real at
+    the broker. The cancel MUST still reach the broker; gating on `_entry_is_live` left the
+    order working while position.json showed it gone (incident 2026-06-04 09:05)."""
+    pos = {"active": {}, "stop_entry": "19900.0", "stop_direction": "up",
+           "conf_bar_entry": {}, "failed_entries": 0}
+    mock_executor = MagicMock()
+    mock_executor._entry_is_live = False   # CLI process never sent the entry
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=pos), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
+        live_orders.cancel_stop_entry("user-requested")
+
+    mock_executor.place_close.assert_called_once_with("cancel-stop")
+    assert saved["stop_entry"] == ""
+
+
+def test_cancel_stop_entry_skips_broker_cancel_when_unplaced(_in_tmp, _mock_today):
+    """D3: when the entry was never placed at the broker (window gate set
+    stop_entry_unplaced=True — persisted, cross-process truth), no broker cancel is sent;
+    only local state is cleared. This is the correct gate, replacing per-process
+    `_entry_is_live`, and mirrors the stop-entry-cancelled dispatch path."""
+    pos = {"active": {}, "stop_entry": "19900.0", "stop_direction": "up",
+           "stop_entry_unplaced": True, "conf_bar_entry": {}, "failed_entries": 0}
+    mock_executor = MagicMock()
+    mock_executor._entry_is_live = True    # per-process flag must NOT force a spurious cancel
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=pos), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
+        live_orders.cancel_stop_entry("user-requested")
+
+    mock_executor.place_close.assert_not_called()
+    assert saved["stop_entry"] == ""
+    assert "stop_entry_unplaced" not in saved or saved.get("stop_entry_unplaced") is None
+
+
+# ---------------------------------------------------------------------------
 # Test 7: close_position clears active and other fields
 # ---------------------------------------------------------------------------
 
