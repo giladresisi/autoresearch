@@ -28,7 +28,7 @@ from orchestrator.process import ProcessManager
 from orchestrator.relay import SessionRelay
 from orchestrator.scheduler import get_et_now, is_trading_day, next_session_open
 from orchestrator.summarizer import Summarizer
-from session_times import SESSION_OPEN as _SESSION_OPEN_V2, SESSION_CLOSE as _SESSION_CLOSE_V2
+from session_times import SESSION_OPEN as _SESSION_OPEN_V2, SESSION_CLOSE as _SESSION_CLOSE_V2, cme_session_date
 
 import paths
 
@@ -423,6 +423,12 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
         while True:
             now   = get_et_now()
             today = now.date()
+            # `today` (ET calendar date) drives SCHEDULING (session_open_dt, grace_end_dt,
+            # is_trading_day). `session_label` (CME trade date = ET-open-date + 1, stable
+            # across the midnight roll) names the session FOLDER, so the orchestrator's
+            # state JSONs land in the same folder as automation.main's events/bar_state
+            # (which use session_date_str() == cme_session_date(now)).
+            session_label = cme_session_date(now)
 
             if not is_trading_day(today):
                 _pre_src, _pre_thr, _pre_err = _start_pre_session_ib(bar_data_dir)
@@ -469,14 +475,15 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
                 continue
 
             # Run session (no pre-session IB during session — subprocess owns the IB connection)
-            signal_ch, orch_ch = _make_session_channels(today)
+            signal_ch, orch_ch = _make_session_channels(session_label)
             relay = SessionRelay(signal_ch)
             # This session's state JSONs live in its session folder. Resolve the dir once
             # here and hand the SAME path to the subprocess via ACT_STATE_DIR so both
             # processes agree by construction — the session-end position check below must
             # read exactly what the subprocess wrote (a date mismatch would miss an open
-            # position at close).
-            _session_state_dir = _SESSIONS_DIR / today.isoformat()
+            # position at close). Folder is named by the CME trade date (session_label),
+            # matching automation.main's session_date_str().
+            _session_state_dir = _SESSIONS_DIR / session_label.isoformat()
             paths.set_state_dir(_session_state_dir)
             if LIVE_TRADING:
                 signal_cmd = ["uv", "run", "python", "-m", "automation.main"]
@@ -497,7 +504,7 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
             except Exception as _exc:
                 orch_ch.writeln(f"[ORCH] WARNING: 1s session merge failed: {_exc}")
             _close_session_position(orch_ch)
-            relay.write_trades_tsv(_SESSIONS_DIR / today.isoformat() / "trades.tsv", today)
+            relay.write_trades_tsv(_SESSIONS_DIR / session_label.isoformat() / "trades.tsv", today)
             # if summarizer is not None:
             #     summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)
             if result == "ib_disconnected":

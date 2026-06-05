@@ -18,7 +18,7 @@ import hypothesis as _hyp_mod
 import smt_state as _smt_state
 import strategy as _strat_mod
 import trend as _trend_mod
-from session_times import is_entry_allowed, cme_session_start as _cme_session_start
+from session_times import is_entry_allowed, cme_session_start as _cme_session_start, cme_session_date
 from smt_state import save_bar_state
 
 _ET = ZoneInfo("America/New_York")
@@ -255,7 +255,7 @@ class SessionPipeline:
             if _env_state:
                 paths.set_state_dir(_env_state)
             else:
-                _d = _smt_state._SESSION_DATE or str(now.date())
+                _d = _smt_state._SESSION_DATE or cme_session_date(now).isoformat()
                 paths.set_state_dir(paths.sessions_dir() / _d)
 
         # Reset per-hypothesis tracking state on every session start.
