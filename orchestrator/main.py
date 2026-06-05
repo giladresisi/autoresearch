@@ -352,7 +352,12 @@ def _make_ib_health_check(thread: _threading.Thread, thread_exc: list):
     return check
 
 
-_PIDFILE = Path(__file__).resolve().parent.parent / "orchestrator.pid"
+def _pidfile() -> Path:
+    """Orchestrator PID file — lives in the shared general live folder (alongside global.json
+    and the pause sentinel), NOT the worktree, so there is one canonical location for the
+    single live orchestrator across worktrees. Resolved at call time (general_live_dir reads
+    ACT_GLOBAL_DIR and mkdir's)."""
+    return paths.general_live_dir() / "orchestrator.pid"
 
 
 def _kill_stale_orchestrator() -> None:
@@ -401,7 +406,7 @@ def _kill_stale_orchestrator() -> None:
                 proc.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-    _PIDFILE.write_text(str(current_pid))
+    _pidfile().write_text(str(current_pid))
 
 
 def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_reset: bool = False) -> None:
@@ -533,8 +538,9 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
         raise
     finally:
         try:
-            if _PIDFILE.exists() and _PIDFILE.read_text().strip() == str(_os.getpid()):
-                _PIDFILE.unlink()
+            _pf = _pidfile()
+            if _pf.exists() and _pf.read_text().strip() == str(_os.getpid()):
+                _pf.unlink()
         except OSError:
             pass
 

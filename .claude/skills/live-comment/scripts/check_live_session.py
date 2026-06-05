@@ -37,7 +37,8 @@ def _orchestrator_alive() -> tuple[bool, str]:
     os.kill(pid, 0) misbehaves. We also sanity-check the process name to guard
     against PID reuse by an unrelated program after the orchestrator exits.
     """
-    pid_file = ROOT / "orchestrator.pid"
+    import paths  # ROOT is on sys.path
+    pid_file = paths.general_live_dir() / "orchestrator.pid"
     if not pid_file.exists():
         return False, "no orchestrator.pid file (orchestrator not started)"
     raw = pid_file.read_text().strip()

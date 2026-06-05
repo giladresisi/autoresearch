@@ -119,7 +119,9 @@ so events that fired between the state-check and the monitor arm are never misse
 ```bash
 BASE="$(pwd)"
 STARTUP_LOG="$BASE/orchestrator_stdout.log"
-PID_FILE="$BASE/orchestrator.pid"
+# PID file now lives in the shared general live folder (paths.general_live_dir()),
+# alongside global.json / the pause sentinel — resolve it via paths.py.
+PID_FILE="$(uv run python -c "import paths; print(paths.general_live_dir() / 'orchestrator.pid')" 2>/dev/null)"
 
 gap_fill_done=false
 fill_incomplete_reported=false
