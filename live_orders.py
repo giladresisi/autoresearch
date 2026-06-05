@@ -283,6 +283,16 @@ def _current_price() -> float:
 def place_market_entry(direction: str, entry_price: float, stop_price: float, *, flatten_first: bool = False, source: str = "strategy") -> None:
     """Enter at market with stop. Logs, dispatches MKT+sl, writes active to position.json."""
     now = _now_et()
+    # Safety net (mirrors place_stop_entry): anchor the protective stop to the assumed fill
+    # and guarantee it clears _MIN_FILL_STOP_DISTANCE on the protective side BEFORE the order
+    # is sent. A market fill must never carry a stop at/beyond the fill — Tradovate rejects an
+    # invalid stop leg (long stop ≥ fill / short stop ≤ fill), leaving the entry naked — nor a
+    # near-zero stop that the entry bar instantly trips (incident 2026-06-04: manual `trade.py
+    # up` filled then immediately stopped out / had its S/L leg rejected). The fill anchor is
+    # entry_price when given, else the current market price (manual entries pass entry 0.0);
+    # anchoring to 0.0 would defeat the floor. Only widens; far stops are untouched.
+    fill_price = entry_price if entry_price != 0.0 else _current_price()
+    stop_price = _floor_stop_distance(direction, fill_price, stop_price)
     pmt_signal = {
         "direction": direction,
         "entry_price": entry_price,
@@ -293,7 +303,6 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float, *,
     if not getattr(_executor, "_entry_is_live", True):
         # Entry was blocked by window gate — don't update position state or log
         return
-    fill_price = entry_price if entry_price != 0.0 else _current_price()
     pos = _load_pos()
     pos["active"] = {
         "direction": direction,
