@@ -202,6 +202,43 @@ def test_place_stop_entry_downgrade_fills_immediately(_in_tmp, _mock_today):
     assert events[1]["stp_mkt_downgrade"] is True
 
 
+def test_place_stop_entry_downgrade_records_market_fill(_in_tmp, _mock_today):
+    """The downgrade fill is recorded at the executor's market-anchored estimate
+    (rec.fill_price = current price + slip), NOT at the already-passed trigger —
+    live trigger-vs-broker fill gaps were 12-20 pts in fast moves (2026-06-05).
+    The protective stop stays as placed (it must keep matching the broker SL)."""
+    empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
+                 "conf_bar_entry": {}, "failed_entries": 0}
+    mock_executor = MagicMock()
+    # Trigger 19850 long; market already ran to ~19834 → executor anchors fill there.
+    mock_executor.place_entry.return_value = SimpleNamespace(
+        order_type="market", fill_price=19834.75)
+    mock_executor._entry_is_live = True
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=empty_pos), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)), \
+         patch("smt_state.load_hypothesis", return_value={"direction": "up"}), \
+         patch("smt_state.load_daily", return_value={"liquidities": []}), \
+         patch("smt_state.load_global", return_value={"all_time_high": 21000.0}), \
+         patch("smt_state.save_hypothesis"), \
+         patch("hypothesis.recompute_cautious_for_fill") as mock_recompute:
+        live_orders.place_stop_entry("long", 19850.0, 19820.0)
+
+    # Fill recorded at the market-anchored estimate; stop unchanged (matches broker SL).
+    assert saved["active"]["fill_price"] == pytest.approx(19834.75)
+    assert saved["active"]["stop"] == pytest.approx(19820.0)
+    # Cautious ladder re-anchored to the ACTUAL fill, not the trigger.
+    assert mock_recompute.call_args.args[1] == pytest.approx(19834.75)
+
+    events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
+    assert events[0]["kind"] == "new-stop-entry"
+    assert events[0]["entry_price"] == pytest.approx(19850.0)   # placement keeps the trigger
+    assert events[1]["kind"] == "stop-entry-filled"
+    assert events[1]["price"] == pytest.approx(19834.75)        # fill = market estimate
+    assert events[1]["trigger_price"] == pytest.approx(19850.0)  # trigger kept for visibility
+
+
 # ---------------------------------------------------------------------------
 # Test 1c: a real resting STP (no downgrade) stays a pending stop_entry
 # ---------------------------------------------------------------------------
@@ -1107,3 +1144,62 @@ def test_close_position_clears_session_stop_entry(_in_tmp, _mock_today, _mock_sm
     on_disk = json.loads(seeded.read_text(encoding="utf-8"))
     assert on_disk["active"] == {}
     assert on_disk["stop_entry"] == ""
+
+
+# ---------------------------------------------------------------------------
+# _current_price freshness (2026-06-05: the bar_state midpoint is up to ~5m stale —
+# the source of bad STP->MKT downgrade decisions and 12-20pt assumed-fill gaps)
+# ---------------------------------------------------------------------------
+
+def test_current_price_prefers_fresh_inprocess_bars(_in_tmp, monkeypatch):
+    """A fresh in-process live 1m frame (orchestrator process) wins over everything."""
+    import pandas as pd
+    import strategy_smt
+    idx = pd.DatetimeIndex([pd.Timestamp.now(tz="America/New_York").floor("1min")])
+    monkeypatch.setattr(strategy_smt, "_mnq_bars",
+                        pd.DataFrame({"Close": [20123.5]}, index=idx))
+    assert live_orders._current_price() == pytest.approx(20123.5)
+
+
+def test_current_price_ignores_stale_inprocess_bars(_in_tmp, monkeypatch):
+    """A stale in-process frame (restart leftovers, old backtest state) must NOT leak
+    in — fall through to the legacy bar_state midpoint."""
+    import pandas as pd
+    import strategy_smt
+    old_idx = pd.DatetimeIndex([pd.Timestamp("2025-01-01 10:00", tz="America/New_York")])
+    monkeypatch.setattr(strategy_smt, "_mnq_bars",
+                        pd.DataFrame({"Close": [11111.0]}, index=old_idx))
+    smt_state.save_bar_state({"time": "t", "potential_stop_long": 19800.0,
+                              "potential_stop_short": 19900.0})
+    assert live_orders._current_price() == pytest.approx(19850.0)
+
+
+def test_current_price_uses_fresh_live_1m_parquet(_in_tmp, monkeypatch):
+    """Standalone process (no in-process frame): a fresh live MNQ_1m.parquet close wins
+    over the (up to ~5m stale) bar_state midpoint."""
+    import pandas as pd
+    import strategy_smt
+    monkeypatch.setattr(strategy_smt, "_mnq_bars", None)
+    idx = pd.DatetimeIndex([pd.Timestamp.now(tz="America/New_York").floor("1min")])
+    pd.DataFrame({"Open": [20220.0], "High": [20225.0], "Low": [20215.0],
+                  "Close": [20222.25], "Volume": [10]}, index=idx).to_parquet(
+        paths.general_live_dir() / "MNQ_1m.parquet")
+    smt_state.save_bar_state({"time": "t", "potential_stop_long": 19800.0,
+                              "potential_stop_short": 19900.0})
+    assert live_orders._current_price() == pytest.approx(20222.25)
+
+
+def test_current_price_stale_sources_keep_legacy_order(_in_tmp, monkeypatch):
+    """With no fresh source at all, behavior is unchanged: bar_state midpoint first,
+    then the most recent parquet close regardless of age."""
+    import pandas as pd
+    import strategy_smt
+    monkeypatch.setattr(strategy_smt, "_mnq_bars", None)
+    old_idx = pd.DatetimeIndex([pd.Timestamp("2025-01-01 10:00", tz="America/New_York")])
+    pd.DataFrame({"Open": [1.0], "High": [1.0], "Low": [1.0],
+                  "Close": [17000.0], "Volume": [1]}, index=old_idx).to_parquet(
+        paths.general_live_dir() / "MNQ_1m.parquet")
+    # bar_state present -> midpoint wins (legacy)
+    smt_state.save_bar_state({"time": "t", "potential_stop_long": 19800.0,
+                              "potential_stop_short": 19900.0})
+    assert live_orders._current_price() == pytest.approx(19850.0)

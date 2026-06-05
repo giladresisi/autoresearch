@@ -520,3 +520,40 @@ def test_modify_stop_entry_replaces_even_if_close_fails():
         _mod.time.sleep = orig_sleep
     assert "close" in post_calls
     assert "buy" in post_calls
+
+
+# ---------------------------------------------------------------------------
+# STP->MKT downgrade: assumed fill anchored at the market, not the trigger
+# (2026-06-05: trigger-anchoring produced 12-20pt strategy-vs-broker fill gaps)
+# ---------------------------------------------------------------------------
+
+def test_stp_mkt_downgrade_fill_anchored_at_market():
+    """When the STP downgrades to MKT (trigger already reached), the assumed fill is
+    anchored at the CURRENT market price — the broker fills at the market, which may
+    sit well past the trigger in a fast move."""
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    sig = _signal("long", limit=True)          # stop_fill_bars set -> STP path
+    sig["current_price"] = 20012.0             # market already past the 20000 trigger
+    rec = ex.place_entry(sig, _bar())
+    _drain(ex)
+    payload = ex._http.post.call_args.kwargs["json"]
+    assert payload["order_type"] == "MKT"      # downgraded
+    assert rec.order_type == "market"
+    # Market order: 3 adverse ticks on top of the market anchor (not the trigger).
+    assert rec.fill_price == pytest.approx(20012.0 + 3 * 0.25)
+    assert rec.requested_price == pytest.approx(20000.0)  # trigger preserved
+
+
+def test_resting_stp_fill_still_anchored_at_trigger():
+    """A genuinely resting STP (trigger not reached) keeps the trigger anchor —
+    the broker will fill it at the trigger when price gets there."""
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    sig = _signal("long", limit=True)
+    sig["current_price"] = 19990.0             # below trigger -> rests as STP
+    rec = ex.place_entry(sig, _bar())
+    _drain(ex)
+    assert rec.order_type == "stop"
+    # Stop order at 10:00 ET -> 4-tick pre-11:00 slippage anchored at the trigger.
+    assert rec.fill_price == pytest.approx(20000.0 + 4 * 0.25)
