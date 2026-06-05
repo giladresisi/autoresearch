@@ -161,11 +161,12 @@ class SessionPipeline:
                 .dropna(subset=["Open"])
             )
             self._hist_1hr = _1hr_full[_1hr_full.index >= _14d_ago]
-            self._hist_4hr = (
+            _4hr_full = (
                 self._hist_mnq_1m.resample("4h", label="left")
                 .agg(_agg)
                 .dropna(subset=["Open"])
             )
+            self._hist_4hr = _4hr_full[_4hr_full.index >= _14d_ago]
         else:
             self._hist_1hr = pd.DataFrame(columns=list(_agg))
             self._hist_4hr = pd.DataFrame(columns=list(_agg))
