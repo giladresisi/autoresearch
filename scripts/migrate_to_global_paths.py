@@ -4,10 +4,10 @@
 # WHAT: One-time, idempotent migration of existing in-project runtime data into the new
 # global / worktree-local locations defined by paths.py.
 #   - Parquets  : COPY  data/*.parquet (+ their *.parquet.bak siblings) into BOTH
-#                 paths.data_main_dir() AND paths.data_live_dir() (seed both sides).
+#                 paths.general_main_dir() AND paths.general_live_dir() (seed both sides).
 #   - Sessions  : MOVE  sessions/<date>/ subdirs into paths.sessions_dir().
-#   - Regression: MOVE  data/regression/<date>/ folders into paths.regression_dir(),
-#                 preserving the date-folder structure.
+#   - Regression: MOVE  data/regression/<date>/ folders into paths.regression_sessions_dir()
+#                 (<regression>/sessions/<date>), preserving the date-folder structure.
 #
 # WHY: The path restructure (.agents/plans/global-path-restructure.md) relocates production
 # parquets and live sessions into a machine-global folder and regression outputs into a
@@ -98,10 +98,10 @@ def plan_migration(project_root: Path, force: bool = False) -> Plan:
     NON-EMPTY / differing target is marked skip="refused" vs allowed to overwrite/merge."""
     plan = Plan()
 
-    main_dir = paths.data_main_dir()
-    live_dir = paths.data_live_dir()
+    main_dir = paths.general_main_dir()
+    live_dir = paths.general_live_dir()
     sessions_target = paths.sessions_dir()
-    regression_target = paths.regression_dir()
+    regression_target = paths.regression_sessions_dir()
 
     # --- Parquets: COPY data/*.parquet (+ *.parquet.bak) into BOTH main and live ---
     data_dir = project_root / "data"
@@ -138,7 +138,7 @@ def plan_migration(project_root: Path, force: bool = False) -> Plan:
             skip = "refused: target exists and is non-empty (use --force)"
         plan.actions.append(Action("move", src, dst, "session", skip))
 
-    # --- Regression: MOVE data/regression/<date>/ -> <regression>/<date> ---
+    # --- Regression: MOVE data/regression/<date>/ -> <regression>/sessions/<date> ---
     regression_src_root = project_root / "data" / "regression"
     regression_dirs: list[Path] = []
     if regression_src_root.is_dir():
@@ -190,8 +190,8 @@ def migrate(project_root: Path, dry_run: bool = False, force: bool = False) -> P
     callers/tests can inspect what was planned, run, and skipped. Ensures the new target dirs
     exist via the paths.py getters (which mkdir) regardless of whether anything is migrated."""
     # Materialize targets up front (paths getters mkdir parents).
-    paths.data_live_dir()
-    paths.data_main_dir()
+    paths.general_live_dir()
+    paths.general_main_dir()
     paths.sessions_dir()
     paths.regression_dir()
 
@@ -222,10 +222,10 @@ def _print_summary(plan: Plan, dry_run: bool) -> None:
     print("migrate_to_global_paths" + (" (dry-run)" if dry_run else ""))
     print("=" * 70)
     print(f"global root      : {paths.global_root()}")
-    print(f"  data/main      : {paths.data_main_dir()}")
-    print(f"  data/live      : {paths.data_live_dir()}")
+    print(f"  general/main      : {paths.general_main_dir()}")
+    print(f"  general/live      : {paths.general_live_dir()}")
     print(f"  sessions       : {paths.sessions_dir()}")
-    print(f"regression dir   : {paths.regression_dir()}")
+    print(f"regression dir   : {paths.regression_sessions_dir()}")
     print("-" * 70)
 
     for category, verb in (("parquet", "COPY"), ("session", "MOVE"), ("regression", "MOVE")):

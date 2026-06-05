@@ -823,8 +823,8 @@ class TestPromoteLiveToMain:
         import scripts.check_session_parquets as csp
         importlib.reload(csp)
 
-        live_dir = paths.data_live_dir()
-        main_dir = paths.data_main_dir()
+        live_dir = paths.general_live_dir()
+        main_dir = paths.general_main_dir()
 
         # Live has fresh (post-merge) parquets; main has a stale prior version.
         self._write_parquet(live_dir / "MNQ_1m.parquet", close=28000.0)
@@ -855,12 +855,12 @@ class TestPromoteLiveToMain:
         import scripts.check_session_parquets as csp
         importlib.reload(csp)
 
-        live_dir = paths.data_live_dir()
+        live_dir = paths.general_live_dir()
         # Only MES_1m present in live; the others are absent and must be skipped silently.
         self._write_parquet(live_dir / "MES_1m.parquet", close=6000.0)
 
         result = csp.promote_live_to_main()
 
         assert result == {"MES_1m.parquet": "ok"}
-        assert (paths.data_main_dir() / "MES_1m.parquet").exists()
-        assert not (paths.data_main_dir() / "MNQ_1m.parquet").exists()
+        assert (paths.general_main_dir() / "MES_1m.parquet").exists()
+        assert not (paths.general_main_dir() / "MNQ_1m.parquet").exists()

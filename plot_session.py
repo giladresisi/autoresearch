@@ -56,7 +56,7 @@ _session_end = pd.Timestamp(
     tz=_ET,
 )
 
-df = pd.read_parquet(paths.data_main_dir() / "MNQ_1m.parquet")
+df = pd.read_parquet(paths.general_main_dir() / "MNQ_1m.parquet")
 # Ensure tz-aware comparison
 if df.index.tz is None:
     df.index = df.index.tz_localize(_ET)

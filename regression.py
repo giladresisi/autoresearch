@@ -141,7 +141,7 @@ def run_regression(
         # Run outputs go in a per-run timestamped folder; baselines live at a stable
         # <regression>/<date>/baseline/ so A/B baselines survive across runs.
         run_dir     = paths.regression_run_dir(date, started)
-        bl_dir      = paths.regression_dir() / date / "baseline"
+        bl_dir      = paths.regression_sessions_dir() / date / "baseline"
         bl_dir.mkdir(parents=True, exist_ok=True)
         events_path = run_dir / f"events{_sfx}.jsonl"
         trades_path = run_dir / f"trades{_sfx}.tsv"
@@ -195,7 +195,7 @@ def run_regression(
         if not no_plot:
             import webbrowser
             _plot_result = subprocess.run(
-                [sys.executable, "data/regression/plot_regression.py", date, mode, str(run_dir)],
+                [sys.executable, "regression/plot_regression.py", date, mode, str(run_dir)],
                 check=False,
                 capture_output=True,
                 text=True,

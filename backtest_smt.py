@@ -434,7 +434,7 @@ def run_backtest(
     _position_id          = 0    # monotonic counter; shared by partial + final records of same position
 
     # Load 5m historical for hypothesis direction (deterministic, no API calls)
-    _hist_mnq_path = paths.data_main_dir() / "MNQ.parquet"
+    _hist_mnq_path = paths.general_main_dir() / "MNQ.parquet"
     _hist_mnq_df = pd.read_parquet(_hist_mnq_path) if _hist_mnq_path.exists() else pd.DataFrame(
         columns=["Open", "High", "Low", "Close", "Volume"]
     )
@@ -1212,7 +1212,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
     if mode == "1s":
         import numpy as _np
-        _1s_dir = paths.data_main_dir()
+        _1s_dir = paths.general_main_dir()
         _1s_cache = Path(FUTURES_CACHE_DIR) / "1s"
         _mnq_1s_p = (_1s_dir / "MNQ_1s.parquet") if (_1s_dir / "MNQ_1s.parquet").exists() else (_1s_cache / "MNQ.parquet")
         _mes_1s_p = (_1s_dir / "MES_1s.parquet") if (_1s_dir / "MES_1s.parquet").exists() else (_1s_cache / "MES.parquet")

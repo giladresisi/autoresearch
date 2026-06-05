@@ -674,13 +674,13 @@ def load_futures_data() -> dict[str, pd.DataFrame]:
       1. <main>/{ticker}_{interval}.parquet           — promoted production store
       2. <main>/{ticker}.parquet                      — legacy no-interval name
       3. FUTURES_CACHE_DIR/{interval}/{ticker}.parquet — IB ephemeral cache fallback
-    where <main> = paths.data_main_dir() (backtest read source; never the live append dir).
+    where <main> = paths.general_main_dir() (backtest read source; never the live append dir).
     Returns {"MNQ": df, "MES": df} with tz-aware ET DatetimeIndex.
     Raises FileNotFoundError if parquets are missing (run prepare_futures_1m.py).
     """
     manifest = _load_futures_manifest()
     interval = manifest.get("fetch_interval", "1m")
-    _main = paths.data_main_dir()
+    _main = paths.general_main_dir()
     result: dict[str, pd.DataFrame] = {}
     for ticker in ["MNQ", "MES"]:
         primary_path    = _main / f"{ticker}_{interval}.parquet"

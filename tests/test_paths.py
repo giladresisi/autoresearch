@@ -31,10 +31,10 @@ def test_global_root_override_creates_dir(tmp_path, monkeypatch):
 
 def test_global_children_under_root(tmp_path, monkeypatch):
     monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path / "g"))
-    assert paths.data_live_dir() == tmp_path / "g" / "data" / "live"
-    assert paths.data_main_dir() == tmp_path / "g" / "data" / "main"
+    assert paths.general_live_dir() == tmp_path / "g" / "general" / "live"
+    assert paths.general_main_dir() == tmp_path / "g" / "general" / "main"
     assert paths.sessions_dir() == tmp_path / "g" / "sessions"
-    for p in (paths.data_live_dir(), paths.data_main_dir(), paths.sessions_dir()):
+    for p in (paths.general_live_dir(), paths.general_main_dir(), paths.sessions_dir()):
         assert p.is_dir()
 
 
@@ -58,12 +58,19 @@ def test_regression_dir_default_is_cwd_regression(tmp_path, monkeypatch):
 
 # ── regression_run_dir TH naming ───────────────────────────────────────────────
 
+def test_regression_sessions_dir_under_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("ACT_REGRESSION_DIR", str(tmp_path / "reg"))
+    assert paths.regression_sessions_dir() == tmp_path / "reg" / "sessions"
+    assert paths.regression_sessions_dir().is_dir()
+
+
 def test_run_dir_th_naming_from_et(tmp_path, monkeypatch):
     monkeypatch.setenv("ACT_REGRESSION_DIR", str(tmp_path / "reg"))
     # 2026-06-02 10:00:00 ET (EDT, UTC-4) == 21:00:00 TH (UTC+7).
     started = datetime.datetime(2026, 6, 2, 10, 0, 0, tzinfo=ZoneInfo("America/New_York"))
     run = paths.regression_run_dir("2026-06-02", started)
-    assert run == tmp_path / "reg" / "2026-06-02" / "21-00-00"
+    # Per-date run folders live under <regression>/sessions/<date>/<HH-MM-SS>.
+    assert run == tmp_path / "reg" / "sessions" / "2026-06-02" / "21-00-00"
     assert run.is_dir()
 
 

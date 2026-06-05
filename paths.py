@@ -41,16 +41,21 @@ def global_root() -> Path:
     return _ensure(p)
 
 
-def data_live_dir() -> Path:
-    """Live orchestrator's parquet append target (`<global>/data/live`). The live writer
-    and backtest readers never share a file — this is the writer's side."""
-    return _ensure(global_root() / "data" / "live")
+def general_live_dir() -> Path:
+    """Live orchestrator's general persistent folder (`<global>/general/live`).
+
+    Holds the live parquet append target AND the cross-session live artifacts that must
+    persist outside any single session folder: `global.json` (dynamic all_time_high) and
+    the manual-pause sentinel. The live writer and backtest readers never share a file —
+    this is the writer's side. (Formerly `<global>/data/live`.)"""
+    return _ensure(global_root() / "general" / "live")
 
 
-def data_main_dir() -> Path:
-    """Backtest parquet read source (`<global>/data/main`). `parquet-check` promotes
-    validated parquets live -> main after a successful post-session run."""
-    return _ensure(global_root() / "data" / "main")
+def general_main_dir() -> Path:
+    """Backtest parquet read source (`<global>/general/main`). `parquet-check` promotes
+    validated parquets live -> main after a successful post-session run.
+    (Formerly `<global>/data/main`.)"""
+    return _ensure(global_root() / "general" / "main")
 
 
 def sessions_dir() -> Path:
@@ -63,15 +68,23 @@ def sessions_dir() -> Path:
 # ---------------------------------------------------------------------------
 
 def regression_dir() -> Path:
-    """Worktree-root regression output root. Env `ACT_REGRESSION_DIR`, default
-    `<cwd>/regression`. Worktree-local on purpose so parallel agents' runs don't mix."""
+    """Worktree-root regression root. Env `ACT_REGRESSION_DIR`, default `<cwd>/regression`.
+    Worktree-local on purpose so parallel agents' runs don't mix. The root holds tracked
+    tooling (e.g. plot_regression.py); the machine-local per-date run folders live under
+    regression_sessions_dir() (gitignored)."""
     root = os.environ.get("ACT_REGRESSION_DIR")
     p = Path(root).expanduser() if root else Path.cwd() / "regression"
     return _ensure(p)
 
 
+def regression_sessions_dir() -> Path:
+    """Per-date regression run folders live under `<regression>/sessions/` so the
+    regression/ root can keep committed tooling while these date folders stay gitignored."""
+    return _ensure(regression_dir() / "sessions")
+
+
 def regression_run_dir(date: str, started: datetime) -> Path:
-    """Per-run output folder `<regression>/<date>/<HH-MM-SS TH>`.
+    """Per-run output folder `<regression>/sessions/<date>/<HH-MM-SS TH>`.
 
     `started` is converted to TH (Asia/Bangkok) and formatted HH-MM-SS — the same
     timezone the rest of the project names sessions by (session_times.cme_session_date).
@@ -80,7 +93,7 @@ def regression_run_dir(date: str, started: datetime) -> Path:
     if started.tzinfo is None:
         started = started.replace(tzinfo=_ET)
     stamp = started.astimezone(_TH).strftime("%H-%M-%S")
-    return _ensure(regression_dir() / date / stamp)
+    return _ensure(regression_sessions_dir() / date / stamp)
 
 
 # ---------------------------------------------------------------------------

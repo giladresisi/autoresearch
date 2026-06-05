@@ -104,7 +104,7 @@ def _pre_session_init() -> None:
     price discontinuities in append-only parquets.
     """
     _check_ib_reachable()
-    bar_data_dir = paths.data_live_dir()
+    bar_data_dir = paths.general_live_dir()
     try:
         from data.parquet_maintenance import merge_session_1s_parquets
         merge_session_1s_parquets(bar_data_dir)
@@ -176,7 +176,7 @@ def _cli_check_parquets() -> None:
     whether to call --create-empty-parquets or ask the user to copy files.
     """
     import json
-    bar_data_dir = paths.data_live_dir()
+    bar_data_dir = paths.general_live_dir()
     required = ["MNQ_1m.parquet", "MES_1m.parquet", "MNQ_1s.parquet", "MES_1s.parquet"]
     missing = [f for f in required if not (bar_data_dir / f).exists()]
     print(json.dumps({"missing": missing}), flush=True)
@@ -190,7 +190,7 @@ def _cli_create_empty_parquets() -> None:
     --check-parquets.  Skips files that already exist.
     """
     import pandas as _pd
-    bar_data_dir = paths.data_live_dir()
+    bar_data_dir = paths.general_live_dir()
     required = ["MNQ_1m.parquet", "MES_1m.parquet", "MNQ_1s.parquet", "MES_1s.parquet"]
     empty = _pd.DataFrame(
         columns=["Open", "High", "Low", "Close", "Volume"],
@@ -409,7 +409,7 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
     _kill_stale_orchestrator()
     if not skip_summary and summarizer is None:
         summarizer = Summarizer()
-    bar_data_dir = paths.data_live_dir()
+    bar_data_dir = paths.general_live_dir()
     _check_parquet_files(bar_data_dir)
     _pre_src = None
     _pre_thr = None

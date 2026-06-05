@@ -50,9 +50,10 @@ data/realtime/*.parquet
 trades.tsv
 
 # SMT v2 regression outputs (baselines are local, not committed)
-# New worktree-root regression output dir (paths.regression_dir(), per-run subfolders).
-regression/
-# LEGACY: pre-restructure regression outputs (now under worktree-root regression/); harmless.
+# The regression/ root holds tracked tooling (plot_regression.py); only the machine-local
+# per-date run folders under regression/sessions/ are ignored.
+regression/sessions/
+# LEGACY: pre-restructure regression outputs (now under regression/sessions/); harmless.
 data/regression/*/
 
 # SMT v2 runtime state files (ephemeral, not committed)

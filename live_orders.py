@@ -276,7 +276,7 @@ def _current_price() -> float:
     # Live append target — the orchestrator writes today's bars here during a session.
     for _name in ("MNQ_1s.parquet", "MNQ_1m.parquet"):
         try:
-            _p = paths.data_live_dir() / _name
+            _p = paths.general_live_dir() / _name
             if _p.exists():
                 _df = pd.read_parquet(_p, columns=["Close"])
                 if not _df.empty:
@@ -703,8 +703,8 @@ def hypothesis() -> list:
     hyp["direction"] = "none"
     save_hypothesis(hyp)
 
-    mnq_path = paths.data_live_dir() / "MNQ_1m.parquet"
-    mes_path = paths.data_live_dir() / "MES_1m.parquet"
+    mnq_path = paths.general_live_dir() / "MNQ_1m.parquet"
+    mes_path = paths.general_live_dir() / "MES_1m.parquet"
     if not mnq_path.exists() or not mes_path.exists():
         print("[live_orders] hypothesis: bar parquets not found — is the orchestrator running?", flush=True)
         return []

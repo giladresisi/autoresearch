@@ -33,14 +33,27 @@ def _fast_copy(obj):
         return tuple(_fast_copy(v) for v in obj)
     return copy.deepcopy(obj)
 
-# The four state files resolve under paths.state_dir() AT CALL TIME, so a mid-run
+# daily/hypothesis/position resolve under paths.state_dir() AT CALL TIME, so a mid-run
 # paths.set_state_dir(...) takes effect immediately: live points the prefix at the
 # session folder, a backtest at its per-run folder. Functions (not constants) are the
 # whole point — a captured constant would freeze the prefix at import time.
-def _global_path() -> Path:     return paths.state_dir() / "global.json"
 def _daily_path() -> Path:      return paths.state_dir() / "daily.json"
 def _hypothesis_path() -> Path: return paths.state_dir() / "hypothesis.json"
 def _position_path() -> Path:   return paths.state_dir() / "position.json"
+
+
+def _global_path() -> Path:
+    """global.json is the exception to the per-session state_dir rule.
+
+    It carries the dynamic all_time_high, which must persist ACROSS sessions. In LIVE it
+    therefore lives in the stable general live folder (paths.general_live_dir()), not the
+    per-session state_dir — so the ATH is simply read back each session with no
+    prior-session seeding needed. In BACKTEST (in-memory) it stays under state_dir() so
+    each per-run/per-date folder is isolated and final_snapshot() captures it (and the
+    in-memory store stays keyed per run). _IN_MEMORY is the live-vs-backtest discriminator."""
+    if _IN_MEMORY:
+        return paths.state_dir() / "global.json"
+    return paths.general_live_dir() / "global.json"
 
 def _session_folder_date() -> str:
     """ET session date naming the per-session folder (sessions/<date>) for files that may
@@ -52,13 +65,14 @@ def _session_folder_date() -> str:
     return _SESSION_DATE or _dt.datetime.now(_zi.ZoneInfo("America/New_York")).date().isoformat()
 
 
-# Manual entry-pause sentinel (trade.py pause/resume). Lives in the live session folder
-# (<global>/sessions/<date>) alongside bar_state.json, NOT under state_dir(): it is a
-# manual cross-process flag (trade.py writes it, the orchestrator reads it), so resolving
-# it from the ET session date — exactly like bar_state_path() — makes both processes agree
-# by construction, without either having to set state_dir().
+# Manual entry-pause sentinel (trade.py pause/resume). Lives in the general live folder
+# (<global>/general/live) alongside global.json, NOT under state_dir() or a per-session
+# folder: it is a manual cross-process flag (trade.py writes it, the orchestrator reads
+# it), so a single fixed location makes both processes agree by construction, without
+# either having to set state_dir() or compute the session date. Because it is no longer
+# per-session, a pause now PERSISTS across sessions/restarts until explicitly resumed.
 def pause_path() -> Path:
-    return paths.sessions_dir() / _session_folder_date() / "paused"
+    return paths.general_live_dir() / "paused"
 
 # Session date locked at startup (ET date, YYYY-MM-DD). Set via set_session_date().
 _SESSION_DATE: str = ""

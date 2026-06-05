@@ -62,8 +62,8 @@ def test_happy_path(tree):
 
     # Parquet (+ .bak) copied into BOTH main and live; source still present (copy, not move).
     for name in ("MNQ_1m.parquet", "MNQ_1m.parquet.bak"):
-        assert (paths.data_main_dir() / name).read_bytes() == (tree.project / "data" / name).read_bytes()
-        assert (paths.data_live_dir() / name).read_bytes() == (tree.project / "data" / name).read_bytes()
+        assert (paths.general_main_dir() / name).read_bytes() == (tree.project / "data" / name).read_bytes()
+        assert (paths.general_live_dir() / name).read_bytes() == (tree.project / "data" / name).read_bytes()
         assert (tree.project / "data" / name).exists()  # COPY: source preserved
 
     # Session MOVED into global sessions (source gone, dest present with its file).
@@ -71,8 +71,8 @@ def test_happy_path(tree):
     assert (moved_session / "events.jsonl").read_text(encoding="utf-8") == '{"e": 1}\n'
     assert not (tree.project / "sessions" / "2026-06-01").exists()
 
-    # Regression date folder MOVED into regression_dir (structure preserved, source gone).
-    moved_reg = tree.regression_dir / "2026-06-02"
+    # Regression date folder MOVED into regression_dir/sessions/ (structure preserved, source gone).
+    moved_reg = tree.regression_dir / "sessions" / "2026-06-02"
     assert (moved_reg / "trades.tsv").read_text(encoding="utf-8") == "pnl\t1.0\n"
     assert not (tree.project / "data" / "regression" / "2026-06-02").exists()
 
@@ -86,14 +86,14 @@ def test_dry_run_changes_nothing(tree):
     plan = mig.migrate(tree.project, dry_run=True, force=False)
 
     # Nothing copied into main/live.
-    assert not (paths.data_main_dir() / "MNQ_1m.parquet").exists()
-    assert not (paths.data_live_dir() / "MNQ_1m.parquet").exists()
+    assert not (paths.general_main_dir() / "MNQ_1m.parquet").exists()
+    assert not (paths.general_live_dir() / "MNQ_1m.parquet").exists()
     # Session NOT moved.
     assert (tree.project / "sessions" / "2026-06-01" / "events.jsonl").exists()
     assert not (paths.sessions_dir() / "2026-06-01").exists()
     # Regression NOT moved.
     assert (tree.project / "data" / "regression" / "2026-06-02" / "trades.tsv").exists()
-    assert not (tree.regression_dir / "2026-06-02").exists()
+    assert not (tree.regression_dir / "sessions" / "2026-06-02").exists()
     # But the plan still enumerated runnable actions.
     assert len(plan.runnable()) > 0
 
