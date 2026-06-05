@@ -42,12 +42,23 @@ def _daily_path() -> Path:      return paths.state_dir() / "daily.json"
 def _hypothesis_path() -> Path: return paths.state_dir() / "hypothesis.json"
 def _position_path() -> Path:   return paths.state_dir() / "position.json"
 
-# Manual entry-pause sentinel (trade.py pause/resume). Unlike the four state JSONs above,
-# this is a manual cross-process control flag (not per-session strategy state), so it
-# stays at the legacy worktree-local data/ path rather than moving under state_dir().
-# DATA_DIR is retained because is_paused() reconstructs the path from it dynamically.
-DATA_DIR        = Path("data")
-PAUSE_PATH      = DATA_DIR / "paused"   # manual entry-pause sentinel (trade.py pause/resume)
+def _session_folder_date() -> str:
+    """ET session date naming the per-session folder (sessions/<date>) for files that may
+    be written by separate processes (bar_state.json, the pause sentinel). ET — not naive
+    local — so a standalone trade.py on a clock running ahead of ET doesn't pick tomorrow's
+    folder once the local date rolls but the ET session date has not. _SESSION_DATE wins."""
+    import datetime as _dt
+    import zoneinfo as _zi
+    return _SESSION_DATE or _dt.datetime.now(_zi.ZoneInfo("America/New_York")).date().isoformat()
+
+
+# Manual entry-pause sentinel (trade.py pause/resume). Lives in the live session folder
+# (<global>/sessions/<date>) alongside bar_state.json, NOT under state_dir(): it is a
+# manual cross-process flag (trade.py writes it, the orchestrator reads it), so resolving
+# it from the ET session date — exactly like bar_state_path() — makes both processes agree
+# by construction, without either having to set state_dir().
+def pause_path() -> Path:
+    return paths.sessions_dir() / _session_folder_date() / "paused"
 
 # Session date locked at startup (ET date, YYYY-MM-DD). Set via set_session_date().
 _SESSION_DATE: str = ""
@@ -254,27 +265,21 @@ def save_position(d: dict) -> None:
 
 
 def is_paused() -> bool:
-    """True if a manual entry pause is in effect (the data/paused sentinel exists).
+    """True if a manual entry pause is in effect (the session-folder `paused` sentinel exists).
 
     Always False in in-memory (backtest) mode — pause is a live-execution control and must
     never affect backtests, which never create the sentinel anyway.
     """
     if _IN_MEMORY:
         return False
-    # Resolve from DATA_DIR dynamically so test fixtures that redirect DATA_DIR to a tmp dir
-    # (and never create the sentinel) automatically see "not paused".
-    return (DATA_DIR / "paused").exists()
+    return pause_path().exists()
 
 
 def bar_state_path(date_str: str | None = None) -> Path:
-    import datetime as _dt
-    import zoneinfo as _zi
-    # Resolve to the ET date (matching the ET-named session folders and live_orders),
-    # NOT the naive local date. A standalone process (e.g. trade.py) on a machine whose
-    # local clock runs ahead of ET would otherwise pick the wrong day's folder once the
-    # local date has rolled over but the ET session date has not (after ~13:00 ET for a
-    # UTC+7 clock) — which made an ad-hoc close read no bar_state and log price 0.0.
-    d = date_str or _SESSION_DATE or _dt.datetime.now(_zi.ZoneInfo("America/New_York")).date().isoformat()
+    # ET session date (see _session_folder_date) — matches the orchestrator's session folder
+    # and the pause sentinel; a naive-local date could pick the wrong day's folder for a
+    # standalone process (e.g. trade.py) once the local date rolls but the ET session has not.
+    d = date_str or _session_folder_date()
     return paths.sessions_dir() / d / "bar_state.json"
 
 

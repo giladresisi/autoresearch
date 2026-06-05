@@ -203,21 +203,31 @@ class TestHypothesisCache:
 
 
 # ---------------------------------------------------------------------------
-# is_paused: manual entry-pause sentinel (resolved from DATA_DIR; inert in backtest)
+# is_paused: manual entry-pause sentinel (resolved under sessions/<date>; inert in backtest)
 # ---------------------------------------------------------------------------
 
+def _make_pause_sentinel(tmp_path, monkeypatch):
+    """Point sessions_dir() at tmp, fix the session date, and return the sentinel path
+    (where smt_state.pause_path() resolves) so a test can create/inspect it."""
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
+    monkeypatch.setattr(smt_state, "_SESSION_DATE", "2026-01-15")
+    return smt_state.pause_path()
+
+
 def test_is_paused_reflects_sentinel(tmp_path, monkeypatch):
-    monkeypatch.setattr(smt_state, "DATA_DIR", tmp_path)
+    flag = _make_pause_sentinel(tmp_path, monkeypatch)
     monkeypatch.setattr(smt_state, "_IN_MEMORY", False)
     assert smt_state.is_paused() is False
-    (tmp_path / "paused").write_text("x")
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.write_text("x")
     assert smt_state.is_paused() is True
 
 
 def test_is_paused_false_in_memory_mode(tmp_path, monkeypatch):
     """Pause must never affect backtests (in-memory mode), even if a sentinel exists on disk."""
-    monkeypatch.setattr(smt_state, "DATA_DIR", tmp_path)
-    (tmp_path / "paused").write_text("x")
+    flag = _make_pause_sentinel(tmp_path, monkeypatch)
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.write_text("x")
     monkeypatch.setattr(smt_state, "_IN_MEMORY", True)
     assert smt_state.is_paused() is False
     monkeypatch.setattr(smt_state, "_IN_MEMORY", False)

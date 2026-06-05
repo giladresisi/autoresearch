@@ -53,9 +53,10 @@ _fill_bar_time: "pd.Timestamp | None" = None
 _cancel_bar_time: "pd.Timestamp | None" = None
 _pending_close_after: "pd.Timestamp | None" = None
 
-# Manual entry pause (trade.py pause/resume). Canonical flag + is_paused() live in
-# smt_state so both this dispatch gate and the live pipeline's entry gate share one source.
-_PAUSE_FLAG = smt_state.PAUSE_PATH
+# Manual entry pause (trade.py pause/resume). Canonical flag path + is_paused() live in
+# smt_state so this dispatch gate, the live pipeline's entry gate, and trade.py share one
+# source. Resolved at call time via smt_state.pause_path() (the session folder is not known
+# at import), so pause()/resume() below call it rather than capturing a frozen constant.
 
 # Live-execution safety net mirroring strategy.MKT_FILL_MIN_STOP_DISTANCE: a stop entry the
 # executor downgrades to MKT fills at market, which can land closer to the protective stop than
@@ -145,19 +146,21 @@ def is_paused() -> bool:
 
 def pause() -> bool:
     """Engage the manual entry pause. Idempotent: returns False (no-op) if already paused."""
-    if _PAUSE_FLAG.exists():
+    flag = smt_state.pause_path()
+    if flag.exists():
         return False
-    _PAUSE_FLAG.parent.mkdir(parents=True, exist_ok=True)
-    _PAUSE_FLAG.write_text(_now_et(), encoding="utf-8")
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.write_text(_now_et(), encoding="utf-8")
     _log({"kind": "paused", "time": _now_et()})
     return True
 
 
 def resume() -> bool:
     """Lift the manual entry pause. Idempotent: returns False (no-op) if not paused."""
-    if not _PAUSE_FLAG.exists():
+    flag = smt_state.pause_path()
+    if not flag.exists():
         return False
-    _PAUSE_FLAG.unlink()
+    flag.unlink()
     _log({"kind": "resumed", "time": _now_et()})
     return True
 
