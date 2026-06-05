@@ -115,11 +115,17 @@ def _log(event: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _load_pos() -> dict:
+    # Cross-process safety: a standalone caller (trade.py, ad-hoc REPL) that never set
+    # the state dir must operate on the SAME session position.json as the orchestrator —
+    # not the legacy worktree-local data/ (2026-06-05 04:21 phantom fill: a manual close
+    # cleared stop_entry in the wrong file). No-op once the state dir is set.
+    smt_state.ensure_live_state_dir()
     from smt_state import load_position
     return load_position()
 
 
 def _save_pos(pos: dict) -> None:
+    smt_state.ensure_live_state_dir()
     from smt_state import save_position
     save_position(pos)
 
@@ -657,6 +663,7 @@ def trend_broken() -> dict:
     """
     from smt_state import load_hypothesis, save_hypothesis
 
+    smt_state.ensure_live_state_dir()  # standalone caller: resolve the session state folder
     hypothesis = load_hypothesis()
     broken_dir = hypothesis.get("direction", "none")
 
@@ -706,6 +713,7 @@ def hypothesis() -> list:
     today    = now.date()
     now_str  = now.isoformat()
 
+    smt_state.ensure_live_state_dir()  # standalone caller: resolve the session state folder
     hyp     = load_hypothesis()
     old_dir = hyp.get("direction", "none")
     hyp["direction"] = "none"
@@ -768,6 +776,7 @@ def _force_hypothesis_for_direction(forced_v2: str) -> None:
     import hypothesis as _hyp_mod
     from smt_state import load_daily, load_global, load_hypothesis
 
+    smt_state.ensure_live_state_dir()  # standalone caller: resolve the session state folder
     hyp           = load_hypothesis()
     old_direction = hyp.get("direction", "none")
 

@@ -82,6 +82,33 @@ def set_session_date(d: str) -> None:
     global _SESSION_DATE
     _SESSION_DATE = d
 
+
+def ensure_live_state_dir() -> None:
+    """Point state_dir at the live session folder when no caller has set it.
+
+    position/daily/hypothesis are CROSS-PROCESS files in live: the orchestrator pipeline
+    sets state_dir to sessions/<date> explicitly (session_pipeline.on_session_start), but
+    a standalone process (trade.py, an ad-hoc `import live_orders` REPL) that never called
+    paths.set_state_dir silently read/wrote the legacy worktree-local data/ — a DIFFERENT
+    position.json than the one the orchestrator manages. Incident 2026-06-05 04:21: a
+    manual close cleared stop_entry in the wrong file, so the session copy kept a stale
+    stop_entry with no broker counterpart until bar-based fill-detection confirmed it
+    into a phantom position.
+
+    Resolution mirrors session_pipeline: ACT_STATE_DIR env wins (the orchestrator hands
+    it to its subprocess), else sessions/<CME trade date> — the same folder naming the
+    orchestrator uses (_SESSION_DATE when locked, else session_times.session_date_str).
+    No-op in in-memory (backtest) mode or once state_dir points anywhere non-default,
+    so explicit callers (backtests, the pipeline) keep full control."""
+    if _IN_MEMORY or not paths.state_dir_is_default():
+        return
+    env = os.environ.get("ACT_STATE_DIR")
+    if env:
+        paths.set_state_dir(env)
+        return
+    from session_times import session_date_str
+    paths.set_state_dir(paths.sessions_dir() / (_SESSION_DATE or session_date_str()))
+
 DEFAULT_GLOBAL = {"all_time_high": 0.0, "confidence": "medium", "trend": "up"}
 
 DEFAULT_DAILY = {

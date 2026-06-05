@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import live_orders
+import paths
+import smt_state
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +36,17 @@ def _isolate_global_dir(tmp_path, monkeypatch):
     Point it at tmp_path for EVERY test so none read the real machine-global session
     data (a stray real bar_state.json would otherwise leak into _session_mid_price)."""
     monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def _reset_state_dir(monkeypatch):
+    """smt_state.ensure_live_state_dir (invoked lazily by _load_pos/_save_pos) mutates
+    the module-global state-dir prefix. Clear ACT_STATE_DIR for determinism and restore
+    the legacy default after every test so a tmp_path session folder resolved in one
+    test never leaks into the next (each test gets a different tmp_path)."""
+    monkeypatch.delenv("ACT_STATE_DIR", raising=False)
+    yield
+    paths.set_state_dir(paths._DEFAULT_STATE_DIR)
 
 
 @pytest.fixture()
@@ -1009,3 +1022,88 @@ def test_dispatch_allows_entries_when_not_paused(_in_tmp, _mock_today):
                               "direction": "up", "price": 19900.0, "stop": 19870.0})
 
     mock_executor.place_entry.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Cross-process state-dir resolution (incident 2026-06-05 04:21 phantom fill):
+# a standalone process (trade.py / ad-hoc REPL) that never set the state dir must
+# read/write the SAME session position.json the orchestrator manages — not the
+# legacy worktree-local data/.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def _mock_smt_today():
+    """Lock smt_state's session date so ensure_live_state_dir resolves a fixed folder."""
+    smt_state.set_session_date(_FIXED_DATE)
+    yield _FIXED_DATE
+    smt_state.set_session_date("")
+
+
+def _seed_session_position(tmp_path: Path, date: str, pos: dict) -> Path:
+    """Write a position.json into the (tmp) global session folder, as the orchestrator would."""
+    folder = tmp_path / "sessions" / date
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "position.json"
+    path.write_text(json.dumps(pos), encoding="utf-8")
+    return path
+
+
+def test_load_pos_resolves_session_state_dir(_in_tmp, _mock_today, _mock_smt_today):
+    """With no explicit state dir, _load_pos reads the SESSION folder's position.json
+    (the orchestrator's copy) — not the legacy worktree-local data/."""
+    pos = dict(_POS_EMPTY, stop_entry="30170.75", stop_direction="up")
+    _seed_session_position(_in_tmp, _FIXED_DATE, pos)
+    assert paths.state_dir_is_default()
+
+    loaded = live_orders.get_position()
+
+    assert loaded["stop_entry"] == "30170.75"
+    assert paths.state_dir() == _in_tmp / "sessions" / _FIXED_DATE
+
+
+def test_act_state_dir_env_wins(_in_tmp, _mock_today, _mock_smt_today, monkeypatch):
+    """ACT_STATE_DIR (handed by the orchestrator to its subprocess) takes precedence
+    over the session-date fallback."""
+    override = _in_tmp / "explicit-state"
+    override.mkdir()
+    (override / "position.json").write_text(
+        json.dumps(dict(_POS_EMPTY, stop_entry="11111.0")), encoding="utf-8")
+    _seed_session_position(_in_tmp, _FIXED_DATE, dict(_POS_EMPTY, stop_entry="22222.0"))
+    monkeypatch.setenv("ACT_STATE_DIR", str(override))
+
+    loaded = live_orders.get_position()
+
+    assert loaded["stop_entry"] == "11111.0"
+
+
+def test_explicit_state_dir_not_overridden(_in_tmp, _mock_today, _mock_smt_today):
+    """A caller that already pointed state_dir somewhere (pipeline, backtest harness)
+    keeps full control — ensure_live_state_dir must be a no-op."""
+    explicit = _in_tmp / "run-folder"
+    explicit.mkdir()
+    (explicit / "position.json").write_text(
+        json.dumps(dict(_POS_EMPTY, stop_entry="33333.0")), encoding="utf-8")
+    _seed_session_position(_in_tmp, _FIXED_DATE, dict(_POS_EMPTY, stop_entry="44444.0"))
+    paths.set_state_dir(explicit)
+
+    loaded = live_orders.get_position()
+
+    assert loaded["stop_entry"] == "33333.0"
+    assert paths.state_dir() == explicit
+
+
+def test_close_position_clears_session_stop_entry(_in_tmp, _mock_today, _mock_smt_today):
+    """Phantom-fill regression (2026-06-05 04:21): a manual close from a process that
+    never set the state dir must clear stop_entry in the SESSION position.json, so the
+    orchestrator's bar-based fill detection can never confirm the dead broker order."""
+    pos = dict(_POS_ACTIVE, stop_entry="30170.75", stop_direction="up")
+    seeded = _seed_session_position(_in_tmp, _FIXED_DATE, pos)
+    mock_executor = MagicMock()
+
+    with patch.object(live_orders, "_executor", mock_executor):
+        live_orders.close_position(30142.0, "user-requested")
+
+    mock_executor.place_close.assert_called_once_with("close")
+    on_disk = json.loads(seeded.read_text(encoding="utf-8"))
+    assert on_disk["active"] == {}
+    assert on_disk["stop_entry"] == ""

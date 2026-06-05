@@ -103,7 +103,8 @@ def regression_run_dir(date: str, started: datetime) -> Path:
 # unchanged until callers opt in (Wave 4).
 # ---------------------------------------------------------------------------
 
-_STATE_DIR: Path = Path("data")
+_DEFAULT_STATE_DIR = Path("data")
+_STATE_DIR: Path = _DEFAULT_STATE_DIR
 
 
 def set_state_dir(path) -> None:
@@ -111,6 +112,13 @@ def set_state_dir(path) -> None:
     state read/write (smt_state resolves paths under state_dir() at call time)."""
     global _STATE_DIR
     _STATE_DIR = Path(path)
+
+
+def state_dir_is_default() -> bool:
+    """True while no caller has pointed state_dir anywhere (still the legacy `data/`
+    default). Lets live cross-process callers (smt_state.ensure_live_state_dir) detect
+    a standalone process that never resolved the session state folder."""
+    return _STATE_DIR == _DEFAULT_STATE_DIR
 
 
 def state_dir() -> Path:
