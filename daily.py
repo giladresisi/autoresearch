@@ -226,8 +226,9 @@ def run_daily_fixed(
     ----------
     now         : current wall-clock / bar time (tz-aware, ET)
     hist_mnq_1m : historical 1m bars (multiple prior days + current week)
-    hist_1hr    : 1hr bars over recent trading days (for FVG scan)
-    hist_4hr    : 4hr bars over recent trading days (for FVG scan)
+    hist_1hr    : completed 1hr bars for the FVG scan (recent days; live passes the
+                  rolling frame, which includes today's completed bars)
+    hist_4hr    : completed 4hr bars for the FVG scan (same frame contract as hist_1hr)
     today       : the trading date these levels apply to
     """
 

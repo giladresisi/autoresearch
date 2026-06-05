@@ -11,25 +11,22 @@ SESSION_CLOSE = datetime.time(16, 55)  # 16:55 ET (maintenance window 16:55–18
 
 
 def cme_session_date(ts: datetime.datetime) -> datetime.date:
-    """Return the TH (Asia/Bangkok) calendar date for the CME session containing ts.
+    """ET-based CME trade date for the session containing ts.
 
-    The CME session opens at 18:00 ET. We convert that session-open moment to
-    Thailand time to get the "session date" — stable for the entire session and
+    CME index futures trade 18:00 ET → 17:00 ET the next day. The session's trade
+    date is its CLOSE date = (ET session-open date) + 1 day. This is stable across
+    the midnight roll, so an overnight session keeps a single date, and it is
     season-independent (works for both EDT and EST).
 
-    18:00 ET = 05:00 TH (summer/EDT) = 06:00 TH (winter/EST), always the next TH
-    calendar day relative to the ET session-open date.  So:
-        TH session date = ET session-open date + 1 day
-
-    This is consistent with the user's "use TH today unless 0:00–4:00 TH" rule,
-    because 18:00 ET → 05:00/06:00 TH is always after the 4:00 TH threshold.
+    Computed purely from ET — no timezone-conversion detour. (Equivalent to the
+    former "18:00 ET → next TH calendar day" rule, since 18:00 ET = 05:00/06:00 TH
+    is always the next TH day, i.e. ET session-open date + 1.)
     """
     et = ts.astimezone(_ET) if ts.tzinfo else ts.replace(tzinfo=datetime.timezone.utc).astimezone(_ET)
     d = et.date()
-    if et.hour < 18:
+    if et.hour < 18:                       # before 18:00 ET → session opened yesterday
         d -= datetime.timedelta(days=1)
-    session_open_et = datetime.datetime(d.year, d.month, d.day, 18, 0, tzinfo=_ET)
-    return session_open_et.astimezone(_TH).date()
+    return d + datetime.timedelta(days=1)  # trade date = ET session-open date + 1
 
 
 def session_date_str() -> str:

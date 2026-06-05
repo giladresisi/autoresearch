@@ -115,11 +115,17 @@ def _log(event: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _load_pos() -> dict:
+    # Cross-process safety: a standalone caller (trade.py, ad-hoc REPL) that never set
+    # the state dir must operate on the SAME session position.json as the orchestrator —
+    # not the legacy worktree-local data/ (2026-06-05 04:21 phantom fill: a manual close
+    # cleared stop_entry in the wrong file). No-op once the state dir is set.
+    smt_state.ensure_live_state_dir()
     from smt_state import load_position
     return load_position()
 
 
 def _save_pos(pos: dict) -> None:
+    smt_state.ensure_live_state_dir()
     from smt_state import save_position
     save_position(pos)
 
@@ -194,7 +200,14 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float, *, s
     rec = _executor.place_entry(pmt_signal, None)
     entry_live = getattr(_executor, "_entry_is_live", True)
     if entry_live and getattr(rec, "order_type", None) == "market":
-        _register_downgraded_fill(direction, entry_price, stop_price, source, now)
+        # Record the executor's market-anchored fill estimate (current price + slip),
+        # NOT the trigger — the market already passed the trigger, so the broker fills
+        # at the market (live gaps were 12-20 pts in fast moves; 2026-06-05 05:17).
+        _fill = float(getattr(rec, "fill_price", 0.0) or 0.0)
+        if _fill <= 0.0:
+            _fill = entry_price  # defensive: executor gave no estimate
+        _register_downgraded_fill(direction, entry_price, stop_price, source, now,
+                                  fill_price=_fill)
         return
     pos = _load_pos()
     pos["stop_entry"] = str(entry_price)
@@ -211,17 +224,23 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float, *, s
 
 
 def _register_downgraded_fill(direction: str, entry_price: float, stop_price: float,
-                              source: str, now: str) -> None:
+                              source: str, now: str, fill_price: float | None = None) -> None:
     """Record an immediate fill after the executor downgraded an STP entry to MKT.
 
     Mirrors the strategy's stop-entry fill transition (strategy.py): set active, clear
     the pending stop entry, re-anchor the cautious ladder to the fill price (Addendum 4),
     and log stop-entry-filled — all at dispatch time, since the broker already filled.
+
+    fill_price is the executor's market-anchored estimate of the actual fill (current
+    price + slip ticks); entry_price stays the original trigger. The protective stop is
+    NOT re-anchored to the fill — it was already sent to the broker at placement, and
+    strategy state must keep matching the broker's working SL.
     """
+    fill = float(fill_price) if fill_price else float(entry_price)
     pos = _load_pos()
     pos["active"] = {
         "time": now,
-        "fill_price": entry_price,
+        "fill_price": fill,
         "direction": direction,
         "stop": stop_price,
         "contracts": 2,
@@ -233,9 +252,18 @@ def _register_downgraded_fill(direction: str, entry_price: float, stop_price: fl
     pos.pop("stop_entry_source", None)
     pos.pop("stop_entry_unplaced", None)
     _save_pos(pos)
-    _recompute_cautious_at_fill(float(entry_price))
+    _recompute_cautious_at_fill(fill)
+    # Align events.jsonl with signals.log. The strategy emitted a `new-stop-entry`, but the
+    # broker instantly downgraded it STP->MKT and filled the same instant — so on this path
+    # events.jsonl would otherwise show a standalone `stop-entry-filled` with no originating
+    # `new-stop-entry` (signals.log has the placement; events.jsonl did not). Log the
+    # placement too, then the fill, both tagged `stp_mkt_downgrade` so the immediate-downgrade
+    # origin is explicit (and so the fill is distinguishable from a later bar-based fill).
+    _log({"kind": "new-stop-entry", "time": now, "direction": direction,
+          "entry_price": entry_price, "stop_price": stop_price, "stp_mkt_downgrade": True})
     _log({"kind": "stop-entry-filled", "time": now, "direction": direction,
-          "price": entry_price, "stop_price": stop_price})
+          "price": fill, "stop_price": stop_price, "trigger_price": entry_price,
+          "stp_mkt_downgrade": True})
 
 
 def _recompute_cautious_at_fill(fill_price: float) -> None:
@@ -261,19 +289,47 @@ def _recompute_cautious_at_fill(fill_price: float) -> None:
 
 
 def _current_price() -> float:
-    """Estimate current market price from the last bar_state midpoint.
+    """Freshest available estimate of the current market price.
 
-    Falls back to the most recent MNQ parquet bar close when bar_state is missing or
-    incomplete — e.g. an ad-hoc/manual close issued from a process other than the live
-    automation (which is what writes bar_state.json). Without this fallback such a
-    close logs price 0.0 even though a valid market price is available on disk.
+    Order (first FRESH source wins; freshness = last bar within 3 minutes of now):
+    1. The in-process live 1m frame (strategy_smt's module bars, updated by the IB feed
+       on every completed 1m bar) — no disk IO, <=60s stale in the orchestrator process.
+    2. The live MNQ_1m.parquet last close (rewritten by the orchestrator every completed
+       1m bar) — covers standalone processes (trade.py, ad-hoc REPLs).
+    3. Legacy fallbacks, unguarded: bar_state midpoint (potential stops of the PREVIOUS
+       5m block — up to ~5m stale; this staleness was the source of the 12-20pt STP->MKT
+       fill gaps and wrong downgrade decisions, 2026-06-05 05:17 note), then the most
+       recent parquet close regardless of age (manual ops outside market hours).
     """
+    _now = pd.Timestamp.now(tz=_ET)
+    _fresh_cutoff = _now - pd.Timedelta(minutes=3)
+
+    # 1) In-process live bars (orchestrator process only; empty elsewhere). The freshness
+    # guard also keeps leftover backtest frames or a stale restart from leaking in.
+    try:
+        import strategy_smt as _ss
+        _bars = getattr(_ss, "_mnq_bars", None)
+        if _bars is not None and len(_bars) and _bars.index.tz is not None \
+                and _bars.index[-1] >= _fresh_cutoff:
+            return float(_bars["Close"].iloc[-1])
+    except Exception:
+        pass
+
+    # 2) Live 1m parquet, fresh (cross-process: the orchestrator rewrites it every minute).
+    try:
+        _p = paths.general_live_dir() / "MNQ_1m.parquet"
+        if _p.exists():
+            _df = pd.read_parquet(_p, columns=["Close"])
+            if not _df.empty and _df.index.tz is not None and _df.index[-1] >= _fresh_cutoff:
+                return float(_df["Close"].iloc[-1])
+    except Exception:
+        pass
+
+    # 3) Legacy: bar_state midpoint, then any parquet close regardless of age.
     from smt_state import load_bar_state
     bar = load_bar_state()
     if bar and "potential_stop_long" in bar and "potential_stop_short" in bar:
         return (float(bar["potential_stop_long"]) + float(bar["potential_stop_short"])) / 2.0
-    # Fallback: last completed bar close from the live parquets (1s preferred — freshest).
-    # Live append target — the orchestrator writes today's bars here during a session.
     for _name in ("MNQ_1s.parquet", "MNQ_1m.parquet"):
         try:
             _p = paths.general_live_dir() / _name
@@ -649,6 +705,7 @@ def trend_broken() -> dict:
     """
     from smt_state import load_hypothesis, save_hypothesis
 
+    smt_state.ensure_live_state_dir()  # standalone caller: resolve the session state folder
     hypothesis = load_hypothesis()
     broken_dir = hypothesis.get("direction", "none")
 
@@ -698,6 +755,7 @@ def hypothesis() -> list:
     today    = now.date()
     now_str  = now.isoformat()
 
+    smt_state.ensure_live_state_dir()  # standalone caller: resolve the session state folder
     hyp     = load_hypothesis()
     old_dir = hyp.get("direction", "none")
     hyp["direction"] = "none"
@@ -760,6 +818,7 @@ def _force_hypothesis_for_direction(forced_v2: str) -> None:
     import hypothesis as _hyp_mod
     from smt_state import load_daily, load_global, load_hypothesis
 
+    smt_state.ensure_live_state_dir()  # standalone caller: resolve the session state folder
     hyp           = load_hypothesis()
     old_direction = hyp.get("direction", "none")
 

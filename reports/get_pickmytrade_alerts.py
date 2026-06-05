@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download PickMyTrade Alerts CSV for a session date into sessions/<date>/."""
+"""Download PickMyTrade Alerts CSV for a session date into <global>/sessions/<date>/."""
 import argparse
 import datetime
 import os
@@ -10,7 +10,20 @@ from pathlib import Path
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
+# Repo root on sys.path so `import paths` works when run as `python reports/<script>.py`
+# (sys.path[0] is the script's own folder, not the cwd).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import paths
+
 _ALERTS_URL = "https://app.pickmytrade.trade/#/dashboard/home?tab=alerts"
+
+
+def _sessions_dir() -> Path:
+    """Session root: SESSIONS_DIR env override, else the machine-global live sessions
+    root (paths.sessions_dir()). The old default ("sessions", worktree-local) predates
+    the global path restructure and never matches where the orchestrator writes."""
+    env = os.getenv("SESSIONS_DIR")
+    return Path(env) if env else paths.sessions_dir()
 
 
 def run(session_date: datetime.date, *, headed: bool = False, count: int = 100) -> Path:
@@ -18,8 +31,7 @@ def run(session_date: datetime.date, *, headed: bool = False, count: int = 100) 
     pmt_email = os.environ["PMT_EMAIL"]
     pmt_pw    = os.environ["PMT_PASSWORD"]
 
-    sessions_dir = Path(os.getenv("SESSIONS_DIR", "sessions"))
-    out_dir = sessions_dir / session_date.isoformat()
+    out_dir = _sessions_dir() / session_date.isoformat()
     if not out_dir.exists():
         raise FileNotFoundError(
             f"Session directory '{out_dir}' does not exist — "

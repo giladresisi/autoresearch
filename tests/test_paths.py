@@ -102,3 +102,11 @@ def test_set_state_dir_round_trip(tmp_path):
     paths.set_state_dir(tmp_path / "run")
     assert paths.state_dir() == tmp_path / "run"
     assert (tmp_path / "run").is_dir()
+
+
+def test_state_dir_is_default_tracks_set_state_dir(tmp_path):
+    assert paths.state_dir_is_default()
+    paths.set_state_dir(tmp_path / "run")
+    assert not paths.state_dir_is_default()
+    paths.set_state_dir(paths._DEFAULT_STATE_DIR)
+    assert paths.state_dir_is_default()

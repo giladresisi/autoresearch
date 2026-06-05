@@ -86,6 +86,12 @@ class PickMyTradeExecutor:
         entry_price = float(signal["entry_price"])
         stop_price = float(signal["stop_price"]) if signal.get("stop_price") is not None else 0.0
         is_stop = signal.get("stop_fill_bars") is not None or signal.get("limit_fill_bars") is not None
+        # Anchor for the assumed-fill estimate. Default = the requested entry price; the
+        # STP->MKT downgrade overrides it with the current market price — a market order
+        # fills at the market, not at the (already-passed) trigger. Anchoring at the
+        # trigger produced 12-20pt strategy-vs-broker fill gaps in fast moves
+        # (2026-06-05 05:17 reconciliation).
+        fill_anchor = entry_price
         if is_stop:
             # Downgrade STP → MKT only when the market has reached/passed the trigger (R1).
             # Tradovate rejects a stop order whose trigger is at or past the market price (it
@@ -101,6 +107,7 @@ class PickMyTradeExecutor:
                 print(f"[PMT] STP->MKT: trigger {entry_price} reached by market {_current}", flush=True)
                 payload = self._build_payload(data, order_type="MKT", sl=stop_price)
                 order_type = "market"
+                fill_anchor = _current
             else:
                 payload = self._build_payload(data, order_type="STP", sl=stop_price, price=entry_price)
                 order_type = "stop"
@@ -117,7 +124,7 @@ class PickMyTradeExecutor:
         else:
             _bar_time = datetime.datetime.now(_ET).time()
         fill_price = assumed_fill_price(
-            direction, order_type, entry_price, self._entry_slip_ticks, self._tick_size,
+            direction, order_type, fill_anchor, self._entry_slip_ticks, self._tick_size,
             bar_time=_bar_time,
         )
         session_date = str(bar.name.date()) if hasattr(bar, "name") and bar.name is not None else ""

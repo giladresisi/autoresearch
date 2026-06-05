@@ -1122,3 +1122,179 @@ def test_on_1m_bar_runs_strategy_when_paused_but_active(_isolate_state, monkeypa
     pipeline.on_1m_bar(pd.Timestamp("2025-11-14 09:20", tz="America/New_York"), bar, bar, today_mnq, today_mnq)
 
     assert len(strat_calls) == 1, "paused + active must still call run_strategy (management/exits)"
+
+
+# ---------------------------------------------------------------------------
+# Live FVG detection (frozen-frame fix, 2026-06-05): _extend_fvg_frames appends
+# just-completed 1hr/4hr bars from live 1m and detects FVGs completing at them.
+# ---------------------------------------------------------------------------
+
+def _fvg_session_bars() -> pd.DataFrame:
+    """Today-session 1m bars forming a bull 1hr FVG completing at 21:00 ET:
+    bar1 (19:00) High=21010; bar3 (21:00) Low=21020 > bar1 High -> gap 21010-21020.
+    bar3's low prints at its first minute (21:00, excluded from the visited check by
+    the strict index > formation_ts slice); later lows stay above the gap top."""
+    rows = [
+        ("2025-11-13 19:00", 21000.0, 21010.0, 20990.0, 21005.0),
+        ("2025-11-13 19:30", 21005.0, 21008.0, 20995.0, 21000.0),
+        ("2025-11-13 20:00", 21016.0, 21030.0, 21015.0, 21028.0),
+        ("2025-11-13 21:00", 21030.0, 21035.0, 21020.0, 21032.0),
+        ("2025-11-13 21:01", 21032.0, 21040.0, 21025.0, 21038.0),
+    ]
+    idx = pd.DatetimeIndex([pd.Timestamp(t, tz="America/New_York") for t, *_ in rows])
+    return pd.DataFrame({
+        "Open":   [r[1] for r in rows],
+        "High":   [r[2] for r in rows],
+        "Low":    [r[3] for r in rows],
+        "Close":  [r[4] for r in rows],
+        "Volume": [100] * len(rows),
+    }, index=idx)
+
+
+def _bare_fvg_pipeline(fvg_1hr="empty", fvg_4hr=None) -> SessionPipeline:
+    """Minimal pipeline carrying only the rolling-FVG state (_extend_fvg_frames units)."""
+    _cols = ["Open", "High", "Low", "Close"]
+    p = SessionPipeline.__new__(SessionPipeline)
+    p._fvg_1hr = pd.DataFrame(columns=_cols) if isinstance(fvg_1hr, str) else fvg_1hr
+    p._fvg_4hr = fvg_4hr
+    p._fvg_done_1hr = None
+    p._fvg_done_4hr = None
+    return p
+
+
+def test_extend_fvg_frames_detects_live_1hr_fvg():
+    """A 1hr FVG completing intra-session is detected from live 1m bars — at any bar
+    time after the boundary (timestamp-based catch-up, not a minute==0 tick)."""
+    pipeline = _bare_fvg_pipeline()
+    now = pd.Timestamp("2025-11-13 22:37", tz="America/New_York")  # NOT minute 0
+
+    found = pipeline._extend_fvg_frames(now, _fvg_session_bars())
+
+    assert [f["name"] for f in found] == ["fvg_20251113_2100_bull"]
+    assert found[0]["top"] == 21020.0 and found[0]["bottom"] == 21010.0
+    # Frame extended with the completed 19/20/21 bars only (22:00 still forming).
+    assert list(pipeline._fvg_1hr.index.hour) == [19, 20, 21]
+
+
+def test_extend_fvg_frames_excludes_forming_bar():
+    """The still-forming TF bar must not complete an FVG (its H/L is not final)."""
+    pipeline = _bare_fvg_pipeline()
+    bars = _fvg_session_bars()
+
+    # 21:30 — the 21:00 bar (the FVG's completing bar) is still forming -> nothing.
+    found = pipeline._extend_fvg_frames(
+        pd.Timestamp("2025-11-13 21:30", tz="America/New_York"), bars)
+    assert found == []
+    assert list(pipeline._fvg_1hr.index.hour) == [19, 20]
+
+    # Next boundary passed — the completed 21:00 bar now finishes the FVG.
+    found = pipeline._extend_fvg_frames(
+        pd.Timestamp("2025-11-13 22:05", tz="America/New_York"), bars)
+    assert [f["name"] for f in found] == ["fvg_20251113_2100_bull"]
+
+
+def test_extend_fvg_frames_no_redetection():
+    """Windows ending at already-processed bars are never re-tested — a detected
+    (or later pruned) FVG cannot be returned twice / resurrect."""
+    pipeline = _bare_fvg_pipeline()
+    bars = _fvg_session_bars()
+    now1 = pd.Timestamp("2025-11-13 22:37", tz="America/New_York")
+    assert len(pipeline._extend_fvg_frames(now1, bars)) == 1
+
+    # Add a neutral 22:00 hour (no new FVG) and advance past the next boundary.
+    extra = pd.DataFrame(
+        {"Open": [21038.0], "High": [21045.0], "Low": [21025.0],
+         "Close": [21040.0], "Volume": [100]},
+        index=pd.DatetimeIndex([pd.Timestamp("2025-11-13 22:00", tz="America/New_York")]))
+    bars2 = pd.concat([bars, extra])
+    now2 = pd.Timestamp("2025-11-13 23:10", tz="America/New_York")
+
+    assert pipeline._extend_fvg_frames(now2, bars2) == []
+
+
+def test_extend_fvg_frames_joins_hist_and_live_bars():
+    """An FVG whose first two bars are hist and whose completing bar is live is found
+    (the rolling frame joins the session-init seed with live appends)."""
+    hist_idx = pd.DatetimeIndex([
+        pd.Timestamp("2025-11-13 19:00", tz="America/New_York"),
+        pd.Timestamp("2025-11-13 20:00", tz="America/New_York"),
+    ])
+    hist_1hr = pd.DataFrame({
+        "Open": [21000.0, 21016.0], "High": [21010.0, 21030.0],
+        "Low": [20990.0, 21015.0], "Close": [21005.0, 21028.0],
+    }, index=hist_idx)
+    pipeline = _bare_fvg_pipeline(fvg_1hr=hist_1hr)
+    live = _fvg_session_bars().loc["2025-11-13 21:00":]  # only the completing hour
+
+    found = pipeline._extend_fvg_frames(
+        pd.Timestamp("2025-11-13 22:00", tz="America/New_York"), live)
+
+    assert [f["name"] for f in found] == ["fvg_20251113_2100_bull"]
+
+
+def test_extend_fvg_frames_detects_live_4hr_fvg():
+    """Same mechanism on the 4hr frame (bull FVG completing at the 12:00 4hr bar)."""
+    rows = [
+        ("2025-11-13 04:00", 21000.0, 21010.0, 20990.0, 21005.0),
+        ("2025-11-13 08:30", 21016.0, 21030.0, 21015.0, 21028.0),
+        ("2025-11-13 12:00", 21030.0, 21035.0, 21020.0, 21032.0),
+        ("2025-11-13 12:01", 21032.0, 21040.0, 21025.0, 21038.0),
+    ]
+    idx = pd.DatetimeIndex([pd.Timestamp(t, tz="America/New_York") for t, *_ in rows])
+    bars = pd.DataFrame({
+        "Open":   [r[1] for r in rows],
+        "High":   [r[2] for r in rows],
+        "Low":    [r[3] for r in rows],
+        "Close":  [r[4] for r in rows],
+        "Volume": [100] * len(rows),
+    }, index=idx)
+    _cols = ["Open", "High", "Low", "Close"]
+    pipeline = _bare_fvg_pipeline(fvg_1hr=None,  # 1hr side disabled for isolation
+                                  fvg_4hr=pd.DataFrame(columns=_cols))
+
+    found = pipeline._extend_fvg_frames(
+        pd.Timestamp("2025-11-13 16:45", tz="America/New_York"), bars)
+
+    assert [f["name"] for f in found] == ["fvg_20251113_1200_bull"]
+
+
+def test_live_fvg_lands_in_daily_json(_isolate_state, monkeypatch):
+    """End-to-end: an FVG forming intra-session is appended to daily.json liquidities
+    by _update_dynamic_liquidities (the old frozen-frame scan never found these)."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    hist = _make_1m_bars("2025-11-12 09:20", n=5)
+    pipeline = SessionPipeline(hist, hist, lambda e: None)
+    pipeline.on_session_start(
+        pd.Timestamp("2025-11-13 19:00", tz="America/New_York"),
+        _fvg_session_bars().iloc[:1], force_reset=True)
+
+    today_mnq = _fvg_session_bars()
+    bar = _bar_row(base=21030.0)
+    pipeline.on_1m_bar(pd.Timestamp("2025-11-13 22:37", tz="America/New_York"),
+                       bar, bar, today_mnq, today_mnq)
+
+    _names = [l["name"] for l in smt_state.load_daily()["liquidities"]]
+    assert "fvg_20251113_2100_bull" in _names
+
+
+def test_daily_reset_preserves_live_fvgs(_isolate_state):
+    """The 09:20 daily reset rebuilds the FVG frames from hist + today's COMPLETED
+    bars, so FVGs formed live earlier in the session survive the wholesale
+    liquidity recompute (previously they were dropped: run_daily_fixed re-scanned
+    the session-init hist-only frames)."""
+    hist = _make_1m_bars("2025-11-12 09:20", n=5)
+    pipeline = SessionPipeline(hist, hist, lambda e: None)
+
+    pipeline.on_daily_or_startup(
+        pd.Timestamp("2025-11-14 09:20", tz="America/New_York"), _fvg_session_bars())
+
+    _names = [l["name"] for l in smt_state.load_daily()["liquidities"]]
+    assert "fvg_20251113_2100_bull" in _names

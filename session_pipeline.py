@@ -18,7 +18,7 @@ import hypothesis as _hyp_mod
 import smt_state as _smt_state
 import strategy as _strat_mod
 import trend as _trend_mod
-from session_times import is_entry_allowed, cme_session_start as _cme_session_start
+from session_times import is_entry_allowed, cme_session_start as _cme_session_start, cme_session_date
 from smt_state import save_bar_state
 
 _ET = ZoneInfo("America/New_York")
@@ -63,6 +63,16 @@ class SessionPipeline:
         self._daily_triggered = False
         self._hist_1hr: pd.DataFrame | None = None
         self._hist_4hr: pd.DataFrame | None = None
+        # Rolling TF frames for the FVG liquidity scan: seeded at daily/startup from
+        # hist + today's COMPLETED bars, then extended intra-session with each
+        # just-completed 1hr/4hr bar resampled from live 1m (_extend_fvg_frames).
+        # Kept separate from _hist_1hr/_hist_4hr, which the hypothesis paths consume
+        # as strictly-pre-session history (they concat today's resample themselves).
+        self._fvg_1hr: pd.DataFrame | None = None
+        self._fvg_4hr: pd.DataFrame | None = None
+        # Fast-path cache: last completed TF boundary already processed per frame.
+        self._fvg_done_1hr: pd.Timestamp | None = None
+        self._fvg_done_4hr: pd.Timestamp | None = None
         self._session_ath: float | None = None
         # Tracks (cautious_price_initial, cautious_price_secondary) of last emitted
         # new-hypothesis. Used to suppress redundant signals above session_ath.
@@ -161,11 +171,12 @@ class SessionPipeline:
                 .dropna(subset=["Open"])
             )
             self._hist_1hr = _1hr_full[_1hr_full.index >= _14d_ago]
-            self._hist_4hr = (
+            _4hr_full = (
                 self._hist_mnq_1m.resample("4h", label="left")
                 .agg(_agg)
                 .dropna(subset=["Open"])
             )
+            self._hist_4hr = _4hr_full[_4hr_full.index >= _14d_ago]
         else:
             self._hist_1hr = pd.DataFrame(columns=list(_agg))
             self._hist_4hr = pd.DataFrame(columns=list(_agg))
@@ -175,10 +186,35 @@ class SessionPipeline:
         _combined = pd.concat([self._hist_mnq_1m, today_mnq]).sort_index()
         _combined = _combined[~_combined.index.duplicated(keep="last")]
 
+        # Rolling FVG frames: hist + today's COMPLETED TF bars, 14d-bounded. A
+        # still-forming bar is excluded — its H/L is not final, so it must not
+        # complete an FVG yet. At first startup this equals the hist-only frames
+        # (today_mnq is empty/just opened); at the 09:20 daily reset it keeps the
+        # session's completed bars, so run_daily_fixed re-detects FVGs that formed
+        # live earlier in the session instead of silently dropping them.
+        if not _combined.empty:
+            _fvg_1hr_full = (
+                _combined.resample("1h", label="left").agg(_agg).dropna(subset=["Open"])
+            )
+            self._fvg_1hr = _fvg_1hr_full[
+                (_fvg_1hr_full.index >= _14d_ago) & (_fvg_1hr_full.index < now.floor("1h"))
+            ]
+            _fvg_4hr_full = (
+                _combined.resample("4h", label="left").agg(_agg).dropna(subset=["Open"])
+            )
+            self._fvg_4hr = _fvg_4hr_full[
+                (_fvg_4hr_full.index >= _14d_ago) & (_fvg_4hr_full.index < now.floor("4h"))
+            ]
+        else:
+            self._fvg_1hr = pd.DataFrame(columns=list(_agg))
+            self._fvg_4hr = pd.DataFrame(columns=list(_agg))
+        self._fvg_done_1hr = None
+        self._fvg_done_4hr = None
+
         # Reset daily.json and recompute fixed levels.
         save_daily(copy.deepcopy(DEFAULT_DAILY))
         _daily_mod.run_daily_fixed(
-            now, _combined, self._hist_1hr, self._hist_4hr, now.date()
+            now, _combined, self._fvg_1hr, self._fvg_4hr, now.date()
         )
 
         # Seed initial day/week/session levels from combined bars.
@@ -255,7 +291,7 @@ class SessionPipeline:
             if _env_state:
                 paths.set_state_dir(_env_state)
             else:
-                _d = _smt_state._SESSION_DATE or str(now.date())
+                _d = _smt_state._SESSION_DATE or cme_session_date(now).isoformat()
                 paths.set_state_dir(paths.sessions_dir() / _d)
 
         # Reset per-hypothesis tracking state on every session start.
@@ -879,7 +915,7 @@ class SessionPipeline:
         today_mnq: pd.DataFrame,
     ) -> list[dict]:
         """Update session/day/week H/L and FVG state in daily.json on every bar."""
-        from daily import _session_bars, _detect_fvgs, TIME_WINDOWS
+        from daily import _session_bars, TIME_WINDOWS
 
         _state = _smt_state.load_daily()
         _liq = _state.get("liquidities", [])
@@ -1050,22 +1086,18 @@ class SessionPipeline:
                     "visited": True,
                 })
 
-        # ── New FVG detection at hour/4hr boundaries ────────────────────────────
-        if now.minute == 0 and self._hist_1hr is not None:
-            _new_1hr = _detect_fvgs(self._hist_1hr, today_mnq)
-            for _f in _new_1hr:
-                if _f["name"] not in _liq_map:
-                    _liq.append(_f)
-                    _liq_map[_f["name"]] = _f
-                    _changed.append(_f["name"])
-
-        if now.minute == 0 and now.hour % 4 == 0 and self._hist_4hr is not None:
-            _new_4hr = _detect_fvgs(self._hist_4hr, today_mnq)
-            for _f in _new_4hr:
-                if _f["name"] not in _liq_map:
-                    _liq.append(_f)
-                    _liq_map[_f["name"]] = _f
-                    _changed.append(_f["name"])
+        # ── New FVG detection from LIVE bars at 1hr/4hr boundaries ─────────────
+        # Frozen-frame fix (2026-06-05): the old scan re-ran _detect_fvgs over
+        # self._hist_1hr/_hist_4hr — frames frozen at session init — so FVGs forming
+        # intra-session were never detected, and hist FVGs already excluded as
+        # visited could resurrect (that re-scan's visited check only saw today's
+        # bars). Now each just-completed TF bar is resampled from live 1m and only
+        # the 3-bar windows ending at new bars are tested.
+        for _f in self._extend_fvg_frames(now, today_mnq):
+            if _f["name"] not in _liq_map:
+                _liq.append(_f)
+                _liq_map[_f["name"]] = _f
+                _changed.append(_f["name"])
 
         if _changed or _to_remove:
             _state["liquidities"] = list(_liq_map.values())
@@ -1078,6 +1110,65 @@ class SessionPipeline:
             ]
 
         return _liq_events
+
+    def _extend_fvg_frames(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> list[dict]:
+        """Append just-completed 1hr/4hr bars (built from live 1m) to the rolling FVG
+        frames and return the FVGs completed by those new bars.
+
+        Boundary tracking is timestamp-based rather than minute==0, so a missed tick
+        or a data gap catches up on every boundary since the last processed one. Only
+        the 3-bar windows ending at newly appended bars are tested — an FVG can only
+        ever complete at its 3rd bar, so older windows need no re-scan (and a pruned
+        FVG can never resurrect). The visited check inside _detect_fvgs runs against
+        today's 1m bars after formation, matching the daily-scan semantics.
+        """
+        from daily import _detect_fvgs
+
+        out: list[dict] = []
+        for _freq, _frame_attr, _done_attr in (
+            ("1h", "_fvg_1hr", "_fvg_done_1hr"),
+            ("4h", "_fvg_4hr", "_fvg_done_4hr"),
+        ):
+            _cur = now.floor(_freq)  # bars labeled >= _cur are still forming
+            if getattr(self, _done_attr) == _cur:
+                continue  # fast path: no new boundary completed since the last call
+            _frame = getattr(self, _frame_attr)
+            if _frame is None:
+                continue
+            setattr(self, _done_attr, _cur)
+            if today_mnq.empty:
+                continue
+            _step = pd.Timedelta(_freq)
+            # Completed-but-missing labels: from the frame's end (or today's first
+            # bar after a blank frame) up to — excluding — the still-forming bar.
+            _label = (
+                _frame.index[-1] + _step
+                if len(_frame)
+                else today_mnq.index[0].floor(_freq)
+            )
+            _new_idx: list = []
+            _new_rows: list[dict] = []
+            while _label < _cur:
+                _lo = today_mnq.index.searchsorted(_label, side="left")
+                _hi = today_mnq.index.searchsorted(_label + _step, side="left")
+                _win = today_mnq.iloc[_lo:_hi]
+                if not _win.empty:
+                    _new_idx.append(_label)
+                    _new_rows.append({
+                        "Open":  float(_win["Open"].iloc[0]),
+                        "High":  float(_win["High"].values.max()),
+                        "Low":   float(_win["Low"].values.min()),
+                        "Close": float(_win["Close"].iloc[-1]),
+                    })
+                _label += _step
+            if not _new_rows:
+                continue
+            _add = pd.DataFrame(_new_rows, index=pd.DatetimeIndex(_new_idx))
+            _frame = _add if _frame.empty else pd.concat([_frame, _add])
+            setattr(self, _frame_attr, _frame)
+            # tail(K+2): exactly the windows whose completing (3rd) bar is new.
+            out.extend(_detect_fvgs(_frame.tail(len(_new_rows) + 2), today_mnq))
+        return out
 
     def _day_start_ts(self, now: pd.Timestamp) -> pd.Timestamp:
         """Return 18:00 ET on the date the current CME futures session opened.

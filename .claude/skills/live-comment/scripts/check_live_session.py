@@ -82,8 +82,9 @@ def main() -> None:
             f"{SESSION_OPEN.strftime('%H:%M')} ET); now {now_et.strftime('%H:%M')} ET"
         )
 
+    import paths  # ROOT is on sys.path
     session_date = session_date_str()
-    folder = ROOT / "sessions" / session_date
+    folder = paths.sessions_dir() / session_date
     comments = folder / "comments.md"
 
     print("STATUS: LIVE")
