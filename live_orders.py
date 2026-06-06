@@ -674,6 +674,7 @@ def dispatch(sig: dict) -> None:
             from smt_state import load_hypothesis, save_hypothesis
             hyp = load_hypothesis()
             hyp["direction"] = "none"
+            hyp["manual"] = False  # GIL-8: direction cleared → release the manual lock
             save_hypothesis(hyp)
         pos["active"] = {}
         pos["stop_entry"] = ""
@@ -713,6 +714,7 @@ def trend_broken() -> dict:
     cancel_stop_entry(reason="trend-broken-manual")
 
     hypothesis["direction"] = "none"
+    hypothesis["manual"] = False  # GIL-8: trend-broken is a release path for the manual lock
     save_hypothesis(hypothesis)
 
     # Clear conf_bar_entry in case cancel_stop_entry didn't (no pending stop).
@@ -759,6 +761,7 @@ def hypothesis() -> list:
     hyp     = load_hypothesis()
     old_dir = hyp.get("direction", "none")
     hyp["direction"] = "none"
+    hyp["manual"] = False  # GIL-8: explicit re-evaluation releases the manual lock
     save_hypothesis(hyp)
 
     mnq_path = paths.general_live_dir() / "MNQ_1m.parquet"
@@ -805,13 +808,86 @@ def hypothesis() -> list:
     return signals or []
 
 
+def set_direction(direction_v2: str) -> bool:
+    """Manually flip the hypothesis to a chosen direction and LOCK it (GIL-8).
+
+    One-shot discretionary override: rewrites hypothesis.json for the forced
+    direction with a freshly computed cautious ladder (via
+    _force_hypothesis_for_direction → build_hypothesis_from_direction; the direction
+    is NOT re-derived by the rules), then sets the `manual` lock flag so the
+    automatic reset paths (level sweep, session-ATH cross, daily/weekly mid-cross
+    and global-trend trend-broken) leave the hypothesis alone until released via
+    `trade.py unlock` or `trade.py trend-broken`. The locked cautious ladder is also
+    preserved across fills (recompute_cautious_for_fill no-ops while locked).
+
+    If the hypothesis already points the requested way, it is locked as-is (no
+    cautious recompute). Returns True when set and locked; False when the rewrite
+    didn't take (active position present, or no current price available).
+
+    Usage:
+        import live_orders; live_orders.set_direction("down")
+        python trade.py set-direction down    (alias: trade.py flip down)
+    """
+    from smt_state import load_hypothesis, save_hypothesis
+
+    smt_state.ensure_live_state_dir()
+    if direction_v2 not in ("up", "down"):
+        print(f"[live_orders] set_direction: invalid direction {direction_v2!r} (use up|down)", flush=True)
+        return False
+    _force_hypothesis_for_direction(direction_v2)
+    hyp = load_hypothesis()
+    if hyp.get("direction") != direction_v2:
+        print("[live_orders] set_direction: hypothesis rewrite did not take (active "
+              "position present, or no current price available) — NOT locked", flush=True)
+        return False
+    hyp["manual"] = True
+    save_hypothesis(hyp)
+    _log({"kind": "manual-direction-lock", "time": _now_et(), "direction": direction_v2,
+          "cautious_price_initial": hyp.get("cautious_price_initial", ""),
+          "cautious_price_secondary": hyp.get("cautious_price_secondary", ""),
+          "source": "manual"})
+    print(f"[live_orders] direction locked {direction_v2!r} — cautious "
+          f"{hyp.get('cautious_price_initial', '?')}/{hyp.get('cautious_price_secondary', '?')}; "
+          "automatic hypothesis resets suspended until 'trade.py unlock' or trend-broken.",
+          flush=True)
+    return True
+
+
+def unlock_direction() -> bool:
+    """Release the manual direction lock set by set_direction (GIL-8).
+
+    The direction itself is kept — the strategy's normal reset paths simply apply
+    again from here on. Returns False (no-op) when no lock is set.
+
+    Usage:
+        import live_orders; live_orders.unlock_direction()
+        python trade.py unlock
+    """
+    from smt_state import load_hypothesis, save_hypothesis
+
+    smt_state.ensure_live_state_dir()
+    hyp = load_hypothesis()
+    if not hyp.get("manual"):
+        print("[live_orders] unlock: no manual direction lock set", flush=True)
+        return False
+    hyp["manual"] = False
+    save_hypothesis(hyp)
+    _log({"kind": "manual-direction-unlock", "time": _now_et(),
+          "direction": hyp.get("direction", "none"), "source": "manual"})
+    print(f"[live_orders] manual direction lock released — direction stays "
+          f"{hyp.get('direction', 'none')!r}; automatic resets apply again.", flush=True)
+    return True
+
+
 def _force_hypothesis_for_direction(forced_v2: str) -> None:
     """Rewrite hypothesis.json for a manually forced direction.
 
     Called before place_stop_entry / place_market_entry when forced_v2 differs
-    from the current hypothesis direction. Cancels any pending opposite-direction
-    stop entry, then writes a fresh hypothesis with correct cautious prices and
-    mid-cross guard labels so run_trend() doesn't immediately fire trend-broken.
+    from the current hypothesis direction, and by set_direction (GIL-8). Cancels any
+    pending opposite-direction stop entry, then writes a fresh hypothesis with correct
+    cautious prices and mid-cross guard labels so run_trend() doesn't immediately
+    fire trend-broken. NOTE: the rewrite builds a fresh hypothesis dict, so it drops
+    any manual direction lock — a manual entry against the lock implicitly releases it.
 
     entry_ranges is left empty — the entry is manual, O5 doesn't apply.
     """

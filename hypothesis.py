@@ -151,10 +151,11 @@ def recompute_cautious_for_fill(
     re-derives the cautious levels against the fill so the targets stay relevant and
     up-to-date. Direction / liquidities / ATH are unchanged; only the cautious price
     fields are overwritten. Mutates and returns the hypothesis dict. No-op unless the
-    direction is up/down.
+    direction is up/down, or while the manual direction lock is set (GIL-8: the
+    user's locked ladder is preserved across fills until released).
     """
     direction = hypothesis.get("direction")
-    if direction not in ("up", "down"):
+    if direction not in ("up", "down") or hypothesis.get("manual"):
         return hypothesis
     cp = compute_cautious_prices(direction, float(fill_price), liquidities, ath)
     hypothesis["cautious_price_initial"]         = cp["cautious_price_initial"]

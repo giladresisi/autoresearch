@@ -1298,3 +1298,71 @@ def test_daily_reset_preserves_live_fvgs(_isolate_state):
 
     _names = [l["name"] for l in smt_state.load_daily()["liquidities"]]
     assert "fvg_20251113_2100_bull" in _names
+
+
+# ---------------------------------------------------------------------------
+# GIL-8: manual direction lock — a level sweep must not reset the hypothesis
+# ---------------------------------------------------------------------------
+
+def _level_swept_sig(now: pd.Timestamp) -> dict:
+    return {
+        "kind": "level-swept", "time": now.isoformat(), "price": 21000.0,
+        "level_name": "day_low", "level_price": 20990.0,
+        "cooldown_active": True,  # cooldown path resets direction deterministically
+        "bar_low": 20985.0, "bar_high": 21005.0,
+    }
+
+
+def _lock_pipeline(monkeypatch, emitted: list) -> tuple:
+    """Pipeline with run_trend stubbed to emit a level-swept signal."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    now = pd.Timestamp("2025-11-14 02:00", tz="America/New_York")
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: _level_swept_sig(now))
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: [])
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    hist = _make_1m_bars("2025-11-12 09:20", n=5)
+    pipeline = SessionPipeline(hist, hist, lambda e: emitted.append(e))
+    pipeline.on_session_start(
+        pd.Timestamp("2025-11-13 19:00", tz="America/New_York"),
+        _make_1m_bars("2025-11-13 19:00", n=1), force_reset=True)
+    return pipeline, now
+
+
+def test_level_sweep_resets_direction_without_lock(_isolate_state, monkeypatch):
+    """Sanity: cooldown-path level sweep resets direction when NOT locked."""
+    emitted: list = []
+    pipeline, now = _lock_pipeline(monkeypatch, emitted)
+    hyp = smt_state.load_hypothesis()
+    hyp["direction"] = "up"
+    smt_state.save_hypothesis(hyp)
+
+    today = _make_1m_bars("2025-11-13 19:00", n=10)
+    bar = _bar_row()
+    pipeline.on_1m_bar(now, bar, bar, today, today)
+
+    assert smt_state.load_hypothesis()["direction"] == "none"
+    assert any(e["kind"] == "trend-broken" for e in emitted)
+
+
+def test_level_sweep_skipped_with_manual_lock(_isolate_state, monkeypatch):
+    """GIL-8: the same sweep is absorbed as a non-event while the lock is set."""
+    emitted: list = []
+    pipeline, now = _lock_pipeline(monkeypatch, emitted)
+    hyp = smt_state.load_hypothesis()
+    hyp["direction"] = "up"
+    hyp["manual"] = True
+    smt_state.save_hypothesis(hyp)
+
+    today = _make_1m_bars("2025-11-13 19:00", n=10)
+    bar = _bar_row()
+    pipeline.on_1m_bar(now, bar, bar, today, today)
+
+    hyp = smt_state.load_hypothesis()
+    assert hyp["direction"] == "up"
+    assert hyp["manual"] is True
+    assert not any(e["kind"] == "trend-broken" for e in emitted)

@@ -74,6 +74,9 @@ def _clear_position_and_hypothesis(
     position["conf_bar_entry"] = {}
     position["conf_bar_exit"]  = {}
     hypothesis["direction"] = "none"
+    # GIL-8 invariant: clearing direction releases the manual direction lock too —
+    # a stale lock with direction="none" would freeze future automatic resets.
+    hypothesis["manual"] = False
 
 
 def _last_same_dir_ref_bar(
@@ -191,6 +194,11 @@ def run_trend(
     daily = load_daily()
 
     direction = hypothesis.get("direction", "none")
+    # GIL-8 manual direction lock (trade.py set-direction): while set, the automatic
+    # hypothesis resets below (global-trend / mid-cross trend-broken, session-ATH
+    # cross) are suspended. Released via trade.py unlock / trend-broken, or by any
+    # position-close path (_clear_position_and_hypothesis drops the flag).
+    _manual_lock = bool(hypothesis.get("manual"))
     cautious_initial_raw   = hypothesis.get("cautious_price_initial",   "")
     cautious_secondary_raw = hypothesis.get("cautious_price_secondary", "")
     _lv1 = hypothesis.get("cautious_price_initial_level",   "") or ""
@@ -239,6 +247,7 @@ def run_trend(
         and bar_high >= _session_ath
         and bar_low  <= _session_ath
         and direction not in ("down", "none")
+        and not _manual_lock    # GIL-8: ATH cross must not reset a manual hypothesis
     )
     # Dynamic ATH straddle: above session_ath and price crossed the running high.
     # Triggers a lightweight hypothesis re-evaluation (no trend-broken).
@@ -269,9 +278,10 @@ def run_trend(
         return None
 
     # Global trend invalidation: when confidence=high, cancel any hypothesis opposing global_trend.
+    # Skipped while the manual direction lock is set (GIL-8) — the user forced this direction.
     _global_state = load_global()
     _global_trend = _global_state.get("trend", "up")
-    if _global_state.get("confidence") == "high" and direction != _global_trend:
+    if _global_state.get("confidence") == "high" and direction != _global_trend and not _manual_lock:
         hypothesis["direction"] = "none"
         position["conf_bar_entry"] = {}
         position["conf_bar_exit"]  = {}
@@ -623,8 +633,9 @@ def run_trend(
 
     # Daily-mid invalidation: if the hypothesized direction is contradicted by price
     # crossing the daily mid (e.g. direction=up but close fell below mid), the thesis
-    # is stale — reset before placing any new entry.
-    if daily_mid_price is not None and _mid_cross_guard:
+    # is stale — reset before placing any new entry. Skipped while the manual
+    # direction lock is set (GIL-8).
+    if daily_mid_price is not None and _mid_cross_guard and not _manual_lock:
         _mid_broken = (direction == "up"   and bar_close < daily_mid_price) or \
                       (direction == "down" and bar_close > daily_mid_price)
         if _mid_broken:
@@ -646,7 +657,8 @@ def run_trend(
             }
 
     # Weekly-mid invalidation: same logic applied to the broader weekly range.
-    if weekly_mid_price is not None and _weekly_mid_cross_guard:
+    # Skipped while the manual direction lock is set (GIL-8).
+    if weekly_mid_price is not None and _weekly_mid_cross_guard and not _manual_lock:
         _wm_broken = (direction == "up"   and bar_close < weekly_mid_price) or \
                      (direction == "down" and bar_close > weekly_mid_price)
         if _wm_broken:

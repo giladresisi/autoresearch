@@ -440,6 +440,7 @@ class SessionPipeline:
                     _ghost_pos["stop_entry"] = ""
                     _ghost_pos["conf_bar_exit"] = {}
                     _ghost_hyp["direction"] = "none"
+                    _ghost_hyp["manual"] = False  # GIL-8: direction cleared → release the lock
                     _smt_state.save_position(_ghost_pos)
                     _smt_state.save_hypothesis(_ghost_hyp)
                     self._emit(_ghost_evt)
@@ -465,7 +466,12 @@ class SessionPipeline:
                 # Cooldown active: the same level+direction was swept recently. Still
                 # emit trend-broken to reset direction, but skip the immediate hypothesis
                 # re-run — it will form naturally at the next 5m boundary.
-                if trend_sig.get("cooldown_active"):
+                if _smt_state.load_hypothesis().get("manual"):
+                    # GIL-8 manual direction lock (trade.py set-direction): a swept
+                    # level must not reset the manually forced hypothesis — absorb the
+                    # sweep as a non-event until trade.py unlock / trend-broken releases.
+                    pass
+                elif trend_sig.get("cooldown_active"):
                     _level_name_cd  = trend_sig.get("level_name", "")
                     _level_price_cd = float(trend_sig.get("level_price", 0) or 0)
                     # Suppress if the level was already priced in at hypothesis formation
