@@ -19,11 +19,16 @@ _ALERTS_URL = "https://app.pickmytrade.trade/#/dashboard/home?tab=alerts"
 
 
 def _sessions_dir() -> Path:
-    """Session root: SESSIONS_DIR env override, else the machine-global live sessions
-    root (paths.sessions_dir()). The old default ("sessions", worktree-local) predates
-    the global path restructure and never matches where the orchestrator writes."""
+    """Session root: the machine-global live sessions root (paths.sessions_dir()).
+
+    SESSIONS_DIR is honored ONLY as an *absolute*-path override. A relative value like
+    "sessions" is the pre-restructure worktree-local default — it is frequently still set
+    in .env and never matches where the orchestrator writes (the global sessions root), so
+    a relative override is ignored rather than silently resolving to the wrong folder."""
     env = os.getenv("SESSIONS_DIR")
-    return Path(env) if env else paths.sessions_dir()
+    if env and Path(env).is_absolute():
+        return Path(env)
+    return paths.sessions_dir()
 
 
 def run(session_date: datetime.date, *, headed: bool = False, count: int = 100) -> Path:
