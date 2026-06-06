@@ -63,6 +63,26 @@ If fetching fails, note which files are missing and continue with what's availab
 
 ---
 
+## Step 2.1 — Rebuild a complete trade ledger from events.jsonl
+
+The live `trades.tsv` is written from the orchestrator relay's **in-memory, per-run** events
+and overwritten at each session-end, so it loses round-trips across restarts/terminations
+(GIL-13). Rebuild a complete ledger from the persistent, append-only `events.jsonl` before
+analysis:
+
+```bash
+uv run python -m scripts.rebuild_trades_from_events --date <date>
+```
+
+This writes `<global>/sessions/<date>/trades_full.tsv` (the original `trades.tsv` is left
+intact). Suspect pairings — bad (`<=0`) price, or an implausibly long hold (a missing-exit /
+phantom) — keep the row but blank the P&L and tag `exit_reason` with `|suspect:...`; a fill
+with no matching exit (a phantom) is emitted as `unpaired-open`. The analysis reads
+**`trades_full.tsv`** as the strategy ledger, and the gap between it and the live `trades.tsv`
+is itself a data-quality finding (that IS D1).
+
+---
+
 ## Step 2.5 — Run 1s regression
 
 Run the 1s backtest replay for the session date. This produces a deterministic
@@ -142,10 +162,15 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
    update-stop-loss, new-stop-exit, move-stop-exit, stop-exit, stopped-out,
    market-close, cancel-limit-entry, smt-div, trend-broken.
 
-2. <SESSION>\trades.tsv
+2. <SESSION>\trades_full.tsv   (complete strategy ledger — rebuilt from events.jsonl in Step 2.1)
    TSV: entry_time, entry_price, direction, contracts, exit_time, exit_price,
    exit_reason, pnl_points, pnl_dollars.
-   This is the STRATEGY's own P&L record — the assumed fills, not actual broker fills.
+   The STRATEGY's own P&L record (assumed fills, not actual broker fills), complete across
+   restarts. Rows whose exit_reason contains "suspect:" (bad-price / long-hold) or
+   "unpaired-open" are FLAGGED anomalies — exclude their P&L from totals but DO surface them
+   (phantoms, 0.0-price fills). The original <SESSION>\trades.tsv is the live relay's
+   restart-lossy record; a gap between trades_full.tsv and trades.tsv is discrepancy D-class
+   material (the relay only persisted the final run-segment's trades).
 
 3. <SESSION>\signals.log
    Raw stdout from automation.main. Contains [PMT] lines showing every order sent
