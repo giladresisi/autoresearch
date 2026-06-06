@@ -77,9 +77,10 @@ Use `--dry-run` if the user wants validation only without any data changes.
 and why the automatic fix failed (check `reason` field in the JSON).
 
 **Promotion (session-end only) — `promotion` block.** After a SUCCESSFUL session-end
-merge, the script's FINAL step promotes the validated parquets from the live data dir
-(`<global>/data/live`) to the backtest read source (`<global>/data/main`): for each
-`<inst>_1m.parquet` / `<inst>_1s.parquet` present in live it backs up the existing main
+merge, the script's FINAL step promotes the validated parquets from the **live production**
+dir (`<global>/general/live`, env `ACT_GLOBAL_DIR`; resolved by `paths.general_live_dir()`)
+to the **backtest read source** (`<global>/general/main`; `paths.general_main_dir()`): for
+each `<inst>_1m.parquet` / `<inst>_1s.parquet` present in live it backs up the existing main
 file to `<name>.parquet.bak`, then atomically copies live → main. The `promotion` field:
 - `promote_success: true` + `promoted: {<name>: "ok", ...}` — live→main promotion done.
 - `promote_success: false` + `reason` — promotion failed; main was NOT updated (escalate).
@@ -143,7 +144,11 @@ Output 3–5 concise lines:
 The executing agent MUST NOT use Edit, Write, or any tool that modifies `.py`, `.md`,
 or any non-parquet file.
 
-**Allowed writes**: `data/*.parquet`, `data/*.parquet.bak`, `data/*.parquet.tmp` only.
+**Allowed writes**: parquet files only — the **live production** parquets + session 1s
+files under `<global>/general/live/` (`*.parquet`, `*.parquet.bak`, `*.parquet.tmp`, and
+the `backup_parquets_until_*/` dirs) and, on session-end promotion, the **backtest-main**
+parquets under `<global>/general/main/`. (Resolved via `paths.general_live_dir()` /
+`paths.general_main_dir()` — never the legacy worktree-local `data/`.)
 
 If the LLM determines that a code change would be beneficial (e.g., a recurring gap
 pattern suggests a bug in a source file), it MUST:
