@@ -22,6 +22,7 @@ Evidence before assertions: never claim success without real command output prov
 4. **Side-effecting test policy.** Full-suite runs must exclude machine-wide-side-effecting tests. This project's `pyproject.toml` `addopts` already applies `-m 'not integration'`, which excludes live IB/network and orchestrator/process-lifecycle tests. Use `python -m pytest tests/ -q` as the full run. Do NOT pass `-m integration` and do NOT run orchestrator/IB/live-connection tests — a live trading process may be running on this machine and those tests can hang or kill it. Honor whatever the plan's "side-effecting test policy" section specifies if it differs.
 5. **Platform**: Windows. Use PowerShell-compatible commands; prefer the exact pytest commands written in the plan. `python -m pytest ...` works cross-shell.
 6. Do not weaken or delete tests to make them pass. Fix the code, or document a genuine infeasibility with a precise reason.
+7. **Run long steps in the FOREGROUND (blocking)** and finish the whole job in one continuous turn — see `<completion_discipline>`.
 </hard_rules>
 
 <workflow>
@@ -58,6 +59,14 @@ Fix ALL genuine issues from the code-review and the acceptance-criteria validati
 </step>
 
 </workflow>
+
+<completion_discipline>
+**Return ONLY when the work is truly, fully finished.** You are a one-shot subagent: the moment you stop producing tool calls your task is marked COMPLETE and you will NOT be automatically re-invoked to resume. Therefore:
+- Prefer foreground/blocking execution for builds, test runs, and any long command; wait for each to finish (raise the command timeout if needed) rather than backgrounding and yielding.
+- If you ever background a process, actively WAIT for it in the same turn (poll its output/exit status in a loop with short sleeps) before moving on.
+- Never end your turn with a "still working / will continue later" message, and never assume a follow-up invocation. Execution, all three reviews, and the entire fix-loop must complete before you return.
+- Emit the `<final_report>` only after every test/validation command has actually run and you have the real output in hand.
+</completion_discipline>
 
 <final_report>
 Your return message is the ONLY thing the parent sees — make it concise and complete:
