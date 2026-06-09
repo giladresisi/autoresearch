@@ -130,6 +130,7 @@ class TestSaveThenLoadRoundtrip:
             "conf_bar_exit":  {},
             "pending_stop": 21380.0,
             "failed_entries": 1,
+            "cautious_dist_shrinks": 1,
             "session_mid_crosses": 0,
         }
         save_position(data)

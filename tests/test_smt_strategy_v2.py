@@ -459,6 +459,7 @@ class TestActivePosition:
 
         pos = smt_state.load_position()
         assert pos["failed_entries"] == 1
+        assert pos["cautious_dist_shrinks"] == 1  # bumped in lockstep with failed_entries
         assert pos["active"] == {}
 
 

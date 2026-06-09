@@ -1705,3 +1705,22 @@ Secondary: **`min_test_pnl` > 0** (all qualified folds profitable), **Sharpe â�
 **Started**: 2026-05-07
 **Plan File**: `.agents/plans/1s-bar-accumulation.md`
 
+
+
+## Feature: SMT V2 — three strategy updates
+
+> Note: on rebase onto master, only **two** of the three changes landed — the
+> 15:30-ET entry block and the dynamic cautious thresholds. The 4hr-FVG removal
+> was dropped because master deliberately retained MNQ 4hr FVGs (they feed
+> cautious-target selection); deferred to the hypothesis/entry redesign. The
+> report artifacts below describe the original 3-change execution.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-v2-three-updates.md`
+- Detailed implementation summary (3 changes; Req 4 = no-code)
+- Divergences and resolutions
+- Test results and metrics
+
+**Code Review:** `.agents/code-reviews/smt-v2-three-updates.md` (passed, no genuine issues)
+**Acceptance Validation:** `.agents/acceptance-validations/smt-v2-three-updates-validation.md` (11/11 ACCEPTED)

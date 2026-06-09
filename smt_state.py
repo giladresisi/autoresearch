@@ -153,6 +153,7 @@ DEFAULT_POSITION = {
     "conf_bar_exit":  {},
     "pending_stop": None,
     "failed_entries": 0,
+    "cautious_dist_shrinks": 0,
     "session_mid_crosses": 0,
 }
 

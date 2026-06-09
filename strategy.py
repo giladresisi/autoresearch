@@ -404,7 +404,8 @@ def run_strategy(
                 import hypothesis as _hyp_mod
                 _hyp_mod.recompute_cautious_for_fill(
                     hypothesis, fill_price,
-                    _daily.get("liquidities", []), _global.get("all_time_high"))
+                    _daily.get("liquidities", []), _global.get("all_time_high"),
+                    position.get("cautious_dist_shrinks", 0))
                 smt_state.save_hypothesis(hypothesis)
                 return _make_signal("stop-entry-filled", now, fill_price, direction=direction, stop=stop)
 
@@ -496,7 +497,8 @@ def run_strategy(
                     import hypothesis as _hyp_mod
                     _hyp_mod.recompute_cautious_for_fill(
                         hypothesis, bar_mid,
-                        _daily.get("liquidities", []), _global.get("all_time_high"))
+                        _daily.get("liquidities", []), _global.get("all_time_high"),
+                        position.get("cautious_dist_shrinks", 0))
                     smt_state.save_hypothesis(hypothesis)
                     return _make_signal("market-entry", now, bar_mid, direction=direction,
                                         stop=stop, conf=_conf_tag)
@@ -612,6 +614,7 @@ def run_strategy(
         # conf_bar_entry intentionally preserved: prevents immediate re-entry on the
         # same bar before the next 5m hypothesis re-evaluation can run.
         position["failed_entries"]    = position.get("failed_entries", 0) + 1
+        position["cautious_dist_shrinks"] = position.get("cautious_dist_shrinks", 0) + 1
 
         # Flag for re-evaluation when the stop crossed the daily or weekly mid —
         # structural signals that the directional thesis has genuinely inverted.
@@ -680,6 +683,7 @@ def reset_position_for_session() -> None:
     pos["conf_bar_entry"] = {}
     pos["conf_bar_exit"]  = {}
     pos["failed_entries"] = 0
+    pos["cautious_dist_shrinks"] = 0
     smt_state.save_position(pos)
 
 
@@ -691,6 +695,7 @@ def reset_position_for_new_hypothesis() -> None:
     """
     pos = smt_state.load_position()
     pos["failed_entries"] = 0
+    pos["cautious_dist_shrinks"] = 0
     pos["conf_bar_entry"] = {}
     pos["conf_bar_exit"]  = {}
     pos["stop_entry"] = ""

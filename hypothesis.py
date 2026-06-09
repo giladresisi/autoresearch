@@ -17,6 +17,7 @@ _ET = ZoneInfo("America/New_York")
 CAUTIOUS_SECONDARY_MAX_DIST = 150  # pts — secondary (1m confirmation) max distance
 CAUTIOUS_INITIAL_MAX_DIST   = 110  # pts — initial (5m confirmation) max distance
 CAUTIOUS_MIN_DIST           =  40  # pts — below this secondary distance, skip the entry
+CAUTIOUS_DIST_SHRINK_PCT    = 0.15  # fraction the two max-dist thresholds shrink per failed entry
 CAUTIOUS_INITIAL_OFFSET_PTS   = 2.0  # pts — initial cautious target set this much closer than the level
 CAUTIOUS_SECONDARY_OFFSET_PTS = 5.0  # pts — secondary cautious target set this much closer than the level
 
@@ -35,12 +36,22 @@ def compute_cautious_prices(
     current_close: float,
     liquidities: list,
     ath: float,
+    dist_shrinks: int = 0,
 ) -> dict:
     """Return cautious price fields anchored at current_close.
 
     Called at hypothesis time and again at position entry so levels are
     re-evaluated against the actual fill price rather than the hypothesis price.
+
+    `dist_shrinks` (the per-hypothesis `cautious_dist_shrinks` counter) shrinks both
+    max-distance thresholds by `CAUTIOUS_DIST_SHRINK_PCT` per failed entry, floored at
+    `CAUTIOUS_MIN_DIST`. At dist_shrinks=0 the thresholds are unchanged (the effective
+    maxes equal the module constants), so output is identical to pre-change behavior.
     """
+    _factor = (1.0 - CAUTIOUS_DIST_SHRINK_PCT) ** max(0, dist_shrinks)
+    _sec_max = max(CAUTIOUS_MIN_DIST, CAUTIOUS_SECONDARY_MAX_DIST * _factor)
+    _init_max = max(CAUTIOUS_MIN_DIST, CAUTIOUS_INITIAL_MAX_DIST * _factor)
+
     _cautious_all = []
     for liq in liquidities:
         liq_kind = liq.get("kind")
@@ -56,11 +67,11 @@ def compute_cautious_prices(
             continue
         if p is None:
             continue
-        if direction == "up" and current_close < p <= current_close + CAUTIOUS_SECONDARY_MAX_DIST:
+        if direction == "up" and current_close < p <= current_close + _sec_max:
             _cautious_all.append((p, liq.get("name", "")))
-        elif direction == "down" and current_close - CAUTIOUS_SECONDARY_MAX_DIST <= p < current_close:
+        elif direction == "down" and current_close - _sec_max <= p < current_close:
             _cautious_all.append((p, liq.get("name", "")))
-    if direction == "up" and current_close < ath <= current_close + CAUTIOUS_SECONDARY_MAX_DIST:
+    if direction == "up" and current_close < ath <= current_close + _sec_max:
         _cautious_all.append((ath, "ATH"))
 
     cautious_price_initial         = ""
@@ -78,10 +89,10 @@ def compute_cautious_prices(
         # Filter using raw level price so the offset doesn't shrink the candidate pool.
         if direction == "up":
             _init_candidates = [(p, n) for p, n in _cautious_all
-                                if p < _sec[0] and p <= current_close + CAUTIOUS_INITIAL_MAX_DIST]
+                                if p < _sec[0] and p <= current_close + _init_max]
         else:
             _init_candidates = [(p, n) for p, n in _cautious_all
-                                if p > _sec[0] and p >= current_close - CAUTIOUS_INITIAL_MAX_DIST]
+                                if p > _sec[0] and p >= current_close - _init_max]
 
         if _init_candidates:
             _ini = max(_init_candidates, key=lambda x: x[0]) if direction == "up" \
@@ -145,6 +156,7 @@ def recompute_cautious_for_fill(
     fill_price: float,
     liquidities: list,
     ath,
+    dist_shrinks: int = 0,
 ) -> dict:
     """Re-anchor the two-tier cautious ladder to the *actual fill price* (Addendum 4).
 
@@ -161,7 +173,7 @@ def recompute_cautious_for_fill(
     direction = hypothesis.get("direction")
     if direction not in ("up", "down") or hypothesis.get("manual"):
         return hypothesis
-    cp = compute_cautious_prices(direction, float(fill_price), liquidities, ath)
+    cp = compute_cautious_prices(direction, float(fill_price), liquidities, ath, dist_shrinks)
     hypothesis["cautious_price_initial"]         = cp["cautious_price_initial"]
     hypothesis["cautious_price_initial_level"]   = cp["cautious_price_initial_level"]
     hypothesis["cautious_price_secondary"]       = cp["cautious_price_secondary"]
@@ -1175,9 +1187,11 @@ def build_hypothesis_from_direction(
             elif direction == "down" and top < current_close:
                 targets.append({"name": liq["name"], "price": top})
 
-    # Step 8: two-tier cautious prices.
+    # Step 8: two-tier cautious prices. The per-hypothesis cautious_dist_shrinks counter
+    # tightens the max-distance thresholds after each failed entry under this hypothesis.
     ath = global_state["all_time_high"]
-    _cp = compute_cautious_prices(direction, current_close, liquidities, ath)
+    _dist_shrinks = load_position().get("cautious_dist_shrinks", 0)
+    _cp = compute_cautious_prices(direction, current_close, liquidities, ath, _dist_shrinks)
     cautious_price_initial         = _cp["cautious_price_initial"]
     cautious_price_initial_level   = _cp["cautious_price_initial_level"]
     cautious_price_secondary       = _cp["cautious_price_secondary"]
@@ -1239,6 +1253,7 @@ def build_hypothesis_from_direction(
         if skip_position_reset:
             position = load_position()
             position["failed_entries"] = 0
+            position["cautious_dist_shrinks"] = 0
             save_position(position)
         else:
             _strategy.reset_position_for_new_hypothesis()

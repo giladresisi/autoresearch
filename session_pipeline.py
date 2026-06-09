@@ -1236,6 +1236,7 @@ class SessionPipeline:
                     _sbsc_pos["active"] = {}
                     _sbsc_pos["stop_entry"] = ""
                     _sbsc_pos["failed_entries"] = _sbsc_pos.get("failed_entries", 0) + 1
+                    _sbsc_pos["cautious_dist_shrinks"] = _sbsc_pos.get("cautious_dist_shrinks", 0) + 1
                     _smt_state.save_position(_sbsc_pos)
                     _sbsc_sig = {
                         "kind":      "stopped-out",
