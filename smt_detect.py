@@ -84,9 +84,18 @@ def eligible_levels(liqs: list[dict], now: Any) -> dict[str, dict]:
     """Map level-name → {name, kind:'level', price, sub:'high'|'low'} for the levels
     eligible as SMT touch targets at `now`.
 
-    Eligible = completed-session highs/lows (asia/london/ny_morning/ny_evening, only
-    if that session has CLOSED at `now`) + running day_high/low + week_high/low.
-    day_mid / week_mid and any non-high/low names are not touch targets.
+    Eligible = day_high/low + week_high/low (always) + 6hr-session highs/lows under a
+    day-scoped rule (see below). day_mid / week_mid and any non-high/low names are not
+    touch targets.
+
+    6hr-session scoping by the ET clock:
+      - During today's Asia session (18:00-24:00 ET): only YESTERDAY's NY sessions
+        (ny_morning + ny_evening) are eligible. Today's forming Asia and the older
+        yesterday sessions (asia/london) are excluded.
+      - From London onward (00:00-17:59 ET): only TODAY's sessions that have closed
+        since the 18:00 open — asia (>=00:00), london (>=06:00), ny_morning (>=12:00),
+        ny_evening (>=17:00). This drops yesterday's stale ny_morning/ny_evening that
+        would otherwise leak in during London / NY-morning.
     """
     et = _to_et_time(now)
     out: dict[str, dict] = {}
@@ -103,15 +112,22 @@ def eligible_levels(liqs: list[dict], now: Any) -> dict[str, dict]:
         if name.startswith(("day_", "week_")):
             out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub}
             continue
-        # Completed-session level: eligible only when its session is NOT forming now.
+        # 6hr-session level: day-scoped eligibility (see docstring).
         sess = name.rsplit("_", 1)[0]
         win = _SESSION_WINDOW.get(sess)
         if win is None or et is None:
             continue
-        _open_h, _close_h = win
-        _forming = (_open_h <= et.hour < _close_h)
-        if not _forming:
-            out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub}
+        if et.hour >= 18:
+            # Today's Asia is forming → only yesterday's NY morning/evening levels.
+            if sess not in ("ny_morning", "ny_evening"):
+                continue
+        else:
+            # 00:00-17:59 ET → only today's sessions closed since the 18:00 open.
+            # win[1] is the close hour (asia 24 -> 00:00); a session is eligible once
+            # the clock has passed its close hour today.
+            if et.hour < (win[1] % 24):
+                continue
+        out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub}
     return out
 
 

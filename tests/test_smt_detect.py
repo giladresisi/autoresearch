@@ -248,6 +248,43 @@ def test_asia_not_eligible_while_forming():
     assert "asia_high" in eligible_levels(liqs, closed)
 
 
+def test_session_eligibility_day_scoped():
+    """Day-scoped 6hr-session eligibility (smt_detect.eligible_levels docstring).
+
+    - Asia time (19:15 ET, hour>=18): only YESTERDAY's ny_morning/ny_evening session
+      levels are eligible; today's forming asia + the older london are excluded.
+    - London time (02:15 ET, hour<18): only today's asia has closed (>=00:00); london
+      (>=06:00), ny_morning (>=12:00), ny_evening (>=17:00) have not, so they are absent.
+    - day_/week_ levels are always eligible regardless of clock.
+    """
+    liqs = [
+        {"name": "asia_high", "kind": "level", "price": 21000.0},
+        {"name": "london_high", "kind": "level", "price": 21010.0},
+        {"name": "ny_morning_high", "kind": "level", "price": 21020.0},
+        {"name": "ny_evening_low", "kind": "level", "price": 20990.0},
+        {"name": "day_high", "kind": "level", "price": 21030.0},
+        {"name": "week_low", "kind": "level", "price": 20980.0},
+    ]
+
+    # Asia time: only ny_morning/ny_evening among sessions; london/asia absent.
+    asia_t = pd.Timestamp("2026-06-09 19:15", tz="America/New_York")
+    elig_asia = eligible_levels(liqs, asia_t)
+    assert "ny_morning_high" in elig_asia
+    assert "ny_evening_low" in elig_asia
+    assert "london_high" not in elig_asia
+    assert "asia_high" not in elig_asia
+    assert "day_high" in elig_asia and "week_low" in elig_asia
+
+    # London time: only asia among sessions; ny_morning/ny_evening/london absent.
+    london_t = pd.Timestamp("2026-06-09 02:15", tz="America/New_York")
+    elig_london = eligible_levels(liqs, london_t)
+    assert "asia_high" in elig_london
+    assert "london_high" not in elig_london
+    assert "ny_morning_high" not in elig_london
+    assert "ny_evening_low" not in elig_london
+    assert "day_high" in elig_london and "week_low" in elig_london
+
+
 # ===========================================================================
 # Hidden (body) SMT
 # ===========================================================================
