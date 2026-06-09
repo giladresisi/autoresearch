@@ -29,12 +29,14 @@ Intended to be run once after a session ends and reports have been (or will be) 
 - **Sessions** live in the machine-global sessions root: `<global>/sessions/<date>/`,
   where `<global>` is env `ACT_GLOBAL_DIR` (default `~/projects/auto-co-trader/global`).
   Resolve it with `paths.sessions_dir()` (`import paths; paths.sessions_dir() / "<date>"`).
-- **Regression** outputs are worktree-local, per-run:
-  `regression/<date>/<HH-MM-SS>/` (one timestamped folder per run; `HH-MM-SS` is the
-  TH/Asia-Bangkok start time). Per-date A/B **baselines** live at
-  `regression/<date>/baseline/`. Resolve the run root with `paths.regression_dir()`.
-  For analysis, use the **latest** run folder for the date (most-recent `HH-MM-SS`),
-  or the run you just produced in Step 2.5.
+- **Regression** outputs are worktree-local, per-run, under the per-date sessions root:
+  `regression/sessions/<date>/<HH-MM-SS>/` (one timestamped folder per run; `HH-MM-SS` is
+  the TH/Asia-Bangkok start time). Per-date A/B **baselines** live at
+  `regression/sessions/<date>/baseline/`. Resolve the per-date run root with
+  `paths.regression_sessions_dir() / "<date>"` (the `regression/` root itself,
+  `paths.regression_dir()`, holds only committed tooling). For analysis, use the
+  **latest** run folder for the date (most-recent `HH-MM-SS`), or the run you just
+  produced in Step 2.5.
 
 ## Step 1 — Determine session date
 
@@ -61,6 +63,26 @@ If fetching fails, note which files are missing and continue with what's availab
 
 ---
 
+## Step 2.1 — Rebuild a complete trade ledger from events.jsonl
+
+The live `trades.tsv` is written from the orchestrator relay's **in-memory, per-run** events
+and overwritten at each session-end, so it loses round-trips across restarts/terminations
+(GIL-13). Rebuild a complete ledger from the persistent, append-only `events.jsonl` before
+analysis:
+
+```bash
+uv run python -m scripts.rebuild_trades_from_events --date <date>
+```
+
+This writes `<global>/sessions/<date>/trades_full.tsv` (the original `trades.tsv` is left
+intact). Suspect pairings — bad (`<=0`) price, or an implausibly long hold (a missing-exit /
+phantom) — keep the row but blank the P&L and tag `exit_reason` with `|suspect:...`; a fill
+with no matching exit (a phantom) is emitted as `unpaired-open`. The analysis reads
+**`trades_full.tsv`** as the strategy ledger, and the gap between it and the live `trades.tsv`
+is itself a data-quality finding (that IS D1).
+
+---
+
 ## Step 2.5 — Run 1s regression
 
 Run the 1s backtest replay for the session date. This produces a deterministic
@@ -73,7 +95,7 @@ results = run_regression(dates=["<date>"], mode="1s", skip_lock=True)
 print(results)
 ```
 
-Output files are written to a fresh per-run folder `regression/<date>/<HH-MM-SS>/`
+Output files are written to a fresh per-run folder `regression/sessions/<date>/<HH-MM-SS>/`
 (worktree-local; `HH-MM-SS` is the TH start time). Note the run folder this call
 created — it is the one to read in Step 3:
 - `events_1s.jsonl` — replay event stream
@@ -119,7 +141,7 @@ Delegate all the reading, cross-referencing, and writing to a subagent. This kee
 Use the general-purpose subagent with this prompt. Fill in `<DATE>`, `<BASE>` (the
 worktree root), `<GLOBAL>` (env `ACT_GLOBAL_DIR`, default
 `~/projects/auto-co-trader/global` — resolve with `paths.global_root()`), and `<RUN>`
-(the regression run folder produced in Step 2.5, e.g. `<BASE>\regression\<DATE>\<HH-MM-SS>`):
+(the regression run folder produced in Step 2.5, e.g. `<BASE>\regression\sessions\<DATE>\<HH-MM-SS>`):
 
 ```
 You are a trading session analyst for an automated MNQ futures strategy.
@@ -129,7 +151,7 @@ BASE = C:\Users\gilad\projects\auto-co-trader\live           # the worktree root
 GLOBAL = <GLOBAL>                                            # ACT_GLOBAL_DIR; default ~/projects/auto-co-trader/global
 DATE = <DATE>
 SESSION = <GLOBAL>\sessions\<DATE>
-REGRESSION = <RUN>                                           # <BASE>\regression\<DATE>\<HH-MM-SS> (the run from Step 2.5)
+REGRESSION = <RUN>                                           # <BASE>\regression\sessions\<DATE>\<HH-MM-SS> (the run from Step 2.5)
 
 ---
 DATA SOURCES TO READ (read ALL of them before writing anything):
@@ -140,10 +162,15 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
    update-stop-loss, new-stop-exit, move-stop-exit, stop-exit, stopped-out,
    market-close, cancel-limit-entry, smt-div, trend-broken.
 
-2. <SESSION>\trades.tsv
+2. <SESSION>\trades_full.tsv   (complete strategy ledger — rebuilt from events.jsonl in Step 2.1)
    TSV: entry_time, entry_price, direction, contracts, exit_time, exit_price,
    exit_reason, pnl_points, pnl_dollars.
-   This is the STRATEGY's own P&L record — the assumed fills, not actual broker fills.
+   The STRATEGY's own P&L record (assumed fills, not actual broker fills), complete across
+   restarts. Rows whose exit_reason contains "suspect:" (bad-price / long-hold) or
+   "unpaired-open" are FLAGGED anomalies — exclude their P&L from totals but DO surface them
+   (phantoms, 0.0-price fills). The original <SESSION>\trades.tsv is the live relay's
+   restart-lossy record; a gap between trades_full.tsv and trades.tsv is discrepancy D-class
+   material (the relay only persisted the final run-segment's trades).
 
 3. <SESSION>\signals.log
    Raw stdout from automation.main. Contains [PMT] lines showing every order sent
@@ -169,11 +196,17 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
    Price levels computed at session open: TDO, TWO, week_high, week_low, day_high,
    day_low, day_mid, etc. Use these for context when evaluating targets/stops.
 
-8. <GLOBAL>\data\main\MNQ_1m.parquet
-   Read with pandas: pd.read_parquet("<GLOBAL>/data/main/MNQ_1m.parquet")
+8. <GLOBAL>\general\live\MNQ_1m.parquet   (LIVE PRODUCTION — what the live run saw)
+   Read with pandas: pd.read_parquet("<GLOBAL>/general/live/MNQ_1m.parquet")
    Filter to the session date for bar-by-bar price context (OHLCV).
    Use to verify whether a stop was swept by a wick, whether price continued
    after an exit, and to understand market structure.
+   NOTE on path separation: the live production parquets live under
+   `<GLOBAL>\general\live\` (resolve with `paths.general_live_dir()`); the BACKTEST read
+   source the 1s regression in Step 2.5 replays on is `<GLOBAL>\general\main\`
+   (`paths.general_main_dir()`). After a successful session-end parquet-check these are
+   in sync (it promotes live → main), so either reflects this session — but for live-run
+   bar context read **general/live**. Never the legacy worktree-local `data/`.
 
 9. <REGRESSION>\events_1s.jsonl  (may not exist if regression failed)
    JSONL event stream from the 1s backtest replay — same format as events.jsonl.

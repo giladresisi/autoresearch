@@ -797,3 +797,31 @@ def test_failed_entries_not_reset_when_direction_stays_set():
     assert pos["failed_entries"] == 3, (
         f"failed_entries should remain 3 on early exit, got {pos['failed_entries']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# GIL-8: recompute_cautious_for_fill preserves a manually locked ladder
+# ---------------------------------------------------------------------------
+
+def test_recompute_cautious_for_fill_preserves_manual_ladder():
+    """While the manual direction lock is set, the user's cautious ladder must
+    survive a fill unchanged (no re-anchoring)."""
+    from hypothesis import recompute_cautious_for_fill
+
+    hyp = {
+        "direction": "down",
+        "manual": True,
+        "cautious_price_initial": "20000.0",
+        "cautious_price_initial_level": "day_low",
+        "cautious_price_secondary": "19950.0",
+        "cautious_price_secondary_level": "week_low",
+    }
+    liquidities = [
+        {"name": "day_low",  "kind": "level", "price": 19800.0},
+        {"name": "week_low", "kind": "level", "price": 19700.0},
+    ]
+    out = recompute_cautious_for_fill(dict(hyp), 19900.0, liquidities, 21000.0)
+
+    for k in ("cautious_price_initial", "cautious_price_initial_level",
+              "cautious_price_secondary", "cautious_price_secondary_level"):
+        assert out[k] == hyp[k], f"{k} must be preserved while locked"

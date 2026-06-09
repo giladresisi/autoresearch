@@ -120,6 +120,11 @@ DEFAULT_DAILY = {
 
 DEFAULT_HYPOTHESIS = {
     "direction":     "none",
+    # GIL-8 manual direction lock (trade.py set-direction): while True, the automatic
+    # hypothesis resets (level sweep, ATH cross, mid-cross / global-trend trend-broken)
+    # are suspended. Invariant: manual=True implies direction != "none" — every path
+    # that clears direction also clears this flag.
+    "manual":        False,
     "weekly_mid":    "",
     "daily_mid":     "",
     "last_liquidity": "",

@@ -492,3 +492,111 @@ class TestGlobalTrendInvalidation:
         p = load_position()
         assert p["stop_entry"] == ""
         assert p["conf_bar_entry"] == {}
+
+
+class TestManualDirectionLock:
+    """GIL-8: while hypothesis['manual'] is set (trade.py set-direction), the automatic
+    reset paths must leave the manually forced hypothesis alone."""
+
+    def _setup_mid_break(self, manual: bool):
+        """direction=up formed above the daily mid; bar close falls below mid -> the
+        daily-mid invalidation would normally fire trend-broken."""
+        hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
+        hyp["direction"] = "up"
+        hyp["daily_mid"] = "above"   # _mid_cross_guard arms for direction=up
+        hyp["manual"] = manual
+        save_hypothesis(hyp)
+        save_position(copy.deepcopy(DEFAULT_POSITION))
+        save_daily(_daily_with_levels([
+            {"name": "day_high", "kind": "level", "price": 120.0},
+            {"name": "day_low",  "kind": "level", "price": 80.0},
+        ]))  # mid = 100
+
+    def test_daily_mid_break_fires_without_lock(self):
+        """Sanity: same setup without the lock -> daily-mid trend-broken fires."""
+        from trend import run_trend
+        from smt_state import load_hypothesis
+
+        self._setup_mid_break(manual=False)
+        bar = make_1m_bar(open_=101, high=102, low=94, close=95)  # close < mid 100
+        recent = make_recent_bars(closes=[101, 95], opens=[102, 101])
+        result = run_trend(NOW, bar, recent)
+
+        assert result is not None and result["kind"] == "trend-broken"
+        assert result["level_name"] == "daily_mid"
+        assert load_hypothesis()["direction"] == "none"
+
+    def test_daily_mid_break_skipped_with_lock(self):
+        """Locked: the identical mid-break bar must NOT reset the manual hypothesis."""
+        from trend import run_trend
+        from smt_state import load_hypothesis
+
+        self._setup_mid_break(manual=True)
+        bar = make_1m_bar(open_=101, high=102, low=94, close=95)
+        recent = make_recent_bars(closes=[101, 95], opens=[102, 101])
+        result = run_trend(NOW, bar, recent)
+
+        assert result is None
+        hyp = load_hypothesis()
+        assert hyp["direction"] == "up"
+        assert hyp["manual"] is True
+
+    def test_global_trend_invalidation_skipped_with_lock(self):
+        """confidence=high + opposing global trend normally resets; not while locked."""
+        from trend import run_trend
+        from smt_state import load_hypothesis
+
+        hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
+        hyp["direction"] = "down"
+        hyp["manual"] = True
+        save_hypothesis(hyp)
+        save_position(copy.deepcopy(DEFAULT_POSITION))
+        save_daily(_daily_with_levels([]))
+        save_global({"all_time_high": 0.0, "confidence": "high", "trend": "up"})
+
+        bar = make_1m_bar(open_=100, high=105, low=95, close=102)
+        recent = make_recent_bars(closes=[100, 102], opens=[99, 100])
+        result = run_trend(NOW, bar, recent)
+
+        assert result is None
+        hyp = load_hypothesis()
+        assert hyp["direction"] == "down"
+        assert hyp["manual"] is True
+
+    def test_session_ath_straddle_skipped_with_lock(self):
+        """A session-ATH straddle bar normally emits ath-crossed (direction reset);
+        not while locked."""
+        from trend import run_trend
+        from smt_state import load_hypothesis
+
+        hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
+        hyp["direction"] = "up"
+        hyp["manual"] = True
+        save_hypothesis(hyp)
+        save_position(copy.deepcopy(DEFAULT_POSITION))
+        save_daily(_daily_with_levels([]))
+        save_global({"all_time_high": 100.0, "session_ath": 100.0,
+                     "confidence": "medium", "trend": "up"})
+
+        bar = make_1m_bar(open_=98, high=105, low=95, close=102)  # straddles 100
+        recent = make_recent_bars(closes=[98, 102], opens=[97, 98])
+        result = run_trend(NOW, bar, recent)
+
+        assert result is None or result["kind"] != "ath-crossed"
+        hyp = load_hypothesis()
+        assert hyp["direction"] == "up"
+        assert hyp["manual"] is True
+
+    def test_clear_position_and_hypothesis_releases_lock(self):
+        """Any position-close path clears direction AND the lock (manual=True with
+        direction='none' would freeze future automatic resets)."""
+        from trend import _clear_position_and_hypothesis
+
+        pos = copy.deepcopy(DEFAULT_POSITION)
+        hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
+        hyp["direction"] = "down"
+        hyp["manual"] = True
+        _clear_position_and_hypothesis(pos, hyp, clear_active=True)
+
+        assert hyp["direction"] == "none"
+        assert hyp["manual"] is False

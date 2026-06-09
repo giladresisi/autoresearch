@@ -1203,3 +1203,85 @@ def test_current_price_stale_sources_keep_legacy_order(_in_tmp, monkeypatch):
     smt_state.save_bar_state({"time": "t", "potential_stop_long": 19800.0,
                               "potential_stop_short": 19900.0})
     assert live_orders._current_price() == pytest.approx(19850.0)
+
+
+# ---------------------------------------------------------------------------
+# GIL-8: manual direction flip + lock (set_direction / unlock_direction)
+# ---------------------------------------------------------------------------
+
+def test_set_direction_locks_manual(_in_tmp, _mock_today):
+    """set_direction forces the hypothesis (via _force_hypothesis_for_direction),
+    sets the manual lock flag, and logs a manual-direction-lock event."""
+    hyp_after_force = {"direction": "down", "cautious_price_initial": "19900.0",
+                       "cautious_price_secondary": "19850.0"}
+    saved: dict = {}
+    with patch.object(live_orders, "_force_hypothesis_for_direction") as mock_force, \
+         patch("smt_state.load_hypothesis", return_value=hyp_after_force), \
+         patch("smt_state.save_hypothesis", side_effect=lambda h: saved.update(h)):
+        assert live_orders.set_direction("down") is True
+
+    mock_force.assert_called_once_with("down")
+    assert saved["manual"] is True
+    assert saved["direction"] == "down"
+
+    events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
+    assert len(events) == 1
+    assert events[0]["kind"] == "manual-direction-lock"
+    assert events[0]["direction"] == "down"
+    assert events[0]["cautious_price_initial"] == "19900.0"
+
+
+def test_set_direction_refuses_when_rewrite_did_not_take(_in_tmp, _mock_today):
+    """If the forced rewrite didn't take (active position / no current price), the
+    lock must NOT be set."""
+    with patch.object(live_orders, "_force_hypothesis_for_direction"), \
+         patch("smt_state.load_hypothesis", return_value={"direction": "up"}), \
+         patch("smt_state.save_hypothesis") as mock_save:
+        assert live_orders.set_direction("down") is False
+
+    mock_save.assert_not_called()
+    assert _read_events(_in_tmp / "sessions", _FIXED_DATE) == []
+
+
+def test_set_direction_rejects_invalid_direction(_in_tmp, _mock_today):
+    with patch.object(live_orders, "_force_hypothesis_for_direction") as mock_force:
+        assert live_orders.set_direction("sideways") is False
+    mock_force.assert_not_called()
+
+
+def test_unlock_direction_releases_lock(_in_tmp, _mock_today):
+    saved: dict = {}
+    with patch("smt_state.load_hypothesis",
+               return_value={"direction": "down", "manual": True}), \
+         patch("smt_state.save_hypothesis", side_effect=lambda h: saved.update(h)):
+        assert live_orders.unlock_direction() is True
+
+    assert saved["manual"] is False
+    assert saved["direction"] == "down", "unlock keeps the direction"
+    events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
+    assert events[0]["kind"] == "manual-direction-unlock"
+
+
+def test_unlock_direction_noop_when_not_locked(_in_tmp, _mock_today):
+    with patch("smt_state.load_hypothesis",
+               return_value={"direction": "up", "manual": False}), \
+         patch("smt_state.save_hypothesis") as mock_save:
+        assert live_orders.unlock_direction() is False
+    mock_save.assert_not_called()
+
+
+def test_trend_broken_releases_manual_lock(_in_tmp, _mock_today):
+    """trade.py trend-broken is a release path: clears direction AND the lock."""
+    pos = {"active": {}, "stop_entry": "", "stop_direction": "",
+           "conf_bar_entry": {}, "failed_entries": 0}
+    saved_hyp: dict = {}
+    with patch.object(live_orders, "_executor", MagicMock()), \
+         patch("smt_state.load_position", return_value=pos), \
+         patch("smt_state.save_position"), \
+         patch("smt_state.load_hypothesis",
+               return_value={"direction": "down", "manual": True}), \
+         patch("smt_state.save_hypothesis", side_effect=lambda h: saved_hyp.update(h)):
+        live_orders.trend_broken()
+
+    assert saved_hyp["direction"] == "none"
+    assert saved_hyp["manual"] is False

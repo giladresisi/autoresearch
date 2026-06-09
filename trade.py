@@ -10,8 +10,10 @@ Usage:
   python trade.py move 28000             # Move unfilled stop entry to 28000
   python trade.py update-sl 19700        # Move stop-loss on active position to 19700
   python trade.py close                  # Market close active position
-  python trade.py trend-broken           # Reset hypothesis direction and log trend-broken
-  python trade.py hypothesis             # Force a fresh hypothesis evaluation right now
+  python trade.py trend-broken           # Reset hypothesis direction and log trend-broken (releases any manual lock)
+  python trade.py hypothesis             # Force a fresh hypothesis evaluation right now (releases any manual lock)
+  python trade.py set-direction down     # Force hypothesis direction + cautious ladder and LOCK it (alias: flip)
+  python trade.py unlock                 # Release the manual direction lock (direction kept; auto resets resume)
   python trade.py pause                  # Suppress new automatic entries (exits stay active)
   python trade.py resume                 # Re-enable automatic entries
   python trade.py start                  # Start orchestrator (keeps position.json; resumes & reconciles any open position)
@@ -295,6 +297,16 @@ def main() -> None:
 
     elif cmd == "hypothesis":
         live_orders.hypothesis()
+
+    elif cmd in ("set-direction", "flip"):
+        if len(args) < 2 or args[1].lower() not in ("up", "down"):
+            print("ERROR: set-direction requires a direction (e.g. python trade.py set-direction down)")
+            sys.exit(1)
+        if not live_orders.set_direction(args[1].lower()):
+            sys.exit(1)
+
+    elif cmd == "unlock":
+        live_orders.unlock_direction()
 
     elif cmd == "start":
         import os

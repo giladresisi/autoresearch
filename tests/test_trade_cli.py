@@ -372,3 +372,41 @@ def test_start_pause_engages_pause_then_launches(monkeypatch, tmp_path, capsys):
     terminate_mock.assert_called_once()
     mock_lo.pause.assert_called_once()
     assert "paused mode" in capsys.readouterr().out.lower()
+
+
+# ---------------------------------------------------------------------------
+# GIL-8: `trade.py set-direction` / `flip` / `unlock`
+# ---------------------------------------------------------------------------
+
+def test_set_direction_calls_live_orders(monkeypatch, capsys):
+    mock_lo = MagicMock()
+    mock_lo.set_direction.return_value = True
+    _run_trade(["set-direction", "down"], monkeypatch, mock_lo, MagicMock())
+    mock_lo.set_direction.assert_called_once_with("down")
+
+
+def test_flip_alias_calls_set_direction(monkeypatch, capsys):
+    mock_lo = MagicMock()
+    mock_lo.set_direction.return_value = True
+    _run_trade(["flip", "up"], monkeypatch, mock_lo, MagicMock())
+    mock_lo.set_direction.assert_called_once_with("up")
+
+
+def test_set_direction_requires_direction_arg(monkeypatch, capsys):
+    mock_lo = MagicMock()
+    with pytest.raises(SystemExit):
+        _run_trade(["set-direction"], monkeypatch, mock_lo, MagicMock())
+    mock_lo.set_direction.assert_not_called()
+
+
+def test_set_direction_exits_nonzero_on_refusal(monkeypatch, capsys):
+    mock_lo = MagicMock()
+    mock_lo.set_direction.return_value = False
+    with pytest.raises(SystemExit):
+        _run_trade(["set-direction", "down"], monkeypatch, mock_lo, MagicMock())
+
+
+def test_unlock_calls_live_orders(monkeypatch, capsys):
+    mock_lo = MagicMock()
+    _run_trade(["unlock"], monkeypatch, mock_lo, MagicMock())
+    mock_lo.unlock_direction.assert_called_once_with()
