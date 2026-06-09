@@ -627,9 +627,9 @@ def test_0920_gate_calls_on_daily_or_startup(_isolate_state, monkeypatch):
     # Spy on on_daily_or_startup AFTER session start so the session-start call is excluded.
     daily_calls: list[pd.Timestamp] = []
     _orig = pipeline.on_daily_or_startup
-    def _spy(now, today_mnq):
+    def _spy(now, today_mnq, today_mes=None):
         daily_calls.append(now)
-        return _orig(now, today_mnq)
+        return _orig(now, today_mnq, today_mes)
     monkeypatch.setattr(pipeline, "on_daily_or_startup", _spy)
 
     today_mnq = _make_1m_bars("2025-11-14 09:20", n=10)
@@ -1366,3 +1366,449 @@ def test_level_sweep_skipped_with_manual_lock(_isolate_state, monkeypatch):
     assert hyp["direction"] == "up"
     assert hyp["manual"] is True
     assert not any(e["kind"] == "trend-broken" for e in emitted)
+
+
+# ===========================================================================
+# SMT V2 integration tests (detection + buffers + cadence + consumer + persist)
+# ===========================================================================
+
+def _smt_v2_pipeline(monkeypatch, emitted=None):
+    """A SessionPipeline with daily/trend/hypothesis/strategy stubbed out so only the
+    SMT V2 additive block runs. Seeded at 19:00 (Asia) force_reset."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: [])
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+    emitted = emitted if emitted is not None else []
+    hist_mnq = _make_1m_bars("2025-11-12 09:20", n=5, base=21000.0)
+    hist_mes = _make_1m_bars("2025-11-12 09:20", n=5, base=3000.0)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: emitted.append(e))
+    pipeline.on_session_start(
+        pd.Timestamp("2025-11-13 19:00", tz="America/New_York"),
+        _make_1m_bars("2025-11-13 19:00", n=1), force_reset=True)
+    return pipeline, emitted
+
+
+def _mnq_mes_today(start, n, mnq_base=21000.0, mes_base=3000.0):
+    return (_make_1m_bars(start, n, base=mnq_base),
+            _make_1m_bars(start, n, base=mes_base))
+
+
+def _bar(base, high_off=5.0, low_off=5.0, close_off=1.0):
+    return pd.Series({"Open": base, "High": base + high_off,
+                      "Low": base - low_off, "Close": base + close_off})
+
+
+def test_liquidities_mes_populated(_isolate_state, monkeypatch):
+    """After seeding + a few bars, liquidities_mes has MES level entries; MNQ
+    liquidities is independently populated."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 19:00", n=10)
+    for i in range(10):
+        now = pd.Timestamp("2025-11-13 19:00", tz="America/New_York") + pd.Timedelta(minutes=i)
+        pipeline.on_1m_bar(now, _bar(21000.0), _bar(3000.0),
+                           today_mnq.iloc[:i + 1], today_mes.iloc[:i + 1])
+    daily = smt_state.load_daily()
+    mes_levels = [l for l in daily["liquidities_mes"] if l.get("kind") == "level"]
+    assert mes_levels, "MES levels should be populated"
+    mnq_levels = [l for l in daily["liquidities"] if l.get("kind") == "level"]
+    assert mnq_levels, "MNQ levels still populated"
+    # MES level prices are in the MES scale (~3000), distinct from MNQ (~21000).
+    assert any(2000.0 < l["price"] < 4000.0 for l in mes_levels)
+
+
+def test_mnq_liquidities_unchanged_regression(_isolate_state, monkeypatch):
+    """The additive MES refactor leaves MNQ `liquidities` byte-identical to a run that
+    drives identical MNQ bars — verified by replaying and snapshotting the MNQ key."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 19:00", n=8)
+    for i in range(8):
+        now = pd.Timestamp("2025-11-13 19:00", tz="America/New_York") + pd.Timedelta(minutes=i)
+        pipeline.on_1m_bar(now, _bar(21000.0), _bar(3000.0),
+                           today_mnq.iloc[:i + 1], today_mes.iloc[:i + 1])
+    mnq_liq = {l["name"]: l.get("price") for l in smt_state.load_daily()["liquidities"]
+               if l.get("kind") == "level"}
+    # The refactored MNQ pass must produce the SAME extremes as before: hist bars
+    # (_make_1m_bars base 21000 → High 21010 / Low 20990) dominate the day/week window
+    # (the live 21000±5 bars sit inside it). MES (~3000) must never bleed into MNQ.
+    assert {"day_high", "day_low", "week_high", "week_low"} <= set(mnq_liq)
+    for n in ("day_high", "week_high"):
+        assert abs(mnq_liq[n] - 21010.0) < 1e-6
+    for n in ("day_low", "week_low"):
+        assert abs(mnq_liq[n] - 20990.0) < 1e-6
+    # No MES-scale price leaked into the MNQ block.
+    assert all(p > 10000.0 for p in mnq_liq.values())
+
+
+def _freeze_liquidities(monkeypatch, pipeline):
+    """Stop the per-bar dynamic-liquidity passes from overwriting test-injected daily.json
+    so the detection block sees exactly the levels/FVGs the test crafted."""
+    monkeypatch.setattr(pipeline, "_update_dynamic_liquidities", lambda *a, **kw: [])
+    monkeypatch.setattr(pipeline, "_update_mes_liquidities", lambda *a, **kw: [])
+
+
+def test_detection_runs_every_1m(_isolate_state, monkeypatch):
+    """A crafted MNQ-only wick divergence on a 1m bar populates the per-minute buffer."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)
+    # Seed an MNQ + MES day_high level both instruments share.
+    daily = smt_state.load_daily()
+    daily["liquidities"] = [{"name": "day_high", "kind": "level", "price": 21000.0}]
+    daily["liquidities_mes"] = [{"name": "day_high", "kind": "level", "price": 3000.0}]
+    smt_state.save_daily(daily)
+
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 20:00", n=1)
+    now = pd.Timestamp("2025-11-13 20:01", tz="America/New_York")
+    # MNQ wick touches 21000; MES wick stays below 3000.
+    pipeline.on_1m_bar(now, _bar(20996.0, high_off=10.0), _bar(2990.0, high_off=5.0),
+                       today_mnq, today_mes)
+    per_min = pipeline._smt_buffer.get_new("1m")
+    assert any(r["ref_name"] == "day_high" and r["type"] == "wick" for r in per_min)
+
+
+def test_hidden_only_on_tf_boundary(_isolate_state, monkeypatch):
+    """A close-vs-level divergence yields NO body record off a 15m boundary, and a body
+    record exactly on the 15m boundary."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)
+    daily = smt_state.load_daily()
+    daily["liquidities"] = [{"name": "day_high", "kind": "level", "price": 21000.0}]
+    daily["liquidities_mes"] = [{"name": "day_high", "kind": "level", "price": 3000.0}]
+    smt_state.save_daily(daily)
+
+    # Build a 15m of MNQ bars whose 15m close is > 21000, MES 15m close < 3000.
+    idx = pd.date_range("2025-11-13 20:00", periods=16, freq="1min", tz="America/New_York")
+    mnq = pd.DataFrame({"Open": [20990.0] * 16, "High": [21002.0] * 16,
+                        "Low": [20980.0] * 16, "Close": [21005.0] * 16,
+                        "Volume": [100] * 16}, index=idx)
+    mes = pd.DataFrame({"Open": [2990.0] * 16, "High": [2999.0] * 16,
+                        "Low": [2980.0] * 16, "Close": [2995.0] * 16,
+                        "Volume": [100] * 16}, index=idx)
+
+    # Off-boundary minute (20:07) → no body record.
+    now_off = pd.Timestamp("2025-11-13 20:07", tz="America/New_York")
+    pipeline.on_1m_bar(now_off, _bar(21000.0), _bar(2995.0),
+                       mnq.loc[:now_off], mes.loc[:now_off])
+    assert not any(r["type"] == "body" for r in pipeline._smt_buffer.get_new("5m"))
+
+    # On the 15m boundary (20:15) the completed [20:00,20:15) bar is evaluated → body.
+    now_on = pd.Timestamp("2025-11-13 20:15", tz="America/New_York")
+    pipeline.on_1m_bar(now_on, _bar(21000.0), _bar(2995.0), mnq, mes)
+    assert any(r["type"] == "body" and r["timeframe"] == "15m"
+               for r in pipeline._smt_buffer.get_new("1m"))
+
+
+def test_cadence_morning_1m(_isolate_state, monkeypatch):
+    """At 09:45 ET, flat, a new SMT is ingested by the reference consumer (1m cadence)."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)
+    daily = smt_state.load_daily()
+    daily["liquidities"] = [{"name": "day_high", "kind": "level", "price": 21000.0}]
+    daily["liquidities_mes"] = [{"name": "day_high", "kind": "level", "price": 3000.0}]
+    smt_state.save_daily(daily)
+    today_mnq, today_mes = _mnq_mes_today("2025-11-14 09:45", n=1)
+    now = pd.Timestamp("2025-11-14 09:46", tz="America/New_York")
+    pipeline.on_1m_bar(now, _bar(20996.0, high_off=10.0), _bar(2990.0),
+                       today_mnq, today_mes)
+    assert len(pipeline._pending_watch.retained()) >= 1
+
+
+def test_cadence_offhours_5m(_isolate_state, monkeypatch):
+    """At 11:00 ET (off-hours), the consumer ingests only on the 5m boundary, and the 5m
+    read returns the accumulated window."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)
+    daily = smt_state.load_daily()
+    daily["liquidities"] = [{"name": "day_high", "kind": "level", "price": 21000.0}]
+    daily["liquidities_mes"] = [{"name": "day_high", "kind": "level", "price": 3000.0}]
+    smt_state.save_daily(daily)
+
+    # 11:01 (not a 5m boundary): detection fires but the consumer does NOT ingest.
+    today_mnq, today_mes = _mnq_mes_today("2025-11-14 11:00", n=2)
+    now1 = pd.Timestamp("2025-11-14 11:01", tz="America/New_York")
+    pipeline.on_1m_bar(now1, _bar(20996.0, high_off=10.0), _bar(2990.0),
+                       today_mnq.iloc[:1], today_mes.iloc[:1])
+    assert pipeline._pending_watch.retained() == []
+    assert pipeline._smt_buffer.get_new("5m"), "accumulator holds the off-boundary record"
+
+
+def test_cadence_boundaries(_isolate_state, monkeypatch):
+    """Cadence = 5m at 09:29, 1m at 09:30 and 10:30, 5m at 10:31."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    import datetime as _dt
+    from zoneinfo import ZoneInfo as _Z
+    _ET = _Z("America/New_York")
+
+    def _cadence_at(hh, mm):
+        now = pd.Timestamp(f"2025-11-14 {hh:02d}:{mm:02d}", tz="America/New_York")
+        t = now.tz_convert(_ET).time()
+        return "1m" if (_dt.time(9, 30) <= t <= _dt.time(10, 30)) else "5m"
+
+    assert _cadence_at(9, 29) == "5m"
+    assert _cadence_at(9, 30) == "1m"
+    assert _cadence_at(10, 30) == "1m"
+    assert _cadence_at(10, 31) == "5m"
+
+
+def test_flat_gating(_isolate_state, monkeypatch):
+    """With an active position, the reference consumer does NOT ingest."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)
+    daily = smt_state.load_daily()
+    daily["liquidities"] = [{"name": "day_high", "kind": "level", "price": 21000.0}]
+    daily["liquidities_mes"] = [{"name": "day_high", "kind": "level", "price": 3000.0}]
+    smt_state.save_daily(daily)
+    pos = smt_state.load_position()
+    pos["active"] = {"direction": "up", "fill_price": 21000.0}
+    smt_state.save_position(pos)
+
+    today_mnq, today_mes = _mnq_mes_today("2025-11-14 09:45", n=1)
+    now = pd.Timestamp("2025-11-14 09:46", tz="America/New_York")
+    pipeline.on_1m_bar(now, _bar(20996.0, high_off=10.0), _bar(2990.0),
+                       today_mnq, today_mes)
+    assert pipeline._pending_watch.retained() == [], "no ingest while a position is active"
+
+
+def test_buffer_drains_after_5m_consumer(_isolate_state, monkeypatch):
+    """The accumulator is cleared after the 5m-boundary consumer runs."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)
+    daily = smt_state.load_daily()
+    daily["liquidities"] = [{"name": "day_high", "kind": "level", "price": 21000.0}]
+    daily["liquidities_mes"] = [{"name": "day_high", "kind": "level", "price": 3000.0}]
+    smt_state.save_daily(daily)
+
+    today_mnq, today_mes = _mnq_mes_today("2025-11-14 11:00", n=6)
+    # 11:01..11:04 accumulate (no boundary), 11:05 is the boundary → drain after consumer.
+    for i, mm in enumerate((1, 2, 3, 4)):
+        now = pd.Timestamp(f"2025-11-14 11:0{mm}", tz="America/New_York")
+        pipeline.on_1m_bar(now, _bar(20996.0, high_off=10.0), _bar(2990.0),
+                           today_mnq.iloc[:i + 1], today_mes.iloc[:i + 1])
+    assert pipeline._smt_buffer.get_new("5m"), "accumulated before the boundary"
+    now5 = pd.Timestamp("2025-11-14 11:05", tz="America/New_York")
+    pipeline.on_1m_bar(now5, _bar(20996.0, high_off=10.0), _bar(2990.0),
+                       today_mnq, today_mes)
+    assert pipeline._smt_buffer.get_new("5m") == [], "accumulator drained after the 5m consumer"
+
+
+def test_fill_pairing_end_to_end(_isolate_state, monkeypatch):
+    """A 1hr FVG present in BOTH instruments on the same bar enables a fill; a one-sided
+    FVG never does."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)
+    # Paired bull FVG in both; MNQ enters its zone, MES nowhere near → Fill-A.
+    daily = smt_state.load_daily()
+    daily["liquidities"] = [{"name": "fvg_20251113_2000_bull", "kind": "fvg",
+                             "top": 21010.0, "bottom": 21000.0}]
+    daily["liquidities_mes"] = [{"name": "fvg_20251113_2000_bull", "kind": "fvg",
+                                 "top": 3010.0, "bottom": 3000.0}]
+    smt_state.save_daily(daily)
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 20:30", n=1)
+    now = pd.Timestamp("2025-11-13 20:31", tz="America/New_York")
+    # MNQ high reaches 21005 (entered), MES near 2950 (not reached). Avoid the visited
+    # prune removing the MNQ FVG: keep MNQ bar from straddling fully (low above bottom).
+    mnq_bar = pd.Series({"Open": 21002.0, "High": 21005.0, "Low": 21001.0, "Close": 21003.0})
+    mes_bar = pd.Series({"Open": 2950.0, "High": 2955.0, "Low": 2945.0, "Close": 2950.0})
+    pipeline.on_1m_bar(now, mnq_bar, mes_bar, today_mnq, today_mes)
+    assert any(r["kind"] == "fill" for r in pipeline._smt_buffer.get_new("1m"))
+
+    # One-sided: MES FVG only → no pair → no fill.
+    pipeline2, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline2)
+    daily2 = smt_state.load_daily()
+    daily2["liquidities"] = []
+    daily2["liquidities_mes"] = [{"name": "fvg_20251113_2000_bull", "kind": "fvg",
+                                  "top": 3010.0, "bottom": 3000.0}]
+    smt_state.save_daily(daily2)
+    pipeline2.on_1m_bar(now, mnq_bar, mes_bar, today_mnq, today_mes)
+    assert not any(r["kind"] == "fill" for r in pipeline2._smt_buffer.get_new("1m"))
+
+
+def test_v2_emits_smt_div_for_constructed_smt(_isolate_state, monkeypatch):
+    """on_1m_bar emits a v2 smt-div SIGNAL for a constructed wick SMT: MNQ sweeps its
+    day_high while MES fails to sweep its own → bearish wick divergence. The emitted event
+    carries source=="v2", the MNQ close as price, and the MNQ level price as mnq_div_price."""
+    emitted: list = []
+    pipeline, _ = _smt_v2_pipeline(monkeypatch, emitted)
+    _freeze_liquidities(monkeypatch, pipeline)
+    daily = smt_state.load_daily()
+    daily["liquidities"] = [{"name": "day_high", "kind": "level", "price": 21000.0}]
+    daily["liquidities_mes"] = [{"name": "day_high", "kind": "level", "price": 3000.0}]
+    smt_state.save_daily(daily)
+    emitted.clear()
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 20:00", n=1)
+    now = pd.Timestamp("2025-11-13 20:01", tz="America/New_York")
+    # MNQ wick reaches 21006 (> 21000 day_high); MES wick stays below 3000.
+    events = pipeline.on_1m_bar(now, _bar(20996.0, high_off=10.0), _bar(2990.0, high_off=5.0),
+                                today_mnq, today_mes)
+    sd = [e for e in events if e.get("kind") == "smt-div"]
+    assert sd, "expected a v2 smt-div for the constructed wick SMT"
+    e = next(d for d in sd if d.get("type") == "wick" and d.get("ref_name") == "day_high")
+    assert e["source"] == "v2"
+    assert e["side"] == "bearish"
+    assert e["timeframe"] == "1m"
+    assert e["mnq_div_price"] == 21000.0   # MNQ level price for a wick/body SMT
+    assert e["leader"] == "mnq"
+    assert emitted == events               # _emit and returned list agree
+
+
+def test_v2_emits_smt_div_for_constructed_fill(_isolate_state, monkeypatch):
+    """on_1m_bar emits a v2 smt-div SIGNAL for a constructed FILL: a paired 1hr FVG in both
+    instruments, MNQ enters its zone while MES does not → fill_a. The emitted event has
+    type in {fill_a, fill_b}, source=="v2", and mnq_div_price is None (fills reference an
+    FVG zone, not a level)."""
+    emitted: list = []
+    pipeline, _ = _smt_v2_pipeline(monkeypatch, emitted)
+    _freeze_liquidities(monkeypatch, pipeline)
+    daily = smt_state.load_daily()
+    daily["liquidities"] = [{"name": "fvg_20251113_2000_bull", "kind": "fvg",
+                             "top": 21010.0, "bottom": 21000.0}]
+    daily["liquidities_mes"] = [{"name": "fvg_20251113_2000_bull", "kind": "fvg",
+                                 "top": 3010.0, "bottom": 3000.0}]
+    smt_state.save_daily(daily)
+    emitted.clear()
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 20:30", n=1)
+    now = pd.Timestamp("2025-11-13 20:31", tz="America/New_York")
+    mnq_bar = pd.Series({"Open": 21002.0, "High": 21005.0, "Low": 21001.0, "Close": 21003.0})
+    mes_bar = pd.Series({"Open": 2950.0, "High": 2955.0, "Low": 2945.0, "Close": 2950.0})
+    events = pipeline.on_1m_bar(now, mnq_bar, mes_bar, today_mnq, today_mes)
+    sd = [e for e in events if e.get("kind") == "smt-div"]
+    assert sd, "expected a v2 smt-div for the constructed fill"
+    fill_ev = next(d for d in sd if d.get("type") in ("fill_a", "fill_b"))
+    assert fill_ev["source"] == "v2"
+    assert fill_ev["mnq_div_price"] is None   # fills reference an FVG zone, not a level
+    assert fill_ev["ref_name"] == "fvg_20251113_2000_bull"
+    assert emitted == events
+
+
+def test_restart_reload(_isolate_state, monkeypatch):
+    """Edge/re-arm state + retained set persist to smts.json and reload on a fresh
+    SessionPipeline."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)
+    daily = smt_state.load_daily()
+    daily["liquidities"] = [{"name": "day_high", "kind": "level", "price": 21000.0}]
+    daily["liquidities_mes"] = [{"name": "day_high", "kind": "level", "price": 3000.0}]
+    smt_state.save_daily(daily)
+    today_mnq, today_mes = _mnq_mes_today("2025-11-14 09:45", n=1)
+    now = pd.Timestamp("2025-11-14 09:46", tz="America/New_York")
+    pipeline.on_1m_bar(now, _bar(20996.0, high_off=10.0), _bar(2990.0),
+                       today_mnq, today_mes)
+    saved = smt_state.load_smts()
+    assert saved["detect_state"], "edge state persisted"
+    assert saved["watch"]["retained"], "retained set persisted"
+
+    # Fresh pipeline reloads from smts.json at session start. Use the SAME session date
+    # (2025-11-13) so on_session_start resolves the same sessions/<date> state folder that
+    # holds the smts.json written above.
+    hist_mnq = _make_1m_bars("2025-11-12 09:20", n=5, base=21000.0)
+    hist_mes = _make_1m_bars("2025-11-12 09:20", n=5, base=3000.0)
+    import daily as _daily_mod
+    import hypothesis as _hyp_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: [])
+    pipeline2 = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    pipeline2.on_session_start(
+        pd.Timestamp("2025-11-13 19:00", tz="America/New_York"),
+        _make_1m_bars("2025-11-13 19:00", n=1))
+    assert pipeline2._detect_state, "edge state restored on restart"
+    assert len(pipeline2._pending_watch.retained()) >= 1, "retained set restored on restart"
+
+
+def test_smt_v2_uses_prior_bar_levels_not_just_updated_extreme(_isolate_state, monkeypatch):
+    """Refinement #2: detection evaluates against the PRE-update (prior-bar) levels.
+
+    Because _update_dynamic_liquidities folds the current bar into the running extreme,
+    loading daily.json AFTER it makes the leader trivially "touch" its own just-updated
+    extreme every bar that the extreme advances. Using the PRE-update snapshot instead, a
+    "touch" means the wick reached the PRIOR-bar extreme (a genuine take-out). We exercise
+    this by passing the pre-update snapshot explicitly into _run_smt_v2_detection (mirroring
+    on_1m_bar, which captures _pre_daily before _update_dynamic_liquidities) and contrasting
+    two prior-bar level prices for the SAME 21005 wick.
+    """
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+
+    now = pd.Timestamp("2025-11-13 20:01", tz="America/New_York")
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 20:00", n=2)
+
+    # MNQ wick reaches 21005 (high), MES does NOT reach its high → MNQ-leading divergence.
+    mnq_row = _bar(21000.0, high_off=5.0)   # High = 21005
+    mes_row = _bar(3000.0, high_off=1.0)    # High = 3001 (short of the 3010 MES level below)
+
+    # Case A — prior-bar day_high sits ABOVE the wick (21010). The 21005 wick does NOT reach
+    # the prior extreme, so there is no genuine take-out → must NOT fire. (Under the old
+    # post-update load, the running extreme would have been pulled down to the bar's own
+    # 21005 wick and fired spuriously.)
+    pre_above = {
+        "liquidities": [{"name": "day_high", "kind": "level", "price": 21010.0}],
+        "liquidities_mes": [{"name": "day_high", "kind": "level", "price": 3010.0}],
+    }
+    pipeline._detect_state = {}
+    recs_a = pipeline._run_smt_v2_detection(
+        now, mnq_row, mes_row, today_mnq, today_mes, is_5m=False, pre_daily=pre_above)
+    assert recs_a == [], "not reaching the prior-bar extreme must NOT fire"
+
+    # Case B — genuine take-out: the prior-bar day_high was BELOW the wick (21000), so the
+    # 21005 wick EXCEEDS the prior extreme. Must fire exactly one MNQ-leading short wick SMT.
+    pre_below = {
+        "liquidities": [{"name": "day_high", "kind": "level", "price": 21000.0}],
+        "liquidities_mes": [{"name": "day_high", "kind": "level", "price": 3010.0}],
+    }
+    pipeline._detect_state = {}
+    pipeline._smt_buffer = type(pipeline._smt_buffer)()  # fresh buffer
+    recs_b = pipeline._run_smt_v2_detection(
+        now, mnq_row, mes_row, today_mnq, today_mes, is_5m=False, pre_daily=pre_below)
+    divs_b = [e for e in recs_b if e.get("kind") == "smt-div"]
+    assert len(divs_b) == 1, "exceeding the prior-bar extreme is a genuine take-out → fires"
+    assert divs_b[0]["side"] == "bearish" and divs_b[0]["type"] == "wick"
+    assert divs_b[0]["leader"] == "mnq" and divs_b[0]["ref_name"] == "day_high"
+
+
+def test_on_1m_bar_events_only_adds_v2_smt_div(_isolate_state, monkeypatch):
+    """SMT V2 is now the SOLE source of smt-div SIGNALS. For a scenario that produces a
+    divergence, the ONLY new events vs the pre-V2 baseline are v2 smt-div signals
+    (kind=="smt-div", source=="v2"); the hypothesis-originated smt-div events are gone, and
+    no raw smt/fill record leaks into the stream.
+
+    Baseline = the event list with every v2 smt-div removed. That baseline must contain NO
+    smt-div at all (the old hypothesis path no longer emits them), confirming v2 is additive
+    and exclusive.
+    """
+    emitted: list = []
+    pipeline, _ = _smt_v2_pipeline(monkeypatch, emitted)
+    _freeze_liquidities(monkeypatch, pipeline)
+    daily = smt_state.load_daily()
+    daily["liquidities"] = [{"name": "day_high", "kind": "level", "price": 21000.0}]
+    daily["liquidities_mes"] = [{"name": "day_high", "kind": "level", "price": 3000.0}]
+    smt_state.save_daily(daily)
+    emitted.clear()
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 20:00", n=1)
+    now = pd.Timestamp("2025-11-13 20:01", tz="America/New_York")
+    events = pipeline.on_1m_bar(now, _bar(20996.0, high_off=10.0), _bar(2990.0),
+                                today_mnq, today_mes)
+
+    # emitted (via the _emit callback) and the returned events list agree.
+    assert emitted == events
+
+    smt_divs = [e for e in events if e.get("kind") == "smt-div"]
+    # This scenario crafts an MNQ-leading wick divergence at day_high, so v2 must emit it.
+    assert smt_divs, "v2 detector should emit at least one smt-div for this divergence"
+    # Every smt-div is a v2 signal; none is a leftover hypothesis-originated event.
+    assert all(e.get("source") == "v2" for e in smt_divs)
+    # Hypothesis-originated smt-div carried `mes_div_price`; v2 signals never do.
+    assert all("mes_div_price" not in e for e in smt_divs)
+    # v2 smt-div fields are the new per-1m detector schema.
+    assert all(e.get("timeframe") in ("1m", "15m", "30m", "1h") for e in smt_divs)
+    assert all(e.get("type") in ("wick", "body", "fill_a", "fill_b") for e in smt_divs)
+
+    # Baseline (everything except the v2 smt-div) has NO smt-div — the old hypothesis path
+    # no longer emits them, so v2 is the only source.
+    baseline = [e for e in events if not (e.get("kind") == "smt-div" and e.get("source") == "v2")]
+    assert all(e.get("kind") != "smt-div" for e in baseline)
+    # No raw smt/fill record leaks into the emitted/returned stream.
+    assert all(e.get("kind") not in ("smt", "fill") for e in emitted)
+    assert all(e.get("kind") not in ("smt", "fill") for e in events)

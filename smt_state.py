@@ -40,6 +40,7 @@ def _fast_copy(obj):
 def _daily_path() -> Path:      return paths.state_dir() / "daily.json"
 def _hypothesis_path() -> Path: return paths.state_dir() / "hypothesis.json"
 def _position_path() -> Path:   return paths.state_dir() / "position.json"
+def _smts_path() -> Path:       return paths.state_dir() / "smts.json"
 
 
 def _global_path() -> Path:
@@ -114,8 +115,18 @@ DEFAULT_GLOBAL = {"all_time_high": 0.0, "confidence": "medium", "trend": "up"}
 DEFAULT_DAILY = {
     "formed_at": "",
     "liquidities": [],
+    # Additive MES counterpart of `liquidities` (SMT V2). Same structure
+    # (session/day/week levels + 1hr FVGs). The MNQ `liquidities` key is unchanged.
+    "liquidities_mes": [],
     "estimated_dir": "up",
     "opposite_premove": "no",
+}
+
+# SMT V2 detection store: per-target edge/re-arm state + the reference consumer's
+# retained set. Mirrors the daily/hypothesis/position load/save + _IN_MEMORY pattern.
+DEFAULT_SMTS = {
+    "detect_state": {},
+    "watch": {"retained": []},
 }
 
 DEFAULT_HYPOTHESIS = {
@@ -219,7 +230,7 @@ def final_snapshot() -> None:
     final state in the per-run folder. No-op for files never written this run.
     """
     target = paths.state_dir()
-    for name in ("global.json", "daily.json", "hypothesis.json", "position.json"):
+    for name in ("global.json", "daily.json", "hypothesis.json", "position.json", "smts.json"):
         data = _STORE.get(str(target / name))
         if data is None:
             continue
@@ -308,6 +319,14 @@ def load_position() -> dict:
 
 def save_position(d: dict) -> None:
     _atomic_write(_position_path(), d)
+
+
+def load_smts() -> dict:
+    return _load(_smts_path(), DEFAULT_SMTS)
+
+
+def save_smts(d: dict) -> None:
+    _atomic_write(_smts_path(), d)
 
 
 def is_paused() -> bool:

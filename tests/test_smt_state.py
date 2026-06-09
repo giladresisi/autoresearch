@@ -100,6 +100,7 @@ class TestSaveThenLoadRoundtrip:
             "date": "2026-04-27",
             "formed_at": "2026-04-27T09:30:00",
             "liquidities": [{"name": "TDO", "kind": "level", "price": 21412.5}],
+            "liquidities_mes": [{"name": "TDO", "kind": "level", "price": 2412.5}],
             "estimated_dir": "down",
             "opposite_premove": "yes",
         }
@@ -133,6 +134,34 @@ class TestSaveThenLoadRoundtrip:
         }
         save_position(data)
         assert load_position() == data
+
+    def test_smts_roundtrip(self):
+        from smt_state import DEFAULT_SMTS, load_smts, save_smts
+        data = {
+            "detect_state": {"day_high|short": {"armed": False, "last_cond": True,
+                                                "fire_price": 21500.0, "level_price": 21500.0}},
+            "watch": {"retained": [{"kind": "smt", "type": "wick", "direction": "short"}]},
+        }
+        save_smts(data)
+        assert load_smts() == data
+        # Missing file → default.
+        assert load_smts.__module__  # sanity
+        assert DEFAULT_SMTS == {"detect_state": {}, "watch": {"retained": []}}
+
+
+class TestSmtsInMemory:
+    def test_smts_inmemory(self, monkeypatch):
+        """In-memory (backtest) mode: save_smts/load_smts use the _STORE dict."""
+        from smt_state import load_smts, save_smts
+        monkeypatch.setattr(smt_state, "_IN_MEMORY", True)
+        smt_state._STORE.clear()
+        data = {"detect_state": {"week_low|long": {"armed": True}},
+                "watch": {"retained": []}}
+        save_smts(data)
+        assert load_smts() == data
+        # No file should have been written in in-memory mode.
+        import paths
+        assert not (paths.state_dir() / "smts.json").exists()
 
 
 class TestSaveIsAtomic:

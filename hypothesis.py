@@ -1246,9 +1246,13 @@ def build_hypothesis_from_direction(
         "entry_ranges":                   entry_ranges,
         "direction_reason":               direction_reason,
     }
+    # smt-div SIGNAL emission moved to the SMT V2 per-1m detector
+    # (session_pipeline._run_smt_v2_detection). `divs` are still computed and consumed
+    # internally here (smt_score / direction rules) and embedded in hyp_event above —
+    # they are simply no longer emitted as separate smt-div events for logging/plotting.
     if direction == "none":
-        return divs
-    return [hyp_event] + divs
+        return []
+    return [hyp_event]
 
 
 def run_hypothesis(
