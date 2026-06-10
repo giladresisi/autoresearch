@@ -22,6 +22,7 @@ Usage:
   python trade.py start --pause          # Start with automatic entries paused (creates data/paused; start continues regardless)
   python trade.py start --resume         # Start with automatic entries enabled (clears data/paused; start continues regardless)
   python trade.py terminate              # Kill orchestrator and automation.main
+  python trade.py gap-fill               # IB-backfill main 1s+1m parquets up to now (orchestrator must NOT be running)
 
 Add --force / -f to bypass position.json state checks and override broker state:
   python trade.py close --force
@@ -386,6 +387,20 @@ def main() -> None:
                 print("LLM summary enabled")
         else:
             print("WARNING: orchestrator.pid not written — check orchestrator_stdout.log for errors")
+
+    elif cmd == "gap-fill":
+        from pathlib import Path
+        from dotenv import load_dotenv
+
+        # trade.py does not load .env elsewhere; gap_fill_until_now reads IB_HOST/IB_PORT/
+        # MNQ_CONID/MES_CONID from the environment, so load .env before invoking it.
+        load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+        from gap_fill import gap_fill_until_now
+
+        print("Gap-filling main 1s + 1m parquets up to now "
+              "(do NOT run while the live orchestrator/session is up — IB client-id conflict)...")
+        gap_fill_until_now()
+        print("Gap-fill complete")
 
     elif cmd == "terminate":
         killed = _terminate_all()

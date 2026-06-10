@@ -410,3 +410,22 @@ def test_unlock_calls_live_orders(monkeypatch, capsys):
     mock_lo = MagicMock()
     _run_trade(["unlock"], monkeypatch, mock_lo, MagicMock())
     mock_lo.unlock_direction.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# gap-fill command
+# ---------------------------------------------------------------------------
+
+def test_gap_fill_loads_dotenv_then_calls_gap_fill_until_now(monkeypatch, capsys):
+    """`trade.py gap-fill` loads .env, then invokes gap_fill_until_now()."""
+    mock_dotenv = MagicMock()
+    mock_gap_fill = MagicMock()
+    monkeypatch.setitem(sys.modules, "dotenv", mock_dotenv)
+    monkeypatch.setitem(sys.modules, "gap_fill", mock_gap_fill)
+
+    _run_trade(["gap-fill"], monkeypatch, MagicMock(), MagicMock())
+
+    mock_dotenv.load_dotenv.assert_called_once()
+    mock_gap_fill.gap_fill_until_now.assert_called_once_with()
+    out = capsys.readouterr().out
+    assert "Gap-fill complete" in out

@@ -74,23 +74,7 @@ def _close_session_position(log_ch: OutputChannel) -> None:
         log_ch.writeln(f"[ORCH] WARNING: session-end close failed: {_exc}")
 
 
-def _check_ib_reachable() -> None:
-    """TCP-probe IB Gateway. Prints an alert and exits if unreachable."""
-    import os
-    import socket
-    import sys
-    host = os.environ.get("IB_HOST", "127.0.0.1")
-    port = int(os.environ.get("IB_PORT", "4002"))
-    try:
-        with socket.create_connection((host, port), timeout=5):
-            pass
-    except OSError:
-        print(
-            f"[ORCH] FATAL: IB Gateway not reachable at {host}:{port} — "
-            "open TWS / IB Gateway and restart the orchestrator. Exiting.",
-            flush=True,
-        )
-        sys.exit(1)
+from gap_fill import check_ib_reachable as _check_ib_reachable
 
 
 def _pre_session_init() -> None:

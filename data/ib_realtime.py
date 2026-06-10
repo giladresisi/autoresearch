@@ -699,12 +699,14 @@ class IbRealtimeSource:
                 )])
             _threading.Timer(30.0, _parquet_fallback).start()
 
-    def start(self) -> None:
-        import asyncio, time
-        # eventkit (ib_insync dependency) calls get_event_loop() at module import time;
-        # non-main threads have no loop, so create one before the import.
-        asyncio.set_event_loop(asyncio.new_event_loop())
-        from ib_insync import IB, Future, util
+    def gap_fill(self) -> None:
+        """Backfill the main 1s then 1m parquets from IB up to now (no live streaming).
+
+        This is the fill prologue start() runs at orchestrator startup, factored out so it
+        can also be invoked standalone (e.g. gap_fill.gap_fill_until_now / `trade.py gap-fill`)
+        for a fill-only pass without opening real-time subscriptions. Raises RuntimeError if
+        the 1s fill returns no bars (IB unreachable / no data), which blocks the 1m fill.
+        """
         self._load_parquets()
         if not self._gap_fill_1s_ib():
             raise RuntimeError(
@@ -718,6 +720,14 @@ class IbRealtimeSource:
         # Without this, the first live 1m bar write would overwrite any bars added by
         # gap_fill_1m_ib with the stale df that was loaded before gap-fill ran.
         self._load_parquets()
+
+    def start(self) -> None:
+        import asyncio, time
+        # eventkit (ib_insync dependency) calls get_event_loop() at module import time;
+        # non-main threads have no loop, so create one before the import.
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        from ib_insync import IB, Future, util
+        self.gap_fill()
         # Release ~70 MB: history only needed by _gap_fill_1s_ib; live signal path reads parquet
         self._mnq_1s_df = self._empty_bar_df()
         self._mes_1s_df = self._empty_bar_df()
