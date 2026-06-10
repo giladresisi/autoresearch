@@ -19,6 +19,25 @@ Watermark-gated incremental 1m parquet validation (sidecar `.validation_state.js
 
 ---
 
+## Feature: SMT V2 — SMT & SMT-Fill Detection Redesign
+### Planning Phase
+**Status**: ✅ Implemented (unstaged; not committed)
+**Started**: 2026-06-09
+**Spec**: `docs/superpowers/specs/2026-06-09-smt-v2-detection-design.md`
+**Plan File**: `.agents/plans/smt-v2-detection-redesign.md`
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-v2-detection-redesign.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics
+
+**Code Review:** `.agents/code-reviews/smt-v2-detection-redesign.md` (3 issues found + fixed)
+**Acceptance Validation:** `.agents/acceptance-validations/smt-v2-detection-redesign-validation.md` (16/16 PASS — ACCEPTED)
+
+---
+
 ## Feature: Gate chop-zone market entries (o5-fallback + STP→MKT) into the mid/equilibrium zone
 ### Planning Phase
 **Status**: ✅ Implemented (unstaged; merge gated on broader backtest + user approval)

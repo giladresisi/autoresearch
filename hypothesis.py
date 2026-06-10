@@ -47,6 +47,10 @@ def compute_cautious_prices(
         if liq_kind == "level":
             p = liq.get("price")
         elif liq_kind == "fvg":
+            # keep:True = fill-only yesterday-session FVG universe (SMT-fills); not an
+            # actionable hypothesis level. Skip so trade behavior is unchanged.
+            if liq.get("keep"):
+                continue
             p = liq.get("bottom") if direction == "up" else liq.get("top")
         else:
             continue
@@ -220,6 +224,9 @@ def _get_liquidity_price(liq: dict) -> float | None:
     if liq.get("kind") == "level":
         return liq.get("price")
     if liq.get("kind") == "fvg":
+        # keep:True = fill-only yesterday-session FVG (SMT-fills universe); not actionable.
+        if liq.get("keep"):
+            return None
         # For FVGs, use the midpoint between top and bottom
         top = liq.get("top")
         bottom = liq.get("bottom")
@@ -622,6 +629,9 @@ def _closest_level_name(price: float | None, liquidities: list) -> str | None:
         if liq.get("kind") == "level":
             p = liq.get("price")
         elif liq.get("kind") == "fvg":
+            # keep:True = fill-only yesterday-session FVG (SMT-fills universe); not actionable.
+            if liq.get("keep"):
+                continue
             top = liq.get("top")
             bottom = liq.get("bottom")
             if top is None or bottom is None:
@@ -1153,6 +1163,9 @@ def build_hypothesis_from_direction(
             elif direction == "down" and price < current_close:
                 targets.append({"name": liq["name"], "price": price})
         elif kind == "fvg":
+            # keep:True = fill-only yesterday-session FVG (SMT-fills universe); not a target.
+            if liq.get("keep"):
+                continue
             top = liq.get("top")
             bottom = liq.get("bottom")
             if top is None or bottom is None:
@@ -1246,9 +1259,13 @@ def build_hypothesis_from_direction(
         "entry_ranges":                   entry_ranges,
         "direction_reason":               direction_reason,
     }
+    # smt-div SIGNAL emission moved to the SMT V2 per-1m detector
+    # (session_pipeline._run_smt_v2_detection). `divs` are still computed and consumed
+    # internally here (smt_score / direction rules) and embedded in hyp_event above —
+    # they are simply no longer emitted as separate smt-div events for logging/plotting.
     if direction == "none":
-        return divs
-    return [hyp_event] + divs
+        return []
+    return [hyp_event]
 
 
 def run_hypothesis(

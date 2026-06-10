@@ -15,6 +15,7 @@ Output: sessions/{date}/chart_{HH-MM}.html (timestamped at time of request)
 
 import datetime
 import json
+import os
 import sys
 import webbrowser
 from pathlib import Path
@@ -353,17 +354,28 @@ def _closest_level_name(lv: float) -> str | None:
     closest = min(all_named.items(), key=lambda x: abs(x[1] - lv))
     return closest[0] if abs(closest[1] - lv) <= 10 else None
 
+def _div_scope(e: dict) -> "str | None":
+    """Specific level / FVG name this SMT div fired against. Prefers the event's
+    ref_name (emitted by the SMT V2 detector); falls back to the nearest named level
+    by price for legacy events. FVG names render as fvg_1hr_<HHMM>."""
+    name = e.get("ref_name")
+    if not name:
+        lv = e.get("mnq_div_price")
+        name = _closest_level_name(lv) if lv is not None else None
+    if not name:
+        return None
+    if name.startswith("fvg_"):
+        parts = name.split("_")  # fvg_YYYYMMDD_HHMM_side
+        return f"fvg_1hr_{parts[2]}" if len(parts) >= 3 else name
+    return LEVEL_STYLE.get(name, (name,))[0]
+
 def _div_label(e: dict) -> str:
     tf   = e.get("timeframe", "?")
+    # wick->W, body->H, all fill_* (fill_a/fill_b/fill_retrace)->F (first-char fallback).
     typ  = {"wick": "W", "body": "H", "fill": "F"}.get(e.get("type", ""), e.get("type", "?")[:1].upper())
     side = "↑" if e.get("side") == "bullish" else "↓"
-    mnq_lv = e.get("mnq_div_price")
-    if mnq_lv is not None:
-        name = _closest_level_name(mnq_lv)
-        if name:
-            lv_name = LEVEL_STYLE.get(name, (name,))[0]
-            return f"{tf}{side}{typ}@{lv_name}"
-    return f"{tf}{side}{typ}"
+    scope = _div_scope(e)
+    return f"{tf}{side}{typ}@{scope}" if scope else f"{tf}{side}{typ}"
 
 def _div_hover(e: dict) -> str:
     parts = [
@@ -373,14 +385,14 @@ def _div_hover(e: dict) -> str:
         f"side: {e.get('side')}",
         f"time: {e['ts'].strftime('%H:%M:%S')}",
     ]
+    if e.get("phase"):
+        parts.append(f"phase: {e.get('phase')}")
+    scope = _div_scope(e)
+    if scope:
+        parts.append(f"level: {scope}")
     mnq_lv = e.get("mnq_div_price")
     if mnq_lv is not None:
         parts.append(f"div_price: {mnq_lv}")
-        if e.get("type") in ("wick", "body", "wick_sym", "body_sym"):
-            name = _closest_level_name(mnq_lv)
-            scope = _LEVEL_SCOPE.get(name, "") if name else ""
-            if scope:
-                parts.append(f"scope: {scope}")
     return "<br>".join(parts)
 
 for side_val, symbol, color in [("bullish", "triangle-up", "#4CAF50"), ("bearish", "triangle-down", "#EF5350")]:
@@ -610,4 +622,7 @@ SESSION_DIR.mkdir(parents=True, exist_ok=True)
 out = SESSION_DIR / f"chart_{_REQUEST_TIME}.html"
 fig.write_html(str(out), include_plotlyjs="cdn")
 print(f"Chart: {out.resolve()}")
-webbrowser.open(out.resolve().as_uri())
+# ACT_NO_BROWSER=1 suppresses the auto-open (used by the test suite so running tests
+# never launches a real browser). Interactive use leaves it unset → chart opens as usual.
+if not os.environ.get("ACT_NO_BROWSER"):
+    webbrowser.open(out.resolve().as_uri())

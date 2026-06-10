@@ -23,6 +23,89 @@ from smt_state import save_bar_state
 
 _ET = ZoneInfo("America/New_York")
 
+# SMT V2 refinement #1: dedup level-SMTs whose underlying LEVEL prices are within this
+# tolerance (MNQ points) of each other within one side+bar — a single move can take out
+# several near-coincident levels (e.g. week_high ≈ day_high) and would otherwise emit a
+# duplicate SMT per level. We keep only the highest-scope level per cluster.
+DEDUP_TOL_PTS = 5.0
+
+# Scope priority for dedup (higher = kept). Derived from the ref_name prefix.
+_SCOPE_RANK = {"ath": 3, "week": 2, "day": 1, "session": 0}
+
+
+def _level_scope(ref_name: str) -> str:
+    """Map a level ref_name to its scope bucket for dedup priority.
+
+    ATH* → ath, week_* → week, day_* → day, everything else (the 6hr ny_morning /
+    ny_evening / london / asia session levels) → session.
+    """
+    if ref_name.startswith("ATH"):
+        return "ath"
+    if ref_name.startswith("week_"):
+        return "week"
+    if ref_name.startswith("day_"):
+        return "day"
+    return "session"
+
+
+def _dedup_level_smts(records: list[dict], lvl_px: dict[str, float]) -> list[dict]:
+    """Dedup level (kind=='smt') records by scope within each side.
+
+    Within a side, cluster level-SMT records whose underlying LEVEL prices
+    (lvl_px[ref_name]) are within DEDUP_TOL_PTS of each other; keep only ONE per cluster
+    — the highest-scope level (ATH > week > day > session), ties broken deterministically
+    by ref_name. Records whose level price isn't in lvl_px are kept as-is. Fill records
+    (kind!='smt') are exempt and passed through untouched. Deterministic ordering.
+    """
+    smt_recs = [r for r in records if r.get("kind") == "smt"]
+    other = [r for r in records if r.get("kind") != "smt"]
+
+    # Records we can't place a level price for are kept verbatim (shouldn't happen).
+    keepable: list[dict] = []
+    cluster_pool: list[dict] = []
+    for r in smt_recs:
+        if r.get("ref_name") in lvl_px and lvl_px[r["ref_name"]] is not None:
+            cluster_pool.append(r)
+        else:
+            keepable.append(r)
+
+    kept: list[dict] = list(keepable)
+    # Group by side, then greedily cluster by level price within DEDUP_TOL_PTS.
+    for side in sorted({r.get("side") for r in cluster_pool}):
+        members = sorted(
+            [r for r in cluster_pool if r.get("side") == side],
+            key=lambda r: (lvl_px[r["ref_name"]], r["ref_name"]),
+        )
+        used = [False] * len(members)
+        for i, r in enumerate(members):
+            if used[i]:
+                continue
+            cluster = [r]
+            used[i] = True
+            base_px = lvl_px[r["ref_name"]]
+            for j in range(i + 1, len(members)):
+                if used[j]:
+                    continue
+                if abs(lvl_px[members[j]["ref_name"]] - base_px) <= DEDUP_TOL_PTS:
+                    cluster.append(members[j])
+                    used[j] = True
+            # Keep the highest-scope member; tie-break deterministically by ref_name.
+            winner = max(
+                cluster,
+                key=lambda m: (_SCOPE_RANK[_level_scope(m["ref_name"])], ),
+            )
+            # Stable tie-break: among same top rank, pick smallest ref_name.
+            top_rank = _SCOPE_RANK[_level_scope(winner["ref_name"])]
+            winner = min(
+                [m for m in cluster if _SCOPE_RANK[_level_scope(m["ref_name"])] == top_rank],
+                key=lambda m: m["ref_name"],
+            )
+            kept.append(winner)
+
+    # Preserve original record ordering (deterministic), with fills appended after.
+    kept_ids = {id(r) for r in kept}
+    return [r for r in records if id(r) in kept_ids or r.get("kind") != "smt"]
+
 
 def _mmax(a: "float | None", b: "float | None") -> "float | None":
     """max of two optional floats (None acts as 'no value')."""
@@ -40,6 +123,76 @@ def _mmin(a: "float | None", b: "float | None") -> "float | None":
     if b is None:
         return a
     return a if a <= b else b
+
+
+def _detect_yesterday_session_fvgs(
+    combined_1m: pd.DataFrame, now: pd.Timestamp,
+) -> list[dict]:
+    """ALL 1hr FVGs (3-bar imbalance) formed during YESTERDAY's CME session — regardless
+    of whether they were later filled. Used as an additive fill universe so SMT-fills can
+    fire against the prior session's FVGs through the current session.
+
+    "Yesterday's session" = the CME session immediately before the current one. The
+    current session opened at cme_session_start(now) (18:00 ET); yesterday's session ran
+    from 24h before that (prior 18:00 ET) to 1h before it (17:00 ET on the current
+    session-open day), matching the 18:00→17:00 ET CME session span.
+
+    Returns entries shaped like daily._detect_fvgs output (name/kind/top/bottom) plus a
+    `keep: True` flag so the per-bar visited-prune leaves them in place (the fill state
+    machine handles single-fire + re-arm). FVG formation timestamp (the 3rd/completing
+    1hr bar) must fall inside the yesterday-session window. No unvisited filter is applied.
+    """
+    if combined_1m is None or combined_1m.empty:
+        return []
+    _sess_open = pd.Timestamp(_cme_session_start(now))
+    _y_start = _sess_open - pd.Timedelta(hours=24)  # prior day 18:00 ET
+    _y_end = _sess_open - pd.Timedelta(hours=1)      # current session-open day 17:00 ET
+
+    _agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    # Resample over a window padded 2h on the left so an FVG whose 3rd bar lands at
+    # _y_start still has its first two bars available.
+    _src = combined_1m[
+        (combined_1m.index >= _y_start - pd.Timedelta(hours=2))
+        & (combined_1m.index < _y_end + pd.Timedelta(hours=1))
+    ]
+    if _src.empty:
+        return []
+    _hourly = _src.resample("1h", label="left").agg(_agg).dropna(subset=["Open"])
+    if len(_hourly) < 3:
+        return []
+
+    highs = _hourly["High"].values
+    lows = _hourly["Low"].values
+    idx = _hourly.index
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for i in range(len(_hourly) - 2):
+        bar1_h, bar1_l = highs[i], lows[i]
+        bar3_h, bar3_l = highs[i + 2], lows[i + 2]
+        if bar3_l > bar1_h:
+            top, bottom, side = float(bar3_l), float(bar1_h), "bull"
+        elif bar3_h < bar1_l:
+            top, bottom, side = float(bar1_l), float(bar3_h), "bear"
+        else:
+            continue
+        formation_ts = idx[i + 2]
+        # Formation (completing 3rd bar) must fall in the yesterday-session window.
+        if not (_y_start <= formation_ts <= _y_end):
+            continue
+        ts_str = formation_ts.strftime("%Y%m%d_%H%M")
+        name = f"fvg_{ts_str}_{side}"
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append({
+            "name": name,
+            "kind": "fvg",
+            "top": top,
+            "bottom": bottom,
+            "keep": True,
+        })
+    return out
 
 
 class SessionPipeline:
@@ -129,15 +282,44 @@ class SessionPipeline:
         # once (keyed by window start) and combined with today_mnq's small max/min each bar,
         # avoiding a per-bar boolean mask over the ~11k-row combined frame.
         self._dyn_day_key: "pd.Timestamp | None" = None
-        self._dyn_day_hl: "tuple[float | None, float | None]" = (None, None)
+        # (high, low, close_high, close_low) — close_* feed body-SMT comparison levels.
+        self._dyn_day_hl: "tuple[float | None, ...]" = (None, None, None, None)
         self._dyn_week_key: "pd.Timestamp | None" = None
-        self._dyn_week_hl: "tuple[float | None, float | None]" = (None, None)
+        self._dyn_week_hl: "tuple[float | None, ...]" = (None, None, None, None)
         # Constant 18:00–session-open hist sliver (the ~5 pre-18:05 bars the asia session
         # window needs); concatenated with today_mnq to feed _session_bars a small frame.
         self._dyn_sliver18: "pd.DataFrame | None" = None
 
-    def on_daily_or_startup(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> None:
-        """Compute fixed reference liquidities and seed ATH. Called on startup and at 09:20 ET daily."""
+        # ── SMT V2: MES per-instrument liquidity + 1hr FVG frame (additive) ──────
+        # Mirrors the MNQ dynamic-liquidity caches/frames above, written to the
+        # additive `liquidities_mes` daily.json key. The MNQ caches/frames are
+        # untouched (regression-sensitive).
+        self._fvg_mes_1hr: pd.DataFrame | None = None
+        self._fvg_done_mes_1hr: pd.Timestamp | None = None
+        self._dyn_mes_hist_tail: "pd.DataFrame | None" = None
+        self._dyn_mes_day_key: "pd.Timestamp | None" = None
+        self._dyn_mes_day_hl: "tuple[float | None, ...]" = (None, None, None, None)
+        self._dyn_mes_week_key: "pd.Timestamp | None" = None
+        self._dyn_mes_week_hl: "tuple[float | None, ...]" = (None, None, None, None)
+        self._dyn_mes_sliver18: "pd.DataFrame | None" = None
+
+        # ── SMT V2: detection buffers + reference consumer + persisted state ─────
+        from smt_detect import SmtBuffer, PendingSmtWatch
+        self._smt_buffer = SmtBuffer()
+        self._pending_watch = PendingSmtWatch()
+        self._detect_state: dict = {}
+        # Per-frame last-processed boundary guards for hidden-SMT 15m/30m resamples.
+        self._hidden_done: dict[str, pd.Timestamp | None] = {"1min": None}
+
+    def on_daily_or_startup(
+        self, now: pd.Timestamp, today_mnq: pd.DataFrame,
+        today_mes: "pd.DataFrame | None" = None,
+    ) -> None:
+        """Compute fixed reference liquidities and seed ATH. Called on startup and at 09:20 ET daily.
+
+        `today_mes` (additive, SMT V2): when provided, seeds the parallel
+        `liquidities_mes` block from `_hist_mes_1m` + today's MES bars. When None the
+        MES levels are seeded from history alone (today contributes nothing yet)."""
         from smt_state import (
             DEFAULT_DAILY, DEFAULT_GLOBAL,
             load_daily, load_global, save_daily, save_global,
@@ -211,6 +393,29 @@ class SessionPipeline:
         self._fvg_done_1hr = None
         self._fvg_done_4hr = None
 
+        # SMT V2: seed the MES rolling 1hr FVG frame (hist + today's COMPLETED bars).
+        _combined_mes = pd.concat(
+            [self._hist_mes_1m, today_mes if today_mes is not None else self._hist_mes_1m.iloc[:0]]
+        ).sort_index()
+        _combined_mes = _combined_mes[~_combined_mes.index.duplicated(keep="last")]
+        if not _combined_mes.empty:
+            _fvg_mes_full = (
+                _combined_mes.resample("1h", label="left").agg(_agg).dropna(subset=["Open"])
+            )
+            self._fvg_mes_1hr = _fvg_mes_full[
+                (_fvg_mes_full.index >= _14d_ago) & (_fvg_mes_full.index < now.floor("1h"))
+            ]
+        else:
+            self._fvg_mes_1hr = pd.DataFrame(columns=list(_agg))
+        self._fvg_done_mes_1hr = None
+        # Reset per-session MES dynamic caches so a 09:20 re-run recomputes them.
+        self._dyn_mes_hist_tail = None
+        self._dyn_mes_day_key = None
+        self._dyn_mes_day_hl = (None, None, None, None)
+        self._dyn_mes_week_key = None
+        self._dyn_mes_week_hl = (None, None, None, None)
+        self._dyn_mes_sliver18 = None
+
         # Reset daily.json and recompute fixed levels.
         save_daily(copy.deepcopy(DEFAULT_DAILY))
         _daily_mod.run_daily_fixed(
@@ -224,13 +429,22 @@ class SessionPipeline:
         if _now_ts.tzinfo is None:
             _now_ts = _now_ts.tz_localize("America/New_York")
         _live = compute_live_hl_mid(_combined, _now_ts)
+        # Body-extreme (CLOSE-based) seed for day/week high/low — the same window as the
+        # wick H/L but using Close max/min (no outlier skip). The per-bar dynamic pass
+        # overwrites these immediately; this just seeds a consistent initial close_price.
+        _dw_close = self._seed_close_extremes(_combined, _now_ts)
         for _name in ("week_high", "week_low", "week_mid", "day_high", "day_low", "day_mid"):
             if _name in _live:
                 _existing = next((l for l in _liq if l["name"] == _name), None)
                 if _existing:
                     _existing["price"] = _live[_name]
+                    if _name in _dw_close:
+                        _existing["close_price"] = _dw_close[_name]
                 else:
-                    _liq.append({"name": _name, "kind": "level", "price": _live[_name]})
+                    _entry = {"name": _name, "kind": "level", "price": _live[_name]}
+                    if _name in _dw_close:
+                        _entry["close_price"] = _dw_close[_name]
+                    _liq.append(_entry)
         # Seed session highs/lows from completed sessions in combined bars.
         _today = now.date()
         for _sess in ("asia", "london", "ny_morning", "ny_evening"):
@@ -239,12 +453,71 @@ class SessionPipeline:
                 for _suffix, _col in (("high", "High"), ("low", "Low")):
                     _key = f"{_sess}_{_suffix}"
                     _price = float(_sbars[_col].max() if _suffix == "high" else _sbars[_col].min())
+                    _cprice = float(_sbars["Close"].max() if _suffix == "high" else _sbars["Close"].min())
                     _ex = next((l for l in _liq if l["name"] == _key), None)
                     if _ex:
                         _ex["price"] = _price
+                        _ex["close_price"] = _cprice
                     else:
-                        _liq.append({"name": _key, "kind": "level", "price": _price})
+                        _liq.append({"name": _key, "kind": "level", "price": _price, "close_price": _cprice})
+        # SMT-fills universe (B): ALL 1hr FVGs formed during yesterday's CME session,
+        # regardless of later fill. Added with keep:True so the per-bar prune leaves them
+        # as fill targets through the session. MNQ side.
+        _existing_mnq_fvg = {l["name"] for l in _liq}
+        for _yf in _detect_yesterday_session_fvgs(_combined, now):
+            if _yf["name"] not in _existing_mnq_fvg:
+                _liq.append(_yf)
+                _existing_mnq_fvg.add(_yf["name"])
         _state["liquidities"] = _liq
+        save_daily(_state)
+
+        # ── SMT V2: seed parallel MES day/week/session levels + 1hr FVGs ─────────
+        # Mirrors the MNQ seed above against the MES combined frame, writing the
+        # additive `liquidities_mes` block. Never touches the MNQ `liquidities` key.
+        from daily import _detect_fvgs
+        _state = load_daily()
+        _liq_mes = _state.get("liquidities_mes", [])
+        if not _combined_mes.empty:
+            _live_mes = compute_live_hl_mid(_combined_mes, _now_ts)
+            _dw_close_mes = self._seed_close_extremes(_combined_mes, _now_ts)
+            for _name in ("week_high", "week_low", "week_mid", "day_high", "day_low", "day_mid"):
+                if _name in _live_mes:
+                    _ex = next((l for l in _liq_mes if l["name"] == _name), None)
+                    if _ex:
+                        _ex["price"] = _live_mes[_name]
+                        if _name in _dw_close_mes:
+                            _ex["close_price"] = _dw_close_mes[_name]
+                    else:
+                        _entry = {"name": _name, "kind": "level", "price": _live_mes[_name]}
+                        if _name in _dw_close_mes:
+                            _entry["close_price"] = _dw_close_mes[_name]
+                        _liq_mes.append(_entry)
+            for _sess in ("asia", "london", "ny_morning", "ny_evening"):
+                _sbars = _session_bars(_combined_mes, _sess, _today)
+                if not _sbars.empty:
+                    for _suffix, _col in (("high", "High"), ("low", "Low")):
+                        _key = f"{_sess}_{_suffix}"
+                        _price = float(_sbars[_col].max() if _suffix == "high" else _sbars[_col].min())
+                        _cprice = float(_sbars["Close"].max() if _suffix == "high" else _sbars["Close"].min())
+                        _ex = next((l for l in _liq_mes if l["name"] == _key), None)
+                        if _ex:
+                            _ex["price"] = _price
+                            _ex["close_price"] = _cprice
+                        else:
+                            _liq_mes.append({"name": _key, "kind": "level", "price": _price, "close_price": _cprice})
+            # 1hr FVGs from the seeded MES frame (visited check against MES combined 1m).
+            _existing_mes = {l["name"] for l in _liq_mes}
+            for _f in _detect_fvgs(self._fvg_mes_1hr, _combined_mes):
+                if _f["name"] not in _existing_mes:
+                    _liq_mes.append(_f)
+                    _existing_mes.add(_f["name"])
+            # SMT-fills universe (B): yesterday-session 1hr FVGs for MES (keep:True), so
+            # _pair_fvgs finds the same yesterday FVGs on both legs by name.
+            for _yf in _detect_yesterday_session_fvgs(_combined_mes, now):
+                if _yf["name"] not in _existing_mes:
+                    _liq_mes.append(_yf)
+                    _existing_mes.add(_yf["name"])
+        _state["liquidities_mes"] = _liq_mes
         save_daily(_state)
 
         # Write levels.json snapshot for plot_session.py / regression plots. Lands under
@@ -299,6 +572,14 @@ class SessionPipeline:
         self._hyp_formation_price = None
         self._accepted_level_sweeps = set()
         self._swept_levels_since_hyp = set()
+
+        # SMT V2: restore persisted edge/re-arm state + the reference consumer's
+        # retained set (live restart continuity). The in-memory (backtest) store
+        # returns DEFAULT_SMTS on a fresh run, so this is a clean reset there.
+        from smt_detect import PendingSmtWatch as _PendingSmtWatch
+        _smts = _smt_state.load_smts()
+        self._detect_state = _smts.get("detect_state", {}) or {}
+        self._pending_watch = _PendingSmtWatch.from_dict(_smts.get("watch", {}))
 
         # Always run the daily/startup liquidity computation.
         self.on_daily_or_startup(now, today_mnq_at_open)
@@ -382,7 +663,7 @@ class SessionPipeline:
                 and _bar_floor != self._last_daily_minute
                 and now.date() != self._last_daily_date):
             self._last_daily_minute = _bar_floor
-            self.on_daily_or_startup(now, today_mnq)
+            self.on_daily_or_startup(now, today_mnq, today_mes)
 
         _o = float(mnq_bar_row["Open"])
         _h = float(mnq_bar_row["High"])
@@ -784,11 +1065,29 @@ class SessionPipeline:
                                 _smt_state.save_position(_xpos)
                                 _xdecremented = True
 
+        # SMT V2 refinement #2: snapshot daily.json BEFORE the per-bar liquidity update so
+        # the detector evaluates against the PRIOR-bar extremes (a "touch" then means the
+        # wick genuinely EXCEEDED the prior extreme — a real take-out — not merely equalled
+        # the just-updated running extreme, which the leader would trivially touch).
+        _pre_daily = _smt_state.load_daily()
         # Per-bar: update session/day/week H/L and prune visited FVGs.
         self._update_dynamic_liquidities(now, mnq_bar_row, today_mnq)
+        # SMT V2: update the parallel MES liquidities block (additive; never touches MNQ).
+        self._update_mes_liquidities(now, mes_bar_row, today_mes)
 
         _this_5m = now.floor("5min")
         is_5m = (now.minute % 5 == 0) and (_this_5m != self._last_5m_processed)
+
+        # SMT V2: per-1m detection → buffers → cadence-appropriate reference consumer →
+        # drain → persist. Reads daily.json/position.json, writes smts.json. Emits an
+        # smt-div SIGNAL for every newly-found SMT/fill (replaces the hypothesis module's
+        # smt-div emission for logging/plotting; hypothesis still scores SMTs internally).
+        for _sd in self._run_smt_v2_detection(
+            now, mnq_bar_row, mes_bar_row, today_mnq, today_mes, is_5m,
+            pre_daily=_pre_daily,
+        ):
+            self._emit(_sd)
+            events.append(_sd)
 
         if is_5m:
             self._last_5m_processed = _this_5m
@@ -920,38 +1219,104 @@ class SessionPipeline:
         mnq_bar_row: pd.Series,
         today_mnq: pd.DataFrame,
     ) -> list[dict]:
-        """Update session/day/week H/L and FVG state in daily.json on every bar."""
+        """Update MNQ session/day/week H/L and FVG state in daily.json on every bar.
+
+        Thin wrapper over the instrument-generic helper, bound to the MNQ frame, the
+        `liquidities` key, and the MNQ dynamic caches / FVG frames. Behavior is
+        byte-identical to the pre-refactor single-instrument implementation
+        (regression-guarded by test_mnq_liquidities_unchanged_regression).
+        """
+        return self._update_instrument_liquidities(
+            now, mnq_bar_row, today_mnq,
+            hist_1m=self._hist_mnq_1m,
+            liq_key="liquidities",
+            dyn_attrs=("_dyn_hist_tail", "_dyn_day_key", "_dyn_day_hl",
+                       "_dyn_week_key", "_dyn_week_hl", "_dyn_sliver18"),
+            fvg_specs=(("1h", "_fvg_1hr", "_fvg_done_1hr"),
+                       ("4h", "_fvg_4hr", "_fvg_done_4hr")),
+        )
+
+    def _update_mes_liquidities(
+        self,
+        now: pd.Timestamp,
+        mes_bar_row: pd.Series,
+        today_mes: pd.DataFrame,
+    ) -> list[dict]:
+        """SMT V2: MES counterpart of _update_dynamic_liquidities, writing the additive
+        `liquidities_mes` daily.json key. Mirrors the MNQ pass exactly but only the 1hr
+        FVG frame (no 4hr — fill detection only needs 1hr)."""
+        return self._update_instrument_liquidities(
+            now, mes_bar_row, today_mes,
+            hist_1m=self._hist_mes_1m,
+            liq_key="liquidities_mes",
+            dyn_attrs=("_dyn_mes_hist_tail", "_dyn_mes_day_key", "_dyn_mes_day_hl",
+                       "_dyn_mes_week_key", "_dyn_mes_week_hl", "_dyn_mes_sliver18"),
+            fvg_specs=(("1h", "_fvg_mes_1hr", "_fvg_done_mes_1hr"),),
+        )
+
+    def _update_instrument_liquidities(
+        self,
+        now: pd.Timestamp,
+        bar_row: pd.Series,
+        today_df: pd.DataFrame,
+        *,
+        hist_1m: pd.DataFrame,
+        liq_key: str,
+        dyn_attrs: tuple,
+        fvg_specs: tuple,
+    ) -> list[dict]:
+        """Instrument-generic session/day/week H/L + FVG-prune + live-FVG pass.
+
+        `dyn_attrs` = (hist_tail, day_key, day_hl, week_key, week_hl, sliver18) attribute
+        names holding this instrument's per-session caches. `fvg_specs` = the
+        (freq, frame_attr, done_attr) tuples for _extend_instrument_fvg_frames.
+        """
         from daily import _session_bars, TIME_WINDOWS
 
+        _tail_attr, _daykey_attr, _dayhl_attr, _weekkey_attr, _weekhl_attr, _sliver_attr = dyn_attrs
+
         _state = _smt_state.load_daily()
-        _liq = _state.get("liquidities", [])
+        _liq = _state.get(liq_key, [])
         _liq_map = {l["name"]: l for l in _liq}
 
-        _bar_high = float(mnq_bar_row["High"])
-        _bar_low  = float(mnq_bar_row["Low"])
+        _bar_high = float(bar_row["High"])
+        _bar_low  = float(bar_row["Low"])
         _changed: list[str] = []
         _liq_events: list[dict] = []
 
-        # _hist_mnq_1m is constant per session and strictly precedes today_mnq, so cache an
+        # hist_1m is constant per session and strictly precedes today_df, so cache an
         # 8-day tail once (covers the widest lookback: week H/L ≤5d, day H/L to 06:00).
-        if self._dyn_hist_tail is None:
+        if getattr(self, _tail_attr) is None:
             _tail_cut = _cme_session_start(now) - pd.Timedelta(days=8)
-            self._dyn_hist_tail = self._hist_mnq_1m[self._hist_mnq_1m.index >= _tail_cut]
-        _tail = self._dyn_hist_tail
+            setattr(self, _tail_attr, hist_1m[hist_1m.index >= _tail_cut])
+        _tail = getattr(self, _tail_attr)
 
-        # today_mnq rows are all <= now (last is the running partial bar), so its plain
+        today_mnq = today_df
+        # today_df rows are all <= now (last is the running partial bar), so its plain
         # max/min IS the [session_start, now] window extreme — shared by day + week below.
         _th_vals = today_mnq["High"].values
         _tl_vals = today_mnq["Low"].values
         _today_hi = float(_th_vals.max()) if len(_th_vals) else None
         _today_lo = float(_tl_vals.min()) if len(_tl_vals) else None
+        # CLOSE-based extremes over the same today window (body SMT comparison level):
+        # highest Close for *_high, lowest Close for *_low.
+        _tc_vals = today_mnq["Close"].values
+        _today_chi = float(_tc_vals.max()) if len(_tc_vals) else None
+        _today_clo = float(_tc_vals.min()) if len(_tc_vals) else None
 
-        # Helper: update a named level, track change.
-        def _set(name: str, price: float, kind: str = "level") -> None:
+        # Helper: update a named level, track change. `close_price` (optional) is the
+        # CLOSE-based extreme over the same window — stored alongside the wick `price` for
+        # *_high/*_low levels so hidden (body) SMTs compare against the body extreme. It
+        # never affects the `price` (wick) value or the change-detection (which keys on
+        # `price`); it is updated whenever `price` is.
+        def _set(name: str, price: float, kind: str = "level",
+                 close_price: "float | None" = None) -> None:
             if name in _liq_map:
                 if abs(_liq_map[name].get("price", 0) - price) > 1e-9:
                     _old = _liq_map[name].get("price")
                     _liq_map[name]["price"] = price
+                    if close_price is not None:
+                        _liq_map[name]["close_price"] = close_price
                     _changed.append(name)
                     _liq_events.append({
                         "kind": "liquidity-updated",
@@ -960,8 +1325,20 @@ class SessionPipeline:
                         "old_price": _old,
                         "price": price,
                     })
+                elif close_price is not None:
+                    # Wick unchanged but the body extreme may have moved (e.g. a new lowest
+                    # close without a new lowest low) → keep close_price current. No event
+                    # (events key on the wick `price`), but flag _changed so daily.json is
+                    # persisted with the updated body extreme.
+                    _prev_cp = _liq_map[name].get("close_price")
+                    if _prev_cp is None or abs(_prev_cp - close_price) > 1e-9:
+                        _liq_map[name]["close_price"] = close_price
+                        if name not in _changed:
+                            _changed.append(name)
             else:
                 _new_entry = {"name": name, "kind": kind, "price": price}
+                if close_price is not None:
+                    _new_entry["close_price"] = close_price
                 _liq_map[name] = _new_entry
                 _liq.append(_new_entry)
                 _changed.append(name)
@@ -988,40 +1365,50 @@ class SessionPipeline:
                 tz="America/New_York",
             )
             # Constant hist contribution [day_start, session_start) — recompute only when
-            # the (session-stable) day_start changes.
-            if self._dyn_day_key != _day_start_ts:
-                self._dyn_day_key = _day_start_ts
+            # the (session-stable) day_start changes. Cache holds (high, low, close_hi, close_lo).
+            if getattr(self, _daykey_attr) != _day_start_ts:
+                setattr(self, _daykey_attr, _day_start_ts)
                 _dh_hist = _tail[_tail.index >= _day_start_ts]
-                self._dyn_day_hl = (
-                    (float(_dh_hist["High"].values.max()), float(_dh_hist["Low"].values.min()))
-                    if not _dh_hist.empty else (None, None)
-                )
-            _dh = _mmax(self._dyn_day_hl[0], _today_hi)
-            _dl = _mmin(self._dyn_day_hl[1], _today_lo)
+                setattr(self, _dayhl_attr, (
+                    (float(_dh_hist["High"].values.max()), float(_dh_hist["Low"].values.min()),
+                     float(_dh_hist["Close"].values.max()), float(_dh_hist["Close"].values.min()))
+                    if not _dh_hist.empty else (None, None, None, None)
+                ))
+            _day_hl = getattr(self, _dayhl_attr)
+            _dh = _mmax(_day_hl[0], _today_hi)
+            _dl = _mmin(_day_hl[1], _today_lo)
+            _dch = _mmax(_day_hl[2], _today_chi)
+            _dcl = _mmin(_day_hl[3], _today_clo)
         else:
             _dh = _today_hi
             _dl = _today_lo
+            _dch = _today_chi
+            _dcl = _today_clo
         if _dh is not None and _dl is not None:
-            _set("day_high", _dh)
-            _set("day_low",  _dl)
+            _set("day_high", _dh, close_price=_dch)
+            _set("day_low",  _dl, close_price=_dcl)
             _set("day_mid",  (_dh + _dl) / 2.0)
 
         # ── Week H/L ───────────────────────────────────────────────────────────
         # Week may span multiple sessions; the constant hist contribution
         # [week_start, session_start) is computed once and combined with today's extreme.
         _week_start = self._week_start_ts(now)
-        if self._dyn_week_key != _week_start:
-            self._dyn_week_key = _week_start
+        if getattr(self, _weekkey_attr) != _week_start:
+            setattr(self, _weekkey_attr, _week_start)
             _wh_hist = _tail[_tail.index >= _week_start]
-            self._dyn_week_hl = (
-                (float(_wh_hist["High"].values.max()), float(_wh_hist["Low"].values.min()))
-                if not _wh_hist.empty else (None, None)
-            )
-        _wh = _mmax(self._dyn_week_hl[0], _today_hi)
-        _wl = _mmin(self._dyn_week_hl[1], _today_lo)
+            setattr(self, _weekhl_attr, (
+                (float(_wh_hist["High"].values.max()), float(_wh_hist["Low"].values.min()),
+                 float(_wh_hist["Close"].values.max()), float(_wh_hist["Close"].values.min()))
+                if not _wh_hist.empty else (None, None, None, None)
+            ))
+        _week_hl = getattr(self, _weekhl_attr)
+        _wh = _mmax(_week_hl[0], _today_hi)
+        _wl = _mmin(_week_hl[1], _today_lo)
+        _wch = _mmax(_week_hl[2], _today_chi)
+        _wcl = _mmin(_week_hl[3], _today_clo)
         if _wh is not None and _wl is not None:
-            _set("week_high", _wh)
-            _set("week_low",  _wl)
+            _set("week_high", _wh, close_price=_wch)
+            _set("week_low",  _wl, close_price=_wcl)
             _set("week_mid",  (_wh + _wl) / 2.0)
 
         # ── Active session H/L ─────────────────────────────────────────────────
@@ -1051,24 +1438,32 @@ class SessionPipeline:
             # ~5 pre-18:05 hist bars. Feed _session_bars that constant sliver + today_mnq
             # instead of the full combined frame — every active-session window is otherwise
             # contained in today_mnq.
-            if self._dyn_sliver18 is None:
+            if getattr(self, _sliver_attr) is None:
                 _s18 = pd.Timestamp(_cme_session_start(now))
-                self._dyn_sliver18 = _tail[_tail.index >= _s18]
+                setattr(self, _sliver_attr, _tail[_tail.index >= _s18])
+            _sliver18 = getattr(self, _sliver_attr)
             _sess_src = (
-                pd.concat([self._dyn_sliver18, today_mnq])
-                if not self._dyn_sliver18.empty else today_mnq
+                pd.concat([_sliver18, today_mnq])
+                if not _sliver18.empty else today_mnq
             )
             _sbars = _session_bars(_sess_src, _active_sess, _sess_today)
             if not _sbars.empty:
                 _sh = float(_sbars["High"].max())
                 _sl = float(_sbars["Low"].min())
-                _set(f"{_active_sess}_high", _sh)
-                _set(f"{_active_sess}_low", _sl)
+                _sch = float(_sbars["Close"].max())
+                _scl = float(_sbars["Close"].min())
+                _set(f"{_active_sess}_high", _sh, close_price=_sch)
+                _set(f"{_active_sess}_low", _sl, close_price=_scl)
 
         # ── FVG visited prune ──────────────────────────────────────────────────
         _to_remove = []
         for _l in _liq:
             if _l.get("kind") != "fvg":
+                continue
+            # keep:True FVGs (yesterday-session fill universe) survive the visited prune —
+            # they must remain fill targets through the whole session; the fill state
+            # machine handles single-fire + re-arm.
+            if _l.get("keep"):
                 continue
             _ftop = _l.get("top")
             _fbot = _l.get("bottom")
@@ -1099,27 +1494,28 @@ class SessionPipeline:
         # visited could resurrect (that re-scan's visited check only saw today's
         # bars). Now each just-completed TF bar is resampled from live 1m and only
         # the 3-bar windows ending at new bars are tested.
-        for _f in self._extend_fvg_frames(now, today_mnq):
+        for _f in self._extend_instrument_fvg_frames(now, today_mnq, fvg_specs):
             if _f["name"] not in _liq_map:
                 _liq.append(_f)
                 _liq_map[_f["name"]] = _f
                 _changed.append(_f["name"])
 
         if _changed or _to_remove:
-            _state["liquidities"] = list(_liq_map.values())
+            _state[liq_key] = list(_liq_map.values())
             _smt_state.save_daily(_state)
-            # Keep _ext_levels current for the sweep check.
-            self._ext_levels = [
-                (l["name"], float(l["price"]))
-                for l in _state["liquidities"]
-                if l.get("kind") == "level" and l.get("price") is not None
-            ]
+            # Keep _ext_levels current for the sweep check (MNQ levels only — the
+            # cross-instrument sweep logic uses MNQ bars/levels).
+            if liq_key == "liquidities":
+                self._ext_levels = [
+                    (l["name"], float(l["price"]))
+                    for l in _state[liq_key]
+                    if l.get("kind") == "level" and l.get("price") is not None
+                ]
 
         return _liq_events
 
     def _extend_fvg_frames(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> list[dict]:
-        """Append just-completed 1hr/4hr bars (built from live 1m) to the rolling FVG
-        frames and return the FVGs completed by those new bars.
+        """MNQ 1hr/4hr live-FVG pass (thin wrapper over the instrument-generic helper).
 
         Boundary tracking is timestamp-based rather than minute==0, so a missed tick
         or a data gap catches up on every boundary since the last processed one. Only
@@ -1128,13 +1524,22 @@ class SessionPipeline:
         FVG can never resurrect). The visited check inside _detect_fvgs runs against
         today's 1m bars after formation, matching the daily-scan semantics.
         """
+        return self._extend_instrument_fvg_frames(
+            now, today_mnq,
+            (("1h", "_fvg_1hr", "_fvg_done_1hr"),
+             ("4h", "_fvg_4hr", "_fvg_done_4hr")),
+        )
+
+    def _extend_instrument_fvg_frames(
+        self, now: pd.Timestamp, today_mnq: pd.DataFrame, specs: tuple,
+    ) -> list[dict]:
+        """Append just-completed TF bars (built from live 1m) to the rolling FVG frames
+        named in `specs` = ((freq, frame_attr, done_attr), ...) and return the FVGs
+        completed by those new bars. Instrument-agnostic (MNQ or MES)."""
         from daily import _detect_fvgs
 
         out: list[dict] = []
-        for _freq, _frame_attr, _done_attr in (
-            ("1h", "_fvg_1hr", "_fvg_done_1hr"),
-            ("4h", "_fvg_4hr", "_fvg_done_4hr"),
-        ):
+        for _freq, _frame_attr, _done_attr in specs:
             _cur = now.floor(_freq)  # bars labeled >= _cur are still forming
             if getattr(self, _done_attr) == _cur:
                 continue  # fast path: no new boundary completed since the last call
@@ -1176,6 +1581,204 @@ class SessionPipeline:
             out.extend(_detect_fvgs(_frame.tail(len(_new_rows) + 2), today_mnq))
         return out
 
+    # ── SMT V2 detection orchestration ──────────────────────────────────────
+    @staticmethod
+    def _completed_tf_bar(today_df: pd.DataFrame, now: pd.Timestamp, tf: str) -> "dict | None":
+        """Resample today's 1m bars to `tf` and return the just-COMPLETED bar (the one
+        labelled at now.floor(tf) - tf) as an OHLC dict, or None if it does not exist.
+
+        Returns the bar whose window ended exactly at the current TF boundary — only
+        meaningful when `now` sits on that boundary (the caller guards this)."""
+        if today_df is None or today_df.empty:
+            return None
+        _step = pd.Timedelta(tf)
+        _label = now.floor(tf) - _step
+        _lo = today_df.index.searchsorted(_label, side="left")
+        _hi = today_df.index.searchsorted(_label + _step, side="left")
+        _win = today_df.iloc[_lo:_hi]
+        if _win.empty:
+            return None
+        return {
+            "time": _label.isoformat(),
+            "open": float(_win["Open"].iloc[0]),
+            "high": float(_win["High"].values.max()),
+            "low": float(_win["Low"].values.min()),
+            "close": float(_win["Close"].iloc[-1]),
+        }
+
+    def _run_smt_v2_detection(
+        self,
+        now: pd.Timestamp,
+        mnq_bar_row: pd.Series,
+        mes_bar_row: pd.Series,
+        today_mnq: pd.DataFrame,
+        today_mes: pd.DataFrame,
+        is_5m: bool,
+        pre_daily: "dict | None" = None,
+    ) -> list[dict]:
+        """SMT V2: run per-1m detection (regular + fill every bar, hidden at 15m/30m),
+        accumulate into the buffers, run the flat-gated cadence-appropriate reference
+        consumer, drain the accumulator after consumers, and persist to smts.json.
+
+        Returns one `smt-div` signal event per newly-found SMT/fill this bar (for the
+        caller to emit + log), so the new mechanism's SMTs are visible in events.jsonl /
+        the regression plot. Strategy behavior is otherwise unchanged (no consumer acts on
+        these yet). Mutates self._smt_buffer / self._detect_state / self._pending_watch and
+        writes smts.json. Total: never raises on degenerate input.
+        """
+        from smt_detect import (
+            eligible_levels, detect_regular_smts, detect_hidden_smts, detect_fill_smts,
+        )
+
+        # Refinement #2: use the PRE-update daily snapshot captured by the caller (before
+        # _update_dynamic_liquidities ran), so levels AND FVG pairing reflect the prior-bar
+        # state — a one-bar lag that makes a "touch" mean a genuine take-out of the prior
+        # extreme rather than equalling the just-updated running extreme. Fall back to a
+        # fresh load only if no snapshot was passed (defensive; callers always pass it).
+        daily = pre_daily if pre_daily is not None else _smt_state.load_daily()
+        liq_mnq = daily.get("liquidities", []) or []
+        liq_mes = daily.get("liquidities_mes", []) or []
+
+        levels_mnq = eligible_levels(liq_mnq, now)
+        levels_mes = eligible_levels(liq_mes, now)
+
+        # MNQ level-name → price, for the smt-div signal's `mnq_div_price` (drives the
+        # plot label/scope for wick/body SMTs; None for fills, which reference an FVG zone).
+        _mnq_lvl_px = {
+            l["name"]: float(l["price"])
+            for l in liq_mnq
+            if l.get("kind") == "level" and l.get("price") is not None
+        }
+
+        mnq_bar = {
+            "time": now.isoformat(),
+            "high": float(mnq_bar_row["High"]), "low": float(mnq_bar_row["Low"]),
+            "close": float(mnq_bar_row["Close"]),
+        }
+        mes_bar = {
+            "time": now.isoformat(),
+            "high": float(mes_bar_row["High"]), "low": float(mes_bar_row["Low"]),
+            "close": float(mes_bar_row["Close"]),
+        }
+
+        records: list[dict] = []
+        _new, self._detect_state = detect_regular_smts(
+            levels_mnq, levels_mes, mnq_bar, mes_bar, self._detect_state)
+        records += _new
+
+        paired = self._pair_fvgs(liq_mnq, liq_mes)
+        _new, self._detect_state = detect_fill_smts(
+            paired, mnq_bar, mes_bar, self._detect_state)
+        records += _new
+
+        # Hidden (body) SMTs: evaluate the just-completed 1m bar's CLOSE each minute. (15m/30m
+        # fired too late — even 5m can fire early; the 1m close hints a trend change earliest.)
+        for _tf, _tag in (("1min", "1m"),):
+            _floor = now.floor(_tf)
+            if now != _floor:
+                continue  # not on this TF boundary
+            if self._hidden_done.get(_tf) == _floor:
+                continue  # already processed this boundary
+            self._hidden_done[_tf] = _floor
+            _mnq_tf = self._completed_tf_bar(today_mnq, now, _tf)
+            _mes_tf = self._completed_tf_bar(today_mes, now, _tf)
+            if _mnq_tf is None or _mes_tf is None:
+                continue
+            _new, self._detect_state = detect_hidden_smts(
+                levels_mnq, levels_mes, _mnq_tf, _mes_tf, _tag, self._detect_state)
+            records += _new
+
+        # Refinement #1: dedup near-coincident level SMTs (same side, level prices within
+        # DEDUP_TOL_PTS) down to the single highest-scope level. Applied to `records` BEFORE
+        # both buffering and emission so the buffers and emitted smt-div events stay in sync.
+        # Fills are exempt (handled inside _dedup_level_smts).
+        records = _dedup_level_smts(records, _mnq_lvl_px)
+
+        # Map each newly-found record to an smt-div signal event for emission/plotting.
+        # `type` is kept raw (wick / body / fill_a / fill_b) so the hover is precise; the
+        # plot label collapses it to W / H / F. `source:"v2"` marks the new mechanism.
+        sd_events: list[dict] = []
+        for _r in records:
+            sd_events.append({
+                "kind":          "smt-div",
+                "time":          _r["time"],
+                "side":          _r["side"],
+                "type":          _r["type"],
+                # Fills carry a phase (enter|cross|retrace); levels have none.
+                "phase":         _r.get("phase"),
+                "timeframe":     _r["timeframe"],
+                "price":         _r["mnq_price"],
+                # Body SMTs carry their own body-extreme comparison level in the record
+                # (mnq_lvl_price); wick SMTs / fills fall back to the wick level-price map.
+                "mnq_div_price": _r.get("mnq_lvl_price", _mnq_lvl_px.get(_r["ref_name"])),
+                "source":        "v2",
+                "leader":        _r["leader"],
+                "ref_name":      _r["ref_name"],
+            })
+
+        self._smt_buffer.add(records, now)
+
+        # Cadence: 09:30–10:30 ET → per-1m, else 5m boundary.
+        _now_et = now.tz_convert(_ET) if now.tzinfo else now
+        _t = _now_et.time()
+        cadence = "1m" if (datetime.time(9, 30) <= _t <= datetime.time(10, 30)) else "5m"
+
+        # Reference consumer: flat-gated. 1m cadence every bar; 5m cadence on the boundary.
+        _flat = not _smt_state.load_position().get("active")
+        if _flat and (cadence == "1m" or (cadence == "5m" and is_5m)):
+            self._pending_watch.ingest(self._smt_buffer.get_new(cadence))
+        self._pending_watch.update(
+            now, float(mnq_bar_row["Close"]), float(mes_bar_row["Close"]))
+
+        # Drain the 5m accumulator AFTER consumers, at the 5m boundary.
+        if is_5m:
+            self._smt_buffer.drain_if_boundary(now)
+
+        # Persist edge/re-arm state + retained set (live restart continuity).
+        _smt_state.save_smts({
+            "detect_state": self._detect_state,
+            "watch": self._pending_watch.to_dict(),
+        })
+
+        return sd_events
+
+    @staticmethod
+    def _pair_fvgs(liq_mnq: list[dict], liq_mes: list[dict]) -> list[dict]:
+        """Intersect MNQ↔MES 1hr FVGs by formation timestamp+side (the `fvg_<ts>_<side>`
+        name). Returns the paired list consumed by detect_fill_smts."""
+        def _parse(name: str) -> "tuple[str, str] | None":
+            # fvg_{YYYYMMDD_HHMM}_{bull|bear}
+            parts = name.split("_")
+            if len(parts) < 4 or parts[0] != "fvg":
+                return None
+            return (f"{parts[1]}_{parts[2]}", parts[3])
+
+        mnq_map: dict = {}
+        for f in liq_mnq:
+            if f.get("kind") != "fvg":
+                continue
+            k = _parse(f.get("name", ""))
+            if k is not None:
+                mnq_map[k] = f
+        mes_map: dict = {}
+        for f in liq_mes:
+            if f.get("kind") != "fvg":
+                continue
+            k = _parse(f.get("name", ""))
+            if k is not None:
+                mes_map[k] = f
+
+        paired: list[dict] = []
+        for k in sorted(mnq_map.keys() & mes_map.keys()):
+            _ts, _side = k
+            paired.append({
+                "name": f"fvg_{_ts}_{_side}",
+                "side": _side,
+                "mnq": {"top": mnq_map[k]["top"], "bottom": mnq_map[k]["bottom"]},
+                "mes": {"top": mes_map[k]["top"], "bottom": mes_map[k]["bottom"]},
+            })
+        return paired
+
     def _day_start_ts(self, now: pd.Timestamp) -> pd.Timestamp:
         """Return 18:00 ET on the date the current CME futures session opened.
 
@@ -1190,6 +1793,41 @@ class SessionPipeline:
             datetime.datetime(d.year, d.month, d.day, 18, 0),
             tz="America/New_York",
         )
+
+    def _seed_close_extremes(self, combined: pd.DataFrame, now: pd.Timestamp) -> dict:
+        """CLOSE-based day/week extremes for the body-SMT seed.
+
+        Mirrors compute_live_hl_mid's day/week WINDOWS (same lookback by ET hour) but uses
+        Close max/min — no opening-spike outlier skip (the body extreme is a pure close
+        extreme). Returns {day_high, day_low, week_high, week_low} as the highest/lowest
+        Close over each window; keys absent when the window holds no bars. The per-bar
+        dynamic pass overwrites these on the next bar, so this only seeds a sane start."""
+        out: dict = {}
+        if combined is None or combined.empty:
+            return out
+        _today = now.date()
+        # Day window start (same hour rules as compute_live_hl_mid).
+        _day_cal = _today if now.hour >= 18 else _today - datetime.timedelta(days=1)
+        if now.hour >= 18:
+            _day_hr = 6
+        elif now.hour < 6:
+            _day_hr = 12
+        else:
+            _day_hr = 18
+        _day_start = pd.Timestamp(
+            datetime.datetime(_day_cal.year, _day_cal.month, _day_cal.day, _day_hr, 0),
+            tz="America/New_York",
+        )
+        _day_bars = combined[(combined.index >= _day_start) & (combined.index <= now)]
+        if not _day_bars.empty:
+            out["day_high"] = float(_day_bars["Close"].max())
+            out["day_low"] = float(_day_bars["Close"].min())
+        _week_start = self._week_start_ts(now)
+        _week_bars = combined[(combined.index >= _week_start) & (combined.index <= now)]
+        if not _week_bars.empty:
+            out["week_high"] = float(_week_bars["Close"].max())
+            out["week_low"] = float(_week_bars["Close"].min())
+        return out
 
     def _week_start_ts(self, now: pd.Timestamp) -> pd.Timestamp:
         """Return the extended week-H/L start for the CME session containing `now`.
