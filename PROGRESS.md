@@ -1724,3 +1724,17 @@ Secondary: **`min_test_pnl` > 0** (all qualified folds profitable), **Sharpe â�
 
 **Code Review:** `.agents/code-reviews/smt-v2-three-updates.md` (passed, no genuine issues)
 **Acceptance Validation:** `.agents/acceptance-validations/smt-v2-three-updates-validation.md` (11/11 ACCEPTED)
+
+
+
+## Feature: SMT V2 — hypothesis/entry redesign (smt_detect-driven)
+
+### Planning Phase
+**Status**: Planned (split into 3 dependency-ordered phases)
+**Started**: 2026-06-10
+**Plan Files**:
+- `.agents/plans/smt-v2-decouple-active-position.md` — Phase 1: freeze the trade's mgmt direction + cautious ladder into `position["active"]`; re-key `trend.py` off it; remove the automatic direction-mismatch force-close. (Foundational; independently shippable.)
+- `.agents/plans/smt-v2-relevance-filter-core.md` — Phase 2: relevance-filter infrastructure (active-set + scope-ranked-dominant authority + ingest gate pure functions; `smt_detect.fulfillment_status` query API; `divs` schema migration) wired in SHADOW (no behavior change).
+- `.agents/plans/smt-v2-smt-driven-hypothesis.md` — Phase 3 (depends on 1+2): direction = dominant SMT with structural fallback; retire fixed 5m reform → event-driven cadence; detach `failed_entries`/`cautious_dist_shrinks` reset from reforms.
+
+Design decisions captured during brainstorming (scope-ranked dominant SMT; tier ATH≥week>day>1hr-FVG-fill>session, wick>body same-level, recency tiebreak; same-or-higher flips immediately; near-target-OR-high-tier mid-trade gate; SMT-drives-with-structural-fallback).

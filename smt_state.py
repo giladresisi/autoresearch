@@ -146,6 +146,20 @@ DEFAULT_HYPOTHESIS = {
 }
 
 DEFAULT_POSITION = {
+    # ``active`` is the open-trade sub-dict. Empty {} when flat. When a fill creates
+    # it, it carries these keys:
+    #   Pre-existing (entry/exit bookkeeping):
+    #     time, fill_price, direction ("long"/"short" or "up"/"down"), stop,
+    #     contracts, cautious ("no"/"initial"/"secondary"/...), source
+    #     ("strategy"/"manual"), cautious_break_price (set during management).
+    #   FROZEN management snapshot (SMT-v2 Phase 1 — written once at fill by
+    #   freeze_active_mgmt(); immutable for the life of the trade — Contract A):
+    #     mgmt_direction          "up" | "down"  — trade's own management direction
+    #     cautious_initial        float | ""     — frozen initial cautious target price
+    #     cautious_initial_level  str            — frozen initial level tag (e.g. day_high)
+    #     cautious_secondary      float | ""     — frozen secondary cautious target price
+    #     cautious_secondary_level str           — frozen secondary level tag (e.g. week_high)
+    #     backing_tier            "week"|"day"   — tier of the dominant SMT (Phase-1 default)
     "active": {},
     "stop_entry": "",
     "stop_direction": "",
@@ -156,6 +170,36 @@ DEFAULT_POSITION = {
     "cautious_dist_shrinks": 0,
     "session_mid_crosses": 0,
 }
+
+
+def freeze_active_mgmt(active: dict, direction: str, hypothesis: dict) -> None:
+    """Freeze the trade's management direction + cautious ladder into ``active``.
+
+    Called once at every fill site, AFTER that fill's recompute_cautious_for_fill
+    has re-anchored the live hypothesis ladder — so the frozen copy is the
+    fill-anchored ladder (the exact ladder the trade should be managed against).
+    Mutates ``active`` in place. Pure; no I/O; None-tolerant.
+
+    Immutable thereafter: no other code path writes these fields. Clearing
+    ``active`` (on exit/reset) drops them implicitly. SMT-v2 Phase 1, Contract A.
+    """
+    d = "up" if direction == "long" else ("down" if direction == "short" else direction)
+    active["mgmt_direction"]           = d  # "up" | "down"
+    ci   = hypothesis.get("cautious_price_initial", "")
+    ci_l = hypothesis.get("cautious_price_initial_level", "") or ""
+    cs   = hypothesis.get("cautious_price_secondary", "")
+    cs_l = hypothesis.get("cautious_price_secondary_level", "") or ""
+    active["cautious_initial"]         = ci if ci is not None else ""
+    active["cautious_initial_level"]   = ci_l
+    active["cautious_secondary"]       = cs if cs is not None else ""
+    active["cautious_secondary_level"] = cs_l
+    # Phase-1 safe default; Phase 3 refines from the dominant relevant SMT.
+    if cs_l.startswith("week"):
+        active["backing_tier"] = "week"
+    elif cs_l.startswith("day"):
+        active["backing_tier"] = "day"
+    else:
+        active["backing_tier"] = "day"
 
 # ---------------------------------------------------------------------------
 # In-memory mode (used by backtests to skip disk I/O)

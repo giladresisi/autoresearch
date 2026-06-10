@@ -388,44 +388,43 @@ class TestFill:
 
 class TestActivePosition:
 
-    def test_in_position_direction_mismatch_emits_market_close(self):
-        """active.direction=up, hypothesis.direction=down → market-close + direction-mismatch."""
+    def test_in_position_direction_mismatch_preserves_automatic_position(self):
+        """SMT-v2 Phase 1: active.direction=up, hypothesis.direction=down → the automatic
+        direction-mismatch force-close is REMOVED. run_strategy returns None and the
+        position is preserved (trend.py + cautious targets manage the exit)."""
         write_hypothesis(direction="down")
-        write_position(active={
+        active = {
             "time": NOW.isoformat(), "fill_price": 100.0, "direction": "up",
             "stop": 95.0, "contracts": 2, "cautious": "no",
-        })
+        }
+        write_position(active=dict(active))
         bar = make_5m_bar(open_=101.0, high=105.0, low=98.0, close=103.0)
         result = run_strategy(NOW, bar, make_empty_1m_recent())
 
-        assert result is not None
-        assert result["kind"] == "market-close"
-        assert result.get("reason") == "direction-mismatch"
-
+        assert result is None
         pos = smt_state.load_position()
-        assert pos["active"] == {}
-        assert pos["stop_entry"] == ""
+        assert pos["active"] != {}
+        assert pos["active"] == active  # unchanged
 
-    def test_in_position_direction_none_emits_market_close(self):
-        """active.direction=up, hypothesis.direction=none → market-close."""
+    def test_in_position_direction_none_preserves_automatic_position(self):
+        """SMT-v2 Phase 1: active.direction=up, hypothesis.direction=none → no force-close;
+        run_strategy returns None and the automatic position is preserved."""
         write_hypothesis(direction="none")
-        write_position(active={
+        active = {
             "time": NOW.isoformat(), "fill_price": 100.0, "direction": "up",
             "stop": 95.0, "contracts": 2, "cautious": "no",
-        })
+        }
+        write_position(active=dict(active))
         bar = make_5m_bar(open_=101.0, high=105.0, low=98.0, close=103.0)
         result = run_strategy(NOW, bar, make_empty_1m_recent())
 
-        assert result is not None
-        assert result["kind"] == "market-close"
-        assert result.get("reason") == "direction-mismatch"
-
+        assert result is None
         pos = smt_state.load_position()
-        assert pos["active"] == {}
+        assert pos["active"] == active  # unchanged
 
-    def test_in_position_manual_entry_exempt_from_direction_mismatch_close(self):
-        """D7: a manual position (source='manual') is NOT auto-closed on a direction
-        mismatch — discretionary trades are left to the user / their own broker stop."""
+    def test_in_position_manual_entry_preserved(self):
+        """A manual position (source='manual') is preserved on a direction mismatch
+        exactly as before (now redundant with the removed force-close, but kept)."""
         write_hypothesis(direction="down")
         write_position(active={
             "time": NOW.isoformat(), "fill_price": 100.0, "direction": "up",
@@ -439,6 +438,55 @@ class TestActivePosition:
         pos = smt_state.load_position()
         assert pos["active"].get("source") == "manual"
         assert pos["active"].get("direction") == "up"
+
+    def test_fill_freezes_mgmt_fields(self):
+        """SMT-v2 Phase 1 (AC1): a stop-entry fill and a market-entry fill each write the
+        six frozen Contract-A fields into active, with the ladder copied from the
+        (post-recompute) hypothesis ladder."""
+        # --- stop-entry fill ---
+        write_hypothesis(
+            direction="up",
+            cautious_price_initial="160", cautious_price_initial_level="day_high",
+            cautious_price_secondary="200", cautious_price_secondary_level="week_high",
+        )
+        conf = {
+            "time": "2026-04-27T09:55:00-04:00",
+            "high": 105.0, "low": 95.0, "body_high": 103.0, "body_low": 94.0,
+        }
+        write_position(stop_entry=100.0, conf_bar_entry=conf)
+        bar = make_5m_bar(open_=99.0, high=102.0, low=98.0, close=101.0)
+        result = run_strategy(NOW, bar, make_empty_1m_recent())
+        assert result["kind"] == "stop-entry-filled"
+        a = smt_state.load_position()["active"]
+        h = smt_state.load_hypothesis()
+        assert a["mgmt_direction"] == "up"
+        assert a["cautious_initial"] == h["cautious_price_initial"]
+        assert a["cautious_initial_level"] == h["cautious_price_initial_level"]
+        assert a["cautious_secondary"] == h["cautious_price_secondary"]
+        assert a["cautious_secondary_level"] == h["cautious_price_secondary_level"]
+        # backing_tier derives from the (post-recompute) frozen secondary level tag.
+        _exp_tier = "week" if str(a["cautious_secondary_level"]).startswith("week") else "day"
+        assert a["backing_tier"] == _exp_tier
+
+        # --- market-entry fill (long o5-normal path; see TestHeadroomGateMarketEntry) ---
+        write_hypothesis(
+            direction="up",
+            cautious_price_initial="160", cautious_price_initial_level="day_high",
+            cautious_price_secondary="200", cautious_price_secondary_level="week_high",
+        )
+        write_position()
+        write_daily(day_high=200.0, day_low=100.0)
+        bar2 = make_5m_bar(open_=110.0, high=115.0, low=108.0, close=113.0)
+        recent2 = make_opp_1m_recent("up", open_=105.0, close_=95.0, high=107.0, low=93.0)
+        result2 = run_strategy(NOW, bar2, recent2)
+        assert result2["kind"] == "market-entry"
+        a2 = smt_state.load_position()["active"]
+        h2 = smt_state.load_hypothesis()
+        assert a2["mgmt_direction"] == "up"
+        assert a2["cautious_initial"] == h2["cautious_price_initial"]
+        assert a2["cautious_secondary"] == h2["cautious_price_secondary"]
+        assert a2["cautious_secondary_level"] == h2["cautious_price_secondary_level"]
+        assert a2["backing_tier"] in ("week", "day")
 
     def test_in_position_stop_crossed_emits_stopped_out_and_increments_failed(self):
         """LONG: bar.low <= stop → stopped-out, failed_entries incremented."""

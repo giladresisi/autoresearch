@@ -272,16 +272,68 @@ def run_trend(
     )
 
     # ------------------------------------------------------------------
+    # SMT-v2 Phase 1: frozen active-position management snapshot.
+    # When a position is open, Step 3 manages off the FROZEN snapshot captured at
+    # fill (active["mgmt_direction"] + frozen cautious ladder), NOT the live, mutable
+    # hypothesis direction / cautious_price_* fields. This decouples an open trade
+    # from a hypothesis that may flip or go "none" while the trade rides — cautious
+    # targets, not a force-close, decide the exit. Step 4 (flat scan) and the entry
+    # path keep using the live hypothesis direction. (.agents/plans/
+    # smt-v2-decouple-active-position.md)
+    active = position.get("active", {})
+
+    def _norm(d: str) -> str:  # long/short -> up/down; "" -> "none"
+        return "up" if d == "long" else ("down" if d == "short" else (d or "none"))
+
+    if active:
+        # Resolve the frozen snapshot with back-compat fallback for positions written
+        # before this change (lacking the frozen fields): mgmt_direction falls back to
+        # the legacy active["direction"] (normalized), and the ladder falls back to the
+        # live hypothesis cautious fields.
+        mgmt_direction  = active.get("mgmt_direction") or _norm(active.get("direction", ""))
+        f_initial_raw   = active.get("cautious_initial",   hypothesis.get("cautious_price_initial",   ""))
+        f_secondary_raw = active.get("cautious_secondary", hypothesis.get("cautious_price_secondary", ""))
+        f_lv1 = active.get("cautious_initial_level")   or hypothesis.get("cautious_price_initial_level",   "") or ""
+        f_lv2 = active.get("cautious_secondary_level") or hypothesis.get("cautious_price_secondary_level", "") or ""
+        f_cr1 = f"1st-cautious ({f_lv1})" if f_lv1 else "1st-cautious"
+        f_cr2 = f"2nd-cautious ({f_lv2})" if f_lv2 else "2nd-cautious"
+        # active-scoped ATH-secondary off the FROZEN lv2/secondary (mirror L267-272).
+        f_ath_secondary = (
+            f_lv2 in {"day_high", "week_high"}
+            and _session_ath > 0
+            and f_secondary_raw != ""
+            and float(f_secondary_raw) >= _session_ath
+        )
+        # Mid-cross guards re-derived from mgmt_direction so they stay meaningful after a
+        # flip (the live hypothesis daily_mid/weekly_mid side reference is still used; if
+        # absent, default to applying the cross check — matching today when frozen==live).
+        f_mid_cross_guard = (
+            (mgmt_direction == "up"   and _hyp_daily_mid in ("above", "mid")) or
+            (mgmt_direction == "down" and _hyp_daily_mid in ("below", "mid"))
+        )
+        f_weekly_mid_cross_guard = (
+            (mgmt_direction == "up"   and _hyp_weekly_mid in ("above", "mid")) or
+            (mgmt_direction == "down" and _hyp_weekly_mid in ("below", "mid"))
+        )
+
+    # ------------------------------------------------------------------
     # Step 2: early exit when no active direction.
     # ------------------------------------------------------------------
-    if direction == "none":
+    # When a position is open it is managed off the frozen mgmt_direction (never
+    # "none" for a real fill), so a "none" live hypothesis must NOT short-circuit
+    # Step-3 management. Only return early when flat.
+    if direction == "none" and not active:
         return None
 
     # Global trend invalidation: when confidence=high, cancel any hypothesis opposing global_trend.
     # Skipped while the manual direction lock is set (GIL-8) — the user forced this direction.
+    # SMT-v2 Phase 1: also skipped while a position is open ("and not active") — this is a
+    # hypothesis-level reset for the FLAT state; an open trade is managed by the frozen
+    # snapshot + cautious exit, and the live hypothesis is free to reform on the next flat bar.
     _global_state = load_global()
     _global_trend = _global_state.get("trend", "up")
-    if _global_state.get("confidence") == "high" and direction != _global_trend and not _manual_lock:
+    if (_global_state.get("confidence") == "high" and direction != _global_trend
+            and not _manual_lock and not active):
         hypothesis["direction"] = "none"
         position["conf_bar_entry"] = {}
         position["conf_bar_exit"]  = {}
@@ -304,22 +356,36 @@ def run_trend(
     bar_mid   = (bar_high + bar_low) / 2.0
     bar_time_str = str(mnq_1m_bar.get("time", now.isoformat()))
 
-    active = position.get("active", {})
-
     # ------------------------------------------------------------------
     # Step 3: position is open.
     # ------------------------------------------------------------------
+    # `active` and the frozen-snapshot resolver (mgmt_direction, f_initial_raw,
+    # f_secondary_raw, f_lv1, f_lv2, f_cr1, f_cr2, f_ath_secondary, f_*mid_cross_guard)
+    # were computed above (before the Step-2 gates). Everything below keys off the
+    # FROZEN snapshot, NOT the live hypothesis. When frozen == live the management is
+    # byte-equivalent to the pre-change behavior.
     if active:
         # Skip mid-minute bars (1s live/backtest): arm and break checks are
         # once-per-minute events; firing every second produces spurious exits.
         if pd.Timestamp(now).second != 0:
             return None
 
+        # Re-key Step 3 to the frozen snapshot: shadow the live symbols so the
+        # closures and break-checks below all manage off the frozen direction/ladder.
+        direction               = mgmt_direction
+        _lv1                    = f_lv1
+        _lv2                    = f_lv2
+        _cr1                    = f_cr1
+        _cr2                    = f_cr2
+        _ath_secondary          = f_ath_secondary
+        _mid_cross_guard        = f_mid_cross_guard
+        _weekly_mid_cross_guard = f_weekly_mid_cross_guard
+
         cautious_state = active.get("cautious", "no")
         _fill_price    = float(active.get("fill_price") or 0) or None
 
-        cautious_initial   = float(cautious_initial_raw)   if cautious_initial_raw   != "" else None
-        cautious_secondary = float(cautious_secondary_raw) if cautious_secondary_raw != "" else None
+        cautious_initial   = float(f_initial_raw)   if f_initial_raw   != "" else None
+        cautious_secondary = float(f_secondary_raw) if f_secondary_raw != "" else None
 
         def _surpassed(price: float) -> bool:
             return (bar_high >= price) if direction == "up" else (bar_low <= price)
