@@ -1854,3 +1854,138 @@ def test_on_1m_bar_events_only_adds_v2_smt_div(_isolate_state, monkeypatch):
     # No raw smt/fill record leaks into the emitted/returned stream.
     assert all(e.get("kind") not in ("smt", "fill") for e in emitted)
     assert all(e.get("kind") not in ("smt", "fill") for e in events)
+
+
+# ===========================================================================
+# Yesterday-session 1hr FVG fill universe (Theme A)
+# ===========================================================================
+
+def _hist_with_yesterday_bull_fvg(base: float = 21000.0):
+    """1m hist bars (one per hour) spanning the yesterday-session window for a
+    session opening 2025-11-13 18:00 ET (yesterday = 2025-11-12 18:00 → 2025-11-13
+    17:00). Engineered so the 3-bar 1hr window ending at 2025-11-13 01:00 forms a
+    BULLISH FVG (bar3.Low > bar1.High), and that gap is LATER re-entered (filled) — so
+    a plain unvisited scan would drop it, but the yesterday-session universe keeps it.
+    """
+    rows = {}
+    # Hourly anchor bars across the window; default flat band well below the gap.
+    cur = pd.Timestamp("2025-11-12 18:00", tz="America/New_York")
+    end = pd.Timestamp("2025-11-13 17:00", tz="America/New_York")
+    while cur <= end:
+        rows[cur] = (base, base + 2.0, base - 2.0, base + 1.0)
+        cur += pd.Timedelta(hours=1)
+    # Craft the 3-bar bull FVG ending at 01:00 (bars at 23:00, 00:00, 01:00):
+    #   bar1 (23:00) High = base+5 ; bar3 (01:00) Low = base+20 > base+5 → bull gap.
+    b1 = pd.Timestamp("2025-11-12 23:00", tz="America/New_York")
+    b3 = pd.Timestamp("2025-11-13 01:00", tz="America/New_York")
+    rows[b1] = (base, base + 5.0, base - 2.0, base + 1.0)
+    rows[b3] = (base + 25.0, base + 30.0, base + 20.0, base + 25.0)
+    # Re-enter (fill) the gap later in the window so an unvisited scan would EXCLUDE it.
+    fill_ts = pd.Timestamp("2025-11-13 10:00", tz="America/New_York")
+    rows[fill_ts] = (base + 10.0, base + 12.0, base + 8.0, base + 11.0)
+    idx = pd.DatetimeIndex(sorted(rows))
+    data = [rows[t] for t in idx]
+    return pd.DataFrame(
+        {"Open": [d[0] for d in data], "High": [d[1] for d in data],
+         "Low": [d[2] for d in data], "Close": [d[3] for d in data],
+         "Volume": [100] * len(data)},
+        index=idx,
+    )
+
+
+def test_detect_yesterday_session_fvgs_unit():
+    """The helper detects a yesterday-session 1hr FVG even when it was later filled, and
+    flags it keep:True. FVGs whose formation falls OUTSIDE the window are excluded."""
+    from session_pipeline import _detect_yesterday_session_fvgs
+    hist = _hist_with_yesterday_bull_fvg()
+    now = pd.Timestamp("2025-11-13 18:00", tz="America/New_York")
+    fvgs = _detect_yesterday_session_fvgs(hist, now)
+    names = {f["name"] for f in fvgs}
+    assert "fvg_20251113_0100_bull" in names, names
+    assert all(f.get("keep") is True for f in fvgs)
+    assert all(f.get("kind") == "fvg" for f in fvgs)
+    target = next(f for f in fvgs if f["name"] == "fvg_20251113_0100_bull")
+    assert target["bottom"] == 21005.0 and target["top"] == 21020.0
+
+
+def _seed_pipeline_with_yesterday_fvgs(monkeypatch):
+    """SessionPipeline seeded (real on_daily_or_startup, no stub) from MNQ+MES hist both
+    carrying the engineered yesterday-session bull FVG, opening 2025-11-13 18:00 ET."""
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: [])
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+    hist_mnq = _hist_with_yesterday_bull_fvg(base=21000.0)
+    hist_mes = _hist_with_yesterday_bull_fvg(base=3000.0)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    pipeline.on_session_start(
+        pd.Timestamp("2025-11-13 18:00", tz="America/New_York"),
+        _make_1m_bars("2025-11-13 18:00", n=1), force_reset=True)
+    return pipeline
+
+
+def test_yesterday_session_fvgs_seeded_into_both_blocks(_isolate_state, monkeypatch):
+    """on_daily_or_startup adds the (filled) yesterday-session 1hr FVG to BOTH liquidities
+    and liquidities_mes, keep-flagged, so _pair_fvgs can pair them by name."""
+    _seed_pipeline_with_yesterday_fvgs(monkeypatch)
+    daily = smt_state.load_daily()
+    for key, scale in (("liquidities", 21005.0), ("liquidities_mes", 3005.0)):
+        keep = [l for l in daily[key]
+                if l.get("kind") == "fvg" and l.get("keep")
+                and l["name"] == "fvg_20251113_0100_bull"]
+        assert keep, f"{key} missing keep-flagged yesterday FVG: {daily[key]}"
+        assert abs(keep[0]["bottom"] - scale) < 1e-6
+    # Both blocks share the FVG name → it pairs.
+    paired = SessionPipeline._pair_fvgs(daily["liquidities"], daily["liquidities_mes"])
+    assert any(p["name"] == "fvg_20251113_0100_bull" for p in paired)
+
+
+def test_keep_flagged_yesterday_fvg_survives_prune(_isolate_state, monkeypatch):
+    """A bar that straddles a keep-flagged yesterday FVG zone does NOT prune it (it must
+    remain a fill target all session), whereas a non-keep FVG in the same zone is pruned."""
+    pipeline = _seed_pipeline_with_yesterday_fvgs(monkeypatch)
+    # Inject a non-keep FVG covering the same zone to prove the prune still works for it.
+    daily = smt_state.load_daily()
+    daily["liquidities"].append(
+        {"name": "fvg_20251112_2300_bull", "kind": "fvg", "top": 21020.0, "bottom": 21005.0})
+    smt_state.save_daily(daily)
+
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 18:00", n=1)
+    # A bar straddling [21005, 21020] (High 21030 / Low 21000) re-enters the gap.
+    now = pd.Timestamp("2025-11-13 18:01", tz="America/New_York")
+    pipeline.on_1m_bar(now, _bar(21010.0, high_off=20.0, low_off=10.0), _bar(3010.0),
+                       today_mnq, today_mes)
+    names = {l["name"] for l in smt_state.load_daily()["liquidities"]
+             if l.get("kind") == "fvg"}
+    assert "fvg_20251113_0100_bull" in names, "keep-flagged FVG must survive the prune"
+    assert "fvg_20251112_2300_bull" not in names, "non-keep FVG should be pruned when visited"
+
+
+def test_fill_fires_against_yesterday_session_fvg(_isolate_state, monkeypatch):
+    """End-to-end: with the paired yesterday-session FVG present in both blocks, a bar
+    where MNQ enters the FVG but MES does not yields a fill_a smt-div from the pipeline."""
+    pipeline = _seed_pipeline_with_yesterday_fvgs(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)  # keep the seeded FVGs static
+
+    emitted: list = []
+    monkeypatch.setattr(pipeline, "_emit", emitted.append)
+
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 18:00", n=1)
+    now = pd.Timestamp("2025-11-13 18:01", tz="America/New_York")
+    # Bull FVG zone: MNQ [21005,21020], MES [3005,3020]. A bull FVG is filled by a retrace
+    # DOWN. MNQ low dips into its zone (Low 21006 <= top 21020 → entered); MES stays ABOVE
+    # its zone (Low 3030 > top 3020 → NOT entered) → leader=mnq fill_a.
+    mnq_row = pd.Series({"Open": 21010.0, "High": 21015.0, "Low": 21006.0, "Close": 21010.0})
+    mes_row = pd.Series({"Open": 3040.0, "High": 3045.0, "Low": 3030.0, "Close": 3040.0})
+    events = pipeline.on_1m_bar(now, mnq_row, mes_row, today_mnq, today_mes)
+
+    fills = [e for e in events if e.get("kind") == "smt-div"
+             and e.get("type") in ("fill_a", "fill_b")]
+    assert fills, f"expected a fill against the yesterday FVG; got {events}"
+    f = fills[0]
+    assert f["ref_name"] == "fvg_20251113_0100_bull"
+    assert f["leader"] == "mnq"
+    assert f["price"] is not None  # plot y-coordinate must be set
+    assert emitted == events

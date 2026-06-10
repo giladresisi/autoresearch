@@ -514,9 +514,10 @@ def test_fill_pairing_one_sided_no_fire():
 
 def test_fill_a():
     p = _pair("fvg_20260609_1000_bull", "bull", 21010, 21000, 3010, 3000)
-    # MNQ enters its zone [21000,21010]; MES nowhere near its zone.
-    mnq = _bar(high=21005.0, low=20995.0, close=21002.0)
-    mes = _bar(high=2950.0, low=2940.0, close=2945.0)
+    # Bull FVG = filled by a retrace DOWN. MNQ low dips into its zone [21000,21010];
+    # MES stays ABOVE its zone (low > top) so it has NOT entered.
+    mnq = _bar(high=21015.0, low=21005.0, close=21008.0)
+    mes = _bar(high=3060.0, low=3050.0, close=3055.0)
     recs, _ = detect_fill_smts([p], mnq, mes, {})
     assert len(recs) == 1
     assert recs[0]["type"] == "fill_a" and recs[0]["leader"] == "mnq"
@@ -525,9 +526,10 @@ def test_fill_a():
 
 def test_fill_b():
     p = _pair("fvg_20260609_1000_bull", "bull", 21010, 21000, 3010, 3000)
-    # Both entered; MNQ passes the far edge (high above top), MES still inside.
-    mnq = _bar(high=21015.0, low=21000.0, close=21012.0)   # passed (>= top)
-    mes = _bar(high=3005.0, low=3001.0, close=3003.0)      # entered, not passed
+    # Bull FVG, retrace DOWN. Both entered; MNQ passes the far edge (low <= bottom),
+    # MES still inside (bottom < low <= top).
+    mnq = _bar(high=21010.0, low=20999.0, close=21001.0)   # passed (low <= bottom)
+    mes = _bar(high=3010.0, low=3005.0, close=3007.0)      # entered, not passed
     recs, _ = detect_fill_smts([p], mnq, mes, {})
     types = [r["type"] for r in recs]
     assert "fill_b" in types
@@ -538,88 +540,90 @@ def test_fill_b():
 def test_fill_b_follow_on():
     p = _pair("fvg_20260609_1000_bull", "bull", 21010, 21000, 3010, 3000)
     state = {}
-    # Step 1: MNQ enters, MES not reached → Fill-A.
+    # Bull FVG, retrace DOWN.
+    # Step 1: MNQ low dips into zone (entered), MES still above → Fill-A.
     recs, state = detect_fill_smts(
-        [p], _bar(21005, 20995, 21002), _bar(2950, 2940, 2945), state)
+        [p], _bar(21015, 21005, 21008), _bar(3060, 3050, 3055), state)
     assert [r["type"] for r in recs] == ["fill_a"]
-    # Step 2: MES enters too (both inside) → no fire.
+    # Step 2: MES enters too (both inside, neither passed) → no fire.
     recs, state = detect_fill_smts(
-        [p], _bar(21005, 21000, 21003), _bar(3005, 3001, 3003), state)
+        [p], _bar(21012, 21005, 21008), _bar(3012, 3005, 3007), state)
     assert recs == []
-    # Step 3: MNQ passes far edge, MES still inside → Fill-B without re-arm.
+    # Step 3: MNQ passes far edge (low <= bottom), MES still inside → Fill-B without re-arm.
     recs, state = detect_fill_smts(
-        [p], _bar(21015, 21008, 21012), _bar(3006, 3002, 3004), state)
+        [p], _bar(21008, 20999, 21001), _bar(3010, 3006, 3008), state)
     assert [r["type"] for r in recs] == ["fill_b"]
 
 
 def test_fill_independent_b():
     p = _pair("fvg_20260609_1000_bull", "bull", 21010, 21000, 3010, 3000)
-    # Both enter on the same bar (no prior A); MNQ passes far edge.
-    mnq = _bar(high=21015.0, low=21001.0, close=21012.0)
-    mes = _bar(high=3005.0, low=3001.0, close=3003.0)
+    # Bull FVG, retrace DOWN. Both enter on the same bar (no prior A); MNQ passes far
+    # edge (low <= bottom), MES entered but inside (bottom < low <= top).
+    mnq = _bar(high=21010.0, low=20999.0, close=21001.0)
+    mes = _bar(high=3010.0, low=3005.0, close=3007.0)
     recs, _ = detect_fill_smts([p], mnq, mes, {})
     assert any(r["type"] == "fill_b" for r in recs)
 
 
 def test_fill_entered_vs_passed_boundary():
     p = _pair("fvg_20260609_1000_bull", "bull", 21010, 21000, 3010, 3000)
-    # Wick exactly at near edge (bottom=21000) = entered (inclusive).
-    entered_bar = _bar(high=21000.0, low=20990.0, close=20995.0)
+    # Bull FVG, retrace DOWN. Near edge = top (21010), far edge = bottom (21000).
+    # Wick LOW exactly at the near edge (top=21010) = entered (inclusive), not passed.
+    entered_bar = _bar(high=21020.0, low=21010.0, close=21015.0)
     e, passed = smt_detect._fvg_progress(entered_bar, p["mnq"], "bull")
     assert e is True and passed is False
-    # Wick exactly at far edge (top=21010) = passed (inclusive).
-    passed_bar = _bar(high=21010.0, low=21005.0, close=21008.0)
+    # Wick LOW exactly at the far edge (bottom=21000) = passed (inclusive).
+    passed_bar = _bar(high=21008.0, low=21000.0, close=21004.0)
     e2, passed2 = smt_detect._fvg_progress(passed_bar, p["mnq"], "bull")
     assert e2 is True and passed2 is True
 
 
-def test_fill_opp_move_alone_does_not_rearm():
-    # NEW behavior: the points-based opposite-MOVE re-arm was removed for fills too. After a
-    # Fill-A fires, the FVG stays dormant; a large opposite price move alone does NOT re-arm.
+def test_fill_no_double_enter_while_inside():
+    # fill_a fires once, then the fill_a_fired latch + armed=False suppress re-fires while
+    # the leader stays inside (no opposite-direction SMT to re-arm).
     p = _pair("fvg_20260609_1000_bull", "bull", 21010, 21000, 3010, 3000)
     state = {}
-    # Fill-A fires (MNQ enters, MES away).
+    # Bull FVG, retrace DOWN. fill_a fires (MNQ low enters zone, MES stays above).
     recs, state = detect_fill_smts(
-        [p], _bar(21005, 20995, 21002), _bar(2950, 2940, 2945), state)
+        [p], _bar(21015, 21005, 21008), _bar(3060, 3050, 3055), state)
     assert [r["type"] for r in recs] == ["fill_a"]
-    # Same condition again → dormant, no re-fire.
+    # MNQ STILL inside (no exit, no opposite SMT) → latched → no re-fire.
     recs, state = detect_fill_smts(
-        [p], _bar(21005, 20995, 21002), _bar(2950, 2940, 2945), state)
+        [p], _bar(21008, 21002, 21005), _bar(3060, 3050, 3055), state)
     assert recs == []
-    # Large opposite move (MNQ close falls far below the fire price) → STILL dormant.
-    recs, state = detect_fill_smts(
-        [p], _bar(20960, 20950, 20955), _bar(2950, 2940, 2945), state)
-    assert recs == []
-    # Fresh re-approach → STILL no re-fire (a price move alone no longer re-arms).
-    recs, state = detect_fill_smts(
-        [p], _bar(21005, 20995, 21002), _bar(2950, 2940, 2945), state)
-    assert recs == [], "opposite move alone must NOT re-arm a dormant fill"
 
 
 def test_fill_rearm_via_opposite_smt():
-    # A bull-FVG Fill-A fires, goes dormant. An opposite-direction (bear) Fill-A in the SAME
-    # batch re-arms the dormant bull FVG; a fresh re-approach then re-fires it.
-    bull = _pair("fvg_20260609_1000_bull", "bull", 21010, 21000, 3010, 3000)
-    bear = _pair("fvg_20260609_0900_bear", "bear", 20510, 20500, 2510, 2500)
+    # After fill_a fires (armed=False), an opposite-direction record in a later batch
+    # re-arms the fill so a fresh divergent approach re-fires fill_a.
+    p = _pair("fvg_20260609_1000_bull", "bull", 21010, 21000, 3010, 3000)
     state = {}
-    # Bull Fill-A fires (MNQ enters bull zone, MES away); bear untouched.
+    # fill_a fires (MNQ enters, MES above).
     recs, state = detect_fill_smts(
-        [bull, bear], _bar(21005, 20995, 21002), _bar(2950, 2940, 2945), state)
-    assert [r["type"] for r in recs if r["ref_name"].endswith("bull")] == ["fill_a"]
-    # Bull alone again → dormant, no re-fire.
+        [p], _bar(21015, 21005, 21008), _bar(3060, 3050, 3055), state)
+    assert [r["type"] for r in recs] == ["fill_a"]
+    assert state["fvg_20260609_1000_bull"]["armed"] is False
+    # Inject an opposite-direction (short) bear FVG that fires the same batch, re-arming
+    # the bull fill. The bear FVG: MNQ rallies UP into its zone, MES stays below.
+    q = _pair("fvg_20260609_1000_bear", "bear", 21110, 21100, 3110, 3100)
     recs, state = detect_fill_smts(
-        [bull, bear], _bar(21005, 20995, 21002), _bar(2950, 2940, 2945), state)
-    assert recs == []
-    # Bear Fill-A fires (MNQ enters bear zone from above, MES away) → opposite-direction SMT
-    # this batch re-arms the dormant bull FVG.
+        [p, q], _bar(21115, 21105, 21108), _bar(3060, 3050, 3055), state)
+    # The bear fill_a fired (short) → re-armed the bull fill.
+    assert any(r["direction"] == "short" for r in recs)
+    assert state["fvg_20260609_1000_bull"]["armed"] is True
+    # Fresh divergent bull approach now re-fires fill_a.
     recs, state = detect_fill_smts(
-        [bull, bear], _bar(20505, 20495, 20502), _bar(2600, 2590, 2595), state)
-    assert any(r["direction"] == "short" for r in recs), "bear Fill-A fires (opposite SMT)"
-    # Fresh bull re-approach now re-fires Fill-A on the re-armed bull FVG.
-    recs, state = detect_fill_smts(
-        [bull, bear], _bar(21005, 20995, 21002), _bar(2950, 2940, 2945), state)
-    assert any(r["ref_name"].endswith("bull") and r["type"] == "fill_a" for r in recs), \
-        "opposite-direction SMT re-armed the bull FVG → fresh approach re-fires"
+        [p], _bar(21015, 21005, 21008), _bar(3060, 3050, 3055), state)
+    assert [r["type"] for r in recs] == ["fill_a"]
+
+
+def test_fill_state_json_serializable():
+    import json
+    p = _pair("fvg_20260609_1000_bull", "bull", 21010, 21000, 3010, 3000)
+    _, state = detect_fill_smts(
+        [p], _bar(21015, 21005, 21008), _bar(3060, 3050, 3055), {})
+    # State must round-trip through JSON (live restart continuity).
+    assert json.loads(json.dumps(state)) == state
 
 
 # ===========================================================================

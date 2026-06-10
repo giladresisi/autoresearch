@@ -15,6 +15,7 @@ Output: sessions/{date}/chart_{HH-MM}.html (timestamped at time of request)
 
 import datetime
 import json
+import os
 import sys
 import webbrowser
 from pathlib import Path
@@ -370,6 +371,7 @@ def _div_scope(e: dict) -> "str | None":
 
 def _div_label(e: dict) -> str:
     tf   = e.get("timeframe", "?")
+    # wick->W, body->H, all fill_* (fill_a/fill_b/fill_retrace)->F (first-char fallback).
     typ  = {"wick": "W", "body": "H", "fill": "F"}.get(e.get("type", ""), e.get("type", "?")[:1].upper())
     side = "↑" if e.get("side") == "bullish" else "↓"
     scope = _div_scope(e)
@@ -383,6 +385,8 @@ def _div_hover(e: dict) -> str:
         f"side: {e.get('side')}",
         f"time: {e['ts'].strftime('%H:%M:%S')}",
     ]
+    if e.get("phase"):
+        parts.append(f"phase: {e.get('phase')}")
     scope = _div_scope(e)
     if scope:
         parts.append(f"level: {scope}")
@@ -618,4 +622,7 @@ SESSION_DIR.mkdir(parents=True, exist_ok=True)
 out = SESSION_DIR / f"chart_{_REQUEST_TIME}.html"
 fig.write_html(str(out), include_plotlyjs="cdn")
 print(f"Chart: {out.resolve()}")
-webbrowser.open(out.resolve().as_uri())
+# ACT_NO_BROWSER=1 suppresses the auto-open (used by the test suite so running tests
+# never launches a real browser). Interactive use leaves it unset → chart opens as usual.
+if not os.environ.get("ACT_NO_BROWSER"):
+    webbrowser.open(out.resolve().as_uri())

@@ -389,26 +389,23 @@ def detect_hidden_smts(
 def _fvg_progress(bar: dict, zone: dict, side: str = "bull") -> tuple[bool, bool]:
     """(entered, passed) for a bar's wick against an FVG zone [bottom, top].
 
-    Side-aware: a bullish FVG is approached from BELOW (near edge = bottom, far edge =
-    top); a bearish FVG from ABOVE (near edge = top, far edge = bottom).
-
-    entered = wick reaches into the zone (crosses the NEAR edge, not the far). Inclusive
-              at the near edge. For a bull zone the bar's high reaches the bottom; for a
-              bear zone the bar's low reaches the top.
-    passed  = wick crosses fully through the FAR edge (inclusive). Bull → high ≥ top;
-              bear → low ≤ bottom.
-    A bar entirely on the approach side (e.g. a bull bar well below the zone) is neither
-    entered nor passed.
+    An FVG is FILLED by a retracement back into the gap:
+      - a BULLISH FVG sits BELOW price and is filled by a move DOWN into it (near edge =
+        top, far edge = bottom): entered = low <= top, passed = low <= bottom.
+      - a BEARISH FVG sits ABOVE price and is filled by a move UP into it (near edge =
+        bottom, far edge = top): entered = high >= bottom, passed = high >= top.
+    entered = wick reaches the NEAR edge (inclusive); passed = wick crosses the FAR edge.
+    A bar entirely on the approach side (e.g. a bull bar still above the zone) is neither.
     """
     top = float(zone["top"])
     bottom = float(zone["bottom"])
     hi = float(bar["high"])
     lo = float(bar["low"])
-    if side == "bear":
-        entered = lo <= top          # reached down into the zone from above
+    if side == "bull":
+        entered = lo <= top          # retraced DOWN to the near (top) edge
         passed = lo <= bottom        # crossed below the far (bottom) edge
-    else:  # bull (default)
-        entered = hi >= bottom       # reached up into the zone from below
+    else:  # bear
+        entered = hi >= bottom       # rallied UP to the near (bottom) edge
         passed = hi >= top           # crossed above the far (top) edge
     # `passed` implies `entered` (you cannot cross the far edge without entering).
     entered = entered or passed

@@ -125,6 +125,76 @@ def _mmin(a: "float | None", b: "float | None") -> "float | None":
     return a if a <= b else b
 
 
+def _detect_yesterday_session_fvgs(
+    combined_1m: pd.DataFrame, now: pd.Timestamp,
+) -> list[dict]:
+    """ALL 1hr FVGs (3-bar imbalance) formed during YESTERDAY's CME session — regardless
+    of whether they were later filled. Used as an additive fill universe so SMT-fills can
+    fire against the prior session's FVGs through the current session.
+
+    "Yesterday's session" = the CME session immediately before the current one. The
+    current session opened at cme_session_start(now) (18:00 ET); yesterday's session ran
+    from 24h before that (prior 18:00 ET) to 1h before it (17:00 ET on the current
+    session-open day), matching the 18:00→17:00 ET CME session span.
+
+    Returns entries shaped like daily._detect_fvgs output (name/kind/top/bottom) plus a
+    `keep: True` flag so the per-bar visited-prune leaves them in place (the fill state
+    machine handles single-fire + re-arm). FVG formation timestamp (the 3rd/completing
+    1hr bar) must fall inside the yesterday-session window. No unvisited filter is applied.
+    """
+    if combined_1m is None or combined_1m.empty:
+        return []
+    _sess_open = pd.Timestamp(_cme_session_start(now))
+    _y_start = _sess_open - pd.Timedelta(hours=24)  # prior day 18:00 ET
+    _y_end = _sess_open - pd.Timedelta(hours=1)      # current session-open day 17:00 ET
+
+    _agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    # Resample over a window padded 2h on the left so an FVG whose 3rd bar lands at
+    # _y_start still has its first two bars available.
+    _src = combined_1m[
+        (combined_1m.index >= _y_start - pd.Timedelta(hours=2))
+        & (combined_1m.index < _y_end + pd.Timedelta(hours=1))
+    ]
+    if _src.empty:
+        return []
+    _hourly = _src.resample("1h", label="left").agg(_agg).dropna(subset=["Open"])
+    if len(_hourly) < 3:
+        return []
+
+    highs = _hourly["High"].values
+    lows = _hourly["Low"].values
+    idx = _hourly.index
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for i in range(len(_hourly) - 2):
+        bar1_h, bar1_l = highs[i], lows[i]
+        bar3_h, bar3_l = highs[i + 2], lows[i + 2]
+        if bar3_l > bar1_h:
+            top, bottom, side = float(bar3_l), float(bar1_h), "bull"
+        elif bar3_h < bar1_l:
+            top, bottom, side = float(bar1_l), float(bar3_h), "bear"
+        else:
+            continue
+        formation_ts = idx[i + 2]
+        # Formation (completing 3rd bar) must fall in the yesterday-session window.
+        if not (_y_start <= formation_ts <= _y_end):
+            continue
+        ts_str = formation_ts.strftime("%Y%m%d_%H%M")
+        name = f"fvg_{ts_str}_{side}"
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append({
+            "name": name,
+            "kind": "fvg",
+            "top": top,
+            "bottom": bottom,
+            "keep": True,
+        })
+    return out
+
+
 class SessionPipeline:
     """Dispatches daily → trend → hypothesis → strategy for one trading session.
 
@@ -390,6 +460,14 @@ class SessionPipeline:
                         _ex["close_price"] = _cprice
                     else:
                         _liq.append({"name": _key, "kind": "level", "price": _price, "close_price": _cprice})
+        # SMT-fills universe (B): ALL 1hr FVGs formed during yesterday's CME session,
+        # regardless of later fill. Added with keep:True so the per-bar prune leaves them
+        # as fill targets through the session. MNQ side.
+        _existing_mnq_fvg = {l["name"] for l in _liq}
+        for _yf in _detect_yesterday_session_fvgs(_combined, now):
+            if _yf["name"] not in _existing_mnq_fvg:
+                _liq.append(_yf)
+                _existing_mnq_fvg.add(_yf["name"])
         _state["liquidities"] = _liq
         save_daily(_state)
 
@@ -433,6 +511,12 @@ class SessionPipeline:
                 if _f["name"] not in _existing_mes:
                     _liq_mes.append(_f)
                     _existing_mes.add(_f["name"])
+            # SMT-fills universe (B): yesterday-session 1hr FVGs for MES (keep:True), so
+            # _pair_fvgs finds the same yesterday FVGs on both legs by name.
+            for _yf in _detect_yesterday_session_fvgs(_combined_mes, now):
+                if _yf["name"] not in _existing_mes:
+                    _liq_mes.append(_yf)
+                    _existing_mes.add(_yf["name"])
         _state["liquidities_mes"] = _liq_mes
         save_daily(_state)
 
@@ -1376,6 +1460,11 @@ class SessionPipeline:
         for _l in _liq:
             if _l.get("kind") != "fvg":
                 continue
+            # keep:True FVGs (yesterday-session fill universe) survive the visited prune —
+            # they must remain fill targets through the whole session; the fill state
+            # machine handles single-fire + re-arm.
+            if _l.get("keep"):
+                continue
             _ftop = _l.get("top")
             _fbot = _l.get("bottom")
             if _ftop is None or _fbot is None:
@@ -1615,6 +1704,8 @@ class SessionPipeline:
                 "time":          _r["time"],
                 "side":          _r["side"],
                 "type":          _r["type"],
+                # Fills carry a phase (enter|cross|retrace); levels have none.
+                "phase":         _r.get("phase"),
                 "timeframe":     _r["timeframe"],
                 "price":         _r["mnq_price"],
                 # Body SMTs carry their own body-extreme comparison level in the record
