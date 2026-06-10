@@ -453,46 +453,165 @@ def _gapfill_1m_from_session_1s(
     return combined, f"ok: appended {len(df_1m)} 1m bars from {len(all_1s)} 1s bars"
 
 
+def _seam_ok(prev_last: pd.Timestamp, new_first: pd.Timestamp) -> bool:
+    """Validate the join between the trusted body's last bar and the tail's first bar.
+
+    WHY: incremental validation trusts the already-validated body and only checks the
+    appended tail; the seam is the one point where a bad append could silently splice
+    onto good data. Reject overlaps/duplicates (a re-append, not an append); accept a
+    contiguous step (<=90s, the validate_session_df gap threshold); otherwise defer to
+    _is_expected_closed so weekend/maintenance closures are not flagged as holes.
+    """
+    if new_first <= prev_last:          # overlap / duplicate — not append-only
+        return False
+    if (new_first - prev_last) <= pd.Timedelta("90s"):
+        return True                     # contiguous
+    return _is_expected_closed(prev_last, new_first)
+
+
 def check_1m_parquet(inst: str, main_1m_name: str, session_1s_glob: str,
-                     dry_run: bool) -> dict:
+                     dry_run: bool, *, force_full_validate: bool = False,
+                     since: str | None = None) -> dict:
     """Validate the main 1m parquet; repair from backup + 1s resample if corrupt.
+
+    HEALTHY path is incremental: after a one-time full validation seeds a watermark
+    (sidecar .validation_state.json), subsequent runs validate only the bars appended
+    since the watermark plus the concatenation seam, then advance the watermark. A
+    body-integrity guard forces a full re-scan whenever the append-only assumption
+    breaks (rewrite / truncation / interior insert) so correctness is never traded for
+    speed. The corrupt/repair path is unchanged.
 
     When healthy, writes a fresh .bak so the next repair has a post-session snapshot.
     Returns a result dict included in the JSON report under 'instruments_1m'.
     """
+    from scripts.parquet_tail import (
+        bar_at_position, index_bounds, read_after, row_count,
+    )
+    from scripts.parquet_validation_state import (
+        get_watermark, load_state, needs_full_validation, set_watermark,
+    )
+
     main_path = DATA_DIR / main_1m_name
     price_lo, price_hi = PRICE_BOUNDS[inst]
+    state_path = DATA_DIR / ".validation_state.json"
 
     result: dict = {
         "action": "ok",
         "repair_success": None,
         "backup_written": False,
         "validation": None,
+        "validation_scope": None,
+        "validated_through": None,
     }
 
-    # ── Try to read the parquet ───────────────────────────────────────────────
-    df = None
+    # ── Try to read the parquet (probe readability; full read only on full path) ──
     try:
-        df = pd.read_parquet(main_path)
+        pd.read_parquet(main_path, columns=[])
+        readable = True
     except Exception as exc:
+        readable = False
         result["validation"] = {"severity": "critical", "readable": False, "error": str(exc)}
 
-    if df is not None:
-        # Only check for non-positive closes — price bounds span years of history and
-        # would flag valid older bars as bad (e.g. MNQ <20k in early 2024).
-        bad = df[df["Close"] <= 0]
+    if readable:
+        state = load_state(state_path)
+        entry = get_watermark(state, main_1m_name)
+        # Cheap metadata probe — no full materialization of the (~860k-row) body.
+        first, last = index_bounds(main_path)
+        n = row_count(main_path)
+
+        # WHY decide full-vs-incremental up front: a valid watermark + intact body
+        # lets us skip re-reading the trusted body and only validate the new tail.
+        # Any break in the append-only assumption (or an explicit force) takes full.
+        full, reason = needs_full_validation(
+            entry, first_bar=first.isoformat() if first else None, row_count=n
+        )
+        if force_full_validate:
+            full, reason = True, "forced-full"
+
+        if not full:
+            # WHY the body-integrity guard: needs_full_validation already checked
+            # first_bar + row_count, but an interior insert can keep first_bar and grow
+            # the count while shifting every body row. Verifying that the bar at the
+            # watermark's positional index still equals validated_through catches that
+            # last failure mode; on mismatch we fall back to a full re-scan.
+            pos = entry["validated_rows"] - 1
+            bar = bar_at_position(main_path, pos)
+            if bar is None or bar != pd.Timestamp(entry["validated_through"]):
+                full, reason = True, "body-rewritten"
+
+        if full:
+            return _full_validate_1m(
+                result, main_path, main_1m_name, state_path,
+                first, last, n, reason, dry_run,
+            )
+
+        # ── Incremental path: validate only the appended tail + the seam ──────────
+        wm_ts = pd.Timestamp(since) if since else pd.Timestamp(entry["validated_through"])
+        prev_last = pd.Timestamp(entry["validated_through"])
+        tail = read_after(main_path, wm_ts)
+
+        if tail.empty:
+            # Nothing new since the watermark — already-trusted body stands.
+            result["validation"] = {
+                "severity": "ok", "readable": True, "rows": n,
+                "first": first.isoformat() if first else None,
+                "last": last.isoformat() if last else None,
+                "bad_rows": 0,
+            }
+            result["validation_scope"] = "incremental"
+            result["validated_through"] = entry["validated_through"]
+            result["tail_rows"] = 0
+            return result
+
+        # Validate the tail with the canonical validator (price/OHLC/gap severity) and
+        # apply the Close<=0 check for parity with the full path.
+        v = validate_session_df(tail, price_lo, price_hi)
+        bad = tail[tail["Close"] <= 0]
+        severity = v["severity"]
+        if not bad.empty and severity == "ok":
+            severity = "minor"
+
+        # Seam check against the trusted body's last bar.
+        if not _seam_ok(prev_last, tail.index[0]):
+            is_overlap = tail.index[0] <= prev_last
+            result["seam_issue"] = {
+                "prev_last": prev_last.isoformat(),
+                "new_first": tail.index[0].isoformat(),
+                "detail": "overlap/duplicate" if is_overlap
+                          else "unexpected gap at seam",
+            }
+            if is_overlap:
+                # An overlap is deduped downstream (keep="last") — minor is enough.
+                if severity == "ok":
+                    severity = "minor"
+            else:
+                # A real missing-bars hole at the seam: escalate to major so the
+                # advance-gate below does NOT move the watermark past an unfilled hole.
+                if severity in ("ok", "minor"):
+                    severity = "major"
+
         result["validation"] = {
-            "severity": "ok" if bad.empty else "minor",
-            "readable": True,
-            "rows": len(df),
-            "first": df.index[0].isoformat() if not df.empty else None,
-            "last":  df.index[-1].isoformat() if not df.empty else None,
-            "bad_rows": len(bad),
+            "severity": severity, "readable": True, "rows": n,
+            "first": first.isoformat() if first else None,
+            "last": last.isoformat() if last else None,
+            # Close<=0 rows are a subset of validate_session_df's bad set, so v["bad_rows"]
+            # already counts them — no separate addition needed.
+            "bad_rows": v["bad_rows"],
         }
-        # Healthy: refresh the .bak for future repairs
-        if not dry_run and not df.empty:
+        result["validation_scope"] = "incremental"
+        result["validated_through"] = last.isoformat() if last else None
+        result["tail_rows"] = len(tail)
+
+        # Advance the watermark + refresh .bak only when the tail is clean enough.
+        if severity in ("ok", "minor") and not dry_run and last is not None:
             backup_main(main_path)
             result["backup_written"] = True
+            set_watermark(
+                state_path, main_1m_name,
+                validated_through=last.isoformat(),
+                validated_rows=n,
+                first_bar=first.isoformat() if first else "",
+            )
         return result
 
     # ── Corrupt — attempt repair ──────────────────────────────────────────────
@@ -532,8 +651,53 @@ def check_1m_parquet(inst: str, main_1m_name: str, session_1s_glob: str,
     result["repair_success"] = True
     result["backup_written"] = True
     result["repaired_rows"] = len(filled_df)
+    # Re-seed the watermark from the repaired body so the next run trusts it from a
+    # correct baseline (read fresh bounds/count off the just-written file).
+    r_first, r_last = index_bounds(main_path)
+    r_n = row_count(main_path)
+    if r_first is not None and r_last is not None:
+        set_watermark(
+            state_path, main_1m_name,
+            validated_through=r_last.isoformat(),
+            validated_rows=r_n,
+            first_bar=r_first.isoformat(),
+        )
     print(f"[check] {inst} 1m repaired: {status}", file=sys.stderr)
 
+    return result
+
+
+def _full_validate_1m(result: dict, main_path: Path, main_1m_name: str,
+                      state_path: Path, first, last, n: int, reason: str,
+                      dry_run: bool) -> dict:
+    """Full validation path: read the whole body, Close<=0 scan, refresh .bak, seed
+    the watermark. This is today's healthy-path behavior plus the watermark seed."""
+    df = pd.read_parquet(main_path)
+    # Only check for non-positive closes — price bounds span years of history and
+    # would flag valid older bars as bad (e.g. MNQ <20k in early 2024).
+    bad = df[df["Close"] <= 0]
+    result["validation"] = {
+        "severity": "ok" if bad.empty else "minor",
+        "readable": True,
+        "rows": len(df),
+        "first": df.index[0].isoformat() if not df.empty else None,
+        "last":  df.index[-1].isoformat() if not df.empty else None,
+        "bad_rows": len(bad),
+    }
+    result["validation_scope"] = "full"
+    result["full_reason"] = reason
+    result["validated_through"] = last.isoformat() if last else None
+    # Healthy: refresh the .bak for future repairs + seed/advance the watermark.
+    if not dry_run and not df.empty:
+        from scripts.parquet_validation_state import set_watermark
+        backup_main(main_path)
+        result["backup_written"] = True
+        set_watermark(
+            state_path, main_1m_name,
+            validated_through=last.isoformat() if last else df.index[-1].isoformat(),
+            validated_rows=n,
+            first_bar=first.isoformat() if first else df.index[0].isoformat(),
+        )
     return result
 
 
@@ -637,6 +801,16 @@ def main():
         action="store_true",
         help="Validate only; no IB calls, no disk writes",
     )
+    parser.add_argument(
+        "--full-validate",
+        action="store_true",
+        help="Force a full 1m re-scan (ignore the incremental watermark)",
+    )
+    parser.add_argument(
+        "--since",
+        default=None,
+        help="Re-scan the 1m tail from this ISO timestamp (overrides the watermark)",
+    )
     args = parser.parse_args()
 
     report = {
@@ -727,7 +901,10 @@ def main():
 
         report["instruments_1m"] = {}
         for inst, main_1m_name, session_1s_glob in INSTRUMENTS_1M:
-            result_1m = check_1m_parquet(inst, main_1m_name, session_1s_glob, args.dry_run)
+            result_1m = check_1m_parquet(
+                inst, main_1m_name, session_1s_glob, args.dry_run,
+                force_full_validate=args.full_validate, since=args.since,
+            )
             report["instruments_1m"][inst] = result_1m
             if result_1m.get("repair_success") is False:
                 exit_code = max(exit_code, 2)

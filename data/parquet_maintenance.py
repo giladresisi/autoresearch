@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -266,6 +267,34 @@ def _fetch_gap_chunked(
     return df, True
 
 
+def _warn_on_seam(prev_last: pd.Timestamp, new_first: pd.Timestamp, label: str = "") -> None:
+    """Surface 1s concat-seam anomalies at the join point (stderr WARN only; merge behavior unchanged).
+
+    Why: the merge dedups/concats blindly, so an overlap (new data starting at/before the
+    existing tail) or an unexpected weekday hole at the seam is silently swallowed. This emits
+    a diagnostic WARN at the concat point so concatenation anomalies are observable, while the
+    dedup/concat itself stays exactly as-is. Production-silent on clean, contiguous seams.
+    """
+    inst = f" {label}" if label else ""
+    if new_first <= prev_last:
+        # Overlap / duplicate timestamps — dedup downstream keeps "last", but flag it.
+        print(
+            f"[merge_session_1s] WARN: seam overlap{inst} prev_last={prev_last} new_first={new_first}",
+            file=sys.stderr,
+        )
+        return
+    gap = new_first - prev_last
+    if gap > pd.Timedelta("90s"):
+        # Lazy import to avoid any import-cycle risk with scripts.check_session_parquets.
+        from scripts.check_session_parquets import _is_expected_closed
+        if not _is_expected_closed(prev_last, new_first):
+            print(
+                f"[merge_session_1s] WARN: unexpected seam gap{inst} prev_last={prev_last} "
+                f"new_first={new_first} gap={gap}",
+                file=sys.stderr,
+            )
+
+
 def merge_session_1s_parquets(bar_data_dir: Path) -> None:
     """Merge session 1s parquets into main parquets, filling the gap via IB.
 
@@ -345,6 +374,11 @@ def merge_session_1s_parquets(bar_data_dir: Path) -> None:
                             ).sort_index()
                             existing = existing[~existing.index.duplicated(keep="last")]
                             print(f"[merge_session_1s] {instrument}: +{len(gap_df)} gap bars", flush=True)
+
+                # Surface concat-seam anomalies (overlap / unexpected weekday hole) at the
+                # join point. Diagnostic only — the dedup/concat behavior below is unchanged.
+                if not existing.empty and not session_df.empty:
+                    _warn_on_seam(existing.index[-1], session_df.index[0], instrument)
 
                 existing = pd.concat([existing, session_df]).sort_index()
                 existing = existing[~existing.index.duplicated(keep="last")]

@@ -864,3 +864,246 @@ class TestPromoteLiveToMain:
         assert result == {"MES_1m.parquet": "ok"}
         assert (paths.general_main_dir() / "MES_1m.parquet").exists()
         assert not (paths.general_main_dir() / "MNQ_1m.parquet").exists()
+
+
+# ---------------------------------------------------------------------------
+# TestCheck1mIncremental
+# ---------------------------------------------------------------------------
+
+def _make_1m_df(start, n, *, price=27000.0, step_min=1):
+    """Build an n-row 1m OHLCV frame starting at `start` (NY tz)."""
+    base = pd.Timestamp(start, tz="America/New_York")
+    idx = pd.DatetimeIndex([base + pd.Timedelta(minutes=step_min * i) for i in range(n)])
+    return pd.DataFrame({
+        "Open": price, "High": price + 5, "Low": price - 5,
+        "Close": price, "Volume": 100.0,
+    }, index=idx)
+
+
+def _write_1m(bar_dir, df, inst="MNQ"):
+    """Write a 1m main parquet for `inst` into bar_dir; return its path."""
+    path = bar_dir / f"{inst}_1m.parquet"
+    df.to_parquet(path, use_dictionary=False)
+    return path
+
+
+def _append_1m(bar_dir, tail_df, inst="MNQ"):
+    """Append tail_df to the existing 1m main parquet (concat + rewrite)."""
+    path = bar_dir / f"{inst}_1m.parquet"
+    existing = pd.read_parquet(path)
+    combined = pd.concat([existing, tail_df])
+    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    combined.to_parquet(path, use_dictionary=False)
+    return path
+
+
+def _run_check_1m(bar_dir, inst="MNQ", dry_run=False, **kwargs):
+    from scripts.check_session_parquets import check_1m_parquet
+    with patch("scripts.check_session_parquets.DATA_DIR", bar_dir):
+        return check_1m_parquet(
+            inst, f"{inst}_1m.parquet", f"{inst}_1s_session_*.parquet",
+            dry_run, **kwargs,
+        )
+
+
+class TestCheck1mIncremental:
+    def test_first_run_no_watermark_full_then_seeds(self, bar_dir):
+        df = _make_1m_df("2026-05-18 18:00:00", 30)
+        _write_1m(bar_dir, df)
+
+        result = _run_check_1m(bar_dir)
+
+        assert result["validation_scope"] == "full"
+        assert result["full_reason"] == "no-watermark"
+        sidecar = bar_dir / ".validation_state.json"
+        assert sidecar.exists()
+        state = json.loads(sidecar.read_text())
+        assert state["MNQ_1m.parquet"]["validated_through"] == df.index[-1].isoformat()
+
+    def test_second_run_clean_tail_incremental(self, bar_dir):
+        df = _make_1m_df("2026-05-18 18:00:00", 30)
+        _write_1m(bar_dir, df)
+        _run_check_1m(bar_dir)  # seed
+
+        tail = _make_1m_df("2026-05-18 18:30:00", 10)  # contiguous after bar 29 (18:29)
+        _append_1m(bar_dir, tail)
+
+        result = _run_check_1m(bar_dir)
+
+        assert result["validation_scope"] == "incremental"
+        assert result["tail_rows"] > 0
+        assert result["validation"]["severity"] == "ok"
+        state = json.loads((bar_dir / ".validation_state.json").read_text())
+        assert state["MNQ_1m.parquet"]["validated_through"] == tail.index[-1].isoformat()
+
+    def test_incremental_empty_tail_ok(self, bar_dir):
+        df = _make_1m_df("2026-05-18 18:00:00", 30)
+        _write_1m(bar_dir, df)
+        _run_check_1m(bar_dir)  # seed
+        before = json.loads((bar_dir / ".validation_state.json").read_text())
+
+        result = _run_check_1m(bar_dir)  # no new bars
+
+        assert result["validation_scope"] == "incremental"
+        assert result["validation"]["severity"] == "ok"
+        assert result["tail_rows"] == 0
+        after = json.loads((bar_dir / ".validation_state.json").read_text())
+        assert after == before  # watermark unchanged
+
+    def test_incremental_bad_price_in_tail_surfaced(self, bar_dir):
+        df = _make_1m_df("2026-05-18 18:00:00", 30)
+        _write_1m(bar_dir, df)
+        _run_check_1m(bar_dir)  # seed
+
+        tail = _make_1m_df("2026-05-18 18:30:00", 5)
+        tail.iloc[2, tail.columns.get_loc("Close")] = 0.0  # Close<=0 in tail
+        _append_1m(bar_dir, tail)
+
+        result = _run_check_1m(bar_dir)
+
+        assert result["validation_scope"] == "incremental"
+        assert result["validation"]["severity"] in ("minor", "major", "critical")
+        assert result["validation"]["severity"] != "ok"
+
+    def test_seam_overlap_flagged(self, bar_dir):
+        df = _make_1m_df("2026-05-18 18:00:00", 30)
+        _write_1m(bar_dir, df)
+        _run_check_1m(bar_dir)  # seed; watermark = 18:29
+
+        # Craft a tail whose first ts <= watermark by re-running with --since earlier,
+        # forcing read_after to include a bar at/just before the watermark.
+        tail = _make_1m_df("2026-05-18 18:30:00", 5)
+        _append_1m(bar_dir, tail)
+
+        # since=18:28 -> read_after returns bar 18:29 (== prev_last) -> overlap seam.
+        result = _run_check_1m(bar_dir, since="2026-05-18 18:28:00")
+
+        assert result.get("seam_issue") is not None
+        assert result["validation"]["severity"] != "ok"
+
+    def test_seam_unexpected_gap_flagged(self, bar_dir):
+        df = _make_1m_df("2026-05-18 18:00:00", 30)
+        _write_1m(bar_dir, df)
+        _run_check_1m(bar_dir)  # seed; watermark = 18:29 (Monday)
+
+        # Append a tail 2 hours later same weekday -> unexpected weekday hole at seam.
+        tail = _make_1m_df("2026-05-18 20:30:00", 5)
+        _append_1m(bar_dir, tail)
+
+        result = _run_check_1m(bar_dir)
+
+        assert result.get("seam_issue") is not None
+        # A real missing-bars hole at the seam escalates to major so the watermark
+        # is NOT advanced past the unfilled gap.
+        assert result["validation"]["severity"] == "major"
+
+    def test_seam_weekend_gap_ok(self, bar_dir):
+        # Seed at a Friday close bar (2026-05-22 is a Friday). The seam's prev_last
+        # must be >= 17:00 ET for _is_expected_closed's Friday-close branch.
+        df = _make_1m_df("2026-05-22 16:56:00", 5)  # ends 17:00 Fri
+        _write_1m(bar_dir, df)
+        _run_check_1m(bar_dir)  # seed
+
+        # Sunday reopen (2026-05-24 is a Sunday) at 18:00 -> expected weekend closure.
+        tail = _make_1m_df("2026-05-24 18:00:00", 5)
+        _append_1m(bar_dir, tail)
+
+        result = _run_check_1m(bar_dir)
+
+        assert result["validation_scope"] == "incremental"
+        assert result.get("seam_issue") is None
+        assert result["validation"]["severity"] == "ok"
+
+    def test_rewritten_body_falls_back_to_full(self, bar_dir):
+        df = _make_1m_df("2026-05-18 18:00:00", 30)
+        _write_1m(bar_dir, df)
+        _run_check_1m(bar_dir)  # seed
+
+        # Rewrite the body so the first bar moves earlier (body-rewritten) and count grows.
+        new_df = _make_1m_df("2026-05-18 17:00:00", 90)
+        _write_1m(bar_dir, new_df)
+
+        result = _run_check_1m(bar_dir)
+
+        assert result["validation_scope"] == "full"
+        assert result["full_reason"] in ("body-rewritten", "truncation")
+
+    def test_interior_insert_falls_back_to_full(self, bar_dir):
+        # first_bar unchanged + row_count grows, so needs_full_validation() alone would
+        # NOT catch it — only the positional body-integrity guard (bar_at_position) does.
+        df = _make_1m_df("2026-05-18 18:00:00", 30)
+        _write_1m(bar_dir, df)
+        _run_check_1m(bar_dir)  # seed; validated_through = 18:29, rows = 30
+
+        # Insert an interior bar (same first bar, count -> 31). The bar at position 29
+        # is now 18:28, no longer the watermark's 18:29 -> positional guard trips.
+        interior = pd.DataFrame(
+            {"Open": 27000.0, "High": 27005.0, "Low": 26995.0, "Close": 27000.0, "Volume": 100.0},
+            index=pd.DatetimeIndex([pd.Timestamp("2026-05-18 18:14:30", tz="America/New_York")]),
+        )
+        new_df = pd.concat([df, interior]).sort_index()
+        _write_1m(bar_dir, new_df)
+
+        result = _run_check_1m(bar_dir)
+
+        assert result["validation_scope"] == "full"
+        assert result["full_reason"] == "body-rewritten"
+
+    def test_full_validate_flag_forces_full(self, bar_dir):
+        df = _make_1m_df("2026-05-18 18:00:00", 30)
+        _write_1m(bar_dir, df)
+        _run_check_1m(bar_dir)  # seed valid watermark
+
+        result = _run_check_1m(bar_dir, force_full_validate=True)
+
+        assert result["validation_scope"] == "full"
+        assert result["full_reason"] == "forced-full"
+
+    def test_dry_run_no_sidecar_write(self, bar_dir):
+        df = _make_1m_df("2026-05-18 18:00:00", 30)
+        _write_1m(bar_dir, df)
+
+        result = _run_check_1m(bar_dir, dry_run=True)
+
+        assert not (bar_dir / ".validation_state.json").exists()
+        assert result["validation_scope"] == "full"
+
+    def test_repair_sets_watermark(self, bar_dir):
+        from scripts.check_session_parquets import check_1m_parquet
+
+        # Valid backup alongside the (about-to-be-corrupt) main 1m.
+        backup_df = _make_1m_df("2026-05-19 18:00:00", 10)
+        backup_df.to_parquet(bar_dir / "MNQ_1m.parquet.bak", use_dictionary=False)
+
+        # 1s session file with bars after the backup's last bar, so resample succeeds.
+        sess_base = pd.Timestamp("2026-05-19 18:10:00", tz="America/New_York")
+        sess_idx = pd.DatetimeIndex([sess_base + pd.Timedelta(seconds=i) for i in range(180)])
+        sess_df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=sess_idx)
+        sess_df.to_parquet(bar_dir / "MNQ_1s_session_20260519.parquet", use_dictionary=False)
+
+        # Corrupt the main 1m with garbage bytes.
+        (bar_dir / "MNQ_1m.parquet").write_bytes(b"not a parquet file")
+
+        with patch("scripts.check_session_parquets.DATA_DIR", bar_dir):
+            result = check_1m_parquet(
+                "MNQ", "MNQ_1m.parquet", "MNQ_1s_session_*.parquet", False,
+            )
+
+        assert result["repair_success"] is True
+        sidecar = bar_dir / ".validation_state.json"
+        assert sidecar.exists()
+        repaired = pd.read_parquet(bar_dir / "MNQ_1m.parquet")
+        state = json.loads(sidecar.read_text())
+        assert state["MNQ_1m.parquet"]["validated_through"] == repaired.index[-1].isoformat()
+
+    def test_report_has_scope_fields(self, bar_dir):
+        df = _make_1m_df("2026-05-18 18:00:00", 30)
+        _write_1m(bar_dir, df)
+
+        result = _run_check_1m(bar_dir)
+
+        assert "validation_scope" in result
+        assert "validated_through" in result

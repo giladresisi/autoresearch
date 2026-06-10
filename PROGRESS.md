@@ -1,6 +1,24 @@
 ﻿# PROGRESS
 
 
+## Feature: Incremental parquet validation (GIL-15)
+### Status: ✅ Complete (unstaged)
+**Started**: 2026-06-09
+**Plan File**: `.agents/plans/incremental-parquet-validation.md`
+**Linear**: GIL-15
+
+Watermark-gated incremental 1m parquet validation (sidecar `.validation_state.json`), body-integrity guard forcing full re-scan on rewrite/truncation/interior-insert, tail+seam validation, 1s merge seam WARN, and SKILL.md update. 6/6 tasks across 3 waves; 34 new tests; 1151 passed / 23 pre-existing failures / 0 new. Code review APPROVE (3 non-blocking findings applied: seam-gap→major, bad_rows simplification, interior-insert test); acceptance ACCEPTED 21/21.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/incremental-parquet-validation.md`
+- 6/6 tasks completed across 3 waves; 33 new tests (33/33 passing); 0 regressions
+- One divergence (good): `--since` implemented + exercised by the seam-overlap test, beyond the planned minimal support
+- Coverage gaps: Level 4 dry-run smoke deferred (live IB Gateway active); 3 pre-existing `TestProcessInstrumentSessionEnd` failures in a touched file remain (stale, out of scope, non-blocking)
+- Alignment score: 10/10
+
+---
+
 ## Feature: Gate chop-zone market entries (o5-fallback + STP→MKT) into the mid/equilibrium zone
 ### Planning Phase
 **Status**: ✅ Implemented (unstaged; merge gated on broader backtest + user approval)
