@@ -98,6 +98,11 @@ liquidities = levels_data.get("liquidities", [])
 ath = levels_data.get("all_time_high")
 
 named = {l["name"]: l["price"] for l in liquidities if l.get("kind") == "level" and "price" in l}
+# Universe (B) prev-day/prev-week fixed levels: merge so the line-drawer renders them
+# (grey-dot fallback style, window-clipped) and SMT marks land on their level.
+for l in levels_data.get("liquidities_universe", []):
+    if l.get("kind") == "level" and "price" in l:
+        named.setdefault(l["name"], l["price"])
 if ath is not None:
     named["ATH"] = ath
 

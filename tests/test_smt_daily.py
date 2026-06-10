@@ -23,7 +23,7 @@ from smt_state import (
     save_position,
 )
 
-from daily import run_daily_fixed
+from daily import run_daily_fixed, compute_universe_levels
 
 
 # ---------------------------------------------------------------------------
@@ -838,3 +838,59 @@ class TestPrevDayHighLowCMESessionBoundary:
         assert liq["prev1_day_high"] == pytest.approx(21250.0), (
             f"Expected 21250 (Thu eve = part of Fri CME session), got {liq['prev1_day_high']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: compute_universe_levels (prev-day 14td + prev-week 2w fixed levels)
+# ---------------------------------------------------------------------------
+class TestUniverseLevels:
+    """compute_universe_levels builds prev-day/prev-week extremes as FIXED SMT levels."""
+
+    def test_prev_day_extremes_and_close_price(self):
+        # today = Monday 2026-04-27. prev1 = Fri 04-24 (window Thu 18:00 → Fri 17:00),
+        # prev2 = Thu 04-23.
+        fri = make_bars("2026-04-24 09:00:00", periods=480, freq="1min",
+                        base_price=20900.0, high_offset=7.0, low_offset=3.0)  # H 20907 L 20897 C 20901
+        thu = make_bars("2026-04-23 09:00:00", periods=480, freq="1min",
+                        base_price=20800.0, high_offset=4.0, low_offset=6.0)  # H 20804 L 20794 C 20801
+        hist = pd.concat([thu, fri]).sort_index()
+        levels = {e["name"]: e for e in compute_universe_levels(hist, datetime.date(2026, 4, 27))}
+
+        assert levels["prev1_day_high"]["price"] == pytest.approx(20907.0)
+        assert levels["prev1_day_low"]["price"] == pytest.approx(20897.0)
+        # Body extreme = Close max/min (here Close is flat at base+1).
+        assert levels["prev1_day_high"]["close_price"] == pytest.approx(20901.0)
+        assert levels["prev1_day_low"]["close_price"] == pytest.approx(20901.0)
+        assert levels["prev2_day_high"]["price"] == pytest.approx(20804.0)
+        assert levels["prev2_day_low"]["price"] == pytest.approx(20794.0)
+        # Every entry is a FIXED level kind.
+        assert all(e["kind"] == "level" for e in levels.values())
+
+    def test_prev_week_extremes(self):
+        # today = Monday 2026-04-27 → prev1 week = Mon 04-20 .. Fri 04-24. Thu/Fri bars
+        # fall in that week, so prev1_week_high = max(Thu,Fri highs).
+        fri = make_bars("2026-04-24 09:00:00", periods=480, freq="1min",
+                        base_price=20900.0, high_offset=7.0)   # H 20907
+        thu = make_bars("2026-04-23 09:00:00", periods=480, freq="1min",
+                        base_price=20800.0, high_offset=4.0)   # H 20804
+        # prev2 week = Mon 04-13 .. Fri 04-17.
+        wk2 = make_bars("2026-04-14 09:00:00", periods=480, freq="1min",
+                        base_price=20500.0, high_offset=9.0, low_offset=9.0)  # H 20509 L 20491
+        hist = pd.concat([wk2, thu, fri]).sort_index()
+        levels = {e["name"]: e for e in compute_universe_levels(hist, datetime.date(2026, 4, 27))}
+
+        assert levels["prev1_week_high"]["price"] == pytest.approx(20907.0)
+        assert levels["prev2_week_high"]["price"] == pytest.approx(20509.0)
+        assert levels["prev2_week_low"]["price"] == pytest.approx(20491.0)
+
+    def test_empty_windows_skipped(self):
+        # Only one prior trading day of data → prev2.. days and weeks with no bars are
+        # skipped (no error, partial universe).
+        fri = make_bars("2026-04-24 09:00:00", periods=60, freq="1min", base_price=20900.0)
+        names = {e["name"] for e in compute_universe_levels(fri, datetime.date(2026, 4, 27))}
+        assert "prev1_day_high" in names
+        assert "prev3_day_high" not in names  # no data that far back
+
+    def test_empty_frame_returns_empty(self):
+        empty = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        assert compute_universe_levels(empty, datetime.date(2026, 4, 27)) == []

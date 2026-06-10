@@ -1540,9 +1540,15 @@ def test_mnq_liquidities_unchanged_regression(_isolate_state, monkeypatch):
 
 def _freeze_liquidities(monkeypatch, pipeline):
     """Stop the per-bar dynamic-liquidity passes from overwriting test-injected daily.json
-    so the detection block sees exactly the levels/FVGs the test crafted."""
+    so the detection block sees exactly the levels/FVGs the test crafted. Also clears the
+    additive universe (prev-day/week) blocks the seed populates, so a test that crafts a
+    single level isn't joined by seeded prev-levels via the detection-time merge."""
     monkeypatch.setattr(pipeline, "_update_dynamic_liquidities", lambda *a, **kw: [])
     monkeypatch.setattr(pipeline, "_update_mes_liquidities", lambda *a, **kw: [])
+    _d = smt_state.load_daily()
+    _d["liquidities_universe"] = []
+    _d["liquidities_universe_mes"] = []
+    smt_state.save_daily(_d)
 
 
 def test_detection_runs_every_1m(_isolate_state, monkeypatch):
@@ -1562,6 +1568,30 @@ def test_detection_runs_every_1m(_isolate_state, monkeypatch):
                        today_mnq, today_mes)
     per_min = pipeline._smt_buffer.get_new("1m")
     assert any(r["ref_name"] == "day_high" and r["type"] == "wick" for r in per_min)
+
+
+def test_universe_prev_day_smt_fires(_isolate_state, monkeypatch):
+    """Universe (B): a prev-day FIXED level supplied via the additive liquidities_universe
+    block is SMT-eligible. An MNQ-only wick take-out of prev1_day_high yields a wick SMT —
+    proving the detection-time merge of the universe block works end-to-end."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)  # also clears the seeded universe blocks
+    daily = smt_state.load_daily()
+    daily["liquidities"] = []
+    daily["liquidities_mes"] = []
+    daily["liquidities_universe"] = [
+        {"name": "prev1_day_high", "kind": "level", "price": 21000.0}]
+    daily["liquidities_universe_mes"] = [
+        {"name": "prev1_day_high", "kind": "level", "price": 3000.0}]
+    smt_state.save_daily(daily)
+
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 20:00", n=1)
+    now = pd.Timestamp("2025-11-13 20:01", tz="America/New_York")
+    # MNQ wick takes out 21000; MES wick stays below 3000 → MNQ-led bearish SMT.
+    pipeline.on_1m_bar(now, _bar(20996.0, high_off=10.0), _bar(2990.0, high_off=5.0),
+                       today_mnq, today_mes)
+    per_min = pipeline._smt_buffer.get_new("1m")
+    assert any(r["ref_name"] == "prev1_day_high" and r["type"] == "wick" for r in per_min)
 
 
 def test_hidden_on_1m_boundary(_isolate_state, monkeypatch):

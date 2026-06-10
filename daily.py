@@ -143,6 +143,62 @@ def _last_n_trading_dates(today: datetime.date, n: int) -> list[datetime.date]:
     return dates
 
 
+def _last_n_week_mondays(today: datetime.date, n: int) -> list[datetime.date]:
+    """Monday dates of the last n completed Mon–Fri weeks strictly before today's week."""
+    this_monday = today - datetime.timedelta(days=today.weekday())
+    return [this_monday - datetime.timedelta(days=7 * w) for w in range(1, n + 1)]
+
+
+def compute_universe_levels(
+    hist_1m: pd.DataFrame,
+    today: datetime.date,
+    *,
+    n_days: int = 14,
+    n_weeks: int = 2,
+) -> list[dict]:
+    """Prev-day (last `n_days` trading days) + prev-week (last `n_weeks` Mon–Fri weeks)
+    high/low as FIXED SMT levels — the "universe" of historical extremes.
+
+    Each entry: {name, kind:'level', price, close_price}. `price` is the wick extreme
+    (High max / Low min); `close_price` is the body extreme (Close max / min) for hidden
+    SMTs. Windows: a day = (date-1 18:00 ET → date 17:00 ET), the CME session matching
+    run_daily_fixed; a week = Mon 00:00 ET → Sat 00:00 ET (Mon–Fri). Empty windows are
+    skipped, so a short history yields a partial universe rather than erroring.
+
+    These are returned for an ADDITIVE daily.json block (liquidities_universe) consumed
+    only by SMT detection — never merged into the strategy's `liquidities` (which drives
+    the failed-entry sweep decrement).
+    """
+    out: list[dict] = []
+    if hist_1m is None or hist_1m.empty:
+        return out
+    idx = hist_1m.index
+
+    def _extreme(bars: pd.DataFrame, base: str) -> None:
+        if bars.empty:
+            return
+        out.append({"name": f"{base}_high", "kind": "level",
+                    "price": float(bars["High"].max()),
+                    "close_price": float(bars["Close"].max())})
+        out.append({"name": f"{base}_low", "kind": "level",
+                    "price": float(bars["Low"].min()),
+                    "close_price": float(bars["Close"].min())})
+
+    for i, prior_date in enumerate(_last_n_trading_dates(today, n_days), start=1):
+        _pmid  = pd.Timestamp(prior_date, tz="America/New_York")
+        _ps = idx.searchsorted(_pmid - pd.Timedelta(hours=6), side="left")   # date-1 18:00
+        _pe = idx.searchsorted(_pmid + pd.Timedelta(hours=17), side="left")  # date   17:00
+        _extreme(hist_1m.iloc[_ps:_pe], f"prev{i}_day")
+
+    for w, monday in enumerate(_last_n_week_mondays(today, n_weeks), start=1):
+        _ws = pd.Timestamp(monday, tz="America/New_York")
+        _s = idx.searchsorted(_ws, side="left")
+        _e = idx.searchsorted(_ws + pd.Timedelta(days=5), side="left")  # Sat 00:00
+        _extreme(hist_1m.iloc[_s:_e], f"prev{w}_week")
+
+    return out
+
+
 def _detect_fvgs(
     hourly_bars: pd.DataFrame,
     mnq_1m: pd.DataFrame,

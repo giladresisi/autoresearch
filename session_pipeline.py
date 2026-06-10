@@ -485,6 +485,11 @@ class SessionPipeline:
                 _liq.append(_yf)
                 _existing_mnq_fvg.add(_yf["name"])
         _state["liquidities"] = _liq
+        # Universe (B): prev-day (14 trading days) + prev-week (2 Mon–Fri weeks) extremes
+        # as FIXED SMT levels, in an ADDITIVE key consumed only by SMT detection — kept
+        # OUT of `liquidities` so the strategy's failed-entry sweep (_ext_levels) is
+        # byte-identical and trades are unchanged.
+        _state["liquidities_universe"] = _daily_mod.compute_universe_levels(_combined, now.date())
         save_daily(_state)
 
         # ── SMT V2: seed parallel MES day/week/session levels + 1hr FVGs ─────────
@@ -534,6 +539,11 @@ class SessionPipeline:
                     _liq_mes.append(_yf)
                     _existing_mes.add(_yf["name"])
         _state["liquidities_mes"] = _liq_mes
+        # Universe (B): MES counterpart prev-day/prev-week extremes (additive key) so the
+        # intersection in _detect_level_smts sees the same universe names on both legs.
+        if not _combined_mes.empty:
+            _state["liquidities_universe_mes"] = _daily_mod.compute_universe_levels(
+                _combined_mes, now.date())
         save_daily(_state)
 
         # Write levels.json snapshot for plot_session.py / regression plots. Lands under
@@ -550,6 +560,7 @@ class SessionPipeline:
         _levels_path.write_text(
             _json.dumps({
                 "liquidities": _daily_state.get("liquidities", []),
+                "liquidities_universe": _daily_state.get("liquidities_universe", []),
                 "all_time_high": _global.get("all_time_high"),
             }, indent=2),
             encoding="utf-8",
@@ -1665,8 +1676,11 @@ class SessionPipeline:
             return []
 
         daily = pre_daily if pre_daily is not None else _smt_state.load_daily()
-        liq_mnq = daily.get("liquidities", []) or []
-        liq_mes = daily.get("liquidities_mes", []) or []
+        # Universe (B) fixed levels are an additive block merged ONLY here (never into the
+        # strategy's `liquidities`/_ext_levels), so SMT detection sees the prev-day/week
+        # extremes while trades stay unchanged. eligible_levels dedups by name.
+        liq_mnq = (daily.get("liquidities", []) or []) + (daily.get("liquidities_universe", []) or [])
+        liq_mes = (daily.get("liquidities_mes", []) or []) + (daily.get("liquidities_universe_mes", []) or [])
 
         levels_mnq = eligible_levels(liq_mnq, now)
         levels_mes = eligible_levels(liq_mes, now)

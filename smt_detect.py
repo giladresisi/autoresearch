@@ -150,6 +150,11 @@ def eligible_levels(liqs: list[dict], now: Any) -> dict[str, dict]:
         if name.startswith(("day_", "week_")):
             out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub, **_entry_extra}
             continue
+        # Universe fixed levels (prev-day / prev-week extremes): completed history, so
+        # always eligible — no session-window or running-extreme gating.
+        if name.startswith("prev") and ("day" in name or "week" in name):
+            out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub, **_entry_extra}
+            continue
         # 6hr-session level: day-scoped eligibility (see docstring).
         sess = name.rsplit("_", 1)[0]
         win = _SESSION_WINDOW.get(sess)

@@ -334,6 +334,33 @@ def test_asia_not_eligible_while_forming():
     assert "asia_high" in eligible_levels(liqs, closed)
 
 
+def test_universe_prev_levels_always_eligible():
+    """Universe (B) prev-day / prev-week fixed levels are eligible at any hour (completed
+    history — no session-window or running-extreme gating) and pass close_price through."""
+    liqs = [
+        {"name": "prev1_day_high", "kind": "level", "price": 21000.0, "close_price": 20998.0},
+        {"name": "prev7_day_low", "kind": "level", "price": 20500.0},
+        {"name": "prev1_week_high", "kind": "level", "price": 21100.0},
+        {"name": "prev2_week_low", "kind": "level", "price": 20400.0},
+        {"name": "prev1_TDO", "kind": "level", "price": 20777.0},  # not a high/low → dropped
+    ]
+    for t in (pd.Timestamp("2026-06-09 20:00", tz="America/New_York"),   # Asia forming
+              pd.Timestamp("2026-06-09 03:00", tz="America/New_York"),   # overnight
+              pd.Timestamp("2026-06-09 10:00", tz="America/New_York")):  # RTH
+        elig = eligible_levels(liqs, t)
+        assert {"prev1_day_high", "prev7_day_low", "prev1_week_high", "prev2_week_low"} <= set(elig)
+        assert "prev1_TDO" not in elig  # TDO has no _high/_low sub
+    assert abs(elig["prev1_day_high"]["close_price"] - 20998.0) < 1e-9
+
+
+def test_universe_prev_levels_are_fixed():
+    """prev-day → ('fixed','day'); prev-week → ('fixed','week') (never re-arm)."""
+    assert smt_detect._level_class("prev1_day_high") == ("fixed", "day")
+    assert smt_detect._level_class("prev13_day_low") == ("fixed", "day")
+    assert smt_detect._level_class("prev1_week_high") == ("fixed", "week")
+    assert smt_detect._level_class("prev2_week_low") == ("fixed", "week")
+
+
 def test_session_eligibility_day_scoped():
     """Day-scoped 6hr-session eligibility (smt_detect.eligible_levels docstring).
 
