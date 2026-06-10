@@ -143,6 +143,11 @@ DEFAULT_HYPOTHESIS = {
     "targets":       [],
     "cautious_price": "",
     "entry_ranges":  [],
+    # SMT V2 Phase 2 shadow debug keys: the relevance-filtered active set + dominant,
+    # computed each 1m bar in session_pipeline._run_smt_v2_detection but NOT used to
+    # drive direction in Phase 2 (forward-compatible; Phase 3 consumes them).
+    "smt_active_set": [],
+    "smt_dominant":   None,
 }
 
 DEFAULT_POSITION = {

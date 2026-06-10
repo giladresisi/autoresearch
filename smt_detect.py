@@ -625,6 +625,61 @@ def detect_fill_smts(
 
 
 # ---------------------------------------------------------------------------
+# Contract C — read-only fulfillment-query API (SMT V2 Phase 2)
+# ---------------------------------------------------------------------------
+def _record_key(record: dict) -> str:
+    """Single source of truth for the `detect_state` key of an SMT/fill record.
+
+    Mirrors the detection engine's key construction EXACTLY so detection and query
+    agree by construction:
+      - level SMT (kind=="smt"): ``f"{ref_name}|{direction}|{type}"`` (type ∈
+        {"wick","body"}) — see ``_detect_level_smts`` (skey at line 224:
+        ``f"{_skey(name, direction)}|{rec_type}"``).
+      - fill (kind=="fill"): the bare FVG name ``str(ref_name)`` — see
+        ``detect_fill_smts`` (skey at line 443: ``skey = str(name)``).
+
+    Total: missing fields → best-effort string; never raises.
+    """
+    if not isinstance(record, dict):
+        return ""
+    ref_name = record.get("ref_name")
+    if record.get("kind") == "fill":
+        return str(ref_name)
+    direction = record.get("direction")
+    rec_type = record.get("type")
+    return f"{_skey(ref_name, direction)}|{rec_type}"
+
+
+def fulfillment_status(keys: "list[str] | None", detect_state: dict) -> dict[str, str]:
+    """Per-key fulfillment status over ``detect_state`` (read-only; never mutates).
+
+    Returns ``{key: "unfulfilled" | "fulfilled" | "gone"}``:
+      - ``"gone"``       — key absent from ``detect_state`` (expired / never fired).
+      - ``"fulfilled"``  — present and ``st.get("fulfilled") is True``.
+      - ``"unfulfilled"``— present and not fulfilled.
+
+    Fills: fill state dicts (keyed by bare FVG name) have NO ``fulfilled`` field, so
+    ``st.get("fulfilled")`` is falsy → a present, non-fulfilled fill key is
+    ``"unfulfilled"`` by definition in Phase 2 (Phase 3 may extend fill fulfillment).
+
+    Total: ``keys=None`` → ``{}``; never raises.
+    """
+    out: dict[str, str] = {}
+    if not keys:
+        return out
+    ds = detect_state if isinstance(detect_state, dict) else {}
+    for key in keys:
+        st = ds.get(key)
+        if st is None:
+            out[key] = "gone"
+        elif isinstance(st, dict) and st.get("fulfilled") is True:
+            out[key] = "fulfilled"
+        else:
+            out[key] = "unfulfilled"
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Accumulation buffers
 # ---------------------------------------------------------------------------
 class SmtBuffer:

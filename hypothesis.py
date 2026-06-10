@@ -21,6 +21,11 @@ CAUTIOUS_DIST_SHRINK_PCT    = 0.15  # fraction the two max-dist thresholds shrin
 CAUTIOUS_INITIAL_OFFSET_PTS   = 2.0  # pts — initial cautious target set this much closer than the level
 CAUTIOUS_SECONDARY_OFFSET_PTS = 5.0  # pts — secondary cautious target set this much closer than the level
 
+# SMT V2 relevance filter (Phase 2). When ACTIVE (in a position), a new SMT enters the
+# active set only if its ref level is within RELEVANCE_X_PTS of a cautious target OR its
+# tier outranks the backing tier. First-guess default; tunable.
+RELEVANCE_X_PTS = 25.0  # pts — proximity gate for the ingest filter
+
 # P2b: suppress LOW-arm DOWN when price is this many points above the swept level.
 # 50-pt overshoot zone = false positives (38% correct); 20-50pt zone is 80% correct.
 LOW_ARM_DOWN_OVERSHOOT_SUPPRESS_PTS = 50.0
@@ -201,6 +206,235 @@ from smt_state import (
 )
 import strategy as _strategy
 from strategy_smt import detect_smt_divergence, detect_smt_fill
+from smt_detect import _level_class as _smt_level_class, _record_key as _smt_record_key
+
+
+# ===========================================================================
+# SMT V2 relevance-filter infrastructure (Phase 2) — Contract B.
+#
+# Pure functions (total, no IO, JSON-serializable in/out) consumed by the shadow
+# active-set wiring in session_pipeline (Phase 2) and the dominant→direction wiring
+# in Phase 3. In Phase 2 these compute the active set + dominant but DO NOT drive
+# direction — the existing direction engine is unchanged.
+#
+# --- divs record schema (the persisted active-set record) ---
+# A divs record is a flat JSON-serializable dict with these fields:
+#   kind       : "smt" | "fill"
+#   type       : "wick" | "body" | "fill_a" | "fill_b"
+#   side       : "bullish" | "bearish"
+#   direction  : "long" | "short"
+#   timeframe  : "1m" | "15m" | "30m" | "1h"
+#   time       : ISO string (fire time)
+#   leader     : "mnq" | "mes"
+#   ref_name   : level name (e.g. "day_high") or FVG name (e.g. "fvg_<ts>_<side>")
+#   tier       : "ATH" | "week" | "day" | "fill" | "session"
+#   key        : the smt_detect detect_state key (for fulfillment queries),
+#                produced by smt_detect._record_key — always matches detect_state.
+#   fulfilled  : bool (freshly-emitted SMTs are unfulfilled; invalidation updates this)
+#   prices     : mnq_price, mes_price, mnq_lvl_price (level/zone comparison price),
+#                and mes_lvl_price when present. Fills carry the FVG-derived ref price
+#                where available; otherwise mnq_lvl_price=None.
+# ===========================================================================
+
+# Tier authority ranks (higher = more authoritative). ATH and week share the top
+# bucket; day > fill (1hr-FVG-fill) > session (6hr). Unknown → 0.
+_TIER_RANK = {"ATH": 4, "week": 4, "day": 3, "fill": 2, "session": 1}
+
+
+def _tier_rank(tier: "str | None") -> int:
+    """Authority rank for a tier (higher = more authoritative). Unknown/None → 0."""
+    return _TIER_RANK.get(tier or "", 0)
+
+
+def to_record(emission: dict) -> dict:
+    """Map a `smt_detect` emission to the divs record schema (see module docstring).
+
+    Accepts a level/fill emission from `_detect_level_smts`/`detect_fill_smts` (or the
+    `smt-div` shadow event built in `_run_smt_v2_detection`). Total: missing fields
+    default to None/False; never raises.
+
+    `tier`: for kind=="smt" use `_level_class(ref_name)[1]` (week/day/session); ATH is
+    special-cased — `ref_name=="ATH"` OR `is_ath=True` (carried on the emission) → "ATH".
+    For kind=="fill" → "fill". `key`: `smt_detect._record_key(emission)`. `fulfilled`
+    defaults False (invalidation updates it via Contract C).
+    """
+    if not isinstance(emission, dict):
+        emission = {}
+    kind = emission.get("kind")
+    ref_name = emission.get("ref_name")
+
+    if kind == "fill":
+        tier = "fill"
+    else:
+        # ATH special-case: explicit flag or synthetic "ATH" ref_name. Phase 3 supplies
+        # the ATH context (e.g. flagging a week_high SMT as ATH); Phase 2 keeps it simple.
+        if ref_name == "ATH" or emission.get("is_ath") is True:
+            tier = "ATH"
+        else:
+            try:
+                tier = _smt_level_class(ref_name or "")[1]
+            except Exception:
+                tier = None
+
+    rec = {
+        "kind":          kind,
+        "type":          emission.get("type"),
+        "side":          emission.get("side"),
+        "direction":     emission.get("direction"),
+        "timeframe":     emission.get("timeframe"),
+        "time":          emission.get("time"),
+        "leader":        emission.get("leader"),
+        "ref_name":      ref_name,
+        "tier":          tier,
+        "key":           _smt_record_key(emission),
+        "fulfilled":     bool(emission.get("fulfilled", False)),
+        "mnq_price":     emission.get("mnq_price"),
+        "mes_price":     emission.get("mes_price"),
+        "mnq_lvl_price": emission.get("mnq_lvl_price"),
+    }
+    if emission.get("mes_lvl_price") is not None:
+        rec["mes_lvl_price"] = emission.get("mes_lvl_price")
+    return rec
+
+
+def smt_authority(record: dict) -> tuple:
+    """Sortable authority tuple for a divs record (LARGER = more authoritative).
+
+    `dominant = max(active_set, key=smt_authority)`. Tuple order (most-significant first):
+      (tier_rank, kind_rank, recency_value, tf_rank)
+      - tier_rank : ATH≡week (4) > day (3) > fill (2) > session (1); unknown → 0.
+      - kind_rank : wick (1) > body (0); fills/other → 1 (a fill isn't penalized below a
+                    hidden SMT of the same tier — tier already dominates across levels).
+      - recency   : `time` parsed to ns (pandas.Timestamp); on parse failure → 0 (epoch).
+                    Larger = more recent.
+      - tf_rank   : 30m (1) > 15m (0); others → 0 — lowest-significance sub-tiebreak.
+
+    Total: non-dict / missing fields → safe defaults; never raises.
+    """
+    if not isinstance(record, dict):
+        return (0, 0, 0, 0)
+    tier_rank = _tier_rank(record.get("tier"))
+    rec_type = record.get("type")
+    kind_rank = 1 if rec_type == "wick" else (0 if rec_type == "body" else 1)
+    try:
+        ts = pd.Timestamp(record.get("time"))
+        recency = int(ts.value) if ts is not pd.NaT else 0
+    except Exception:
+        recency = 0
+    tf = record.get("timeframe")
+    tf_rank = {"30m": 1, "15m": 0}.get(tf, 0)
+    return (tier_rank, kind_rank, recency, tf_rank)
+
+
+def dominant(active_set: "list[dict] | None") -> "dict | None":
+    """The single most-authoritative record in the active set, or None on empty/None."""
+    if not active_set:
+        return None
+    return max(active_set, key=smt_authority)
+
+
+def ingest_smts(
+    new_records: "list[dict] | None",
+    active_set: "list[dict] | None",
+    *,
+    flat: bool,
+    cautious_targets: "dict | None",
+    backing_tier: "str | None",
+    x_pts: float,
+) -> list[dict]:
+    """Ingest fresh SMT records into the active set per the LOCKED relevance pipeline.
+
+    `new_records` are in divs-record schema (callers run `to_record` first; defensively
+    re-run on records lacking key/tier). `active_set` is the current persisted list.
+
+    Pipeline:
+      1. Drop fulfilled/ineligible incoming records (fulfilled is True, or missing a
+         usable key/direction).
+      2. Gate by position state:
+         - FLAT (flat=True): any tier may enter.
+         - ACTIVE (flat=False): enter only if EITHER the ref level price is within
+           `x_pts` of a cautious target (initial OR secondary; inclusive `<=`), OR
+           `_tier_rank(tier) >= _tier_rank(backing_tier)` (inclusive `>=`).
+      3. Dedup/supersede by `key`: at most one active record per key; a newer `time`
+         replaces an older same-key record.
+
+    Returns a NEW list (does not mutate inputs). Total: new_records=None → copy of
+    active_set; never raises.
+    """
+    base = list(active_set or [])
+    if not new_records:
+        return base
+
+    ct = cautious_targets or {}
+
+    def _target_price(field: str) -> "float | None":
+        v = ct.get(field, "")
+        if v is None or v == "":
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    init_t = _target_price("cautious_price_initial")
+    sec_t = _target_price("cautious_price_secondary")
+    backing_rank = _tier_rank(backing_tier)
+
+    # Index existing active set by key for dedup/supersede.
+    by_key: dict = {}
+    order: list = []
+    for r in base:
+        k = r.get("key")
+        if k is not None and k not in by_key:
+            order.append(k)
+        by_key[k] = r
+
+    def _record_time(r: dict):
+        try:
+            ts = pd.Timestamp(r.get("time"))
+            return int(ts.value) if ts is not pd.NaT else 0
+        except Exception:
+            return 0
+
+    for raw in new_records:
+        rec = raw
+        # Defensive: re-derive schema if a record lacks key/tier.
+        if not isinstance(rec, dict) or "key" not in rec or "tier" not in rec:
+            rec = to_record(rec if isinstance(rec, dict) else {})
+        # (1) Drop fulfilled / ineligible.
+        if rec.get("fulfilled") is True:
+            continue
+        key = rec.get("key")
+        if not key or not rec.get("direction"):
+            continue
+        # (2) Gate by position state.
+        if not flat:
+            tier = rec.get("tier")
+            level_price = rec.get("mnq_lvl_price")
+            if level_price is None:
+                level_price = rec.get("mnq_price")
+            prox_ok = False
+            if level_price is not None:
+                try:
+                    lp = float(level_price)
+                    for t in (init_t, sec_t):
+                        if t is not None and abs(lp - t) <= x_pts:
+                            prox_ok = True
+                            break
+                except (TypeError, ValueError):
+                    prox_ok = False
+            tier_ok = _tier_rank(tier) >= backing_rank
+            if not (prox_ok or tier_ok):
+                continue
+        # (3) Dedup / supersede by key (newer time wins).
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = rec
+            order.append(key)
+        elif _record_time(rec) >= _record_time(existing):
+            by_key[key] = rec
+
+    return [by_key[k] for k in order]
 
 
 def _build_5m_bar(mnq_1m: pd.DataFrame, now: datetime) -> dict | None:

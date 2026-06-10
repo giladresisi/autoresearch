@@ -1748,6 +1748,48 @@ class SessionPipeline:
         # Fills are exempt (handled inside _dedup_level_smts).
         records = _dedup_level_smts(records, _mnq_lvl_px)
 
+        # --- SMT V2 Phase 2 SHADOW active-set compute (zero behavior change) ----------
+        # Compute the relevance-filtered active set + dominant from this bar's fresh
+        # records and store them under hypothesis.json debug keys ONLY. This does NOT
+        # touch `direction` or any field the strategy/executor reads. The whole block is
+        # exception-isolated so a defect here can NEVER break the live detection/direction
+        # path (silent — no prints, no re-raise). Phase 3 will remove the blanket swallow.
+        try:
+            import smt_detect as _smt_detect
+            _pos = _smt_state.load_position()
+            _active_pos = _pos.get("active") or {}
+            _flat_shadow = not _active_pos
+            _backing_tier = _active_pos.get("backing_tier") if not _flat_shadow else None
+            _hyp = _smt_state.load_hypothesis()
+            _active = _hyp.get("smt_active_set", []) or []
+            _ctargets = {
+                "cautious_price_initial":   _hyp.get("cautious_price_initial", ""),
+                "cautious_price_secondary": _hyp.get("cautious_price_secondary", ""),
+            }
+            # Invalidate BEFORE ingest: drop active records that are fulfilled/gone (via
+            # Contract C) or already flagged fulfilled.
+            _status = _smt_detect.fulfillment_status(
+                [r.get("key") for r in _active], self._detect_state)
+            _active = [
+                r for r in _active
+                if _status.get(r.get("key")) == "unfulfilled" and not r.get("fulfilled")
+            ]
+            _new_recs = [_hyp_mod.to_record(r) for r in records]
+            _active = _hyp_mod.ingest_smts(
+                _new_recs, _active,
+                flat=_flat_shadow, cautious_targets=_ctargets,
+                backing_tier=_backing_tier, x_pts=_hyp_mod.RELEVANCE_X_PTS,
+            )
+            _dom = _hyp_mod.dominant(_active)
+            # Re-load and store under debug keys only; leave every other field untouched.
+            _hyp2 = _smt_state.load_hypothesis()
+            _hyp2["smt_active_set"] = _active
+            _hyp2["smt_dominant"] = _dom
+            _smt_state.save_hypothesis(_hyp2)
+        except Exception:
+            pass
+        # --- end SHADOW block ---------------------------------------------------------
+
         # Map each newly-found record to an smt-div signal event for emission/plotting.
         # `type` is kept raw (wick / body / fill_a / fill_b) so the hover is precise; the
         # plot label collapses it to W / H / F. `source:"v2"` marks the new mechanism.
