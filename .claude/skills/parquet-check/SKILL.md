@@ -61,7 +61,11 @@ uv run python scripts/check_session_parquets.py --mode <MODE> 2>check_session_st
 
 Capture stdout (JSON report). On failure to run: read `check_session_stderr.log` for error.
 
-Use `--dry-run` if the user wants validation only without any data changes.
+Flags:
+- `--dry-run` — validation only, no data changes (no parquet, `.bak`, or sidecar writes).
+- `--full-validate` — force a full re-scan of the main 1m parquets, bypassing the
+  incremental watermark. Use after validator-rule changes or to re-establish trust.
+- `--since <iso>` — re-scan the 1m tail from a given timestamp (recovery/debugging aid).
 
 ## Step 2 — Parse and assess
 
@@ -95,6 +99,13 @@ This promotion runs only in `session-end` mode; `orchestrator-start` never promo
 - `backup_used`: path of the backup that was used (only present on repair)
 - `gapfill_status`: "ok: appended N 1m bars from M 1s bars" or "failed: <reason>"
 - `corrupted_saved_as`: filename of the saved corrupt copy (only present on repair)
+- `validation_scope`: `"incremental"` (only the appended tail + seam were validated) or
+  `"full"` (whole body re-scanned)
+- `validated_through`: the timestamp up to which the parquet is validated (the watermark)
+- `full_reason`: why a full scan ran (present when scope is `full`) — `no-watermark`
+  (first run), `version-bump`, `body-rewritten`, `truncation`, or `forced-full`
+- `seam_issue`: may appear when the tail's join onto the validated body is anomalous
+  (overlap/duplicate or unexpected gap)
 
 **If `repair_success = false`**: escalate — backup was not found or was unreadable, or
 the 1s session file had critical quality. Manual intervention required.
@@ -130,6 +141,12 @@ if severity was "ok":
 If any of these concerns are flagged, note them in the final summary and suggest the
 user verify manually.
 
+**Incremental scope note:** when an `instruments_1m` entry has
+`validation_scope == "incremental"`, the low-bar-count and stale-last-bar heuristics
+above apply to the **tail delta** (the bars appended since the watermark), not the
+whole body. A `full` scope run — or an explicit `--full-validate` — is the periodic
+safety net that re-checks the entire body.
+
 ## Step 4 — Final summary
 
 Output 3–5 concise lines:
@@ -149,6 +166,11 @@ files under `<global>/general/live/` (`*.parquet`, `*.parquet.bak`, `*.parquet.t
 the `backup_parquets_until_*/` dirs) and, on session-end promotion, the **backtest-main**
 parquets under `<global>/general/main/`. (Resolved via `paths.general_live_dir()` /
 `paths.general_main_dir()` — never the legacy worktree-local `data/`.)
+
+The script (NOT the agent) also writes the validation-state sidecar
+`.validation_state.json` under the general live dir (`paths.general_live_dir()`), which
+tracks the per-parquet incremental-validation watermark. It sits alongside `global.json`
+and the pause sentinel as a script-managed allowed write.
 
 If the LLM determines that a code change would be beneficial (e.g., a recurring gap
 pattern suggests a bug in a source file), it MUST:

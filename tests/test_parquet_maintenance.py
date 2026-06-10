@@ -210,6 +210,62 @@ class TestMergeSession1sParquets:
         assert result.index.duplicated().sum() == 0
         assert len(result) == 2  # shared_ts once + new ts
 
+    def test_merge_seam_contiguous_silent(self, bar_dir, capsys):
+        """Main ends at T, session starts at T+1s (contiguous) -> no seam WARN, rows merged."""
+        t_main = pd.Timestamp("2026-05-08 10:00:00", tz="America/New_York")
+        main_df = _make_df(t_main.isoformat())
+        main_df.to_parquet(bar_dir / "MNQ_1s.parquet")
+        session_df = _make_df((t_main + pd.Timedelta(seconds=1)).isoformat())
+        session_df.to_parquet(bar_dir / "MNQ_1s_session_20260508.parquet")
+
+        # No MNQ_CONID in env -> gap-fill branch skipped; seam = main[-1] vs session[0].
+        mock_ib = self._make_ib_mock()
+        with patch("ib_insync.IB", return_value=mock_ib):
+            from data.parquet_maintenance import merge_session_1s_parquets
+            merge_session_1s_parquets(bar_dir)
+
+        err = capsys.readouterr().err
+        assert "[merge_session_1s] WARN: seam" not in err
+        result = pd.read_parquet(bar_dir / "MNQ_1s.parquet")
+        assert len(result) == 2
+
+    def test_merge_seam_overlap_warns_and_dedups(self, bar_dir, capsys):
+        """Session starts at/under main's last ts (overlap) -> WARN overlap, unique index."""
+        shared_ts = "2026-05-08 10:00:00"
+        main_df = _make_df(shared_ts)
+        main_df.to_parquet(bar_dir / "MNQ_1s.parquet")
+        # Session begins at the same ts as main's last bar (overlap) then continues.
+        session_df = pd.concat([_make_df(shared_ts), _make_df("2026-05-08 10:00:01")])
+        session_df.to_parquet(bar_dir / "MNQ_1s_session_20260508.parquet")
+
+        mock_ib = self._make_ib_mock()
+        with patch("ib_insync.IB", return_value=mock_ib):
+            from data.parquet_maintenance import merge_session_1s_parquets
+            merge_session_1s_parquets(bar_dir)
+
+        err = capsys.readouterr().err
+        assert "[merge_session_1s] WARN: seam overlap" in err
+        result = pd.read_parquet(bar_dir / "MNQ_1s.parquet")
+        assert result.index.duplicated().sum() == 0
+
+    def test_merge_seam_unexpected_gap_warns(self, bar_dir, capsys):
+        """Session starts after a large WEEKDAY hole from main's last ts -> WARN unexpected gap."""
+        # Both Wednesday mid-session: a multi-hour weekday hole is NOT an expected closed window.
+        t_main = pd.Timestamp("2026-05-06 10:00:00", tz="America/New_York")
+        t_session = pd.Timestamp("2026-05-06 13:00:00", tz="America/New_York")  # 3h weekday gap
+        main_df = _make_df(t_main.isoformat())
+        main_df.to_parquet(bar_dir / "MNQ_1s.parquet")
+        session_df = _make_df(t_session.isoformat())
+        session_df.to_parquet(bar_dir / "MNQ_1s_session_20260506.parquet")
+
+        mock_ib = self._make_ib_mock()
+        with patch("ib_insync.IB", return_value=mock_ib):
+            from data.parquet_maintenance import merge_session_1s_parquets
+            merge_session_1s_parquets(bar_dir)
+
+        err = capsys.readouterr().err
+        assert "[merge_session_1s] WARN: unexpected seam gap" in err
+
     def test_merge_session_gap_fill_called_with_correct_duration(self, bar_dir):
         """reqHistoricalData must be called with durationStr matching the gap size."""
         t_main = pd.Timestamp("2026-05-08 09:18:00", tz="America/New_York")
