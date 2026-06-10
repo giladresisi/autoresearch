@@ -108,10 +108,10 @@ def test_edge_fire_once():
 
 
 def test_opp_move_alone_does_not_rearm():
-    # NEW behavior: the points-based opposite-MOVE re-arm was removed. After a level fires,
-    # price retreating ANY distance away (even far beyond the old MIN_REARM_OPP_MOVE_PTS) and
-    # then re-touching the level does NOT re-fire. Re-arm requires an opposite-direction SMT
-    # (see test_rearm_via_opposite_smt), not a mere price move.
+    # A sub-threshold price move (no opposite-direction SMT, no fulfillment) does NOT re-arm
+    # even a DYNAMIC level. After day_high short fires (fire_mnq_close=20995, day fulfill
+    # threshold 40 → fulfilled only if close <= 20955), a small/medium retreat that stays
+    # ABOVE 20955 and a fresh re-touch does NOT re-fire.
     lm = _levels(day_high=21000.0)
     le = _levels(day_high=3000.0)
     touch_mnq = _bar(high=21001.0, low=20990.0, close=20995.0)
@@ -120,53 +120,139 @@ def test_opp_move_alone_does_not_rearm():
     recs, state = detect_regular_smts(lm, le, touch_mnq, miss_mes, state)
     assert len(recs) == 1  # fired; now dormant
 
-    # Small retreat then re-touch → no re-fire.
-    away_small = _bar(high=20992.0, low=20985.0, close=20990.0)  # not touching; opp move 5
+    # Small retreat (close 20990 > 20955 → not fulfilled) then re-touch → no re-fire.
+    away_small = _bar(high=20992.0, low=20985.0, close=20990.0)
     recs, state = detect_regular_smts(lm, le, away_small, miss_mes, state)
     assert recs == []
     recs, state = detect_regular_smts(lm, le, touch_mnq, miss_mes, state)
-    assert recs == [], "small opp move must not re-arm"
+    assert recs == [], "small sub-threshold move must not re-arm"
 
-    # Large retreat (far beyond the old re-arm threshold) then re-touch → STILL no re-fire,
-    # because a price move alone no longer re-arms.
-    away_big = _bar(high=20970.0, low=20960.0, close=20965.0)   # opp move 30 (was >= 20)
-    recs, state = detect_regular_smts(lm, le, away_big, miss_mes, state)
+    # Medium retreat that still stays above the day fulfillment threshold (close 20965 > 20955
+    # → not fulfilled) then re-touch → STILL no re-fire.
+    away_med = _bar(high=20970.0, low=20962.0, close=20965.0)
+    recs, state = detect_regular_smts(lm, le, away_med, miss_mes, state)
     assert recs == []  # not touching, no fire
     recs, state = detect_regular_smts(lm, le, touch_mnq, miss_mes, state)
-    assert recs == [], "an opposite MOVE alone must NOT re-arm — only an opposite-direction SMT does"
+    assert recs == [], "a sub-threshold move must NOT re-arm — needs fulfillment or an opposite SMT"
 
 
 def test_rearm_via_opposite_smt():
-    # day_high short fires, then a day_low long SMT in the SAME batch re-arms day_high.
-    lm = _levels(day_high=21000.0, day_low=20000.0)
-    le = _levels(day_high=3000.0, day_low=2000.0)
+    # An opposite-direction SMT re-arms a DYNAMIC level (day_high) but NOT a FIXED level
+    # (ny_evening_low). day_high short fires; a day_low long SMT in a later batch re-arms the
+    # dynamic day_high; the fixed ny_evening_low stays dormant forever.
+    # day_high (dynamic, short) and ny_evening_high (fixed, short) both fire in bar 1; bar 2's
+    # day_low long SMT must re-arm the dynamic day_high but NOT the fixed ny_evening_high.
+    lm = _levels(day_high=21000.0, day_low=20000.0, ny_evening_high=21000.0)
+    le = _levels(day_high=3000.0, day_low=2000.0, ny_evening_high=3000.0)
     state = {}
-    # Bar 1: MNQ touches day_high (short fires), MES doesn't.
+    # Bar 1: MNQ touches day_high AND ny_evening_high (both short fire), MES not; day_low not hit.
     mnq1 = _bar(high=21001.0, low=20500.0, close=20800.0)
     mes1 = _bar(high=2999.0, low=2500.0, close=2800.0)
     recs, state = detect_regular_smts(lm, le, mnq1, mes1, state)
     assert any(r["ref_name"] == "day_high" for r in recs)
+    assert any(r["ref_name"] == "ny_evening_high" for r in recs)
 
-    # Bar 2: MNQ no longer touches day_high but touches day_low (long), MES neither.
-    #   The day_low long record re-arms day_high in the batch; but day_high cond is False
-    #   so it won't fire this bar. Then bar 3 re-touches day_high → fires again.
+    # Bar 2: MNQ no longer touches the highs but touches day_low (long), MES neither.
+    #   The day_low long record re-arms the DYNAMIC day_high in the batch (cond False this
+    #   bar). The FIXED ny_evening_high (already fired) must NOT be re-armed.
     mnq2 = _bar(high=20990.0, low=19999.0, close=20100.0)
     mes2 = _bar(high=2990.0, low=2001.0, close=2100.0)
     recs, state = detect_regular_smts(lm, le, mnq2, mes2, state)
     assert any(r["ref_name"] == "day_low" for r in recs)
+    assert not state["ny_evening_high|short|wick"]["armed"], "fixed level must NOT be re-armed by opposite SMT"
 
+    # Bar 3: re-touch the highs → day_high fires again (dynamic re-armed); ny_evening_high
+    # does NOT re-fire (fixed never re-arms).
     mnq3 = _bar(high=21001.0, low=20800.0, close=20900.0)
     mes3 = _bar(high=2999.0, low=2800.0, close=2900.0)
     recs, state = detect_regular_smts(lm, le, mnq3, mes3, state)
     assert any(r["ref_name"] == "day_high" for r in recs), \
-        "opposite SMT re-armed day_high → re-touch fires"
+        "opposite SMT re-armed dynamic day_high → re-touch fires"
+    assert not any(r["ref_name"] == "ny_evening_high" for r in recs), \
+        "fixed ny_evening_high must NOT re-fire"
+
+
+def test_fixed_level_single_smt_ever():
+    # A FIXED level (ny_evening_low, session) fires exactly once and NEVER again — not via an
+    # opposite-direction SMT, not via a favorable (fulfilling) move + fresh re-touch.
+    lm = _levels(ny_evening_low=21000.0, day_high=22000.0)
+    le = _levels(ny_evening_low=3000.0, day_high=3200.0)
+    state = {}
+    # Bar 1: MNQ wicks below ny_evening_low (long fires), MES does not.
+    recs, state = detect_regular_smts(
+        lm, le, _bar(21010.0, 20999.0, 21005.0), _bar(3010.0, 3001.0, 3005.0), state)
+    assert [r["ref_name"] for r in recs] == ["ny_evening_low"]
+    assert recs[0]["direction"] == "long"
+
+    # Bar 2: an opposite-direction SMT (day_high short) fires this batch.
+    recs, state = detect_regular_smts(
+        lm, le, _bar(22001.0, 21500.0, 21800.0), _bar(3199.0, 3100.0, 3150.0), state)
+    assert any(r["ref_name"] == "day_high" for r in recs)
+    assert not state["ny_evening_low|long|wick"]["armed"], "opposite SMT must NOT re-arm a fixed level"
+
+    # Bar 3: price runs far below (would fulfill any tier) — fulfillment is informational only
+    # for a fixed level and must NOT re-arm it.
+    recs, state = detect_regular_smts(
+        lm, le, _bar(20800.0, 20700.0, 20750.0), _bar(3199.0, 3100.0, 3150.0), state)
+    assert state["ny_evening_low|long|wick"]["fulfilled"] is True
+    assert not state["ny_evening_low|long|wick"]["armed"]
+
+    # Bar 4: fresh re-touch of ny_evening_low → does NOT re-fire (fixed, single SMT ever).
+    recs, state = detect_regular_smts(
+        lm, le, _bar(21010.0, 20999.0, 21005.0), _bar(3199.0, 3100.0, 3150.0), state)
+    assert not any(r["ref_name"] == "ny_evening_low" for r in recs), \
+        "fixed level fires exactly once ever"
+
+
+def test_dynamic_rearms_on_fulfillment():
+    # A DYNAMIC level (day_low) fires, then a favorable move past the day fulfillment threshold
+    # (40 pts) marks it fulfilled → re-arms → a fresh re-touch re-fires. No opposite SMT needed.
+    lm = _levels(day_low=21000.0)
+    le = _levels(day_low=3000.0)
+    state = {}
+    # Bar 1: MNQ wicks below day_low (long fires), MES not. fire_mnq_close = 21005 (the MNQ
+    # close at the firing bar — the NEW fulfillment reference, NOT the swept level 21000).
+    recs, state = detect_regular_smts(
+        lm, le, _bar(21010.0, 20999.0, 21005.0), _bar(3010.0, 3001.0, 3005.0), state)
+    assert [r["ref_name"] for r in recs] == ["day_low"]
+    assert state["day_low|long|wick"]["fire_mnq_close"] == 21005.0
+    assert state["day_low|long|wick"]["armed"] is False
+
+    # Bar 2: favorable move for a long (price rises) past fire_close 21005 + 40 = 21045 →
+    # fulfilled → re-arm in the same bar (no re-touch this bar so no fire).
+    recs, state = detect_regular_smts(
+        lm, le, _bar(21050.0, 21030.0, 21045.0), _bar(3050.0, 3030.0, 3045.0), state)
+    assert recs == []
+    assert state["day_low|long|wick"]["armed"] is True, "dynamic level re-arms after a fulfilling move"
+
+    # Bar 3: fresh re-touch of day_low → re-fires.
+    recs, state = detect_regular_smts(
+        lm, le, _bar(21010.0, 20999.0, 21005.0), _bar(3010.0, 3001.0, 3005.0), state)
+    assert any(r["ref_name"] == "day_low" for r in recs), \
+        "dynamic level re-fires after fulfillment + fresh re-touch"
+
+    # A sub-threshold favorable move alone would NOT have fulfilled: verify the threshold is
+    # real by checking that a fire (fire_close 21005) followed by a < 40pt move from that close
+    # stays dormant.
+    state2 = {}
+    recs, state2 = detect_regular_smts(
+        lm, le, _bar(21010.0, 20999.0, 21005.0), _bar(3010.0, 3001.0, 3005.0), state2)
+    assert len(recs) == 1
+    recs, state2 = detect_regular_smts(
+        lm, le, _bar(21035.0, 21025.0, 21030.0), _bar(3035.0, 3025.0, 3030.0), state2)  # 21030-21005=+25 < 40
+    assert state2["day_low|long|wick"]["fulfilled"] is False
+    assert state2["day_low|long|wick"]["armed"] is False
+    recs, state2 = detect_regular_smts(
+        lm, le, _bar(21010.0, 20999.0, 21005.0), _bar(3010.0, 3001.0, 3005.0), state2)
+    assert not any(r["ref_name"] == "day_low" for r in recs), \
+        "sub-threshold move does not fulfill → no re-fire"
 
 
 def test_running_level_advance_does_not_rearm():
-    # NEW behavior: a running-level advance does NOT re-arm. An SMT against a level fires
-    # once and stays dormant through subsequent level updates AND subsequent opposite price
-    # moves — re-firing ONLY after an opposite-direction SMT. This suppresses the per-bar
-    # re-fire flood that ticking running levels would otherwise produce.
+    # A running-level advance does NOT re-arm. An SMT against a (dynamic) level fires once and
+    # stays dormant through subsequent level updates and sub-threshold price moves — it only
+    # re-arms on fulfillment (a threshold move) or an opposite-direction SMT. This suppresses
+    # the per-bar re-fire flood that ticking running levels would otherwise produce.
     le = _levels(day_high=3000.0)
     mnq_touch = _bar(high=21001.0, low=20990.0, close=20995.0)
     mes_miss = _bar(high=2999.0, low=2990.0, close=2995.0)
@@ -184,13 +270,13 @@ def test_running_level_advance_does_not_rearm():
     recs, state = detect_regular_smts(_levels(day_high=21005.0), le, mnq_touch2, mes_miss, state)
     assert recs == [], "running level advance must NOT re-arm"
 
-    # A large opposite price move (no opposite-direction SMT) followed by a fresh touch →
-    # STILL dormant: a price move alone no longer re-arms.
-    away_big = _bar(high=20970.0, low=20960.0, close=20965.0)
-    recs, state = detect_regular_smts(_levels(day_high=21005.0), le, away_big, mes_miss, state)
+    # A sub-threshold retreat (close 20965, fire_mnq_close 20995, day threshold 40 → not
+    # fulfilled since 20965 > 20955) followed by a fresh touch → STILL dormant.
+    away_med = _bar(high=20970.0, low=20962.0, close=20965.0)
+    recs, state = detect_regular_smts(_levels(day_high=21005.0), le, away_med, mes_miss, state)
     assert recs == []
     recs, state = detect_regular_smts(_levels(day_high=21005.0), le, mnq_touch2, mes_miss, state)
-    assert recs == [], "opposite price move alone must NOT re-arm a dormant level"
+    assert recs == [], "sub-threshold move alone must NOT re-arm a dormant level"
 
 
 def test_dedup_near_coincident_levels_keeps_highest_scope():
@@ -314,6 +400,89 @@ def test_hidden_distinct_from_wick():
     mes_b = _bar(high=3010.0, low=2990.0, close=2995.0)
     recs2, _ = detect_hidden_smts(lm, le, mnq_b, mes_b, "15m", {})
     assert len(recs2) == 1 and recs2[0]["type"] == "body"
+
+
+def test_wick_and_body_both_fire_shared_state():
+    # A wick SMT and a body SMT on the SAME (level, direction) both fire when sharing one
+    # state dict, because the per-(level,direction) state key now includes rec_type. This
+    # yields two independent state entries: "day_high|short|wick" and "day_high|short|body".
+    lm = _levels(day_high=21000.0)
+    le = _levels(day_high=3000.0)
+    state = {}
+    # Bar that satisfies BOTH: MNQ wick AND close beyond day_high, MES neither.
+    mnq = _bar(high=21010.0, low=20990.0, close=21005.0)
+    mes = _bar(high=2999.0, low=2990.0, close=2995.0)
+    recs_w, state = detect_regular_smts(lm, le, mnq, mes, state)
+    assert len(recs_w) == 1 and recs_w[0]["type"] == "wick"
+    recs_b, state = detect_hidden_smts(lm, le, mnq, mes, "1m", state)
+    assert len(recs_b) == 1 and recs_b[0]["type"] == "body", \
+        "body SMT fires independently despite the wick SMT on the same level (shared state)"
+    assert recs_w[0]["direction"] == "short" and recs_b[0]["direction"] == "short"
+    # Two independent state keys exist, one per rec_type.
+    assert "day_high|short|wick" in state
+    assert "day_high|short|body" in state
+    assert state["day_high|short|wick"]["fired"] is True
+    assert state["day_high|short|body"]["fired"] is True
+
+
+def test_body_smt_uses_close_price_extreme():
+    # The 2026-06-03 MES day-low case: wick day-low (price) = 7604.0 (lowest LOW),
+    # body day-low (close_price) = 7604.0... here generalized: the body extreme
+    # (close_price) is ABOVE the wick price, so a close that crosses close_price but
+    # whose LOW has NOT yet reached the wick price must fire a BODY SMT.
+    # MES day_low: wick price 7602.50 (lowest low), body close_price 7604.00 (lowest close).
+    lm = {"day_low": {"name": "day_low", "kind": "level", "price": 30575.75,
+                      "close_price": 30575.75, "sub": "low"}}
+    le = {"day_low": {"name": "day_low", "kind": "level", "price": 7602.50,
+                      "close_price": 7604.00, "sub": "low"}}
+    # MES close 7603.25 is BELOW the body extreme (7604.00) but its low (7603.00) is
+    # still ABOVE the wick price (7602.50) → wick would NOT fire, body MUST fire.
+    mes = _bar(high=7606.0, low=7603.0, close=7603.25)
+    # MNQ close (30668) far above its body day-low (30575.75) → MNQ does not touch.
+    mnq = _bar(high=30680.0, low=30660.0, close=30668.0)
+
+    # Body (hidden) SMT: MES leads (its close crossed its body extreme), MNQ did not.
+    recs_b, _ = detect_hidden_smts(lm, le, mnq, mes, "1m", {})
+    assert len(recs_b) == 1
+    assert recs_b[0]["type"] == "body" and recs_b[0]["direction"] == "long"
+    assert recs_b[0]["leader"] == "mes" and recs_b[0]["ref_name"] == "day_low"
+    # The record carries the MES body extreme as the comparison level.
+    assert recs_b[0]["mes_lvl_price"] == 7604.00
+    assert recs_b[0]["mnq_lvl_price"] == 30575.75
+
+    # Wick SMT on the SAME bar: compares LOW to the wick price (7602.50). MES low 7603.00
+    # > 7602.50 → no touch → no wick SMT.
+    recs_w, _ = detect_regular_smts(lm, le, mnq, mes, {})
+    assert recs_w == [], "wick SMT must NOT fire: low has not reached the wick price yet"
+
+
+def test_body_smt_falls_back_to_price_without_close_price():
+    # A body level missing close_price falls back to the wick price for comparison.
+    lm = _levels(day_high=21000.0)   # no close_price key
+    le = _levels(day_high=3000.0)
+    mnq = _bar(high=21010.0, low=20990.0, close=21005.0)  # close beyond wick price
+    mes = _bar(high=3010.0, low=2990.0, close=2995.0)
+    recs, _ = detect_hidden_smts(lm, le, mnq, mes, "1m", {})
+    assert len(recs) == 1 and recs[0]["type"] == "body"
+    assert recs[0]["mnq_lvl_price"] == 21000.0  # fell back to wick price
+
+
+def test_body_high_uses_highest_close():
+    # *_high body SMT references the HIGHEST close. Body extreme (close_price) is BELOW
+    # the wick price, so a close above close_price (but high below wick price) fires body.
+    lm = {"day_high": {"name": "day_high", "kind": "level", "price": 21010.0,
+                       "close_price": 21000.0, "sub": "high"}}
+    le = {"day_high": {"name": "day_high", "kind": "level", "price": 3010.0,
+                       "close_price": 3000.0, "sub": "high"}}
+    # MNQ close 21002 > body extreme 21000 but high 21005 < wick price 21010 → body fires,
+    # wick does not. MES close 2995 < its body extreme 3000 → MES does not touch.
+    mnq = _bar(high=21005.0, low=20990.0, close=21002.0)
+    mes = _bar(high=2998.0, low=2985.0, close=2995.0)
+    recs_b, _ = detect_hidden_smts(lm, le, mnq, mes, "1m", {})
+    assert len(recs_b) == 1 and recs_b[0]["direction"] == "short"
+    assert recs_b[0]["mnq_lvl_price"] == 21000.0
+    recs_w, _ = detect_regular_smts(lm, le, mnq, mes, {})
+    assert recs_w == [], "wick high not reached (21005 < 21010)"
 
 
 def test_hidden_not_on_1m_tags_30m():

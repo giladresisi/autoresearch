@@ -212,9 +212,10 @@ class SessionPipeline:
         # once (keyed by window start) and combined with today_mnq's small max/min each bar,
         # avoiding a per-bar boolean mask over the ~11k-row combined frame.
         self._dyn_day_key: "pd.Timestamp | None" = None
-        self._dyn_day_hl: "tuple[float | None, float | None]" = (None, None)
+        # (high, low, close_high, close_low) — close_* feed body-SMT comparison levels.
+        self._dyn_day_hl: "tuple[float | None, ...]" = (None, None, None, None)
         self._dyn_week_key: "pd.Timestamp | None" = None
-        self._dyn_week_hl: "tuple[float | None, float | None]" = (None, None)
+        self._dyn_week_hl: "tuple[float | None, ...]" = (None, None, None, None)
         # Constant 18:00–session-open hist sliver (the ~5 pre-18:05 bars the asia session
         # window needs); concatenated with today_mnq to feed _session_bars a small frame.
         self._dyn_sliver18: "pd.DataFrame | None" = None
@@ -227,9 +228,9 @@ class SessionPipeline:
         self._fvg_done_mes_1hr: pd.Timestamp | None = None
         self._dyn_mes_hist_tail: "pd.DataFrame | None" = None
         self._dyn_mes_day_key: "pd.Timestamp | None" = None
-        self._dyn_mes_day_hl: "tuple[float | None, float | None]" = (None, None)
+        self._dyn_mes_day_hl: "tuple[float | None, ...]" = (None, None, None, None)
         self._dyn_mes_week_key: "pd.Timestamp | None" = None
-        self._dyn_mes_week_hl: "tuple[float | None, float | None]" = (None, None)
+        self._dyn_mes_week_hl: "tuple[float | None, ...]" = (None, None, None, None)
         self._dyn_mes_sliver18: "pd.DataFrame | None" = None
 
         # ── SMT V2: detection buffers + reference consumer + persisted state ─────
@@ -238,7 +239,7 @@ class SessionPipeline:
         self._pending_watch = PendingSmtWatch()
         self._detect_state: dict = {}
         # Per-frame last-processed boundary guards for hidden-SMT 15m/30m resamples.
-        self._hidden_done: dict[str, pd.Timestamp | None] = {"15min": None, "30min": None}
+        self._hidden_done: dict[str, pd.Timestamp | None] = {"1min": None}
 
     def on_daily_or_startup(
         self, now: pd.Timestamp, today_mnq: pd.DataFrame,
@@ -340,9 +341,9 @@ class SessionPipeline:
         # Reset per-session MES dynamic caches so a 09:20 re-run recomputes them.
         self._dyn_mes_hist_tail = None
         self._dyn_mes_day_key = None
-        self._dyn_mes_day_hl = (None, None)
+        self._dyn_mes_day_hl = (None, None, None, None)
         self._dyn_mes_week_key = None
-        self._dyn_mes_week_hl = (None, None)
+        self._dyn_mes_week_hl = (None, None, None, None)
         self._dyn_mes_sliver18 = None
 
         # Reset daily.json and recompute fixed levels.
@@ -358,13 +359,22 @@ class SessionPipeline:
         if _now_ts.tzinfo is None:
             _now_ts = _now_ts.tz_localize("America/New_York")
         _live = compute_live_hl_mid(_combined, _now_ts)
+        # Body-extreme (CLOSE-based) seed for day/week high/low — the same window as the
+        # wick H/L but using Close max/min (no outlier skip). The per-bar dynamic pass
+        # overwrites these immediately; this just seeds a consistent initial close_price.
+        _dw_close = self._seed_close_extremes(_combined, _now_ts)
         for _name in ("week_high", "week_low", "week_mid", "day_high", "day_low", "day_mid"):
             if _name in _live:
                 _existing = next((l for l in _liq if l["name"] == _name), None)
                 if _existing:
                     _existing["price"] = _live[_name]
+                    if _name in _dw_close:
+                        _existing["close_price"] = _dw_close[_name]
                 else:
-                    _liq.append({"name": _name, "kind": "level", "price": _live[_name]})
+                    _entry = {"name": _name, "kind": "level", "price": _live[_name]}
+                    if _name in _dw_close:
+                        _entry["close_price"] = _dw_close[_name]
+                    _liq.append(_entry)
         # Seed session highs/lows from completed sessions in combined bars.
         _today = now.date()
         for _sess in ("asia", "london", "ny_morning", "ny_evening"):
@@ -373,11 +383,13 @@ class SessionPipeline:
                 for _suffix, _col in (("high", "High"), ("low", "Low")):
                     _key = f"{_sess}_{_suffix}"
                     _price = float(_sbars[_col].max() if _suffix == "high" else _sbars[_col].min())
+                    _cprice = float(_sbars["Close"].max() if _suffix == "high" else _sbars["Close"].min())
                     _ex = next((l for l in _liq if l["name"] == _key), None)
                     if _ex:
                         _ex["price"] = _price
+                        _ex["close_price"] = _cprice
                     else:
-                        _liq.append({"name": _key, "kind": "level", "price": _price})
+                        _liq.append({"name": _key, "kind": "level", "price": _price, "close_price": _cprice})
         _state["liquidities"] = _liq
         save_daily(_state)
 
@@ -389,24 +401,32 @@ class SessionPipeline:
         _liq_mes = _state.get("liquidities_mes", [])
         if not _combined_mes.empty:
             _live_mes = compute_live_hl_mid(_combined_mes, _now_ts)
+            _dw_close_mes = self._seed_close_extremes(_combined_mes, _now_ts)
             for _name in ("week_high", "week_low", "week_mid", "day_high", "day_low", "day_mid"):
                 if _name in _live_mes:
                     _ex = next((l for l in _liq_mes if l["name"] == _name), None)
                     if _ex:
                         _ex["price"] = _live_mes[_name]
+                        if _name in _dw_close_mes:
+                            _ex["close_price"] = _dw_close_mes[_name]
                     else:
-                        _liq_mes.append({"name": _name, "kind": "level", "price": _live_mes[_name]})
+                        _entry = {"name": _name, "kind": "level", "price": _live_mes[_name]}
+                        if _name in _dw_close_mes:
+                            _entry["close_price"] = _dw_close_mes[_name]
+                        _liq_mes.append(_entry)
             for _sess in ("asia", "london", "ny_morning", "ny_evening"):
                 _sbars = _session_bars(_combined_mes, _sess, _today)
                 if not _sbars.empty:
                     for _suffix, _col in (("high", "High"), ("low", "Low")):
                         _key = f"{_sess}_{_suffix}"
                         _price = float(_sbars[_col].max() if _suffix == "high" else _sbars[_col].min())
+                        _cprice = float(_sbars["Close"].max() if _suffix == "high" else _sbars["Close"].min())
                         _ex = next((l for l in _liq_mes if l["name"] == _key), None)
                         if _ex:
                             _ex["price"] = _price
+                            _ex["close_price"] = _cprice
                         else:
-                            _liq_mes.append({"name": _key, "kind": "level", "price": _price})
+                            _liq_mes.append({"name": _key, "kind": "level", "price": _price, "close_price": _cprice})
             # 1hr FVGs from the seeded MES frame (visited check against MES combined 1m).
             _existing_mes = {l["name"] for l in _liq_mes}
             for _f in _detect_fvgs(self._fvg_mes_1hr, _combined_mes):
@@ -1194,13 +1214,25 @@ class SessionPipeline:
         _tl_vals = today_mnq["Low"].values
         _today_hi = float(_th_vals.max()) if len(_th_vals) else None
         _today_lo = float(_tl_vals.min()) if len(_tl_vals) else None
+        # CLOSE-based extremes over the same today window (body SMT comparison level):
+        # highest Close for *_high, lowest Close for *_low.
+        _tc_vals = today_mnq["Close"].values
+        _today_chi = float(_tc_vals.max()) if len(_tc_vals) else None
+        _today_clo = float(_tc_vals.min()) if len(_tc_vals) else None
 
-        # Helper: update a named level, track change.
-        def _set(name: str, price: float, kind: str = "level") -> None:
+        # Helper: update a named level, track change. `close_price` (optional) is the
+        # CLOSE-based extreme over the same window — stored alongside the wick `price` for
+        # *_high/*_low levels so hidden (body) SMTs compare against the body extreme. It
+        # never affects the `price` (wick) value or the change-detection (which keys on
+        # `price`); it is updated whenever `price` is.
+        def _set(name: str, price: float, kind: str = "level",
+                 close_price: "float | None" = None) -> None:
             if name in _liq_map:
                 if abs(_liq_map[name].get("price", 0) - price) > 1e-9:
                     _old = _liq_map[name].get("price")
                     _liq_map[name]["price"] = price
+                    if close_price is not None:
+                        _liq_map[name]["close_price"] = close_price
                     _changed.append(name)
                     _liq_events.append({
                         "kind": "liquidity-updated",
@@ -1209,8 +1241,20 @@ class SessionPipeline:
                         "old_price": _old,
                         "price": price,
                     })
+                elif close_price is not None:
+                    # Wick unchanged but the body extreme may have moved (e.g. a new lowest
+                    # close without a new lowest low) → keep close_price current. No event
+                    # (events key on the wick `price`), but flag _changed so daily.json is
+                    # persisted with the updated body extreme.
+                    _prev_cp = _liq_map[name].get("close_price")
+                    if _prev_cp is None or abs(_prev_cp - close_price) > 1e-9:
+                        _liq_map[name]["close_price"] = close_price
+                        if name not in _changed:
+                            _changed.append(name)
             else:
                 _new_entry = {"name": name, "kind": kind, "price": price}
+                if close_price is not None:
+                    _new_entry["close_price"] = close_price
                 _liq_map[name] = _new_entry
                 _liq.append(_new_entry)
                 _changed.append(name)
@@ -1237,23 +1281,28 @@ class SessionPipeline:
                 tz="America/New_York",
             )
             # Constant hist contribution [day_start, session_start) — recompute only when
-            # the (session-stable) day_start changes.
+            # the (session-stable) day_start changes. Cache holds (high, low, close_hi, close_lo).
             if getattr(self, _daykey_attr) != _day_start_ts:
                 setattr(self, _daykey_attr, _day_start_ts)
                 _dh_hist = _tail[_tail.index >= _day_start_ts]
                 setattr(self, _dayhl_attr, (
-                    (float(_dh_hist["High"].values.max()), float(_dh_hist["Low"].values.min()))
-                    if not _dh_hist.empty else (None, None)
+                    (float(_dh_hist["High"].values.max()), float(_dh_hist["Low"].values.min()),
+                     float(_dh_hist["Close"].values.max()), float(_dh_hist["Close"].values.min()))
+                    if not _dh_hist.empty else (None, None, None, None)
                 ))
             _day_hl = getattr(self, _dayhl_attr)
             _dh = _mmax(_day_hl[0], _today_hi)
             _dl = _mmin(_day_hl[1], _today_lo)
+            _dch = _mmax(_day_hl[2], _today_chi)
+            _dcl = _mmin(_day_hl[3], _today_clo)
         else:
             _dh = _today_hi
             _dl = _today_lo
+            _dch = _today_chi
+            _dcl = _today_clo
         if _dh is not None and _dl is not None:
-            _set("day_high", _dh)
-            _set("day_low",  _dl)
+            _set("day_high", _dh, close_price=_dch)
+            _set("day_low",  _dl, close_price=_dcl)
             _set("day_mid",  (_dh + _dl) / 2.0)
 
         # ── Week H/L ───────────────────────────────────────────────────────────
@@ -1264,15 +1313,18 @@ class SessionPipeline:
             setattr(self, _weekkey_attr, _week_start)
             _wh_hist = _tail[_tail.index >= _week_start]
             setattr(self, _weekhl_attr, (
-                (float(_wh_hist["High"].values.max()), float(_wh_hist["Low"].values.min()))
-                if not _wh_hist.empty else (None, None)
+                (float(_wh_hist["High"].values.max()), float(_wh_hist["Low"].values.min()),
+                 float(_wh_hist["Close"].values.max()), float(_wh_hist["Close"].values.min()))
+                if not _wh_hist.empty else (None, None, None, None)
             ))
         _week_hl = getattr(self, _weekhl_attr)
         _wh = _mmax(_week_hl[0], _today_hi)
         _wl = _mmin(_week_hl[1], _today_lo)
+        _wch = _mmax(_week_hl[2], _today_chi)
+        _wcl = _mmin(_week_hl[3], _today_clo)
         if _wh is not None and _wl is not None:
-            _set("week_high", _wh)
-            _set("week_low",  _wl)
+            _set("week_high", _wh, close_price=_wch)
+            _set("week_low",  _wl, close_price=_wcl)
             _set("week_mid",  (_wh + _wl) / 2.0)
 
         # ── Active session H/L ─────────────────────────────────────────────────
@@ -1314,8 +1366,10 @@ class SessionPipeline:
             if not _sbars.empty:
                 _sh = float(_sbars["High"].max())
                 _sl = float(_sbars["Low"].min())
-                _set(f"{_active_sess}_high", _sh)
-                _set(f"{_active_sess}_low", _sl)
+                _sch = float(_sbars["Close"].max())
+                _scl = float(_sbars["Close"].min())
+                _set(f"{_active_sess}_high", _sh, close_price=_sch)
+                _set(f"{_active_sess}_low", _sl, close_price=_scl)
 
         # ── FVG visited prune ──────────────────────────────────────────────────
         _to_remove = []
@@ -1528,8 +1582,9 @@ class SessionPipeline:
             paired, mnq_bar, mes_bar, self._detect_state)
         records += _new
 
-        # Hidden (body) SMTs only when this 1m bar completes a 15m / 30m bar.
-        for _tf, _tag in (("15min", "15m"), ("30min", "30m")):
+        # Hidden (body) SMTs: evaluate the just-completed 1m bar's CLOSE each minute. (15m/30m
+        # fired too late — even 5m can fire early; the 1m close hints a trend change earliest.)
+        for _tf, _tag in (("1min", "1m"),):
             _floor = now.floor(_tf)
             if now != _floor:
                 continue  # not on this TF boundary
@@ -1562,7 +1617,9 @@ class SessionPipeline:
                 "type":          _r["type"],
                 "timeframe":     _r["timeframe"],
                 "price":         _r["mnq_price"],
-                "mnq_div_price": _mnq_lvl_px.get(_r["ref_name"]),
+                # Body SMTs carry their own body-extreme comparison level in the record
+                # (mnq_lvl_price); wick SMTs / fills fall back to the wick level-price map.
+                "mnq_div_price": _r.get("mnq_lvl_price", _mnq_lvl_px.get(_r["ref_name"])),
                 "source":        "v2",
                 "leader":        _r["leader"],
                 "ref_name":      _r["ref_name"],
@@ -1645,6 +1702,41 @@ class SessionPipeline:
             datetime.datetime(d.year, d.month, d.day, 18, 0),
             tz="America/New_York",
         )
+
+    def _seed_close_extremes(self, combined: pd.DataFrame, now: pd.Timestamp) -> dict:
+        """CLOSE-based day/week extremes for the body-SMT seed.
+
+        Mirrors compute_live_hl_mid's day/week WINDOWS (same lookback by ET hour) but uses
+        Close max/min — no opening-spike outlier skip (the body extreme is a pure close
+        extreme). Returns {day_high, day_low, week_high, week_low} as the highest/lowest
+        Close over each window; keys absent when the window holds no bars. The per-bar
+        dynamic pass overwrites these on the next bar, so this only seeds a sane start."""
+        out: dict = {}
+        if combined is None or combined.empty:
+            return out
+        _today = now.date()
+        # Day window start (same hour rules as compute_live_hl_mid).
+        _day_cal = _today if now.hour >= 18 else _today - datetime.timedelta(days=1)
+        if now.hour >= 18:
+            _day_hr = 6
+        elif now.hour < 6:
+            _day_hr = 12
+        else:
+            _day_hr = 18
+        _day_start = pd.Timestamp(
+            datetime.datetime(_day_cal.year, _day_cal.month, _day_cal.day, _day_hr, 0),
+            tz="America/New_York",
+        )
+        _day_bars = combined[(combined.index >= _day_start) & (combined.index <= now)]
+        if not _day_bars.empty:
+            out["day_high"] = float(_day_bars["Close"].max())
+            out["day_low"] = float(_day_bars["Close"].min())
+        _week_start = self._week_start_ts(now)
+        _week_bars = combined[(combined.index >= _week_start) & (combined.index <= now)]
+        if not _week_bars.empty:
+            out["week_high"] = float(_week_bars["Close"].max())
+            out["week_low"] = float(_week_bars["Close"].min())
+        return out
 
     def _week_start_ts(self, now: pd.Timestamp) -> pd.Timestamp:
         """Return the extended week-H/L start for the CME session containing `now`.

@@ -28,6 +28,13 @@ MIN_REARM_OPP_MOVE_PTS_MES = 3.0    # MES counterpart (≈ MNQ/6.7 scale)
 WATCH_CONFIRM_PTS_MNQ = 20.0        # trend-confirmation distance that invalidates a retained SMT
 WATCH_CONFIRM_PTS_MES = 3.0
 
+# Fulfillment thresholds (pts) by tier+instrument. After a level SMT fires, the swept
+# level is "fulfilled" once price travels this far past the swept level in the SMT's
+# direction (informational for fixed levels; a re-arm trigger for dynamic levels).
+# First-guess defaults; tunable.
+FULFILL_PTS_MNQ = {"week": 80.0, "day": 40.0, "session": 20.0}
+FULFILL_PTS_MES = {"week": 12.0, "day": 6.0, "session": 3.0}
+
 HIDDEN_TFS = ("15min", "30min")
 
 # Per-session ET "forming" window (open_hour, close_hour) — a 6hr-session level is an
@@ -50,6 +57,35 @@ def _rearm_pts(inst: str) -> float:
 
 def _confirm_pts(inst: str) -> float:
     return WATCH_CONFIRM_PTS_MES if inst == "mes" else WATCH_CONFIRM_PTS_MNQ
+
+
+def _level_class(name: str) -> tuple[str, str]:
+    """Classify a level name into (kind, tier).
+
+    kind is "dynamic" (re-armable) or "fixed" (single fire ever); tier selects the
+    fulfillment threshold ("week" | "day" | "session").
+      - week_*  -> ("dynamic", "week")     (running week high/low)
+      - day_*   -> ("dynamic", "day")      (running day high/low)
+      - prev*week* -> ("fixed", "week")    (prior-week high/low)
+      - prev*day*  -> ("fixed", "day")     (prior-day high/low)
+      - else (asia/london/ny_morning/ny_evening _high/_low) -> ("fixed", "session")
+    """
+    n = name or ""
+    if n.startswith("week_"):
+        return ("dynamic", "week")
+    if n.startswith("day_"):
+        return ("dynamic", "day")
+    if n.startswith("prev"):
+        if "week" in n:
+            return ("fixed", "week")
+        if "day" in n:
+            return ("fixed", "day")
+    return ("fixed", "session")
+
+
+def _fulfill_pts(tier: str, inst: str) -> float:
+    table = FULFILL_PTS_MES if inst == "mes" else FULFILL_PTS_MNQ
+    return table.get(tier, table["session"])
 
 
 def _opposite(direction: str) -> str:
@@ -109,8 +145,10 @@ def eligible_levels(liqs: list[dict], now: Any) -> dict[str, dict]:
         sub = _sub(name)
         if sub is None:
             continue
+        _cp = l.get("close_price")
+        _entry_extra = {"close_price": float(_cp)} if _cp is not None else {}
         if name.startswith(("day_", "week_")):
-            out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub}
+            out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub, **_entry_extra}
             continue
         # 6hr-session level: day-scoped eligibility (see docstring).
         sess = name.rsplit("_", 1)[0]
@@ -127,7 +165,7 @@ def eligible_levels(liqs: list[dict], now: Any) -> dict[str, dict]:
             # the clock has passed its close hour today.
             if et.hour < (win[1] % 24):
                 continue
-        out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub}
+        out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub, **_entry_extra}
     return out
 
 
@@ -181,7 +219,9 @@ def _detect_level_smts(
             continue
         direction = "short" if sub == "high" else "long"
         side = "bearish" if direction == "short" else "bullish"
-        skey = _skey(name, direction)
+        # State key includes rec_type so wick (regular) and body (hidden) SMTs on the same
+        # (level, direction) are tracked INDEPENDENTLY — each fires/re-arms on its own.
+        skey = f"{_skey(name, direction)}|{rec_type}"
 
         # Per-instrument touch value (wick or close).
         if body:
@@ -191,8 +231,16 @@ def _detect_level_smts(
             mnq_val = float(mnq_bar["high"]) if sub == "high" else float(mnq_bar["low"])
             mes_val = float(mes_bar["high"]) if sub == "high" else float(mes_bar["low"])
 
-        mnq_lvl_price = float(lvl_mnq["price"])
-        mes_lvl_price = float(lvl_mes["price"])
+        # Comparison level. Hidden (body) SMTs reference the BODY extreme — the lowest
+        # CLOSE for *_low / highest CLOSE for *_high over the level's window — carried as
+        # `close_price`. Wick SMTs (and a body SMT on a level missing close_price) use the
+        # wick `price`. This is the only place the body level differs from the wick level.
+        if body:
+            mnq_lvl_price = float(lvl_mnq.get("close_price", lvl_mnq["price"]))
+            mes_lvl_price = float(lvl_mes.get("close_price", lvl_mes["price"]))
+        else:
+            mnq_lvl_price = float(lvl_mnq["price"])
+            mes_lvl_price = float(lvl_mes["price"])
         mnq_touch = _touched(sub, mnq_val, mnq_lvl_price, body=body)
         mes_touch = _touched(sub, mes_val, mes_lvl_price, body=body)
 
@@ -207,25 +255,53 @@ def _detect_level_smts(
             leader, lead_price, lead_lvl = "mnq", mnq_close, mnq_lvl_price
             cond = False
 
+        kind_cls, tier = _level_class(name)
+
         st = state.get(skey)
         if st is None:
-            st = {"armed": True, "last_cond": False, "fire_price": None, "level_price": mnq_lvl_price}
+            st = {
+                "armed": True,
+                "last_cond": False,
+                "fired": False,
+                "fulfilled": False,
+                "fire_price": None,
+                "fire_level_price": None,
+                "fire_mnq_close": None,
+                "level_price": mnq_lvl_price,
+            }
             state[skey] = st
 
-        # Cooldown: once a (level, direction) fires, it stays DORMANT and does NOT re-fire
-        # on subsequent touches of the same level — even as price oscillates across it, and
-        # even as a running level's terminal price ticks. It re-arms ONLY when an
-        # opposite-direction SMT is created (a genuine regime flip); a fresh re-touch can
-        # then fire again. (A points-based opposite-move re-arm was intentionally removed: it
-        # cannot suppress chop re-fires when the swing amplitude exceeds the threshold — price
-        # wicks the level, runs tens of points away, and wicks it again, re-arming each time.)
-        if not st["armed"]:
-            if any(r.get("direction") == _opposite(direction) for r in records):
-                st["armed"] = True
+        # (a) Fulfillment — once fired and not yet fulfilled, the SMT is fulfilled when MNQ
+        # close FOLLOWS THROUGH FULFILL_PTS[tier] beyond the FIRE close (where price sat when
+        # the SMT formed), in the SMT's favorable direction. Measuring from the fire close (not
+        # the swept level) requires a genuine follow-through: a wick-sweep SMT closes far from
+        # the level, so a level-based check would be satisfied the instant it fires and re-arm
+        # immediately (the day_low flood). Computed for both kinds (informational for fixed; a
+        # re-arm trigger for dynamic).
+        if st.get("fired") and not st.get("fulfilled"):
+            fc = st.get("fire_mnq_close")
+            if fc is not None:
+                pts = _fulfill_pts(tier, "mnq")
+                if direction == "short":
+                    if mnq_close <= float(fc) - pts:
+                        st["fulfilled"] = True
+                else:  # long
+                    if mnq_close >= float(fc) + pts:
+                        st["fulfilled"] = True
 
-        fired = None
+        # (b) Re-arm (only if currently dormant). Fixed levels NEVER re-arm. Dynamic levels
+        # re-arm when the swept level was fulfilled OR an opposite-direction SMT is present
+        # in this batch (a genuine regime flip).
+        if not st["armed"] and kind_cls == "dynamic":
+            opp_present = any(r.get("direction") == _opposite(direction) for r in records)
+            if st.get("fulfilled") or opp_present:
+                st["armed"] = True
+                st["fired"] = False
+                st["fulfilled"] = False
+
+        # (c) Fire on the armed rising edge.
         if cond and not st["last_cond"] and st["armed"]:
-            fired = {
+            records.append({
                 "kind": "smt",
                 "type": rec_type,
                 "side": side,
@@ -236,28 +312,44 @@ def _detect_level_smts(
                 "ref_name": name,
                 "mnq_price": mnq_close,
                 "mes_price": mes_close,
-            }
-            records.append(fired)
+                # The MNQ comparison level used for THIS detection (body-extreme when
+                # body=True, wick price otherwise) so the smt-div signal/plot label can
+                # reference the body extreme for hidden SMTs.
+                "mnq_lvl_price": mnq_lvl_price,
+                "mes_lvl_price": mes_lvl_price,
+            })
             st["armed"] = False
+            st["fired"] = True
+            st["fulfilled"] = False
             st["fire_price"] = lead_price
             st["fire_leader"] = leader
+            st["fire_level_price"] = mnq_lvl_price
+            st["fire_mnq_close"] = mnq_close
 
         st["last_cond"] = cond
         st["level_price"] = mnq_lvl_price
 
-    # Post-pass: an SMT in this batch re-arms any dormant pair of the OPPOSITE direction
-    # (order-independent — the opposite SMT may have been detected after the dormant pair
-    # was visited above). The re-arm persists in state so a later fresh re-touch re-fires.
+    # Post-pass: an SMT in this batch re-arms any dormant DYNAMIC pair of the OPPOSITE
+    # direction (order-independent — the opposite SMT may have been detected after the
+    # dormant pair was visited above). A FIXED level is NEVER re-armed. The re-arm persists
+    # in state so a later fresh re-touch re-fires.
     if records:
         batch_dirs = {r.get("direction") for r in records}
         for skey, st in state.items():
-            # Only level-SMT entries (keyed "name|direction"); skip fill entries (FVG
+            # Only level-SMT entries (keyed "name|direction|type"); skip fill entries (FVG
             # names with no "|") which share this dict but have their own re-arm logic.
             if "|" not in skey or st.get("armed"):
                 continue
-            _dir = skey.rsplit("|", 1)[-1]
+            _parts = skey.split("|")
+            if len(_parts) < 2:
+                continue
+            _name, _dir = _parts[0], _parts[1]
+            if _level_class(_name)[0] != "dynamic":
+                continue
             if _opposite(_dir) in batch_dirs:
                 st["armed"] = True
+                st["fired"] = False
+                st["fulfilled"] = False
 
     return records, state
 

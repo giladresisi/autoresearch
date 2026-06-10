@@ -693,6 +693,51 @@ def test_per_bar_updates_day_high(_isolate_state, monkeypatch):
     assert _dh2["price"] == 30010.0, f"day_high should rise to today's max High, got {_dh2['price']}"
 
 
+def test_per_bar_populates_close_price_body_extreme(_isolate_state, monkeypatch):
+    """on_1m_bar stores a close_price (body extreme) alongside the wick price for
+    day_high/day_low, distinct from the wick price. Highest Close for *_high, lowest
+    Close for *_low — never equal to the wick High/Low here."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    now_sess = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+    pipeline.on_session_start(now_sess, _make_1m_bars("2025-11-14 09:20", n=1), force_reset=True)
+
+    # Today's bars: High 30010, Low 29990, Close 30002 (base+2). The day_high body extreme
+    # is the highest CLOSE (30002) and day_low body extreme the lowest CLOSE (30002),
+    # both strictly inside the wick range [29990, 30010].
+    today_mnq = _make_1m_bars("2025-11-14 09:21", n=2, base=30000.0)
+    today_mes = _make_1m_bars("2025-11-14 09:21", n=2, base=30000.0)
+    bar = pd.Series({"Open": 30000.0, "High": 30010.0, "Low": 29990.0, "Close": 30002.0})
+    pipeline.on_1m_bar(pd.Timestamp("2025-11-14 09:21", tz="America/New_York"),
+                       bar, bar, today_mnq, today_mes)
+
+    _liq = smt_state.load_daily()["liquidities"]
+    _dh = next((l for l in _liq if l["name"] == "day_high"), None)
+    _dl = next((l for l in _liq if l["name"] == "day_low"), None)
+    assert _dh is not None and _dl is not None
+    # close_price present and equal to the close extreme, NOT the wick price.
+    assert _dh.get("close_price") == 30002.0, f"day_high close_price should be highest Close, got {_dh.get('close_price')}"
+    assert _dl.get("close_price") == 30002.0, f"day_low close_price should be lowest Close, got {_dl.get('close_price')}"
+    assert _dh["price"] == 30010.0 and _dh["close_price"] != _dh["price"]
+    assert _dl["price"] == 29990.0 and _dl["close_price"] != _dl["price"]
+
+    # The MES (liquidities_mes) block carries close_price too.
+    _liq_mes = smt_state.load_daily().get("liquidities_mes", [])
+    _dl_mes = next((l for l in _liq_mes if l["name"] == "day_low"), None)
+    if _dl_mes is not None:
+        assert "close_price" in _dl_mes
+
+
 # ---------------------------------------------------------------------------
 # Test 21: per-bar prunes a visited FVG from daily.json
 # ---------------------------------------------------------------------------
@@ -1470,9 +1515,9 @@ def test_detection_runs_every_1m(_isolate_state, monkeypatch):
     assert any(r["ref_name"] == "day_high" and r["type"] == "wick" for r in per_min)
 
 
-def test_hidden_only_on_tf_boundary(_isolate_state, monkeypatch):
-    """A close-vs-level divergence yields NO body record off a 15m boundary, and a body
-    record exactly on the 15m boundary."""
+def test_hidden_on_1m_boundary(_isolate_state, monkeypatch):
+    """Hidden (body) SMTs now run on the 1m cadence: a close-vs-level divergence in the
+    just-COMPLETED 1m bar yields a body record on the next 1m boundary, tagged '1m'."""
     pipeline, _ = _smt_v2_pipeline(monkeypatch)
     _freeze_liquidities(monkeypatch, pipeline)
     daily = smt_state.load_daily()
@@ -1480,7 +1525,8 @@ def test_hidden_only_on_tf_boundary(_isolate_state, monkeypatch):
     daily["liquidities_mes"] = [{"name": "day_high", "kind": "level", "price": 3000.0}]
     smt_state.save_daily(daily)
 
-    # Build a 15m of MNQ bars whose 15m close is > 21000, MES 15m close < 3000.
+    # Build 1m bars whose CLOSE is > 21000 (MNQ) and < 3000 (MES) — a body divergence — but
+    # whose WICKS do NOT take out the level (so no wick SMT interferes).
     idx = pd.date_range("2025-11-13 20:00", periods=16, freq="1min", tz="America/New_York")
     mnq = pd.DataFrame({"Open": [20990.0] * 16, "High": [21002.0] * 16,
                         "Low": [20980.0] * 16, "Close": [21005.0] * 16,
@@ -1489,17 +1535,13 @@ def test_hidden_only_on_tf_boundary(_isolate_state, monkeypatch):
                         "Low": [2980.0] * 16, "Close": [2995.0] * 16,
                         "Volume": [100] * 16}, index=idx)
 
-    # Off-boundary minute (20:07) → no body record.
-    now_off = pd.Timestamp("2025-11-13 20:07", tz="America/New_York")
-    pipeline.on_1m_bar(now_off, _bar(21000.0), _bar(2995.0),
-                       mnq.loc[:now_off], mes.loc[:now_off])
-    assert not any(r["type"] == "body" for r in pipeline._smt_buffer.get_new("5m"))
-
-    # On the 15m boundary (20:15) the completed [20:00,20:15) bar is evaluated → body.
-    now_on = pd.Timestamp("2025-11-13 20:15", tz="America/New_York")
-    pipeline.on_1m_bar(now_on, _bar(21000.0), _bar(2995.0), mnq, mes)
-    assert any(r["type"] == "body" and r["timeframe"] == "15m"
-               for r in pipeline._smt_buffer.get_new("1m"))
+    # On the 20:07 boundary the just-completed [20:06,20:07) 1m bar is evaluated → body,
+    # tagged "1m". (Hidden no longer waits for a 15m/30m boundary.)
+    now = pd.Timestamp("2025-11-13 20:07", tz="America/New_York")
+    pipeline.on_1m_bar(now, _bar(20990.0), _bar(2990.0),
+                       mnq.loc[:now], mes.loc[:now])
+    assert any(r["type"] == "body" and r["timeframe"] == "1m"
+               for r in pipeline._smt_buffer.get_new("5m"))
 
 
 def test_cadence_morning_1m(_isolate_state, monkeypatch):
