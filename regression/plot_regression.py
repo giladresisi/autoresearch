@@ -538,11 +538,14 @@ for kind, style in OTHER_MARKER_STYLE.items():
                         f"→ {dr.get('combined_score', '?')}"
                     )
         hover.append("<br>".join(parts))
+    # Up/down hypotheses get directional arrow markers (distinct from SMT triangles).
+    sym = ([("arrow-up" if e.get("direction") == "up" else "arrow-down") for e in group]
+           if kind == "new-hypothesis" else style["symbol"])
     fig.add_trace(go.Scatter(
         x=[e["ts"] for e in group],
         y=[_event_price(e) for e in group],
         mode="markers", name=kind.replace("-", " "),
-        marker=dict(symbol=style["symbol"], color=style["color"],
+        marker=dict(symbol=sym, color=style["color"],
                     size=style["size"], line=dict(width=2, color=style["color"])),
         hovertemplate="%{customdata}<extra></extra>",
         customdata=hover,
