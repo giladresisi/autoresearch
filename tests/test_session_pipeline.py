@@ -6,6 +6,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+import smt_detect
 import smt_state
 from session_pipeline import SessionPipeline
 
@@ -1540,9 +1541,15 @@ def test_mnq_liquidities_unchanged_regression(_isolate_state, monkeypatch):
 
 def _freeze_liquidities(monkeypatch, pipeline):
     """Stop the per-bar dynamic-liquidity passes from overwriting test-injected daily.json
-    so the detection block sees exactly the levels/FVGs the test crafted."""
+    so the detection block sees exactly the levels/FVGs the test crafted. Also clears the
+    additive universe (prev-day/week) blocks the seed populates, so a test that crafts a
+    single level isn't joined by seeded prev-levels via the detection-time merge."""
     monkeypatch.setattr(pipeline, "_update_dynamic_liquidities", lambda *a, **kw: [])
     monkeypatch.setattr(pipeline, "_update_mes_liquidities", lambda *a, **kw: [])
+    _d = smt_state.load_daily()
+    _d["liquidities_universe"] = []
+    _d["liquidities_universe_mes"] = []
+    smt_state.save_daily(_d)
 
 
 def test_detection_runs_every_1m(_isolate_state, monkeypatch):
@@ -1562,6 +1569,30 @@ def test_detection_runs_every_1m(_isolate_state, monkeypatch):
                        today_mnq, today_mes)
     per_min = pipeline._smt_buffer.get_new("1m")
     assert any(r["ref_name"] == "day_high" and r["type"] == "wick" for r in per_min)
+
+
+def test_universe_prev_day_smt_fires(_isolate_state, monkeypatch):
+    """Universe (B): a prev-day FIXED level supplied via the additive liquidities_universe
+    block is SMT-eligible. An MNQ-only wick take-out of prev1_day_high yields a wick SMT —
+    proving the detection-time merge of the universe block works end-to-end."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)  # also clears the seeded universe blocks
+    daily = smt_state.load_daily()
+    daily["liquidities"] = []
+    daily["liquidities_mes"] = []
+    daily["liquidities_universe"] = [
+        {"name": "prev1_day_high", "kind": "level", "price": 21000.0}]
+    daily["liquidities_universe_mes"] = [
+        {"name": "prev1_day_high", "kind": "level", "price": 3000.0}]
+    smt_state.save_daily(daily)
+
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 20:00", n=1)
+    now = pd.Timestamp("2025-11-13 20:01", tz="America/New_York")
+    # MNQ wick takes out 21000; MES wick stays below 3000 → MNQ-led bearish SMT.
+    pipeline.on_1m_bar(now, _bar(20996.0, high_off=10.0), _bar(2990.0, high_off=5.0),
+                       today_mnq, today_mes)
+    per_min = pipeline._smt_buffer.get_new("1m")
+    assert any(r["ref_name"] == "prev1_day_high" and r["type"] == "wick" for r in per_min)
 
 
 def test_hidden_on_1m_boundary(_isolate_state, monkeypatch):
@@ -1745,6 +1776,117 @@ def test_v2_emits_smt_div_for_constructed_smt(_isolate_state, monkeypatch):
     assert e["mnq_div_price"] == 21000.0   # MNQ level price for a wick/body SMT
     assert e["leader"] == "mnq"
     assert emitted == events               # _emit and returned list agree
+
+
+# ---------------------------------------------------------------------------
+# Adverse-run invalidation trail wiring (Contract INV-2)
+# ---------------------------------------------------------------------------
+def _seed_day_high(pipeline):
+    """Seed a shared MNQ/MES day_high level for an invalidation scenario."""
+    daily = smt_state.load_daily()
+    daily["liquidities"] = [{"name": "day_high", "kind": "level", "price": 21000.0}]
+    daily["liquidities_mes"] = [{"name": "day_high", "kind": "level", "price": 3000.0}]
+    smt_state.save_daily(daily)
+
+
+def _fire_then_invalidate(pipeline):
+    """Fire a bearish (short) day_high wick SMT, then drive adverse-up bars whose MNQ close
+    runs past fire_mnq_close + INVALIDATE_PTS["day"] → invalidation trips. Threshold-relative
+    (reads the live INVALIDATE_PTS) so it stays correct as the default is tuned. Returns the
+    list of on_1m_bar event lists. The adverse bars do NOT re-touch the level (high stays
+    below 21000) so no re-fire / re-arm interferes."""
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 20:00", n=6)
+    # Bar 1 (20:01): MNQ wick takes out day_high (21006), MES stays below → bearish fire.
+    now1 = pd.Timestamp("2025-11-13 20:01", tz="America/New_York")
+    ev1 = pipeline.on_1m_bar(now1, _bar(20996.0, high_off=10.0), _bar(2990.0, high_off=5.0),
+                             today_mnq.iloc[:1], today_mes.iloc[:1])
+    # Adverse-up bars climbing PAST fire_close + INVALIDATE_PTS["day"]. Highs stay below the
+    # 21000 level so the level is NOT re-touched (no re-arm / no re-fire).
+    _fc = next(st["fire_mnq_close"] for k, st in pipeline._detect_state.items()
+               if k.startswith("day_high|short") and isinstance(st, dict)
+               and st.get("fire_mnq_close"))
+    _inv = smt_detect.INVALIDATE_PTS_MNQ["day"]
+    _trip = _fc + _inv + 5.0  # comfortably past the threshold
+    ev_rest = []
+    for i, (mm, mclose) in enumerate(((2, _fc + _inv * 0.5), (3, _trip), (4, _trip + 5.0)), start=1):
+        now = pd.Timestamp(f"2025-11-13 20:0{mm}", tz="America/New_York")
+        # close=mclose but high kept just below level via a Series with explicit fields.
+        mnq_bar = pd.Series({"Open": mclose - 1.0, "High": 20999.0,
+                             "Low": mclose - 2.0, "Close": mclose})
+        mes_bar = pd.Series({"Open": 2988.0, "High": 2989.0, "Low": 2985.0, "Close": 2988.0})
+        ev_rest.append(
+            pipeline.on_1m_bar(now, mnq_bar, mes_bar,
+                               today_mnq.iloc[:i + 1], today_mes.iloc[:i + 1]))
+    return [ev1] + ev_rest
+
+
+def test_smt_invalidations_written_to_state_dir(_isolate_state, monkeypatch):
+    """Drive a bearish (short) day_high SMT then adverse-up bars; assert smt_invalidations.json
+    exists in paths.state_dir() and parses to a list with one reason=='adverse_run' event."""
+    import json
+    import paths
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)
+    _seed_day_high(pipeline)
+
+    _fire_then_invalidate(pipeline)
+
+    inv_path = paths.state_dir() / "smt_invalidations.json"
+    assert inv_path.exists(), "smt_invalidations.json must be written when an SMT invalidates"
+    data = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert isinstance(data, list)
+    adverse = [e for e in data if e.get("reason") == "adverse_run"]
+    assert len(adverse) == 1
+    ev = adverse[0]
+    assert ev["ref_name"] == "day_high"
+    assert ev["direction"] == "short"
+    assert ev["tier"] == "day"
+    assert ev["threshold_pts"] == smt_detect.INVALIDATE_PTS_MNQ["day"]
+    assert "fire_mnq_close" in ev and "trigger_mnq_close" in ev
+
+
+def test_invalidation_trail_not_in_sd_events(_isolate_state, monkeypatch):
+    """The invalidation trail is debug-only: no smt-div / event emitted by the adverse bars
+    carries an invalidation record, and the producer's detect_state holds the trail."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)
+    _seed_day_high(pipeline)
+
+    ev_lists = _fire_then_invalidate(pipeline)
+
+    # No emitted event mentions invalidation in any field.
+    for evs in ev_lists:
+        for e in evs:
+            assert "invalidated" not in e
+            assert e.get("reason") != "adverse_run"
+            assert e.get("kind") != "smt-invalidation"
+    # The trail lives in detect_state (producer side), not in the emitted stream.
+    trail = pipeline._detect_state.get("__invalidations__", [])
+    assert any(e.get("reason") == "adverse_run" for e in trail)
+
+
+def test_no_trail_file_when_no_invalidations(_isolate_state, monkeypatch):
+    """A clean run with no adverse runs writes no invalidation trail file (the impl only
+    writes when the list is non-empty)."""
+    import paths
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    _freeze_liquidities(monkeypatch, pipeline)
+    _seed_day_high(pipeline)
+
+    # Fire a bearish SMT but never run adverse — just hold below the level (no re-touch, no
+    # adverse-up). No invalidation should occur.
+    today_mnq, today_mes = _mnq_mes_today("2025-11-13 20:00", n=3)
+    now1 = pd.Timestamp("2025-11-13 20:01", tz="America/New_York")
+    pipeline.on_1m_bar(now1, _bar(20996.0, high_off=10.0), _bar(2990.0, high_off=5.0),
+                       today_mnq.iloc[:1], today_mes.iloc[:1])
+    # A small favorable-down drift (still well within threshold) — no invalidation.
+    now2 = pd.Timestamp("2025-11-13 20:02", tz="America/New_York")
+    pipeline.on_1m_bar(now2, _bar(20990.0, high_off=2.0), _bar(2988.0, high_off=2.0),
+                       today_mnq.iloc[:2], today_mes.iloc[:2])
+
+    assert not pipeline._detect_state.get("__invalidations__"), "no invalidation expected"
+    inv_path = paths.state_dir() / "smt_invalidations.json"
+    assert not inv_path.exists(), "no trail file should be written for a clean run"
 
 
 def test_v2_emits_smt_div_for_constructed_fill(_isolate_state, monkeypatch):

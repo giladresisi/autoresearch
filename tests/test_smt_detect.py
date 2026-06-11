@@ -334,6 +334,85 @@ def test_asia_not_eligible_while_forming():
     assert "asia_high" in eligible_levels(liqs, closed)
 
 
+def test_universe_prev_levels_always_eligible():
+    """Universe (B) prev-day / prev-week fixed levels are eligible at any hour (completed
+    history — no session-window or running-extreme gating) and pass close_price through."""
+    liqs = [
+        {"name": "prev1_day_high", "kind": "level", "price": 21000.0, "close_price": 20998.0},
+        {"name": "prev7_day_low", "kind": "level", "price": 20500.0},
+        {"name": "prev1_week_high", "kind": "level", "price": 21100.0},
+        {"name": "prev2_week_low", "kind": "level", "price": 20400.0},
+        {"name": "prev1_TDO", "kind": "level", "price": 20777.0},  # not a high/low → dropped
+    ]
+    for t in (pd.Timestamp("2026-06-09 20:00", tz="America/New_York"),   # Asia forming
+              pd.Timestamp("2026-06-09 03:00", tz="America/New_York"),   # overnight
+              pd.Timestamp("2026-06-09 10:00", tz="America/New_York")):  # RTH
+        elig = eligible_levels(liqs, t)
+        assert {"prev1_day_high", "prev7_day_low", "prev1_week_high", "prev2_week_low"} <= set(elig)
+        assert "prev1_TDO" not in elig  # TDO has no _high/_low sub
+    assert abs(elig["prev1_day_high"]["close_price"] - 20998.0) < 1e-9
+
+
+def test_universe_prev_levels_are_fixed():
+    """prev-day → ('fixed','day'); prev-week → ('fixed','week') (never re-arm)."""
+    assert smt_detect._level_class("prev1_day_high") == ("fixed", "day")
+    assert smt_detect._level_class("prev13_day_low") == ("fixed", "day")
+    assert smt_detect._level_class("prev1_week_high") == ("fixed", "week")
+    assert smt_detect._level_class("prev2_week_low") == ("fixed", "week")
+
+
+def test_fixed_high_bullish_when_swept_from_above():
+    # Per-level take-out: a FIXED prev-day HIGH approached from ABOVE (price sits above it and
+    # a wick dips onto it) is a DOWN-sweep → BULLISH, even though the level is a "high".
+    lm = _levels(prev1_day_high=21000.0)
+    le = _levels(prev1_day_high=3000.0)
+    # MNQ close 21005 (above level) ⇒ approach from above; low 20999 dips onto the level.
+    mnq = _bar(high=21010.0, low=20999.0, close=21005.0)
+    mes = _bar(high=3010.0, low=3005.0, close=3007.0)   # MES holds above (low 3005 > 3000)
+    recs, _ = detect_regular_smts(lm, le, mnq, mes, {})
+    assert len(recs) == 1
+    assert recs[0]["ref_name"] == "prev1_day_high"
+    assert recs[0]["side"] == "bullish" and recs[0]["direction"] == "long"
+    assert recs[0]["leader"] == "mnq"
+
+
+def test_fixed_high_bearish_when_swept_from_below():
+    # The SAME prev-day high approached from BELOW (rising into it) is an UP-sweep → BEARISH.
+    lm = _levels(prev1_day_high=21000.0)
+    le = _levels(prev1_day_high=3000.0)
+    mnq = _bar(high=21001.0, low=20990.0, close=20995.0)  # close below level ⇒ from below
+    mes = _bar(high=2999.0, low=2990.0, close=2995.0)     # MES holds below (high 2999 < 3000)
+    recs, _ = detect_regular_smts(lm, le, mnq, mes, {})
+    assert len(recs) == 1
+    assert recs[0]["side"] == "bearish" and recs[0]["direction"] == "short"
+    assert recs[0]["leader"] == "mnq"
+
+
+def test_fixed_low_bearish_when_swept_from_below():
+    # A FIXED prev-day LOW approached from BELOW (price under it, rising into it) is an
+    # UP-sweep → BEARISH (old support acting as resistance) — direction is the sweep, not
+    # the level's "low" name.
+    lm = _levels(prev1_day_low=21000.0)
+    le = _levels(prev1_day_low=3000.0)
+    mnq = _bar(high=21001.0, low=20990.0, close=20995.0)
+    mes = _bar(high=2999.0, low=2990.0, close=2995.0)
+    recs, _ = detect_regular_smts(lm, le, mnq, mes, {})
+    assert len(recs) == 1
+    assert recs[0]["side"] == "bearish" and recs[0]["direction"] == "short"
+
+
+def test_dynamic_high_always_bearish_regardless_of_close():
+    # A DYNAMIC running high keeps its suffix mapping (only ever swept upward) even if the
+    # close sits above it — no approach-flip for dynamic levels.
+    lm = _levels(day_high=21000.0)
+    le = _levels(day_high=3000.0)
+    mnq = _bar(high=21010.0, low=20999.0, close=21005.0)  # close above, but dynamic → bearish
+    mes = _bar(high=2999.0, low=2990.0, close=2995.0)
+    recs, _ = detect_regular_smts(lm, le, mnq, mes, {})
+    assert len(recs) == 1
+    assert recs[0]["side"] == "bearish" and recs[0]["direction"] == "short"
+
+
 def test_session_eligibility_day_scoped():
     """Day-scoped 6hr-session eligibility (smt_detect.eligible_levels docstring).
 

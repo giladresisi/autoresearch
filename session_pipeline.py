@@ -326,6 +326,9 @@ class SessionPipeline:
         self._detect_state: dict = {}
         # Per-frame last-processed boundary guards for hidden-SMT 15m/30m resamples.
         self._hidden_done: dict[str, pd.Timestamp | None] = {"1min": None}
+        # Count of invalidation events already flushed to smt_invalidations.json, so the
+        # per-bar trail write only re-serializes when a NEW event was appended this bar.
+        self._inv_written_n: int = 0
 
     def on_daily_or_startup(
         self, now: pd.Timestamp, today_mnq: pd.DataFrame,
@@ -485,6 +488,11 @@ class SessionPipeline:
                 _liq.append(_yf)
                 _existing_mnq_fvg.add(_yf["name"])
         _state["liquidities"] = _liq
+        # Universe (B): prev-day (14 trading days) + prev-week (2 Mon–Fri weeks) extremes
+        # as FIXED SMT levels, in an ADDITIVE key consumed only by SMT detection — kept
+        # OUT of `liquidities` so the strategy's failed-entry sweep (_ext_levels) is
+        # byte-identical and trades are unchanged.
+        _state["liquidities_universe"] = _daily_mod.compute_universe_levels(_combined, now.date())
         save_daily(_state)
 
         # ── SMT V2: seed parallel MES day/week/session levels + 1hr FVGs ─────────
@@ -534,6 +542,11 @@ class SessionPipeline:
                     _liq_mes.append(_yf)
                     _existing_mes.add(_yf["name"])
         _state["liquidities_mes"] = _liq_mes
+        # Universe (B): MES counterpart prev-day/prev-week extremes (additive key) so the
+        # intersection in _detect_level_smts sees the same universe names on both legs.
+        if not _combined_mes.empty:
+            _state["liquidities_universe_mes"] = _daily_mod.compute_universe_levels(
+                _combined_mes, now.date())
         save_daily(_state)
 
         # Write levels.json snapshot for plot_session.py / regression plots. Lands under
@@ -550,6 +563,7 @@ class SessionPipeline:
         _levels_path.write_text(
             _json.dumps({
                 "liquidities": _daily_state.get("liquidities", []),
+                "liquidities_universe": _daily_state.get("liquidities_universe", []),
                 "all_time_high": _global.get("all_time_high"),
             }, indent=2),
             encoding="utf-8",
@@ -1665,8 +1679,11 @@ class SessionPipeline:
             return []
 
         daily = pre_daily if pre_daily is not None else _smt_state.load_daily()
-        liq_mnq = daily.get("liquidities", []) or []
-        liq_mes = daily.get("liquidities_mes", []) or []
+        # Universe (B) fixed levels are an additive block merged ONLY here (never into the
+        # strategy's `liquidities`/_ext_levels), so SMT detection sees the prev-day/week
+        # extremes while trades stay unchanged. eligible_levels dedups by name.
+        liq_mnq = (daily.get("liquidities", []) or []) + (daily.get("liquidities_universe", []) or [])
+        liq_mes = (daily.get("liquidities_mes", []) or []) + (daily.get("liquidities_universe_mes", []) or [])
 
         levels_mnq = eligible_levels(liq_mnq, now)
         levels_mes = eligible_levels(liq_mes, now)
@@ -1768,6 +1785,19 @@ class SessionPipeline:
             "detect_state": self._detect_state,
             "watch": self._pending_watch.to_dict(),
         })
+
+        # Adverse-run invalidation trail (debug-only; never plotted, never in sd_events or
+        # golden events). Mirror the producer's reserved __invalidations__ list to a JSON
+        # artifact under the current state prefix so a post-run agent can verify which SMTs
+        # were invalidated, when, and why. Full snapshot — the list only grows within a run.
+        # Write ONLY when a new event was appended this bar: a per-1s-bar full rewrite of a
+        # growing list is O(n^2) I/O (~23k rewrites/run), and invalidations are rare.
+        _inv = self._detect_state.get("__invalidations__")
+        if _inv and len(_inv) > self._inv_written_n:
+            import json as _json
+            (paths.state_dir() / "smt_invalidations.json").write_text(
+                _json.dumps(_inv, indent=2), encoding="utf-8")
+            self._inv_written_n = len(_inv)
 
         return sd_events
 
