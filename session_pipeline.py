@@ -1767,12 +1767,15 @@ class SessionPipeline:
                 "cautious_price_secondary": _hyp.get("cautious_price_secondary", ""),
             }
             # Invalidate BEFORE ingest: drop active records that are fulfilled/gone (via
-            # Contract C) or already flagged fulfilled.
-            _status = _smt_detect.fulfillment_status(
-                [r.get("key") for r in _active], self._detect_state)
+            # Contract C) or already flagged fulfilled. A collapsed record carries `keys`
+            # (wick+body folded) — aggregate fulfillment over ALL its underlying detect
+            # keys via `collapsed_status` (ANY fulfilled → fulfilled; ALL gone → gone).
+            _all_keys = [k for r in _active for k in (r.get("keys") or [r.get("key")])]
+            _status = _smt_detect.fulfillment_status(_all_keys, self._detect_state)
             _active = [
                 r for r in _active
-                if _status.get(r.get("key")) == "unfulfilled" and not r.get("fulfilled")
+                if _hyp_mod.collapsed_status(r, _status) == "unfulfilled"
+                and not r.get("fulfilled")
             ]
             _new_recs = [_hyp_mod.to_record(r) for r in records]
             _active = _hyp_mod.ingest_smts(

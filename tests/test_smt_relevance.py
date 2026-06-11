@@ -22,6 +22,7 @@ from hypothesis import (
     smt_authority,
     dominant,
     ingest_smts,
+    collapsed_status,
     _tier_rank,
 )
 from smt_detect import fulfillment_status
@@ -520,3 +521,65 @@ def test_shadow_block_exception_is_swallowed(_isolate_state, monkeypatch):
     assert out["direction"] == "down"  # untouched
     # Shadow store skipped (raise before save) → active set unchanged (default []).
     assert out["smt_active_set"] == []
+
+
+# ===========================================================================
+# --- wick/body collapse ---
+# ===========================================================================
+
+# (d) wick+body collapse to one logical member; wick confirmation supersedes; keys union.
+def test_ingest_collapses_wick_body():
+    wick = _rec(ref_name="week_high", direction="short", side="bearish", tier="week",
+                type="wick", key="week_high|short|wick",
+                time="2026-06-09T10:00:00", mnq_lvl_price=25000.0)
+    body = _rec(ref_name="week_high", direction="short", side="bearish", tier="week",
+                type="body", key="week_high|short|body",
+                time="2026-06-09T10:00:00", mnq_lvl_price=25000.0)
+    out = ingest_smts([body, wick], [], flat=True, cautious_targets=None,
+                      backing_tier=None, x_pts=RELEVANCE_X_PTS)
+    # Exactly ONE member for the logical (week_high, short) key.
+    members = [r for r in out
+               if r.get("ref_name") == "week_high" and r.get("direction") == "short"]
+    assert len(members) == 1
+    member = members[0]
+    assert member["type"] == "wick"  # wick supersedes body
+    assert set(member["keys"]) == {"week_high|short|wick", "week_high|short|body"}
+
+
+# (e) fulfillment of a collapsed record (maps to >1 detect key).
+def test_collapsed_record_fulfillment():
+    keys = ["week_high|short|wick", "week_high|short|body"]
+    rec = _rec(ref_name="week_high", direction="short", tier="week", type="wick",
+               key="week_high|short|wick")
+    rec["keys"] = list(keys)
+
+    # ANY fulfilled → "fulfilled".
+    ds1 = {"week_high|short|wick": {"fulfilled": True},
+           "week_high|short|body": {"fulfilled": False}}
+    st1 = fulfillment_status(keys, ds1)
+    assert collapsed_status(rec, st1) == "fulfilled"
+
+    # wick absent (gone), body unfulfilled → "unfulfilled" (not all gone).
+    ds2 = {"week_high|short|body": {"fulfilled": False}}
+    st2 = fulfillment_status(keys, ds2)
+    assert collapsed_status(rec, st2) == "unfulfilled"
+
+    # both keys absent → "gone".
+    ds3: dict = {}
+    st3 = fulfillment_status(keys, ds3)
+    assert collapsed_status(rec, st3) == "gone"
+
+
+# ===========================================================================
+# (f) totality / None-safety of the collapse helpers
+# ===========================================================================
+def test_collapsed_status_totality():
+    assert collapsed_status(None, {}) == "gone"
+    assert collapsed_status({"keys": []}, {}) == "gone"
+    # missing keys treated as gone
+    assert collapsed_status({"keys": ["a", "b"]}, None) == "gone"
+
+
+def test_to_record_carries_keys_list():
+    r = to_record(_emission(type="wick", ref_name="day_high", direction="short"))
+    assert r["keys"] == [r["key"]]

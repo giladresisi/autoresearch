@@ -246,6 +246,30 @@ def _tier_rank(tier: "str | None") -> int:
     return _TIER_RANK.get(tier or "", 0)
 
 
+def collapsed_status(record: dict, status_map: dict) -> str:
+    """Aggregate a (possibly collapsed) record's fulfillment over its underlying detect
+    keys. A collapsed record carries ``keys: list[str]`` (>=1) — wick+body folded into
+    one logical SMT. Per-record rule (Contract C aggregation):
+      - "fulfilled" if ANY underlying key is fulfilled,
+      - "gone"      if ALL underlying keys are gone,
+      - "unfulfilled" otherwise.
+
+    ``status_map`` is ``{key: "unfulfilled"|"fulfilled"|"gone"}`` (from
+    ``smt_detect.fulfillment_status``). Total/None-safe: missing keys → treated as "gone";
+    a record lacking ``keys`` falls back to its scalar ``key``; never raises.
+    """
+    if not isinstance(record, dict):
+        return "gone"
+    ks = record.get("keys") or [record.get("key")]
+    sm = status_map if isinstance(status_map, dict) else {}
+    sts = [sm.get(k, "gone") for k in ks]
+    if any(s == "fulfilled" for s in sts):
+        return "fulfilled"
+    if sts and all(s == "gone" for s in sts):
+        return "gone"
+    return "unfulfilled"
+
+
 def to_record(emission: dict) -> dict:
     """Map a `smt_detect` emission to the divs record schema (see module docstring).
 
@@ -292,6 +316,10 @@ def to_record(emission: dict) -> dict:
         "mes_price":     emission.get("mes_price"),
         "mnq_lvl_price": emission.get("mnq_lvl_price"),
     }
+    # Logical-collapse support: a fresh record maps to exactly one detect key. The list
+    # form lets ingest_smts merge wick+body variants while fulfillment aggregates over all
+    # underlying keys (Contract C). None-safe: if key is None, [None] is fine downstream.
+    rec["keys"] = [rec["key"]]
     if emission.get("mes_lvl_price") is not None:
         rec["mes_lvl_price"] = emission.get("mes_lvl_price")
     return rec
@@ -355,8 +383,12 @@ def ingest_smts(
          - ACTIVE (flat=False): enter only if EITHER the ref level price is within
            `x_pts` of a cautious target (initial OR secondary; inclusive `<=`), OR
            `_tier_rank(tier) >= _tier_rank(backing_tier)` (inclusive `>=`).
-      3. Dedup/supersede by `key`: at most one active record per key; a newer `time`
-         replaces an older same-key record.
+      3. Collapse/supersede by the LOGICAL key `(ref_name, direction)`: at most one active
+         record per logical key. Wick+body variants of the same logical SMT collapse into
+         one member — wick supersedes body (stronger confirmation), then newer `time` wins.
+         The surviving member carries `keys: list[str]` = the union of all folded detect
+         keys (so fulfillment can aggregate across both variants), and keeps its scalar
+         `key` for back-compat. Fills (unique per FVG) are unaffected — collapse is a no-op.
 
     Returns a NEW list (does not mutate inputs). Total: new_records=None → copy of
     active_set; never raises.
@@ -380,14 +412,8 @@ def ingest_smts(
     sec_t = _target_price("cautious_price_secondary")
     backing_rank = _tier_rank(backing_tier)
 
-    # Index existing active set by key for dedup/supersede.
-    by_key: dict = {}
-    order: list = []
-    for r in base:
-        k = r.get("key")
-        if k is not None and k not in by_key:
-            order.append(k)
-        by_key[k] = r
+    def _logical_key(r: dict):
+        return (r.get("ref_name"), r.get("direction"))
 
     def _record_time(r: dict):
         try:
@@ -395,6 +421,45 @@ def ingest_smts(
             return int(ts.value) if ts is not pd.NaT else 0
         except Exception:
             return 0
+
+    def _confirm_strength(r: dict) -> int:
+        # wick supersedes body; non-wick/body (fills) are not down-ranked below body.
+        t = r.get("type")
+        if t == "wick":
+            return 2
+        if t == "body":
+            return 0
+        return 1
+
+    def _rec_keys(r: dict) -> list:
+        ks = r.get("keys")
+        if isinstance(ks, list) and ks:
+            return list(ks)
+        return [r.get("key")]
+
+    def _merge_keys(a: dict, b: dict) -> list:
+        merged: list = []
+        for k in _rec_keys(a) + _rec_keys(b):
+            if k not in merged:
+                merged.append(k)
+        return merged
+
+    def _supersedes(new: dict, old: dict) -> bool:
+        # wick>body first; equal confirmation strength → newer time wins (>= keeps the
+        # incoming record, matching the prior newer-wins dedup semantics).
+        ns, os_ = _confirm_strength(new), _confirm_strength(old)
+        if ns != os_:
+            return ns > os_
+        return _record_time(new) >= _record_time(old)
+
+    # Index existing active set by the logical key for collapse/supersede.
+    by_key: dict = {}
+    order: list = []
+    for r in base:
+        lk = _logical_key(r)
+        if lk not in by_key:
+            order.append(lk)
+        by_key[lk] = r
 
     for raw in new_records:
         rec = raw
@@ -426,13 +491,25 @@ def ingest_smts(
             tier_ok = _tier_rank(tier) >= backing_rank
             if not (prox_ok or tier_ok):
                 continue
-        # (3) Dedup / supersede by key (newer time wins).
-        existing = by_key.get(key)
+        # Ensure the incoming record carries the list form (defensive for raw dicts that
+        # bypassed to_record but already had key/tier).
+        if not isinstance(rec.get("keys"), list) or not rec.get("keys"):
+            rec = dict(rec)
+            rec["keys"] = [rec.get("key")]
+        # (3) Collapse / supersede by logical (ref_name, direction) key.
+        lk = _logical_key(rec)
+        existing = by_key.get(lk)
         if existing is None:
-            by_key[key] = rec
-            order.append(key)
-        elif _record_time(rec) >= _record_time(existing):
-            by_key[key] = rec
+            by_key[lk] = rec
+            order.append(lk)
+        else:
+            merged_keys = _merge_keys(existing, rec)
+            if _supersedes(rec, existing):
+                survivor = dict(rec)
+            else:
+                survivor = dict(existing)
+            survivor["keys"] = merged_keys
+            by_key[lk] = survivor
 
     return [by_key[k] for k in order]
 
