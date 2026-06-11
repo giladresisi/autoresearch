@@ -481,6 +481,11 @@ def close_position(price: float, reason: str = "user-requested") -> None:
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
     pos["conf_bar_entry"] = {}
+    # Also clear the cautious exit reference bar — a closed position must leave no stale
+    # conf_bar_exit behind (mirrors the strategy/trend exit paths, e.g. trend.py
+    # _clear_position_and_hypothesis). Without this, a manual `trade.py close` leaves the
+    # last cautious reference bar in position.json.
+    pos["conf_bar_exit"] = {}
     _save_pos(pos)
     # Fall back to current bar mid when caller passes 0.0 (e.g. trade.py close).
     resolved_price = float(price) if float(price) != 0.0 else _current_price()

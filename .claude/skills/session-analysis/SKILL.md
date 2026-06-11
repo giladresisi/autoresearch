@@ -3,10 +3,12 @@ name: session-analysis
 description: >
   Run after a trading session ends to cross-reference all session data sources
   (strategy events, PMT alerts, Tradovate fills, 1s regression replay, 1m bar data)
-  and produce two structured analysis files in the session folder
+  and produce three structured analysis files in the session folder
   (`<global>/sessions/<date>/`): discrepancies.md
-  (execution gaps between strategy intent, regression replay, and actual broker fills)
-  and optimizations.md (missed opportunities and strategy improvement ideas).
+  (execution gaps between strategy intent, regression replay, and actual broker fills),
+  optimizations.md (missed opportunities and strategy improvement ideas), and
+  session-analysis.md (a consolidated digest tying together data-health, P&L,
+  discrepancies, and optimizations — the file to open first).
   Downloads broker/PMT reports first if they haven't been fetched yet, then runs
   the 1s regression, and plots both the live session and the 1s regression replay.
   Trigger phrases: "analyze the session", "session analysis", "write discrepancies",
@@ -19,7 +21,8 @@ description: >
 
 # Session Analysis
 
-Cross-references all session data sources and writes two structured analysis files.
+Cross-references all session data sources and writes three structured analysis files
+(`discrepancies.md`, `optimizations.md`, and the consolidated `session-analysis.md`).
 Intended to be run once after a session ends and reports have been (or will be) downloaded.
 
 ---
@@ -359,7 +362,7 @@ exhausted", "unblock DOWN hypothesis at ATH"):
      same RESOLVED / UNRESOLVED check.
 
 ---
-OUTPUT: Write TWO files.
+OUTPUT: Write THREE files.
 
 ### File 1: <SESSION>\discrepancies.md
 
@@ -446,9 +449,52 @@ Raw findings capture individual trade-level observations. Optimization themes
 group them into actionable strategy improvements. High/Medium/Low refers to
 estimated impact over many sessions, not just this one.
 
+### File 3: <SESSION>\session-analysis.md
+
+A consolidated, human-readable digest that ties the run together — the single file to
+open first. Derive it ENTIRELY from sources you already read plus the two files you
+just wrote (do not invent numbers). Structure:
+
+```
+# Session Analysis — <DATE> (MNQ)
+
+Consolidated digest of the post-session run. Full detail lives in the companion files
+`discrepancies.md` and `optimizations.md` in this folder.
+
+---
+
+## 1. Data Health
+<If parquet/data-health results for this session were provided to you in context (e.g.
+a parquet-check was run in the same flow), summarize them here: per-instrument 1s/1m
+severity, rows merged, gaps, promotion status, and an explicit "are the 1s parquets fine
+/ all gaps filled?" verdict. If NO data-health info was provided, write exactly:
+"Not assessed in this run — validate separately with the parquet-check skill." Do not
+fabricate parquet results.>
+
+## 2. Session P&L Snapshot
+| Measure | Value |
+|---|---|
+| Strategy assumed P&L (clean ledger) | <from trades_full.tsv clean rows> |
+| 1s regression replay P&L | <from trades_1s.tsv / regression result> |
+| Ledger composition | <N clean · N suspect · N unpaired-open> |
+<One line on whether live and regression ran on identical code (commit-context result).>
+
+## 3. Discrepancies (see `discrepancies.md`)
+<Bulleted D-list: each D-number, severity tag, one-line summary. Mark [CRITICAL] ones with 🔴.>
+
+## 4. Optimization Themes (see `optimizations.md`)
+<Table or bulleted O-list: each O-number, theme, impact tier, est. session swing.>
+
+## 5. Artifacts
+- Live session chart: <path>
+- 1s regression chart: <path>
+- Regression run folder: <REGRESSION>
+- Companion detail files: `discrepancies.md`, `optimizations.md` (this folder)
+```
+
 ---
 IMPORTANT: Do not write the files until you have read ALL data sources. Read first,
-synthesize, then write both files in one pass. The analysis should be grounded in
+synthesize, then write all three files in one pass. The analysis should be grounded in
 specific timestamps, prices, and order IDs from the actual data — not generic advice.
 ```
 
@@ -459,6 +505,15 @@ specific timestamps, prices, and order IDs from the actual data — not generic 
 Once the subagent completes, confirm:
 - Which discrepancies were found (D1, D2... with one-line summaries and source tag)
 - Which optimization themes were identified (O1, O2... with estimated impact)
-- File paths written
+- File paths written — all THREE: `discrepancies.md`, `optimizations.md`, and the
+  consolidated `session-analysis.md`
+
+**Data Health back-fill:** `session-analysis.md` has a "Data Health" section. The
+session-analysis skill does NOT itself run the parquet-check. If a parquet-check WAS
+run in the same flow (e.g. the user chained `/parquet-check` then `/session-analysis`),
+paste its per-instrument result summary into the subagent prompt (Step 3) so the
+subagent fills that section; otherwise it will record "Not assessed in this run". If you
+have the parquet-check summary but only realize it after the subagent finished, edit the
+"Data Health" section of `session-analysis.md` in place to add it.
 
 If any discrepancy is marked [CRITICAL], call it out explicitly and offer to investigate the root cause in the code.

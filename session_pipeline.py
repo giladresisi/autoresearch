@@ -33,6 +33,22 @@ DEDUP_TOL_PTS = 5.0
 _SCOPE_RANK = {"ath": 3, "week": 2, "day": 1, "session": 0}
 
 
+def _bar_row_has_ohlc(bar_row: "pd.Series", *fields: str) -> bool:
+    """True iff bar_row exposes every named field with a non-NaN value.
+
+    automation.main builds a degenerate empty ``pd.Series(dtype=float)`` for an
+    instrument that has no partial-bar data for the current minute (e.g. a MES feed
+    gap — see the 2026-06-10 MES outage). Scalar access like ``float(bar_row["High"])``
+    would then raise ``KeyError``. Callers use this to skip the instrument's per-bar
+    passes cleanly instead of crashing.
+    """
+    idx = bar_row.index
+    for _f in fields:
+        if _f not in idx or pd.isna(bar_row[_f]):
+            return False
+    return True
+
+
 def _level_scope(ref_name: str) -> str:
     """Map a level ref_name to its scope bucket for dedup priority.
 
@@ -1279,6 +1295,12 @@ class SessionPipeline:
         _liq = _state.get(liq_key, [])
         _liq_map = {l["name"]: l for l in _liq}
 
+        # An instrument with no partial-bar data this minute arrives as a degenerate empty
+        # Series (automation.main builds pd.Series(dtype=float) when mes_partial is None).
+        # Skip its liquidity pass rather than KeyError on bar_row["High"].
+        if not _bar_row_has_ohlc(bar_row, "High", "Low"):
+            return []
+
         _bar_high = float(bar_row["High"])
         _bar_low  = float(bar_row["Low"])
         _changed: list[str] = []
@@ -1635,6 +1657,13 @@ class SessionPipeline:
         # state — a one-bar lag that makes a "touch" mean a genuine take-out of the prior
         # extreme rather than equalling the just-updated running extreme. Fall back to a
         # fresh load only if no snapshot was passed (defensive; callers always pass it).
+        # SMT compares MNQ vs MES; if either instrument has no bar this minute (a
+        # degenerate empty Series from a feed gap), there is nothing to diverge against —
+        # skip cleanly instead of KeyError on mes_bar_row["High"]/["Close"] below.
+        if not (_bar_row_has_ohlc(mnq_bar_row, "High", "Low", "Close")
+                and _bar_row_has_ohlc(mes_bar_row, "High", "Low", "Close")):
+            return []
+
         daily = pre_daily if pre_daily is not None else _smt_state.load_daily()
         liq_mnq = daily.get("liquidities", []) or []
         liq_mes = daily.get("liquidities_mes", []) or []

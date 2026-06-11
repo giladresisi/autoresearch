@@ -295,6 +295,55 @@ def test_on_1m_bar_bar_dict_has_body_fields(_isolate_state, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Test 8b: a degenerate (empty) MES bar_row does not crash on_1m_bar
+# Regression for the 2026-06-10 KeyError('High') crash: when MES has no partial-bar
+# data for the minute, automation.main passes an empty pd.Series(dtype=float) as
+# mes_bar_row. The MES liquidity + SMT passes must skip that bar, not raise.
+# ---------------------------------------------------------------------------
+
+def test_on_1m_bar_tolerates_empty_mes_bar_row(_isolate_state, monkeypatch):
+    """Empty mes_bar_row (MES feed gap) → on_1m_bar skips the MES passes, no KeyError."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+
+    trend_calls = []
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: trend_calls.append(1) or None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+
+    now_sess = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+    pipeline.on_session_start(now_sess, _make_1m_bars("2025-11-14 09:20", n=1))
+
+    now = pd.Timestamp("2025-11-14 09:21", tz="America/New_York")
+    today_mnq = _make_1m_bars("2025-11-14 09:21", n=1)
+    today_mes = _make_1m_bars("2025-11-14 09:21", n=1)
+    empty_mes_bar = pd.Series(dtype=float)  # exactly what automation.main:236 builds
+
+    # Must not raise (pre-fix: KeyError('High') at _update_instrument_liquidities).
+    result = pipeline.on_1m_bar(now, _bar_row(), empty_mes_bar, today_mnq, today_mes)
+    assert isinstance(result, list)
+    # MNQ-side processing still runs (trend fires every bar) despite the MES gap.
+    assert trend_calls, "MNQ trend pass must still run when the MES bar is missing"
+
+
+def test_bar_row_has_ohlc_helper():
+    """_bar_row_has_ohlc: True only when every requested field is present & non-NaN."""
+    import session_pipeline as _sp
+    full = pd.Series({"Open": 1.0, "High": 2.0, "Low": 0.5, "Close": 1.5})
+    assert _sp._bar_row_has_ohlc(full, "High", "Low", "Close")
+    assert not _sp._bar_row_has_ohlc(pd.Series(dtype=float), "High")
+    assert not _sp._bar_row_has_ohlc(pd.Series({"High": float("nan"), "Low": 1.0}), "High", "Low")
+    assert not _sp._bar_row_has_ohlc(pd.Series({"Open": 1.0}), "High")
+
+
+# ---------------------------------------------------------------------------
 # Test 9: recent includes all-day bars from midnight (Fix #7)
 # ---------------------------------------------------------------------------
 

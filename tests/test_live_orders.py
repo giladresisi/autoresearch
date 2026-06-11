@@ -659,6 +659,7 @@ def test_close_position_clears_active(_in_tmp, _mock_today):
         "stop_entry": "19850.0",
         "stop_direction": "up",
         "conf_bar_entry": {"open": 19840.0},
+        "conf_bar_exit": {"open": 19845.0},
         "failed_entries": 1,
     }
     mock_executor = MagicMock()
@@ -673,6 +674,8 @@ def test_close_position_clears_active(_in_tmp, _mock_today):
     assert saved["stop_entry"] == ""
     assert saved["stop_direction"] == ""
     assert saved["conf_bar_entry"] == {}
+    # A manual close must also clear the cautious exit reference bar (no stale state).
+    assert saved["conf_bar_exit"] == {}
 
     events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
     assert len(events) == 1
