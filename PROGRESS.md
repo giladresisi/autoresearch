@@ -1,6 +1,26 @@
 ﻿# PROGRESS
 
 
+## Feature: SMT adverse-run invalidation + relevance supersession
+### Status: ✅ Part A complete + post-exec bug fixed (unstaged); Part B spec-only
+**Started**: 2026-06-11
+**Plan File**: `.agents/plans/smt-adverse-invalidation-and-relevance-supersession.md`
+
+Producer-side adverse-run invalidation (mirror of fulfillment) + structured `smt_invalidations` debug trail in smt-stuff; consumer-side relevance-filter Rule A (same-level latest-take-out-wins), Rule B (recency-trend cross-tier suppression, gated+measured), and `invalidated` handling specced for `../entry-stuff/` (NOT executed there — shared stash store). Trade invariant: 1s 2026-06-03 stays 21 / $534.50.
+
+**POST-EXECUTION BUG FOUND + FIXED (2026-06-11):** The executor's "09:49 case is threshold-tuning, not a defect" was WRONG. Independent log-vs-price verification showed the `prev1_week_high|short` adverse threshold WAS crossed at 09:51:37 (+41.75), so it SHOULD have invalidated. Root cause: invalidation was computed inside the per-bar loop keyed to the *current approach direction*; once price crossed the level the computed direction flipped, stranding the fired SMT's key (never re-evaluated). Fix: moved invalidation to a direction-independent maintenance pass over all fired-open states each bar (trade-safe — only sets the flag + trail; fulfillment/re-arm untouched). Now `prev1_week_high|short` invalidates 09:51:37 (wick) / 09:52:00 (body); trail 36→52 events; the relevance dominant flips off the week-high bearish to `week_low/long` at 09:51. Regression still 21/$534.50; 271 SMT tests pass incl. new `test_invalidation_survives_direction_flip`. Day `INVALIDATE_PTS` tuning under multi-day shadow analysis (correctives ran 30–62pts adverse → not obviously false positives).
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-adverse-invalidation-and-relevance-supersession.md`
+- Part A (producer + trail) complete; 5/5 executable tasks (Waves 1–3); 11 new tests (8 unit + 3 integration); 120 targeted passing; 1238 passed / 23 pre-existing failures / 0 new
+- Three divergences: (1) motivating 09:49 prev1_week_high bearish fired but did not cross the week 40-pt adverse threshold → literal-FAIL / capability-PASS (threshold tuning, not a defect); (2) pre-existing `__prevref_` direction-by-sweep WIP left untouched; (3) trail write gated on new-event-this-bar (perf fix vs O(n²) per-1s-bar rewrite)
+- 1s 2026-06-03 regression = 21 / $534.50 (trades=PASS, events=FAIL expected); trail captured 36 adverse_run events
+- Part B (entry-stuff consumer) spec-only and untouched; all changes UNSTAGED
+- Alignment score: 9/10
+
+---
+
 ## Feature: Incremental parquet validation (GIL-15)
 ### Status: ✅ Complete (unstaged)
 **Started**: 2026-06-09

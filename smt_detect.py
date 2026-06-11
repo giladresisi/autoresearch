@@ -35,6 +35,16 @@ WATCH_CONFIRM_PTS_MES = 3.0
 FULFILL_PTS_MNQ = {"week": 80.0, "day": 40.0, "session": 20.0}
 FULFILL_PTS_MES = {"week": 12.0, "day": 6.0, "session": 3.0}
 
+# Adverse-run invalidation — mirror of FULFILL_PTS. A fired, not-yet-fulfilled SMT is
+# "invalidated" when MNQ close runs AGAINST its direction past the fire close by this much.
+# Informational only this iteration (NOT a re-arm trigger; shadow-only — not wired to trades).
+# `day` was widened 20→40 from an 8-day multi-regime shadow sweep (_shadow_smt_analysis.py): at
+# 20 the fixed prev-day invalidations were ~57% "premature" (thesis still fulfilled within 180m);
+# 40 cuts that to ~48% while keeping ~all the correct invalidations. (week/session left as the
+# half-of-FULFILL default pending their own sweep.)
+INVALIDATE_PTS_MNQ = {"week": 40.0, "day": 40.0, "session": 10.0}
+INVALIDATE_PTS_MES = {"week": 6.0, "day": 6.0, "session": 1.5}
+
 HIDDEN_TFS = ("15min", "30min")
 
 # Per-session ET "forming" window (open_hour, close_hour) — a 6hr-session level is an
@@ -85,6 +95,11 @@ def _level_class(name: str) -> tuple[str, str]:
 
 def _fulfill_pts(tier: str, inst: str) -> float:
     table = FULFILL_PTS_MES if inst == "mes" else FULFILL_PTS_MNQ
+    return table.get(tier, table["session"])
+
+
+def _invalidate_pts(tier: str, inst: str) -> float:
+    table = INVALIDATE_PTS_MES if inst == "mes" else INVALIDATE_PTS_MNQ
     return table.get(tier, table["session"])
 
 
@@ -215,6 +230,12 @@ def _detect_level_smts(
     mnq_close = float(mnq_bar.get("close", mnq_bar.get("Close", 0.0)))
     mes_close = float(mes_bar.get("close", mes_bar.get("Close", 0.0)))
 
+    # Prior-bar MNQ close (the approach reference for fixed-level sweep direction). Stored
+    # per rec_type under a reserved no-"|" key so the level-SMT post-pass skips it. Seeded to
+    # the current close on the first bar (approach = current side).
+    _prevref_key = "__prevref_" + rec_type
+    prev_ref = float(state.get(_prevref_key, mnq_close))
+
     # Deterministic order so a same-bar opposite SMT can re-arm reproducibly.
     for name in sorted(levels_mnq.keys() & levels_mes.keys()):
         lvl_mnq = levels_mnq[name]
@@ -222,34 +243,58 @@ def _detect_level_smts(
         sub = lvl_mnq.get("sub")
         if sub is None or sub != lvl_mes.get("sub"):
             continue
-        direction = "short" if sub == "high" else "long"
-        side = "bearish" if direction == "short" else "bullish"
-        # State key includes rec_type so wick (regular) and body (hidden) SMTs on the same
-        # (level, direction) are tracked INDEPENDENTLY — each fires/re-arms on its own.
-        skey = f"{_skey(name, direction)}|{rec_type}"
 
-        # Per-instrument touch value (wick or close).
-        if body:
-            mnq_val = mnq_close
-            mes_val = mes_close
-        else:
-            mnq_val = float(mnq_bar["high"]) if sub == "high" else float(mnq_bar["low"])
-            mes_val = float(mes_bar["high"]) if sub == "high" else float(mes_bar["low"])
+        kind_cls, tier = _level_class(name)
 
-        # Comparison level. Hidden (body) SMTs reference the BODY extreme — the lowest
-        # CLOSE for *_low / highest CLOSE for *_high over the level's window — carried as
-        # `close_price`. Wick SMTs (and a body SMT on a level missing close_price) use the
-        # wick `price`. This is the only place the body level differs from the wick level.
+        # Comparison level (same for both sweep directions). Hidden (body) SMTs reference the
+        # BODY extreme — the lowest CLOSE for *_low / highest CLOSE for *_high over the level's
+        # window — carried as `close_price`. Wick SMTs (and a body SMT on a level missing
+        # close_price) use the wick `price`.
         if body:
             mnq_lvl_price = float(lvl_mnq.get("close_price", lvl_mnq["price"]))
             mes_lvl_price = float(lvl_mes.get("close_price", lvl_mes["price"]))
         else:
             mnq_lvl_price = float(lvl_mnq["price"])
             mes_lvl_price = float(lvl_mes["price"])
-        mnq_touch = _touched(sub, mnq_val, mnq_lvl_price, body=body)
-        mes_touch = _touched(sub, mes_val, mes_lvl_price, body=body)
 
-        # Determine leader (the one that touched while the other didn't).
+        # Direction by SWEEP/approach (universal per-level take-out), not by the level's
+        # high/low name. A DOWN-sweep (price falling ONTO the level) is bullish; an UP-sweep
+        # (rising INTO it) is bearish. A DYNAMIC running extreme is only ever swept one way (a
+        # running high upward, a low downward), so its proven suffix mapping is kept. A FIXED
+        # level (prev-day/week, 6hr-session) can be met from either side, so the approach side
+        # — the prior MNQ close vs the level — picks it: above => down-sweep/bullish, below =>
+        # up-sweep/bearish (exact tie falls back to the suffix default).
+        if kind_cls == "dynamic":
+            direction = "short" if sub == "high" else "long"
+        elif prev_ref > mnq_lvl_price:
+            direction = "long"
+        elif prev_ref < mnq_lvl_price:
+            direction = "short"
+        else:
+            direction = "short" if sub == "high" else "long"
+        side = "bearish" if direction == "short" else "bullish"
+        # State key includes rec_type so wick (regular) and body (hidden) SMTs on the same
+        # (level, direction) are tracked INDEPENDENTLY — each fires/re-arms on its own.
+        skey = f"{_skey(name, direction)}|{rec_type}"
+
+        # Same-side divergence test for the active sweep direction. Bearish (up-sweep) uses the
+        # HIGH wick (CLOSE for body); bullish (down-sweep) the LOW wick (CLOSE for body). The
+        # leader is the instrument that takes the level out while the laggard does not.
+        if body:
+            mnq_val = mnq_close
+            mes_val = mes_close
+        elif direction == "short":
+            mnq_val = float(mnq_bar["high"])
+            mes_val = float(mes_bar["high"])
+        else:
+            mnq_val = float(mnq_bar["low"])
+            mes_val = float(mes_bar["low"])
+
+        _touch_sub = "high" if direction == "short" else "low"
+        mnq_touch = _touched(_touch_sub, mnq_val, mnq_lvl_price, body=body)
+        mes_touch = _touched(_touch_sub, mes_val, mes_lvl_price, body=body)
+
+        # Determine leader (the one that took the level out while the other didn't).
         if mnq_touch and not mes_touch:
             leader, lead_price, lead_lvl = "mnq", mnq_close, mnq_lvl_price
             cond = True
@@ -260,8 +305,6 @@ def _detect_level_smts(
             leader, lead_price, lead_lvl = "mnq", mnq_close, mnq_lvl_price
             cond = False
 
-        kind_cls, tier = _level_class(name)
-
         st = state.get(skey)
         if st is None:
             st = {
@@ -269,6 +312,7 @@ def _detect_level_smts(
                 "last_cond": False,
                 "fired": False,
                 "fulfilled": False,
+                "invalidated": False,
                 "fire_price": None,
                 "fire_level_price": None,
                 "fire_mnq_close": None,
@@ -294,6 +338,10 @@ def _detect_level_smts(
                     if mnq_close >= float(fc) + pts:
                         st["fulfilled"] = True
 
+        # (a2) Adverse-run invalidation is maintained AFTER this loop (see the dedicated pass
+        # below) — NOT here — because it must be checked independently of the current bar's
+        # approach direction.
+
         # (b) Re-arm (only if currently dormant). Fixed levels NEVER re-arm. Dynamic levels
         # re-arm when the swept level was fulfilled OR an opposite-direction SMT is present
         # in this batch (a genuine regime flip).
@@ -303,6 +351,7 @@ def _detect_level_smts(
                 st["armed"] = True
                 st["fired"] = False
                 st["fulfilled"] = False
+                st["invalidated"] = False
 
         # (c) Fire on the armed rising edge.
         if cond and not st["last_cond"] and st["armed"]:
@@ -326,6 +375,8 @@ def _detect_level_smts(
             st["armed"] = False
             st["fired"] = True
             st["fulfilled"] = False
+            st["invalidated"] = False
+            st["fire_time"] = iso
             st["fire_price"] = lead_price
             st["fire_leader"] = leader
             st["fire_level_price"] = mnq_lvl_price
@@ -333,6 +384,47 @@ def _detect_level_smts(
 
         st["last_cond"] = cond
         st["level_price"] = mnq_lvl_price
+
+    # (a2) Adverse-run invalidation — the mirror of fulfillment, maintained INDEPENDENTLY of the
+    # current bar's approach direction. The per-level loop above keys state by the direction the
+    # current approach implies (prev_ref vs level price); but a fired SMT is invalidated precisely
+    # when price runs to the OPPOSITE side of its level, which is exactly when that approach
+    # direction flips — so a direction-keyed check would strand the original SMT's key (never
+    # re-visited → never invalidated; the prev1_week_high|short 09:49 case). So sweep EVERY
+    # fired-open state of this rec_type each bar and test the adverse-run condition against the
+    # current MNQ close using the state's OWN stored direction (parsed from its key), regardless
+    # of eligibility this bar. Informational only: sets the `invalidated` flag + appends to the
+    # reserved trail key; never touches records/fire/fulfill/re-arm, so trades are unaffected.
+    # Iterate a snapshot (list) because the first event creates the `__invalidations__` key.
+    for skey, st in list(state.items()):
+        if "|" not in skey:
+            continue
+        _parts = skey.split("|")
+        if len(_parts) < 3 or _parts[2] != rec_type:
+            continue
+        if not (st.get("fired") and not st.get("fulfilled") and not st.get("invalidated")):
+            continue
+        fc = st.get("fire_mnq_close")
+        if fc is None:
+            continue
+        _name, _dir = _parts[0], _parts[1]
+        _kind_cls, _tier = _level_class(_name)
+        inv = _invalidate_pts(_tier, "mnq")
+        adverse = (
+            (_dir == "short" and mnq_close >= float(fc) + inv)
+            or (_dir == "long" and mnq_close <= float(fc) - inv)
+        )
+        if adverse:
+            st["invalidated"] = True
+            st["invalidated_time"] = iso
+            st["invalidated_mnq_close"] = mnq_close
+            state.setdefault("__invalidations__", []).append({
+                "time": iso, "key": skey, "ref_name": _name, "tier": _tier,
+                "kind": _kind_cls, "direction": _dir, "type": rec_type,
+                "fire_time": st.get("fire_time"), "fire_mnq_close": float(fc),
+                "trigger_mnq_close": mnq_close, "threshold_pts": inv,
+                "reason": "adverse_run",
+            })
 
     # Post-pass: an SMT in this batch re-arms any dormant DYNAMIC pair of the OPPOSITE
     # direction (order-independent — the opposite SMT may have been detected after the
@@ -355,7 +447,10 @@ def _detect_level_smts(
                 st["armed"] = True
                 st["fired"] = False
                 st["fulfilled"] = False
+                st["invalidated"] = False
 
+    # Persist the approach reference for next bar's fixed-level sweep-direction decision.
+    state[_prevref_key] = mnq_close
     return records, state
 
 

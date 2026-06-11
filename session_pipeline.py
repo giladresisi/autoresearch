@@ -326,6 +326,9 @@ class SessionPipeline:
         self._detect_state: dict = {}
         # Per-frame last-processed boundary guards for hidden-SMT 15m/30m resamples.
         self._hidden_done: dict[str, pd.Timestamp | None] = {"1min": None}
+        # Count of invalidation events already flushed to smt_invalidations.json, so the
+        # per-bar trail write only re-serializes when a NEW event was appended this bar.
+        self._inv_written_n: int = 0
 
     def on_daily_or_startup(
         self, now: pd.Timestamp, today_mnq: pd.DataFrame,
@@ -1782,6 +1785,19 @@ class SessionPipeline:
             "detect_state": self._detect_state,
             "watch": self._pending_watch.to_dict(),
         })
+
+        # Adverse-run invalidation trail (debug-only; never plotted, never in sd_events or
+        # golden events). Mirror the producer's reserved __invalidations__ list to a JSON
+        # artifact under the current state prefix so a post-run agent can verify which SMTs
+        # were invalidated, when, and why. Full snapshot — the list only grows within a run.
+        # Write ONLY when a new event was appended this bar: a per-1s-bar full rewrite of a
+        # growing list is O(n^2) I/O (~23k rewrites/run), and invalidations are rare.
+        _inv = self._detect_state.get("__invalidations__")
+        if _inv and len(_inv) > self._inv_written_n:
+            import json as _json
+            (paths.state_dir() / "smt_invalidations.json").write_text(
+                _json.dumps(_inv, indent=2), encoding="utf-8")
+            self._inv_written_n = len(_inv)
 
         return sd_events
 
