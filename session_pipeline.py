@@ -1766,28 +1766,62 @@ class SessionPipeline:
                 "cautious_price_initial":   _hyp.get("cautious_price_initial", ""),
                 "cautious_price_secondary": _hyp.get("cautious_price_secondary", ""),
             }
-            # Invalidate BEFORE ingest: drop active records that are fulfilled/gone (via
-            # Contract C) or already flagged fulfilled. A collapsed record carries `keys`
-            # (wick+body folded) — aggregate fulfillment over ALL its underlying detect
-            # keys via `collapsed_status` (ANY fulfilled → fulfilled; ALL gone → gone).
+            # Invalidate BEFORE ingest: drop active records that are fulfilled/gone/
+            # INVALIDATED (Part B) or already flagged fulfilled. A collapsed record carries
+            # `keys` (wick+body folded) — aggregate over ALL its underlying detect keys via
+            # `collapsed_relevance` (ANY fulfilled → fulfilled; ANY invalidated → invalidated;
+            # ALL gone → gone). Only `unfulfilled` records survive (fulfilled/invalidated/
+            # gone are all terminal). `invalidated` is forward-compatible: absent producer
+            # flag → smt_status returns unfulfilled → no drop.
             _all_keys = [k for r in _active for k in (r.get("keys") or [r.get("key")])]
-            _status = _smt_detect.fulfillment_status(_all_keys, self._detect_state)
+            _status = _smt_detect.smt_status(_all_keys, self._detect_state)
             _active = [
                 r for r in _active
-                if _hyp_mod.collapsed_status(r, _status) == "unfulfilled"
+                if _hyp_mod.collapsed_relevance(r, _status) == "unfulfilled"
                 and not r.get("fulfilled")
+                and not r.get("invalidated")
             ]
+            # Ingest fresh records WITHOUT the internal Rule A pass (apply_rule_a_step=False)
+            # so we can run Rule A explicitly next and capture its superseded-event trail.
             _new_recs = [_hyp_mod.to_record(r) for r in records]
-            _active = _hyp_mod.ingest_smts(
+            _collapsed = _hyp_mod.ingest_smts(
                 _new_recs, _active,
                 flat=_flat_shadow, cautious_targets=_ctargets,
                 backing_tier=_backing_tier, x_pts=_hyp_mod.RELEVANCE_X_PTS,
+                apply_rule_a_step=False,
             )
+            _events: list = []
+            # Rule A — same-level latest-take-out-wins (capture the trail).
+            _active, _a_events = _hyp_mod.apply_rule_a(_collapsed)
+            _events.extend(_a_events)
+            # MNQ close this bar — the adverse-move reference for Rule B / leg tracking.
+            _now_close = float(mnq_bar_row["Close"])
+            # Rule B (gated; default OFF) — recency-trend cross-tier suppression.
+            _active, _b_events = _hyp_mod.apply_rule_b(
+                _active, now_close=_now_close, enabled=_hyp_mod.RULE_B_ENABLED,
+                min_age_min=_hyp_mod.RULE_B_MIN_AGE_MIN,
+                adverse_pts=_hyp_mod.RULE_B_ADVERSE_PTS,
+                tier_slack=_hyp_mod.RULE_B_TIER_SLACK,
+            )
+            _events.extend(_b_events)
+            # Leg-scoped suppression — track the most-recently swept-and-reclaimed FIXED
+            # level (dynamic; from this bar's liquidities) and suppress older counter-trend
+            # SMTs until price returns to the swept origin. Leg state persists across bars.
+            _leg_state = _hyp.get("smt_leg_state") or {}
+            _leg_state = _hyp_mod.update_leg(
+                _leg_state, fixed_levels=liq_mnq,
+                now_close=_now_close, now_time=now,
+            )
+            _active, _leg_events, _leg_state = _hyp_mod.suppress_counter_trend(
+                _active, _leg_state, _now_close)
+            _events.extend(_leg_events)
             _dom = _hyp_mod.dominant(_active)
             # Re-load and store under debug keys only; leave every other field untouched.
             _hyp2 = _smt_state.load_hypothesis()
             _hyp2["smt_active_set"] = _active
             _hyp2["smt_dominant"] = _dom
+            _hyp2["smt_leg_state"] = _leg_state
+            _hyp2["smt_suppressions"] = _events
             _smt_state.save_hypothesis(_hyp2)
         except Exception:
             pass

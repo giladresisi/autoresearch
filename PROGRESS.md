@@ -21,6 +21,23 @@ Producer-side adverse-run invalidation (mirror of fulfillment) + structured `smt
 
 ---
 
+## Feature: SMT V2 relevance filter — sweep-confirmation gate + wick/body collapse (GIL-17)
+### Status: ✅ Implemented (unstaged; not committed)
+**Started**: 2026-06-11
+**Plan File**: `.agents/plans/smt-v2-relevance-sweep-gate.md`
+**Linear**: GIL-17
+
+Shadow-only Phase-2 relevance filter: pure `sweep_confirmed` gate (own-pivot `mnq_price`, tier-scaled tolerance, momentum rule long→`>+eps`/short→`<-eps`) folded into a confirmation-aware `dominant`; wick/body collapse into one logical `(ref_name, direction)` SMT in `ingest_smts` with `keys` union; `collapsed_status` fulfillment aggregation in the shadow block. `smt_authority` byte-identical; direction engine/`_record_key`/`fulfillment_status` untouched. 8/8 tasks; +8 new tests (45/45 in file); full suite 1379 passed / 28 pre-existing failures / 0 new. Stage C 1s A/B 2026-06-03 byte-identical check deferred (separate agent).
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/smt-v2-relevance-sweep-gate.md`
+- 8/8 tasks (lightweight sequential); 8 new tests across named groups (a–f), all passing; 0 regressions (+8 net)
+- One good divergence (`collapsed_status` extracted as a pure helper — plan-encouraged); baseline-note divergence (28 real pre-existing failures vs 1 stated); Stage C A/B deferred
+- Alignment score: 10/10
+
+---
+
 ## Feature: Incremental parquet validation (GIL-15)
 ### Status: ✅ Complete (unstaged)
 **Started**: 2026-06-09
@@ -1738,3 +1755,14 @@ Secondary: **`min_test_pnl` > 0** (all qualified folds profitable), **Sharpe â�
 - `.agents/plans/smt-v2-smt-driven-hypothesis.md` — Phase 3 (depends on 1+2): direction = dominant SMT with structural fallback; retire fixed 5m reform → event-driven cadence; detach `failed_entries`/`cautious_dist_shrinks` reset from reforms.
 
 Design decisions captured during brainstorming (scope-ranked dominant SMT; tier ATH≥week>day>1hr-FVG-fill>session, wick>body same-level, recency tiebreak; same-or-higher flips immediately; near-target-OR-high-tier mid-trade gate; SMT-drives-with-structural-fallback).
+
+
+## Feature: SMT V2 Part B — Consumer Relevance Rules (Shadow, GIL-19)
+
+### Reports Generated
+**Execution Report:** `.agents/execution-reports/smt-consumer-relevance-shadow.md`
+**Code Review:** `.agents/code-reviews/smt-consumer-relevance-shadow.md` (passed, no issues)
+**Acceptance Validation:** `.agents/acceptance-validations/smt-consumer-relevance-shadow-validation.md` (10 PASS / 1 PARTIAL-by-runtime-bound / 0 FAIL → ACCEPTED)
+- Shadow-only: smt_status (C-STATUS), Rule A (C-RULEA), Rule B gated default-OFF (C-RULEB), leg-scoped suppression (C-LEG), smt_suppressions trail
+- Trades byte-identical to fe7a27b baseline on 2026-06-03 (md5 match); 16/16 new tests pass; 0 new full-suite failures
+- Left UNSTAGED; ../smt-stuff untouched

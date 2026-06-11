@@ -650,17 +650,23 @@ def _record_key(record: dict) -> str:
     return f"{_skey(ref_name, direction)}|{rec_type}"
 
 
-def fulfillment_status(keys: "list[str] | None", detect_state: dict) -> dict[str, str]:
-    """Per-key fulfillment status over ``detect_state`` (read-only; never mutates).
+def smt_status(keys: "list[str] | None", detect_state: dict) -> dict[str, str]:
+    """Per-key relevance status over ``detect_state`` (read-only; never mutates).
 
-    Returns ``{key: "unfulfilled" | "fulfilled" | "gone"}``:
-      - ``"gone"``       — key absent from ``detect_state`` (expired / never fired).
-      - ``"fulfilled"``  — present and ``st.get("fulfilled") is True``.
-      - ``"unfulfilled"``— present and not fulfilled.
+    Contract C-STATUS. Returns ``{key: "unfulfilled" | "fulfilled" | "invalidated" | "gone"}``:
+      - ``"gone"``        — key absent from ``detect_state`` (expired / never fired).
+      - ``"fulfilled"``   — present and ``st.get("fulfilled") is True`` (checked FIRST so
+                            fulfilled precedence is preserved over invalidated).
+      - ``"invalidated"`` — present, not fulfilled, and ``st.get("invalidated") is True``.
+      - ``"unfulfilled"`` — present and neither fulfilled nor invalidated.
 
-    Fills: fill state dicts (keyed by bare FVG name) have NO ``fulfilled`` field, so
-    ``st.get("fulfilled")`` is falsy → a present, non-fulfilled fill key is
-    ``"unfulfilled"`` by definition in Phase 2 (Phase 3 may extend fill fulfillment).
+    The ``invalidated`` flag is produced by the SMT V2 Part A producer change. Until that
+    flag is present on ``detect_state`` (forward-compatible / pre-rebase), the
+    ``st.get("invalidated")`` lookup is falsy and a present non-fulfilled key is
+    ``"unfulfilled"`` — i.e. NO drop, exactly the legacy behavior.
+
+    Fills: fill state dicts (keyed by bare FVG name) have NO ``fulfilled``/``invalidated``
+    field, so a present fill key is ``"unfulfilled"`` by definition in Phase 2.
 
     Total: ``keys=None`` → ``{}``; never raises.
     """
@@ -674,8 +680,31 @@ def fulfillment_status(keys: "list[str] | None", detect_state: dict) -> dict[str
             out[key] = "gone"
         elif isinstance(st, dict) and st.get("fulfilled") is True:
             out[key] = "fulfilled"
+        elif isinstance(st, dict) and st.get("invalidated") is True:
+            out[key] = "invalidated"
         else:
             out[key] = "unfulfilled"
+    return out
+
+
+def fulfillment_status(keys: "list[str] | None", detect_state: dict) -> dict[str, str]:
+    """Per-key fulfillment status over ``detect_state`` (read-only; never mutates).
+
+    Thin wrapper over :func:`smt_status` that collapses ``"invalidated"`` →
+    ``"unfulfilled"`` so existing callers/tests that only know the legacy
+    ``{"unfulfilled","fulfilled","gone"}`` vocabulary are unaffected.
+
+    Returns ``{key: "unfulfilled" | "fulfilled" | "gone"}``:
+      - ``"gone"``       — key absent from ``detect_state`` (expired / never fired).
+      - ``"fulfilled"``  — present and ``st.get("fulfilled") is True``.
+      - ``"unfulfilled"``— present and not fulfilled (invalidated folds in here).
+
+    Total: ``keys=None`` → ``{}``; never raises.
+    """
+    out = smt_status(keys, detect_state)
+    for k, v in out.items():
+        if v == "invalidated":
+            out[k] = "unfulfilled"
     return out
 
 

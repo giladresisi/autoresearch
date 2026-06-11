@@ -26,6 +26,21 @@ CAUTIOUS_SECONDARY_OFFSET_PTS = 5.0  # pts — secondary cautious target set thi
 # tier outranks the backing tier. First-guess default; tunable.
 RELEVANCE_X_PTS = 25.0  # pts — proximity gate for the ingest filter
 
+# SMT V2 Part B — Rule B (recency-trend cross-tier suppression). SHIPS DEFAULT OFF; gated
+# behind RULE_B_ENABLED. A fresher opposite-direction SMT suppresses an older contradicting
+# one ACROSS tiers when min-age, adverse-move, and tier-slack gates all hold. Measured in
+# shadow before any Phase-3 wiring; first-guess thresholds, tunable.
+RULE_B_ENABLED      = False   # default OFF — Rule B is measured, not shipped active
+RULE_B_MIN_AGE_MIN  = 15.0    # min minutes the newer opposite SMT must postdate the older
+RULE_B_ADVERSE_PTS  = 40.0    # min pts price moved AGAINST the older SMT (MNQ)
+RULE_B_TIER_SLACK   = 1       # newer tier may be this many ranks below the older and still win
+
+# SMT V2 Part B — leg-scoped counter-trend suppression. After a FIXED level is swept-and-
+# reclaimed, suppress dominant counter-trend SMTs that predate the reclaim until price
+# returns to the swept origin. RECLAIM_MARGIN_PTS = how far beyond the level counts as a
+# genuine breach (not noise) before the reclaim back through it.
+RECLAIM_MARGIN_PTS  = 15.0    # pts — breach depth beyond a FIXED level to register a sweep
+
 # P2b: suppress LOW-arm DOWN when price is this many points above the swept level.
 # 50-pt overshoot zone = false positives (38% correct); 20-50pt zone is 80% correct.
 LOW_ARM_DOWN_OVERSHOOT_SUPPRESS_PTS = 50.0
@@ -270,6 +285,38 @@ def collapsed_status(record: dict, status_map: dict) -> str:
     return "unfulfilled"
 
 
+def collapsed_relevance(record: dict, status_map: dict) -> str:
+    """Aggregate a (possibly collapsed) record's relevance over its underlying detect
+    keys, treating ``invalidated`` as a TERMINAL state alongside ``fulfilled``/``gone``.
+
+    Extends :func:`collapsed_status` to the C-STATUS vocabulary
+    (``unfulfilled|fulfilled|invalidated|gone``). ``status_map`` is the output of
+    ``smt_detect.smt_status`` (``{key: status}``). Per-record aggregation precedence:
+      - "fulfilled"   if ANY underlying key is fulfilled,
+      - "invalidated" else if ANY underlying key is invalidated,
+      - "gone"        else if ALL underlying keys are gone,
+      - "unfulfilled" otherwise.
+
+    The shadow active-set drop treats fulfilled/invalidated/gone all as terminal, so a
+    collapsed record is dropped when this returns anything other than "unfulfilled".
+
+    Total/None-safe: missing keys → treated as "gone"; a record lacking ``keys`` falls
+    back to its scalar ``key``; never raises.
+    """
+    if not isinstance(record, dict):
+        return "gone"
+    ks = record.get("keys") or [record.get("key")]
+    sm = status_map if isinstance(status_map, dict) else {}
+    sts = [sm.get(k, "gone") for k in ks]
+    if any(s == "fulfilled" for s in sts):
+        return "fulfilled"
+    if any(s == "invalidated" for s in sts):
+        return "invalidated"
+    if sts and all(s == "gone" for s in sts):
+        return "gone"
+    return "unfulfilled"
+
+
 def to_record(emission: dict) -> dict:
     """Map a `smt_detect` emission to the divs record schema (see module docstring).
 
@@ -312,6 +359,7 @@ def to_record(emission: dict) -> dict:
         "tier":          tier,
         "key":           _smt_record_key(emission),
         "fulfilled":     bool(emission.get("fulfilled", False)),
+        "invalidated":   bool(emission.get("invalidated", False)),
         "mnq_price":     emission.get("mnq_price"),
         "mes_price":     emission.get("mes_price"),
         "mnq_lvl_price": emission.get("mnq_lvl_price"),
@@ -369,6 +417,7 @@ def ingest_smts(
     cautious_targets: "dict | None",
     backing_tier: "str | None",
     x_pts: float,
+    apply_rule_a_step: bool = True,
 ) -> list[dict]:
     """Ingest fresh SMT records into the active set per the LOCKED relevance pipeline.
 
@@ -466,8 +515,9 @@ def ingest_smts(
         # Defensive: re-derive schema if a record lacks key/tier.
         if not isinstance(rec, dict) or "key" not in rec or "tier" not in rec:
             rec = to_record(rec if isinstance(rec, dict) else {})
-        # (1) Drop fulfilled / ineligible.
-        if rec.get("fulfilled") is True:
+        # (1) Drop fulfilled / invalidated / ineligible. `invalidated` is a terminal
+        # producer-side state (Part A); absent flag → False → no drop (forward-compatible).
+        if rec.get("fulfilled") is True or rec.get("invalidated") is True:
             continue
         key = rec.get("key")
         if not key or not rec.get("direction"):
@@ -511,7 +561,378 @@ def ingest_smts(
             survivor["keys"] = merged_keys
             by_key[lk] = survivor
 
-    return [by_key[k] for k in order]
+    collapsed = [by_key[k] for k in order]
+    # Rule A — same-level latest-take-out-wins. Operates ON the collapsed set (above already
+    # merged same-(ref_name,direction)); Rule A resolves OPPOSITE-direction same-ref_name by
+    # recency. Pure: returns (kept, events). Callers that want the superseded-event TRAIL
+    # pass `apply_rule_a_step=False` and run `apply_rule_a` themselves (capturing events);
+    # the default keeps `ingest_smts` self-contained for direct callers/tests.
+    if not apply_rule_a_step:
+        return collapsed
+    kept, _events = apply_rule_a(collapsed)
+    return kept
+
+
+def apply_rule_a(active: "list[dict] | None") -> "tuple[list[dict], list[dict]]":
+    """Rule A — same-level latest-take-out-wins (Contract C-RULEA).
+
+    Groups the active set by ``ref_name``; if a single ``ref_name`` holds BOTH directions,
+    keep only the most-recent (by ``time``) and drop the older opposite-direction record(s).
+    Same-direction sets are untouched (collapse already merged those upstream). Records
+    with no ``ref_name`` are passed through unchanged.
+
+    Pure / total: returns ``(kept, superseded_events)`` where each event is::
+
+        {"event": "superseded_same_level", "ref_name": ..., "kept_key": ...,
+         "kept_direction": ..., "kept_time": ..., "dropped_key": ...,
+         "dropped_direction": ..., "dropped_time": ...}
+
+    Never mutates its input; never raises.
+    """
+    src = list(active or [])
+    if not src:
+        return src, []
+
+    def _rtime(r: dict) -> int:
+        try:
+            ts = pd.Timestamp(r.get("time"))
+            return int(ts.value) if ts is not pd.NaT else 0
+        except Exception:
+            return 0
+
+    # Group indices by ref_name preserving first-seen order.
+    groups: dict = {}
+    order_rn: list = []
+    for i, r in enumerate(src):
+        rn = r.get("ref_name") if isinstance(r, dict) else None
+        if rn is None:
+            continue
+        if rn not in groups:
+            groups[rn] = []
+            order_rn.append(rn)
+        groups[rn].append(i)
+
+    drop_idx: set = set()
+    events: list = []
+    for rn in order_rn:
+        idxs = groups[rn]
+        non_none_dirs = {src[i].get("direction") for i in idxs
+                         if src[i].get("direction") is not None}
+        # Only act when at least two DISTINCT non-None directions are present.
+        if len(non_none_dirs) < 2:
+            continue
+        # Keep the single most-recent record for this ref_name; drop every older record
+        # whose direction differs from the winner's (opposite-direction supersession).
+        winner = max(idxs, key=lambda i: _rtime(src[i]))
+        win_dir = src[winner].get("direction")
+        for i in idxs:
+            if i == winner:
+                continue
+            if src[i].get("direction") != win_dir:
+                drop_idx.add(i)
+                events.append({
+                    "event":             "superseded_same_level",
+                    "ref_name":          rn,
+                    "kept_key":          src[winner].get("key"),
+                    "kept_direction":    win_dir,
+                    "kept_time":         src[winner].get("time"),
+                    "dropped_key":       src[i].get("key"),
+                    "dropped_direction": src[i].get("direction"),
+                    "dropped_time":      src[i].get("time"),
+                })
+
+    kept = [src[i] for i in range(len(src)) if i not in drop_idx]
+    return kept, events
+
+
+def _ts_value(t) -> "int | None":
+    """Parse a time-ish value to ns since epoch; None on failure (total/never-raises)."""
+    try:
+        ts = pd.Timestamp(t)
+        return int(ts.value) if ts is not pd.NaT else None
+    except Exception:
+        return None
+
+
+def apply_rule_b(
+    active: "list[dict] | None",
+    *,
+    now_close: "float | None",
+    enabled: bool,
+    min_age_min: float,
+    adverse_pts: float,
+    tier_slack: int,
+) -> "tuple[list[dict], list[dict]]":
+    """Rule B — recency-trend cross-tier suppression (Contract C-RULEB). GATED.
+
+    A record ``O`` is suppressed iff a newer opposite-direction record ``N`` exists with:
+      - ``N.time - O.time >= min_age_min`` (the newer signal is meaningfully fresher),
+      - price has moved AGAINST ``O`` by ``>= adverse_pts`` — for a SHORT ``O`` (expects
+        price down) adverse = ``now_close - O_level >= adverse_pts``; for a LONG ``O``
+        (expects price up) adverse = ``O_level - now_close >= adverse_pts``, where
+        ``O_level`` is ``O.mnq_lvl_price`` (fallback ``O.mnq_price``), and
+      - ``_tier_rank(N.tier) >= _tier_rank(O.tier) - tier_slack`` (cross-tier: ``N`` need
+        not strictly outrank ``O`` — it may be ``tier_slack`` ranks below and still win).
+
+    Pure / total: returns ``(kept, suppressed_events)``. No-op (identity, empty events)
+    when ``enabled=False`` or ``now_close`` is None. Never mutates input; never raises.
+    """
+    src = list(active or [])
+    if not enabled or now_close is None or not src:
+        return src, []
+    try:
+        nc = float(now_close)
+    except (TypeError, ValueError):
+        return src, []
+
+    def _olevel(r: dict) -> "float | None":
+        v = r.get("mnq_lvl_price")
+        if v is None:
+            v = r.get("mnq_price")
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    drop_idx: set = set()
+    events: list = []
+    for oi, o in enumerate(src):
+        o_dir = o.get("direction")
+        if o_dir not in ("long", "short"):
+            continue
+        o_t = _ts_value(o.get("time"))
+        o_lvl = _olevel(o)
+        if o_t is None or o_lvl is None:
+            continue
+        # adverse-move gate (against O).
+        if o_dir == "short":
+            adverse_ok = (nc - o_lvl) >= adverse_pts
+        else:
+            adverse_ok = (o_lvl - nc) >= adverse_pts
+        if not adverse_ok:
+            continue
+        o_rank = _tier_rank(o.get("tier"))
+        # find a qualifying newer opposite N.
+        for ni, n in enumerate(src):
+            if ni == oi:
+                continue
+            if n.get("direction") not in ("long", "short"):
+                continue
+            if n.get("direction") == o_dir:
+                continue  # must be opposite
+            n_t = _ts_value(n.get("time"))
+            if n_t is None:
+                continue
+            age_min = (n_t - o_t) / 6e10  # ns → minutes
+            if age_min < min_age_min:
+                continue
+            if _tier_rank(n.get("tier")) < (o_rank - tier_slack):
+                continue
+            drop_idx.add(oi)
+            events.append({
+                "event":             "suppressed_by_trend",
+                "ref_name":          o.get("ref_name"),
+                "dropped_key":       o.get("key"),
+                "dropped_direction": o_dir,
+                "dropped_time":      o.get("time"),
+                "by_key":            n.get("key"),
+                "by_direction":      n.get("direction"),
+                "by_time":           n.get("time"),
+                "now_close":         nc,
+            })
+            break
+
+    kept = [src[i] for i in range(len(src)) if i not in drop_idx]
+    return kept, events
+
+
+def _fixed_level_candidates(fixed_levels: "list[dict] | None") -> list:
+    """Normalize fixed-level inputs to ``[{"name","price"}]`` (total/None-safe).
+
+    Accepts liquidity dicts (``{"name","kind":"level","price"}``) — only FIXED-tier levels
+    (``_smt_level_class(name)[0] == "fixed"``) with a high/low sub are kept, so dynamic
+    running ``day_*``/``week_*`` extremes are excluded (only prev*/session fixed levels
+    qualify as swept-and-reclaimed leg origins).
+    """
+    out: list = []
+    for lv in fixed_levels or []:
+        if not isinstance(lv, dict):
+            continue
+        if lv.get("kind") not in (None, "level"):
+            continue
+        name = lv.get("name")
+        price = lv.get("price")
+        if name is None or price is None:
+            continue
+        try:
+            kind_cls, _tier = _smt_level_class(name)
+        except Exception:
+            continue
+        if kind_cls != "fixed":
+            continue
+        # Only high/low levels are touch/sweep targets.
+        if not (str(name).endswith("_high") or str(name).endswith("_low")):
+            continue
+        try:
+            out.append({"name": name, "price": float(price)})
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def update_leg(
+    leg_state: "dict | None",
+    *,
+    fixed_levels: "list[dict] | None",
+    now_close: "float | None",
+    now_time,
+) -> dict:
+    """Track the most-recently swept-and-reclaimed FIXED level (Contract C-LEG).
+
+    A leg is registered when a FIXED level is breached beyond by ``RECLAIM_MARGIN_PTS`` and
+    then price closes back THROUGH it (the reclaim). The level is chosen DYNAMICALLY from
+    ``fixed_levels`` — never hardcoded. Tracks per-candidate breach progress in
+    ``leg_state["_breaches"]``; the active leg is recorded under ``leg_state["leg"]`` as::
+
+        {"level_name", "level_price", "origin_price", "reclaim_time", "recovery_dir"}
+
+    ``recovery_dir`` is ``"long"`` when a low was breached-down then reclaimed-up,
+    ``"short"`` when a high was breached-up then reclaimed-down. ``origin_price`` is the
+    swept level price — the leg clears (handled by ``suppress_counter_trend``) once
+    ``now_close`` returns to it.
+
+    Pure-ish: returns a NEW leg_state dict (does not mutate the input). Total: degenerate
+    input → unchanged copy; never raises.
+    """
+    st = dict(leg_state) if isinstance(leg_state, dict) else {}
+    breaches = dict(st.get("_breaches") or {})
+    st["_breaches"] = breaches
+    if now_close is None:
+        return st
+    try:
+        nc = float(now_close)
+    except (TypeError, ValueError):
+        return st
+
+    cands = _fixed_level_candidates(fixed_levels)
+    iso = None
+    try:
+        iso = pd.Timestamp(now_time).isoformat() if now_time is not None else None
+    except Exception:
+        iso = None
+
+    for c in cands:
+        name = c["name"]
+        price = c["price"]
+        is_high = str(name).endswith("_high")
+        b = breaches.get(name) or {"breached": False}
+        # Register a breach beyond the level by the margin.
+        if is_high:
+            if nc >= price + RECLAIM_MARGIN_PTS:
+                b["breached"] = True
+            elif b.get("breached") and nc < price:
+                # Reclaim: closed back below the high after breaching above → recovery short.
+                st["leg"] = {
+                    "level_name":   name,
+                    "level_price":  price,
+                    "origin_price": price,
+                    "reclaim_time": iso,
+                    "recovery_dir": "short",
+                }
+                b["breached"] = False
+        else:  # low
+            if nc <= price - RECLAIM_MARGIN_PTS:
+                b["breached"] = True
+            elif b.get("breached") and nc > price:
+                # Reclaim: closed back above the low after breaching below → recovery long.
+                st["leg"] = {
+                    "level_name":   name,
+                    "level_price":  price,
+                    "origin_price": price,
+                    "reclaim_time": iso,
+                    "recovery_dir": "long",
+                }
+                b["breached"] = False
+        breaches[name] = b
+
+    return st
+
+
+def suppress_counter_trend(
+    active: "list[dict] | None",
+    leg_state: "dict | None",
+    now_close: "float | None",
+) -> "tuple[list[dict], list[dict], dict]":
+    """Leg-scoped counter-trend suppression (Contract C-LEG, consumer side).
+
+    Given an active leg (from :func:`update_leg`), drop dominant-eligible SMTs whose
+    ``direction`` OPPOSES the leg's ``recovery_dir`` AND whose ``time < reclaim_time``,
+    until ``now_close`` returns to ``origin_price`` (then the leg clears and nothing is
+    suppressed). Records aligned with ``recovery_dir`` and records that postdate the
+    reclaim are NEVER suppressed.
+
+    Leg clears when price returns to origin:
+      - recovery_dir "long"  (a low was reclaimed up): clears once ``now_close <= origin``.
+      - recovery_dir "short" (a high was reclaimed down): clears once ``now_close >= origin``.
+
+    Returns ``(kept, suppressed_events, new_leg_state)`` — new_leg_state has ``leg`` removed
+    when the leg cleared. Pure/total: no leg or None inputs → identity; never raises.
+    """
+    src = list(active or [])
+    st = dict(leg_state) if isinstance(leg_state, dict) else {}
+    leg = st.get("leg")
+    if not isinstance(leg, dict) or not src:
+        return src, [], st
+
+    origin = leg.get("origin_price")
+    recovery_dir = leg.get("recovery_dir")
+    reclaim_t = _ts_value(leg.get("reclaim_time"))
+    try:
+        nc = float(now_close) if now_close is not None else None
+    except (TypeError, ValueError):
+        nc = None
+
+    # Leg-clear check: price returned to origin.
+    if nc is not None and origin is not None:
+        try:
+            o = float(origin)
+            if recovery_dir == "long" and nc <= o:
+                st = dict(st)
+                st.pop("leg", None)
+                return src, [], st
+            if recovery_dir == "short" and nc >= o:
+                st = dict(st)
+                st.pop("leg", None)
+                return src, [], st
+        except (TypeError, ValueError):
+            pass
+
+    if recovery_dir not in ("long", "short") or reclaim_t is None:
+        return src, [], st
+
+    counter = "short" if recovery_dir == "long" else "long"
+    drop_idx: set = set()
+    events: list = []
+    for i, r in enumerate(src):
+        if r.get("direction") != counter:
+            continue
+        r_t = _ts_value(r.get("time"))
+        if r_t is None or r_t >= reclaim_t:
+            continue  # only SMTs that PREDATE the reclaim
+        drop_idx.add(i)
+        events.append({
+            "event":             "suppressed_by_leg",
+            "ref_name":          r.get("ref_name"),
+            "dropped_key":       r.get("key"),
+            "dropped_direction": r.get("direction"),
+            "dropped_time":      r.get("time"),
+            "leg_level_name":    leg.get("level_name"),
+            "leg_recovery_dir":  recovery_dir,
+            "leg_reclaim_time":  leg.get("reclaim_time"),
+        })
+
+    kept = [src[i] for i in range(len(src)) if i not in drop_idx]
+    return kept, events, st
 
 
 def _build_5m_bar(mnq_1m: pd.DataFrame, now: datetime) -> dict | None:
