@@ -1,206 +1,169 @@
 ---
 name: strategy-experiment
 description: >
-  End-to-end harness for testing a trading-strategy idea against a PAST session in an isolated
-  git worktree for the auto-co-trader project: it specs the idea, adaptively plans + implements
-  the change, A/B-regresses it on the example day(s), and verifies — at the exact timestamps of
-  the supplied example occurrences — whether the change produced the desired effect (and what it
-  did to the whole day). Use this whenever the user wants to TRY / TEST / EXAMINE / VALIDATE a
-  strategy or signal idea on a real historical session before shipping it — phrases like "test
-  this idea on yesterday's session", "examine whether this change fixes the 14:50 occurrence",
-  "set up an experiment for this SMT rule and verify it on 2026-06-10", "A/B this idea and check
-  the example times", "run this strategy tweak through a worktree and confirm the effect", or any
-  request that pairs a strategy-behavior idea with one or more concrete example occurrences to
-  prove it against. Trigger even if the user doesn't say "skill" or "experiment". This skill
-  REQUIRES at least one concrete, replayable example occurrence (a live session date OR an explicit
-  regression-run path on disk) — without one there is nothing to verify the effect against, and the
-  skill must refuse to run. Do NOT use it for: a plain regression/backtest run with no idea to
-  implement (use the regression-runner), session post-mortems (use session-analysis), just specing
-  an idea without testing it (use strategy-feature), or live/orchestrator operations.
+  Runs an experiment that tests a trading-strategy idea against a PAST session in the auto-co-trader
+  project, in one of two modes. DEFAULT = HANDOFF: create a new git worktree, write all context +
+  example occurrences into a new Linear issue (via /create-issue), and write a thin `feature.md`
+  runbook in the worktree, then hand off to a SEPARATE main agent who runs plan → implement → A/B
+  regression → verification there and updates the issue. DIRECT mode (only when the user explicitly
+  says to run it now / here / in this worktree / directly): NO new worktree — after creating the
+  Linear issue and writing/overriding the local `feature.md`, the CURRENT agent runs ALL phases
+  itself. Use this whenever the user wants to TRY / TEST / EXAMINE / VALIDATE / SET UP AN EXPERIMENT
+  FOR a strategy or signal idea on a real historical session — e.g. "test this idea on yesterday's
+  session", "set up an experiment for this SMT rule on 2026-06-10", "I'd like to try this now in
+  this worktree using strategy-experiment" (→ direct), "have another agent try this in a separate
+  worktree" (→ handoff). Trigger even if the user doesn't say "skill" or "experiment". REQUIRES at
+  least one concrete, replayable example occurrence (a live-session date OR an explicit regression-run
+  path on disk) — without one there is nothing to verify the effect against, and the skill must
+  refuse to run. Do NOT use it for: a plain regression/backtest run with no idea to implement (use
+  the regression-runner), session post-mortems (use session-analysis), or live/orchestrator ops.
+
 ---
 
 # strategy-experiment
 
-Turn a strategy-behavior idea **plus one or more concrete example occurrences** into a finished,
-self-contained experiment: an isolated worktree holding the implemented change, an A/B regression
-on the example day(s), and a verification report that says — per occurrence — whether the desired
-behavior actually happened, and what the change did to the full session P&L.
+Test a strategy-behavior idea — **plus one or more concrete example occurrences** — against a real
+historical session, end to end: spec it into a Linear issue, implement the change in isolation,
+A/B-regress it on the example day(s), and verify at the exact occurrence timestamps whether the
+desired effect happened (and what it did to the whole day).
 
-This skill is an **orchestrator**. It does not re-implement work that existing skills/agents already
-do well; it sequences them and adds the one thing none of them do: **timestamp-anchored
-before/after verification tied to real example occurrences.** That verification is the whole point,
-which is why a concrete, replayable example is mandatory — see Stage 0.
+It runs in **two modes**:
 
-The loop ends with an unstaged change in the worktree and a verdict for you to review. It never
-commits, merges, or pushes. You decide whether the result is worth keeping.
+- **Handoff (default).** Create a new worktree + the Linear issue + a thin `feature.md` runbook,
+  then **stop and hand off** to a separate main agent who runs the heavy stages in that worktree.
+  Keeps each context clean and lets the long-running work happen in its own session.
+- **Direct.** Only when the user explicitly asks to run it **now / here / in this worktree /
+  directly**. No new worktree — the **current** agent creates the Linear issue, writes the local
+  `feature.md`, and then runs **all** phases itself.
+
+It never commits, merges, or pushes.
 
 ---
 
 ## Stage 0 — Gate on a concrete example occurrence (early-exit)
 
-The deliverable is a *verified* effect. You can only verify an effect against a real, replayable
-event. So before doing anything else, confirm the invocation carries **at least one example
-occurrence**, each fully specified:
+The payoff is a *verified* effect, which needs a real, replayable event to check against. Confirm
+the invocation carries **at least one example occurrence**, each fully specified:
 
 - **date** — the session day to replay (`YYYY-MM-DD`).
 - **time (ET)** — the clock time of the occurrence (`HH:MM`, optionally `HH:MM:SS`).
-- **source** — where this occurrence was observed, in one of two verifiable forms:
-  - `live-session:<YYYY-MM-DD>` → must resolve to an existing `<global>/sessions/<date>/` folder
-    containing `events.jsonl` (global root: `paths.global_root()`, default
-    `~/projects/auto-co-trader/global`).
-  - `regression-run:<absolute-path>` → must be an existing regression run directory on this
-    machine containing `events_1s.jsonl`/`events.jsonl` + a trades file. The user must state the
-    path explicitly — do not guess it.
-- **current behavior** — what the strategy does today at that moment (the thing being fixed).
+- **source** — one of two verifiable forms:
+  - `live-session:<YYYY-MM-DD>` → an existing `<global>/sessions/<date>/` folder containing
+    `events.jsonl` (global root: `paths.global_root()`, default `~/projects/auto-co-trader/global`).
+  - `regression-run:<absolute-path>` → an existing regression run dir containing
+    `events_1s.jsonl`/`events.jsonl` + a trades file. The user must state the path explicitly.
+- **current behavior** — what the strategy does today at that moment.
 - **desired behavior** — what it should do instead after the change (the assertion to verify).
-- **window** *(optional)* — the inspection window around the time (default `time ± 8 min`).
+- **window** *(optional)* — inspection window around the time (default `time ± 8 min`).
 
-**Refuse to run if the gate fails.** Specifically:
-
-- Zero occurrences supplied → stop. Tell the user the skill needs at least one concrete example
-  to verify against, and show the required fields above. Do **not** create a worktree.
-- An occurrence is missing `date`, `time`, `source`, `current`, or `desired` → ask the user to
-  complete it; do not proceed with a half-specified occurrence.
-- A `source` path/folder does **not exist** on disk → stop and report exactly which source was not
-  found. A non-existent source cannot be replayed or inspected, so the experiment is unverifiable.
-
-Verify each source exists before continuing (e.g. `test -f <global>/sessions/<date>/events.jsonl`
-for a live session; `test -d <path>` + a trades file for a regression run). Only proceed once every
-occurrence is complete and its source is confirmed present.
-
-> Why this is strict: an experiment whose effect can't be checked at a real occurrence is just an
-> untested code change. The example is what separates this skill from `strategy-feature`.
-
-Collect the distinct `date`s — they become the **A/B regression dates** in Stage 4, and each
-occurrence's `time`/`window` becomes a **verification probe** in Stage 5.
+**Refuse to run if the gate fails:** zero occurrences, a half-specified occurrence (missing any of
+date/time/source/current/desired), or a `source` that does not exist on disk → stop and report
+exactly why; do not create a worktree or a Linear issue. Verify each source exists before
+continuing. Collect the distinct `date`s — they become the **A/B regression dates**, and each
+`time`/`window` becomes a **verification probe**.
 
 ---
 
-## Stage 1 — Spec + worktree (delegate to `strategy-feature`)
+## Stage 1 — Pick the mode (direct vs handoff)
 
-Assemble the **request body**: the idea (what behavior to change and why) followed by an
-`## Example Occurrences` table built from Stage 0 (the exact schema is in
-`references/example-occurrences.md` — read it and follow it verbatim, because Stage 5's verifier
-parses this table). If the idea came from this conversation, write it to a request file first
-(e.g. `requests/<slug>.md`) so there is a durable source; if the user pointed at an existing
-file/section, use that.
+Decide from the invocation. **Default to handoff** when nothing is said about where/who runs it.
 
-Invoke the **`strategy-feature`** skill with that request. It creates the worktree (via
-`/new-co-trader-worktree`, based off the current branch — proceed with the current branch as base
-when it warns you're not on `master`), copies the gitignored data + `.env`, grounds the spec in
-real `file.py:line` anchors with the backtest-vs-live path note, and writes a self-contained
-`feature.md`.
+- **Direct** — the user explicitly indicated running it **now / here / in this worktree / by you /
+  directly** (e.g. "I'd like to try this now in this worktree using strategy-experiment", "run it
+  directly here", "do it in the current worktree now"). → No new worktree; the current agent runs
+  every phase.
+- **Handoff (default)** — the user asked for a **separate worktree / another agent** ("have another
+  agent try this in a separate worktree"), OR said nothing about mode. → New worktree + issue +
+  thin runbook, then hand off.
 
-> **Overwrite any pre-existing `feature.md`.** The worktree is a checkout of the base branch,
-> which often carries a **stale, tracked `feature.md`** from an earlier experiment. That is
-> expected — this experiment's `feature.md` must **replace it wholesale**, never append to or
-> merge with it, and never fail because it already exists. The Write tool requires a Read first
-> when a file exists: read the stale file (to confirm it's an unrelated leftover), then write the
-> new spec over it, replacing the entire contents.
-
-After `strategy-feature` returns, **ensure `feature.md` contains the `## Example Occurrences`
-table verbatim** (append it if `strategy-feature` did not carry it through). This table is the
-contract Stage 5 reads — the worktree must be self-describing.
-
-Record: worktree path `../<tag>`, branch `autoresearch/<tag>`, and the `feature.md` path. **All
-subsequent work happens inside the worktree.**
+State which mode you picked and why before proceeding.
 
 ---
 
-## Stage 2 — Adaptive planning (signal the execution weight)
+## Stage 2 — Ground the idea (and, handoff only, create the worktree)
 
-Spawn a planning agent (`gsd-planner`, or a `general-purpose` agent carrying the `/plan-feature`
-methodology) to read `feature.md`, explore the real code touchpoints, and **assess complexity**,
-then choose the plan shape and stamp an execution directive:
+Assemble the **request body**: the idea (what to change and why) + an `## Example Occurrences` table
+built from Stage 0 (schema in `references/example-occurrences.md` — follow it verbatim; the verifier
+parses this table). If the idea came from this conversation, write it to a request file first (e.g.
+`requests/<slug>.md`) for a durable source.
 
-- **Lightweight / sequential** when the change is small and local: ≤2 files, modifies existing
-  logic only (no new modules/interfaces/state-schema), unit-testable in isolation, doesn't fork
-  the backtest and live paths. The typical signal-rule tweak.
-- **Full `/plan-feature`** when the change is genuinely large: new modules/interfaces, ≥3 files
-  across subsystems, state-file/schema changes, a real parallelizable surface, or it must live in
-  **both** the backtest (`SimulatedBrokerExecutor` via `regression.py` → `backtest_smt.run_backtest_v2`)
-  and live executor paths. When delegating to `/plan-feature`, **pass a non-interactive marker**
-  (e.g. `[non-interactive] auto-approve acceptance criteria — invoked indirectly by
-  strategy-experiment`) so its acceptance-criteria step auto-approves the proposed criteria instead
-  of blocking on a user prompt — this harness runs unattended.
-
-Output: `.agents/plans/<slug>.md` whose header carries **`EXECUTION_MODE: lightweight`** or
-**`EXECUTION_MODE: team`** plus a one-line rationale. This is the planner→executor signal — the
-planner owns the decision and records it in the plan, so the next stage just reads it.
-
-> Don't force the heavy machinery. Most strategy-rule changes are a single-file edit + a unit test
-> + a regression check; making a 4-agent team design that is pure friction. The gate exists so the
-> weight matches the change.
+- **Handoff:** invoke the **`strategy-feature`** skill with that request. It creates the worktree
+  (via `/new-co-trader-worktree`, off the current branch — proceed with the current branch as base
+  when warned you're not on `master`), copies the gitignored data + `.env`, and **grounds the idea
+  in the codebase** (real `file.py:line` anchors + the backtest-vs-live path note). Treat the
+  grounded `feature.md` it writes as your **draft context** for the Linear issue; you replace it in
+  Stage 4. Record the worktree path `../<tag>` and branch `autoresearch/<tag>`.
+- **Direct:** do **not** create a worktree — you work in the **current** worktree. Ground the idea
+  inline (Explore/Grep/Read) so the Linear issue and `feature.md` cite real `file.py:line` anchors
+  and the backtest-vs-live path.
 
 ---
 
-## Stage 3 — Adaptive execution (route on `EXECUTION_MODE`)
+## Stage 3 — Create the Linear issue (both modes; delegate to `/create-issue`)
 
-Read the plan's `EXECUTION_MODE` and route:
-
-- `lightweight` → spawn the **`plan-executor`** agent on `.agents/plans/<slug>.md`. It implements
-  the plan sequentially, then runs its own review pipeline (code-review →
-  acceptance-criteria-validate → execution-report) and fixes genuine issues. Leaves all changes
-  **unstaged**.
-- `team` → invoke the **`/execute`** skill on the plan (team-based parallel waves). Same
-  no-commit / unstaged contract.
-
-Either way: **no `git add` / commit / push / merge.** The change stays unstaged in the worktree so
-it can be A/B-regressed cleanly and discarded if it doesn't pan out.
+Invoke the **`create-issue`** skill to open a Linear issue (project **`ai-trader`**, In Progress)
+holding **all the context**: summary/problem + why it matters; background with the occurrences'
+numbers/timestamps; current code & where the change lives (the `file.py:line` anchors + backtest-vs-
+live note); requirements/recommendation; the full **example-occurrences table**; and the experiment
+plan (plan → implement → A/B 1s regression on the example day(s) → verify). Capture the returned
+**issue identifier (e.g. `GIL-42`) and URL** — Stage 4 writes them into `feature.md`.
 
 ---
 
-## Stage 4 — A/B regression on the example day(s) (delegate to `regression-runner`)
+## Stage 4 — Write / overwrite the local `feature.md` (both modes)
 
-Spawn the **`regression-runner`** agent in **`ab-working-change`** mode, **`1s`**, over the Stage-0
-dates. This compares the worktree's change (WITH) against a clean HEAD baseline (WITHOUT) on the
-*same* day — the only way to attribute an effect to the change.
+Write `feature.md` as a **thin pointer + runbook** (the full spec lives in the Linear issue) — in
+the new worktree (handoff) or the current worktree (direct). Read
+`references/handoff-feature-template.md` and follow it: header (Linear ID + URL as source of truth,
+branch, status), the A–E runbook, and the `## Example Occurrences` table verbatim (the
+`experiment-verifier` parses it locally from this file).
 
-Require from its report (per date): both run directories (baseline + change), per-side
-`n_trades` + `pnl`, the event/trade diff verdict, and the chart paths. If the runner reports the
-two sides are byte-identical, the change is behavior-neutral on that day — surface that prominently,
-because it usually means the new rule never engaged at the occurrence (a likely Stage-5 FAIL).
-
----
-
-## Stage 5 — Timestamp verification (delegate to `experiment-verifier`)
-
-Spawn the **`experiment-verifier`** agent with: the `feature.md` path (for the
-`## Example Occurrences` table) and the baseline + change regression run dirs per date. For each
-occurrence it slices the `window` around `time` in both runs' `events`/`trades`, and checks whether
-the **desired behavior** now holds in the change run where the **current behavior** held in the
-baseline — i.e. it confirms the change *caused* the intended difference at that exact moment. It
-also reports the whole-day `n_trades`/`pnl` delta per date.
-
-Output: a written `experiment-verification.md` in the worktree, plus a returned verdict —
-per-occurrence **PASS/FAIL with evidence** and the full-day delta.
+> **Overwrite any pre-existing `feature.md`.** A worktree checked out from the base branch often
+> carries a **stale, tracked `feature.md`** from an earlier experiment — replace it **wholesale**,
+> never append, never fail because it exists. The Write tool requires a Read first when a file
+> exists: read the stale file (confirm it's an unrelated leftover), then write over it.
 
 ---
 
-## Stage 6 — Hand off (no merge)
+## Stage 5 — Branch on mode
 
-Report concisely to the user:
+### Handoff (default) — hand off, then STOP
+Report and stop; do **not** run the stages yourself:
+- worktree path + branch; the Linear issue ID + URL (the tracker); the `feature.md` runbook path.
+- Next step for the user: start a separate main agent in the worktree —
+  `cd ../<tag>` then `claude`, and ask it to "run the experiment per feature.md". It progresses
+  through the stages, comments its findings on the Linear issue, and notifies the user when done.
 
-- Worktree path + branch; `feature.md`, plan (+ `EXECUTION_MODE`), and `experiment-verification.md`
-  paths.
-- The per-occurrence PASS/FAIL verdict and the whole-day P&L/trade delta per date.
-- The A/B chart paths so they can eyeball the effect.
-- A one-line bottom line: did the idea do what it was meant to at the example(s), and at what
-  whole-day cost/benefit.
+Leave everything **unstaged**. The skill's job ends at the handoff.
 
-Then stop. Leave everything **unstaged**; the user reviews the evidence and decides whether to
-keep, refine, or discard. Only commit/merge if they explicitly ask in a later request.
+### Direct — run all phases yourself (in the current worktree)
+You are the agent running the experiment. Execute the `feature.md` runbook A→E here, and after
+**each** stage post a concise comment to the Linear issue summarizing what you did/found:
+
+- **A — Plan.** Spawn the **`experiment-planner`** subagent on `feature.md` (+ the Linear issue). It
+  explores the code, assesses scope/complexity, and writes `.agents/plans/<slug>.md` — choosing the
+  full `/plan-feature` skill (large/cross-cutting) or a lightweight sequential plan it writes directly
+  (small/local), and stamping `EXECUTION_MODE: team|lightweight` + an `EXECUTOR DIRECTIVE` into the
+  plan header.
+- **B — Implement.** Spawn the **`plan-executor`** subagent on `.agents/plans/<slug>.md`, telling it
+  to honor the plan's `EXECUTION_MODE`: `team` → use the `/execute` skill (the planner used
+  `/plan-feature`); `lightweight` → implement the sequential plan directly (no `/execute`). It then
+  runs its own review pipeline. Run the unit tests named in the issue; leave changes **UNSTAGED**.
+- **C — A/B regression.** `regression-runner` agent, `ab-working-change` `1s`, on the example
+  day(s). Capture baseline vs change run dirs, `n_trades`/`pnl`, diff verdict, chart paths.
+- **D — Verify.** `experiment-verifier` agent with `feature.md` + the baseline/change run dirs →
+  per-occurrence PASS/FAIL + whole-day delta; it writes `experiment-verification.md`.
+- **E — Notify.** Notify the user (push notification) with the one-line verdict.
+
+These stages are long-running (regression is CPU-heavy) — run each to completion in-turn rather than
+backgrounding and returning early. Leave everything **unstaged**; the user reviews and decides on
+merge. Do **not** commit/merge/push.
 
 ---
 
 ## Notes
 
-- **One idea → one worktree → one experiment.** For several independent ideas, run the skill once
-  per idea so each gets its own isolated, verifiable branch.
-- **Keep scope faithful to the request.** Don't expand the idea; if it's ambiguous about what to
-  build, ask before Stage 1.
-- **Long-running.** Stages 3–4 can take many minutes (regression is CPU-heavy). The delegated
-  agents run their work to completion in-turn; let them finish rather than backgrounding and
-  returning early.
-- **Multiple occurrences across multiple days** are fine — Stage 4 loops the dates and Stage 5
-  probes every occurrence. More occurrences = a stronger verdict.
+- **One idea → one Linear issue → one experiment** (+ one worktree in handoff mode).
+- **Keep scope faithful to the request.** If the idea is ambiguous about what to build, ask before
+  Stage 2.
+- **Default is handoff** — only go direct on an explicit "run it here/now/directly" signal.
