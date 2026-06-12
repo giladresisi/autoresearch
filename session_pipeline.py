@@ -266,6 +266,11 @@ class SessionPipeline:
         # Set after stop-exit (shallow sweep) — enter at bar_mid immediately.
         # Not set after market-close or stopped-out (let normal stop/approach logic apply).
         self._force_market_entry: bool = False
+        # Tracks the pause-sentinel state seen on the previous bar. A True→False flip is a
+        # pause→resume transition: arm a force-eval (same machinery as the post-exit path) so
+        # the strategy re-runs its FULL entry evaluation against the last completed 5m bar
+        # immediately, rather than waiting for the next 5m boundary. None = not yet observed.
+        self._prev_paused: bool | None = None
         # Bar close price when the current hypothesis was formed. Used to suppress
         # cooldown-path trend-broken when the level was already past at formation
         # (e.g. a 1s bar revisits a level the hypothesis already priced in).
@@ -693,6 +698,19 @@ class SessionPipeline:
                     "price":            _last_price,
                 })
 
+        # Late-startup analogue of the resume transition: if the strategy comes up flat (no
+        # active position, no resting entry) and is NOT paused at startup, arm a force-eval so
+        # the first live bar evaluates the FULL entry against the last completed 5m bar instead
+        # of waiting for the next 5m boundary. Seed _prev_paused from the current sentinel so the
+        # per-bar transition detector has a correct baseline (a startup while paused is not, by
+        # itself, a resume; the True→False flip is detected on the later un-pause).
+        _start_paused = _smt_state.is_paused()
+        self._prev_paused = _start_paused
+        if not _start_paused and not _has_active:
+            _start_pos = load_position()
+            if _start_pos.get("stop_entry", "") == "":
+                self._force_entry_eval_after = now
+
     def on_1m_bar(
         self,
         now: pd.Timestamp,
@@ -788,6 +806,24 @@ class SessionPipeline:
 
         # Snapshot stop_entry before trend runs so we can detect silent cancellations.
         _prev_stop = _smt_state.load_position().get("stop_entry", "")
+
+        # Pause→resume transition: when the pause sentinel flips True→False between bars, the
+        # user is taking over from this moment — INCLUDING the just-closed 5m setup bar. Arm a
+        # force-eval (same machinery as the post-exit path) so the strategy re-runs its FULL
+        # entry evaluation against the last completed 5m bar on THIS bar, arming the stop-entry
+        # iff the existing confirmation criteria are met — rather than waiting for the next 5m
+        # boundary. Only when FLAT and with no entry already resting (the same preconditions the
+        # normal entry path requires); never disturb an open position or an already-armed entry.
+        _now_paused = _smt_state.is_paused()
+        if (
+            self._prev_paused is True
+            and not _now_paused
+            and self._force_entry_eval_after is None
+        ):
+            _resume_pos = _smt_state.load_position()
+            if not _resume_pos.get("active") and _resume_pos.get("stop_entry", "") == "":
+                self._force_entry_eval_after = now
+        self._prev_paused = _now_paused
 
         # Trend runs first: validates existing hypothesis before a new one may form.
         trend_sig = _trend_mod.run_trend(now, mnq_1m_bar, recent)
