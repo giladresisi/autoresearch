@@ -303,7 +303,7 @@ def run_daily_fixed(
     if two_price is not None:
         liquidities.append({"name": "TWO", "kind": "level", "price": float(two_price)})
 
-    # Prior 2 trading days: high, low, TDO
+    # Prior 2 trading days: high, low
     # Window = CME session: (prior_date-1) 18:00 ET → prior_date 17:00 ET.
     # Midnight-to-midnight would include the evening bars of the NEXT session.
     for i, prior_date in enumerate(_last_n_trading_dates(today, 2), start=1):
@@ -318,10 +318,6 @@ def run_daily_fixed(
                                 "price": float(prior_bars["High"].max())})
             liquidities.append({"name": f"prev{i}_day_low", "kind": "level",
                                 "price": float(prior_bars["Low"].min())})
-        prior_tdo = compute_tdo(hist_mnq_1m, prior_date)
-        if prior_tdo is not None:
-            liquidities.append({"name": f"prev{i}_TDO", "kind": "level",
-                                "price": float(prior_tdo)})
 
     # Recent unvisited 1hr FVGs
     fvgs = _detect_fvgs(hist_1hr, hist_mnq_1m)
