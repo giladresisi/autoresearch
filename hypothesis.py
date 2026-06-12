@@ -1417,6 +1417,36 @@ def _compute_smt_score(divs: list, liquidities: list) -> float:
     return max(-1.0, min(1.0, score / max_possible))
 
 
+# Tier-authority weights for the new-mechanism SMT score (mirror the legacy
+# LEVEL_WEIGHT ranks: week/ATH highest, day mid, fill/session lowest).
+_SMT_V2_TIER_WEIGHT = {"ATH": 3.0, "week": 3.0, "day": 2.0, "fill": 1.5, "session": 1.0}
+
+
+def _compute_smt_score_v2(active_set: list) -> float:
+    """SMT directional score from the new detection mechanism's relevance-filtered
+    active set (records in the divs-record schema — see ``to_record``). Tier-authority
+    weighted, signed by side (bullish→+, bearish→−), normalized to [-1, 1].
+
+    Replaces the legacy ``_compute_smt_score(divs, liquidities)`` which scored the old
+    15m/30m ``_compute_divs`` output by level-name × timeframe × type. Here ``tier``
+    (week/ATH > day > fill > session) carries the authority; timeframe/type no longer
+    apply. Total/None-safe: empty set → 0.0; never raises.
+    """
+    score = 0.0
+    max_possible = 0.0
+    for rec in active_set or []:
+        if not isinstance(rec, dict):
+            continue
+        w = _SMT_V2_TIER_WEIGHT.get(rec.get("tier") or "", 1.0)
+        side = rec.get("side")
+        sign = 1 if side in ("bullish", "long") else -1
+        score += sign * w
+        max_possible += w
+    if max_possible == 0:
+        return 0.0
+    return max(-1.0, min(1.0, score / max_possible))
+
+
 def _determine_direction(
     current_bar: dict,
     mnq_1m: pd.DataFrame,
@@ -1432,7 +1462,10 @@ def _determine_direction(
     fvg_1hr = _detect_fvg_1hr(hist_mnq_1m, mnq_1m, hist_1hr=hist_1hr)
     levels  = _build_meaningful_levels(liquidities, fvg_1hr)
     prior   = mnq_1m.iloc[:-1]
-    smt_sc  = _compute_smt_score(divs, liquidities)
+    # SMT score now sourced from the new detection mechanism's relevance-filtered active
+    # set (passed in as `divs`), scored by tier authority. The legacy level×tf×type
+    # scorer (_compute_smt_score) is retired from the live path.
+    smt_sc  = _compute_smt_score_v2(divs)
 
     week_high = _named_price(liquidities, "week_high")
     week_low  = _named_price(liquidities, "week_low")
@@ -2120,33 +2153,14 @@ def run_hypothesis(
     ]
     last_liquidity, _ = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_hyp_pre_session)
 
-    # Step 5: divs — SMT divergences at 15m and 30m.
-    # Before NY morning (09:30 ET), extend the bar window back to the prior NY
-    # evening session (12:00–18:00 ET on the session-open day) so that SMTs
-    # against yesterday's afternoon lows/highs are detectable during Asia and
-    # London. From 09:30 ET onward the current session window is long enough
-    # that extending back to yesterday adds noise without value.
-    _now_et = now.astimezone(_ET) if getattr(now, "tzinfo", None) else now
-    _pre_ny_morning = _now_et.hour < 9 or (_now_et.hour == 9 and _now_et.minute < 30)
-    if _pre_ny_morning and not hist_mnq_1m.empty and not mnq_1m.empty:
-        _sess_open   = pd.Timestamp(_cme_session_start(now))
-        _ny_eve_start = _sess_open - pd.Timedelta(hours=6)  # 12:00 ET on session-open day
-        _prior_mnq = hist_mnq_1m[
-            (hist_mnq_1m.index >= _ny_eve_start) & (hist_mnq_1m.index < _sess_open)
-        ]
-        _prior_mes = hist_mes_1m[
-            (hist_mes_1m.index >= _ny_eve_start) & (hist_mes_1m.index < _sess_open)
-        ] if not hist_mes_1m.empty else pd.DataFrame()
-        if not _prior_mnq.empty:
-            _div_mnq = pd.concat([_prior_mnq, mnq_1m]).sort_index()
-            _div_mnq = _div_mnq[~_div_mnq.index.duplicated(keep="last")]
-            _div_mes = pd.concat([_prior_mes, mes_1m]).sort_index() if not _prior_mes.empty else mes_1m
-            _div_mes = _div_mes[~_div_mes.index.duplicated(keep="last")]
-            divs = _compute_divs(_div_mnq, _div_mes)
-        else:
-            divs = _compute_divs(mnq_1m, mes_1m)
-    else:
-        divs = _compute_divs(mnq_1m, mes_1m)
+    # Step 5: divs — sourced from the NEW SMT detection mechanism. The relevance-filtered,
+    # unfulfilled active set (smt_active_set) is computed each 1m bar by the pipeline
+    # (session_pipeline._run_smt_v2_detection) and persisted on the hypothesis; here we read
+    # it and carry it as `divs` (the formation's active SMTs). This unifies onto the single
+    # detection engine — the legacy 15m/30m `_compute_divs` path is retired. `mes_1m` /
+    # `hist_mes_1m` remain in the signature for call-site compatibility (the pipeline still
+    # passes them) but no longer feed divs.
+    divs = hypothesis.get("smt_active_set", []) or []
 
     # Step 6: direction — determined by ICT rules (see direction.md).
     # confidence=high overrides all rules: direction follows the global trend unconditionally.

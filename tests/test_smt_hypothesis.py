@@ -390,18 +390,18 @@ def test_last_liquidity_picks_most_recent_meaningful():
 
 # ══ Test 9: divs includes wick, body, and fill types ════════════════════════
 
-def test_divs_includes_wick_body_and_fill_types():
-    """Mocked divergence detectors return all three types; assert each in divs.
+def test_divs_sourced_from_smt_active_set():
+    """SMT V2 refactor: `divs` is owned by the NEW detection mechanism.
 
-    Provides 32 1m bars so that resampling to 15m yields 2+ bars (giving bar_idx >= 1),
-    enabling the iteration in _compute_divs to reach the mock calls.
+    run_hypothesis no longer recomputes 15m/30m divergences via the legacy
+    `_compute_divs`; it carries the pipeline-persisted relevance-filtered active set
+    (`smt_active_set`) through as `divs`. Seed an active set, form a hypothesis, and
+    assert `divs` is exactly that set (wick + body + fill records all preserved).
     """
     save_global(_make_default_global())
     save_daily(_make_default_daily())
 
-    # now at 10:35 so the 5m bar is 10:30-10:35
     now = _make_now(time_str="10:35:00")
-    # 32 bars from 10:00 to 10:31 — spans 09:30, 09:45, 10:00, 10:15, 10:30 15m periods
     n_bars = 32
     mnq_1m = _make_1m_bars(
         [150.0] * n_bars, [152.0] * n_bars, [148.0] * n_bars, [150.0] * n_bars,
@@ -416,32 +416,29 @@ def test_divs_includes_wick_body_and_fill_types():
     hist_mes = _make_1m_bars([75.0] * 5, [76.0] * 5, [74.0] * 5, [75.0] * 5,
                                start_time="2026-04-20 10:00:00")
 
-    call_count = {"div": 0, "fill": 0}
+    # The active set the pipeline's shadow detector would have persisted this bar.
+    active = [
+        {"kind": "smt", "type": "wick", "side": "bullish", "direction": "long",
+         "tier": "day", "key": "day_low|long|wick", "keys": ["day_low|long|wick"],
+         "ref_name": "day_low", "fulfilled": False, "invalidated": False},
+        {"kind": "smt", "type": "body", "side": "bearish", "direction": "short",
+         "tier": "week", "key": "week_high|short|body", "keys": ["week_high|short|body"],
+         "ref_name": "week_high", "fulfilled": False, "invalidated": False},
+        {"kind": "fill", "type": "fill_a", "side": "bullish", "direction": "long",
+         "tier": "fill", "key": "fvg_x_bull", "keys": ["fvg_x_bull"],
+         "ref_name": "fvg_x_bull", "fulfilled": False, "invalidated": False},
+    ]
+    h0 = load_hypothesis()
+    h0["direction"] = "none"
+    h0["smt_active_set"] = active
+    save_hypothesis(h0)
 
-    def fake_divergence(mes, mnq, bar_idx, session_start_idx=0, **kwargs):
-        if call_count["div"] == 0:
-            call_count["div"] += 1
-            return ("long", 1.0, 0.5, "wick", 149.0)
-        elif call_count["div"] == 1:
-            call_count["div"] += 1
-            return ("short", 1.0, 0.5, "body", 151.0)
-        return None
-
-    def fake_fill(mes, mnq, bar_idx, **kwargs):
-        if call_count["fill"] == 0:
-            call_count["fill"] += 1
-            return ("long", 152.0, 148.0)
-        return None
-
-    with patch("hypothesis.detect_smt_divergence", side_effect=fake_divergence):
-        with patch("hypothesis.detect_smt_fill", side_effect=fake_fill):
-            run_hypothesis(now, mnq_1m, mes_1m, hist_mnq, hist_mes)
+    run_hypothesis(now, mnq_1m, mes_1m, hist_mnq, hist_mes)
 
     h = load_hypothesis()
+    assert h["divs"] == active, f"divs not sourced from smt_active_set: {h['divs']}"
     types_found = {d["type"] for d in h["divs"]}
-    assert "wick" in types_found, f"Expected 'wick' in divs types, got: {types_found}"
-    assert "body" in types_found, f"Expected 'body' in divs types, got: {types_found}"
-    assert "fill" in types_found, f"Expected 'fill' in divs types, got: {types_found}"
+    assert {"wick", "body", "fill_a"} <= types_found, f"missing record types: {types_found}"
 
 
 # ══ Test 10: direction is determined (not 'none') for a standard in-range bar ═
