@@ -229,6 +229,37 @@ def test_place_exit_short_posts_buy_close():
     assert payload["data"] == "close"
 
 
+def test_modify_stop_entry_cancels_old_when_placed_at_broker_cross_process():
+    """D6: modify_stop_entry cancels the old order even when _entry_is_live is False
+    (a separate trade.py CLI process), as long as placed_at_broker=True (the order is
+    really working at the broker per position.json). Pre-fix it skipped the cancel →
+    a DUPLICATE resting order (2026-06-11 09:19)."""
+    ex = _make_executor()
+    ex._entry_is_live = False  # fresh CLI process — did not place the entry itself
+    ex._http.post = MagicMock(return_value=_ok_response())
+    old = _stop_signal("long", 20000.0, 19990.0)
+    new = _stop_signal("long", 19980.0, 19990.0)
+    ex.modify_stop_entry(old, new, _bar(), placed_at_broker=True)
+    _drain(ex)
+    posted = [c.kwargs["json"] for c in ex._http.post.call_args_list]
+    assert any(p.get("data") == "close" for p in posted), "old broker order must be cancelled"
+    assert any(p.get("order_type") == "STP" for p in posted), "new STP must be placed"
+
+
+def test_modify_stop_entry_no_cancel_when_unplaced_cross_process():
+    """D6 guard: with _entry_is_live False AND placed_at_broker False (truly unplaced),
+    modify_stop_entry must NOT send a cancel — there is no broker order to cancel."""
+    ex = _make_executor()
+    ex._entry_is_live = False
+    ex._http.post = MagicMock(return_value=_ok_response())
+    old = _stop_signal("long", 20000.0, 19990.0)
+    new = _stop_signal("long", 19980.0, 19990.0)
+    ex.modify_stop_entry(old, new, _bar(), placed_at_broker=False)
+    _drain(ex)
+    posted = [c.kwargs["json"] for c in ex._http.post.call_args_list]
+    assert not any(p.get("data") == "close" for p in posted), "must not cancel a non-existent order"
+
+
 def test_place_exit_returns_none():
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())

@@ -410,7 +410,12 @@ def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: st
         "stop_fill_bars": 1,
         "current_price": _current_price(),
     }
-    _executor.modify_stop_entry(old_pmt, new_pmt, None)
+    # Cross-process truth: if position.json shows a placed (non-`unplaced`) stop entry, the
+    # old STP order IS working at the broker and must be cancelled even from a separate
+    # `trade.py move` CLI process (where executor._entry_is_live is False). Without this the
+    # move places the new order but leaves the old one resting → duplicate (D6, 2026-06-11).
+    _old_placed = bool(pos.get("stop_entry")) and not pos.get("stop_entry_unplaced")
+    _executor.modify_stop_entry(old_pmt, new_pmt, None, placed_at_broker=_old_placed)
     pos["stop_entry"] = str(new_entry_price)
     pos["pending_stop"] = new_stop_price
     if getattr(_executor, "_entry_is_live", True):

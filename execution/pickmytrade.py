@@ -187,8 +187,16 @@ class PickMyTradeExecutor:
         self.place_close(label=exit_type)
         return None
 
-    def modify_stop_entry(self, old_signal: dict, new_signal: dict, bar: BarRow) -> None:
-        if not self._entry_is_live:
+    def modify_stop_entry(self, old_signal: dict, new_signal: dict, bar: BarRow,
+                          placed_at_broker: bool = False) -> None:
+        # `_entry_is_live` is per-process — True only in the process that placed the entry
+        # (the orchestrator). A separate CLI process (`trade.py move`) has it False even
+        # though a working STP order exists at the broker; relying on it alone skipped the
+        # cancel and left a DUPLICATE resting order (2026-06-11 09:19; same class as the
+        # 2026-06-04 09:05 cancel incident). `placed_at_broker` is the cross-process truth
+        # from position.json (a persisted, non-`unplaced` stop_entry), so the cancel fires
+        # regardless of which process calls this.
+        if not self._entry_is_live and not placed_at_broker:
             # Entry was never sent to broker — window was closed when it was placed
             if session_times.is_entry_allowed(datetime.datetime.now(_ET).time()):
                 # Window just opened — place fresh entry (no existing broker order to cancel)

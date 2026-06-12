@@ -444,6 +444,32 @@ def test_move_stop_entry_reads_old_from_position(_in_tmp, _mock_today):
     assert events[0]["kind"] == "move-stop-entry"
 
 
+def test_move_stop_entry_passes_placed_at_broker(_in_tmp, _mock_today):
+    """D6: move_stop_entry tells the executor whether the old order is live at the broker
+    (placed_at_broker) — the cross-process truth from position.json — so a CLI-process move
+    (executor._entry_is_live False) still cancels the old order instead of leaving a duplicate.
+    True when stop_entry is set and NOT unplaced; False when stop_entry_unplaced is set."""
+    mock_executor = MagicMock()
+    # (a) a placed (non-unplaced) stop entry → placed_at_broker=True
+    pos = {"active": {}, "stop_entry": "19850.0", "stop_direction": "up",
+           "conf_bar_entry": {}, "failed_entries": 0}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=pos), \
+         patch("smt_state.save_position", side_effect=lambda p: None):
+        live_orders.move_stop_entry(19900.0, 19870.0, "long")
+    assert mock_executor.modify_stop_entry.call_args.kwargs.get("placed_at_broker") is True
+
+    # (b) an unplaced stop entry (never reached the broker) → placed_at_broker=False
+    mock_executor.reset_mock()
+    pos2 = {"active": {}, "stop_entry": "19850.0", "stop_direction": "up",
+            "stop_entry_unplaced": True, "conf_bar_entry": {}, "failed_entries": 0}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=pos2), \
+         patch("smt_state.save_position", side_effect=lambda p: None):
+        live_orders.move_stop_entry(19900.0, 19870.0, "long")
+    assert mock_executor.modify_stop_entry.call_args.kwargs.get("placed_at_broker") is False
+
+
 # ---------------------------------------------------------------------------
 # Test 4: stop_entry_filled sends S/L and updates active.stop
 # ---------------------------------------------------------------------------
