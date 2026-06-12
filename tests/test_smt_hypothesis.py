@@ -388,6 +388,67 @@ def test_last_liquidity_picks_most_recent_meaningful():
     )
 
 
+# ══ GIL-23: rule2b direction_reason carries the recovery-guard diagnostic fields ══
+
+def test_rule2b_direction_reason_carries_guard_fields():
+    """GIL-23 Fix 2: when _determine_direction returns via the rule2b high-sweep
+    branch, direction_reason must carry the six guard-input fields so the chosen
+    direction is reproducible from events.jsonl."""
+    # Same scenario as test_last_liquidity_picks_most_recent_meaningful: session
+    # bars sweep up through day_high/week_high into weekly premium → rule2b high-sweep.
+    save_global(_make_default_global())
+    save_daily({
+        "date": "2026-04-27",
+        "liquidities": [
+            {"name": "week_high", "kind": "level", "price": 200.0},
+            {"name": "week_low",  "kind": "level", "price": 100.0},
+            {"name": "day_high",  "kind": "level", "price": 180.0},
+            {"name": "day_low",   "kind": "level", "price": 120.0},
+        ],
+        "estimated_dir": "up",
+        "opposite_premove": "no",
+    })
+
+    now = _make_now(time_str="10:10:00")
+
+    opens  = [150.0] * 5 + [170.0] * 5
+    highs  = [155.0] * 5 + [200.0] * 5   # Bars 5-9 cross day_high=180
+    lows   = [100.0] * 5 + [165.0] * 5   # Bars 0-4 cross day_low=120
+    closes = [152.0] * 5 + [175.0] * 5
+
+    mnq_1m = _make_1m_bars(opens, highs, lows, closes,
+                           start_time="2026-04-27 10:00:00")
+    mes_1m = _make_1m_bars(
+        [75.0] * 10, [76.0] * 10, [74.0] * 10, [75.0] * 10,
+        start_time="2026-04-27 10:00:00",
+    )
+
+    # run_hypothesis returns the emitted new-hypothesis event(s); direction_reason
+    # is embedded there. Build the same hist context _call_with_nullmocks uses.
+    week_ago = _make_1m_bars([100] * 5, [101] * 5, [99] * 5, [100] * 5,
+                             start_time="2026-04-20 10:00:00")
+    pre_sess = _make_pre_session_hist()
+    hist_mnq_1m = pd.concat([week_ago, pre_sess]).sort_index()
+    hist_mes_1m = _make_1m_bars([50] * 5, [51] * 5, [49] * 5, [50] * 5,
+                                start_time="2026-04-20 10:00:00")
+
+    with patch("hypothesis.detect_smt_divergence", return_value=None):
+        with patch("hypothesis.detect_smt_fill", return_value=None):
+            events = run_hypothesis(now, mnq_1m, mes_1m, hist_mnq_1m, hist_mes_1m)
+
+    assert events, "expected a new-hypothesis event (non-none direction)"
+    reason = events[0]["direction_reason"]
+    assert reason.get("rule") == "rule2b", f"expected rule2b, got {reason.get('rule')!r}"
+    for key in (
+        "session_ath", "all_time_high", "recovery_gap",
+        "is_false_pos_ath", "is_false_pos_morning", "is_false_pos_recovery",
+    ):
+        assert key in reason, f"missing guard field {key!r} in direction_reason: {reason}"
+    assert isinstance(reason["is_false_pos_ath"], bool)
+    assert isinstance(reason["is_false_pos_morning"], bool)
+    assert isinstance(reason["is_false_pos_recovery"], bool)
+
+
 # ══ Test 9: divs includes wick, body, and fill types ════════════════════════
 
 def test_divs_sourced_from_smt_active_set():

@@ -353,18 +353,20 @@ class SessionPipeline:
         from hypothesis import compute_live_hl_mid
         from daily import _session_bars
 
-        # Cross-session ATH continuity: per-session global.json starts fresh, so carry the
-        # dynamic all_time_high forward from the prior session before seeding from hist.
-        # No-op in backtest (in-memory) mode — keeps backtests deterministic.
-        _smt_state.seed_global_from_prior()
-
-        # Seed all_time_high and session_ath from historical bars.
+        # Seed all_time_high (the running ATH) and session_ath (its session-open snapshot).
+        # GIL-23: session_ath must be the PERSISTED true ATH, not the short windowed in-memory
+        # IB frame max — on 2026-06-11 that windowed max collapsed to 29011.25 (vs the true
+        # 30807) and silently disabled rule2b's recovery guard. all_time_high already persists
+        # cross-session in general_live_dir()/global.json and is only ever raised when a new high
+        # supersedes it, so we DERIVE session_ath from it rather than re-initialising it from the
+        # volatile hist window each session. No-op in backtest (in-memory): there all_time_high
+        # resolves to max(0, 60-day-window max) = the same value the old windowed seed produced.
         _global = load_global()
         if not self._hist_mnq_1m.empty:
             _hist_ath = float(self._hist_mnq_1m["High"].max())
             _global["all_time_high"] = max(_global.get("all_time_high", 0.0), _hist_ath)
-            _global["session_ath"] = _hist_ath
-            self._session_ath = _hist_ath
+            _global["session_ath"]   = _global["all_time_high"]
+            self._session_ath = _global["session_ath"]
         else:
             self._session_ath = None
         save_global(_global)
