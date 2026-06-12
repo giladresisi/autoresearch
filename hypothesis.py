@@ -1616,6 +1616,16 @@ def _determine_direction(
             return False
 
         r2b_dir = None
+        # GIL-23: pre-initialize the recovery-guard diagnostics so the single rule2b
+        # return point can always record them. Only the high-sweep/above-mid branch
+        # recomputes these; the low-sweep and high-sweep/below-mid branches leave the
+        # safe defaults (those paths don't consult the recovery guard).
+        _ath = global_state.get("all_time_high")
+        _session_ath_val = float(global_state.get("session_ath") or _ath or 0)
+        _recovery_gap = 0.0
+        _is_false_pos_ath = False
+        _is_false_pos_morning = False
+        _is_false_pos_recovery = False
         if _anchor_age_ok:
             if _last_liq in _low_names:
                 if _above_mid:
@@ -1739,6 +1749,15 @@ def _determine_direction(
         if r2b_dir is not None:
             reason["rule"]             = "rule2b"
             reason["last_swept_level"] = _last_liq
+            # GIL-23: record the recovery-guard inputs so the chosen direction is
+            # reproducible from events.jsonl (the 06-11 mis-short was undiagnosable
+            # because session_ath/recovery_gap were not persisted).
+            reason["session_ath"]          = round(_session_ath_val, 2)
+            reason["all_time_high"]        = round(float(_ath), 2) if _ath is not None else None
+            reason["recovery_gap"]         = round(_recovery_gap, 4)
+            reason["is_false_pos_ath"]     = bool(_is_false_pos_ath)
+            reason["is_false_pos_morning"] = bool(_is_false_pos_morning)
+            reason["is_false_pos_recovery"]= bool(_is_false_pos_recovery)
             return r2b_dir, reason
 
     # Rule 2: trending toward an unvisited level with momentum — decisive continuation.

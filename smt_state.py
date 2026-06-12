@@ -238,41 +238,6 @@ def reset_in_memory() -> None:
     _STORE.clear()
 
 
-def seed_global_from_prior() -> None:
-    """Live only: carry all_time_high forward across the now per-session state folders.
-
-    Each live session's global.json starts fresh, so without this the dynamic ATH would
-    reset every session. Scans the most recent prior session's global.json under
-    paths.sessions_dir() and seeds the current session's ATH if higher. No-op in
-    in-memory (backtest) mode — backtests must stay deterministic/isolated. Never raises.
-    """
-    if _IN_MEMORY:
-        return
-    try:
-        cur = paths.state_dir().resolve()
-        root = paths.sessions_dir()
-        best = 0.0
-        if root.exists():
-            for child in root.iterdir():
-                if not child.is_dir() or child.resolve() == cur:
-                    continue
-                gp = child / "global.json"
-                if not gp.exists():
-                    continue
-                try:
-                    ath = float(json.loads(gp.read_text(encoding="utf-8")).get("all_time_high", 0.0) or 0.0)
-                except (json.JSONDecodeError, OSError, TypeError, ValueError):
-                    continue
-                best = max(best, ath)
-        if best > 0.0:
-            g = load_global()
-            if best > float(g.get("all_time_high", 0.0) or 0.0):
-                g["all_time_high"] = best
-                save_global(g)
-    except Exception:
-        return
-
-
 def final_snapshot() -> None:
     """Dump the four state files for the current state_dir() to disk as real JSON.
 

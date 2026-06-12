@@ -38,8 +38,8 @@ def _bar_row(base: float = 21000.0) -> pd.Series:
 def _isolate_state(tmp_path, monkeypatch):
     import paths
     monkeypatch.setattr(paths, "_STATE_DIR", tmp_path)
-    # Isolate the global sessions dir too so the live path's seed_global_from_prior()
-    # never reads the real machine-global session data.
+    # Isolate the global dir too so the live path's load_global()/levels.json writes
+    # never read or touch the real machine-global session data.
     monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
     monkeypatch.setattr(smt_state, "_IN_MEMORY",      False)
 

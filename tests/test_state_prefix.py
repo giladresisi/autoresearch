@@ -1,6 +1,6 @@
 # tests/test_state_prefix.py
-# Wave 4 — the state-dir prefix: disjoint-folder isolation, in-memory keying, the final
-# snapshot dump, and cross-session ATH continuity (seed_global_from_prior).
+# Wave 4 — the state-dir prefix: disjoint-folder isolation, in-memory keying, and the
+# final snapshot dump.
 
 import json
 
@@ -110,39 +110,3 @@ def test_final_snapshot_dumps_four_jsons(tmp_path):
         assert (run / name).exists(), f"{name} should be snapshotted"
     assert json.loads((run / "global.json").read_text())["all_time_high"] == 9.0
     assert json.loads((run / "position.json").read_text())["failed_entries"] == 2
-
-
-# ── Cross-session ATH continuity ───────────────────────────────────────────────
-
-def test_seed_global_from_prior_carries_ath_forward(tmp_path, monkeypatch):
-    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
-    prior = paths.sessions_dir() / "2026-06-01"
-    prior.mkdir(parents=True, exist_ok=True)
-    (prior / "global.json").write_text(
-        json.dumps({"all_time_high": 25000.0, "confidence": "high", "trend": "up"}),
-        encoding="utf-8",
-    )
-    cur = paths.sessions_dir() / "2026-06-02"
-    paths.set_state_dir(cur)
-    smt_state.seed_global_from_prior()
-    assert smt_state.load_global()["all_time_high"] == 25000.0
-
-
-def test_seed_global_from_prior_missing_prior_does_not_crash(tmp_path, monkeypatch):
-    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
-    paths.set_state_dir(paths.sessions_dir() / "2026-06-02")
-    smt_state.seed_global_from_prior()  # no prior session exists → must not raise
-    assert smt_state.load_global()["all_time_high"] == 0.0
-
-
-def test_seed_global_from_prior_noop_in_memory(tmp_path, monkeypatch):
-    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
-    prior = paths.sessions_dir() / "2026-06-01"
-    prior.mkdir(parents=True, exist_ok=True)
-    (prior / "global.json").write_text(
-        json.dumps({"all_time_high": 25000.0}), encoding="utf-8"
-    )
-    smt_state.set_in_memory_mode(True)
-    paths.set_state_dir(paths.sessions_dir() / "2026-06-02")
-    smt_state.seed_global_from_prior()  # in-memory (backtest) → no-op
-    assert smt_state.load_global()["all_time_high"] == 0.0
