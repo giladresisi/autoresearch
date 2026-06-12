@@ -258,6 +258,12 @@ def _register_downgraded_fill(direction: str, entry_price: float, stop_price: fl
     pos.pop("stop_entry_unplaced", None)
     _save_pos(pos)
     _recompute_cautious_at_fill(fill)
+    # SMT-v2 Phase 1: freeze the fill-anchored (post-recompute) management direction +
+    # cautious ladder into active — immutable for the life of the trade. Reload the
+    # hypothesis so the frozen ladder reflects the re-anchored (post-recompute) values.
+    hyp = smt_state.load_hypothesis()
+    smt_state.freeze_active_mgmt(pos["active"], direction, hyp)
+    _save_pos(pos)
     # Align events.jsonl with signals.log. The strategy emitted a `new-stop-entry`, but the
     # broker instantly downgraded it STP->MKT and filled the same instant — so on this path
     # events.jsonl would otherwise show a standalone `stop-entry-filled` with no originating
@@ -415,6 +421,12 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float, *,
     pos["stop_entry"] = ""
     pos["stop_direction"] = ""
     pos.pop("stop_entry_source", None)
+    # SMT-v2 Phase 1: freeze the management direction + cautious ladder into active —
+    # immutable for the life of the trade. This path does NOT recompute cautious (manual
+    # entries are discretionary), so the frozen ladder copies whatever the live hypothesis
+    # currently holds at entry — acceptable and consistent with today's manual behavior.
+    hyp = smt_state.load_hypothesis()
+    smt_state.freeze_active_mgmt(pos["active"], direction, hyp)
     _save_pos(pos)
     _log({"kind": "market-entry", "time": now, "direction": direction,
           "entry_price": entry_price, "stop_price": stop_price})
@@ -468,6 +480,10 @@ def stop_entry_filled(direction: str, stop_price: float, fill_price: float = 0.0
 
     The real S/L was already embedded in the STP order at placement time, so
     no separate update_stop_loss call is needed here.
+
+    SMT-v2 Phase 1: no freeze here — this path only updates active["stop"] on an
+    already-active position; it never creates active, so the frozen management
+    fields were already written at the originating fill (strategy fill / downgrade).
     """
     now = _now_et()
     pos = _load_pos()

@@ -17,8 +17,29 @@ _ET = ZoneInfo("America/New_York")
 CAUTIOUS_SECONDARY_MAX_DIST = 150  # pts — secondary (1m confirmation) max distance
 CAUTIOUS_INITIAL_MAX_DIST   = 110  # pts — initial (5m confirmation) max distance
 CAUTIOUS_MIN_DIST           =  40  # pts — below this secondary distance, skip the entry
+CAUTIOUS_DIST_SHRINK_PCT    = 0.15  # fraction the two max-dist thresholds shrink per failed entry
 CAUTIOUS_INITIAL_OFFSET_PTS   = 2.0  # pts — initial cautious target set this much closer than the level
 CAUTIOUS_SECONDARY_OFFSET_PTS = 5.0  # pts — secondary cautious target set this much closer than the level
+
+# SMT V2 relevance filter (Phase 2). When ACTIVE (in a position), a new SMT enters the
+# active set only if its ref level is within RELEVANCE_X_PTS of a cautious target OR its
+# tier outranks the backing tier. First-guess default; tunable.
+RELEVANCE_X_PTS = 25.0  # pts — proximity gate for the ingest filter
+
+# SMT V2 Part B — Rule B (recency-trend cross-tier suppression). SHIPS DEFAULT OFF; gated
+# behind RULE_B_ENABLED. A fresher opposite-direction SMT suppresses an older contradicting
+# one ACROSS tiers when min-age, adverse-move, and tier-slack gates all hold. Measured in
+# shadow before any Phase-3 wiring; first-guess thresholds, tunable.
+RULE_B_ENABLED      = False   # default OFF — Rule B is measured, not shipped active
+RULE_B_MIN_AGE_MIN  = 15.0    # min minutes the newer opposite SMT must postdate the older
+RULE_B_ADVERSE_PTS  = 40.0    # min pts price moved AGAINST the older SMT (MNQ)
+RULE_B_TIER_SLACK   = 1       # newer tier may be this many ranks below the older and still win
+
+# SMT V2 Part B — leg-scoped counter-trend suppression. After a FIXED level is swept-and-
+# reclaimed, suppress dominant counter-trend SMTs that predate the reclaim until price
+# returns to the swept origin. RECLAIM_MARGIN_PTS = how far beyond the level counts as a
+# genuine breach (not noise) before the reclaim back through it.
+RECLAIM_MARGIN_PTS  = 15.0    # pts — breach depth beyond a FIXED level to register a sweep
 
 # P2b: suppress LOW-arm DOWN when price is this many points above the swept level.
 # 50-pt overshoot zone = false positives (38% correct); 20-50pt zone is 80% correct.
@@ -35,12 +56,22 @@ def compute_cautious_prices(
     current_close: float,
     liquidities: list,
     ath: float,
+    dist_shrinks: int = 0,
 ) -> dict:
     """Return cautious price fields anchored at current_close.
 
     Called at hypothesis time and again at position entry so levels are
     re-evaluated against the actual fill price rather than the hypothesis price.
+
+    `dist_shrinks` (the per-hypothesis `cautious_dist_shrinks` counter) shrinks both
+    max-distance thresholds by `CAUTIOUS_DIST_SHRINK_PCT` per failed entry, floored at
+    `CAUTIOUS_MIN_DIST`. At dist_shrinks=0 the thresholds are unchanged (the effective
+    maxes equal the module constants), so output is identical to pre-change behavior.
     """
+    _factor = (1.0 - CAUTIOUS_DIST_SHRINK_PCT) ** max(0, dist_shrinks)
+    _sec_max = max(CAUTIOUS_MIN_DIST, CAUTIOUS_SECONDARY_MAX_DIST * _factor)
+    _init_max = max(CAUTIOUS_MIN_DIST, CAUTIOUS_INITIAL_MAX_DIST * _factor)
+
     _cautious_all = []
     for liq in liquidities:
         liq_kind = liq.get("kind")
@@ -56,11 +87,11 @@ def compute_cautious_prices(
             continue
         if p is None:
             continue
-        if direction == "up" and current_close < p <= current_close + CAUTIOUS_SECONDARY_MAX_DIST:
+        if direction == "up" and current_close < p <= current_close + _sec_max:
             _cautious_all.append((p, liq.get("name", "")))
-        elif direction == "down" and current_close - CAUTIOUS_SECONDARY_MAX_DIST <= p < current_close:
+        elif direction == "down" and current_close - _sec_max <= p < current_close:
             _cautious_all.append((p, liq.get("name", "")))
-    if direction == "up" and current_close < ath <= current_close + CAUTIOUS_SECONDARY_MAX_DIST:
+    if direction == "up" and current_close < ath <= current_close + _sec_max:
         _cautious_all.append((ath, "ATH"))
 
     cautious_price_initial         = ""
@@ -78,10 +109,10 @@ def compute_cautious_prices(
         # Filter using raw level price so the offset doesn't shrink the candidate pool.
         if direction == "up":
             _init_candidates = [(p, n) for p, n in _cautious_all
-                                if p < _sec[0] and p <= current_close + CAUTIOUS_INITIAL_MAX_DIST]
+                                if p < _sec[0] and p <= current_close + _init_max]
         else:
             _init_candidates = [(p, n) for p, n in _cautious_all
-                                if p > _sec[0] and p >= current_close - CAUTIOUS_INITIAL_MAX_DIST]
+                                if p > _sec[0] and p >= current_close - _init_max]
 
         if _init_candidates:
             _ini = max(_init_candidates, key=lambda x: x[0]) if direction == "up" \
@@ -145,6 +176,7 @@ def recompute_cautious_for_fill(
     fill_price: float,
     liquidities: list,
     ath,
+    dist_shrinks: int = 0,
 ) -> dict:
     """Re-anchor the two-tier cautious ladder to the *actual fill price* (Addendum 4).
 
@@ -161,7 +193,7 @@ def recompute_cautious_for_fill(
     direction = hypothesis.get("direction")
     if direction not in ("up", "down") or hypothesis.get("manual"):
         return hypothesis
-    cp = compute_cautious_prices(direction, float(fill_price), liquidities, ath)
+    cp = compute_cautious_prices(direction, float(fill_price), liquidities, ath, dist_shrinks)
     hypothesis["cautious_price_initial"]         = cp["cautious_price_initial"]
     hypothesis["cautious_price_initial_level"]   = cp["cautious_price_initial_level"]
     hypothesis["cautious_price_secondary"]       = cp["cautious_price_secondary"]
@@ -189,6 +221,718 @@ from smt_state import (
 )
 import strategy as _strategy
 from strategy_smt import detect_smt_divergence, detect_smt_fill
+from smt_detect import _level_class as _smt_level_class, _record_key as _smt_record_key
+
+
+# ===========================================================================
+# SMT V2 relevance-filter infrastructure (Phase 2) — Contract B.
+#
+# Pure functions (total, no IO, JSON-serializable in/out) consumed by the shadow
+# active-set wiring in session_pipeline (Phase 2) and the dominant→direction wiring
+# in Phase 3. In Phase 2 these compute the active set + dominant but DO NOT drive
+# direction — the existing direction engine is unchanged.
+#
+# --- divs record schema (the persisted active-set record) ---
+# A divs record is a flat JSON-serializable dict with these fields:
+#   kind       : "smt" | "fill"
+#   type       : "wick" | "body" | "fill_a" | "fill_b"
+#   side       : "bullish" | "bearish"
+#   direction  : "long" | "short"
+#   timeframe  : "1m" | "15m" | "30m" | "1h"
+#   time       : ISO string (fire time)
+#   leader     : "mnq" | "mes"
+#   ref_name   : level name (e.g. "day_high") or FVG name (e.g. "fvg_<ts>_<side>")
+#   tier       : "ATH" | "week" | "day" | "fill" | "session"
+#   key        : the smt_detect detect_state key (for fulfillment queries),
+#                produced by smt_detect._record_key — always matches detect_state.
+#   fulfilled  : bool (freshly-emitted SMTs are unfulfilled; invalidation updates this)
+#   prices     : mnq_price, mes_price, mnq_lvl_price (level/zone comparison price),
+#                and mes_lvl_price when present. Fills carry the FVG-derived ref price
+#                where available; otherwise mnq_lvl_price=None.
+# ===========================================================================
+
+# Tier authority ranks (higher = more authoritative). ATH and week share the top
+# bucket; day > fill (1hr-FVG-fill) > session (6hr). Unknown → 0.
+_TIER_RANK = {"ATH": 4, "week": 4, "day": 3, "fill": 2, "session": 1}
+
+
+def _tier_rank(tier: "str | None") -> int:
+    """Authority rank for a tier (higher = more authoritative). Unknown/None → 0."""
+    return _TIER_RANK.get(tier or "", 0)
+
+
+def collapsed_status(record: dict, status_map: dict) -> str:
+    """Aggregate a (possibly collapsed) record's fulfillment over its underlying detect
+    keys. A collapsed record carries ``keys: list[str]`` (>=1) — wick+body folded into
+    one logical SMT. Per-record rule (Contract C aggregation):
+      - "fulfilled" if ANY underlying key is fulfilled,
+      - "gone"      if ALL underlying keys are gone,
+      - "unfulfilled" otherwise.
+
+    ``status_map`` is ``{key: "unfulfilled"|"fulfilled"|"gone"}`` (from
+    ``smt_detect.fulfillment_status``). Total/None-safe: missing keys → treated as "gone";
+    a record lacking ``keys`` falls back to its scalar ``key``; never raises.
+    """
+    if not isinstance(record, dict):
+        return "gone"
+    ks = record.get("keys") or [record.get("key")]
+    sm = status_map if isinstance(status_map, dict) else {}
+    sts = [sm.get(k, "gone") for k in ks]
+    if any(s == "fulfilled" for s in sts):
+        return "fulfilled"
+    if sts and all(s == "gone" for s in sts):
+        return "gone"
+    return "unfulfilled"
+
+
+def collapsed_relevance(record: dict, status_map: dict) -> str:
+    """Aggregate a (possibly collapsed) record's relevance over its underlying detect
+    keys, treating ``invalidated`` as a TERMINAL state alongside ``fulfilled``/``gone``.
+
+    Extends :func:`collapsed_status` to the C-STATUS vocabulary
+    (``unfulfilled|fulfilled|invalidated|gone``). ``status_map`` is the output of
+    ``smt_detect.smt_status`` (``{key: status}``). Per-record aggregation precedence:
+      - "fulfilled"   if ANY underlying key is fulfilled,
+      - "invalidated" else if ANY underlying key is invalidated,
+      - "gone"        else if ALL underlying keys are gone,
+      - "unfulfilled" otherwise.
+
+    The shadow active-set drop treats fulfilled/invalidated/gone all as terminal, so a
+    collapsed record is dropped when this returns anything other than "unfulfilled".
+
+    Total/None-safe: missing keys → treated as "gone"; a record lacking ``keys`` falls
+    back to its scalar ``key``; never raises.
+    """
+    if not isinstance(record, dict):
+        return "gone"
+    ks = record.get("keys") or [record.get("key")]
+    sm = status_map if isinstance(status_map, dict) else {}
+    sts = [sm.get(k, "gone") for k in ks]
+    if any(s == "fulfilled" for s in sts):
+        return "fulfilled"
+    if any(s == "invalidated" for s in sts):
+        return "invalidated"
+    if sts and all(s == "gone" for s in sts):
+        return "gone"
+    return "unfulfilled"
+
+
+def to_record(emission: dict) -> dict:
+    """Map a `smt_detect` emission to the divs record schema (see module docstring).
+
+    Accepts a level/fill emission from `_detect_level_smts`/`detect_fill_smts` (or the
+    `smt-div` shadow event built in `_run_smt_v2_detection`). Total: missing fields
+    default to None/False; never raises.
+
+    `tier`: for kind=="smt" use `_level_class(ref_name)[1]` (week/day/session); ATH is
+    special-cased — `ref_name=="ATH"` OR `is_ath=True` (carried on the emission) → "ATH".
+    For kind=="fill" → "fill". `key`: `smt_detect._record_key(emission)`. `fulfilled`
+    defaults False (invalidation updates it via Contract C).
+    """
+    if not isinstance(emission, dict):
+        emission = {}
+    kind = emission.get("kind")
+    ref_name = emission.get("ref_name")
+
+    if kind == "fill":
+        tier = "fill"
+    else:
+        # ATH special-case: explicit flag or synthetic "ATH" ref_name. Phase 3 supplies
+        # the ATH context (e.g. flagging a week_high SMT as ATH); Phase 2 keeps it simple.
+        if ref_name == "ATH" or emission.get("is_ath") is True:
+            tier = "ATH"
+        else:
+            try:
+                tier = _smt_level_class(ref_name or "")[1]
+            except Exception:
+                tier = None
+
+    rec = {
+        "kind":          kind,
+        "type":          emission.get("type"),
+        "side":          emission.get("side"),
+        "direction":     emission.get("direction"),
+        "timeframe":     emission.get("timeframe"),
+        "time":          emission.get("time"),
+        "leader":        emission.get("leader"),
+        "ref_name":      ref_name,
+        "tier":          tier,
+        "key":           _smt_record_key(emission),
+        "fulfilled":     bool(emission.get("fulfilled", False)),
+        "invalidated":   bool(emission.get("invalidated", False)),
+        "mnq_price":     emission.get("mnq_price"),
+        "mes_price":     emission.get("mes_price"),
+        "mnq_lvl_price": emission.get("mnq_lvl_price"),
+    }
+    # Logical-collapse support: a fresh record maps to exactly one detect key. The list
+    # form lets ingest_smts merge wick+body variants while fulfillment aggregates over all
+    # underlying keys (Contract C). None-safe: if key is None, [None] is fine downstream.
+    rec["keys"] = [rec["key"]]
+    if emission.get("mes_lvl_price") is not None:
+        rec["mes_lvl_price"] = emission.get("mes_lvl_price")
+    return rec
+
+
+def smt_authority(record: dict) -> tuple:
+    """Sortable authority tuple for a divs record (LARGER = more authoritative).
+
+    `dominant = max(active_set, key=smt_authority)`. Tuple order (most-significant first):
+      (tier_rank, kind_rank, recency_value, tf_rank)
+      - tier_rank : ATH≡week (4) > day (3) > fill (2) > session (1); unknown → 0.
+      - kind_rank : wick (1) > body (0); fills/other → 1 (a fill isn't penalized below a
+                    hidden SMT of the same tier — tier already dominates across levels).
+      - recency   : `time` parsed to ns (pandas.Timestamp); on parse failure → 0 (epoch).
+                    Larger = more recent.
+      - tf_rank   : 30m (1) > 15m (0); others → 0 — lowest-significance sub-tiebreak.
+
+    Total: non-dict / missing fields → safe defaults; never raises.
+    """
+    if not isinstance(record, dict):
+        return (0, 0, 0, 0)
+    tier_rank = _tier_rank(record.get("tier"))
+    rec_type = record.get("type")
+    kind_rank = 1 if rec_type == "wick" else (0 if rec_type == "body" else 1)
+    try:
+        ts = pd.Timestamp(record.get("time"))
+        recency = int(ts.value) if ts is not pd.NaT else 0
+    except Exception:
+        recency = 0
+    tf = record.get("timeframe")
+    tf_rank = {"30m": 1, "15m": 0}.get(tf, 0)
+    return (tier_rank, kind_rank, recency, tf_rank)
+
+
+def dominant(active_set: "list[dict] | None") -> "dict | None":
+    """The single most-authoritative record in the active set, or None on empty/None."""
+    if not active_set:
+        return None
+    return max(active_set, key=smt_authority)
+
+
+def ingest_smts(
+    new_records: "list[dict] | None",
+    active_set: "list[dict] | None",
+    *,
+    flat: bool,
+    cautious_targets: "dict | None",
+    backing_tier: "str | None",
+    x_pts: float,
+    apply_rule_a_step: bool = True,
+) -> list[dict]:
+    """Ingest fresh SMT records into the active set per the LOCKED relevance pipeline.
+
+    `new_records` are in divs-record schema (callers run `to_record` first; defensively
+    re-run on records lacking key/tier). `active_set` is the current persisted list.
+
+    Pipeline:
+      1. Drop fulfilled/ineligible incoming records (fulfilled is True, or missing a
+         usable key/direction).
+      2. Gate by position state:
+         - FLAT (flat=True): any tier may enter.
+         - ACTIVE (flat=False): enter only if EITHER the ref level price is within
+           `x_pts` of a cautious target (initial OR secondary; inclusive `<=`), OR
+           `_tier_rank(tier) >= _tier_rank(backing_tier)` (inclusive `>=`).
+      3. Collapse/supersede by the LOGICAL key `(ref_name, direction)`: at most one active
+         record per logical key. Wick+body variants of the same logical SMT collapse into
+         one member — wick supersedes body (stronger confirmation), then newer `time` wins.
+         The surviving member carries `keys: list[str]` = the union of all folded detect
+         keys (so fulfillment can aggregate across both variants), and keeps its scalar
+         `key` for back-compat. Fills (unique per FVG) are unaffected — collapse is a no-op.
+
+    Returns a NEW list (does not mutate inputs). Total: new_records=None → copy of
+    active_set; never raises.
+    """
+    base = list(active_set or [])
+    if not new_records:
+        return base
+
+    ct = cautious_targets or {}
+
+    def _target_price(field: str) -> "float | None":
+        v = ct.get(field, "")
+        if v is None or v == "":
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    init_t = _target_price("cautious_price_initial")
+    sec_t = _target_price("cautious_price_secondary")
+    backing_rank = _tier_rank(backing_tier)
+
+    def _logical_key(r: dict):
+        return (r.get("ref_name"), r.get("direction"))
+
+    def _record_time(r: dict):
+        try:
+            ts = pd.Timestamp(r.get("time"))
+            return int(ts.value) if ts is not pd.NaT else 0
+        except Exception:
+            return 0
+
+    def _confirm_strength(r: dict) -> int:
+        # wick supersedes body; non-wick/body (fills) are not down-ranked below body.
+        t = r.get("type")
+        if t == "wick":
+            return 2
+        if t == "body":
+            return 0
+        return 1
+
+    def _rec_keys(r: dict) -> list:
+        ks = r.get("keys")
+        if isinstance(ks, list) and ks:
+            return list(ks)
+        return [r.get("key")]
+
+    def _merge_keys(a: dict, b: dict) -> list:
+        merged: list = []
+        for k in _rec_keys(a) + _rec_keys(b):
+            if k not in merged:
+                merged.append(k)
+        return merged
+
+    def _supersedes(new: dict, old: dict) -> bool:
+        # wick>body first; equal confirmation strength → newer time wins (>= keeps the
+        # incoming record, matching the prior newer-wins dedup semantics).
+        ns, os_ = _confirm_strength(new), _confirm_strength(old)
+        if ns != os_:
+            return ns > os_
+        return _record_time(new) >= _record_time(old)
+
+    # Index existing active set by the logical key for collapse/supersede.
+    by_key: dict = {}
+    order: list = []
+    for r in base:
+        lk = _logical_key(r)
+        if lk not in by_key:
+            order.append(lk)
+        by_key[lk] = r
+
+    for raw in new_records:
+        rec = raw
+        # Defensive: re-derive schema if a record lacks key/tier.
+        if not isinstance(rec, dict) or "key" not in rec or "tier" not in rec:
+            rec = to_record(rec if isinstance(rec, dict) else {})
+        # (1) Drop fulfilled / invalidated / ineligible. `invalidated` is a terminal
+        # producer-side state (Part A); absent flag → False → no drop (forward-compatible).
+        if rec.get("fulfilled") is True or rec.get("invalidated") is True:
+            continue
+        key = rec.get("key")
+        if not key or not rec.get("direction"):
+            continue
+        # (2) Gate by position state.
+        if not flat:
+            tier = rec.get("tier")
+            level_price = rec.get("mnq_lvl_price")
+            if level_price is None:
+                level_price = rec.get("mnq_price")
+            prox_ok = False
+            if level_price is not None:
+                try:
+                    lp = float(level_price)
+                    for t in (init_t, sec_t):
+                        if t is not None and abs(lp - t) <= x_pts:
+                            prox_ok = True
+                            break
+                except (TypeError, ValueError):
+                    prox_ok = False
+            tier_ok = _tier_rank(tier) >= backing_rank
+            if not (prox_ok or tier_ok):
+                continue
+        # Ensure the incoming record carries the list form (defensive for raw dicts that
+        # bypassed to_record but already had key/tier).
+        if not isinstance(rec.get("keys"), list) or not rec.get("keys"):
+            rec = dict(rec)
+            rec["keys"] = [rec.get("key")]
+        # (3) Collapse / supersede by logical (ref_name, direction) key.
+        lk = _logical_key(rec)
+        existing = by_key.get(lk)
+        if existing is None:
+            by_key[lk] = rec
+            order.append(lk)
+        else:
+            merged_keys = _merge_keys(existing, rec)
+            if _supersedes(rec, existing):
+                survivor = dict(rec)
+            else:
+                survivor = dict(existing)
+            survivor["keys"] = merged_keys
+            by_key[lk] = survivor
+
+    collapsed = [by_key[k] for k in order]
+    # Rule A — same-level latest-take-out-wins. Operates ON the collapsed set (above already
+    # merged same-(ref_name,direction)); Rule A resolves OPPOSITE-direction same-ref_name by
+    # recency. Pure: returns (kept, events). Callers that want the superseded-event TRAIL
+    # pass `apply_rule_a_step=False` and run `apply_rule_a` themselves (capturing events);
+    # the default keeps `ingest_smts` self-contained for direct callers/tests.
+    if not apply_rule_a_step:
+        return collapsed
+    kept, _events = apply_rule_a(collapsed)
+    return kept
+
+
+def apply_rule_a(active: "list[dict] | None") -> "tuple[list[dict], list[dict]]":
+    """Rule A — same-level latest-take-out-wins (Contract C-RULEA).
+
+    Groups the active set by ``ref_name``; if a single ``ref_name`` holds BOTH directions,
+    keep only the most-recent (by ``time``) and drop the older opposite-direction record(s).
+    Same-direction sets are untouched (collapse already merged those upstream). Records
+    with no ``ref_name`` are passed through unchanged.
+
+    Pure / total: returns ``(kept, superseded_events)`` where each event is::
+
+        {"event": "superseded_same_level", "ref_name": ..., "kept_key": ...,
+         "kept_direction": ..., "kept_time": ..., "dropped_key": ...,
+         "dropped_direction": ..., "dropped_time": ...}
+
+    Never mutates its input; never raises.
+    """
+    src = list(active or [])
+    if not src:
+        return src, []
+
+    def _rtime(r: dict) -> int:
+        try:
+            ts = pd.Timestamp(r.get("time"))
+            return int(ts.value) if ts is not pd.NaT else 0
+        except Exception:
+            return 0
+
+    # Group indices by ref_name preserving first-seen order.
+    groups: dict = {}
+    order_rn: list = []
+    for i, r in enumerate(src):
+        rn = r.get("ref_name") if isinstance(r, dict) else None
+        if rn is None:
+            continue
+        if rn not in groups:
+            groups[rn] = []
+            order_rn.append(rn)
+        groups[rn].append(i)
+
+    drop_idx: set = set()
+    events: list = []
+    for rn in order_rn:
+        idxs = groups[rn]
+        non_none_dirs = {src[i].get("direction") for i in idxs
+                         if src[i].get("direction") is not None}
+        # Only act when at least two DISTINCT non-None directions are present.
+        if len(non_none_dirs) < 2:
+            continue
+        # Keep the single most-recent record for this ref_name; drop every older record
+        # whose direction differs from the winner's (opposite-direction supersession).
+        winner = max(idxs, key=lambda i: _rtime(src[i]))
+        win_dir = src[winner].get("direction")
+        for i in idxs:
+            if i == winner:
+                continue
+            if src[i].get("direction") != win_dir:
+                drop_idx.add(i)
+                events.append({
+                    "event":             "superseded_same_level",
+                    "ref_name":          rn,
+                    "kept_key":          src[winner].get("key"),
+                    "kept_direction":    win_dir,
+                    "kept_time":         src[winner].get("time"),
+                    "dropped_key":       src[i].get("key"),
+                    "dropped_direction": src[i].get("direction"),
+                    "dropped_time":      src[i].get("time"),
+                })
+
+    kept = [src[i] for i in range(len(src)) if i not in drop_idx]
+    return kept, events
+
+
+def _ts_value(t) -> "int | None":
+    """Parse a time-ish value to ns since epoch; None on failure (total/never-raises)."""
+    try:
+        ts = pd.Timestamp(t)
+        return int(ts.value) if ts is not pd.NaT else None
+    except Exception:
+        return None
+
+
+def apply_rule_b(
+    active: "list[dict] | None",
+    *,
+    now_close: "float | None",
+    enabled: bool,
+    min_age_min: float,
+    adverse_pts: float,
+    tier_slack: int,
+) -> "tuple[list[dict], list[dict]]":
+    """Rule B — recency-trend cross-tier suppression (Contract C-RULEB). GATED.
+
+    A record ``O`` is suppressed iff a newer opposite-direction record ``N`` exists with:
+      - ``N.time - O.time >= min_age_min`` (the newer signal is meaningfully fresher),
+      - price has moved AGAINST ``O`` by ``>= adverse_pts`` — for a SHORT ``O`` (expects
+        price down) adverse = ``now_close - O_level >= adverse_pts``; for a LONG ``O``
+        (expects price up) adverse = ``O_level - now_close >= adverse_pts``, where
+        ``O_level`` is ``O.mnq_lvl_price`` (fallback ``O.mnq_price``), and
+      - ``_tier_rank(N.tier) >= _tier_rank(O.tier) - tier_slack`` (cross-tier: ``N`` need
+        not strictly outrank ``O`` — it may be ``tier_slack`` ranks below and still win).
+
+    Pure / total: returns ``(kept, suppressed_events)``. No-op (identity, empty events)
+    when ``enabled=False`` or ``now_close`` is None. Never mutates input; never raises.
+    """
+    src = list(active or [])
+    if not enabled or now_close is None or not src:
+        return src, []
+    try:
+        nc = float(now_close)
+    except (TypeError, ValueError):
+        return src, []
+
+    def _olevel(r: dict) -> "float | None":
+        v = r.get("mnq_lvl_price")
+        if v is None:
+            v = r.get("mnq_price")
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    drop_idx: set = set()
+    events: list = []
+    for oi, o in enumerate(src):
+        o_dir = o.get("direction")
+        if o_dir not in ("long", "short"):
+            continue
+        o_t = _ts_value(o.get("time"))
+        o_lvl = _olevel(o)
+        if o_t is None or o_lvl is None:
+            continue
+        # adverse-move gate (against O).
+        if o_dir == "short":
+            adverse_ok = (nc - o_lvl) >= adverse_pts
+        else:
+            adverse_ok = (o_lvl - nc) >= adverse_pts
+        if not adverse_ok:
+            continue
+        o_rank = _tier_rank(o.get("tier"))
+        # find a qualifying newer opposite N.
+        for ni, n in enumerate(src):
+            if ni == oi:
+                continue
+            if n.get("direction") not in ("long", "short"):
+                continue
+            if n.get("direction") == o_dir:
+                continue  # must be opposite
+            n_t = _ts_value(n.get("time"))
+            if n_t is None:
+                continue
+            age_min = (n_t - o_t) / 6e10  # ns → minutes
+            if age_min < min_age_min:
+                continue
+            if _tier_rank(n.get("tier")) < (o_rank - tier_slack):
+                continue
+            drop_idx.add(oi)
+            events.append({
+                "event":             "suppressed_by_trend",
+                "ref_name":          o.get("ref_name"),
+                "dropped_key":       o.get("key"),
+                "dropped_direction": o_dir,
+                "dropped_time":      o.get("time"),
+                "by_key":            n.get("key"),
+                "by_direction":      n.get("direction"),
+                "by_time":           n.get("time"),
+                "now_close":         nc,
+            })
+            break
+
+    kept = [src[i] for i in range(len(src)) if i not in drop_idx]
+    return kept, events
+
+
+def _fixed_level_candidates(fixed_levels: "list[dict] | None") -> list:
+    """Normalize fixed-level inputs to ``[{"name","price"}]`` (total/None-safe).
+
+    Accepts liquidity dicts (``{"name","kind":"level","price"}``) — only FIXED-tier levels
+    (``_smt_level_class(name)[0] == "fixed"``) with a high/low sub are kept, so dynamic
+    running ``day_*``/``week_*`` extremes are excluded (only prev*/session fixed levels
+    qualify as swept-and-reclaimed leg origins).
+    """
+    out: list = []
+    for lv in fixed_levels or []:
+        if not isinstance(lv, dict):
+            continue
+        if lv.get("kind") not in (None, "level"):
+            continue
+        name = lv.get("name")
+        price = lv.get("price")
+        if name is None or price is None:
+            continue
+        try:
+            kind_cls, _tier = _smt_level_class(name)
+        except Exception:
+            continue
+        if kind_cls != "fixed":
+            continue
+        # Only high/low levels are touch/sweep targets.
+        if not (str(name).endswith("_high") or str(name).endswith("_low")):
+            continue
+        try:
+            out.append({"name": name, "price": float(price)})
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def update_leg(
+    leg_state: "dict | None",
+    *,
+    fixed_levels: "list[dict] | None",
+    now_close: "float | None",
+    now_time,
+) -> dict:
+    """Track the most-recently swept-and-reclaimed FIXED level (Contract C-LEG).
+
+    A leg is registered when a FIXED level is breached beyond by ``RECLAIM_MARGIN_PTS`` and
+    then price closes back THROUGH it (the reclaim). The level is chosen DYNAMICALLY from
+    ``fixed_levels`` — never hardcoded. Tracks per-candidate breach progress in
+    ``leg_state["_breaches"]``; the active leg is recorded under ``leg_state["leg"]`` as::
+
+        {"level_name", "level_price", "origin_price", "reclaim_time", "recovery_dir"}
+
+    ``recovery_dir`` is ``"long"`` when a low was breached-down then reclaimed-up,
+    ``"short"`` when a high was breached-up then reclaimed-down. ``origin_price`` is the
+    swept level price — the leg clears (handled by ``suppress_counter_trend``) once
+    ``now_close`` returns to it.
+
+    Pure-ish: returns a NEW leg_state dict (does not mutate the input). Total: degenerate
+    input → unchanged copy; never raises.
+    """
+    st = dict(leg_state) if isinstance(leg_state, dict) else {}
+    breaches = dict(st.get("_breaches") or {})
+    st["_breaches"] = breaches
+    if now_close is None:
+        return st
+    try:
+        nc = float(now_close)
+    except (TypeError, ValueError):
+        return st
+
+    cands = _fixed_level_candidates(fixed_levels)
+    iso = None
+    try:
+        iso = pd.Timestamp(now_time).isoformat() if now_time is not None else None
+    except Exception:
+        iso = None
+
+    for c in cands:
+        name = c["name"]
+        price = c["price"]
+        is_high = str(name).endswith("_high")
+        b = breaches.get(name) or {"breached": False}
+        # Register a breach beyond the level by the margin.
+        if is_high:
+            if nc >= price + RECLAIM_MARGIN_PTS:
+                b["breached"] = True
+            elif b.get("breached") and nc < price:
+                # Reclaim: closed back below the high after breaching above → recovery short.
+                st["leg"] = {
+                    "level_name":   name,
+                    "level_price":  price,
+                    "origin_price": price,
+                    "reclaim_time": iso,
+                    "recovery_dir": "short",
+                }
+                b["breached"] = False
+        else:  # low
+            if nc <= price - RECLAIM_MARGIN_PTS:
+                b["breached"] = True
+            elif b.get("breached") and nc > price:
+                # Reclaim: closed back above the low after breaching below → recovery long.
+                st["leg"] = {
+                    "level_name":   name,
+                    "level_price":  price,
+                    "origin_price": price,
+                    "reclaim_time": iso,
+                    "recovery_dir": "long",
+                }
+                b["breached"] = False
+        breaches[name] = b
+
+    return st
+
+
+def suppress_counter_trend(
+    active: "list[dict] | None",
+    leg_state: "dict | None",
+    now_close: "float | None",
+) -> "tuple[list[dict], list[dict], dict]":
+    """Leg-scoped counter-trend suppression (Contract C-LEG, consumer side).
+
+    Given an active leg (from :func:`update_leg`), drop dominant-eligible SMTs whose
+    ``direction`` OPPOSES the leg's ``recovery_dir`` AND whose ``time < reclaim_time``,
+    until ``now_close`` returns to ``origin_price`` (then the leg clears and nothing is
+    suppressed). Records aligned with ``recovery_dir`` and records that postdate the
+    reclaim are NEVER suppressed.
+
+    Leg clears when price returns to origin:
+      - recovery_dir "long"  (a low was reclaimed up): clears once ``now_close <= origin``.
+      - recovery_dir "short" (a high was reclaimed down): clears once ``now_close >= origin``.
+
+    Returns ``(kept, suppressed_events, new_leg_state)`` — new_leg_state has ``leg`` removed
+    when the leg cleared. Pure/total: no leg or None inputs → identity; never raises.
+    """
+    src = list(active or [])
+    st = dict(leg_state) if isinstance(leg_state, dict) else {}
+    leg = st.get("leg")
+    if not isinstance(leg, dict) or not src:
+        return src, [], st
+
+    origin = leg.get("origin_price")
+    recovery_dir = leg.get("recovery_dir")
+    reclaim_t = _ts_value(leg.get("reclaim_time"))
+    try:
+        nc = float(now_close) if now_close is not None else None
+    except (TypeError, ValueError):
+        nc = None
+
+    # Leg-clear check: price returned to origin.
+    if nc is not None and origin is not None:
+        try:
+            o = float(origin)
+            if recovery_dir == "long" and nc <= o:
+                st = dict(st)
+                st.pop("leg", None)
+                return src, [], st
+            if recovery_dir == "short" and nc >= o:
+                st = dict(st)
+                st.pop("leg", None)
+                return src, [], st
+        except (TypeError, ValueError):
+            pass
+
+    if recovery_dir not in ("long", "short") or reclaim_t is None:
+        return src, [], st
+
+    counter = "short" if recovery_dir == "long" else "long"
+    drop_idx: set = set()
+    events: list = []
+    for i, r in enumerate(src):
+        if r.get("direction") != counter:
+            continue
+        r_t = _ts_value(r.get("time"))
+        if r_t is None or r_t >= reclaim_t:
+            continue  # only SMTs that PREDATE the reclaim
+        drop_idx.add(i)
+        events.append({
+            "event":             "suppressed_by_leg",
+            "ref_name":          r.get("ref_name"),
+            "dropped_key":       r.get("key"),
+            "dropped_direction": r.get("direction"),
+            "dropped_time":      r.get("time"),
+            "leg_level_name":    leg.get("level_name"),
+            "leg_recovery_dir":  recovery_dir,
+            "leg_reclaim_time":  leg.get("reclaim_time"),
+        })
+
+    kept = [src[i] for i in range(len(src)) if i not in drop_idx]
+    return kept, events, st
 
 
 def _build_5m_bar(mnq_1m: pd.DataFrame, now: datetime) -> dict | None:
@@ -673,6 +1417,36 @@ def _compute_smt_score(divs: list, liquidities: list) -> float:
     return max(-1.0, min(1.0, score / max_possible))
 
 
+# Tier-authority weights for the new-mechanism SMT score (mirror the legacy
+# LEVEL_WEIGHT ranks: week/ATH highest, day mid, fill/session lowest).
+_SMT_V2_TIER_WEIGHT = {"ATH": 3.0, "week": 3.0, "day": 2.0, "fill": 1.5, "session": 1.0}
+
+
+def _compute_smt_score_v2(active_set: list) -> float:
+    """SMT directional score from the new detection mechanism's relevance-filtered
+    active set (records in the divs-record schema — see ``to_record``). Tier-authority
+    weighted, signed by side (bullish→+, bearish→−), normalized to [-1, 1].
+
+    Replaces the legacy ``_compute_smt_score(divs, liquidities)`` which scored the old
+    15m/30m ``_compute_divs`` output by level-name × timeframe × type. Here ``tier``
+    (week/ATH > day > fill > session) carries the authority; timeframe/type no longer
+    apply. Total/None-safe: empty set → 0.0; never raises.
+    """
+    score = 0.0
+    max_possible = 0.0
+    for rec in active_set or []:
+        if not isinstance(rec, dict):
+            continue
+        w = _SMT_V2_TIER_WEIGHT.get(rec.get("tier") or "", 1.0)
+        side = rec.get("side")
+        sign = 1 if side in ("bullish", "long") else -1
+        score += sign * w
+        max_possible += w
+    if max_possible == 0:
+        return 0.0
+    return max(-1.0, min(1.0, score / max_possible))
+
+
 def _determine_direction(
     current_bar: dict,
     mnq_1m: pd.DataFrame,
@@ -688,7 +1462,10 @@ def _determine_direction(
     fvg_1hr = _detect_fvg_1hr(hist_mnq_1m, mnq_1m, hist_1hr=hist_1hr)
     levels  = _build_meaningful_levels(liquidities, fvg_1hr)
     prior   = mnq_1m.iloc[:-1]
-    smt_sc  = _compute_smt_score(divs, liquidities)
+    # SMT score now sourced from the new detection mechanism's relevance-filtered active
+    # set (passed in as `divs`), scored by tier authority. The legacy level×tf×type
+    # scorer (_compute_smt_score) is retired from the live path.
+    smt_sc  = _compute_smt_score_v2(divs)
 
     week_high = _named_price(liquidities, "week_high")
     week_low  = _named_price(liquidities, "week_low")
@@ -1175,9 +1952,11 @@ def build_hypothesis_from_direction(
             elif direction == "down" and top < current_close:
                 targets.append({"name": liq["name"], "price": top})
 
-    # Step 8: two-tier cautious prices.
+    # Step 8: two-tier cautious prices. The per-hypothesis cautious_dist_shrinks counter
+    # tightens the max-distance thresholds after each failed entry under this hypothesis.
     ath = global_state["all_time_high"]
-    _cp = compute_cautious_prices(direction, current_close, liquidities, ath)
+    _dist_shrinks = load_position().get("cautious_dist_shrinks", 0)
+    _cp = compute_cautious_prices(direction, current_close, liquidities, ath, _dist_shrinks)
     cautious_price_initial         = _cp["cautious_price_initial"]
     cautious_price_initial_level   = _cp["cautious_price_initial_level"]
     cautious_price_secondary       = _cp["cautious_price_secondary"]
@@ -1239,6 +2018,7 @@ def build_hypothesis_from_direction(
         if skip_position_reset:
             position = load_position()
             position["failed_entries"] = 0
+            position["cautious_dist_shrinks"] = 0
             save_position(position)
         else:
             _strategy.reset_position_for_new_hypothesis()
@@ -1373,33 +2153,14 @@ def run_hypothesis(
     ]
     last_liquidity, _ = _find_last_liquidity(mnq_1m, liquidities, extra_bars=_hyp_pre_session)
 
-    # Step 5: divs — SMT divergences at 15m and 30m.
-    # Before NY morning (09:30 ET), extend the bar window back to the prior NY
-    # evening session (12:00–18:00 ET on the session-open day) so that SMTs
-    # against yesterday's afternoon lows/highs are detectable during Asia and
-    # London. From 09:30 ET onward the current session window is long enough
-    # that extending back to yesterday adds noise without value.
-    _now_et = now.astimezone(_ET) if getattr(now, "tzinfo", None) else now
-    _pre_ny_morning = _now_et.hour < 9 or (_now_et.hour == 9 and _now_et.minute < 30)
-    if _pre_ny_morning and not hist_mnq_1m.empty and not mnq_1m.empty:
-        _sess_open   = pd.Timestamp(_cme_session_start(now))
-        _ny_eve_start = _sess_open - pd.Timedelta(hours=6)  # 12:00 ET on session-open day
-        _prior_mnq = hist_mnq_1m[
-            (hist_mnq_1m.index >= _ny_eve_start) & (hist_mnq_1m.index < _sess_open)
-        ]
-        _prior_mes = hist_mes_1m[
-            (hist_mes_1m.index >= _ny_eve_start) & (hist_mes_1m.index < _sess_open)
-        ] if not hist_mes_1m.empty else pd.DataFrame()
-        if not _prior_mnq.empty:
-            _div_mnq = pd.concat([_prior_mnq, mnq_1m]).sort_index()
-            _div_mnq = _div_mnq[~_div_mnq.index.duplicated(keep="last")]
-            _div_mes = pd.concat([_prior_mes, mes_1m]).sort_index() if not _prior_mes.empty else mes_1m
-            _div_mes = _div_mes[~_div_mes.index.duplicated(keep="last")]
-            divs = _compute_divs(_div_mnq, _div_mes)
-        else:
-            divs = _compute_divs(mnq_1m, mes_1m)
-    else:
-        divs = _compute_divs(mnq_1m, mes_1m)
+    # Step 5: divs — sourced from the NEW SMT detection mechanism. The relevance-filtered,
+    # unfulfilled active set (smt_active_set) is computed each 1m bar by the pipeline
+    # (session_pipeline._run_smt_v2_detection) and persisted on the hypothesis; here we read
+    # it and carry it as `divs` (the formation's active SMTs). This unifies onto the single
+    # detection engine — the legacy 15m/30m `_compute_divs` path is retired. `mes_1m` /
+    # `hist_mes_1m` remain in the signature for call-site compatibility (the pipeline still
+    # passes them) but no longer feed divs.
+    divs = hypothesis.get("smt_active_set", []) or []
 
     # Step 6: direction — determined by ICT rules (see direction.md).
     # confidence=high overrides all rules: direction follows the global trend unconditionally.

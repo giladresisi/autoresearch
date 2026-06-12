@@ -390,18 +390,18 @@ def test_last_liquidity_picks_most_recent_meaningful():
 
 # ══ Test 9: divs includes wick, body, and fill types ════════════════════════
 
-def test_divs_includes_wick_body_and_fill_types():
-    """Mocked divergence detectors return all three types; assert each in divs.
+def test_divs_sourced_from_smt_active_set():
+    """SMT V2 refactor: `divs` is owned by the NEW detection mechanism.
 
-    Provides 32 1m bars so that resampling to 15m yields 2+ bars (giving bar_idx >= 1),
-    enabling the iteration in _compute_divs to reach the mock calls.
+    run_hypothesis no longer recomputes 15m/30m divergences via the legacy
+    `_compute_divs`; it carries the pipeline-persisted relevance-filtered active set
+    (`smt_active_set`) through as `divs`. Seed an active set, form a hypothesis, and
+    assert `divs` is exactly that set (wick + body + fill records all preserved).
     """
     save_global(_make_default_global())
     save_daily(_make_default_daily())
 
-    # now at 10:35 so the 5m bar is 10:30-10:35
     now = _make_now(time_str="10:35:00")
-    # 32 bars from 10:00 to 10:31 — spans 09:30, 09:45, 10:00, 10:15, 10:30 15m periods
     n_bars = 32
     mnq_1m = _make_1m_bars(
         [150.0] * n_bars, [152.0] * n_bars, [148.0] * n_bars, [150.0] * n_bars,
@@ -416,32 +416,29 @@ def test_divs_includes_wick_body_and_fill_types():
     hist_mes = _make_1m_bars([75.0] * 5, [76.0] * 5, [74.0] * 5, [75.0] * 5,
                                start_time="2026-04-20 10:00:00")
 
-    call_count = {"div": 0, "fill": 0}
+    # The active set the pipeline's shadow detector would have persisted this bar.
+    active = [
+        {"kind": "smt", "type": "wick", "side": "bullish", "direction": "long",
+         "tier": "day", "key": "day_low|long|wick", "keys": ["day_low|long|wick"],
+         "ref_name": "day_low", "fulfilled": False, "invalidated": False},
+        {"kind": "smt", "type": "body", "side": "bearish", "direction": "short",
+         "tier": "week", "key": "week_high|short|body", "keys": ["week_high|short|body"],
+         "ref_name": "week_high", "fulfilled": False, "invalidated": False},
+        {"kind": "fill", "type": "fill_a", "side": "bullish", "direction": "long",
+         "tier": "fill", "key": "fvg_x_bull", "keys": ["fvg_x_bull"],
+         "ref_name": "fvg_x_bull", "fulfilled": False, "invalidated": False},
+    ]
+    h0 = load_hypothesis()
+    h0["direction"] = "none"
+    h0["smt_active_set"] = active
+    save_hypothesis(h0)
 
-    def fake_divergence(mes, mnq, bar_idx, session_start_idx=0, **kwargs):
-        if call_count["div"] == 0:
-            call_count["div"] += 1
-            return ("long", 1.0, 0.5, "wick", 149.0)
-        elif call_count["div"] == 1:
-            call_count["div"] += 1
-            return ("short", 1.0, 0.5, "body", 151.0)
-        return None
-
-    def fake_fill(mes, mnq, bar_idx, **kwargs):
-        if call_count["fill"] == 0:
-            call_count["fill"] += 1
-            return ("long", 152.0, 148.0)
-        return None
-
-    with patch("hypothesis.detect_smt_divergence", side_effect=fake_divergence):
-        with patch("hypothesis.detect_smt_fill", side_effect=fake_fill):
-            run_hypothesis(now, mnq_1m, mes_1m, hist_mnq, hist_mes)
+    run_hypothesis(now, mnq_1m, mes_1m, hist_mnq, hist_mes)
 
     h = load_hypothesis()
+    assert h["divs"] == active, f"divs not sourced from smt_active_set: {h['divs']}"
     types_found = {d["type"] for d in h["divs"]}
-    assert "wick" in types_found, f"Expected 'wick' in divs types, got: {types_found}"
-    assert "body" in types_found, f"Expected 'body' in divs types, got: {types_found}"
-    assert "fill" in types_found, f"Expected 'fill' in divs types, got: {types_found}"
+    assert {"wick", "body", "fill_a"} <= types_found, f"missing record types: {types_found}"
 
 
 # ══ Test 10: direction is determined (not 'none') for a standard in-range bar ═
@@ -651,6 +648,7 @@ def test_failed_entries_reset_on_direction_transition_from_none():
         "stop_entry": "",
         "conf_bar_entry": {"high": 155.0, "low": 145.0},
         "failed_entries": 2,
+        "cautious_dist_shrinks": 2,
     }
     save_position(position)
 
@@ -673,6 +671,9 @@ def test_failed_entries_reset_on_direction_transition_from_none():
     pos = load_position()
     assert pos["failed_entries"] == 0, (
         f"failed_entries should be 0 after none→up transition, got {pos['failed_entries']}"
+    )
+    assert pos["cautious_dist_shrinks"] == 0, (
+        f"cautious_dist_shrinks should be 0 after none→up transition, got {pos['cautious_dist_shrinks']}"
     )
     assert pos["conf_bar_entry"] == {}, (
         f"conf_bar_entry should be {{}} after transition, got {pos['conf_bar_entry']}"
@@ -825,3 +826,91 @@ def test_recompute_cautious_for_fill_preserves_manual_ladder():
     for k in ("cautious_price_initial", "cautious_price_initial_level",
               "cautious_price_secondary", "cautious_price_secondary_level"):
         assert out[k] == hyp[k], f"{k} must be preserved while locked"
+
+
+# ══ Change 3: dynamic cautious-target max-distance thresholds ═════════════════
+
+def _shrink_liqs():
+    """A single up-side level 140pts above the anchor — qualifies at shrinks=0
+    (max=150) but is excluded at shrinks>=1 (max=127.5)."""
+    return [{"name": "L140", "kind": "level", "price": 20140.0}]
+
+
+def test_cautious_dist_shrinks_zero_is_unchanged():
+    """dist_shrinks=0 must reproduce the pre-change effective thresholds (150/110):
+    the 140pt level still qualifies as the secondary."""
+    from hypothesis import compute_cautious_prices
+    r = compute_cautious_prices("up", 20000.0, _shrink_liqs(), 999999.0, 0)
+    assert r["cautious_price_secondary_level"] == "L140"
+    # Default kwarg must match dist_shrinks=0 byte-for-byte.
+    assert compute_cautious_prices("up", 20000.0, _shrink_liqs(), 999999.0) == r
+
+
+def test_cautious_dist_shrinks_one_excludes_far_level():
+    """dist_shrinks=1 → secondary max = 150*0.85 = 127.5; the 140pt level that
+    qualified at shrinks=0 is now excluded (no secondary found)."""
+    from hypothesis import compute_cautious_prices
+    r = compute_cautious_prices("up", 20000.0, _shrink_liqs(), 999999.0, 1)
+    assert r["cautious_price_secondary"] == ""
+    assert r["cautious_price_secondary_level"] == ""
+
+
+def test_cautious_dist_shrinks_includes_level_within_shrunk_max():
+    """A level inside the shrunk secondary max (120 < 127.5) still qualifies at
+    shrinks=1, confirming the threshold shrank rather than disappeared."""
+    from hypothesis import compute_cautious_prices
+    liqs = [{"name": "L120", "kind": "level", "price": 20120.0}]
+    r = compute_cautious_prices("up", 20000.0, liqs, 999999.0, 1)
+    assert r["cautious_price_secondary_level"] == "L120"
+
+
+def test_cautious_dist_shrinks_large_clamps_to_min():
+    """Large dist_shrinks clamps both effective maxes at CAUTIOUS_MIN_DIST (40),
+    never below. A level just inside 40 qualifies; one beyond it does not."""
+    from hypothesis import compute_cautious_prices, CAUTIOUS_MIN_DIST
+    assert CAUTIOUS_MIN_DIST == 40
+    # 39pt level is inside the floored max(40) but is below the MIN_DIST skip for
+    # the initial tier; it still qualifies as the secondary.
+    r_in = compute_cautious_prices(
+        "up", 20000.0, [{"name": "Lnear", "kind": "level", "price": 20039.0}],
+        999999.0, 20)
+    assert r_in["cautious_price_secondary_level"] == "Lnear"
+    # 41pt level is just beyond the floored max(40) → excluded.
+    r_out = compute_cautious_prices(
+        "up", 20000.0, [{"name": "Lfar", "kind": "level", "price": 20041.0}],
+        999999.0, 20)
+    assert r_out["cautious_price_secondary_level"] == ""
+
+
+def test_cautious_dist_shrinks_reset_by_session_helper():
+    """reset_position_for_session clears cautious_dist_shrinks to 0."""
+    import strategy
+    pos = copy.deepcopy(DEFAULT_POSITION)
+    pos["failed_entries"] = 3
+    pos["cautious_dist_shrinks"] = 3
+    save_position(pos)
+    strategy.reset_position_for_session()
+    assert load_position()["cautious_dist_shrinks"] == 0
+
+
+def test_cautious_dist_shrinks_reset_by_new_hypothesis_helper():
+    """reset_position_for_new_hypothesis clears cautious_dist_shrinks to 0."""
+    import strategy
+    pos = copy.deepcopy(DEFAULT_POSITION)
+    pos["failed_entries"] = 3
+    pos["cautious_dist_shrinks"] = 3
+    save_position(pos)
+    strategy.reset_position_for_new_hypothesis()
+    assert load_position()["cautious_dist_shrinks"] == 0
+
+
+def test_recompute_cautious_for_fill_honors_dist_shrinks():
+    """recompute_cautious_for_fill threads dist_shrinks into the recomputed ladder:
+    a far level present at shrinks=0 is dropped at a high shrink count."""
+    from hypothesis import recompute_cautious_for_fill
+    hyp = {"direction": "up", "manual": False}
+    liqs = _shrink_liqs()  # 140pt level
+    out0 = recompute_cautious_for_fill(dict(hyp), 20000.0, liqs, 999999.0, 0)
+    assert out0["cautious_price_secondary_level"] == "L140"
+    out1 = recompute_cautious_for_fill(dict(hyp), 20000.0, liqs, 999999.0, 1)
+    assert out1["cautious_price_secondary_level"] == ""

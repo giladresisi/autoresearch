@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,15 @@ FULFILL_PTS_MES = {"week": 12.0, "day": 6.0, "session": 3.0}
 # half-of-FULFILL default pending their own sweep.)
 INVALIDATE_PTS_MNQ = {"week": 40.0, "day": 40.0, "session": 10.0}
 INVALIDATE_PTS_MES = {"week": 6.0, "day": 6.0, "session": 1.5}
+
+# Fixed-level recency gate (TEMPORARY / reversible — added to de-flood SMT detection of
+# stale prior-period extremes). A fixed prev-day/prev-week level is eligible as an SMT
+# touch target only if it is recent: keep prev{i}_day with i <= MAX_FIXED_DAY_AGE and
+# prev{w}_week with w <= MAX_FIXED_WEEK_AGE; older ones are excluded. FVGs and running
+# day_/week_/session levels are unaffected. Set either constant to None to disable that
+# half of the gate (restore the full universe).
+MAX_FIXED_DAY_AGE = 2    # keep prev1_day, prev2_day
+MAX_FIXED_WEEK_AGE = 1   # keep prev1_week
 
 HIDDEN_TFS = ("15min", "30min")
 
@@ -131,6 +141,27 @@ def _sub(name: str) -> "str | None":
     return None
 
 
+_PREV_DAY_RE = re.compile(r"^prev(\d+)_day_")
+_PREV_WEEK_RE = re.compile(r"^prev(\d+)_week_")
+
+
+def _fixed_level_recent_enough(name: str) -> bool:
+    """Recency gate for fixed prev-day/prev-week SMT levels (TEMPORARY de-flood).
+
+    True if the level is recent enough to be an eligible SMT target:
+      - prev{i}_day_*  -> i <= MAX_FIXED_DAY_AGE  (None disables -> always True)
+      - prev{w}_week_* -> w <= MAX_FIXED_WEEK_AGE (None disables -> always True)
+    Any other name (running day_/week_, session, FVG, TDO, ...) -> True (not gated here).
+    """
+    m = _PREV_DAY_RE.match(name)
+    if m:
+        return MAX_FIXED_DAY_AGE is None or int(m.group(1)) <= MAX_FIXED_DAY_AGE
+    m = _PREV_WEEK_RE.match(name)
+    if m:
+        return MAX_FIXED_WEEK_AGE is None or int(m.group(1)) <= MAX_FIXED_WEEK_AGE
+    return True
+
+
 def eligible_levels(liqs: list[dict], now: Any) -> dict[str, dict]:
     """Map level-name → {name, kind:'level', price, sub:'high'|'low'} for the levels
     eligible as SMT touch targets at `now`.
@@ -165,9 +196,12 @@ def eligible_levels(liqs: list[dict], now: Any) -> dict[str, dict]:
         if name.startswith(("day_", "week_")):
             out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub, **_entry_extra}
             continue
-        # Universe fixed levels (prev-day / prev-week extremes): completed history, so
-        # always eligible — no session-window or running-extreme gating.
+        # Universe fixed levels (prev-day / prev-week extremes): completed history, so no
+        # session-window or running-extreme gating — but a recency gate skips stale ones
+        # (prev{i}_day with i > MAX_FIXED_DAY_AGE / prev{w}_week with w > MAX_FIXED_WEEK_AGE).
         if name.startswith("prev") and ("day" in name or "week" in name):
+            if not _fixed_level_recent_enough(name):
+                continue
             out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub, **_entry_extra}
             continue
         # 6hr-session level: day-scoped eligibility (see docstring).
@@ -622,6 +656,90 @@ def detect_fill_smts(
             st["fire_price"] = mnq_close
 
     return records, state
+
+
+# ---------------------------------------------------------------------------
+# Contract C — read-only fulfillment-query API (SMT V2 Phase 2)
+# ---------------------------------------------------------------------------
+def _record_key(record: dict) -> str:
+    """Single source of truth for the `detect_state` key of an SMT/fill record.
+
+    Mirrors the detection engine's key construction EXACTLY so detection and query
+    agree by construction:
+      - level SMT (kind=="smt"): ``f"{ref_name}|{direction}|{type}"`` (type ∈
+        {"wick","body"}) — see ``_detect_level_smts`` (skey at line 224:
+        ``f"{_skey(name, direction)}|{rec_type}"``).
+      - fill (kind=="fill"): the bare FVG name ``str(ref_name)`` — see
+        ``detect_fill_smts`` (skey at line 443: ``skey = str(name)``).
+
+    Total: missing fields → best-effort string; never raises.
+    """
+    if not isinstance(record, dict):
+        return ""
+    ref_name = record.get("ref_name")
+    if record.get("kind") == "fill":
+        return str(ref_name)
+    direction = record.get("direction")
+    rec_type = record.get("type")
+    return f"{_skey(ref_name, direction)}|{rec_type}"
+
+
+def smt_status(keys: "list[str] | None", detect_state: dict) -> dict[str, str]:
+    """Per-key relevance status over ``detect_state`` (read-only; never mutates).
+
+    Contract C-STATUS. Returns ``{key: "unfulfilled" | "fulfilled" | "invalidated" | "gone"}``:
+      - ``"gone"``        — key absent from ``detect_state`` (expired / never fired).
+      - ``"fulfilled"``   — present and ``st.get("fulfilled") is True`` (checked FIRST so
+                            fulfilled precedence is preserved over invalidated).
+      - ``"invalidated"`` — present, not fulfilled, and ``st.get("invalidated") is True``.
+      - ``"unfulfilled"`` — present and neither fulfilled nor invalidated.
+
+    The ``invalidated`` flag is produced by the SMT V2 Part A producer change. Until that
+    flag is present on ``detect_state`` (forward-compatible / pre-rebase), the
+    ``st.get("invalidated")`` lookup is falsy and a present non-fulfilled key is
+    ``"unfulfilled"`` — i.e. NO drop, exactly the legacy behavior.
+
+    Fills: fill state dicts (keyed by bare FVG name) have NO ``fulfilled``/``invalidated``
+    field, so a present fill key is ``"unfulfilled"`` by definition in Phase 2.
+
+    Total: ``keys=None`` → ``{}``; never raises.
+    """
+    out: dict[str, str] = {}
+    if not keys:
+        return out
+    ds = detect_state if isinstance(detect_state, dict) else {}
+    for key in keys:
+        st = ds.get(key)
+        if st is None:
+            out[key] = "gone"
+        elif isinstance(st, dict) and st.get("fulfilled") is True:
+            out[key] = "fulfilled"
+        elif isinstance(st, dict) and st.get("invalidated") is True:
+            out[key] = "invalidated"
+        else:
+            out[key] = "unfulfilled"
+    return out
+
+
+def fulfillment_status(keys: "list[str] | None", detect_state: dict) -> dict[str, str]:
+    """Per-key fulfillment status over ``detect_state`` (read-only; never mutates).
+
+    Thin wrapper over :func:`smt_status` that collapses ``"invalidated"`` →
+    ``"unfulfilled"`` so existing callers/tests that only know the legacy
+    ``{"unfulfilled","fulfilled","gone"}`` vocabulary are unaffected.
+
+    Returns ``{key: "unfulfilled" | "fulfilled" | "gone"}``:
+      - ``"gone"``       — key absent from ``detect_state`` (expired / never fired).
+      - ``"fulfilled"``  — present and ``st.get("fulfilled") is True``.
+      - ``"unfulfilled"``— present and not fulfilled (invalidated folds in here).
+
+    Total: ``keys=None`` → ``{}``; never raises.
+    """
+    out = smt_status(keys, detect_state)
+    for k, v in out.items():
+        if v == "invalidated":
+            out[k] = "unfulfilled"
+    return out
 
 
 # ---------------------------------------------------------------------------

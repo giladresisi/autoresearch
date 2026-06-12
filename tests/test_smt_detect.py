@@ -334,21 +334,21 @@ def test_asia_not_eligible_while_forming():
     assert "asia_high" in eligible_levels(liqs, closed)
 
 
-def test_universe_prev_levels_always_eligible():
-    """Universe (B) prev-day / prev-week fixed levels are eligible at any hour (completed
-    history — no session-window or running-extreme gating) and pass close_price through."""
+def test_universe_recent_prev_levels_always_eligible():
+    """Universe (B) RECENT prev-day / prev-week fixed levels are eligible at any hour
+    (completed history — no session-window or running-extreme gating) and pass close_price
+    through. (Stale levels are gated out — see test_recency_gate_drops_stale_fixed_levels.)"""
     liqs = [
         {"name": "prev1_day_high", "kind": "level", "price": 21000.0, "close_price": 20998.0},
-        {"name": "prev7_day_low", "kind": "level", "price": 20500.0},
+        {"name": "prev2_day_low", "kind": "level", "price": 20500.0},
         {"name": "prev1_week_high", "kind": "level", "price": 21100.0},
-        {"name": "prev2_week_low", "kind": "level", "price": 20400.0},
         {"name": "prev1_TDO", "kind": "level", "price": 20777.0},  # not a high/low → dropped
     ]
     for t in (pd.Timestamp("2026-06-09 20:00", tz="America/New_York"),   # Asia forming
               pd.Timestamp("2026-06-09 03:00", tz="America/New_York"),   # overnight
               pd.Timestamp("2026-06-09 10:00", tz="America/New_York")):  # RTH
         elig = eligible_levels(liqs, t)
-        assert {"prev1_day_high", "prev7_day_low", "prev1_week_high", "prev2_week_low"} <= set(elig)
+        assert {"prev1_day_high", "prev2_day_low", "prev1_week_high"} <= set(elig)
         assert "prev1_TDO" not in elig  # TDO has no _high/_low sub
     assert abs(elig["prev1_day_high"]["close_price"] - 20998.0) < 1e-9
 
@@ -359,6 +359,67 @@ def test_universe_prev_levels_are_fixed():
     assert smt_detect._level_class("prev13_day_low") == ("fixed", "day")
     assert smt_detect._level_class("prev1_week_high") == ("fixed", "week")
     assert smt_detect._level_class("prev2_week_low") == ("fixed", "week")
+
+
+def test_recency_gate_keeps_recent_fixed_levels():
+    """Recency gate KEEPS prev{i}_day with i<=2 and prev{w}_week with w<=1."""
+    liqs = [
+        {"name": "prev1_day_high", "kind": "level", "price": 21000.0},
+        {"name": "prev2_day_low", "kind": "level", "price": 20500.0},
+        {"name": "prev1_week_high", "kind": "level", "price": 21100.0},
+    ]
+    elig = eligible_levels(liqs, pd.Timestamp("2026-06-09 10:00", tz="America/New_York"))
+    assert {"prev1_day_high", "prev2_day_low", "prev1_week_high"} <= set(elig)
+
+
+def test_recency_gate_drops_stale_fixed_levels():
+    """Recency gate DROPS prev{i}_day with i>2 (prev3+, prev14) and prev{w}_week with w>1."""
+    liqs = [
+        {"name": "prev3_day_high", "kind": "level", "price": 21000.0},
+        {"name": "prev14_day_low", "kind": "level", "price": 20500.0},
+        {"name": "prev2_week_low", "kind": "level", "price": 20400.0},
+    ]
+    elig = eligible_levels(liqs, pd.Timestamp("2026-06-09 10:00", tz="America/New_York"))
+    assert "prev3_day_high" not in elig
+    assert "prev14_day_low" not in elig
+    assert "prev2_week_low" not in elig
+
+
+def test_recency_gate_leaves_running_session_fvg_unaffected():
+    """The recency gate only touches prev-day/prev-week fixed levels: running day_/week_
+    extremes and an eligible 6hr-session level still appear; FVGs (kind!='level') are
+    ignored by eligible_levels regardless."""
+    liqs = [
+        {"name": "day_high", "kind": "level", "price": 21030.0},
+        {"name": "week_low", "kind": "level", "price": 20980.0},
+        {"name": "ny_morning_high", "kind": "level", "price": 21020.0},
+        {"name": "fvg_20260609_1000_bull", "kind": "fvg", "price": 21005.0},
+    ]
+    # 13:00 ET → ny_morning (closes 12:00) is eligible.
+    elig = eligible_levels(liqs, pd.Timestamp("2026-06-09 13:00", tz="America/New_York"))
+    assert "day_high" in elig
+    assert "week_low" in elig
+    assert "ny_morning_high" in elig
+    assert "fvg_20260609_1000_bull" not in elig  # kind != 'level' → never enters level path
+
+
+def test_recency_gate_reversible_via_none(monkeypatch):
+    """Setting MAX_FIXED_DAY_AGE / MAX_FIXED_WEEK_AGE to None disables the gate (restores
+    the full universe) — stale levels become eligible again."""
+    liqs = [
+        {"name": "prev3_day_high", "kind": "level", "price": 21000.0},
+        {"name": "prev2_week_low", "kind": "level", "price": 20400.0},
+    ]
+    now = pd.Timestamp("2026-06-09 10:00", tz="America/New_York")
+    # Gated: dropped.
+    assert "prev3_day_high" not in eligible_levels(liqs, now)
+    assert "prev2_week_low" not in eligible_levels(liqs, now)
+    # Disable both halves → both eligible again.
+    monkeypatch.setattr(smt_detect, "MAX_FIXED_DAY_AGE", None)
+    monkeypatch.setattr(smt_detect, "MAX_FIXED_WEEK_AGE", None)
+    elig = eligible_levels(liqs, now)
+    assert "prev3_day_high" in elig
+    assert "prev2_week_low" in elig
 
 
 def test_fixed_high_bullish_when_swept_from_above():

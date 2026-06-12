@@ -628,3 +628,104 @@ def test_resting_stp_fill_still_anchored_at_trigger():
     assert rec.order_type == "stop"
     # Stop order at 10:00 ET -> 4-tick pre-11:00 slippage anchored at the trigger.
     assert rec.fill_price == pytest.approx(20000.0 + 4 * 0.25)
+
+
+# ---------------------------------------------------------------------------
+# 15:30 ET new-entry cutoff (wall-clock, internal to the PMT executor)
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+import execution.pickmytrade as _pmt_mod
+
+
+def _freeze_pmt_clock(monkeypatch, hh: int, mm: int) -> None:
+    """Freeze the module's wall-clock ET 'now' to a fixed HH:MM (today's date).
+
+    Patches execution.pickmytrade.datetime.datetime so now(_ET) returns the frozen
+    time while every other datetime/time/timezone use keeps real behavior.
+    """
+    _real_datetime = _dt.datetime  # capture before patching (datetime module is global)
+    _frozen_et = _real_datetime.now(_pmt_mod._ET).replace(
+        hour=hh, minute=mm, second=0, microsecond=0
+    )
+
+    class _FrozenDateTime(_real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is _pmt_mod._ET:
+                return _frozen_et
+            return _real_datetime.now(tz)
+
+    monkeypatch.setattr(_pmt_mod.datetime, "datetime", _FrozenDateTime)
+
+
+def test_market_entry_allowed_before_cutoff(monkeypatch):
+    """15:29 ET -> market entry submitted (status filled, _post_order called)."""
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    _freeze_pmt_clock(monkeypatch, 15, 29)
+    rec = ex.place_entry(_signal("long"), _bar())
+    _drain(ex)
+    assert rec.status == "filled"
+    assert ex._entry_is_live is True
+    assert ex._http.post.call_count == 1
+
+
+def test_market_entry_blocked_after_cutoff(monkeypatch):
+    """15:31 ET -> market entry blocked (status blocked, no HTTP submit)."""
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    _freeze_pmt_clock(monkeypatch, 15, 31)
+    rec = ex.place_entry(_signal("long"), _bar())
+    _drain(ex)
+    assert rec.status == "blocked"
+    assert ex._entry_is_live is False
+    assert ex._http.post.call_count == 0
+
+
+def test_stop_entry_blocked_after_cutoff(monkeypatch):
+    """15:31 ET -> stop entry also blocked."""
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    _freeze_pmt_clock(monkeypatch, 15, 31)
+    sig = _signal("long", limit=True)
+    sig["current_price"] = 19990.0  # below trigger -> rests as STP
+    rec = ex.place_entry(sig, _bar())
+    _drain(ex)
+    assert rec.status == "blocked"
+    assert rec.order_type == "stop"
+    assert ex._entry_is_live is False
+    assert ex._http.post.call_count == 0
+
+
+def test_entry_allowed_exactly_at_cutoff(monkeypatch):
+    """15:30:00 ET exactly -> still allowed (block is strictly AFTER 15:30)."""
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    _freeze_pmt_clock(monkeypatch, 15, 30)
+    rec = ex.place_entry(_signal("long"), _bar())
+    _drain(ex)
+    assert rec.status == "filled"
+    assert ex._entry_is_live is True
+    assert ex._http.post.call_count == 1
+
+
+def test_close_allowed_after_cutoff(monkeypatch):
+    """15:31 ET -> place_close still works (not gated by the entry cutoff)."""
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    _freeze_pmt_clock(monkeypatch, 15, 31)
+    ex.place_close()
+    payload = ex._http.post.call_args.kwargs["json"]
+    assert payload["data"] == "close"
+    assert ex._http.post.call_count == 1
+
+
+def test_update_stop_loss_allowed_after_cutoff(monkeypatch):
+    """15:31 ET -> update_stop_loss still works (not gated by the entry cutoff)."""
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    _freeze_pmt_clock(monkeypatch, 15, 31)
+    status, body = ex.update_stop_loss(_position("long"), _bar())
+    assert status == 200
+    assert ex._http.post.call_count == 1
