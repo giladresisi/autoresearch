@@ -99,15 +99,29 @@ class PickMyTradeExecutor:
             # A stop whose trigger is still ahead of the market (un-reached) rests legally and
             # must NOT be downgraded, or we enter the breakout before it confirms.
             _current = float(signal.get("current_price", 0.0))
-            _trigger_reached = _current > 0 and (
-                (direction == "long"  and _current >= entry_price) or
-                (direction == "short" and _current <= entry_price)
-            )
+            _bar_high = float(signal.get("bar_high", 0.0))
+            _bar_low = float(signal.get("bar_low", 0.0))
+            # Downgrade STP -> MKT when the live market has REACHED the trigger. Key off the
+            # bar EXTREME toward the trigger (high for longs, low for shorts) in addition to
+            # the current close: the close lags within the bar, so a stop the live price has
+            # already touched intrabar was being placed as a resting STP and rejected by
+            # Tradovate (a stop at/past the market is invalid). 2026-06-11 (four rejected
+            # brackets). bar_high/bar_low default to 0.0 (absent) -> falls back to close-only.
+            if direction == "long":
+                _reach = max(_current, _bar_high)
+                _trigger_reached = _reach > 0 and _reach >= entry_price
+            else:
+                _cands = [_p for _p in (_current, _bar_low) if _p > 0]
+                _reach = min(_cands) if _cands else 0.0
+                _trigger_reached = _reach > 0 and _reach <= entry_price
             if _trigger_reached:
-                print(f"[PMT] STP->MKT: trigger {entry_price} reached by market {_current}", flush=True)
+                # Market fills at the live market, not the wick extreme — anchor the assumed
+                # fill to the current price (fall back to the trigger if no current price).
+                _mkt = _current if _current > 0 else entry_price
+                print(f"[PMT] STP->MKT: trigger {entry_price} reached (px={_current} hi={_bar_high} lo={_bar_low})", flush=True)
                 payload = self._build_payload(data, order_type="MKT", sl=stop_price)
                 order_type = "market"
-                fill_anchor = _current
+                fill_anchor = _mkt
             else:
                 payload = self._build_payload(data, order_type="STP", sl=stop_price, price=entry_price)
                 order_type = "stop"

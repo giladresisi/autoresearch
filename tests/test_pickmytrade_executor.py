@@ -156,6 +156,46 @@ def test_r1_short_at_or_below_trigger_downgrades():
     assert rec.order_type == "market"
 
 
+# ---------------------------------------------------------------------------
+# O2/D1: STP->MKT downgrade keys off the bar EXTREME (high for longs, low for shorts),
+# not just the lagging close — a stop the live market already touched intrabar must go MKT
+# instead of resting as a STP that Tradovate rejects (2026-06-11, four rejected brackets).
+# bar_high/bar_low absent (0.0) -> falls back to the close-only behavior above.
+# ---------------------------------------------------------------------------
+
+def test_stp_mkt_long_downgrades_on_bar_high_even_if_close_below():
+    # 2026-06-11 12:45: entry 28896.25, close 28885.5 (below) but bar high 28898 reached it.
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    sig = _stop_signal("long", entry_price=28896.25, current_price=28885.5)
+    sig["bar_high"], sig["bar_low"] = 28898.0, 28872.75
+    rec = ex.place_entry(sig, _bar())
+    _drain(ex)
+    assert rec.order_type == "market"
+
+
+def test_stp_mkt_short_downgrades_on_bar_low_even_if_close_above():
+    # 2026-06-11 13:55: entry 29174.0, close 29184.75 (above) but bar low 29163.75 reached it.
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    sig = _stop_signal("short", entry_price=29174.0, current_price=29184.75)
+    sig["bar_high"], sig["bar_low"] = 29192.0, 29163.75
+    rec = ex.place_entry(sig, _bar())
+    _drain(ex)
+    assert rec.order_type == "market"
+
+
+def test_stp_mkt_long_stays_stop_when_neither_close_nor_bar_high_reach():
+    # Genuine resting long stop: trigger above BOTH the close and the bar high -> stays STP.
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    sig = _stop_signal("long", entry_price=28900.0, current_price=28885.0)
+    sig["bar_high"], sig["bar_low"] = 28895.0, 28870.0
+    rec = ex.place_entry(sig, _bar())
+    _drain(ex)
+    assert rec.order_type == "stop"
+
+
 def test_gtd_in_second_present_on_market_order():
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
