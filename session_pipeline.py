@@ -33,7 +33,7 @@ DEDUP_TOL_PTS = 5.0
 _SCOPE_RANK = {"ath": 3, "week": 2, "day": 1, "session": 0}
 
 
-def _bar_row_has_ohlc(bar_row: "pd.Series", *fields: str) -> bool:
+def _bar_row_has_ohlc(bar_row, *fields: str) -> bool:
     """True iff bar_row exposes every named field with a non-NaN value.
 
     automation.main builds a degenerate empty ``pd.Series(dtype=float)`` for an
@@ -41,10 +41,17 @@ def _bar_row_has_ohlc(bar_row: "pd.Series", *fields: str) -> bool:
     gap — see the 2026-06-10 MES outage). Scalar access like ``float(bar_row["High"])``
     would then raise ``KeyError``. Callers use this to skip the instrument's per-bar
     passes cleanly instead of crashing.
+
+    Works for both a ``pd.Series`` (live path) and a plain ``dict`` (backtest path,
+    backtest_smt.py): both raise KeyError on a missing key, so ``bar_row[_f]`` is the
+    common accessor — do NOT use ``bar_row.index`` (a dict has no ``.index``).
     """
-    idx = bar_row.index
     for _f in fields:
-        if _f not in idx or pd.isna(bar_row[_f]):
+        try:
+            _v = bar_row[_f]
+        except (KeyError, IndexError):
+            return False
+        if pd.isna(_v):
             return False
     return True
 
