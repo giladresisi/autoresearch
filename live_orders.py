@@ -416,6 +416,13 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float, *,
     pos["stop_direction"] = ""
     pos.pop("stop_entry_source", None)
     _save_pos(pos)
+    # Re-anchor the cautious ladder to the actual fill — a manual market entry (or any
+    # market entry) otherwise leaves hypothesis.json's cautious levels at the stale
+    # formation anchor, so the cautious break can trail too tight and stop the position
+    # out prematurely (2026-06-12: a manual re-entry was stopped out on the old ladder).
+    # Mirrors the STP->MKT downgrade fill path; no-op while the manual direction lock is
+    # set. Best-effort (never blocks the recorded entry).
+    _recompute_cautious_at_fill(fill_price)
     _log({"kind": "market-entry", "time": now, "direction": direction,
           "entry_price": entry_price, "stop_price": stop_price})
 
