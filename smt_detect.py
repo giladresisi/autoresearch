@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,15 @@ FULFILL_PTS_MES = {"week": 12.0, "day": 6.0, "session": 3.0}
 # half-of-FULFILL default pending their own sweep.)
 INVALIDATE_PTS_MNQ = {"week": 40.0, "day": 40.0, "session": 10.0}
 INVALIDATE_PTS_MES = {"week": 6.0, "day": 6.0, "session": 1.5}
+
+# Fixed-level recency gate (TEMPORARY / reversible — added to de-flood SMT detection of
+# stale prior-period extremes). A fixed prev-day/prev-week level is eligible as an SMT
+# touch target only if it is recent: keep prev{i}_day with i <= MAX_FIXED_DAY_AGE and
+# prev{w}_week with w <= MAX_FIXED_WEEK_AGE; older ones are excluded. FVGs and running
+# day_/week_/session levels are unaffected. Set either constant to None to disable that
+# half of the gate (restore the full universe).
+MAX_FIXED_DAY_AGE = 2    # keep prev1_day, prev2_day
+MAX_FIXED_WEEK_AGE = 1   # keep prev1_week
 
 HIDDEN_TFS = ("15min", "30min")
 
@@ -131,6 +141,27 @@ def _sub(name: str) -> "str | None":
     return None
 
 
+_PREV_DAY_RE = re.compile(r"^prev(\d+)_day_")
+_PREV_WEEK_RE = re.compile(r"^prev(\d+)_week_")
+
+
+def _fixed_level_recent_enough(name: str) -> bool:
+    """Recency gate for fixed prev-day/prev-week SMT levels (TEMPORARY de-flood).
+
+    True if the level is recent enough to be an eligible SMT target:
+      - prev{i}_day_*  -> i <= MAX_FIXED_DAY_AGE  (None disables -> always True)
+      - prev{w}_week_* -> w <= MAX_FIXED_WEEK_AGE (None disables -> always True)
+    Any other name (running day_/week_, session, FVG, TDO, ...) -> True (not gated here).
+    """
+    m = _PREV_DAY_RE.match(name)
+    if m:
+        return MAX_FIXED_DAY_AGE is None or int(m.group(1)) <= MAX_FIXED_DAY_AGE
+    m = _PREV_WEEK_RE.match(name)
+    if m:
+        return MAX_FIXED_WEEK_AGE is None or int(m.group(1)) <= MAX_FIXED_WEEK_AGE
+    return True
+
+
 def eligible_levels(liqs: list[dict], now: Any) -> dict[str, dict]:
     """Map level-name → {name, kind:'level', price, sub:'high'|'low'} for the levels
     eligible as SMT touch targets at `now`.
@@ -165,9 +196,12 @@ def eligible_levels(liqs: list[dict], now: Any) -> dict[str, dict]:
         if name.startswith(("day_", "week_")):
             out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub, **_entry_extra}
             continue
-        # Universe fixed levels (prev-day / prev-week extremes): completed history, so
-        # always eligible — no session-window or running-extreme gating.
+        # Universe fixed levels (prev-day / prev-week extremes): completed history, so no
+        # session-window or running-extreme gating — but a recency gate skips stale ones
+        # (prev{i}_day with i > MAX_FIXED_DAY_AGE / prev{w}_week with w > MAX_FIXED_WEEK_AGE).
         if name.startswith("prev") and ("day" in name or "week" in name):
+            if not _fixed_level_recent_enough(name):
+                continue
             out[name] = {"name": name, "kind": "level", "price": float(price), "sub": sub, **_entry_extra}
             continue
         # 6hr-session level: day-scoped eligibility (see docstring).
