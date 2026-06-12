@@ -335,13 +335,59 @@ def test_on_1m_bar_tolerates_empty_mes_bar_row(_isolate_state, monkeypatch):
 
 
 def test_bar_row_has_ohlc_helper():
-    """_bar_row_has_ohlc: True only when every requested field is present & non-NaN."""
+    """_bar_row_has_ohlc: True only when every requested field is present & non-NaN.
+
+    Must work for BOTH a pd.Series (live path) AND a plain dict (backtest path,
+    backtest_smt.py) — a dict has no `.index`, so the helper must not touch it.
+    """
     import session_pipeline as _sp
+    # --- pd.Series (live path) ---
     full = pd.Series({"Open": 1.0, "High": 2.0, "Low": 0.5, "Close": 1.5})
     assert _sp._bar_row_has_ohlc(full, "High", "Low", "Close")
     assert not _sp._bar_row_has_ohlc(pd.Series(dtype=float), "High")
     assert not _sp._bar_row_has_ohlc(pd.Series({"High": float("nan"), "Low": 1.0}), "High", "Low")
     assert not _sp._bar_row_has_ohlc(pd.Series({"Open": 1.0}), "High")
+    # --- plain dict (backtest path) — regression for "'dict' object has no attribute 'index'" ---
+    assert _sp._bar_row_has_ohlc({"Open": 1.0, "High": 2.0, "Low": 0.5, "Close": 1.5},
+                                 "High", "Low", "Close")
+    assert not _sp._bar_row_has_ohlc({}, "High")                       # empty dict
+    assert not _sp._bar_row_has_ohlc({"Open": 1.0}, "High")            # missing key
+    assert not _sp._bar_row_has_ohlc({"High": float("nan"), "Low": 1.0}, "High", "Low")  # NaN
+
+
+def test_on_1m_bar_accepts_dict_bar_rows(_isolate_state, monkeypatch):
+    """on_1m_bar must accept plain-dict bar rows (the backtest_smt.py path).
+
+    Regression for `AttributeError: 'dict' object has no attribute 'index'` raised by
+    `_bar_row_has_ohlc` when the MES-gap guard used `bar_row.index` (Series-only). The
+    backtest replay passes dicts, so every regression/backtest crashed on the first bar.
+    """
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: None)
+
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    pipeline.on_session_start(pd.Timestamp("2025-11-14 09:20", tz="America/New_York"),
+                              _make_1m_bars("2025-11-14 09:20", n=1))
+
+    now = pd.Timestamp("2025-11-14 09:21", tz="America/New_York")
+    # Plain dicts, exactly as backtest_smt.py builds them.
+    mnq_row = {"Open": 21000.0, "High": 21010.0, "Low": 20990.0, "Close": 21002.0, "Volume": 100}
+    mes_row = {"Open": 21000.0, "High": 21010.0, "Low": 20990.0, "Close": 21002.0, "Volume": 100}
+    today_mnq = _make_1m_bars("2025-11-14 09:21", n=1)
+    today_mes = _make_1m_bars("2025-11-14 09:21", n=1)
+
+    # Pre-fix: AttributeError('dict' object has no attribute 'index').
+    result = pipeline.on_1m_bar(now, mnq_row, mes_row, today_mnq, today_mes)
+    assert isinstance(result, list)
 
 
 # ---------------------------------------------------------------------------
