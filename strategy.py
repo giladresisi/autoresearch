@@ -525,10 +525,15 @@ def run_strategy(
                     return None
                 # R1: mirror the live STP->MKT downgrade — the executor market-fills the moment
                 # the market reaches the trigger (pickmytrade.place_entry); below the trigger the
-                # stop rests legally as a resting stop_entry.
+                # stop rests legally as a resting stop_entry. The trigger is "reached" the instant
+                # the price TOUCHES it intrabar — i.e. the bar EXTREME toward it (high for longs,
+                # low for shorts), matching the resting-stop fill check above (bar_high>=entry) and
+                # the live executor's bar-extreme downgrade. bar_mid lagged within the bar, so a
+                # stop the market had already touched rested and was rejected by Tradovate
+                # (D1/O2, 2026-06-11 — four rejected brackets, booked as phantom fills).
                 will_market_fill = (
-                    (direction == _DIR_UP   and bar_mid >= entry_price) or
-                    (direction == _DIR_DOWN and bar_mid <= entry_price)
+                    (direction == _DIR_UP   and float(mnq_bar["high"]) >= entry_price) or
+                    (direction == _DIR_DOWN and float(mnq_bar["low"])  <= entry_price)
                 )
                 # A stop entry ultimately fills AT its trigger as a market/STP order — whether the
                 # executor downgrades it to MKT now (will_market_fill) or it triggers on a later
@@ -539,7 +544,13 @@ def run_strategy(
                 # room and stops out on the entry bar (incident 2026-06-04: resting stop entries
                 # placed 5-6 pts off the conf low, instant stop-out). Mirrors the market path's
                 # floor; max() only ever widens — a far conf-bar stop is left untouched.
-                expected_fill = bar_mid if will_market_fill else entry_price
+                # Never BETTER than the trigger: a stop fires AT the trigger, so a touch fills
+                # ~there; only a full gap-through (bar_mid already past the trigger) fills worse.
+                if will_market_fill:
+                    expected_fill = max(entry_price, bar_mid) if direction == _DIR_UP \
+                        else min(entry_price, bar_mid)
+                else:
+                    expected_fill = entry_price
                 risk = max(abs(stop_loss - entry_price), MKT_FILL_MIN_STOP_DISTANCE)
                 if direction == _DIR_UP:
                     stop_loss = expected_fill - risk

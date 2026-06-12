@@ -190,12 +190,17 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float, *, s
     # before the order (and its broker SL) is sent — a downgrade fill must never rest on a
     # near-zero-risk stop (incident 2026-06-04). Only widens; far stops are untouched.
     stop_price = _floor_stop_distance(direction, entry_price, stop_price)
+    _bar_high, _bar_low = _current_bar_extremes()
     pmt_signal = {
         "direction": direction,
         "entry_price": entry_price,
         "stop_price": stop_price,
         "stop_fill_bars": 1,
         "current_price": _current_price(),
+        # Bar extremes so the executor can downgrade STP->MKT when the live market has
+        # already touched the trigger intrabar (not just on the lagging close).
+        "bar_high": _bar_high,
+        "bar_low": _bar_low,
     }
     rec = _executor.place_entry(pmt_signal, None)
     entry_live = getattr(_executor, "_entry_is_live", True)
@@ -342,6 +347,38 @@ def _current_price() -> float:
     return 0.0
 
 
+def _current_bar_extremes() -> "tuple[float, float]":
+    """Freshest (high, low) of the most recent live bar — same source priority as
+    `_current_price`, but the bar EXTREMES rather than the close.
+
+    Used by the STP->MKT downgrade so a stop whose trigger the live market has already
+    TOUCHED intrabar (the bar high reached a long trigger / the bar low reached a short
+    trigger) is sent MKT instead of a resting STP that Tradovate rejects as at/past market
+    (2026-06-11 — four rejected brackets). The close lags within the bar, so the close-only
+    check missed these. Returns (0.0, 0.0) when no fresh source is available (the executor
+    then falls back to the close-only behavior).
+    """
+    _now = pd.Timestamp.now(tz=_ET)
+    _fresh_cutoff = _now - pd.Timedelta(minutes=3)
+    try:
+        import strategy_smt as _ss
+        _bars = getattr(_ss, "_mnq_bars", None)
+        if _bars is not None and len(_bars) and _bars.index.tz is not None \
+                and _bars.index[-1] >= _fresh_cutoff:
+            return float(_bars["High"].iloc[-1]), float(_bars["Low"].iloc[-1])
+    except Exception:
+        pass
+    try:
+        _p = paths.general_live_dir() / "MNQ_1m.parquet"
+        if _p.exists():
+            _df = pd.read_parquet(_p, columns=["High", "Low"])
+            if not _df.empty and _df.index.tz is not None and _df.index[-1] >= _fresh_cutoff:
+                return float(_df["High"].iloc[-1]), float(_df["Low"].iloc[-1])
+    except Exception:
+        pass
+    return 0.0, 0.0
+
+
 def place_market_entry(direction: str, entry_price: float, stop_price: float, *, flatten_first: bool = False, source: str = "strategy") -> None:
     """Enter at market with stop. Logs, dispatches MKT+sl, writes active to position.json."""
     now = _now_et()
@@ -410,7 +447,12 @@ def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: st
         "stop_fill_bars": 1,
         "current_price": _current_price(),
     }
-    _executor.modify_stop_entry(old_pmt, new_pmt, None)
+    # Cross-process truth: if position.json shows a placed (non-`unplaced`) stop entry, the
+    # old STP order IS working at the broker and must be cancelled even from a separate
+    # `trade.py move` CLI process (where executor._entry_is_live is False). Without this the
+    # move places the new order but leaves the old one resting → duplicate (D6, 2026-06-11).
+    _old_placed = bool(pos.get("stop_entry")) and not pos.get("stop_entry_unplaced")
+    _executor.modify_stop_entry(old_pmt, new_pmt, None, placed_at_broker=_old_placed)
     pos["stop_entry"] = str(new_entry_price)
     pos["pending_stop"] = new_stop_price
     if getattr(_executor, "_entry_is_live", True):
