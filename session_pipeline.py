@@ -617,10 +617,27 @@ class SessionPipeline:
         _smts = _smt_state.load_smts()
         self._detect_state = _smts.get("detect_state", {}) or {}
         self._pending_watch = _PendingSmtWatch.from_dict(_smts.get("watch", {}))
+        # Cold-start guard for the pre-startup warm-up below: a genuine first start of this
+        # session has no restored per-level detect_state (ignoring the reserved bookkeeping
+        # keys). A warm restart already reflects the pre-startup bars in detect_state, so we
+        # must NOT replay them again (would double-fire). Snapshot emptiness BEFORE the
+        # warm-up mutates detect_state.
+        _cold_start = not any(
+            not str(_k).startswith("__") for _k in self._detect_state.keys()
+        )
 
         # Always run the daily/startup liquidity computation.
         self.on_daily_or_startup(now, today_mnq_at_open)
         self._daily_triggered = True
+
+        # Pre-startup SMT warm-up: if the orchestrator started LATE (after the 18:00 ET
+        # session open) on a cold start, replay [session_open, now) through the SMT detector
+        # so SMTs that fired before startup are detected, logged (source="v2-warmup"), and
+        # folded into detect_state / smts.json — matching what the live loop would have built
+        # had it been running. Runs AFTER liquidities are seeded and BEFORE the first
+        # hypothesis. No hypothesis-direction wiring (scope: detection + logging only).
+        if _cold_start:
+            self._warmup_replay_smts(now, today_mnq_at_open)
 
         # Reset hypothesis and position only when explicitly forced.
         if force_reset:
@@ -1658,6 +1675,7 @@ class SessionPipeline:
         today_mes: pd.DataFrame,
         is_5m: bool,
         pre_daily: "dict | None" = None,
+        warmup_now: "pd.Timestamp | None" = None,
     ) -> list[dict]:
         """SMT V2: run per-1m detection (regular + fill every bar, hidden at 15m/30m),
         accumulate into the buffers, run the flat-gated cadence-appropriate reference
@@ -1668,6 +1686,13 @@ class SessionPipeline:
         the regression plot. Strategy behavior is otherwise unchanged (no consumer acts on
         these yet). Mutates self._smt_buffer / self._detect_state / self._pending_watch and
         writes smts.json. Total: never raises on degenerate input.
+
+        `warmup_now` (pre-startup replay): when set to the startup timestamp, the emitted
+        smt-div events are tagged `source="v2-warmup"`, `warmup=True`, and `logged_at=<now>`
+        while their `time` stays the REAL pre-startup occurrence bar — so a late start that
+        replays `[session_open, now)` records SMTs it would otherwise have missed, and
+        post-session analysis can tell they were found at startup rather than live. The
+        detection logic and persisted detect_state are identical to the live per-bar path.
         """
         from smt_detect import (
             eligible_levels, detect_regular_smts, detect_hidden_smts, detect_fill_smts,
@@ -1752,7 +1777,7 @@ class SessionPipeline:
         # plot label collapses it to W / H / F. `source:"v2"` marks the new mechanism.
         sd_events: list[dict] = []
         for _r in records:
-            sd_events.append({
+            _ev = {
                 "kind":          "smt-div",
                 "time":          _r["time"],
                 "side":          _r["side"],
@@ -1764,10 +1789,17 @@ class SessionPipeline:
                 # Body SMTs carry their own body-extreme comparison level in the record
                 # (mnq_lvl_price); wick SMTs / fills fall back to the wick level-price map.
                 "mnq_div_price": _r.get("mnq_lvl_price", _mnq_lvl_px.get(_r["ref_name"])),
-                "source":        "v2",
+                # Pre-startup warm-up replay tags this as "v2-warmup" + warmup/logged_at;
+                # the live per-bar path keeps the plain "v2" source. `time` is the real
+                # occurrence bar in both cases.
+                "source":        "v2-warmup" if warmup_now is not None else "v2",
                 "leader":        _r["leader"],
                 "ref_name":      _r["ref_name"],
-            })
+            }
+            if warmup_now is not None:
+                _ev["warmup"] = True
+                _ev["logged_at"] = warmup_now.isoformat()
+            sd_events.append(_ev)
 
         self._smt_buffer.add(records, now)
 
@@ -1807,6 +1839,82 @@ class SessionPipeline:
             self._inv_written_n = len(_inv)
 
         return sd_events
+
+    def _warmup_replay_smts(
+        self,
+        now: pd.Timestamp,
+        today_mnq_at_open: pd.DataFrame,
+    ) -> list[dict]:
+        """Pre-startup SMT warm-up: replay this session's bars in [session_open, now)
+        through the SAME per-bar SMT detection the live loop uses, so a late start catches
+        SMTs that fired before the orchestrator came up.
+
+        Mirrors the SMT-relevant slice of on_1m_bar for each pre-startup 1m bar — snapshot
+        daily.json, update the MNQ + MES dynamic liquidities, then run _run_smt_v2_detection
+        (with warmup_now=now so the emitted smt-div events are tagged source="v2-warmup",
+        warmup=True, logged_at=now while their `time` stays the real occurrence bar). Trend /
+        hypothesis / strategy / order paths are intentionally NOT run — this only populates
+        detect_state and logs the pre-existing SMTs. detect_state / smts.json end up exactly
+        as if the live loop had processed these bars. Returns the emitted warm-up smt-div
+        events (already emitted via self._emit; returned for the caller's bookkeeping/tests).
+
+        Idempotency / restart safety: the caller only invokes this on a genuine cold start
+        for this session (detect_state empty). On a warm restart, detect_state already holds
+        the per-level edge/fired state for these bars, so this is skipped to avoid re-firing.
+        """
+        events: list[dict] = []
+        if today_mnq_at_open is None or today_mnq_at_open.empty:
+            return events
+
+        _ss = pd.Timestamp(_cme_session_start(now))
+        # MNQ pre-startup session bars [session_open, now). today_mnq_at_open is already
+        # masked to <= now by the caller; intersect with the session window defensively.
+        _mnq = today_mnq_at_open[
+            (today_mnq_at_open.index >= _ss) & (today_mnq_at_open.index < now)
+        ]
+        if _mnq.empty:
+            return events
+        # Monotonic-increasing index is required for the per-bar searchsorted windows.
+        assert _mnq.index.is_monotonic_increasing, "warm-up MNQ index must be sorted ascending"
+
+        # MES pre-startup session bars come from hist (the dispatcher only passes MNQ at
+        # open); reconstruct the same [session_open, now) window from _hist_mes_1m.
+        _mes_src = self._hist_mes_1m if self._hist_mes_1m is not None else pd.DataFrame()
+        _mes = _mes_src[(_mes_src.index >= _ss) & (_mes_src.index < now)]
+
+        for _ts in _mnq.index:
+            _mnq_row = _mnq.loc[_ts]
+            _mes_row = _mes.loc[_ts] if _ts in _mes.index else pd.Series(dtype=float)
+            _today_mnq = _mnq[_mnq.index <= _ts]
+            _today_mes = _mes[_mes.index <= _ts]
+
+            # Same pre-update daily snapshot + dynamic-liquidity refresh order as on_1m_bar.
+            _pre_daily = _smt_state.load_daily()
+            self._update_dynamic_liquidities(_ts, _mnq_row, _today_mnq)
+            if _bar_row_has_ohlc(_mes_row, "High", "Low", "Close"):
+                self._update_mes_liquidities(_ts, _mes_row, _today_mes)
+
+            _this_5m = _ts.floor("5min")
+            _is_5m = (_ts.minute % 5 == 0) and (_this_5m != self._last_5m_processed)
+            if _is_5m:
+                self._last_5m_processed = _this_5m
+
+            for _sd in self._run_smt_v2_detection(
+                _ts, _mnq_row, _mes_row, _today_mnq, _today_mes, _is_5m,
+                pre_daily=_pre_daily, warmup_now=now,
+            ):
+                self._emit(_sd)
+                events.append(_sd)
+
+        # Persist detect_state immediately after the warm-up, before any live bars. The
+        # per-bar path inside _run_smt_v2_detection already wrote smts.json each bar; this
+        # is a defensive final flush so the cold-start guard (detect_state non-empty) holds
+        # even if the last bar produced no new records.
+        _smt_state.save_smts({
+            "detect_state": self._detect_state,
+            "watch":        self._pending_watch.to_dict(),
+        })
+        return events
 
     @staticmethod
     def _pair_fvgs(liq_mnq: list[dict], liq_mes: list[dict]) -> list[dict]:
