@@ -176,6 +176,7 @@ def test_gateway_disconnect_raises_ibgateway_disconnected_error(tmp_path):
         def __init__(self):
             self.disconnectedEvent = MagicMock()
             self.disconnectedEvent.__iadd__ = lambda self_, cb: disconnect_callbacks.append(cb)
+            self.errorEvent = MagicMock()
             self.isConnected = MagicMock(return_value=True)
 
         def connect(self, *a, **kw):
@@ -191,10 +192,13 @@ def test_gateway_disconnect_raises_ibgateway_disconnected_error(tmp_path):
         for cb in disconnect_callbacks:
             cb()
 
-    # ib_insync imports are lazy inside start(); patch at the ib_insync module level
+    # ib_insync imports are lazy inside start(); patch at the ib_insync module level.
+    # start() runs the public gap_fill() prologue before connecting; stub it so this test
+    # exercises only the connect/disconnect path (no real IB backfill).
     with patch("ib_insync.IB", return_value=fake_ib), \
          patch("ib_insync.Future"), \
          patch("ib_insync.util") as util_mock, \
+         patch.object(src, "gap_fill"), \
          patch.object(src, "_setup_subscriptions"):
         util_mock.run.side_effect = fake_util_run
         util_mock.stop = MagicMock()
@@ -242,6 +246,7 @@ def test_ibgateway_disconnected_error_not_retried(tmp_path):
     class FakeIB:
         def __init__(self):
             self.disconnectedEvent = MagicMock()
+            self.errorEvent = MagicMock()
             self.isConnected = MagicMock(return_value=False)
 
         def connect(self, *a, **kw):
@@ -250,10 +255,12 @@ def test_ibgateway_disconnected_error_not_retried(tmp_path):
         def disconnect(self):
             pass
 
-    # ib_insync imports are lazy inside start(); patch at the ib_insync module level
+    # ib_insync imports are lazy inside start(); patch at the ib_insync module level.
+    # Stub the public gap_fill() prologue so start() reaches the connect/retry path.
     with patch("ib_insync.IB", return_value=FakeIB()), \
          patch("ib_insync.Future"), \
          patch("ib_insync.util") as util_mock, \
+         patch.object(src, "gap_fill"), \
          patch.object(src, "_setup_subscriptions"):
         # Raise IbGatewayDisconnectedError from util.run() — simulates the check
         # "if self._disconnected_by_gateway: raise IbGatewayDisconnectedError(...)"
@@ -473,8 +480,9 @@ def test_gap_fill_1s_ib_skips_when_empty_parquet(tmp_path):
 def test_gap_fill_1s_ib_skips_when_already_current(tmp_path):
     """_gap_fill_1s_ib must not open an IB connection when parquets are already current."""
     src = _make_source(tmp_path)
-    # Set last bar to 1 minute ago (within the 2-minute buffer → already current)
-    recent_ts = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(minutes=1)
+    # Set last bar to 30s ago (within the 60-second freshness threshold → already current;
+    # see ib_realtime.py _gap_fill_1s_ib needs_fill check `> 60`).
+    recent_ts = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(seconds=30)
     src._mnq_1s_df = pd.DataFrame(
         {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0]},
         index=pd.DatetimeIndex([recent_ts]),
@@ -558,15 +566,18 @@ def test_1s_dfs_freed_after_gap_fill_in_start(tmp_path):
     class FakeIB:
         def __init__(self):
             self.disconnectedEvent = MagicMock()
+            self.errorEvent = MagicMock()
             self.isConnected = MagicMock(return_value=True)
         def connect(self, *a, **kw): pass
         def disconnect(self): pass
 
+    # start() runs gap_fill() (the 1s+1m IB backfill prologue) then frees the 1s history
+    # DataFrames. Stub the public gap_fill() so no real IB work runs; the freeing happens
+    # in start() itself, immediately after the gap_fill() call, so it is still exercised.
     with patch("ib_insync.IB", return_value=FakeIB()), \
          patch("ib_insync.Future"), \
          patch("ib_insync.util") as util_mock, \
-         patch.object(src, "_load_parquets"), \
-         patch.object(src, "_gap_fill_1s_ib"), \
+         patch.object(src, "gap_fill"), \
          patch.object(src, "_setup_subscriptions"):
         def _fake_run():
             src._stopping = True

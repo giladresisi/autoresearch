@@ -232,21 +232,23 @@ def test_place_entry_returns_fill_record():
 
 
 def test_pmt_market_entry_long_slippage():
-    # MKT always 1 tick regardless of entry_slip_ticks
+    # MKT always 3 ticks regardless of entry_slip_ticks
+    # (assumed_fill_price market branch is hardcoded to 3 ticks — protocol.py L29-30,
+    # calibrated from live PMT relay observations in commit e7ee2b3 / D3).
     ex = _make_executor(entry_slip_ticks=2)
     ex._http.post = MagicMock(return_value=_ok_response())
     rec = ex.place_entry(_signal("long"), _bar())
     _drain(ex)
-    assert rec.fill_price == pytest.approx(20000.0 + 1 * 0.25)
+    assert rec.fill_price == pytest.approx(20000.0 + 3 * 0.25)
 
 
 def test_pmt_market_entry_short_slippage():
-    # MKT always 1 tick regardless of entry_slip_ticks
+    # MKT always 3 ticks regardless of entry_slip_ticks (protocol.py L29-30; D3 calibration).
     ex = _make_executor(entry_slip_ticks=2)
     ex._http.post = MagicMock(return_value=_ok_response())
     rec = ex.place_entry(_signal("short"), _bar())
     _drain(ex)
-    assert rec.fill_price == pytest.approx(20000.0 - 1 * 0.25)
+    assert rec.fill_price == pytest.approx(20000.0 - 3 * 0.25)
 
 
 def test_pmt_stop_entry_before_1100_applies_4tick_slippage():
@@ -258,13 +260,13 @@ def test_pmt_stop_entry_before_1100_applies_4tick_slippage():
     assert rec.fill_price == pytest.approx(20000.0 + 4 * 0.25)
 
 
-def test_pmt_zero_slip_ticks_mkt_still_applies_1tick():
-    # MKT orders ignore entry_slip_ticks — always 1 tick
+def test_pmt_zero_slip_ticks_mkt_still_applies_3ticks():
+    # MKT orders ignore entry_slip_ticks — always 3 ticks (protocol.py L29-30; D3 calibration).
     ex = _make_executor(entry_slip_ticks=0)
     ex._http.post = MagicMock(return_value=_ok_response())
     rec = ex.place_entry(_signal("long"), _bar())
     _drain(ex)
-    assert rec.fill_price == pytest.approx(20000.0 + 1 * 0.25)
+    assert rec.fill_price == pytest.approx(20000.0 + 3 * 0.25)
 
 
 def test_place_exit_long_posts_sell_close():
@@ -401,6 +403,11 @@ def test_stop_entry_sends_real_sl():
 
 def test_modify_stop_entry_includes_sl():
     ex = _make_executor()
+    # An entry must already be live at the broker for the cancel-then-replace path to run.
+    # The guard at pickmytrade.py L232 (`if not self._entry_is_live and not placed_at_broker`)
+    # short-circuits to a fresh place_entry when there is nothing to cancel; set
+    # _entry_is_live=True to model the in-orchestrator move of a working STP order.
+    ex._entry_is_live = True
     ex._http.post = MagicMock(return_value=_ok_response())
     old = _signal("long", limit=True)
     new = {**_signal("long", limit=True), "entry_price": 20050.0}
@@ -516,6 +523,7 @@ def test_place_exit_delegates_to_close():
 
 def test_modify_stop_entry_sends_close_then_stop():
     ex = _make_executor()
+    ex._entry_is_live = True  # working STP at broker -> cancel-then-replace path (L232)
     ex._http.post = MagicMock(return_value=_ok_response())
     old_sig = _signal("long", limit=True)
     new_sig = {**_signal("long", limit=True), "entry_price": 20010.0}
@@ -534,6 +542,8 @@ def test_modify_stop_entry_close_is_synchronous():
     """Close step in modify_stop_entry must run synchronously, not via thread pool."""
     ex = _make_executor()
     call_order = []
+
+    ex._entry_is_live = True  # working STP at broker -> cancel-then-replace path (L232)
 
     original_post = ex._post_order
     def tracked_post(order_id, payload):
@@ -559,15 +569,17 @@ def test_modify_stop_entry_close_is_synchronous():
     assert call_order[1][0] == "pool"
 
 
-def test_pmt_stop_entry_after_1100_applies_2tick_slippage():
-    # Bar timestamp at 11:30 ET → at or after 11:00 → 2 ticks slippage for STP
+def test_pmt_stop_entry_after_1100_applies_1tick_slippage():
+    # Bar timestamp at 11:30 ET → at or after 11:00 → 1 tick slippage for STP
+    # (assumed_fill_price stop branch, post-11:00 ET — protocol.py L31-36; D3 calibration
+    # in commit e7ee2b3 lowered the post-11:00 stop slippage from 2 ticks to 1).
     ts_after = pd.Timestamp("2026-04-30 11:30:00", tz="America/New_York")
     bar_after = _BarRow(20000.0, 20005.0, 19995.0, 20000.0, 100.0, ts_after)
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     rec = ex.place_entry(_signal("long", limit=True), bar_after)
     _drain(ex)
-    assert rec.fill_price == pytest.approx(20000.0 + 2 * 0.25)
+    assert rec.fill_price == pytest.approx(20000.0 + 1 * 0.25)
 
 
 def test_pmt_place_entry_passes_bar_time_to_assumed_fill_price():
@@ -585,6 +597,7 @@ def test_modify_stop_entry_replaces_even_if_close_fails():
     import httpx as _httpx
     import execution.pickmytrade as _mod
     ex = _make_executor()
+    ex._entry_is_live = True  # working STP at broker -> cancel-then-replace path (L232)
     orig_sleep = _mod.time.sleep
     _mod.time.sleep = lambda _: None
     post_calls = []

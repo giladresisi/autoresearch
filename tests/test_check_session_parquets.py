@@ -447,14 +447,17 @@ class TestProcessInstrumentSessionEnd:
             for p in reversed(entered):
                 p.__exit__(None, None, None)
 
-    def test_ok_session_merges_and_backs_up(self, bar_dir):
+    def test_ok_session_classified_for_merge(self, bar_dir):
+        # process_instrument classifies a clean session as action="merge"; the actual merge,
+        # backup and promote are performed once by main() after all instruments are processed
+        # (commit 8204f5b deferred the merge), so merge_success is left None here.
         from scripts.check_session_parquets import process_instrument
 
         _make_valid_session(bar_dir)
         _make_main_parquet(bar_dir)
 
         with patch("scripts.check_session_parquets.DATA_DIR", bar_dir), \
-             patch("data.parquet_maintenance.merge_session_1s_parquets") as mock_merge, \
+             patch("data.parquet_maintenance.merge_session_1s_parquets"), \
              patch("ib_insync.Contract", MagicMock()), \
              patch("scripts.check_session_parquets.get_session_start_for_end_mode",
                    return_value=pd.Timestamp("2026-05-20 09:00:00", tz="America/New_York")):
@@ -464,9 +467,9 @@ class TestProcessInstrumentSessionEnd:
                 "session-end", False, _make_ib_mock()
             )
 
-        assert result["merge_success"] is True
-        assert result["backup_written"] is True
-        assert mock_merge.called
+        assert result["severity"] == "ok"
+        assert result["action"] == "merge"
+        assert result["merge_success"] is None  # deferred to main()
 
     def test_minor_session_merges_as_is(self, bar_dir):
         from scripts.check_session_parquets import process_instrument
@@ -499,7 +502,7 @@ class TestProcessInstrumentSessionEnd:
             )
 
         assert result["action"] == "merge"
-        assert result["merge_success"] is True
+        assert result["merge_success"] is None  # deferred to main()
 
     def test_major_session_targeted_fill(self, bar_dir):
         from scripts.check_session_parquets import process_instrument
@@ -612,34 +615,32 @@ class TestProcessInstrumentSessionEnd:
         assert files_before == files_after
         assert result["merge_success"] is None
 
-    def test_late_start_escalates_to_rebuild(self, bar_dir):
+    def test_late_start_alone_does_not_escalate_to_rebuild(self, bar_dir):
+        # Regression guard for commit c1145c5: a clean session that merely STARTS LATE
+        # (here ~15.5h after the expected overnight open) must NOT be escalated to
+        # critical/rebuild. Late-start escalation was removed because it misfired on
+        # intentional short runs; the overnight gap is filled at the next
+        # orchestrator-start. Critical is reserved for genuine gaps / bad price data.
         from scripts.check_session_parquets import process_instrument
 
         _make_valid_session(bar_dir)
         _make_main_parquet(bar_dir)
 
-        # Session starts at 09:30, expected at 18:00 night before -> ~15.5h late -> critical
-        good_base = pd.Timestamp("2026-05-19 18:00:00", tz="America/New_York")
-        good_idx = pd.DatetimeIndex([good_base + pd.Timedelta(seconds=i) for i in range(10)])
-        good_df = pd.DataFrame({
-            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
-            "Close": 27000.0, "Volume": 100.0,
-        }, index=good_idx)
-
         with patch("scripts.check_session_parquets.DATA_DIR", bar_dir), \
              patch("data.parquet_maintenance.merge_session_1s_parquets"), \
              patch("ib_insync.Contract", MagicMock()), \
              patch("scripts.check_session_parquets.get_session_start_for_end_mode",
-                   return_value=pd.Timestamp("2026-05-19 18:00:00", tz="America/New_York")), \
-             patch("scripts.check_session_parquets.rebuild_session", return_value=good_df):
+                   return_value=pd.Timestamp("2026-05-19 18:00:00", tz="America/New_York")):
 
             result = process_instrument(
                 "MNQ", 12345, "MNQ_1s.parquet", "MNQ_1s_session_*.parquet",
                 "session-end", False, _make_ib_mock()
             )
 
-        assert result["action"] == "rebuild_then_merge"
-        assert result["severity"] == "critical"
+        # _make_valid_session builds a clean (no-gap, valid-price) session, so despite the
+        # large late_start it stays "ok" and is queued for a normal merge.
+        assert result["severity"] != "critical"
+        assert result["action"] == "merge"
 
 
 # ---------------------------------------------------------------------------

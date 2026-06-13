@@ -115,19 +115,12 @@ def test_check_setup_exits_1_without_key(monkeypatch):
 # _pre_session_init tests
 # ---------------------------------------------------------------------------
 
-def test_pre_session_init_skips_when_no_api_key(monkeypatch, capsys):
-    monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
-    _pre_session_init()  # must not raise
-    out = capsys.readouterr().out
-    # The guard must print the skip message and must NOT start the backfill.
-    assert "DATABENTO_API_KEY not set" in out
-    assert "Running Databento" not in out
-
-
-
 def test_pre_session_init_does_not_raise_on_backfill_exception(monkeypatch):
-    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
-    with patch("data.parquet_maintenance.backfill_parquets", side_effect=RuntimeError("network")):
+    # _pre_session_init merges leftover session 1s parquets at startup; a failure there
+    # must be swallowed (best-effort crash recovery), not propagated. gap_fill_1m_ib is
+    # stubbed so the test never touches a live IB connection (signal-mode branch).
+    with patch("data.parquet_maintenance.merge_session_1s_parquets", side_effect=RuntimeError("disk")), \
+         patch("data.ib_realtime.gap_fill_1m_ib", lambda *a, **kw: None):
         _pre_session_init()  # must not raise despite the exception
 
 
