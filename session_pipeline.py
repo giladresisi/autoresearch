@@ -237,6 +237,13 @@ class SessionPipeline:
         self._hist_mes_1m = hist_mes_1m
         self._emit = emit_fn
         self._daily_triggered = False
+        # GIL-27: per-bar Timestamp.floor() cache. The same `now` is floored to the same
+        # freq at several call sites within one on_1m_bar pass (1min ×2, 5min ×2, 1h across
+        # MNQ+MES), and Timestamp.floor() is surprisingly costly (pytz localize + np.isclose
+        # ~5% of 1s runtime). Memoize per bar: identity-reset on a new `now`, then reuse.
+        # Returns exactly now.floor(freq), so output is byte-identical.
+        self._floor_bar_ts: pd.Timestamp | None = None
+        self._floor_bar_cache: dict[str, pd.Timestamp] = {}
         self._hist_1hr: pd.DataFrame | None = None
         self._hist_4hr: pd.DataFrame | None = None
         # Rolling TF frames for the FVG liquidity scan: seeded at daily/startup from
@@ -755,6 +762,24 @@ class SessionPipeline:
             if _start_pos.get("stop_entry", "") == "":
                 self._force_entry_eval_after = now
 
+    def _floor(self, now: pd.Timestamp, freq: str) -> pd.Timestamp:
+        """now.floor(freq), memoized for the current bar. Identity-reset when `now`
+        changes, so within one on_1m_bar pass every call site sharing the same `now`
+        recomputes the floor at most once. Byte-identical to a direct now.floor(freq).
+
+        Self-initializing so it stays correct on instances built via __new__ that bypass
+        __init__ (e.g. the _extend_fvg_frames unit tests), matching the old now.floor()'s
+        lack of any instance-state precondition."""
+        cache = getattr(self, "_floor_bar_cache", None)
+        if cache is None or now is not self._floor_bar_ts:
+            self._floor_bar_ts = now
+            self._floor_bar_cache = cache = {}
+        v = cache.get(freq)
+        if v is None:
+            v = now.floor(freq)
+            cache[freq] = v
+        return v
+
     def on_1m_bar(
         self,
         now: pd.Timestamp,
@@ -784,7 +809,7 @@ class SessionPipeline:
         #   replacing the prior-day proxy used during the Asia session.
         # 09:20 ET (NY pre-market): FVGs and session H/L are stable for the RTH session.
         # Only one fires per calendar date — whichever comes first sets _last_daily_date.
-        _bar_floor = now.floor("1min")
+        _bar_floor = self._floor(now, "1min")
         _is_midnight = (now.hour == 0 and now.minute == 0)
         _is_0920    = (now.hour == 9 and now.minute == 20)
         if ((_is_midnight or _is_0920)
@@ -1239,7 +1264,7 @@ class SessionPipeline:
         # SMT V2: update the parallel MES liquidities block (additive; never touches MNQ).
         self._update_mes_liquidities(now, mes_bar_row, today_mes)
 
-        _this_5m = now.floor("5min")
+        _this_5m = self._floor(now, "5min")
         is_5m = (now.minute % 5 == 0) and (_this_5m != self._last_5m_processed)
 
         if is_5m:
@@ -1700,7 +1725,7 @@ class SessionPipeline:
 
         out: list[dict] = []
         for _freq, _frame_attr, _done_attr in specs:
-            _cur = now.floor(_freq)  # bars labeled >= _cur are still forming
+            _cur = self._floor(now, _freq)  # bars labeled >= _cur are still forming
             if getattr(self, _done_attr) == _cur:
                 continue  # fast path: no new boundary completed since the last call
             _frame = getattr(self, _frame_attr)
@@ -2028,7 +2053,7 @@ class SessionPipeline:
         # Hidden (body) SMTs: evaluate the just-completed 1m bar's CLOSE each minute. (15m/30m
         # fired too late — even 5m can fire early; the 1m close hints a trend change earliest.)
         for _tf, _tag in (("1min", "1m"),):
-            _floor = now.floor(_tf)
+            _floor = self._floor(now, _tf)
             if now != _floor:
                 continue  # not on this TF boundary
             if self._hidden_done.get(_tf) == _floor:
@@ -2391,7 +2416,7 @@ class SessionPipeline:
         )
 
     def _write_bar_state(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> None:
-        current_5m = now.floor("5min")
+        current_5m = self._floor(now, "5min")
         # Within a 5m block the [prev_5m, current_5m) window holds only completed,
         # immutable prior-block bars — recompute the stops once per block, then reuse.
         if current_5m != self._bar_state_5m:

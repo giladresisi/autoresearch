@@ -22,10 +22,23 @@ _TH = ZoneInfo("Asia/Bangkok")
 _ET = ZoneInfo("America/New_York")
 
 
+# Directories already materialized this process. Every getter funnels through _ensure
+# on every call (dozens per second in 1s backtests); the mkdir syscall is ~184 µs on
+# Windows even when the dir exists, so a repeat mkdir of an already-created dir was the
+# single largest backtest cost (GIL-27: ~36% of 1s runtime). Memoize: mkdir once per
+# distinct path, then short-circuit. Behavior is identical — the dir is still created on
+# first use; only the redundant re-creation of an existing dir is skipped.
+_ENSURED: set[str] = set()
+
+
 def _ensure(p: Path) -> Path:
-    """mkdir -p the directory and return it. Every getter funnels through here so a
-    freshly-overridden env var or state dir is materialized on first use."""
-    p.mkdir(parents=True, exist_ok=True)
+    """mkdir -p the directory (once per process) and return it. Every getter funnels
+    through here so a freshly-overridden env var or state dir is materialized on first
+    use; subsequent calls for the same path skip the redundant mkdir syscall."""
+    s = str(p)
+    if s not in _ENSURED:
+        p.mkdir(parents=True, exist_ok=True)
+        _ENSURED.add(s)
     return p
 
 

@@ -37,24 +37,48 @@ def _fast_copy(obj):
 # paths.set_state_dir(...) takes effect immediately: live points the prefix at the
 # session folder, a backtest at its per-run folder. Functions (not constants) are the
 # whole point — a captured constant would freeze the prefix at import time.
-def _daily_path() -> Path:      return paths.state_dir() / "daily.json"
-def _hypothesis_path() -> Path: return paths.state_dir() / "hypothesis.json"
-def _position_path() -> Path:   return paths.state_dir() / "position.json"
-def _smts_path() -> Path:       return paths.state_dir() / "smts.json"
+#
+# GIL-27: these resolve dozens of times per second in 1s backtests, and each
+# `state_dir() / "<name>.json"` rebuilds a Path (pathlib _parse_path/join/__str__ — a
+# measurable hot-path cost). Cache the resolved Paths and rebuild ONLY when the underlying
+# state dir or the live/backtest mode changes. Correctness is preserved because the only
+# things the result depends on are paths._STATE_DIR (reassigned to a NEW object by
+# paths.set_state_dir — identity-comparable, matching backtest_smt's own `paths._STATE_DIR`
+# read) and _IN_MEMORY (the global.json live-vs-backtest discriminator). state_dir() is
+# still called on change so the directory is materialized exactly as before.
+_PATH_CACHE_SD = None      # last paths._STATE_DIR object seen
+_PATH_CACHE_MEM = None     # last _IN_MEMORY seen
+_PATH_CACHE: dict[str, Path] = {}
 
 
-def _global_path() -> Path:
-    """global.json is the exception to the per-session state_dir rule.
+def _state_paths() -> dict[str, Path]:
+    global _PATH_CACHE_SD, _PATH_CACHE_MEM, _PATH_CACHE
+    _sd = paths._STATE_DIR
+    if _sd is not _PATH_CACHE_SD or _PATH_CACHE_MEM != _IN_MEMORY:
+        _base = paths.state_dir()  # materializes the dir (memoized in paths) on change
+        _PATH_CACHE = {
+            "daily":      _base / "daily.json",
+            "hypothesis": _base / "hypothesis.json",
+            "position":   _base / "position.json",
+            "smts":       _base / "smts.json",
+            # global.json is the exception to the per-session state_dir rule. It carries the
+            # dynamic all_time_high, which must persist ACROSS sessions. In LIVE it lives in
+            # the stable general live folder (read back each session, no seeding). In BACKTEST
+            # (in-memory) it stays under state_dir() so each per-run/per-date folder is
+            # isolated and final_snapshot() captures it. _IN_MEMORY is the discriminator.
+            "global":     (_base / "global.json") if _IN_MEMORY
+                          else (paths.general_live_dir() / "global.json"),
+        }
+        _PATH_CACHE_SD = _sd
+        _PATH_CACHE_MEM = _IN_MEMORY
+    return _PATH_CACHE
 
-    It carries the dynamic all_time_high, which must persist ACROSS sessions. In LIVE it
-    therefore lives in the stable general live folder (paths.general_live_dir()), not the
-    per-session state_dir — so the ATH is simply read back each session with no
-    prior-session seeding needed. In BACKTEST (in-memory) it stays under state_dir() so
-    each per-run/per-date folder is isolated and final_snapshot() captures it (and the
-    in-memory store stays keyed per run). _IN_MEMORY is the live-vs-backtest discriminator."""
-    if _IN_MEMORY:
-        return paths.state_dir() / "global.json"
-    return paths.general_live_dir() / "global.json"
+
+def _daily_path() -> Path:      return _state_paths()["daily"]
+def _hypothesis_path() -> Path: return _state_paths()["hypothesis"]
+def _position_path() -> Path:   return _state_paths()["position"]
+def _smts_path() -> Path:       return _state_paths()["smts"]
+def _global_path() -> Path:     return _state_paths()["global"]
 
 def _session_folder_date() -> str:
     """ET session date naming the per-session folder (sessions/<date>) for files that may
