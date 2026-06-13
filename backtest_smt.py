@@ -1341,7 +1341,9 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                 today_mnq   = mnq_1m_today[mnq_1m_today.index <= bar_ts]
                 today_mes   = mes_1m_today[mes_1m_today.index <= bar_ts]
                 _before = len(day_events)
-                pipeline.on_1m_bar(bar_ts, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
+                # 1m mode feeds COMPLETED 1m bars → SMT detection runs on each bar (R3).
+                pipeline.on_1m_bar(bar_ts, mnq_bar_row, mes_bar_row, today_mnq, today_mes,
+                                   bar_complete=True)
                 _annotate_slippage(day_events[_before:], V2_MARKET_CLOSE_SLIPPAGE_PTS)
 
         else:  # mode == "1s": aggregate 1s bars into running partial 1m bar, call once per second
@@ -1430,7 +1432,10 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                     _today_mnq = pd.DataFrame(_fm, index=_idx_mnq, columns=_cols_idx)
                     _today_mes = pd.DataFrame(_fe, index=_idx_mes, columns=_cols_idx)
                     _before = len(day_events)
-                    pipeline.on_1m_bar(_now, _mnq_row, _mes_row, _today_mnq, _today_mes)
+                    # 1s mode feeds intra-minute PARTIALS → SMT detection runs only on the
+                    # minute rollover, on the just-completed bar (R3); execution stays 1s.
+                    pipeline.on_1m_bar(_now, _mnq_row, _mes_row, _today_mnq, _today_mes,
+                                       bar_complete=False)
                     _annotate_slippage(day_events[_before:], V2_MARKET_CLOSE_SLIPPAGE_PTS)
 
                 # Append this completed minute's 1m bar to the running base accumulators.
@@ -1443,6 +1448,18 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                     _eC[_lj]  if _mes_has else _eo, _ecV[_lj] if _mes_has else 0.0]], dtype=float)
                 _base_vals_mes = _np.vstack((_base_vals_mes, _row_mes)) if _base_vals_mes.size else _row_mes
                 _base_idx_mes = _idx_mes
+
+            # R3: the rollover detection path detects minute M only when M+1 starts, so the
+            # final minute of the session is still pending — flush it against its completed
+            # bar so the 1s detection tail matches 1m (which detects every completed bar).
+            try:
+                _last_today_mnq = pd.DataFrame(_fm, index=_idx_mnq, columns=_cols_idx)
+                _last_today_mes = pd.DataFrame(_fe, index=_idx_mes, columns=_cols_idx)
+                _before = len(day_events)
+                pipeline.finalize_detection(_last_today_mnq, _last_today_mes)
+                _annotate_slippage(day_events[_before:], V2_MARKET_CLOSE_SLIPPAGE_PTS)
+            except NameError:
+                pass  # no 1s bars were processed this session
 
         # ------------------------------------------------------------------ #
         # Emit end-of-session event if a position is still open               #

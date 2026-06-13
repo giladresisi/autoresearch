@@ -1,6 +1,23 @@
 ﻿# PROGRESS
 
 
+## Feature: Evaluate/arm an entry immediately on resume (and flat late startup)
+### Status: ✅ Complete (unstaged)
+**Started**: 2026-06-12
+**Plan File**: `.agents/plans/resume-immediate-entry-eval.md`
+
+On a pause→resume transition (and on a flat late startup), `session_pipeline.py` arms a force-eval (`_force_entry_eval_after = now`) so the strategy re-runs its FULL existing entry evaluation against the last completed 5m bar immediately, instead of waiting for the next 5m boundary — arming the stop-entry iff the existing confirmation criteria are met. Reuses the existing force-eval machinery + the real `strategy.run_strategy` confirmation/placement logic (no entry/order logic reimplemented). +36 lines in `session_pipeline.py` (`__init__` `_prev_paused` tracker, `on_1m_bar` resume detector, `on_session_start` late-startup arm); staleness handled by the already-merged D1/O2 STP→MKT downgrade (no new code). 8 new tests (8/8 pass), 69/69 `test_session_pipeline.py`, 0 new failures across the suite. code-review PASSED (no findings); acceptance ACCEPTED 3/3. All changes UNSTAGED.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/resume-immediate-entry-eval.md`
+- 3/3 tasks; 8 new tests (8/8 passing); 0 regressions
+- One divergence (good): staleness-safety satisfied by the existing D1/O2 STP→MKT downgrade path — zero new code, as the plan anticipated
+- Known pre-existing/environmental flake noted: `test_smt_daily.py::TestAllTimeHighUpdate` (does not isolate `ACT_GLOBAL_DIR`); independent of this change
+- Alignment score: 10/10
+
+---
+
 ## Feature: SMT adverse-run invalidation + relevance supersession
 ### Status: ✅ Part A complete + post-exec bug fixed (unstaged); Part B spec-only
 **Started**: 2026-06-11

@@ -857,6 +857,7 @@ class SmtV2Dispatcher:
         mes_bar_row: pd.Series,
         mnq_1m_df: pd.DataFrame,
         mes_1m_df: pd.DataFrame,
+        bar_complete: "bool | None" = None,
     ) -> None:
         if self._pipeline is None:
             return
@@ -864,7 +865,8 @@ class SmtV2Dispatcher:
         # since future bars don't exist yet.
         today_mnq = mnq_1m_df[mnq_1m_df.index.date == now.date()]
         today_mes = mes_1m_df[mes_1m_df.index.date == now.date()]
-        self._pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
+        self._pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes,
+                                 bar_complete=bar_complete)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -954,7 +956,10 @@ def main() -> None:
                 _smtv2_dispatcher.on_session_start(_bar_ts_v2, _mnq_df, _mes_df)
             _mnq_bar = _mnq_df.iloc[-1] if not _mnq_df.empty else pd.Series(dtype=float)
             _mes_bar = _mes_df.iloc[-1] if not _mes_df.empty else pd.Series(dtype=float)
-            _smtv2_dispatcher.on_1m_bar(_bar_ts_v2, _mnq_bar, _mes_bar, _mnq_df, _mes_df)
+            # signal_smt drives the pipeline from COMPLETED 1m bars → SMT detection runs
+            # on each bar (R3 bar_complete=True).
+            _smtv2_dispatcher.on_1m_bar(
+                _bar_ts_v2, _mnq_bar, _mes_bar, _mnq_df, _mes_df, bar_complete=True)
 
     _ib_source = IbRealtimeSource(
         host=IB_HOST, port=IB_PORT, client_id=IB_CLIENT_ID,

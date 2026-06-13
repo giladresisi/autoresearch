@@ -295,6 +295,32 @@ the live session. The goal is to make all three sources converge: any divergence
 between live and regression represents a real-time execution artifact that may
 be worth fixing in the strategy or infrastructure.
 
+**B0. Whole-session P&L delta — MANDATORY, do this FIRST (before per-trade matching).**
+Compute the live clean-ledger P&L (sum of `trades_full.tsv` clean rows) and the 1s-regression
+P&L (sum of `trades_1s.tsv`), and compare them. The regression is the apples-to-apples measure
+of what the CURRENT, fully-automated strategy logic does on this exact tape — so a large gap
+means the live P&L is NOT attributable to the strategy and must be explained, not reported at
+face value. **Trigger a dedicated discrepancy (its own D-number) whenever the absolute gap
+exceeds the larger of $300 or 50% of the live clean P&L.** When triggered, DECOMPOSE the gap
+into these four buckets and quantify each in dollars (cite specific entry timestamps/prices
+from `events.jsonl` ↔ `trades_1s.tsv`):
+  1. **Manual-discretion trades** — entries/closes the user placed by hand (look for
+     `source="manual"`, `reason="user-requested"`, `reason="manual-reconcile-flat"`, and
+     `comments.md` notes of hand-placed stop-entries / S/Ls / `trade.py` closes). These exist
+     only in live and are human alpha (or loss), NOT strategy edge.
+  2. **Auto trades present only in LIVE** — strategy-sourced trades with no regression
+     counterpart in the same window. These are usually a **manually-perturbed-state artifact**:
+     pauses/resumes/reconciles/late-start left the live state different from the clean replay,
+     so it armed entries the deterministic replay never did. Not reproducible edge.
+  3. **Auto trades present only in REGRESSION** — trades the clean replay took that live missed
+     (e.g. live started late, or was paused). Note the window and net.
+  4. **Common trades** — present in both (matched entry ±5s, same direction). This is the only
+     P&L genuinely attributable to current strategy logic running live.
+State plainly which P&L figure to trust as the strategy measure (almost always the regression),
+and flag the live total as hybrid/manual if buckets 1–2 dominate. A late start (live not running
+from 18:00 ET) and the number of pause/resume cycles are primary causes of buckets 2–3 — call
+them out. Only after B0 proceed to the per-trade matching below.
+
 For each trade pair (matched by entry_time ± 5 seconds and direction):
   - **Entry price**: flag if |live − regression| > 0.25 pts (1 tick)
   - **Exit time**: flag if |live − regression| > 60 seconds
@@ -478,6 +504,9 @@ fabricate parquet results.>
 | 1s regression replay P&L | <from trades_1s.tsv / regression result> |
 | Ledger composition | <N clean · N suspect · N unpaired-open> |
 <One line on whether live and regression ran on identical code (commit-context result).>
+<If the B0 whole-session P&L-delta check triggered a discrepancy, add a "P&L-delta" line here:
+the gap size and its one-line decomposition (manual $ · live-only-auto $ · regression-only $ ·
+common $), and which figure to trust as the strategy measure. Reference the D-number.>
 
 ## 3. Discrepancies (see `discrepancies.md`)
 <Bulleted D-list: each D-number, severity tag, one-line summary. Mark [CRITICAL] ones with 🔴.>

@@ -264,12 +264,6 @@ def _detect_level_smts(
     mnq_close = float(mnq_bar.get("close", mnq_bar.get("Close", 0.0)))
     mes_close = float(mes_bar.get("close", mes_bar.get("Close", 0.0)))
 
-    # Prior-bar MNQ close (the approach reference for fixed-level sweep direction). Stored
-    # per rec_type under a reserved no-"|" key so the level-SMT post-pass skips it. Seeded to
-    # the current close on the first bar (approach = current side).
-    _prevref_key = "__prevref_" + rec_type
-    prev_ref = float(state.get(_prevref_key, mnq_close))
-
     # Deterministic order so a same-bar opposite SMT can re-arm reproducibly.
     for name in sorted(levels_mnq.keys() & levels_mes.keys()):
         lvl_mnq = levels_mnq[name]
@@ -291,21 +285,12 @@ def _detect_level_smts(
             mnq_lvl_price = float(lvl_mnq["price"])
             mes_lvl_price = float(lvl_mes["price"])
 
-        # Direction by SWEEP/approach (universal per-level take-out), not by the level's
-        # high/low name. A DOWN-sweep (price falling ONTO the level) is bullish; an UP-sweep
-        # (rising INTO it) is bearish. A DYNAMIC running extreme is only ever swept one way (a
-        # running high upward, a low downward), so its proven suffix mapping is kept. A FIXED
-        # level (prev-day/week, 6hr-session) can be met from either side, so the approach side
-        # — the prior MNQ close vs the level — picks it: above => down-sweep/bullish, below =>
-        # up-sweep/bearish (exact tie falls back to the suffix default).
-        if kind_cls == "dynamic":
-            direction = "short" if sub == "high" else "long"
-        elif prev_ref > mnq_lvl_price:
-            direction = "long"
-        elif prev_ref < mnq_lvl_price:
-            direction = "short"
-        else:
-            direction = "short" if sub == "high" else "long"
+        # R1: direction is unidirectional by the level's high/low suffix for ALL level kinds
+        # (dynamic AND fixed). A swept HIGH → bearish/short (up-sweep, rising INTO it); a swept
+        # LOW → bullish/long (down-sweep, falling ONTO it). Fixed levels no longer fire on the
+        # opposite ("reclaim from the depleted side") approach: once a level's resting liquidity
+        # has been taken out, a later cross from the far side is NOT a fresh SMT.
+        direction = "short" if sub == "high" else "long"
         side = "bearish" if direction == "short" else "bullish"
         # State key includes rec_type so wick (regular) and body (hidden) SMTs on the same
         # (level, direction) are tracked INDEPENDENTLY — each fires/re-arms on its own.
@@ -420,15 +405,14 @@ def _detect_level_smts(
         st["level_price"] = mnq_lvl_price
 
     # (a2) Adverse-run invalidation — the mirror of fulfillment, maintained INDEPENDENTLY of the
-    # current bar's approach direction. The per-level loop above keys state by the direction the
-    # current approach implies (prev_ref vs level price); but a fired SMT is invalidated precisely
-    # when price runs to the OPPOSITE side of its level, which is exactly when that approach
-    # direction flips — so a direction-keyed check would strand the original SMT's key (never
-    # re-visited → never invalidated; the prev1_week_high|short 09:49 case). So sweep EVERY
-    # fired-open state of this rec_type each bar and test the adverse-run condition against the
-    # current MNQ close using the state's OWN stored direction (parsed from its key), regardless
-    # of eligibility this bar. Informational only: sets the `invalidated` flag + appends to the
-    # reserved trail key; never touches records/fire/fulfill/re-arm, so trades are unaffected.
+    # per-level loop above. A fired SMT must be invalidated whenever price runs INV_PTS to the
+    # adverse side of its fire close, even on bars where its level is not present/eligible or not
+    # touched (the per-level loop only visits a level when it appears in this batch — e.g. the
+    # prev1_week_high|short 09:49 case ran adverse on later bars where the level was absent). So
+    # sweep EVERY fired-open state of this rec_type each bar and test the adverse-run condition
+    # against the current MNQ close using the state's OWN stored direction (parsed from its key),
+    # regardless of eligibility this bar. Informational only: sets the `invalidated` flag + appends
+    # to the reserved trail key; never touches records/fire/fulfill/re-arm, so trades are unaffected.
     # Iterate a snapshot (list) because the first event creates the `__invalidations__` key.
     for skey, st in list(state.items()):
         if "|" not in skey:
@@ -483,8 +467,6 @@ def _detect_level_smts(
                 st["fulfilled"] = False
                 st["invalidated"] = False
 
-    # Persist the approach reference for next bar's fixed-level sweep-direction decision.
-    state[_prevref_key] = mnq_close
     return records, state
 
 

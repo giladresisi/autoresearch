@@ -470,7 +470,14 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
             _session_state_dir = _SESSIONS_DIR / session_label.isoformat()
             paths.set_state_dir(_session_state_dir)
             if LIVE_TRADING:
-                signal_cmd = ["uv", "run", "python", "-m", "automation.main"]
+                # Spawn the venv interpreter DIRECTLY (not via `uv run`). Under
+                # `uv run python -m automation.main` the `uv` wrapper is the direct child and
+                # the real `python -m automation.main` runs as a GRANDCHILD; the orchestrator's
+                # terminate/kill (ProcessManager._terminate) would then reap only the wrapper
+                # and orphan the actual trading process — which kept running and traded while
+                # paused after the orchestrator crashed (incident 2026-06-12, D2). sys.executable
+                # is the active venv interpreter, so the orchestrator holds the real PID.
+                signal_cmd = [sys.executable, "-m", "automation.main"]
             else:
                 signal_cmd = _SIGNAL_SMT
             print(f"[orchestrator] mode={'LIVE_TRADING' if LIVE_TRADING else 'signal'}", flush=True)

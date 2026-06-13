@@ -397,6 +397,34 @@ def test_place_market_entry_floors_against_current_price_when_entry_zero(_in_tmp
     assert saved["active"]["stop"] == pytest.approx(19840.0)
 
 
+def test_place_market_entry_reanchors_cautious_to_fill(_in_tmp, _mock_today):
+    """A manual market entry must re-anchor the cautious ladder to the ACTUAL fill —
+    same as the strategy's own fills / the STP->MKT downgrade do. Without this the ladder
+    stays anchored to a stale formation price, so the cautious break can trail too tight
+    and stop a manual re-entry out prematurely (2026-06-12)."""
+    empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
+                 "conf_bar_entry": {}, "failed_entries": 0}
+    mock_executor = MagicMock()
+    mock_executor._entry_is_live = True
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch.object(live_orders, "_current_price", return_value=19850.0), \
+         patch("smt_state.load_position", return_value=empty_pos), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)), \
+         patch("smt_state.load_hypothesis", return_value={"direction": "up"}), \
+         patch("smt_state.load_daily", return_value={"liquidities": []}), \
+         patch("smt_state.load_global", return_value={"all_time_high": 21000.0}), \
+         patch("smt_state.save_hypothesis") as mock_save_hyp, \
+         patch("hypothesis.recompute_cautious_for_fill") as mock_recompute:
+        # manual entry: entry 0.0 → fill resolved to current price 19850
+        live_orders.place_market_entry("long", 0.0, 19820.0)
+
+    # Cautious ladder re-anchored to the actual fill (19850.0) and persisted.
+    mock_recompute.assert_called_once()
+    assert mock_recompute.call_args.args[1] == pytest.approx(19850.0)
+    mock_save_hyp.assert_called_once()
+
+
 def test_place_market_entry_far_stop_unchanged(_in_tmp, _mock_today):
     """A market-entry stop already farther than the floor is left exactly as-is."""
     empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",

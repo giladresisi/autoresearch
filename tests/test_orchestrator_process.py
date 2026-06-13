@@ -80,6 +80,39 @@ def test_terminate_graceful():
 
 
 # ---------------------------------------------------------------------------
+# 7b. test_terminate_reaps_orphan_descendants  (D2: no grandchild left trading)
+# ---------------------------------------------------------------------------
+def test_terminate_reaps_orphan_descendants():
+    """A wrapper subprocess whose real worker is a grandchild must not leave an orphan:
+    _terminate captures descendants before killing the parent and reaps any survivors."""
+    relay = make_relay()
+    log, lines = make_log_channel()
+    pm = ProcessManager(SCRIPT_PATH, relay, log)
+
+    proc = MagicMock()
+    proc.pid = 4242
+    proc.wait.return_value = 0
+
+    # Grandchild (the real automation.main worker) still alive after the parent dies.
+    orphan = MagicMock()
+    orphan.pid = 4243
+
+    with patch("orchestrator.process.psutil") as mock_psutil:
+        mock_psutil.NoSuchProcess = psutil.NoSuchProcess
+        mock_psutil.AccessDenied = psutil.AccessDenied
+        mock_psutil.Process.return_value.children.return_value = [orphan]
+        # wait_procs reports the orphan as still alive after terminate → must be killed.
+        mock_psutil.wait_procs.return_value = ([], [orphan])
+
+        pm._terminate(proc)
+
+    proc.terminate.assert_called_once()
+    orphan.terminate.assert_called_once()
+    orphan.kill.assert_called_once()
+    assert any("4243" in line for line in lines)
+
+
+# ---------------------------------------------------------------------------
 # 8. test_kill_existing_terminates_matching_process
 # ---------------------------------------------------------------------------
 def test_kill_existing_terminates_matching_process():
