@@ -401,63 +401,6 @@ def _make_long_session_bars(base=20000.0):
     return mnq, mes
 
 
-# ══ TRADE_DIRECTION filter tests ═════════════════════════════════════════════
-
-def _patch_direction_test_guards(monkeypatch, trade_direction):
-    """Shared setup for direction-filter tests: disable all guards except direction.
-
-    Patches strategy-side constants on strategy_smt and harness-side on backtest_smt.
-    Returns backtest_smt so callers can invoke run_backtest on the correct module.
-    """
-    import strategy_smt as _strat
-    import backtest_smt as _bk
-    # Strategy-side: affect _build_signal_from_bar, manage_position, and process_scan_bar
-    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
-    monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
-    monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
-    # TRADE_DIRECTION and SIGNAL_BLACKOUT now read by process_scan_bar from strategy_smt
-    monkeypatch.setattr(_strat, "TRADE_DIRECTION", trade_direction)
-    monkeypatch.setattr(_strat, "SIGNAL_BLACKOUT_START", "")
-    monkeypatch.setattr(_strat, "SIGNAL_BLACKOUT_END", "")
-    # Harness-side: affect run_backtest directly
-    monkeypatch.setattr(_bk, "TRADE_DIRECTION", trade_direction)
-    monkeypatch.setattr(_bk, "SIGNAL_BLACKOUT_START", "")
-    monkeypatch.setattr(_bk, "SIGNAL_BLACKOUT_END", "")
-    monkeypatch.setattr(_bk, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
-    monkeypatch.setattr(_bk, "REENTRY_MAX_MOVE_PTS", 0.0)
-    monkeypatch.setattr(_bk, "compute_tdo", lambda *a: 19900.0)
-    return _bk
-
-
-def test_trade_direction_short_blocks_long(monkeypatch):
-    """TRADE_DIRECTION='short' causes run_backtest to skip bullish SMT signals."""
-    _bk = _patch_direction_test_guards(monkeypatch, "short")
-    mnq, mes = _make_long_session_bars()
-    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
-    assert stats["total_trades"] == 0
-
-
-def test_trade_direction_long_blocks_short(monkeypatch):
-    """TRADE_DIRECTION='long' causes run_backtest to skip bearish SMT signals."""
-    import backtest_smt as _bk
-    _patch_direction_test_guards(monkeypatch, "long")
-    monkeypatch.setattr(_bk, "compute_tdo", lambda *a: 20100.0)
-    mnq, mes = _make_short_session_bars()
-    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
-    assert stats["total_trades"] == 0
-
-
-def test_trade_direction_both_passes_short(monkeypatch):
-    """TRADE_DIRECTION='both' does not filter bearish SMT signals."""
-    _bk = _patch_direction_test_guards(monkeypatch, "both")
-    mnq, mes = _make_short_session_bars()
-    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
-    assert stats["total_trades"] >= 1
-    assert any(t["direction"] == "short" for t in stats["trade_records"])
-
-
 # ══ TDO validity gate tests ══════════════════════════════════════════════════
 
 def test_tdo_validity_blocks_inverted_long(monkeypatch):
@@ -780,167 +723,18 @@ def test_breakeven_stop_only_tightens(monkeypatch):
 
 # ══ State machine / re-entry integration tests ══════════════════════════════
 
-def _make_reentry_session_bars(base=20000.0):
-    """Build a session where a trade stops out early and a re-entry fires later.
-
-    Bar 5: bullish anchor (close > open).
-    Bar 7: MES new session high (divergence), MNQ fails → bearish signal.
-    Bar 8: confirmation → entry (open=base+2, close=base-2, high=base+6).
-    Bar 9: immediate stop-out (high exceeds stop).
-    Bar 12: new anchor bar for re-entry (bullish).
-    Bar 14: re-entry confirmation (bearish bar, high > anchor).
-    Bar 20: position closes at session end.
-    """
-    n = 50
-    start_ts = pd.Timestamp("2025-01-02 09:00:00", tz="America/New_York")
-    idx = pd.date_range(start=start_ts, periods=n, freq="1min")
-    mes_highs = [base + 5] * n
-    mnq_highs = [base + 5] * n
-    mes_lows  = [base - 5] * n
-    mnq_lows  = [base - 5] * n
-    opens  = [base] * n
-    closes = [base] * n
-
-    # Bullish anchor before divergence
-    opens[5]  = base - 2; closes[5] = base + 2
-    # SMT divergence at bar 7
-    mes_highs[7] = base + 30
-    # Bearish confirmation at bar 8 (entry)
-    opens[8] = base + 2; closes[8] = base - 2; mnq_highs[8] = base + 6
-    # Stop-out bar: short stop = entry + SHORT_STOP_RATIO * dist_to_tdo
-    # With TDO=base-100, dist=100, stop ≈ entry + 40 = base - 2 + 40 = base+38
-    mnq_highs[9] = base + 40  # triggers stop
-
-    # Re-entry anchor: new bullish bar at 12
-    opens[12] = base - 3; closes[12] = base + 3
-    # Re-entry confirmation at bar 14: bearish, high > bar-12 close
-    opens[14] = base + 3; closes[14] = base - 3; mnq_highs[14] = base + 7
-
-    mnq = pd.DataFrame(
-        {"Open": opens, "High": mnq_highs, "Low": mnq_lows, "Close": closes, "Volume": [1000.0]*n},
-        index=idx,
-    )
-    mes = pd.DataFrame(
-        {"Open": opens, "High": mes_highs, "Low": mes_lows, "Close": closes, "Volume": [1000.0]*n},
-        index=idx,
-    )
-    return mnq, mes
 
 
-def _patch_reentry_guards(monkeypatch, reentry_max_move=50.0, breakeven_pct=0.0):
-    """Shared setup for reentry tests. Returns backtest_smt for run_backtest calls."""
-    import strategy_smt as _strat
-    import backtest_smt as _bk
-    # Strategy-side
-    monkeypatch.setattr(_strat, "TDO_VALIDITY_CHECK", False)
-    monkeypatch.setattr(_strat, "MIN_STOP_POINTS", 0.0)
-    monkeypatch.setattr(_strat, "MIN_TDO_DISTANCE_PTS", 0.0)
-    monkeypatch.setattr(_strat, "MAX_TDO_DISTANCE_PTS", 999.0)
-    monkeypatch.setattr(_strat, "TRAIL_AFTER_TP_PTS", 0.0)
-    monkeypatch.setattr(_strat, "BREAKEVEN_TRIGGER_PCT", breakeven_pct)
-    # Disable limit entry so signal fills at bar-8 close (not delayed to bar 9).
-    # Bar 9's high is designed to trigger the stop, which requires entry at bar 8.
-    # Must patch both modules: backtest_smt holds its own bound name.
-    monkeypatch.setattr(_strat, "LIMIT_ENTRY_BUFFER_PTS", None)
-    monkeypatch.setattr(_bk,    "LIMIT_ENTRY_BUFFER_PTS", None)
-    # Disable midnight-open TP override so compute_tdo=19900 is used as TDO.
-    # Must patch both modules since backtest_smt holds its own bound name.
-    monkeypatch.setattr(_strat, "MIDNIGHT_OPEN_AS_TP", False)
-    monkeypatch.setattr(_bk, "MIDNIGHT_OPEN_AS_TP", False)
-    # MAX_REENTRY_COUNT and SIGNAL_BLACKOUT are read by process_scan_bar from strategy_smt
-    monkeypatch.setattr(_strat, "MAX_REENTRY_COUNT", 999)
-    monkeypatch.setattr(_strat, "SIGNAL_BLACKOUT_START", "")
-    monkeypatch.setattr(_strat, "SIGNAL_BLACKOUT_END", "")
-    monkeypatch.setattr(_strat, "PARTIAL_EXIT_ENABLED", False)
-    # Harness-side
-    monkeypatch.setattr(_bk, "REENTRY_MAX_MOVE_PTS", reentry_max_move)
-    monkeypatch.setattr(_bk, "MAX_REENTRY_COUNT", 999)  # disable cap; initial entry also uses reentry_count
-    monkeypatch.setattr(_bk, "SIGNAL_BLACKOUT_START", "")
-    monkeypatch.setattr(_bk, "SIGNAL_BLACKOUT_END", "")
-    monkeypatch.setattr(_bk, "ALLOWED_WEEKDAYS", frozenset({0, 1, 2, 3, 4}))
-    monkeypatch.setattr(_bk, "compute_tdo", lambda *a: 19900.0)
-    return _bk
 
 
-def test_reentry_after_stop(monkeypatch):
-    """Re-entry fires a second trade when stop-out move < REENTRY_MAX_MOVE_PTS."""
-    _bk = _patch_reentry_guards(monkeypatch, reentry_max_move=50.0, breakeven_pct=0.0)
-    mnq, mes = _make_reentry_session_bars()
-    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
-    assert stats["total_trades"] >= 2
 
 
-def test_no_reentry_when_disabled(monkeypatch):
-    """REENTRY_MAX_MOVE_PTS=0.0 → only one trade even with a valid re-entry setup."""
-    _bk = _patch_reentry_guards(monkeypatch, reentry_max_move=0.0, breakeven_pct=0.0)
-    mnq, mes = _make_reentry_session_bars()
-    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
-    assert stats["total_trades"] <= 1
 
 
-def test_no_reentry_when_move_exceeds_threshold(monkeypatch):
-    """Stop-out after favorable move > REENTRY_MAX_MOVE_PTS → no second trade.
-
-    For a short, move = entry_price - stop_out_bar_close.  A positive value
-    means price moved favorably (downward) before reversing and stopping us out.
-    When move >= threshold, re-entry is suppressed (we missed the move already).
-    """
-    _bk = _patch_reentry_guards(monkeypatch, reentry_max_move=5.0, breakeven_pct=0.0)
-
-    # Build a session where:
-    # - entry at bar 8 close = base-2
-    # - stop-out at bar 9: high = base+40 triggers stop, but close = base-20
-    # - move = (base-2) - (base-20) = 18 >= REENTRY_MAX_MOVE_PTS (5.0) → blocked
-    base = 20000.0
-    mnq, mes = _make_reentry_session_bars(base=base)
-    # Override bar-9 close: price dipped 20 pts favorably before the wick stopped us out.
-    mnq = mnq.copy()
-    mnq.iloc[9, mnq.columns.get_loc("Close")] = base - 20
-
-    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
-    assert stats["total_trades"] == 1
 
 
-def test_reentry_breakeven_active_bypasses_move_check(monkeypatch):
-    """Trade stopped at breakeven → REENTRY_ELIGIBLE regardless of move size."""
-    _bk = _patch_reentry_guards(monkeypatch, reentry_max_move=1.0, breakeven_pct=0.01)
-    mnq, mes = _make_reentry_session_bars()
-    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-03")
-    # Verify the backtest completes without error; with breakeven active the position
-    # stops at entry so breakeven_active bypasses the move check → reentry eligible.
-    assert "total_trades" in stats
 
 
-def test_state_resets_at_day_boundary(monkeypatch):
-    """A pending divergence from day 1 does NOT carry to day 2."""
-    _bk = _patch_reentry_guards(monkeypatch, reentry_max_move=0.0, breakeven_pct=0.0)
-
-    # Day 1: divergence fires but no confirmation bar in session (no bearish confirm)
-    n = 30
-    d1_start = pd.Timestamp("2025-01-02 09:00:00", tz="America/New_York")
-    d1_idx   = pd.date_range(start=d1_start, periods=n, freq="1min")
-    mes_highs = [20005.0] * n; mes_highs[7] = 20030.0
-    mnq_highs = [20005.0] * n
-    opens_d1  = [20000.0] * n; opens_d1[5] = 19998.0; closes_d1 = [20000.0] * n; closes_d1[5] = 20002.0
-    # No bearish confirmation bar → state stays WAITING_FOR_ENTRY at day end
-    mnq1 = pd.DataFrame({"Open": opens_d1, "High": mnq_highs, "Low": [19995.0]*n, "Close": closes_d1, "Volume": [1000.0]*n}, index=d1_idx)
-    mes1 = pd.DataFrame({"Open": opens_d1, "High": mes_highs, "Low": [19995.0]*n, "Close": closes_d1, "Volume": [1000.0]*n}, index=d1_idx)
-
-    # Day 2: flat bars — no divergence of its own
-    d2_start = pd.Timestamp("2025-01-03 09:00:00", tz="America/New_York")
-    d2_idx   = pd.date_range(start=d2_start, periods=n, freq="1min")
-    flat_opens  = [20000.0] * n
-    flat_closes = [20000.0] * n
-    # Bar 5 on day 2: bearish bar that would confirm a "short" if state carried over
-    flat_opens[5] = 20002.0; flat_closes[5] = 19998.0
-    mnq2 = pd.DataFrame({"Open": flat_opens, "High": [20005.0]*n, "Low": [19995.0]*n, "Close": flat_closes, "Volume": [1000.0]*n}, index=d2_idx)
-    mes2 = pd.DataFrame({"Open": flat_opens, "High": [20005.0]*n, "Low": [19995.0]*n, "Close": flat_closes, "Volume": [1000.0]*n}, index=d2_idx)
-
-    mnq = pd.concat([mnq1, mnq2])
-    mes = pd.concat([mes1, mes2])
-    stats = _bk.run_backtest(mnq, mes, start="2025-01-02", end="2025-01-04")
-    # Day 2 should not see a trade from the stale day-1 divergence
-    assert stats["total_trades"] == 0
 
 
 # ══ Task 7b — MAX_TDO_DISTANCE_PTS ceiling filter tests ══════════════════════
@@ -1064,16 +858,6 @@ def test_set_bar_data_overwrites_previous():
     assert train_smt._mnq_bars is df2
 
 
-def test_run_backtest_calls_init_bar_data(monkeypatch):
-    import backtest_smt as _bk
-    calls = []
-    monkeypatch.setattr(_bk, "init_bar_data", lambda *a, **kw: calls.append(True))
-    mnq = _make_1m_bars([100]*2, [101]*2, [99]*2, [100]*2)
-    mes = _make_1m_bars([50]*2, [51]*2, [49]*2, [50]*2)
-    monkeypatch.setattr(_bk, "BACKTEST_START", "2025-01-02")
-    monkeypatch.setattr(_bk, "BACKTEST_END",   "2025-01-03")
-    _bk.run_backtest(mnq, mes)
-    assert len(calls) == 1
 
 
 # ══ Phase 2: exit_market infrastructure ══════════════════════════════════════

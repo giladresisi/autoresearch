@@ -644,7 +644,7 @@ def test_v1_session_end_no_double_close_on_stop(monkeypatch, tmp_path, capsys):
 
 
 def test_v2_session_end_closes_active_position(monkeypatch, tmp_path):
-    """V2: bar at 16:00:01 with active position → close_position(reason='session-end') called."""
+    """V2: bar at 17:00:00 (inside the 16:55-18:05 CME maintenance/closed window) with active position → close_position(reason='session-end') called."""
     import automation.main as am
     import live_orders
     import strategy_smt
@@ -660,7 +660,7 @@ def test_v2_session_end_closes_active_position(monkeypatch, tmp_path):
     monkeypatch.setattr(live_orders, "cancel_stop_entry", cancel_mock)
     monkeypatch.setattr(live_orders, "close_position", close_mock)
 
-    test_ts = pd.Timestamp("2026-05-19 16:00:01", tz="America/New_York")
+    test_ts = pd.Timestamp("2026-05-19 17:00:00", tz="America/New_York")
     bar = strategy_smt._BarRow(20000.0, 20005.0, 19995.0, 20001.0, 50.0, test_ts)
     am._on_bar(bar, None)
 
@@ -670,7 +670,7 @@ def test_v2_session_end_closes_active_position(monkeypatch, tmp_path):
 
 
 def test_v2_session_end_cancels_pending_entry(monkeypatch, tmp_path):
-    """V2: bar at 16:00:01 with pending entry only → cancel_stop_entry('session-end') called."""
+    """V2: bar at 17:00:00 (inside the 16:55-18:05 CME maintenance/closed window) with pending entry only → cancel_stop_entry('session-end') called."""
     import automation.main as am
     import live_orders
     import strategy_smt
@@ -686,7 +686,7 @@ def test_v2_session_end_cancels_pending_entry(monkeypatch, tmp_path):
     monkeypatch.setattr(live_orders, "cancel_stop_entry", cancel_mock)
     monkeypatch.setattr(live_orders, "close_position", close_mock)
 
-    test_ts = pd.Timestamp("2026-05-19 16:00:01", tz="America/New_York")
+    test_ts = pd.Timestamp("2026-05-19 17:00:00", tz="America/New_York")
     bar = strategy_smt._BarRow(20000.0, 20005.0, 19995.0, 20001.0, 50.0, test_ts)
     am._on_bar(bar, None)
 
@@ -695,7 +695,7 @@ def test_v2_session_end_cancels_pending_entry(monkeypatch, tmp_path):
 
 
 def test_v2_session_end_already_flat_noop(monkeypatch, tmp_path):
-    """V2: bar at 16:00:01 with no position/entry → neither cancel nor close called."""
+    """V2: bar at 17:00:00 (inside the 16:55-18:05 CME maintenance/closed window) with no position/entry → neither cancel nor close called."""
     import automation.main as am
     import live_orders
     import strategy_smt
@@ -711,7 +711,7 @@ def test_v2_session_end_already_flat_noop(monkeypatch, tmp_path):
     monkeypatch.setattr(live_orders, "cancel_stop_entry", cancel_mock)
     monkeypatch.setattr(live_orders, "close_position", close_mock)
 
-    test_ts = pd.Timestamp("2026-05-19 16:00:01", tz="America/New_York")
+    test_ts = pd.Timestamp("2026-05-19 17:00:00", tz="America/New_York")
     bar = strategy_smt._BarRow(20000.0, 20005.0, 19995.0, 20001.0, 50.0, test_ts)
     am._on_bar(bar, None)
 

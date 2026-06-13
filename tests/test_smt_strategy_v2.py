@@ -325,14 +325,12 @@ class TestFill:
         # stop_entry set but conf_bar_entry empty (manual path via trade.py)
         write_position(stop_entry=100.0, conf_bar_entry={})
 
-        # Write bar_state.json with potential_stop_long
+        # Write bar_state.json via the same API run_strategy reads it with, so the session-date
+        # folder matches regardless of the calendar date (datetime.date.today() diverges from the
+        # ET session date on Sundays / after the daily roll).
         monkeypatch.chdir(tmp_path)
-        import datetime as _dt
-        today = _dt.date.today().isoformat()
-        (tmp_path / "sessions" / today).mkdir(parents=True, exist_ok=True)
-        (tmp_path / "sessions" / today / "bar_state.json").write_text(
-            '{"time": "x", "potential_stop_long": 93.0, "potential_stop_short": 107.0}',
-            encoding="utf-8",
+        smt_state.save_bar_state(
+            {"time": "x", "potential_stop_long": 93.0, "potential_stop_short": 107.0}
         )
 
         # Bar that crosses the stop entry; distance |100-93|=7 ≥ MIN_STOP_DISTANCE

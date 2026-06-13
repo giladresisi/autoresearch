@@ -49,12 +49,15 @@ def test_s1_human_slippage_applied_to_long_entry():
     }
     bar = _BarRow(20000.0, 20005.0, 19995.0, 20000.0, 100.0,
                   pd.Timestamp("2025-01-02 09:30:00", tz="America/New_York"))
-    # entry_slip_ticks=0 isolates human-mode slippage; human_slip_pts=2.0 adds +2.0 for long
+    # Market entries get a calibrated 3-tick (3*0.25 = 0.75) adverse slip baked into
+    # assumed_fill_price (execution/protocol.py:30 — slip_ticks/entry_slip_ticks is
+    # IGNORED for market orders since calibration commit bcc8df4/e7ee2b3). On top of
+    # that, human_mode adds human_slip_pts=2.0 for a long. So 20000 + 0.75 + 2.0.
     executor = SimulatedBrokerExecutor(human_mode=True, human_slip_pts=2.0, entry_slip_ticks=0)
     fill = executor.place_entry(signal, bar)
     pos = backtest_smt._open_position(signal, datetime.date(2025, 1, 2), 1, 1, 0,
                                        fill_price=fill.fill_price)
-    assert pos["entry_price"] == 20002.0
+    assert pos["entry_price"] == 20002.75
 
 
 def test_s2_human_slippage_not_applied_when_mode_off():
@@ -78,7 +81,10 @@ def test_s2_human_slippage_not_applied_when_mode_off():
     fill = executor.place_entry(signal, bar)
     pos = backtest_smt._open_position(signal, datetime.date(2025, 1, 2), 1, 1, 0,
                                        fill_price=fill.fill_price)
-    assert pos["entry_price"] == 20000.0
+    # human_mode=False → the +2.0 human slip is correctly NOT applied
+    # (gated at execution/simulated.py:61). What remains is only the calibrated
+    # 3-tick (0.75) market slip from assumed_fill_price. So 20000 + 0.75, no human slip.
+    assert pos["entry_price"] == 20000.75
 
 
 # ══ Confidence scoring (C-1 … C-5) ═══════════════════════════════════════════

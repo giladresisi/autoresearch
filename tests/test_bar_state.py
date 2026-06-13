@@ -4,9 +4,6 @@
 
 from __future__ import annotations
 
-import datetime
-from pathlib import Path
-
 import pandas as pd
 import pytest
 
@@ -160,8 +157,9 @@ def test_bar_state_written_after_1m_bar(_isolate, monkeypatch):
     sp = SessionPipeline(pd.DataFrame(), pd.DataFrame(), emit_fn=lambda _: None)
     sp._write_bar_state(now, today_mnq)
 
-    today = datetime.date.today().isoformat()
-    path = Path("sessions") / today / "bar_state.json"
+    # Resolve the expected path via the same helper save_bar_state uses (ET session date),
+    # not datetime.date.today() — the two diverge on Sundays / after the daily roll.
+    path = smt_state.bar_state_path()
     assert path.exists(), f"bar_state.json should exist at {path}"
 
 
