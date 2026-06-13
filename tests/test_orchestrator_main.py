@@ -43,6 +43,14 @@ def _no_real_orchestrator_kill(monkeypatch):
     monkeypatch.setattr("orchestrator.main._kill_stale_orchestrator", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_ib_reachable_probe(monkeypatch):
+    """_pre_session_init() (reached by run() and the _pre_session_init tests) calls the REAL
+    gap_fill.check_ib_reachable — a live socket probe that added ~2s to every test here and is
+    not the unit under test. Stub it module-wide. (GIL-28 perf cleanup.)"""
+    monkeypatch.setattr("orchestrator.main._check_ib_reachable", lambda *a, **kw: None)
+
+
 
 def test_main_after_grace_end_skips_to_next_day():
     mock_summarizer = MagicMock()

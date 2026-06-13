@@ -150,8 +150,11 @@ def test_gap_fill_not_called_from_start(tmp_path):
     with patch("ib_insync.IB", return_value=ib_mock), \
          patch("ib_insync.Future"), \
          patch("ib_insync.util") as util_mock, \
+         patch.object(src, "gap_fill") as mock_public_gap_fill, \
          patch.object(src, "_gap_fill") as mock_gap_fill, \
          patch.object(src, "_setup_subscriptions"):
+        # start() calls the PUBLIC gap_fill(); stub it so the test stays hermetic (no real
+        # IB connection / 1s+1m backfill, which otherwise hangs on time.sleep retry loops).
         # Simulate a deliberate stop() — sets _stopping=True so start() exits cleanly.
         def _fake_run():
             src._stopping = True
@@ -159,6 +162,7 @@ def test_gap_fill_not_called_from_start(tmp_path):
         util_mock.getLoop.return_value = MagicMock()
         src.start()
 
+    # Invariant: start() must use the public gap_fill(), never the legacy private _gap_fill().
     mock_gap_fill.assert_not_called()
 
 

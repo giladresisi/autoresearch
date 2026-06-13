@@ -10,6 +10,22 @@ from execution.protocol import FillRecord
 from strategy_smt import _BarRow
 
 
+@pytest.fixture(autouse=True)
+def _fast_executor_env(monkeypatch):
+    """Strip the two per-test wall-clock costs in this module (GIL-28 perf cleanup):
+
+    1. httpx.Client() construction (SSL context / CA-bundle load) costs ~1.7s EVERY
+       instantiation, and PickMyTradeExecutor builds one in __init__ per _make_executor()
+       call — this dominated the module's runtime (~48s for 50 tests). Every test mocks the
+       HTTP layer (sets ex._http.post), so the real client is never used; replace it with a
+       MagicMock factory.
+    2. The exponential retry backoff (time.sleep(2**attempt)) on the retry path.
+    """
+    import execution.pickmytrade as _mod
+    monkeypatch.setattr(_mod.httpx, "Client", lambda *a, **kw: MagicMock())
+    monkeypatch.setattr(_mod.time, "sleep", lambda *a, **kw: None)
+
+
 def _make_executor(entry_slip_ticks: int = 2, account_ids: list = None) -> PickMyTradeExecutor:
     return PickMyTradeExecutor(
         webhook_url="https://pmt.example.com/signal",

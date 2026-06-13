@@ -273,6 +273,49 @@ def test_on_1m_bar_calls_trend_every_bar(_isolate_state, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Test 5b: 5m dispatch order is trend → hypothesis → strategy
+# (re-homed from former test_smt_dispatch_order.py — GIL-28; asserts ordering
+#  directly on on_1m_bar instead of via a full run_backtest_v2 run)
+# ---------------------------------------------------------------------------
+
+def test_on_1m_bar_dispatch_order_trend_hypothesis_strategy(_isolate_state, monkeypatch):
+    """At a 5m boundary, on_1m_bar dispatch order must be trend → hypothesis → strategy."""
+    import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    import strategy as _strat_mod
+
+    call_order: list[str] = []
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: call_order.append("trend") or None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: call_order.append("hypothesis") or None)
+    monkeypatch.setattr(_strat_mod, "run_strategy", lambda *a, **kw: call_order.append("strategy") or None)
+
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5)
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+
+    now_sess = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+    pipeline.on_session_start(now_sess, _make_1m_bars("2025-11-14 09:20", n=1))
+    # on_session_start runs hypothesis once itself; clear so we anchor on per-bar dispatch.
+    call_order.clear()
+
+    today_mnq = _make_1m_bars("2025-11-14 09:20", n=10)
+    today_mes = _make_1m_bars("2025-11-14 09:20", n=10)
+    bar = _bar_row()
+
+    # 09:20 is a 5m boundary → all three dispatch.
+    pipeline.on_1m_bar(now_sess, bar, bar, today_mnq, today_mes)
+
+    assert "trend" in call_order and "hypothesis" in call_order and "strategy" in call_order, (
+        f"all three must dispatch on a 5m boundary, got {call_order}"
+    )
+    assert call_order.index("trend") < call_order.index("hypothesis") < call_order.index("strategy"), (
+        f"dispatch order must be trend → hypothesis → strategy, got {call_order}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 6: run_hypothesis called only on 5m boundaries
 # ---------------------------------------------------------------------------
 
