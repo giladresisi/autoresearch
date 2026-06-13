@@ -60,15 +60,43 @@ def make_recent_bars(
     )
 
 
-def _active_position(cautious="no") -> dict:
-    """Return a minimal active position sub-dict."""
+def _active_position(
+    cautious="no",
+    direction="up",
+    cautious_initial="",
+    cautious_initial_level="",
+    cautious_secondary="",
+    cautious_secondary_level="",
+) -> dict:
+    """Return a minimal active position sub-dict.
+
+    SMT-v2 Phase 1: also writes the FROZEN management snapshot (mgmt_direction +
+    the four cautious ladder fields + backing_tier) so existing trend management
+    tests exercise the frozen path. The frozen ladder is left "" by default so the
+    back-compat fallback pulls it from the live hypothesis (frozen == live), keeping
+    pre-existing assertions byte-equivalent. Tests that want to pin the frozen ladder
+    pass the values explicitly.
+    """
+    _mgmt = "up" if direction == "long" else ("down" if direction == "short" else direction)
+    _cs_l = cautious_secondary_level or ""
+    if _cs_l.startswith("week"):
+        _tier = "week"
+    else:
+        _tier = "day"
     return {
         "time": "2026-04-27T10:00:00-04:00",
         "fill_price": 100.0,
-        "direction": "up",
+        "direction": direction,
         "stop": 95.0,
         "contracts": 2,
         "cautious": cautious,
+        # Frozen management snapshot (Contract A)
+        "mgmt_direction": _mgmt,
+        "cautious_initial": cautious_initial,
+        "cautious_initial_level": cautious_initial_level,
+        "cautious_secondary": cautious_secondary,
+        "cautious_secondary_level": cautious_secondary_level,
+        "backing_tier": _tier,
     }
 
 
@@ -131,8 +159,11 @@ class TestCautiousArming:
         save_hypothesis(hyp)
 
         pos = copy.deepcopy(DEFAULT_POSITION)
-        active = _active_position(cautious="no")
-        active["direction"] = direction
+        # Frozen ladder == live ladder (byte-equivalence): pin the frozen initial.
+        active = _active_position(
+            cautious="no", direction=direction,
+            cautious_initial=str(cautious_price),
+        )
         pos["active"] = active
         save_position(pos)
 
@@ -230,8 +261,11 @@ class TestCautiousYes:
         save_hypothesis(hyp)
 
         pos = copy.deepcopy(DEFAULT_POSITION)
-        active = _active_position(cautious="yes")
-        active["direction"] = direction
+        # Frozen ladder == live ladder (byte-equivalence): pin the frozen secondary.
+        active = _active_position(
+            cautious="yes", direction=direction,
+            cautious_secondary=str(cautious_price),
+        )
         pos["active"] = active
         save_position(pos)
 
@@ -398,7 +432,7 @@ class TestSignalShape:
         save_hypothesis(hyp)
 
         pos = copy.deepcopy(DEFAULT_POSITION)
-        pos["active"] = _active_position(cautious="no")
+        pos["active"] = _active_position(cautious="no", cautious_initial="160")
         save_position(pos)
 
         save_daily(_daily_with_levels([]))
@@ -600,3 +634,71 @@ class TestManualDirectionLock:
 
         assert hyp["direction"] == "none"
         assert hyp["manual"] is False
+
+
+# ---------------------------------------------------------------------------
+# SMT-v2 Phase 1: frozen-snapshot byte-equivalence regression
+# ---------------------------------------------------------------------------
+
+class TestFrozenSnapshotRegression:
+    """A non-flipping trade (frozen == live) must produce signals byte-equivalent to
+    the pre-change behavior; flipping the LIVE hypothesis mid-trade must NOT change the
+    emitted management signals (the frozen snapshot insulates management)."""
+
+    def _setup_long_initial_arm(self, live_direction="up"):
+        """direction=up trade, frozen initial cautious=160. The arming bar (high=162,
+        close=161) closes beyond the initial level -> 'new-stop-exit' (initial)."""
+        hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
+        hyp["direction"] = live_direction
+        # Live ladder: when not flipped, equals the frozen ladder.
+        hyp["cautious_price_initial"] = "160" if live_direction == "up" else ""
+        save_hypothesis(hyp)
+
+        pos = copy.deepcopy(DEFAULT_POSITION)
+        pos["active"] = _active_position(
+            cautious="no", direction="up", cautious_initial="160",
+            cautious_initial_level="day_high",
+        )
+        save_position(pos)
+        save_daily(_daily_with_levels([]))
+
+    def test_normal_trade_management_byte_equivalent(self):
+        """frozen == live, direction matches -> the captured baseline signal."""
+        from trend import run_trend
+        from smt_state import load_position
+
+        self._setup_long_initial_arm(live_direction="up")
+        bar = make_1m_bar(open_=100, high=162, low=98, close=161)
+        recent = make_recent_bars(closes=[100, 161], opens=[99, 100])
+        result = run_trend(NOW, bar, recent)
+
+        # Captured baseline (pre-change behavior for this exact scenario).
+        assert result is not None
+        assert result["kind"] == "new-stop-exit"
+        assert result["level"] == "initial"
+        assert result["level_name"] == "day_high"
+        assert load_position()["active"]["cautious"] == "initial"
+        # snapshot the full emitted dict for the flip comparison
+        TestFrozenSnapshotRegression._baseline = result
+
+    def test_flip_does_not_change_normal_management(self):
+        """Same scenario but the LIVE hypothesis is flipped to the opposite direction
+        ('down') and its live ladder wiped — management must be identical because it
+        keys off the frozen up-side snapshot."""
+        from trend import run_trend
+        from smt_state import load_position
+
+        self._setup_long_initial_arm(live_direction="down")  # live flipped
+        bar = make_1m_bar(open_=100, high=162, low=98, close=161)
+        recent = make_recent_bars(closes=[100, 161], opens=[99, 100])
+        result = run_trend(NOW, bar, recent)
+
+        assert result is not None
+        assert result["kind"] == "new-stop-exit"
+        assert result["level"] == "initial"
+        assert result["level_name"] == "day_high"
+        assert load_position()["active"]["cautious"] == "initial"
+        # Identical to the non-flipped baseline (frozen snapshot insulates management).
+        self._setup_long_initial_arm(live_direction="up")
+        baseline = run_trend(NOW, bar, recent)
+        assert result == baseline

@@ -15,6 +15,10 @@ from execution.protocol import FillRecord, BarRow, assumed_fill_price
 
 _ET = zoneinfo.ZoneInfo("America/New_York")
 
+# Wall-clock ET cutoff for new entries: after this time new market/stop entries are
+# blocked at the executor. Closes, cancels and stop-loss modifications are unaffected.
+_NEW_ENTRY_CUTOFF = datetime.time(15, 30)
+
 
 
 class PickMyTradeExecutor:
@@ -143,9 +147,24 @@ class PickMyTradeExecutor:
         )
         session_date = str(bar.name.date()) if hasattr(bar, "name") and bar.name is not None else ""
 
+        _now_et_time = datetime.datetime.now(_ET).time()
+
         # Block outside entry windows — return identical FillRecord shape so callers are unaffected
-        if not session_times.is_entry_allowed(datetime.datetime.now(_ET).time()):
+        if not session_times.is_entry_allowed(_now_et_time):
             print(f"[PMT] entry window blocked — not sending {order_id}", flush=True)
+            self._entry_is_live = False
+            return FillRecord(
+                order_id=order_id, symbol=self._symbol, direction=direction,
+                order_type=order_type, requested_price=entry_price,
+                fill_price=round(fill_price, 4),
+                fill_time=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                contracts=self._contracts, status="blocked", session_date=session_date,
+            )
+
+        # Block new entries after 15:30 ET wall-clock (market + stop). Real-time guard:
+        # uses wall-clock now, NOT bar time. Closes/cancels/stop-mods are unaffected.
+        if _now_et_time > _NEW_ENTRY_CUTOFF:
+            print("[PMT] new entry blocked after 15:30 ET", flush=True)
             self._entry_is_live = False
             return FillRecord(
                 order_id=order_id, symbol=self._symbol, direction=direction,

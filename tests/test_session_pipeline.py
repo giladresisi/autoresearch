@@ -36,7 +36,7 @@ def _isolate_state(tmp_path, monkeypatch):
 
     Also point ACT_GLOBAL_DIR at tmp_path: the live path of on_session_start sets the
     state dir to sessions_dir()/<date> (so state + levels.json land in the session
-    folder) and seed_global_from_prior() scans sessions_dir() — both must be isolated."""
+    folder) and load_global() reads general_live_dir()/global.json — both must be isolated."""
     import paths
     monkeypatch.setattr(paths, "_STATE_DIR", tmp_path)
     monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
@@ -61,6 +61,59 @@ def test_on_session_start_seeds_ath_from_history(_isolate_state, monkeypatch):
     pipeline.on_session_start(now, _make_1m_bars("2025-11-14 09:20", n=1))
 
     assert smt_state.load_global()["all_time_high"] == 25010.0
+
+
+# ---------------------------------------------------------------------------
+# Test 1b/1c (GIL-23): session_ath is derived from the PERSISTED all_time_high
+# (general_live_dir/global.json), never collapsing to the windowed in-memory frame max.
+# ---------------------------------------------------------------------------
+
+def test_session_ath_seeds_from_persisted_ath_not_windowed(_isolate_state, monkeypatch):
+    """GIL-23: session_ath must be the persisted true ATH, not the short windowed in-memory
+    IB frame max. Reproduces 2026-06-11: persisted all_time_high 30807 carried in global.json,
+    windowed frame max 29011.25 -> session_ath must seed to 30807, NOT 29011.25 (the collapse
+    that silently disabled rule2b's recovery guard)."""
+    import daily as _daily_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+
+    # The true ATH already persisted cross-session in general_live_dir/global.json (live).
+    smt_state.save_global({"all_time_high": 30807.0, "confidence": "medium", "trend": "up"})
+
+    # Windowed in-memory frame: max High == 29011.25 (below the persisted ATH).
+    hist_mnq = _make_1m_bars("2026-06-11 09:20", n=5, base=29001.25)  # High = 29011.25
+    assert float(hist_mnq["High"].max()) == 29011.25
+    hist_mes = _make_1m_bars("2026-06-11 09:20", n=5)
+
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    now = pd.Timestamp("2026-06-11 09:20", tz="America/New_York")
+    pipeline.on_session_start(now, _make_1m_bars("2026-06-11 09:20", n=1))
+
+    _g = smt_state.load_global()
+    assert _g["session_ath"] == 30807.0       # persisted ATH, not the windowed 29011.25
+    assert _g["all_time_high"] == 30807.0
+    assert pipeline._session_ath == 30807.0
+
+
+def test_backtest_seed_session_ath_equals_window_max(_isolate_state, monkeypatch):
+    """GIL-23 regression-safety: in backtest (in-memory) mode global.json starts at DEFAULT
+    (all_time_high = 0), so session_ath resolves to max(0, window max) = the 60-day window max
+    — byte-identical to the old windowed seed, keeping backtests deterministic."""
+    import daily as _daily_mod
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(smt_state, "_IN_MEMORY", True)
+    smt_state._STORE.clear()  # fresh in-memory global (all_time_high defaults to 0)
+
+    # Windowed frame max == 25010.0.
+    hist_mnq = _make_1m_bars("2025-11-13 09:20", n=5, base=25000.0)  # High = 25010
+    hist_mes = _make_1m_bars("2025-11-13 09:20", n=5)
+
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    now = pd.Timestamp("2025-11-14 09:20", tz="America/New_York")
+    pipeline.on_session_start(now, _make_1m_bars("2025-11-14 09:20", n=1))
+
+    _g = smt_state.load_global()
+    assert _g["session_ath"] == 25010.0
+    assert _g["all_time_high"] == 25010.0
 
 
 # ---------------------------------------------------------------------------

@@ -404,8 +404,14 @@ def run_strategy(
                 import hypothesis as _hyp_mod
                 _hyp_mod.recompute_cautious_for_fill(
                     hypothesis, fill_price,
-                    _daily.get("liquidities", []), _global.get("all_time_high"))
+                    _daily.get("liquidities", []), _global.get("all_time_high"),
+                    position.get("cautious_dist_shrinks", 0))
                 smt_state.save_hypothesis(hypothesis)
+                # SMT-v2 Phase 1: freeze the fill-anchored (post-recompute) management
+                # direction + cautious ladder into active — immutable for the life of the
+                # trade. trend.py Step-3 manages off this snapshot, not the live hypothesis.
+                smt_state.freeze_active_mgmt(position["active"], direction, hypothesis)
+                smt_state.save_position(position)
                 return _make_signal("stop-entry-filled", now, fill_price, direction=direction, stop=stop)
 
         if fill_check_only:
@@ -496,8 +502,14 @@ def run_strategy(
                     import hypothesis as _hyp_mod
                     _hyp_mod.recompute_cautious_for_fill(
                         hypothesis, bar_mid,
-                        _daily.get("liquidities", []), _global.get("all_time_high"))
+                        _daily.get("liquidities", []), _global.get("all_time_high"),
+                        position.get("cautious_dist_shrinks", 0))
                     smt_state.save_hypothesis(hypothesis)
+                    # SMT-v2 Phase 1: freeze the fill-anchored (post-recompute) management
+                    # direction + cautious ladder into active — immutable for the life of
+                    # the trade. trend.py Step-3 manages off this snapshot.
+                    smt_state.freeze_active_mgmt(position["active"], direction, hypothesis)
+                    smt_state.save_position(position)
                     return _make_signal("market-entry", now, bar_mid, direction=direction,
                                         stop=stop, conf=_conf_tag)
 
@@ -582,18 +594,15 @@ def run_strategy(
     _pos_dir = active.get("direction", "")
     _pos_hyp_dir = "up" if _pos_dir == "long" else ("down" if _pos_dir == "short" else _pos_dir)
     if direction == "none" or direction != _pos_hyp_dir:
-        # D7: a manually-entered position (trade.py up/down) is discretionary — the strategy
-        # must not auto-flatten or manage it on a direction mismatch. Leave it entirely to
-        # the user / its own broker stop. (Otherwise a manual long is auto-closed in ~0.4s.)
-        if active.get("source") == "manual":
-            return None
-        position["active"]            = {}
-        position["stop_entry"]       = ""
-        position["conf_bar_entry"]   = {}
-        position["conf_bar_exit"]    = {}
-        smt_state.save_position(position)
-        _bar_mid = (float(mnq_bar["high"]) + float(mnq_bar["low"])) / 2.0
-        return _make_signal("market-close", now, _bar_mid, reason="direction-mismatch", close_reason="trend-broken")
+        # SMT-v2 Phase 1 (.agents/plans/smt-v2-decouple-active-position.md): the automatic
+        # direction-mismatch market-close is REMOVED. An open position is now managed off the
+        # frozen snapshot (active["mgmt_direction"] + frozen cautious ladder) by trend.py
+        # Step-3, with cautious targets — not a force-close — deciding the exit. So a flipped
+        # or none live hypothesis no longer flattens a live trade. strategy.py Section 3 does
+        # nothing under a mismatch (the manual exemption is now redundant but kept explicit):
+        # management is trend.py's responsibility, and running 3.2/3.3 here against a mismatched
+        # live direction would double-manage. Return None.
+        return None
 
     # 3.2 Stop crossed
     stop = active["stop"]
@@ -612,6 +621,7 @@ def run_strategy(
         # conf_bar_entry intentionally preserved: prevents immediate re-entry on the
         # same bar before the next 5m hypothesis re-evaluation can run.
         position["failed_entries"]    = position.get("failed_entries", 0) + 1
+        position["cautious_dist_shrinks"] = position.get("cautious_dist_shrinks", 0) + 1
 
         # Flag for re-evaluation when the stop crossed the daily or weekly mid —
         # structural signals that the directional thesis has genuinely inverted.
@@ -680,6 +690,7 @@ def reset_position_for_session() -> None:
     pos["conf_bar_entry"] = {}
     pos["conf_bar_exit"]  = {}
     pos["failed_entries"] = 0
+    pos["cautious_dist_shrinks"] = 0
     smt_state.save_position(pos)
 
 
@@ -691,6 +702,7 @@ def reset_position_for_new_hypothesis() -> None:
     """
     pos = smt_state.load_position()
     pos["failed_entries"] = 0
+    pos["cautious_dist_shrinks"] = 0
     pos["conf_bar_entry"] = {}
     pos["conf_bar_exit"]  = {}
     pos["stop_entry"] = ""

@@ -130,6 +130,7 @@ class TestSaveThenLoadRoundtrip:
             "conf_bar_exit":  {},
             "pending_stop": 21380.0,
             "failed_entries": 1,
+            "cautious_dist_shrinks": 1,
             "session_mid_crosses": 0,
         }
         save_position(data)
@@ -272,3 +273,60 @@ def test_is_paused_false_in_memory_mode(tmp_path, monkeypatch):
     assert smt_state.is_paused() is False
     monkeypatch.setattr(smt_state, "_IN_MEMORY", False)
     assert smt_state.is_paused() is True
+
+
+# ---------------------------------------------------------------------------
+# SMT-v2 Phase 1: freeze_active_mgmt (pure helper — no I/O)
+# ---------------------------------------------------------------------------
+
+class TestFreezeActiveMgmt:
+    def test_freeze_active_mgmt_copies_ladder_and_normalizes_direction(self):
+        hyp = {
+            "cautious_price_initial": 100.0, "cautious_price_initial_level": "day_high",
+            "cautious_price_secondary": 200.0, "cautious_price_secondary_level": "week_high",
+        }
+        a = {}
+        smt_state.freeze_active_mgmt(a, "long", hyp)
+        assert a["mgmt_direction"] == "up"
+        assert a["cautious_initial"] == 100.0
+        assert a["cautious_initial_level"] == "day_high"
+        assert a["cautious_secondary"] == 200.0
+        assert a["cautious_secondary_level"] == "week_high"
+        assert a["backing_tier"] == "week"
+
+        b = {}
+        smt_state.freeze_active_mgmt(b, "short", hyp)
+        assert b["mgmt_direction"] == "down"
+
+        # already-normalized up/down passes through unchanged
+        c = {}
+        smt_state.freeze_active_mgmt(c, "up", hyp)
+        assert c["mgmt_direction"] == "up"
+
+    def test_freeze_active_mgmt_none_tolerant(self):
+        """Missing hypothesis cautious fields → frozen fields default to '' / 'day'; no raise."""
+        a = {}
+        smt_state.freeze_active_mgmt(a, "down", {})
+        assert a["mgmt_direction"] == "down"
+        assert a["cautious_initial"] == ""
+        assert a["cautious_initial_level"] == ""
+        assert a["cautious_secondary"] == ""
+        assert a["cautious_secondary_level"] == ""
+        assert a["backing_tier"] == "day"
+
+        # explicit None values also tolerated
+        b = {}
+        smt_state.freeze_active_mgmt(b, "up", {
+            "cautious_price_initial": None, "cautious_price_initial_level": None,
+            "cautious_price_secondary": None, "cautious_price_secondary_level": None,
+        })
+        assert b["cautious_initial"] == ""
+        assert b["cautious_secondary_level"] == ""
+        assert b["backing_tier"] == "day"
+
+    def test_backing_tier_derivation(self):
+        for lv, tier in (("week_high", "week"), ("week_low", "week"),
+                         ("day_high", "day"), ("day_low", "day"), ("", "day")):
+            a = {}
+            smt_state.freeze_active_mgmt(a, "up", {"cautious_price_secondary_level": lv})
+            assert a["backing_tier"] == tier, lv

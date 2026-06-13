@@ -358,18 +358,20 @@ class SessionPipeline:
         from hypothesis import compute_live_hl_mid
         from daily import _session_bars
 
-        # Cross-session ATH continuity: per-session global.json starts fresh, so carry the
-        # dynamic all_time_high forward from the prior session before seeding from hist.
-        # No-op in backtest (in-memory) mode — keeps backtests deterministic.
-        _smt_state.seed_global_from_prior()
-
-        # Seed all_time_high and session_ath from historical bars.
+        # Seed all_time_high (the running ATH) and session_ath (its session-open snapshot).
+        # GIL-23: session_ath must be the PERSISTED true ATH, not the short windowed in-memory
+        # IB frame max — on 2026-06-11 that windowed max collapsed to 29011.25 (vs the true
+        # 30807) and silently disabled rule2b's recovery guard. all_time_high already persists
+        # cross-session in general_live_dir()/global.json and is only ever raised when a new high
+        # supersedes it, so we DERIVE session_ath from it rather than re-initialising it from the
+        # volatile hist window each session. No-op in backtest (in-memory): there all_time_high
+        # resolves to max(0, 60-day-window max) = the same value the old windowed seed produced.
         _global = load_global()
         if not self._hist_mnq_1m.empty:
             _hist_ath = float(self._hist_mnq_1m["High"].max())
             _global["all_time_high"] = max(_global.get("all_time_high", 0.0), _hist_ath)
-            _global["session_ath"] = _hist_ath
-            self._session_ath = _hist_ath
+            _global["session_ath"]   = _global["all_time_high"]
+            self._session_ath = _global["session_ath"]
         else:
             self._session_ath = None
         save_global(_global)
@@ -1289,6 +1291,7 @@ class SessionPipeline:
                     _sbsc_pos["active"] = {}
                     _sbsc_pos["stop_entry"] = ""
                     _sbsc_pos["failed_entries"] = _sbsc_pos.get("failed_entries", 0) + 1
+                    _sbsc_pos["cautious_dist_shrinks"] = _sbsc_pos.get("cautious_dist_shrinks", 0) + 1
                     _smt_state.save_position(_sbsc_pos)
                     _sbsc_sig = {
                         "kind":      "stopped-out",
@@ -1807,6 +1810,85 @@ class SessionPipeline:
         # both buffering and emission so the buffers and emitted smt-div events stay in sync.
         # Fills are exempt (handled inside _dedup_level_smts).
         records = _dedup_level_smts(records, _mnq_lvl_px)
+
+        # --- SMT V2 Phase 2 SHADOW active-set compute (zero behavior change) ----------
+        # Compute the relevance-filtered active set + dominant from this bar's fresh
+        # records and store them under hypothesis.json debug keys ONLY. This does NOT
+        # touch `direction` or any field the strategy/executor reads. The whole block is
+        # exception-isolated so a defect here can NEVER break the live detection/direction
+        # path (silent — no prints, no re-raise). Phase 3 will remove the blanket swallow.
+        try:
+            import smt_detect as _smt_detect
+            _pos = _smt_state.load_position()
+            _active_pos = _pos.get("active") or {}
+            _flat_shadow = not _active_pos
+            _backing_tier = _active_pos.get("backing_tier") if not _flat_shadow else None
+            _hyp = _smt_state.load_hypothesis()
+            _active = _hyp.get("smt_active_set", []) or []
+            _ctargets = {
+                "cautious_price_initial":   _hyp.get("cautious_price_initial", ""),
+                "cautious_price_secondary": _hyp.get("cautious_price_secondary", ""),
+            }
+            # Invalidate BEFORE ingest: drop active records that are fulfilled/gone/
+            # INVALIDATED (Part B) or already flagged fulfilled. A collapsed record carries
+            # `keys` (wick+body folded) — aggregate over ALL its underlying detect keys via
+            # `collapsed_relevance` (ANY fulfilled → fulfilled; ANY invalidated → invalidated;
+            # ALL gone → gone). Only `unfulfilled` records survive (fulfilled/invalidated/
+            # gone are all terminal). `invalidated` is forward-compatible: absent producer
+            # flag → smt_status returns unfulfilled → no drop.
+            _all_keys = [k for r in _active for k in (r.get("keys") or [r.get("key")])]
+            _status = _smt_detect.smt_status(_all_keys, self._detect_state)
+            _active = [
+                r for r in _active
+                if _hyp_mod.collapsed_relevance(r, _status) == "unfulfilled"
+                and not r.get("fulfilled")
+                and not r.get("invalidated")
+            ]
+            # Ingest fresh records WITHOUT the internal Rule A pass (apply_rule_a_step=False)
+            # so we can run Rule A explicitly next and capture its superseded-event trail.
+            _new_recs = [_hyp_mod.to_record(r) for r in records]
+            _collapsed = _hyp_mod.ingest_smts(
+                _new_recs, _active,
+                flat=_flat_shadow, cautious_targets=_ctargets,
+                backing_tier=_backing_tier, x_pts=_hyp_mod.RELEVANCE_X_PTS,
+                apply_rule_a_step=False,
+            )
+            _events: list = []
+            # Rule A — same-level latest-take-out-wins (capture the trail).
+            _active, _a_events = _hyp_mod.apply_rule_a(_collapsed)
+            _events.extend(_a_events)
+            # MNQ close this bar — the adverse-move reference for Rule B / leg tracking.
+            _now_close = float(mnq_bar_row["Close"])
+            # Rule B (gated; default OFF) — recency-trend cross-tier suppression.
+            _active, _b_events = _hyp_mod.apply_rule_b(
+                _active, now_close=_now_close, enabled=_hyp_mod.RULE_B_ENABLED,
+                min_age_min=_hyp_mod.RULE_B_MIN_AGE_MIN,
+                adverse_pts=_hyp_mod.RULE_B_ADVERSE_PTS,
+                tier_slack=_hyp_mod.RULE_B_TIER_SLACK,
+            )
+            _events.extend(_b_events)
+            # Leg-scoped suppression — track the most-recently swept-and-reclaimed FIXED
+            # level (dynamic; from this bar's liquidities) and suppress older counter-trend
+            # SMTs until price returns to the swept origin. Leg state persists across bars.
+            _leg_state = _hyp.get("smt_leg_state") or {}
+            _leg_state = _hyp_mod.update_leg(
+                _leg_state, fixed_levels=liq_mnq,
+                now_close=_now_close, now_time=now,
+            )
+            _active, _leg_events, _leg_state = _hyp_mod.suppress_counter_trend(
+                _active, _leg_state, _now_close)
+            _events.extend(_leg_events)
+            _dom = _hyp_mod.dominant(_active)
+            # Re-load and store under debug keys only; leave every other field untouched.
+            _hyp2 = _smt_state.load_hypothesis()
+            _hyp2["smt_active_set"] = _active
+            _hyp2["smt_dominant"] = _dom
+            _hyp2["smt_leg_state"] = _leg_state
+            _hyp2["smt_suppressions"] = _events
+            _smt_state.save_hypothesis(_hyp2)
+        except Exception:
+            pass
+        # --- end SHADOW block ---------------------------------------------------------
 
         # Map each newly-found record to an smt-div signal event for emission/plotting.
         # `type` is kept raw (wick / body / fill_a / fill_b) so the hover is precise; the
