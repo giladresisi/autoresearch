@@ -316,7 +316,7 @@ def run_strategy(
         if position["failed_entries"] > MAX_FAILED_ENTRIES:
             return None
 
-        _daily = smt_state.load_daily()
+        _daily = smt_state.load_daily_ro()  # GIL-27 read-only
         _chop_rng = _daily.get("overnight_range", 0)
         _chop_mid_x = position.get("session_mid_crosses", 0)
         if (
@@ -626,7 +626,7 @@ def run_strategy(
         # Flag for re-evaluation when the stop crossed the daily or weekly mid —
         # structural signals that the directional thesis has genuinely inverted.
         # Stops on the same side of both mids are noise and skip the re-run.
-        _daily = smt_state.load_daily()
+        _daily = smt_state.load_daily_ro()  # GIL-27 read-only
         _daily_mid, _weekly_mid = _session_mids(_daily.get("liquidities", []))
         _stop_crossed_daily = _daily_mid is not None and (
             (active_dir == _DIR_UP   and float(exit_price) < _daily_mid) or

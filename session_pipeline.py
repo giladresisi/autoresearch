@@ -1252,7 +1252,7 @@ class SessionPipeline:
         # the detector evaluates against the PRIOR-bar extremes (a "touch" then means the
         # wick genuinely EXCEEDED the prior extreme — a real take-out — not merely equalled
         # the just-updated running extreme, which the leader would trivially touch).
-        _pre_daily = _smt_state.load_daily()
+        _pre_daily = _smt_state.load_daily_ro()  # GIL-27: read-only snapshot (fed to detection only)
 
         # R3: SMT DETECTION on COMPLETED 1m bars only (deterministic across replay modes).
         # Run the completed-bar detection driver BEFORE this call's per-second liquidity
@@ -2023,7 +2023,7 @@ class SessionPipeline:
                 and _bar_row_has_ohlc(mes_bar_row, "High", "Low", "Close")):
             return []
 
-        daily = pre_daily if pre_daily is not None else _smt_state.load_daily()
+        daily = pre_daily if pre_daily is not None else _smt_state.load_daily_ro()
         # Universe (B) fixed levels are an additive block merged ONLY here (never into the
         # strategy's `liquidities`/_ext_levels), so SMT detection sees the prev-day/week
         # extremes while trades stay unchanged. eligible_levels dedups by name.

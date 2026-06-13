@@ -329,6 +329,24 @@ def load_daily() -> dict:
     return _load(_daily_path(), DEFAULT_DAILY)
 
 
+def load_daily_ro() -> dict:
+    """READ-ONLY view of daily.json — the caller MUST NOT mutate the result or any of its
+    nested objects (level/FVG dicts).
+
+    GIL-27: load_daily()'s per-call deep copy (_fast_copy) was ~8% of 1s-backtest runtime,
+    and daily carries large `liquidities*` lists. In backtest (in-memory) mode this returns
+    the store dict directly, skipping the copy. That is safe for read-only consumers because
+    the store object is only ever *replaced* by save_daily (which deep-copies on write via
+    _atomic_write) — never mutated in place — so a reader holds a stable snapshot even across
+    a later save. In live mode there is no in-memory store, so it falls back to the normal
+    (disk) copy-load. Only provably read-only call sites use this; mutating sites keep
+    load_daily()."""
+    if _IN_MEMORY:
+        d = _STORE.get(str(_daily_path()))
+        return d if d is not None else _fast_copy(DEFAULT_DAILY)
+    return load_daily()
+
+
 def save_daily(d: dict) -> None:
     _atomic_write(_daily_path(), d)
 

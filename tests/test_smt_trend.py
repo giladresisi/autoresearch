@@ -125,7 +125,7 @@ def redirect_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(trend, "save_hypothesis", smt_state.save_hypothesis)
     monkeypatch.setattr(trend, "load_position", smt_state.load_position)
     monkeypatch.setattr(trend, "save_position", smt_state.save_position)
-    monkeypatch.setattr(trend, "load_daily", smt_state.load_daily)
+    monkeypatch.setattr(trend, "load_daily_ro", smt_state.load_daily_ro)
 
     # Default global: confidence="medium" so existing tests are unaffected by the
     # new global-trend invalidation branch (which only fires on confidence="high").
