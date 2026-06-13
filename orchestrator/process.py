@@ -134,12 +134,46 @@ class ProcessManager:
             self._relay.emit(line.rstrip("\n"))
 
     def _terminate(self, proc: subprocess.Popen) -> None:
+        """Terminate proc AND all of its descendants.
+
+        Defense-in-depth: the session subprocess may be a wrapper whose real worker is a
+        grandchild (historically `uv run python -m automation.main`). On Windows
+        proc.terminate() kills only the direct child, orphaning the worker — which then trades
+        unsupervised (incident 2026-06-12, D2). Capture the descendant set BEFORE terminating,
+        then reap any survivors so no orphan remains regardless of how the subprocess was
+        spawned. Gathering descendants must never raise (the unit tests pass a bare mock with a
+        non-real pid), so it is wrapped defensively.
+        """
+        try:
+            descendants = psutil.Process(proc.pid).children(recursive=True)
+        except Exception:
+            descendants = []
         proc.terminate()
         try:
             proc.wait(timeout=_SIGTERM_WAIT_S)
         except subprocess.TimeoutExpired:
             self._log.writeln("[ORCH] SIGTERM timeout — killing process")
             proc.kill()
+        if descendants:
+            self._reap_descendants(descendants)
+
+    def _reap_descendants(self, descendants: list) -> None:
+        """Terminate, then force-kill, any still-alive descendant processes (orphan workers)."""
+        for child in descendants:
+            try:
+                child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        try:
+            _gone, alive = psutil.wait_procs(descendants, timeout=_SIGTERM_WAIT_S)
+        except Exception:
+            alive = descendants
+        for child in alive:
+            try:
+                self._log.writeln(f"[ORCH] Killing orphaned subprocess descendant (pid={child.pid})")
+                child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
 
     def _wait_until_grace_end(self, grace_end_dt: datetime.datetime | None = None) -> None:
         while True:
