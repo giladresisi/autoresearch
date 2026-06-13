@@ -63,6 +63,41 @@ def test_on_session_start_seeds_ath_from_history(_isolate_state, monkeypatch):
     assert smt_state.load_global()["all_time_high"] == 25010.0
 
 
+def test_yesterday_session_fvg_upgraded_to_keep_when_also_unvisited(_isolate_state, monkeypatch):
+    """A yesterday-session 1hr FVG that was ALSO added by the unvisited `_detect_fvgs` pass
+    (which returns no `keep`) must be UPGRADED to keep:True, not skipped as a dup — otherwise
+    the per-bar visited-prune drops the MES leg once it fills the FVG while the MNQ leg
+    survives (keep:True), so `_pair_fvgs` can no longer pair it and the fill SMT is missed
+    (e.g. fvg_20260611_1600 fill_b @ 2026-06-12 03:03)."""
+    import daily as _daily_mod
+    import session_pipeline as _sp
+
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    # Unvisited pass (MES, session_pipeline line ~575) returns the FVG WITHOUT keep.
+    _fvg = {"name": "fvg_TEST_bull", "kind": "fvg", "top": 21090.0, "bottom": 21010.0}
+    monkeypatch.setattr(_daily_mod, "_detect_fvgs", lambda *a, **kw: [dict(_fvg)])
+    # Yesterday-session pass (MNQ ~527 + MES ~581) returns the SAME name WITH keep.
+    monkeypatch.setattr(
+        _sp, "_detect_yesterday_session_fvgs", lambda *a, **kw: [{**_fvg, "keep": True}]
+    )
+
+    hist_mnq = _make_1m_bars("2026-06-11 09:20", n=5)
+    hist_mes = _make_1m_bars("2026-06-11 09:20", n=5)
+    pipeline = SessionPipeline(hist_mnq, hist_mes, lambda e: None)
+    pipeline.on_session_start(
+        pd.Timestamp("2026-06-12 02:00", tz="America/New_York"),
+        _make_1m_bars("2026-06-12 02:00", n=1),
+    )
+
+    daily = smt_state.load_daily()
+    mes_fvg = next((l for l in daily.get("liquidities_mes", []) if l["name"] == "fvg_TEST_bull"), None)
+    mnq_fvg = next((l for l in daily.get("liquidities", []) if l["name"] == "fvg_TEST_bull"), None)
+    # MES leg: added first by the unvisited pass without keep → must be upgraded (the fix).
+    assert mes_fvg is not None and mes_fvg.get("keep") is True, mes_fvg
+    # MNQ leg: kept too (added via the yesterday-session pass with keep).
+    assert mnq_fvg is not None and mnq_fvg.get("keep") is True, mnq_fvg
+
+
 # ---------------------------------------------------------------------------
 # Test 1b/1c (GIL-23): session_ath is derived from the PERSISTED all_time_high
 # (general_live_dir/global.json), never collapsing to the windowed in-memory frame max.

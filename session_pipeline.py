@@ -528,6 +528,12 @@ class SessionPipeline:
             if _yf["name"] not in _existing_mnq_fvg:
                 _liq.append(_yf)
                 _existing_mnq_fvg.add(_yf["name"])
+            else:
+                # Symmetric with the MES side: upgrade an already-added (unvisited, no-keep)
+                # FVG to a keep fill target so the visited-prune leaves it in place.
+                _ex = next((l for l in _liq if l.get("name") == _yf["name"]), None)
+                if _ex is not None:
+                    _ex["keep"] = True
         _state["liquidities"] = _liq
         # Universe (B): prev-day (14 trading days) + prev-week (2 Mon–Fri weeks) extremes
         # as FIXED SMT levels, in an ADDITIVE key consumed only by SMT detection — kept
@@ -582,6 +588,15 @@ class SessionPipeline:
                 if _yf["name"] not in _existing_mes:
                     _liq_mes.append(_yf)
                     _existing_mes.add(_yf["name"])
+                else:
+                    # Already added by the unvisited _detect_fvgs pass above WITHOUT keep:True.
+                    # Upgrade it to a keep fill target so the per-bar visited-prune leaves it
+                    # in place — otherwise MES loses this leg once it fills the FVG while the
+                    # MNQ leg survives (keep:True), so _pair_fvgs can no longer pair it and the
+                    # fill SMT is missed (e.g. fvg_20260611_1600 fill_b @ 2026-06-12 03:03).
+                    _ex = next((l for l in _liq_mes if l.get("name") == _yf["name"]), None)
+                    if _ex is not None:
+                        _ex["keep"] = True
         _state["liquidities_mes"] = _liq_mes
         # Universe (B): MES counterpart prev-day/prev-week extremes (additive key) so the
         # intersection in _detect_level_smts sees the same universe names on both legs.
