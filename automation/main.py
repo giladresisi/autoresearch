@@ -236,7 +236,11 @@ def _on_bar(bar, mes_partial) -> None:
         mes_bar_row = pd.Series(dtype=float)
         today_mes = _today_mes_base
 
-    _smtv2_dispatcher._pipeline.on_1m_bar(_bar_ts, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
+    # R3: the live IB callback fires per-second on the intra-minute partial bar. SMT
+    # DETECTION must run only on completed 1m bars (bar_complete=False → detect on minute
+    # rollover, using the just-completed bar); ORDER EXECUTION still runs every second.
+    _smtv2_dispatcher._pipeline.on_1m_bar(
+        _bar_ts, mnq_bar_row, mes_bar_row, today_mnq, today_mes, bar_complete=False)
 
 
 def _bar_timestamp(bar) -> pd.Timestamp:
@@ -998,6 +1002,7 @@ class SmtV2Dispatcher:
         mes_bar_row: pd.Series,
         mnq_1m_df: pd.DataFrame,
         mes_1m_df: pd.DataFrame,
+        bar_complete: "bool | None" = None,
     ) -> None:
         if self._pipeline is None:
             return
@@ -1005,7 +1010,8 @@ class SmtV2Dispatcher:
         _cme_start = pd.Timestamp(cme_session_start(now))
         today_mnq = mnq_1m_df[mnq_1m_df.index >= _cme_start]
         today_mes = mes_1m_df[mes_1m_df.index >= _cme_start]
-        self._pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes)
+        self._pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes,
+                                 bar_complete=bar_complete)
 
     def _emit(self, sig: dict) -> None:
         """Print signal to stdout (relay captures it to signals.log), then dispatch to live_orders."""

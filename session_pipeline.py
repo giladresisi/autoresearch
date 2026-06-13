@@ -342,6 +342,33 @@ class SessionPipeline:
         # per-bar trail write only re-serializes when a NEW event was appended this bar.
         self._inv_written_n: int = 0
 
+        # ── R3: 1m-cadence SMT detection (determinism across replay modes) ───────
+        # SMT DETECTION must fire only on COMPLETED 1m bars, using the completed bar, so
+        # that 1m regression, 1s regression, and live all produce the same smt-div stream.
+        # ORDER EXECUTION stays at 1s cadence (handled outside the detection block).
+        #
+        # _last_detect_minute: the floor("1min") of the last minute whose COMPLETED bar was
+        # fed to detection. In the per-second (1s/live) path, a minute is complete only once
+        # `now` crosses into the next minute; the rollover then runs detection for the just-
+        # completed minute using its finalized bar (reconstructed from today_mnq/today_mes).
+        self._last_detect_minute: "pd.Timestamp | None" = None
+        # Pre-detection daily.json snapshot captured at the START of the current detection
+        # minute (before that minute's first per-second liquidity update). When the minute
+        # rolls over, this snapshot reflects liquidity state through the PRIOR completed bar
+        # — exactly the `_pre_daily` a 1m-mode call sees (refinement #2 one-bar lag). Keyed
+        # by the minute it belongs to so a stale snapshot is never reused.
+        self._detect_pre_daily: "dict | None" = None
+        self._detect_pre_daily_minute: "pd.Timestamp | None" = None
+        # 5m-bucket of the last completed-bar detection that the emit-gate let through. The
+        # gate currently ignores this (always emits); it is the seam for a future "only when
+        # the 5m bucket changed since the last emission" tightening (see _should_emit_smt).
+        self._last_emitted_5m_bucket: "pd.Timestamp | None" = None
+        # Detection-side 5m-boundary tracker — independent of _last_5m_processed (which the
+        # execution-side hypothesis block owns). Detection runs on COMPLETED bars, so its
+        # `is_5m` (drives the SMT buffer drain + 5m reference-consumer cadence) must key off
+        # the completed detection minute, not the current intra-minute partial.
+        self._last_detect_5m: "pd.Timestamp | None" = None
+
     def on_daily_or_startup(
         self, now: pd.Timestamp, today_mnq: pd.DataFrame,
         today_mes: "pd.DataFrame | None" = None,
@@ -720,8 +747,20 @@ class SessionPipeline:
         mes_bar_row: pd.Series,
         today_mnq: pd.DataFrame,
         today_mes: pd.DataFrame,
+        bar_complete: "bool | None" = None,
     ) -> list[dict]:
-        """Process one completed 1m bar. Returns list of emitted event dicts."""
+        """Process one bar. Returns list of emitted event dicts.
+
+        `bar_complete` (R3): whether this call delivers a COMPLETED 1m bar (the bar_row is
+        final OHLC for `now`'s minute) or an intra-minute partial.
+          - True  → 1m-regression / completed-bar driver: SMT detection runs immediately on
+                    this bar.
+          - False → per-second 1s / live driver: this is a partial; SMT detection runs only
+                    when the minute rolls over, on the just-completed prior minute's bar.
+          - None  → auto-detect from cadence (see _run_completed_bar_detection): used by the
+                    legacy unit tests that call on_1m_bar once per distinct minute.
+        ORDER EXECUTION (trend / hypothesis / strategy below) is UNCHANGED — it runs on
+        every call regardless of `bar_complete` (1s-cadence fidelity preserved)."""
         if not self._daily_triggered:
             return []
 
@@ -1162,24 +1201,31 @@ class SessionPipeline:
         # wick genuinely EXCEEDED the prior extreme — a real take-out — not merely equalled
         # the just-updated running extreme, which the leader would trivially touch).
         _pre_daily = _smt_state.load_daily()
-        # Per-bar: update session/day/week H/L and prune visited FVGs.
+
+        # R3: SMT DETECTION on COMPLETED 1m bars only (deterministic across replay modes).
+        # Run the completed-bar detection driver BEFORE this call's per-second liquidity
+        # update: in the per-second (1s/live) path a minute rollover here detects the
+        # just-completed PRIOR minute against the daily snapshot taken at the start of that
+        # minute (state through the bar before it) — matching the `_pre_daily` a 1m-mode
+        # detection sees. `_pre_daily` (this call's pre-update snapshot) is also recorded as
+        # the per-minute snapshot for the current minute. ORDER EXECUTION (trend / hypothesis
+        # / strategy) stays at 1s cadence further below.
+        _det_events = self._run_completed_bar_detection(
+            now, mnq_bar_row, mes_bar_row, today_mnq, today_mes,
+            pre_daily=_pre_daily, bar_complete=bar_complete,
+        )
+        for _sd in _det_events:
+            self._emit(_sd)
+            events.append(_sd)
+
+        # Per-bar: update session/day/week H/L and prune visited FVGs. Runs every 1s so
+        # EXECUTION (entry/fill/exit below) sees up-to-the-second liquidity state.
         self._update_dynamic_liquidities(now, mnq_bar_row, today_mnq)
         # SMT V2: update the parallel MES liquidities block (additive; never touches MNQ).
         self._update_mes_liquidities(now, mes_bar_row, today_mes)
 
         _this_5m = now.floor("5min")
         is_5m = (now.minute % 5 == 0) and (_this_5m != self._last_5m_processed)
-
-        # SMT V2: per-1m detection → buffers → cadence-appropriate reference consumer →
-        # drain → persist. Reads daily.json/position.json, writes smts.json. Emits an
-        # smt-div SIGNAL for every newly-found SMT/fill (replaces the hypothesis module's
-        # smt-div emission for logging/plotting; hypothesis still scores SMTs internally).
-        for _sd in self._run_smt_v2_detection(
-            now, mnq_bar_row, mes_bar_row, today_mnq, today_mes, is_5m,
-            pre_daily=_pre_daily,
-        ):
-            self._emit(_sd)
-            events.append(_sd)
 
         if is_5m:
             self._last_5m_processed = _this_5m
@@ -1682,6 +1728,182 @@ class SessionPipeline:
 
     # ── SMT V2 detection orchestration ──────────────────────────────────────
     @staticmethod
+    def _minute_bar_from_frame(df: pd.DataFrame, minute: pd.Timestamp) -> "pd.Series | None":
+        """Return the COMPLETED 1m OHLC(V) row labelled exactly `minute` from `df`, or None.
+
+        Used by the per-second (1s/live) rollover path to recover a just-finished minute's
+        finalized bar from today_mnq/today_mes (where it sits as a normal indexed row once
+        the next minute has begun). Aggregates defensively in case the frame carries sub-
+        minute rows for that label (it normally carries one 1m row)."""
+        if df is None or len(df) == 0:
+            return None
+        _step = pd.Timedelta("1min")
+        _lo = df.index.searchsorted(minute, side="left")
+        _hi = df.index.searchsorted(minute + _step, side="left")
+        if _hi <= _lo:
+            return None
+        _win = df.iloc[_lo:_hi]
+        _out = {
+            "Open":  float(_win["Open"].iloc[0]),
+            "High":  float(_win["High"].values.max()),
+            "Low":   float(_win["Low"].values.min()),
+            "Close": float(_win["Close"].iloc[-1]),
+        }
+        if "Volume" in _win.columns:
+            _out["Volume"] = float(_win["Volume"].values.sum())
+        return pd.Series(_out)
+
+    def _run_completed_bar_detection(
+        self,
+        now: pd.Timestamp,
+        mnq_bar_row,
+        mes_bar_row,
+        today_mnq: pd.DataFrame,
+        today_mes: pd.DataFrame,
+        *,
+        pre_daily: "dict | None",
+        bar_complete: "bool | None",
+    ) -> list[dict]:
+        """R3 driver: run SMT detection on COMPLETED 1m bars only, deterministically across
+        replay modes, while order execution stays at 1s cadence (handled by the caller).
+
+        Two paths, both ending in a single _run_smt_v2_detection call per completed minute
+        passed through the _should_emit_smt gate:
+
+        * bar_complete is True/None (1m regression, completed-bar drivers, legacy per-minute
+          unit tests): `mnq_bar_row` IS the finalized bar for `now`'s minute. Detect it
+          immediately, mirroring the pre-R3 order exactly (pre_daily reflects through the
+          prior bar; today_mnq carries the completed bar).
+
+        * bar_complete is False (per-second 1s / live): `mnq_bar_row` is an intra-minute
+          PARTIAL. Detection must NOT run on it. Instead, when the minute rolls over, the
+          PRIOR minute is now complete: reconstruct its finalized bar from today_mnq/
+          today_mes and detect it against the daily snapshot captured at the START of that
+          prior minute (state through the bar before it). This makes the 1s/live smt-div
+          stream identical to the 1m stream (modulo exact sub-bar timestamp).
+
+        Returns the emitted smt-div events (already gated; the caller emits + appends)."""
+        _now_minute = now.floor("1min")
+
+        # 1m-regression / completed-bar / legacy-per-minute path: detect this bar now.
+        if bar_complete or bar_complete is None:
+            # Record this minute's pre-update snapshot for symmetry (unused on this path,
+            # but keeps the per-minute snapshot coherent if a caller mixes modes).
+            self._detect_pre_daily = pre_daily
+            self._detect_pre_daily_minute = _now_minute
+            if not self._should_emit_smt(_now_minute):
+                self._last_detect_minute = _now_minute
+                return []
+            _this_5m = _now_minute.floor("5min")
+            _is_5m = (_now_minute.minute % 5 == 0) and (_this_5m != self._last_detect_5m)
+            if _is_5m:
+                self._last_detect_5m = _this_5m
+            _out = self._run_smt_v2_detection(
+                now, mnq_bar_row, mes_bar_row, today_mnq, today_mes, _is_5m,
+                pre_daily=pre_daily,
+            )
+            self._last_detect_minute = _now_minute
+            self._last_emitted_5m_bucket = _this_5m
+            return _out
+
+        # Per-second (1s/live) path: detect the just-completed PRIOR minute on rollover.
+        events: list[dict] = []
+        _prev_minute = self._detect_pre_daily_minute
+        if (
+            _prev_minute is not None
+            and _now_minute > _prev_minute
+            and _prev_minute != self._last_detect_minute
+        ):
+            # The bar at _prev_minute is now finalized inside today_mnq/today_mes.
+            _mnq_done = self._minute_bar_from_frame(today_mnq, _prev_minute)
+            _mes_done = self._minute_bar_from_frame(today_mes, _prev_minute)
+            if _mnq_done is not None:
+                if self._should_emit_smt(_prev_minute):
+                    _prev_5m = _prev_minute.floor("5min")
+                    _is_5m_prev = (
+                        (_prev_minute.minute % 5 == 0)
+                        and (_prev_5m != self._last_detect_5m)
+                    )
+                    if _is_5m_prev:
+                        self._last_detect_5m = _prev_5m
+                    # MES may have no bar this minute (feed gap) — pass a degenerate empty
+                    # Series; _run_smt_v2_detection skips cleanly via _bar_row_has_ohlc.
+                    _mes_arg = _mes_done if _mes_done is not None else pd.Series(dtype=float)
+                    events = self._run_smt_v2_detection(
+                        _prev_minute, _mnq_done, _mes_arg,
+                        today_mnq, today_mes, _is_5m_prev,
+                        pre_daily=self._detect_pre_daily,
+                    )
+                    self._last_emitted_5m_bucket = _prev_5m
+                self._last_detect_minute = _prev_minute
+
+        # Capture THIS minute's pre-update snapshot (state through the prior completed bar)
+        # the first time we see the minute, so the next rollover detects this minute's bar
+        # against the correct prior-bar liquidity state.
+        if self._detect_pre_daily_minute != _now_minute:
+            self._detect_pre_daily = pre_daily
+            self._detect_pre_daily_minute = _now_minute
+
+        return events
+
+    def finalize_detection(
+        self, today_mnq: pd.DataFrame, today_mes: pd.DataFrame,
+    ) -> list[dict]:
+        """R3: detect the FINAL pending minute in the per-second (1s/live) path.
+
+        The rollover path detects minute M only once minute M+1 begins; the very last minute
+        of a session never sees a successor call, so its completed bar would be missed. Call
+        this once after the per-second loop ends (1s backtest) to detect that trailing
+        minute against its start-of-minute daily snapshot — making the 1s tail match the 1m
+        stream, which detects every completed bar including the last. Idempotent: a minute
+        already detected (or already flushed) is not re-detected. Emits via self._emit and
+        also returns the events for the caller's bookkeeping. No-op for the bar_complete=True
+        (1m) path, which already detects every bar inline."""
+        events: list[dict] = []
+        _pending = self._detect_pre_daily_minute
+        if _pending is None or _pending == self._last_detect_minute:
+            return events
+        _mnq_done = self._minute_bar_from_frame(today_mnq, _pending)
+        if _mnq_done is None:
+            return events
+        _mes_done = self._minute_bar_from_frame(today_mes, _pending)
+        if self._should_emit_smt(_pending):
+            _p5 = _pending.floor("5min")
+            _is_5m_p = (_pending.minute % 5 == 0) and (_p5 != self._last_detect_5m)
+            if _is_5m_p:
+                self._last_detect_5m = _p5
+            _mes_arg = _mes_done if _mes_done is not None else pd.Series(dtype=float)
+            events = self._run_smt_v2_detection(
+                _pending, _mnq_done, _mes_arg, today_mnq, today_mes, _is_5m_p,
+                pre_daily=self._detect_pre_daily,
+            )
+            self._last_emitted_5m_bucket = _p5
+            for _sd in events:
+                self._emit(_sd)
+        self._last_detect_minute = _pending
+        return events
+
+    def _should_emit_smt(self, now: pd.Timestamp) -> bool:
+        """Emit-gate predicate for completed-1m SMT detection (R3).
+
+        Called once per COMPLETED 1m bar (the per-second / 1s / live path runs detection
+        only on a minute rollover; 1m regression runs it once per bar). Currently returns
+        ``True`` for every completed 1m bar, so detection fires on each finished minute in
+        all replay modes — keeping the smt-div stream identical between 1m and 1s/live.
+
+        HOOK (do NOT enable now): a future tightening makes detection emit only when the
+        5m bucket has changed since the last emission. The seam is already wired — flip
+        ``_ENABLE_5M_GATE`` to True and the body below restricts emission to one bar per
+        5m bucket. `_last_emitted_5m_bucket` is maintained by the caller after a True
+        verdict, so a unit test can assert this predicate is consulted per completed bar.
+        """
+        _ENABLE_5M_GATE = False  # R3 out-of-scope: 5m-only emission is a future toggle.
+        if not _ENABLE_5M_GATE:
+            return True
+        _bucket = now.floor("5min")
+        return _bucket != self._last_emitted_5m_bucket
+
+    @staticmethod
     def _completed_tf_bar(today_df: pd.DataFrame, now: pd.Timestamp, tf: str) -> "dict | None":
         """Resample today's 1m bars to `tf` and return the just-COMPLETED bar (the one
         labelled at now.floor(tf) - tf) as an OHLC dict, or None if it does not exist.
@@ -2016,6 +2238,10 @@ class SessionPipeline:
             _is_5m = (_ts.minute % 5 == 0) and (_this_5m != self._last_5m_processed)
             if _is_5m:
                 self._last_5m_processed = _this_5m
+                # R3: keep the detection-side 5m tracker aligned with the execution-side one
+                # for the warm-up's completed bars, so the live loop's first completed-bar
+                # detection after startup continues the same 5m drain cadence.
+                self._last_detect_5m = _this_5m
 
             for _sd in self._run_smt_v2_detection(
                 _ts, _mnq_row, _mes_row, _today_mnq, _today_mes, _is_5m,
@@ -2023,6 +2249,11 @@ class SessionPipeline:
             ):
                 self._emit(_sd)
                 events.append(_sd)
+            # R3: record the warm-up's completed minute so the live rollover path does not
+            # re-detect a minute the warm-up already processed.
+            self._last_detect_minute = _ts
+            self._detect_pre_daily = _pre_daily
+            self._detect_pre_daily_minute = _ts
 
         # Persist detect_state immediately after the warm-up, before any live bars. The
         # per-bar path inside _run_smt_v2_detection already wrote smts.json each bar; this
