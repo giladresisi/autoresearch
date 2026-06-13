@@ -361,44 +361,60 @@ def test_universe_prev_levels_are_fixed():
     assert smt_detect._level_class("prev2_week_low") == ("fixed", "week")
 
 
-def test_fixed_high_bullish_when_swept_from_above():
-    # Per-level take-out: a FIXED prev-day HIGH approached from ABOVE (price sits above it and
-    # a wick dips onto it) is a DOWN-sweep → BULLISH, even though the level is a "high".
+def test_fixed_high_bearish_on_up_sweep():
+    # R1: a FIXED prev-day HIGH is unidirectional → BEARISH on a leader up-sweep (the HIGH wick
+    # takes the level out while the laggard holds below). Direction is the suffix, not the approach.
     lm = _levels(prev1_day_high=21000.0)
     le = _levels(prev1_day_high=3000.0)
-    # MNQ close 21005 (above level) ⇒ approach from above; low 20999 dips onto the level.
-    mnq = _bar(high=21010.0, low=20999.0, close=21005.0)
-    mes = _bar(high=3010.0, low=3005.0, close=3007.0)   # MES holds above (low 3005 > 3000)
+    mnq = _bar(high=21001.0, low=20990.0, close=20995.0)  # MNQ high pierces the level
+    mes = _bar(high=2999.0, low=2990.0, close=2995.0)     # MES holds below (high 2999 < 3000)
     recs, _ = detect_regular_smts(lm, le, mnq, mes, {})
     assert len(recs) == 1
     assert recs[0]["ref_name"] == "prev1_day_high"
+    assert recs[0]["side"] == "bearish" and recs[0]["direction"] == "short"
+    assert recs[0]["leader"] == "mnq"
+
+
+def test_fixed_high_never_bullish_from_above():
+    # R1: a FIXED prev-day HIGH must NOT fire BULLISH when crossed/reclaimed from above (the
+    # depleted-side approach). Under the old bidirectional rule price sitting above with a wick
+    # dipping onto the level fired a spurious bullish SMT; now the level is short-only, so its
+    # touch is the HIGH wick — which BOTH legs pierce here ⇒ no leader ⇒ no fire at all.
+    lm = _levels(prev1_day_high=21000.0)
+    le = _levels(prev1_day_high=3000.0)
+    mnq = _bar(high=21010.0, low=20999.0, close=21005.0)  # close above; both highs above level
+    mes = _bar(high=3010.0, low=3005.0, close=3007.0)
+    recs, _ = detect_regular_smts(lm, le, mnq, mes, {})
+    assert recs == []
+    # And even with a clean one-sided down-side touch, the only direction a high can emit is short.
+    assert not any(r["direction"] == "long" for r in recs)
+
+
+def test_fixed_low_bullish_on_down_sweep():
+    # R1: a FIXED prev-day LOW is unidirectional → BULLISH on a leader down-sweep (the LOW wick
+    # dips onto the level while the laggard holds above).
+    lm = _levels(prev1_day_low=21000.0)
+    le = _levels(prev1_day_low=3000.0)
+    mnq = _bar(high=21010.0, low=20999.0, close=21005.0)  # MNQ low pierces the level
+    mes = _bar(high=3010.0, low=3001.0, close=3007.0)     # MES holds above (low 3001 > 3000)
+    recs, _ = detect_regular_smts(lm, le, mnq, mes, {})
+    assert len(recs) == 1
+    assert recs[0]["ref_name"] == "prev1_day_low"
     assert recs[0]["side"] == "bullish" and recs[0]["direction"] == "long"
     assert recs[0]["leader"] == "mnq"
 
 
-def test_fixed_high_bearish_when_swept_from_below():
-    # The SAME prev-day high approached from BELOW (rising into it) is an UP-sweep → BEARISH.
-    lm = _levels(prev1_day_high=21000.0)
-    le = _levels(prev1_day_high=3000.0)
-    mnq = _bar(high=21001.0, low=20990.0, close=20995.0)  # close below level ⇒ from below
-    mes = _bar(high=2999.0, low=2990.0, close=2995.0)     # MES holds below (high 2999 < 3000)
-    recs, _ = detect_regular_smts(lm, le, mnq, mes, {})
-    assert len(recs) == 1
-    assert recs[0]["side"] == "bearish" and recs[0]["direction"] == "short"
-    assert recs[0]["leader"] == "mnq"
-
-
-def test_fixed_low_bearish_when_swept_from_below():
-    # A FIXED prev-day LOW approached from BELOW (price under it, rising into it) is an
-    # UP-sweep → BEARISH (old support acting as resistance) — direction is the sweep, not
-    # the level's "low" name.
+def test_fixed_low_never_bearish_from_below():
+    # R1: a FIXED prev-day LOW must NOT fire BEARISH on an up-side reclaim (price under it rising
+    # into it). The old bidirectional rule fired a spurious bearish SMT here; now the level is
+    # long-only, so its touch is the LOW wick — which BOTH legs pierce here ⇒ no leader ⇒ no fire.
     lm = _levels(prev1_day_low=21000.0)
     le = _levels(prev1_day_low=3000.0)
-    mnq = _bar(high=21001.0, low=20990.0, close=20995.0)
+    mnq = _bar(high=21001.0, low=20990.0, close=20995.0)  # close below; both lows below level
     mes = _bar(high=2999.0, low=2990.0, close=2995.0)
     recs, _ = detect_regular_smts(lm, le, mnq, mes, {})
-    assert len(recs) == 1
-    assert recs[0]["side"] == "bearish" and recs[0]["direction"] == "short"
+    assert recs == []
+    assert not any(r["direction"] == "short" for r in recs)
 
 
 def test_dynamic_high_always_bearish_regardless_of_close():
