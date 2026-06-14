@@ -1,8 +1,31 @@
 # GIL-27 — Backtest perf: profiled findings & ranked recommendations
 
-**Status:** Investigation complete **and Wave 1 IMPLEMENTED + verified** (UNSTAGED). See
-"Wave 1 — implemented & verified" below for the measured 3-date byte-identical A/B and the
-~3.1× speedup. Throwaway artifacts (`_perf_*.py`, `pyspy_1s.folded`) are also UNSTAGED.
+**Status:** Investigation complete; **Wave 1 + floor + #3/#3b IMPLEMENTED, A/B-verified, and
+COMMITTED** (4 commits on `autoresearch/backtest-perf`). Net result: **1s backtest ~895 s →
+~223 s/date = ~4.0× faster (−75%)**, byte-identical (events + trades) on 2026-05-18/-20/-22.
+Throwaway profiling artifacts (`_perf_*.py`, `pyspy_*`) remain UNSTAGED.
+
+## Shipped stack (each its own commit, each 3-date byte-identical A/B = PASS)
+
+| commit | change | files | 1s A/B (−18/−20/−22) |
+|---|---|---|---|
+| `23333ac` | Wave 1: #1 memoize `_ensure`, #2 cache state Paths, #4 per-bar floor cache | paths.py, smt_state.py, session_pipeline.py | 289 / 296 / 274 s — PASS |
+| `b370ff0` | DST-safe `.replace()` floor for 1min/5min | session_pipeline.py | PASS (timing under contention) |
+| `ac7c2b9` | #3 `load_daily_ro` at audited read-only sites | smt_state.py, session_pipeline.py, trend.py, strategy.py, test fixture | PASS |
+| `3ea5519` | #3b `load_hypothesis_ro`/`load_position_ro` at inline read-then-discard sites | smt_state.py, session_pipeline.py | **220 / 228 / 222 s** — PASS |
+
+Consolidated final run (full stack, clean): **~223 s/date avg vs 895 s → 4.0×**, trades/P&L identical
+(29/+$2605, 32/−$174, 21/+$1015). Unit suites for changed modules: ~398 pass, only 2 pre-existing
+local-vs-ET-midnight date flakes (bar_state written at `date.today()` but read at the ET session date).
+
+**Caveats:** (a) the floor `.replace()` is byte-identical on normal + DST-spring days but the November
+fall-back ambiguous 01:00–02:00 ET hour (Asia session, ~1 hr/yr) is unverifiable with on-disk (May) data
+— accepted by the user; (b) A/B covers backtest in-memory mode — the `_ro` loaders fall back to the normal
+copy-load in live mode (no live behavior change), and #1/#2 are structurally identical live.
+
+---
+
+## Original Wave-1 section (pre-floor/#3) and recommendation below.
 
 ## Wave 1 — implemented & verified (2026-06-14, UNSTAGED)
 
