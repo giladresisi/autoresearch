@@ -1,78 +1,89 @@
-# Experiment Verification — GIL-23 ATH-seed root fix + direction diagnosability
+# GIL-25 (R2) — Per-ticker liquidity-level invalidation: verification
 
-Worktree: `C:\Users\gilad\projects\auto-co-trader\ath-seed-direction-fix`
-Run dirs (1s, 2026-06-11):
-- CHANGE: `regression\sessions\2026-06-11\13-25-28`
-- BASELINE: `regression\sessions\2026-06-11\_baseline_run`
+**Date:** 2026-06-14 · **Branch:** `autoresearch/smt-level-invalidation` (base `live` @ f475455)
+**Verdict:** ✅ PASS — depletion retirement + fixed re-arm both verified in the SMT-div stream;
+trade-level A/B on 2026-06-12 is **net positive** (wired live per the user's decision).
 
-> **Verification caveat (from GIL-23 / feature.md, confirmed true here):** the 1s backtest baseline
-> already seeds the true ATH `30807` (its 60-day parquet window contains the 05-26→06-04 high) and
-> already chooses `up` at both occurrences. The standard baseline-vs-change A/B therefore *cannot*
-> reproduce the live `down`→`up` flip — it is a no-op by design. The real pass/fail for the seed fix
-> lives in GIL-23's Stage-B unit tests (reported as all 3 passed), not in this A/B. What this
-> verification asserts is: (a) the change did **not regress** ex1/ex2 to `down`, and (b) the new
-> `direction_reason` diagnostic fields are present and sane at both timestamps.
+## What was built (3 consumers + re-arm)
+- **(1) Detection** (`smt_detect._detect_level_smts`): per-ticker depletion latch in the reserved
+  `detect_state["__level_inv__"]`. A level is retired for a ticker once it runs `FULFILL_PTS[tier]`
+  beyond it (HH above a `*_high`, LL below a `*_low`, wick pass). The pair comparison is **skipped
+  if either ticker** retired it. Audit trail in `__level_retirements__`.
+- **(1b) Fixed re-arm** (AC#3 / GIL-25 2026-06-13): fixed levels no longer fire once-ever — they
+  re-arm on a fresh re-visit (depart-then-return; departure margin = `FULFILL_PTS[tier]`) and
+  re-fire **until invalidated**. Invalidation (the skip above) is the terminal state.
+- **(2) Cautious targets** (`hypothesis.compute_cautious_prices`) and **(3) hypothesis targets**
+  (`build_hypothesis_from_direction` step 7): drop MNQ-invalidated level names (loaded from
+  `__level_inv__` via `_invalidated_target_names()`). Wired into the **live trade path** (user's
+  decision); `invalidated_names=None`/empty is a pure no-op for direct callers/tests.
 
-## Verdict summary
-| occurrence | date | time (ET) | verdict | one-line reason |
-|-----|------------|----------|------------------------------|-----------------|
-| ex1 | 2026-06-11 | 13:43:42 | INCONCLUSIVE — no regression | Baseline already `up` (no live `down` to flip); change stays `up` and now logs session_ath=30807, recovery_gap=0.0528, is_false_pos_recovery=true |
-| ex2 | 2026-06-11 | 15:10:00 | INCONCLUSIVE — no regression | Baseline already `up`; change stays `up` and now logs session_ath=30807, recovery_gap≈0.049, is_false_pos_recovery=true |
+## Tests
+- New: `tests/test_smt_level_invalidation.py` (11) — latch thresholds, skip-if-either, asymmetric
+  (Q8 shape), body-pass skip, fixed re-arm/no-refire-without-departure/terminal-on-invalidation.
+- Updated: `test_smt_detect.py` (`test_rearm_via_opposite_smt`, replaced `…single_smt_ever` →
+  `…rearms_until_invalidated`, added `…opposite_smt_does_not_rearm_fixed_without_departure`);
+  `test_smt_invalidation.py` (`…precedence_same_bar`); `test_smt_hypothesis.py` (+5 consumer 2/3).
+- Suite: SMT/hypothesis/pipeline = **203 pass**. Full suite (skip IB) = **26 failures, ALL
+  pre-existing** — identical set reproduced on base source f475455 (test_pickmytrade_executor,
+  test_hypothesis_smt LLM, test_check_session_parquets, test_bar_state, …). **Zero new failures.**
 
-INCONCLUSIVE here is the **expected** outcome per the caveat (premise absent in replay), and is explicitly **not a failure**. Both occurrences also pass the regression-safety bar: direction unchanged + diagnostics added.
+## SMT-stream verification (regression replay 2026-06-12, baseline vs change)
+The replay runs the CME session (overnight from 2026-06-11 18:00 ET). It does **not** reproduce
+the exact live-session occurrence times (the live run used different live level prices / state) —
+a known replay-vs-live caveat — but it reproduces the same depleted-pool mechanism and one
+occurrence (Q3) exactly. smt-div A/B diff (1s and 1m identical conclusions):
 
-## Per-occurrence detail
+**REMOVED by change (depleted pools retired):**
+- `prev2_day_high` @ **00:05 (wick) / 00:06 (body)** — **occurrence Q3 exactly** ✅
+- `prev1_day_high` @ 21:22 (wick+body) — same depleted-pool mechanism as Q7 (replay timing) ✅
 
-### ex1 — 2026-06-11, window 13:35–13:52 ET
-The documented `current behavior` (live `new-hypothesis down` @13:43:42, recovery guard off because session_ath=29011.25 ≤ price) is **not present in the baseline replay** — the baseline already chooses `up`, so there is no `down` for the change to flip. The actual `new-hypothesis` event fires at 13:43:42 (exact spec match; a second one at 13:40:00 sits in the same window).
+**ADDED by change (fixed re-arm, AC#3):**
+- `ny_evening_high` re-fires @ **18:21 and 18:34** (was single-fire-ever) ✅
+- `london_high` @ 07:53 (body) — legitimate re-fire on a fresh re-visit ✅
 
-BASELINE @13:43:42 (confirms baseline already `up`, diagnostics absent):
-```
-dir=up  price=29179.5  last_liq=day_high
-direction_reason: {rule=rule2b, last_swept_level=day_high, weekly_zone=premium,
-                   daily_zone=premium, smt_score=0.0, ...}   # NO session_ath/recovery_gap/is_false_pos_*
-```
+`asia_high` (Q8) does not occur in the replay environment → covered by the asymmetric unit test
+(`test_asymmetric_one_ticker_depleted_skips_pair`).
 
-CHANGE @13:43:42 (still `up`, diagnostics present and sane):
-```
-dir=up  price=29179.5  last_liq=day_high
-direction_reason: {rule=rule2b, last_swept_level=day_high, weekly_zone=premium, daily_zone=premium,
-                   all_time_high=30807.0, session_ath=30807.0, recovery_gap=0.0528,
-                   is_false_pos_ath=false, is_false_pos_morning=false, is_false_pos_recovery=true,
-                   smt_score=0.0, ...}
-```
-(Identical values on the 13:40:00 hypothesis: session_ath=30807, recovery_gap=0.0528, is_false_pos_recovery=true.)
+## Trade A/B (2026-06-12) — P&L + exit timing
+| mode | baseline | change | Δ |
+|---|---|---|---|
+| **1s** | 19 trades, **−$304** | 18 trades, **+$881** | **+$1,185** |
+| **1m** | 16 trades, **+$1,005.5** | 12 trades, **+$1,185** | **+$179.5** |
 
-`recovery_gap` 0.0528 = (30807−29179.5)/30807 ≈ 5.28% > 3% PM threshold → recovery-week continuation → `up`, exactly matching the issue's expected `recovery_gap≈5.3%`. **Verdict: INCONCLUSIVE (no regression).** Change did not regress to `down`; the corrected seed and guard booleans are now reproducible from the event log.
+All trades are **long** (uptrend day). The change **captures the 03:00–05:39 morning rally** that
+baseline missed entirely — 03:35→04:01 **+$438**, 04:47→05:23 **+$374**, 05:26→05:39 **+$240** —
+where baseline instead took two losers (05:55 −$89, 06:07 −$141). Dropping the depleted prev-day
+high levels as cautious/hypothesis targets removed premature exit ceilings, so longs rode the
+uptrend further (e.g. 19:30→19:52 +$212 vs baseline +$150; 22:36 exit re-timed). Net strongly
+positive on this day. NOTE: this is **one day**; before any merge the P&L effect should be
+broadened across regimes, and the user may want to tune the cautious-pts threshold for
+invalidated-as-target levels (the original exploration intent).
 
-### ex2 — 2026-06-11, window 15:02–15:18 ET
-Same situation: baseline already `up`; the near-15:10 hypothesis fires at 15:10:42 (a second at 15:05:00 in-window).
+## Late / cold start — pre-startup crossings (verified)
+The `__level_inv__` latch is built inside `_run_smt_v2_detection`, which the cold-start **warm-up
+replay** (`session_pipeline._warmup_replay_smts`) runs for every pre-startup bar `[session_open,
+now)`. So a fixed prev liquidity decisively crossed *before the orchestrator started* is retired
+from the first live bar (and `__level_inv__`/`__level_retirements__` are `__`-prefixed, so they
+don't mask the cold-start guard). Verified on 3 real late-start probes:
+- **06-12 @ 09:30** retires `prev1_day_high{mnq}`, `prev2_day_high{mnq}`, **`asia_high{mes}`**,
+  `asia_low{mnq}` — i.e. all three occurrence levels (incl. the Q8 asymmetric MES case the
+  replay-from-open didn't surface). 06-08 @ 19:30 retires `prev1_week_low`/`prev2_day_low`;
+  06-10 @ 09:30 retires 6 levels. Retirement events stamp the real pre-startup bar.
+- Locked in by `tests/test_smt_warmup_startup.py::test_warmup_seeds_level_invalidation`.
+- **Residual (minor):** a level crossed in a *prior* session **and** fully retraced below it
+  before this session's 18:00 open is not pre-seeded (warm-up only goes back to session open;
+  if price is still beyond at open it IS caught on the first bar). Backtests replay from open so
+  they're inherently covered.
 
-BASELINE @15:10:42:
-```
-dir=up  price=29304.25  last_liq=day_high
-direction_reason: {rule=rule2b, last_swept_level=day_high, weekly_zone=premium, daily_zone=premium, ...}  # no diagnostics
-```
+## Artifacts
+- Plots: `regression/sessions/2026-06-12/r2_ab/R2_{change,baseline}_{1s,1m}.html`
+- Streams/trades: same folder, `{change,baseline}_{events,trades}[_1s].*`
+- Plan: `.agents/plans/1.smt-level-invalidation-r2.md`
 
-CHANGE @15:10:42:
-```
-dir=up  price=29304.25  last_liq=day_high
-direction_reason: {... all_time_high=30807.0, session_ath=30807.0, recovery_gap=0.0488,
-                   is_false_pos_ath=false, is_false_pos_morning=false, is_false_pos_recovery=true, ...}
-```
-(15:05:00 hypothesis: session_ath=30807, recovery_gap=0.0491, is_false_pos_recovery=true.)
-
-`recovery_gap` ≈0.049 ((30807−29304.25)/30807 ≈ 4.88%) > 3% → `up`. **Verdict: INCONCLUSIVE (no regression).** Direction held `up`; diagnostics present and sane.
-
-## Attribution / in-window diff
-Diffing the two runs across all 223 events: **0 rows differ in any non-`direction_reason` field**; exactly **26 rows differ in `direction_reason`**, and those are precisely the 26 `new-hypothesis` events. Every diff is purely **additive** — the six new keys (`all_time_high`, `session_ath`, `recovery_gap`, `is_false_pos_ath`, `is_false_pos_morning`, `is_false_pos_recovery`) appear in the change run with all pre-existing keys byte-identical. This matches Fix-2 (diagnosability) exactly and confirms Fix-1's seed is a no-op in backtest (session_ath was already 30807 via the 60-day window; the change run's `global.json` confirms `session_ath=30807.0`, `all_time_high=30807.0`, `trend=up`). No unrelated side effects.
-
-## Whole-day impact
-| date | baseline n_trades, pnl | change n_trades, pnl | Δpnl | Δtrades |
-|------|------------------------|----------------------|------|---------|
-| 2026-06-11 | 34, +$2,536 | 34, +$2,536 | $0 | 0 |
-
-`trades_1s.tsv` is byte-identical between the two runs.
-
-## Bottom line
-At both example occurrences the change behaved exactly as the caveat predicted: the backtest baseline was already correct (`up`), so there was no live `down`→`up` flip to reproduce — hence INCONCLUSIVE, which is the expected, non-failure outcome. The verification did confirm the two things it can: (a) **no regression** — direction stays `up` at 13:43:42 and 15:10:42, trades and whole-day P&L are byte-identical (+$2,536, 34 trades, Δ=$0/0); and (b) the **diagnosability fix is live and sane** — every `rule2b` high-sweep hypothesis now carries `session_ath≈30807`, `all_time_high≈30807`, the matching `recovery_gap` (0.0528 at ex1, ~0.049 at ex2, both > the 3% PM threshold → continuation), and the three `is_false_pos_*` booleans (`is_false_pos_recovery=true`, others false). The actual proof that the seed fix corrects the live failure mode (windowed `_hist_mnq_1m` max 29011 < full-parquet 30807, lost prior global) rests on GIL-23's Stage-B unit tests, not this A/B; this A/B stands only as the regression-safety check, and it passes (no change to the already-correct 06-11 backtest).
+## Acceptance criteria
+- [x] Per-ticker level invalidation state; skipped in `_detect_level_smts` if either ticker invalidated.
+- [x] Fan-out to cautious + hypothesis target lists (invalidated dropped); wired live.
+- [x] Fixed-level re-arm until invalidated (no longer single-fire-ever); invalidation terminal.
+- [x] 2026-06-12 regression: depleted prev2_day_high @ 00:05/00:06 (Q3) + prev1_day_high no longer
+      fire; asia_high (Q8) covered by unit test (absent from replay env).
+- [x] Unit tests for invalidation + re-arm; SMT/pipeline suite green except known pre-existing.

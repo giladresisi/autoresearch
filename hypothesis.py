@@ -51,12 +51,30 @@ LOW_ARM_DOWN_OVERSHOOT_SUPPRESS_PTS = 50.0
 P8_ATH_GUARD_HOUR = 12
 
 
+def _invalidated_target_names() -> "set[str]":
+    """R2 (GIL-25): MNQ-invalidated (depleted) level names, for dropping from the cautious /
+    hypothesis target consumers. Source = smts.json detect_state reserved ``__level_inv__``
+    (the per-ticker depletion latch produced by ``smt_detect._detect_level_smts``).
+
+    MNQ only: these target lists are MNQ-price exit/entry levels, so the traded instrument's
+    own depletion is what retires a level as a target (an MES-only depletion does not exhaust
+    MNQ's resting orders at the MNQ price). Total: never raises (degenerate state → empty set).
+    """
+    try:
+        liv = (load_smts().get("detect_state", {}) or {}).get("__level_inv__", {}) or {}
+        return {name for name, v in liv.items()
+                if isinstance(v, dict) and v.get("mnq")}
+    except Exception:
+        return set()
+
+
 def compute_cautious_prices(
     direction: str,
     current_close: float,
     liquidities: list,
     ath: float,
     dist_shrinks: int = 0,
+    invalidated_names: "set[str] | None" = None,
 ) -> dict:
     """Return cautious price fields anchored at current_close.
 
@@ -67,13 +85,20 @@ def compute_cautious_prices(
     max-distance thresholds by `CAUTIOUS_DIST_SHRINK_PCT` per failed entry, floored at
     `CAUTIOUS_MIN_DIST`. At dist_shrinks=0 the thresholds are unchanged (the effective
     maxes equal the module constants), so output is identical to pre-change behavior.
+
+    `invalidated_names` (R2 / GIL-25) — level names whose resting liquidity has been depleted
+    for MNQ (per-ticker retirement); they are skipped as cautious candidates. None/empty →
+    no drop (PURE; reproduces the legacy output byte-for-byte).
     """
+    _inv = invalidated_names or set()
     _factor = (1.0 - CAUTIOUS_DIST_SHRINK_PCT) ** max(0, dist_shrinks)
     _sec_max = max(CAUTIOUS_MIN_DIST, CAUTIOUS_SECONDARY_MAX_DIST * _factor)
     _init_max = max(CAUTIOUS_MIN_DIST, CAUTIOUS_INITIAL_MAX_DIST * _factor)
 
     _cautious_all = []
     for liq in liquidities:
+        if liq.get("name") in _inv:
+            continue   # R2: depleted level — not a cautious target
         liq_kind = liq.get("kind")
         if liq_kind == "level":
             p = liq.get("price")
@@ -141,6 +166,8 @@ def compute_cautious_prices(
         _terminal_names = {"day_low", "week_low"} if direction == "down" else {"day_high", "week_high"}
         _terminal_candidates = []
         for liq in liquidities:
+            if liq.get("name") in _inv:
+                continue   # R2: depleted level — not a terminal cautious target
             if liq.get("name") in _terminal_names and liq.get("kind") == "level":
                 p = liq.get("price")
                 if p is None:
@@ -193,7 +220,8 @@ def recompute_cautious_for_fill(
     direction = hypothesis.get("direction")
     if direction not in ("up", "down") or hypothesis.get("manual"):
         return hypothesis
-    cp = compute_cautious_prices(direction, float(fill_price), liquidities, ath, dist_shrinks)
+    cp = compute_cautious_prices(direction, float(fill_price), liquidities, ath, dist_shrinks,
+                                 invalidated_names=_invalidated_target_names())
     hypothesis["cautious_price_initial"]         = cp["cautious_price_initial"]
     hypothesis["cautious_price_initial_level"]   = cp["cautious_price_initial_level"]
     hypothesis["cautious_price_secondary"]       = cp["cautious_price_secondary"]
@@ -216,6 +244,7 @@ from smt_state import (
     load_daily,
     load_hypothesis,
     load_position,
+    load_smts,
     save_hypothesis,
     save_position,
 )
@@ -1946,9 +1975,14 @@ def build_hypothesis_from_direction(
     When hist_mnq_1m is None, entry_ranges is left empty (manual entries bypass O5).
     When skip_veto is True, the direction-veto check is skipped entirely.
     """
-    # Step 7: targets — filter liquidities in direction from current close.
+    # Step 7: targets — filter liquidities in direction from current close. R2 (GIL-25): drop
+    # levels whose MNQ liquidity has been depleted (per-ticker retirement) so a destroyed pool
+    # is neither a hypothesis target nor (below) a cautious target.
+    _inv_names = _invalidated_target_names()
     targets = []
     for liq in liquidities:
+        if liq.get("name") in _inv_names:
+            continue
         kind = liq.get("kind")
         if kind == "level":
             price = liq.get("price")
@@ -1975,7 +2009,8 @@ def build_hypothesis_from_direction(
     # tightens the max-distance thresholds after each failed entry under this hypothesis.
     ath = global_state["all_time_high"]
     _dist_shrinks = load_position().get("cautious_dist_shrinks", 0)
-    _cp = compute_cautious_prices(direction, current_close, liquidities, ath, _dist_shrinks)
+    _cp = compute_cautious_prices(direction, current_close, liquidities, ath, _dist_shrinks,
+                                  invalidated_names=_inv_names)
     cautious_price_initial         = _cp["cautious_price_initial"]
     cautious_price_initial_level   = _cp["cautious_price_initial_level"]
     cautious_price_secondary       = _cp["cautious_price_secondary"]

@@ -161,13 +161,16 @@ def test_fulfillment_takes_precedence_same_bar():
     # These are mutually exclusive numerically, so precedence is instead proven by construction:
     # the invalidation branch is guarded by `not st.get("fulfilled")` re-checked AFTER the
     # fulfillment branch ran this bar. We verify a bar that fulfills never sets invalidated.
+    # R2 note: for a FIXED level a favorable follow-through also DEPARTS the level (price left
+    # the level region) → it re-arms (fired→False). Either way the key guarantee holds: a
+    # favorable move never produces an ADVERSE-run invalidation.
     state = {}
     recs, state = _fire_short(state)
     skey = "prev1_day_high|short|wick"
     fc = state[skey]["fire_mnq_close"]  # 20995
-    # Favorable DOWN move past fc - 40 = 20955 → fulfilled this bar.
+    # Favorable DOWN move past fc - 40 = 20955 → fulfilled, then (R2) departed → re-armed.
     recs, state = _drift_short(state, mnq_close=fc - 45.0, t="2026-06-09T10:01:00")
-    assert state[skey]["fulfilled"] is True
+    assert state[skey]["armed"] is True          # R2: held reversal re-armed the fixed level
     assert state[skey]["invalidated"] is False
     assert state.get("__invalidations__", []) == []
 

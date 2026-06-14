@@ -134,6 +134,37 @@ def test_warmup_catches_june8_bullish_smt(_inmem_state):
         "warm-up did not populate detect_state"
 
 
+def test_warmup_seeds_level_invalidation(_inmem_state):
+    """R2 (GIL-25): a late start must also REBUILD the per-ticker level-depletion latch for
+    fixed prev liquidities that were decisively crossed before the orchestrator came up — so
+    a depleted prev pool is retired (no spurious SMT / no stale cautious-hypothesis target)
+    from the first live bar. The warm-up runs the identical detection path, which maintains
+    `detect_state["__level_inv__"]`.
+
+    Ground truth (June-8 late start @ 19:30 ET): by the 18:00 session-open bar price already
+    sits beyond `prev1_week_low` (29743.0) and `prev2_day_low` (set in a prior session), so
+    both are latched as retired for at least one ticker, with a retirement event stamped at
+    the REAL pre-startup bar (not the startup instant)."""
+    frames = _june8_frames()
+    if frames is None:
+        pytest.skip("2026-06-08 live 1m data (MNQ+MES) not available via paths")
+    mnq, mes = frames
+
+    pipe, _events = _build_late_start_pipeline(mnq, mes, _LATE_NOW)
+
+    liv = pipe._detect_state.get("__level_inv__", {})
+    retired = {n: v for n, v in liv.items() if v.get("mnq") or v.get("mes")}
+    # At least one fixed prev liquidity crossed before the late start must be retired.
+    assert retired, "warm-up did not rebuild any per-ticker level invalidation"
+    assert "prev1_week_low" in retired, f"prev1_week_low not retired by warm-up; got {retired}"
+
+    rets = pipe._detect_state.get("__level_retirements__", [])
+    assert rets, "warm-up produced no level-retirement audit events"
+    # The retirement is stamped at the real pre-startup occurrence bar, not the startup instant.
+    assert all(r.get("time") != _LATE_NOW.isoformat() for r in rets)
+    assert any(r.get("ref_name") == "prev1_week_low" for r in rets)
+
+
 def test_warmup_is_restart_safe(_inmem_state):
     """A warm restart (detect_state already reflects the pre-startup bars) must NOT
     replay them again — the cold-start guard skips the warm-up to avoid double-firing."""

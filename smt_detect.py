@@ -274,6 +274,15 @@ def _detect_level_smts(
 
         kind_cls, tier = _level_class(name)
 
+        # R2 (GIL-25): per-ticker depletion retirement. Once EITHER ticker has run a confirmed
+        # HH/LL FULFILL_PTS[tier] beyond this level (latched at the foot of this loop, in the
+        # reserved state["__level_inv__"]), the level's resting liquidity is gone — skip the
+        # pair comparison entirely (no fire, no re-arm). This is LEVEL-lifecycle invalidation,
+        # distinct from the Part-A adverse-run `st["invalidated"]` flag (a fired SMT *record*).
+        _liv = state.get("__level_inv__", {}).get(name)
+        if _liv and (_liv.get("mnq") or _liv.get("mes")):
+            continue
+
         # Comparison level (same for both sweep directions). Hidden (body) SMTs reference the
         # BODY extreme — the lowest CLOSE for *_low / highest CLOSE for *_high over the level's
         # window — carried as `close_price`. Wick SMTs (and a body SMT on a level missing
@@ -336,6 +345,7 @@ def _detect_level_smts(
                 "fire_level_price": None,
                 "fire_mnq_close": None,
                 "level_price": mnq_lvl_price,
+                "departed": False,
             }
             state[skey] = st
 
@@ -361,16 +371,36 @@ def _detect_level_smts(
         # below) — NOT here — because it must be checked independently of the current bar's
         # approach direction.
 
-        # (b) Re-arm (only if currently dormant). Fixed levels NEVER re-arm. Dynamic levels
-        # re-arm when the swept level was fulfilled OR an opposite-direction SMT is present
-        # in this batch (a genuine regime flip).
-        if not st["armed"] and kind_cls == "dynamic":
-            opp_present = any(r.get("direction") == _opposite(direction) for r in records)
-            if st.get("fulfilled") or opp_present:
+        # R2: departure tracking for the FIXED-level re-arm. After a fixed level fires, mark it
+        # "departed" once price leaves the level by the tier margin (reuse FULFILL_PTS). An
+        # UPWARD departure of a *_high (or downward of a *_low) also trips the depletion latch
+        # below → the level is retired (skipped) before it can re-arm, so in practice a fixed
+        # level only re-arms after a genuine REVERSAL away from the level (the level held).
+        if kind_cls == "fixed" and st.get("fired") and not st.get("departed"):
+            if abs(mnq_close - mnq_lvl_price) >= _fulfill_pts(tier, "mnq"):
+                st["departed"] = True
+
+        # (b) Re-arm (only if currently dormant). Dynamic levels re-arm when the swept level
+        # was fulfilled OR an opposite-direction SMT is present in this batch (a genuine regime
+        # flip). FIXED levels re-arm on a fresh re-visit (depart-then-return) — replacing the
+        # old single-fire-ever rule (GIL-25 2026-06-13): a fired SMT followed by a reversal
+        # means the level held (its liquidity was NOT consumed), so a later re-approach may
+        # legitimately fire again. The terminal state that stops further fires is per-ticker
+        # invalidation (the skip at the top of this loop), NOT the first fire.
+        if not st["armed"]:
+            if kind_cls == "dynamic":
+                opp_present = any(r.get("direction") == _opposite(direction) for r in records)
+                if st.get("fulfilled") or opp_present:
+                    st["armed"] = True
+                    st["fired"] = False
+                    st["fulfilled"] = False
+                    st["invalidated"] = False
+            elif st.get("departed"):
                 st["armed"] = True
                 st["fired"] = False
                 st["fulfilled"] = False
                 st["invalidated"] = False
+                st["departed"] = False
 
         # (c) Fire on the armed rising edge.
         if cond and not st["last_cond"] and st["armed"]:
@@ -395,6 +425,7 @@ def _detect_level_smts(
             st["fired"] = True
             st["fulfilled"] = False
             st["invalidated"] = False
+            st["departed"] = False
             st["fire_time"] = iso
             st["fire_price"] = lead_price
             st["fire_leader"] = leader
@@ -403,6 +434,33 @@ def _detect_level_smts(
 
         st["last_cond"] = cond
         st["level_price"] = mnq_lvl_price
+
+        # R2: update the per-ticker depletion latch (WICK pass only — needs bar High/Low; body
+        # SMTs only READ it via the skip above). Latched terminal once a ticker runs
+        # FULFILL_PTS[tier] beyond the level (a HH above a *_high, a LL below a *_low), using
+        # each instrument's own wick level price. A flip appends one audit event.
+        if not body:
+            _liv_all = state.setdefault("__level_inv__", {})
+            _ent = _liv_all.setdefault(name, {"mnq": False, "mes": False})
+            _was = (_ent["mnq"], _ent["mes"])
+            _thr_mnq = _fulfill_pts(tier, "mnq")
+            _thr_mes = _fulfill_pts(tier, "mes")
+            if sub == "high":
+                if not _ent["mnq"] and float(mnq_bar["high"]) >= mnq_lvl_price + _thr_mnq:
+                    _ent["mnq"] = True
+                if not _ent["mes"] and float(mes_bar["high"]) >= mes_lvl_price + _thr_mes:
+                    _ent["mes"] = True
+            else:
+                if not _ent["mnq"] and float(mnq_bar["low"]) <= mnq_lvl_price - _thr_mnq:
+                    _ent["mnq"] = True
+                if not _ent["mes"] and float(mes_bar["low"]) <= mes_lvl_price - _thr_mes:
+                    _ent["mes"] = True
+            if (_ent["mnq"], _ent["mes"]) != _was:
+                state.setdefault("__level_retirements__", []).append({
+                    "time": iso, "ref_name": name, "tier": tier, "kind": kind_cls,
+                    "mnq": _ent["mnq"], "mes": _ent["mes"],
+                    "mnq_level_price": mnq_lvl_price, "mes_level_price": mes_lvl_price,
+                })
 
     # (a2) Adverse-run invalidation — the mirror of fulfillment, maintained INDEPENDENTLY of the
     # per-level loop above. A fired SMT must be invalidated whenever price runs INV_PTS to the
