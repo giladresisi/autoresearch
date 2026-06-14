@@ -975,3 +975,82 @@ def test_recompute_cautious_for_fill_honors_dist_shrinks():
     assert out0["cautious_price_secondary_level"] == "L140"
     out1 = recompute_cautious_for_fill(dict(hyp), 20000.0, liqs, 999999.0, 1)
     assert out1["cautious_price_secondary_level"] == ""
+
+
+# ══ R2 (GIL-25): drop per-ticker-invalidated levels from cautious + hypothesis targets ═══
+
+def _two_up_levels():
+    # prev1_day_high (140 above) is the furthest → secondary; L100 (100 above) the initial.
+    return [
+        {"name": "prev1_day_high", "kind": "level", "price": 20140.0},
+        {"name": "L100",           "kind": "level", "price": 20100.0},
+    ]
+
+
+def test_compute_cautious_drops_invalidated_level():
+    """An invalidated level is excluded from the cautious-ladder candidate pool."""
+    from hypothesis import compute_cautious_prices
+    liqs = _two_up_levels()
+    base = compute_cautious_prices("up", 20000.0, liqs, 999999.0)
+    assert base["cautious_price_secondary_level"] == "prev1_day_high"
+    out = compute_cautious_prices("up", 20000.0, liqs, 999999.0,
+                                  invalidated_names={"prev1_day_high"})
+    assert out["cautious_price_secondary_level"] == "L100"
+
+
+def test_compute_cautious_invalidated_default_is_noop():
+    """No invalidated_names (None / omitted / empty) reproduces the legacy output byte-for-byte."""
+    from hypothesis import compute_cautious_prices
+    liqs = _two_up_levels()
+    a = compute_cautious_prices("up", 20000.0, liqs, 999999.0)
+    b = compute_cautious_prices("up", 20000.0, liqs, 999999.0, invalidated_names=None)
+    c = compute_cautious_prices("up", 20000.0, liqs, 999999.0, invalidated_names=set())
+    assert a == b == c
+
+
+def test_compute_cautious_drops_invalidated_in_terminal_fallback():
+    """The terminal-extreme fallback (no in-range candidates) also drops invalidated levels."""
+    from hypothesis import compute_cautious_prices
+    # Both day_high (far) candidates beyond secondary max → fallback to terminal day_high/week_high.
+    liqs = [
+        {"name": "day_high",  "kind": "level", "price": 21000.0},
+        {"name": "week_high", "kind": "level", "price": 22000.0},
+    ]
+    base = compute_cautious_prices("up", 20000.0, liqs, 999999.0)
+    assert base["cautious_price_secondary_level"] in ("day_high", "week_high")
+    out = compute_cautious_prices("up", 20000.0, liqs, 999999.0,
+                                  invalidated_names={"day_high", "week_high"})
+    assert out["cautious_price_secondary_level"] == ""
+
+
+def test_invalidated_target_names_loads_mnq_from_smts():
+    """The helper reads MNQ-invalidated level names from smts.json detect_state __level_inv__."""
+    from smt_state import save_smts
+    from hypothesis import _invalidated_target_names
+    save_smts({"detect_state": {"__level_inv__": {
+        "prev1_day_high": {"mnq": True,  "mes": False},   # MNQ depleted → dropped
+        "prev2_day_low":  {"mnq": False, "mes": True},    # only MES → NOT dropped (MNQ-traded)
+        "day_high":       {"mnq": False, "mes": False},
+    }}})
+    assert _invalidated_target_names() == {"prev1_day_high"}
+
+
+def test_build_hypothesis_targets_drop_invalidated_level():
+    """build_hypothesis_from_direction excludes an MNQ-invalidated level from the targets list."""
+    from smt_state import save_smts
+    from hypothesis import build_hypothesis_from_direction
+    save_global(_make_default_global())
+    save_smts({"detect_state": {"__level_inv__": {
+        "prev1_day_high": {"mnq": True, "mes": False}}}})
+    liqs = [
+        {"name": "prev1_day_high", "kind": "level", "price": 20100.0},
+        {"name": "day_high",       "kind": "level", "price": 20050.0},
+    ]
+    build_hypothesis_from_direction(
+        "up", _make_now(), 20000.0, liqs, _make_default_global(),
+        old_direction="up", weekly_mid="", daily_mid="", last_liquidity="",
+        divs=[], direction_reason={}, skip_veto=True, old_formed_at="2026-04-27T09:30:00",
+    )
+    names = {t["name"] for t in load_hypothesis()["targets"]}
+    assert "prev1_day_high" not in names
+    assert "day_high" in names

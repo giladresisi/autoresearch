@@ -1,56 +1,70 @@
-# Experiment: SMT V2 relevance filter — sweep-confirmation gate + wick/body collapse
+# Feature: Per-ticker liquidity-level invalidation / depletion retirement (R2)
 
-**Linear issue (source of truth):** `GIL-17` — https://linear.app/gilad-resisi/issue/GIL-17/smt-v2-relevance-filter-sweep-confirmation-gate-wickbody-collapse
-**Worktree / branch:** `autoresearch/entry-stuff` (DIRECT mode — current worktree, off HEAD @ b4a4498)
-**Status:** set up — running DIRECT (the current agent executes all stages in THIS worktree).
+> **Source of truth: Linear GIL-25** — https://linear.app/gilad-resisi/issue/GIL-25
+> Read the issue AND its comments first (esp. the 2026-06-13 re-arm refinement: fixed levels
+> re-arm and may fire repeatedly *until invalidated* — invalidation, not the first fire, is
+> terminal). This file is a thin runbook; the full spec/design lives in GIL-25.
 
-> Read the Linear issue (GIL-17) first. It holds the full context: problem, the June 3 evidence
-> (gap-vs-trend cohorts + price arc), current code with `file.py:line` anchors, the two structural
-> changes to implement, the verification approach, and the example occurrences. This file is just
-> how to *proceed*.
+- **Branch:** `autoresearch/smt-level-invalidation` (off `live` @ f475455 — has R1 unidirectional
+  + master SMT-v2 merge + R3 1m-cadence detection + the keep:True FVG fix).
+- **Status:** spec-only / handoff. A separate agent implements here. Nothing committed yet.
+- **Foundation for:** GIL-26 (R4) — R4's FVG-edge invalidation reuses this machinery. Land R2
+  first; R4 plugs FVG edges into it.
+- **Shadow change:** SMT detection does NOT drive hypothesis/entry yet → **verify by the
+  SMT-div stream, NOT P&L.** An A/B P&L delta is meaningless here; do not use it as the pass
+  criterion.
 
----
+## What to build (summary — full detail in GIL-25)
+Track per-ticker level state: mark a level "destroyed/invalidated" for a ticker once that
+ticker runs a confirmed HH/LL **well beyond** it (reuse the existing `FULFILL_PTS` /
+`INVALIDATE_PTS` tier thresholds in `smt_detect.py`). Fan out to **three** consumers:
+(1) SMT detection `smt_detect.py::_detect_level_smts` — skip a level if **either** ticker has
+it invalidated; (2) cautious-target selection; (3) hypothesis target lists. Also change the
+**fixed-level re-arm rule** (GIL-25 2026-06-13 comment): a fixed level re-arms on a fresh
+re-visit (depart-then-return) and may fire again **until invalidated** — replace the current
+"single fire ever" (`smt_detect.py` re-arm only `kind_cls=="dynamic"`, ~line 348). Distinguish
+from the existing Part-A adverse-run `invalidated` flag (that invalidates a fired SMT *record*;
+this invalidates the *level*).
 
-## Runbook — DIRECT mode (current agent runs this experiment here)
+## Code anchors (backtest vs live)
+Backtests run `regression.py` → `backtest_smt.run_backtest_v2` (SimulatedBrokerExecutor); live
+runs `automation.main`. Detection is shared. Anchors: `smt_detect.py::_detect_level_smts`
+(direction/fire/re-arm; the dynamic-only re-arm gate ~348), `FULFILL_PTS_*` / `INVALIDATE_PTS_*`
+(reuse for the "well beyond" threshold), `eligible_levels` (recency gate); cautious-target +
+hypothesis-target assembly in `session_pipeline.py` (consumers to gate). State: `daily.json`
+(`liquidities`, `liquidities_mes`, universe keys), `smts.json` (detect_state).
 
-Work through the stages **in order**. After **each** stage, post a concise comment to GIL-17. When
-all stages are done, **notify the user** (push notification) with the one-line verdict. Leave ALL
-changes **UNSTAGED** — never commit, merge, or push.
-
-- **Stage A — Plan.** Spawn the **`experiment-planner`** subagent on this `feature.md` + GIL-17. It
-  explores the code, assesses scope, and writes `.agents/plans/<slug>.md` with `EXECUTION_MODE:
-  team|lightweight` + an `EXECUTOR DIRECTIVE`. Expected: lightweight (local to `hypothesis.py` pure
-  functions + `tests/test_smt_relevance.py`). → Comment: plan path, `EXECUTION_MODE`, one-line approach.
-- **Stage B — Implement.** Spawn the **`plan-executor`** subagent on the plan, honoring its
-  `EXECUTION_MODE`. It runs its review pipeline; run `tests/test_smt_relevance.py` (+ `tests/` quick
-  full run, `-m 'not integration'`); leave changes UNSTAGED. → Comment: files changed, test results.
-- **Stage C — A/B regression (no-regression sanity).** Spawn the `regression-runner` agent in
-  `ab-working-change` mode, `1s`, on **2026-06-03**. The filter is shadow → expect **IDENTICAL
-  events/trades, P&L Δ=0**. A DIFFER verdict here is a RED FLAG (means the change leaked into
-  behavior). → Comment: baseline vs change `n_trades`/`pnl`, diff verdict (must be IDENTICAL), chart paths.
-- **Stage D — Verify (decision-quality scorecard — the real signal).** This experiment is NOT
-  verified by P&L. Build/extend the offline harness (see `C:\Users\gilad\AppData\Local\Temp\smt_phase3_preview.py`
-  and `..\june3_prox.py` as references) that replays the run's 35-SMT stream through BOTH the OLD
-  filter (HEAD `ingest_smts`/`dominant`) and the NEW filter, scoring each SMT's direction against the
-  next-30m move (RIGHT/wrong) and recording each filter's admit/suppress + was-dominant decision. A
-  decision is **correct** when it admits a RIGHT SMT or suppresses a wrong one. Produce a per-SMT
-  old-vs-new table flagged **better/worse/same**, plus a whole-session tally, and check the 3 example
-  occurrences below (suppress #1, keep-dominant #2, collapse #3). Write `experiment-verification.md`.
-  → Comment: per-occurrence PASS/FAIL + the old-vs-new correct-decision tally.
-- **Stage E — Notify.** Push a notification: one-line verdict (did the new filter suppress the
-  premature reversals while keeping the at-level sweeps; net better/worse/same decision count; A/B
-  confirmed flat). Leave everything UNSTAGED; the user reviews and decides on merge.
-
-**Success criterion:** new filter strictly improves the correct-decision count (suppresses the
-premature-reversal cohort, keeps the at-level sweep cohort) with ZERO regression on the guardrail
-(day_high DOWN @09:31 must stay admitted + dominant), and the A/B is byte-identical.
-
----
+## Runbook
+- **A — Plan.** Turn GIL-25 + this file into `.agents/plans/<slug>.md` (`/plan-feature` if
+  large/cross-cutting); stamp EXECUTION_MODE + executor directive.
+- **B — Implement.** Per the plan; leave changes UNSTAGED. Skip IB-touching tests
+  (`--ignore=tests/test_ib_realtime.py --ignore=tests/test_ib_integration.py`); the 24
+  master-inherited wall-clock/V1 failures are pre-existing (flag only NEW failures).
+- **C — Regression (SMT-stream, NOT P&L).** Run a 1s **and** 1m regression for 2026-06-12
+  (`run_regression(dates=["2026-06-12"], mode="1s"/"1m", skip_lock=True)`). Inspect the
+  smt-div stream + `daily.json`.
+- **D — Verify (SMT-stream).** At each occurrence below assert the desired SMT-stream effect
+  (the spurious SMTs are gone). Write `experiment-verification.md`.
+- **E — Notify** the user with the one-line verdict + comment on GIL-25.
 
 ## Example Occurrences
+| date | time (ET) | source | current behavior | desired behavior | window |
+|---|---|---|---|---|---|
+| 2026-06-12 | 05:35 | live-session:2026-06-12 | spurious bullish `asia_high` SMT (lead=mnq): MES is far above its asia_high 7421.5 (cleared it earlier) while MNQ oscillates at its asia_high 29647.5 → false divergence | with per-ticker invalidation, MES's asia_high is retired → the pair is skipped → **no `asia_high` SMT fires at 05:35** | ±8m |
+| 2026-06-12 | 04:19 | live-session:2026-06-12 | `prev1_day_high` SMTs fire @ 04:19 (wick) / 04:20 (body) though both tickers already crossed below it (depleted pool) | the depleted prev1_day_high is invalidated/retired → **no prev1_day_high SMT fires @ 04:19/04:20** | ±8m |
+| 2026-06-12 | 00:05 | live-session:2026-06-12 | `prev2_day_high` SMTs fire @ 00:05/00:06 though price is already above it (depleted) | invalidated/retired → **no prev2_day_high SMT @ 00:05/00:06** | ±8m |
 
-| # | date | time (ET) | source | window | current behavior | desired behavior |
-|---|------|-----------|--------|--------|------------------|------------------|
-| 1 | 2026-06-03 | 09:40 | regression-run:C:\Users\gilad\projects\auto-co-trader\entry-stuff\regression\sessions\2026-06-03\17-53-08 | 09:32–09:50 | day_low UP wick+body SMTs (#18-21) admitted while price (~30700) is ~140pt above the day_low and still falling toward the 09:50 low (30496); can drive an UP hypothesis prematurely (next-30m −32…−76, wrong). | Sweep-confirmation gate SUPPRESSES these UP SMTs (price has not reached the low extreme + momentum is down). Eligible only after price sweeps the 09:50 low (#22-27, fired at/below the low, admit). |
-| 2 | 2026-06-03 | 09:31 | regression-run:C:\Users\gilad\projects\auto-co-trader\entry-stuff\regression\sessions\2026-06-03\17-53-08 | 09:23–09:39 | day_high DOWN wick SMT (#17) admitted and dominant; fired at the high (gap +5) and preceded the −196 crash. | Guardrail: gate must STILL admit and keep this SMT dominant (sweep confirmed). Must NOT over-suppress the best signal — same-or-better decision. |
-| 3 | 2026-06-03 | 05:22 | regression-run:C:\Users\gilad\projects\auto-co-trader\entry-stuff\regression\sessions\2026-06-03\17-53-08 | 05:14–05:30 | week_high fires both a wick (#10) and a body (#12) divergence within 5s → two separate active-set records (week_high\|down\|wick and week_high\|down\|body). | Collapse into ONE logical SMT per (ref_name, direction): one week_high-down member with wick as confirmation strength; the active set holds one member, not two. |
+## Acceptance criteria
+- [ ] Per-ticker level invalidation state; a level is skipped in `_detect_level_smts` if either
+      ticker has it invalidated.
+- [ ] Fan-out to cautious-target selection + hypothesis target lists (invalidated levels dropped).
+- [ ] Fixed-level re-arm: fires repeatedly on fresh re-visits until invalidated (no longer
+      single-fire-ever); invalidation is terminal.
+- [ ] 2026-06-12 1s+1m regression: the spurious SMTs above (asia_high 05:35, prev1_day_high
+      04:19/04:20, prev2_day_high 00:05/00:06) no longer fire.
+- [ ] Unit tests for invalidation + re-arm; SMT/pipeline suite green except known pre-existing
+      failures.
+
+## Out of scope
+- GIL-26 (R4) FVG-edge levels (separate worktree; depends on this). Wiring SMTs into
+  hypothesis/entry direction. Any P&L-affecting change (shadow detection only).
