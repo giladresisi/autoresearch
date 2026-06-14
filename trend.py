@@ -12,7 +12,7 @@ from typing import Optional
 import pandas as pd
 
 from smt_state import (
-    load_daily,
+    load_daily_ro,
     load_global,
     load_hypothesis,
     load_position,
@@ -191,7 +191,7 @@ def run_trend(
     # ------------------------------------------------------------------
     hypothesis = load_hypothesis()
     position = load_position()
-    daily = load_daily()
+    daily = load_daily_ro()  # GIL-27: read-only (only reads level prices; never mutates daily)
 
     direction = hypothesis.get("direction", "none")
     # GIL-8 manual direction lock (trade.py set-direction): while set, the automatic

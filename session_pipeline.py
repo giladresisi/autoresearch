@@ -237,6 +237,13 @@ class SessionPipeline:
         self._hist_mes_1m = hist_mes_1m
         self._emit = emit_fn
         self._daily_triggered = False
+        # GIL-27: per-bar Timestamp.floor() cache. The same `now` is floored to the same
+        # freq at several call sites within one on_1m_bar pass (1min ×2, 5min ×2, 1h across
+        # MNQ+MES), and Timestamp.floor() is surprisingly costly (pytz localize + np.isclose
+        # ~5% of 1s runtime). Memoize per bar: identity-reset on a new `now`, then reuse.
+        # Returns exactly now.floor(freq), so output is byte-identical.
+        self._floor_bar_ts: pd.Timestamp | None = None
+        self._floor_bar_cache: dict[str, pd.Timestamp] = {}
         self._hist_1hr: pd.DataFrame | None = None
         self._hist_4hr: pd.DataFrame | None = None
         # Rolling TF frames for the FVG liquidity scan: seeded at daily/startup from
@@ -717,7 +724,7 @@ class SessionPipeline:
             _active = load_position().get("active", {})
             _pos_dir = _active.get("direction", "")
             _pos_hyp_dir = "down" if _pos_dir == "short" else ("up" if _pos_dir == "long" else "none")
-            _new_hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
+            _new_hyp_dir = _smt_state.load_hypothesis_ro().get("direction", "none")
 
             if _new_hyp_dir == "none":
                 _hyp_snap = _smt_state.load_hypothesis()
@@ -755,6 +762,36 @@ class SessionPipeline:
             if _start_pos.get("stop_entry", "") == "":
                 self._force_entry_eval_after = now
 
+    def _floor(self, now: pd.Timestamp, freq: str) -> pd.Timestamp:
+        """now.floor(freq), memoized for the current bar. Identity-reset when `now`
+        changes, so within one on_1m_bar pass every call site sharing the same `now`
+        recomputes the floor at most once. Byte-identical to a direct now.floor(freq).
+
+        Self-initializing so it stays correct on instances built via __new__ that bypass
+        __init__ (e.g. the _extend_fvg_frames unit tests), matching the old now.floor()'s
+        lack of any instance-state precondition."""
+        cache = getattr(self, "_floor_bar_cache", None)
+        if cache is None or now is not self._floor_bar_ts:
+            self._floor_bar_ts = now
+            self._floor_bar_cache = cache = {}
+        v = cache.get(freq)
+        if v is None:
+            # GIL-27: Timestamp.floor() is dominated by the pytz localize/np.isclose path
+            # (~5× the cost). For sub-hour minute boundaries the floor is a pure wall-clock
+            # truncation that DST never perturbs (DST shifts are whole hours), so .replace()
+            # is byte-identical AND ~5.8× faster — verified equal across 82.8k timestamps on a
+            # normal day and the DST spring-forward day. 1h/4h KEEP .floor() (the DST fall-back
+            # ambiguous hour makes wall-clock-replace unsafe for hour-grained floors).
+            if freq == "1min":
+                v = now.replace(second=0, microsecond=0, nanosecond=0)
+            elif freq == "5min":
+                v = now.replace(minute=(now.minute // 5) * 5,
+                                second=0, microsecond=0, nanosecond=0)
+            else:
+                v = now.floor(freq)
+            cache[freq] = v
+        return v
+
     def on_1m_bar(
         self,
         now: pd.Timestamp,
@@ -784,7 +821,7 @@ class SessionPipeline:
         #   replacing the prior-day proxy used during the Asia session.
         # 09:20 ET (NY pre-market): FVGs and session H/L are stable for the RTH session.
         # Only one fires per calendar date — whichever comes first sets _last_daily_date.
-        _bar_floor = now.floor("1min")
+        _bar_floor = self._floor(now, "1min")
         _is_midnight = (now.hour == 0 and now.minute == 0)
         _is_0920    = (now.hour == 9 and now.minute == 20)
         if ((_is_midnight or _is_0920)
@@ -858,10 +895,10 @@ class SessionPipeline:
 
         # Snapshot direction before any module can mutate hypothesis state — ensures
         # terminal output and executor receive the same direction for every signal this bar.
-        _hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
+        _hyp_dir = _smt_state.load_hypothesis_ro().get("direction", "none")
 
         # Snapshot stop_entry before trend runs so we can detect silent cancellations.
-        _prev_stop = _smt_state.load_position().get("stop_entry", "")
+        _prev_stop = _smt_state.load_position_ro().get("stop_entry", "")
 
         # Pause→resume transition: when the pause sentinel flips True→False between bars, the
         # user is taking over from this moment — INCLUDING the just-closed 5m setup bar. Arm a
@@ -893,7 +930,7 @@ class SessionPipeline:
                 # Cooldown active: the same level+direction was swept recently. Still
                 # emit trend-broken to reset direction, but skip the immediate hypothesis
                 # re-run — it will form naturally at the next 5m boundary.
-                if _smt_state.load_hypothesis().get("manual"):
+                if _smt_state.load_hypothesis_ro().get("manual"):
                     # GIL-8 manual direction lock (trade.py set-direction): a swept
                     # level must not reset the manually forced hypothesis — absorb the
                     # sweep as a non-event until trade.py unlock / trend-broken releases.
@@ -981,7 +1018,7 @@ class SessionPipeline:
                         )
                     else:
                         _level_hyp_divs = []
-                    _new_dir = _smt_state.load_hypothesis().get("direction", "none")
+                    _new_dir = _smt_state.load_hypothesis_ro().get("direction", "none")
                     if _new_dir == "none":
                         # Hypothesis couldn't form after level sweep. Two cases:
                         # (a) Bar is entirely above ATH — price in uncharted territory
@@ -1104,7 +1141,7 @@ class SessionPipeline:
                     )
                 else:
                     _ath_hyp_divs = []
-                _new_dir = _smt_state.load_hypothesis().get("direction", "none")
+                _new_dir = _smt_state.load_hypothesis_ro().get("direction", "none")
                 _tb_sig = {
                     "kind":             "trend-broken",
                     "time":             trend_sig["time"],
@@ -1170,14 +1207,14 @@ class SessionPipeline:
                     else:
                         self._emit(_d)
                         events.append(_d)
-                _hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
+                _hyp_dir = _smt_state.load_hypothesis_ro().get("direction", "none")
             else:
                 # Normal trend signal (daily/weekly mid invalidation, or cautious exit).
                 trend_sig.setdefault("direction", _hyp_dir)
                 self._emit(trend_sig)
                 events.append(trend_sig)
                 # Emit a dedicated cancel signal if trend cleared a pending limit without one.
-                if _prev_stop != "" and _smt_state.load_position().get("stop_entry", "") == "":
+                if _prev_stop != "" and _smt_state.load_position_ro().get("stop_entry", "") == "":
                     _cancel_sig = {
                         "kind":      "stop-entry-cancelled",
                         "time":      now.isoformat(),
@@ -1215,7 +1252,7 @@ class SessionPipeline:
         # the detector evaluates against the PRIOR-bar extremes (a "touch" then means the
         # wick genuinely EXCEEDED the prior extreme — a real take-out — not merely equalled
         # the just-updated running extreme, which the leader would trivially touch).
-        _pre_daily = _smt_state.load_daily()
+        _pre_daily = _smt_state.load_daily_ro()  # GIL-27: read-only snapshot (fed to detection only)
 
         # R3: SMT DETECTION on COMPLETED 1m bars only (deterministic across replay modes).
         # Run the completed-bar detection driver BEFORE this call's per-second liquidity
@@ -1239,7 +1276,7 @@ class SessionPipeline:
         # SMT V2: update the parallel MES liquidities block (additive; never touches MNQ).
         self._update_mes_liquidities(now, mes_bar_row, today_mes)
 
-        _this_5m = now.floor("5min")
+        _this_5m = self._floor(now, "5min")
         is_5m = (now.minute % 5 == 0) and (_this_5m != self._last_5m_processed)
 
         if is_5m:
@@ -1274,7 +1311,7 @@ class SessionPipeline:
                     self._emit(d)
                     events.append(d)
             # Reload direction so strategy sees the updated bias on the same bar.
-            _new_5m_dir = _smt_state.load_hypothesis().get("direction", "none")
+            _new_5m_dir = _smt_state.load_hypothesis_ro().get("direction", "none")
             if _new_5m_dir != _hyp_dir:
                 self._accepted_level_sweeps.clear()
                 self._swept_levels_since_hyp.clear()
@@ -1299,7 +1336,7 @@ class SessionPipeline:
         # directly and can fill-detect a stale stop_entry into a *phantom* position, so it must
         # be skipped entirely when there is no active position. A real active position is still
         # managed (run_strategy Section 3 runs) so exits keep working.
-        if _smt_state.is_paused() and not _smt_state.load_position().get("active"):
+        if _smt_state.is_paused() and not _smt_state.load_position_ro().get("active"):
             strat_sig = None
         else:
             strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent,
@@ -1700,7 +1737,7 @@ class SessionPipeline:
 
         out: list[dict] = []
         for _freq, _frame_attr, _done_attr in specs:
-            _cur = now.floor(_freq)  # bars labeled >= _cur are still forming
+            _cur = self._floor(now, _freq)  # bars labeled >= _cur are still forming
             if getattr(self, _done_attr) == _cur:
                 continue  # fast path: no new boundary completed since the last call
             _frame = getattr(self, _frame_attr)
@@ -1986,7 +2023,7 @@ class SessionPipeline:
                 and _bar_row_has_ohlc(mes_bar_row, "High", "Low", "Close")):
             return []
 
-        daily = pre_daily if pre_daily is not None else _smt_state.load_daily()
+        daily = pre_daily if pre_daily is not None else _smt_state.load_daily_ro()
         # Universe (B) fixed levels are an additive block merged ONLY here (never into the
         # strategy's `liquidities`/_ext_levels), so SMT detection sees the prev-day/week
         # extremes while trades stay unchanged. eligible_levels dedups by name.
@@ -2028,7 +2065,7 @@ class SessionPipeline:
         # Hidden (body) SMTs: evaluate the just-completed 1m bar's CLOSE each minute. (15m/30m
         # fired too late — even 5m can fire early; the 1m close hints a trend change earliest.)
         for _tf, _tag in (("1min", "1m"),):
-            _floor = now.floor(_tf)
+            _floor = self._floor(now, _tf)
             if now != _floor:
                 continue  # not on this TF boundary
             if self._hidden_done.get(_tf) == _floor:
@@ -2164,7 +2201,7 @@ class SessionPipeline:
         cadence = "1m" if (datetime.time(9, 30) <= _t <= datetime.time(10, 30)) else "5m"
 
         # Reference consumer: flat-gated. 1m cadence every bar; 5m cadence on the boundary.
-        _flat = not _smt_state.load_position().get("active")
+        _flat = not _smt_state.load_position_ro().get("active")
         if _flat and (cadence == "1m" or (cadence == "5m" and is_5m)):
             self._pending_watch.ingest(self._smt_buffer.get_new(cadence))
         self._pending_watch.update(
@@ -2391,7 +2428,7 @@ class SessionPipeline:
         )
 
     def _write_bar_state(self, now: pd.Timestamp, today_mnq: pd.DataFrame) -> None:
-        current_5m = now.floor("5min")
+        current_5m = self._floor(now, "5min")
         # Within a 5m block the [prev_5m, current_5m) window holds only completed,
         # immutable prior-block bars — recompute the stops once per block, then reuse.
         if current_5m != self._bar_state_5m:
