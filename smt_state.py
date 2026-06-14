@@ -362,6 +362,18 @@ def load_hypothesis() -> dict:
     return result
 
 
+def load_hypothesis_ro() -> dict:
+    """READ-ONLY view of hypothesis.json — caller MUST NOT mutate the result. GIL-27:
+    skips the per-load _fast_copy in backtest (in-memory) mode; safe because the store
+    object is only ever replaced by save_hypothesis (never mutated in place). Used only at
+    inline read-then-discard sites (e.g. ``load_hypothesis_ro().get("direction")``). Live
+    mode falls back to the normal cached/disk load. See [[load_daily_ro]] rationale."""
+    if _IN_MEMORY:
+        d = _STORE.get(str(_hypothesis_path()))
+        return d if d is not None else _fast_copy(DEFAULT_HYPOTHESIS)
+    return load_hypothesis()
+
+
 def save_hypothesis(d: dict) -> None:
     global _hyp_cache, _hyp_cache_valid
     _atomic_write(_hypothesis_path(), d)
@@ -372,6 +384,17 @@ def save_hypothesis(d: dict) -> None:
 
 def load_position() -> dict:
     return _load(_position_path(), DEFAULT_POSITION)
+
+
+def load_position_ro() -> dict:
+    """READ-ONLY view of position.json — caller MUST NOT mutate. GIL-27: skips the
+    per-load _fast_copy in backtest (in-memory) mode (store object only ever replaced by
+    save_position, never mutated in place). Inline read-then-discard sites only. See
+    [[load_daily_ro]]."""
+    if _IN_MEMORY:
+        d = _STORE.get(str(_position_path()))
+        return d if d is not None else _fast_copy(DEFAULT_POSITION)
+    return load_position()
 
 
 def save_position(d: dict) -> None:

@@ -724,7 +724,7 @@ class SessionPipeline:
             _active = load_position().get("active", {})
             _pos_dir = _active.get("direction", "")
             _pos_hyp_dir = "down" if _pos_dir == "short" else ("up" if _pos_dir == "long" else "none")
-            _new_hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
+            _new_hyp_dir = _smt_state.load_hypothesis_ro().get("direction", "none")
 
             if _new_hyp_dir == "none":
                 _hyp_snap = _smt_state.load_hypothesis()
@@ -895,10 +895,10 @@ class SessionPipeline:
 
         # Snapshot direction before any module can mutate hypothesis state — ensures
         # terminal output and executor receive the same direction for every signal this bar.
-        _hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
+        _hyp_dir = _smt_state.load_hypothesis_ro().get("direction", "none")
 
         # Snapshot stop_entry before trend runs so we can detect silent cancellations.
-        _prev_stop = _smt_state.load_position().get("stop_entry", "")
+        _prev_stop = _smt_state.load_position_ro().get("stop_entry", "")
 
         # Pause→resume transition: when the pause sentinel flips True→False between bars, the
         # user is taking over from this moment — INCLUDING the just-closed 5m setup bar. Arm a
@@ -930,7 +930,7 @@ class SessionPipeline:
                 # Cooldown active: the same level+direction was swept recently. Still
                 # emit trend-broken to reset direction, but skip the immediate hypothesis
                 # re-run — it will form naturally at the next 5m boundary.
-                if _smt_state.load_hypothesis().get("manual"):
+                if _smt_state.load_hypothesis_ro().get("manual"):
                     # GIL-8 manual direction lock (trade.py set-direction): a swept
                     # level must not reset the manually forced hypothesis — absorb the
                     # sweep as a non-event until trade.py unlock / trend-broken releases.
@@ -1018,7 +1018,7 @@ class SessionPipeline:
                         )
                     else:
                         _level_hyp_divs = []
-                    _new_dir = _smt_state.load_hypothesis().get("direction", "none")
+                    _new_dir = _smt_state.load_hypothesis_ro().get("direction", "none")
                     if _new_dir == "none":
                         # Hypothesis couldn't form after level sweep. Two cases:
                         # (a) Bar is entirely above ATH — price in uncharted territory
@@ -1141,7 +1141,7 @@ class SessionPipeline:
                     )
                 else:
                     _ath_hyp_divs = []
-                _new_dir = _smt_state.load_hypothesis().get("direction", "none")
+                _new_dir = _smt_state.load_hypothesis_ro().get("direction", "none")
                 _tb_sig = {
                     "kind":             "trend-broken",
                     "time":             trend_sig["time"],
@@ -1207,14 +1207,14 @@ class SessionPipeline:
                     else:
                         self._emit(_d)
                         events.append(_d)
-                _hyp_dir = _smt_state.load_hypothesis().get("direction", "none")
+                _hyp_dir = _smt_state.load_hypothesis_ro().get("direction", "none")
             else:
                 # Normal trend signal (daily/weekly mid invalidation, or cautious exit).
                 trend_sig.setdefault("direction", _hyp_dir)
                 self._emit(trend_sig)
                 events.append(trend_sig)
                 # Emit a dedicated cancel signal if trend cleared a pending limit without one.
-                if _prev_stop != "" and _smt_state.load_position().get("stop_entry", "") == "":
+                if _prev_stop != "" and _smt_state.load_position_ro().get("stop_entry", "") == "":
                     _cancel_sig = {
                         "kind":      "stop-entry-cancelled",
                         "time":      now.isoformat(),
@@ -1311,7 +1311,7 @@ class SessionPipeline:
                     self._emit(d)
                     events.append(d)
             # Reload direction so strategy sees the updated bias on the same bar.
-            _new_5m_dir = _smt_state.load_hypothesis().get("direction", "none")
+            _new_5m_dir = _smt_state.load_hypothesis_ro().get("direction", "none")
             if _new_5m_dir != _hyp_dir:
                 self._accepted_level_sweeps.clear()
                 self._swept_levels_since_hyp.clear()
@@ -1336,7 +1336,7 @@ class SessionPipeline:
         # directly and can fill-detect a stale stop_entry into a *phantom* position, so it must
         # be skipped entirely when there is no active position. A real active position is still
         # managed (run_strategy Section 3 runs) so exits keep working.
-        if _smt_state.is_paused() and not _smt_state.load_position().get("active"):
+        if _smt_state.is_paused() and not _smt_state.load_position_ro().get("active"):
             strat_sig = None
         else:
             strat_sig = _strat_mod.run_strategy(now, mnq_1m_bar, recent,
@@ -2201,7 +2201,7 @@ class SessionPipeline:
         cadence = "1m" if (datetime.time(9, 30) <= _t <= datetime.time(10, 30)) else "5m"
 
         # Reference consumer: flat-gated. 1m cadence every bar; 5m cadence on the boundary.
-        _flat = not _smt_state.load_position().get("active")
+        _flat = not _smt_state.load_position_ro().get("active")
         if _flat and (cadence == "1m" or (cadence == "5m" and is_5m)):
             self._pending_watch.ingest(self._smt_buffer.get_new(cadence))
         self._pending_watch.update(
