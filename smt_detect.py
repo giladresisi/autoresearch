@@ -113,6 +113,25 @@ def _invalidate_pts(tier: str, inst: str) -> float:
     return table.get(tier, table["session"])
 
 
+def pre_session_depleted(
+    sub: str, level_price: float, tier: str, inst: str,
+    window_high: float, window_low: float,
+) -> bool:
+    """R2 Phase 1.1 (GIL-25): True if a past liquidity was already run FULFILL_PTS[tier][inst]
+    beyond before the session opened — i.e. its resting liquidity is depleted and it should be
+    seeded invalidated up front (the live/warm-up latch only starts at session open and would
+    otherwise miss a prior-session take-out, firing spurious mid-session SMTs).
+
+    `window_high`/`window_low` are the price extremes over the pre-session window (the level's
+    source-window end → session open). A `*_high` is depleted once the window High runs
+    >= level+thr; a `*_low` once the window Low runs <= level-thr. Pure; total.
+    """
+    thr = _fulfill_pts(tier, inst)
+    if sub == "high":
+        return float(window_high) >= float(level_price) + thr
+    return float(window_low) <= float(level_price) - thr
+
+
 def _opposite(direction: str) -> str:
     return "short" if direction == "long" else "long"
 

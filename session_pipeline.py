@@ -693,6 +693,11 @@ class SessionPipeline:
         # had it been running. Runs AFTER liquidities are seeded and BEFORE the first
         # hypothesis. No hypothesis-direction wiring (scope: detection + logging only).
         if _cold_start:
+            # R2 Phase 1.1 (GIL-25): seed per-ticker depletion for PAST liquidities (prev-day/
+            # week) already run beyond before this session opened, so the warm-up + live loop
+            # skip them instead of firing spurious mid-session SMTs (and the cautious/hypothesis
+            # fan-out drops them as targets from bar 0). Runs BEFORE the warm-up replay.
+            self._seed_pre_session_invalidation(now)
             self._warmup_replay_smts(now, today_mnq_at_open)
 
         # Reset hypothesis and position only when explicitly forced.
@@ -2231,6 +2236,57 @@ class SessionPipeline:
             self._inv_written_n = len(_inv)
 
         return sd_events
+
+    def _seed_pre_session_invalidation(self, now: pd.Timestamp) -> None:
+        """R2 Phase 1.1 (GIL-25): pre-seed `detect_state["__level_inv__"]` for PAST liquidities
+        (prev-day / prev-week) whose resting liquidity was already taken out BEFORE this session
+        opened. The live + warm-up latch only starts at session open, so a prior-session take-out
+        is otherwise invisible and the depleted level fires spurious mid-session SMTs and lingers
+        as a cautious/hypothesis target. For each prev-day/week level (per ticker) we scan the
+        bars in (level.window_end, session_open) — the level's own source window cannot exceed it
+        by construction, so this only catches a genuine post-formation cross — and mark it
+        invalidated when the window extreme runs FULFILL_PTS[tier] beyond the level. Total: never
+        raises (degenerate input → no-op)."""
+        from smt_detect import _level_class, _sub, pre_session_depleted
+        try:
+            session_open = pd.Timestamp(_cme_session_start(now))
+        except Exception:
+            return
+        daily = _smt_state.load_daily()
+        sources = (
+            ("mnq", self._hist_mnq_1m,
+             (daily.get("liquidities", []) or []) + (daily.get("liquidities_universe", []) or [])),
+            ("mes", self._hist_mes_1m,
+             (daily.get("liquidities_mes", []) or []) + (daily.get("liquidities_universe_mes", []) or [])),
+        )
+        liv = self._detect_state.setdefault("__level_inv__", {})
+        for inst, hist, levels in sources:
+            if hist is None or getattr(hist, "empty", True):
+                continue
+            for l in levels:
+                name = l.get("name", "")
+                we = l.get("window_end")
+                price = l.get("price")
+                sub = _sub(name)
+                if not name.startswith("prev") or we is None or price is None or sub is None:
+                    continue
+                try:
+                    we_ts = pd.Timestamp(we)
+                except Exception:
+                    continue
+                win = hist[(hist.index > we_ts) & (hist.index < session_open)]
+                if win.empty:
+                    continue
+                tier = _level_class(name)[1]
+                if pre_session_depleted(sub, float(price), tier, inst,
+                                        float(win["High"].max()), float(win["Low"].min())):
+                    ent = liv.setdefault(name, {"mnq": False, "mes": False})
+                    if not ent.get(inst):
+                        ent[inst] = True
+                        self._detect_state.setdefault("__level_retirements__", []).append({
+                            "time": session_open.isoformat(), "ref_name": name, "tier": tier,
+                            "kind": "fixed", inst: True, "reason": "pre_session_seed",
+                        })
 
     def _warmup_replay_smts(
         self,
