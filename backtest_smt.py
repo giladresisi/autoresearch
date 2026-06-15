@@ -60,6 +60,30 @@ FUTURES_CACHE_DIR = os.environ.get(
     os.path.join(os.path.expanduser("~"), ".cache", "autoresearch", "futures_data"),
 )
 
+
+def _main_dir_for_date(date_str: str) -> Path:
+    """Per-contract main parquet subfolder for backtesting ``date_str`` (YYYY-MM-DD), per
+    ``<main>/rollover_ledger.json``.
+
+    Rows are newest-first; the first row whose ``prep_date`` is <= ``date_str`` wins, and its
+    ``subfolder`` holds that contract era's bars — raw front-month for the pre-roll catch-all,
+    back-adjusted for later eras (so a session reads its own era's price scale). ISO dates
+    compare correctly as strings. Falls back to ``general_main_dir()`` itself when there is no
+    ledger, no matching row, or the named subfolder is missing (pre-rollover flat layout)."""
+    main = paths.general_main_dir()
+    ledger = main / "rollover_ledger.json"
+    if not ledger.exists():
+        return main
+    try:
+        rows = json.loads(ledger.read_text(encoding="utf-8"))
+    except Exception:
+        return main
+    for row in rows:
+        if str(date_str) >= str(row.get("prep_date", "")):
+            sub = main / str(row.get("subfolder", ""))
+            return sub if sub.exists() else main
+    return main
+
 # Backtest window — loaded from futures_manifest.json at module load time below.
 # Default values are overridden when the manifest exists.
 BACKTEST_START: str = "2024-09-01"
@@ -1210,9 +1234,15 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
     # so we never leak a backtest's per-run folder into live/test module state.
     _prev_state_dir = paths._STATE_DIR
 
+    # Contract-rollover routing: pick the per-contract main subfolder for the backtested
+    # date range, per the rollover ledger. Dates before this range's roll read the raw
+    # pre-roll era; on/after read the back-adjusted era. (Single-era range → one subfolder;
+    # the live regression calls run_backtest_v2(date, date) so the range is one day.)
+    _routed_main = _main_dir_for_date(start_date)
+
     if mode == "1s":
         import numpy as _np
-        _1s_dir = paths.general_main_dir()
+        _1s_dir = _routed_main
         _1s_cache = Path(FUTURES_CACHE_DIR) / "1s"
         _mnq_1s_p = (_1s_dir / "MNQ_1s.parquet") if (_1s_dir / "MNQ_1s.parquet").exists() else (_1s_cache / "MNQ.parquet")
         _mes_1s_p = (_1s_dir / "MES_1s.parquet") if (_1s_dir / "MES_1s.parquet").exists() else (_1s_cache / "MES.parquet")
@@ -1227,7 +1257,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         _mnq_1m_agg = mnq_all.resample("1min", label="left").agg(_1m_agg).dropna(subset=["Open"])
         _mes_1m_agg = mes_all.resample("1min", label="left").agg(_1m_agg).dropna(subset=["Open"])
     else:
-        futures = load_futures_data()
+        futures = load_futures_data(main_dir=_routed_main)
         mnq_all = futures["MNQ"]
         mes_all = futures["MES"]
 

@@ -40,18 +40,23 @@ files left over by a previous run on the same calendar day.
 appends the `=== RESTART` marker to `orchestrator_stdout.log`, launches the process with
 stdout/stderr captured to the log files, and confirms the PID.
 
+**Default to resumed mode (automatic entries enabled).** Start with `--resume` unless the
+user explicitly asks to start paused — only then use `--pause` instead. `--resume` lifts the
+manual entry pause so automatic entries fire; `--pause` suppresses new automatic entries
+(exits stay active). `--force` restarts without a prompt and resets hypothesis/position state
+at session start.
+
 Choose flags based on the user's request:
 
 | User intent | Command |
 |---|---|
-| Fresh start (default) | `uv run python trade.py start` |
-| Already running, restart without prompt | `uv run python trade.py start --force` |
-| Keep position.json as-is | `uv run python trade.py start --resume` |
-| Restart without prompt, keep position | `uv run python trade.py start --force --resume` |
+| Default start (resumed — automatic entries enabled) | `uv run python trade.py start --force --resume` |
+| Start PAUSED (only when explicitly requested) | `uv run python trade.py start --force --pause` |
+| Keep position/hypothesis state (no reset) | omit `--force` |
 | Enable LLM session summary | add `--summary` |
 
 ```powershell
-uv run python trade.py start --force   # adjust flags per user request
+uv run python trade.py start --force --resume   # default: resumed. Use --pause only if explicitly requested.
 ```
 
 ### Record the running commit (once, at session start)

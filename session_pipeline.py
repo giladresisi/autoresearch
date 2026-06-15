@@ -403,7 +403,15 @@ class SessionPipeline:
         _global = load_global()
         if not self._hist_mnq_1m.empty:
             _hist_ath = float(self._hist_mnq_1m["High"].max())
-            _global["all_time_high"] = max(_global.get("all_time_high", 0.0), _hist_ath)
+            _persisted = float(_global.get("all_time_high", 0.0))
+            # Corruption guard (GIL-23 follow-up): a persisted ATH implausibly far above the
+            # (back-adjusted) data max — a manual sentinel like 999999, or a stale pre-rollover
+            # contract scale — must NOT stick via max(). A legitimate ATH is always a bar inside
+            # the hist window, so it never exceeds ~1x _hist_ath; >3x means corruption → re-anchor
+            # to the data max. (A too-LOW stale value self-heals via the max() below.)
+            if _hist_ath > 0 and _persisted > _hist_ath * 3:
+                _persisted = 0.0
+            _global["all_time_high"] = max(_persisted, _hist_ath)
             _global["session_ath"]   = _global["all_time_high"]
             self._session_ath = _global["session_ath"]
         else:

@@ -739,6 +739,56 @@ def test_entry_allowed_exactly_at_cutoff(monkeypatch):
     assert ex._http.post.call_count == 1
 
 
+def test_entry_blocked_just_before_close(monkeypatch):
+    """16:54 ET -> still inside the 15:30->16:55 pre-close window, entry blocked."""
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    _freeze_pmt_clock(monkeypatch, 16, 54)
+    rec = ex.place_entry(_signal("long"), _bar())
+    _drain(ex)
+    assert rec.status == "blocked"
+    assert ex._entry_is_live is False
+    assert ex._http.post.call_count == 0
+
+
+def test_entry_allowed_after_session_close(monkeypatch):
+    """16:56 ET -> past the 16:55 close, the pre-close block no longer applies."""
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    _freeze_pmt_clock(monkeypatch, 16, 56)
+    rec = ex.place_entry(_signal("long"), _bar())
+    _drain(ex)
+    assert rec.status == "filled"
+    assert ex._entry_is_live is True
+    assert ex._http.post.call_count == 1
+
+
+def test_evening_entry_allowed_new_session(monkeypatch):
+    """20:00 ET (new session, opens 18:05) -> entry allowed and submitted.
+
+    This is the regression for the Sunday/overnight-session fix: the 15:30 cutoff must NOT
+    suppress entries in the evening of the next session."""
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    _freeze_pmt_clock(monkeypatch, 20, 0)
+    rec = ex.place_entry(_signal("long"), _bar())
+    _drain(ex)
+    assert rec.status == "filled"
+    assert ex._entry_is_live is True
+    assert ex._http.post.call_count == 1
+
+
+def test_overnight_entry_allowed(monkeypatch):
+    """02:00 ET (overnight, mid-session) -> entry allowed (well before the 15:30 window)."""
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    _freeze_pmt_clock(monkeypatch, 2, 0)
+    rec = ex.place_entry(_signal("long"), _bar())
+    _drain(ex)
+    assert rec.status == "filled"
+    assert ex._http.post.call_count == 1
+
+
 def test_close_allowed_after_cutoff(monkeypatch):
     """15:31 ET -> place_close still works (not gated by the entry cutoff)."""
     ex = _make_executor()

@@ -336,7 +336,13 @@ def run_daily_fixed(
     # ------------------------------------------------------------------ #
     global_state = load_global()
     _hist_ath = float(hist_mnq_1m["High"].max()) if not hist_mnq_1m.empty else 0.0
-    global_state["all_time_high"] = max(_hist_ath, float(global_state.get("all_time_high", 0.0)))
+    _persisted = float(global_state.get("all_time_high", 0.0))
+    # Corruption guard: an implausibly-high persisted ATH (manual sentinel like 999999, or a
+    # stale pre-rollover contract scale) must NOT stick via max(); re-anchor to the data max.
+    # See session_pipeline.on_session_start for the rationale (>3x data max == corruption).
+    if _hist_ath > 0 and _persisted > _hist_ath * 3:
+        _persisted = 0.0
+    global_state["all_time_high"] = max(_hist_ath, _persisted)
     save_global(global_state)
 
     # ------------------------------------------------------------------ #
