@@ -174,27 +174,31 @@ def compute_universe_levels(
         return out
     idx = hist_1m.index
 
-    def _extreme(bars: pd.DataFrame, base: str) -> None:
+    def _extreme(bars: pd.DataFrame, base: str, window_end: str) -> None:
         if bars.empty:
             return
+        # window_end (the level's source-window close) lets the session-start seeder scan only
+        # the post-formation window for a pre-session take-out (R2 Phase 1.1 / GIL-25).
         out.append({"name": f"{base}_high", "kind": "level",
                     "price": float(bars["High"].max()),
-                    "close_price": float(bars["Close"].max())})
+                    "close_price": float(bars["Close"].max()), "window_end": window_end})
         out.append({"name": f"{base}_low", "kind": "level",
                     "price": float(bars["Low"].min()),
-                    "close_price": float(bars["Close"].min())})
+                    "close_price": float(bars["Close"].min()), "window_end": window_end})
 
     for i, prior_date in enumerate(_last_n_trading_dates(today, n_days), start=1):
         _pmid  = pd.Timestamp(prior_date, tz="America/New_York")
         _ps = idx.searchsorted(_pmid - pd.Timedelta(hours=6), side="left")   # date-1 18:00
         _pe = idx.searchsorted(_pmid + pd.Timedelta(hours=17), side="left")  # date   17:00
-        _extreme(hist_1m.iloc[_ps:_pe], f"prev{i}_day")
+        _extreme(hist_1m.iloc[_ps:_pe], f"prev{i}_day",
+                 (_pmid + pd.Timedelta(hours=17)).isoformat())
 
     for w, monday in enumerate(_last_n_week_mondays(today, n_weeks), start=1):
         _ws = pd.Timestamp(monday, tz="America/New_York")
         _s = idx.searchsorted(_ws, side="left")
         _e = idx.searchsorted(_ws + pd.Timedelta(days=5), side="left")  # Sat 00:00
-        _extreme(hist_1m.iloc[_s:_e], f"prev{w}_week")
+        _extreme(hist_1m.iloc[_s:_e], f"prev{w}_week",
+                 (_ws + pd.Timedelta(days=5)).isoformat())
 
     return out
 
@@ -314,10 +318,11 @@ def run_daily_fixed(
         _pe = hist_mnq_1m.index.searchsorted(_pe_dt, side="left")
         prior_bars = hist_mnq_1m.iloc[_ps:_pe]
         if not prior_bars.empty:
+            _wend = _pe_dt.isoformat()   # prior_date 17:00 ET = the level's source-window end
             liquidities.append({"name": f"prev{i}_day_high", "kind": "level",
-                                "price": float(prior_bars["High"].max())})
+                                "price": float(prior_bars["High"].max()), "window_end": _wend})
             liquidities.append({"name": f"prev{i}_day_low", "kind": "level",
-                                "price": float(prior_bars["Low"].min())})
+                                "price": float(prior_bars["Low"].min()), "window_end": _wend})
 
     # Recent unvisited 1hr FVGs
     fvgs = _detect_fvgs(hist_1hr, hist_mnq_1m)

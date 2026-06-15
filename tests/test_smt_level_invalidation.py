@@ -83,6 +83,42 @@ def test_uses_fulfill_pts_tier_thresholds():
 
 
 # ===========================================================================
+# Phase 1.1 (GIL-25): pre-session depletion seeding — a past liquidity already run
+# beyond before the session opened must be marked invalidated up front.
+# ===========================================================================
+def test_pre_session_depleted_high():
+    from smt_detect import pre_session_depleted
+    # high level 21000, day tier thr 40 (mnq): window High >= 21040 → depleted.
+    assert pre_session_depleted("high", 21000.0, "day", "mnq", 21041.0, 20900.0) is True
+    assert pre_session_depleted("high", 21000.0, "day", "mnq", 21039.0, 20900.0) is False
+
+
+def test_pre_session_depleted_low():
+    from smt_detect import pre_session_depleted
+    # low level 21000, day tier thr 40 (mnq): window Low <= 20960 → depleted.
+    assert pre_session_depleted("low", 21000.0, "day", "mnq", 21100.0, 20960.0) is True
+    assert pre_session_depleted("low", 21000.0, "day", "mnq", 21100.0, 20961.0) is False
+
+
+def test_pre_session_depleted_uses_instrument_threshold():
+    from smt_detect import pre_session_depleted
+    # MES day thr = 6: 3007 >= 3000+6 depleted; 3005 not.
+    assert pre_session_depleted("high", 3000.0, "day", "mes", 3007.0, 2990.0) is True
+    assert pre_session_depleted("high", 3000.0, "day", "mes", 3005.0, 2990.0) is False
+
+
+def test_universe_levels_carry_window_end():
+    import pandas as pd, datetime
+    import daily
+    idx = pd.date_range("2026-05-25 18:00", periods=60*24*9, freq="1min", tz="America/New_York")
+    df = pd.DataFrame({"Open": 100.0, "High": 105.0, "Low": 95.0, "Close": 100.0}, index=idx)
+    levels = daily.compute_universe_levels(df, datetime.date(2026, 6, 3))
+    prevs = [l for l in levels if l["name"].startswith("prev") and l["name"].endswith(("_high", "_low"))]
+    assert prevs, "expected prev-day/week universe levels"
+    assert all("window_end" in l for l in prevs), "every prev universe level must carry window_end"
+
+
+# ===========================================================================
 # Skip-if-either-invalidated: a retired level is inert (no fire) on a fresh divergence
 # ===========================================================================
 def test_latched_level_is_skipped_no_fire():
