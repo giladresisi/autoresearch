@@ -171,6 +171,12 @@ which are still in `.env` at this point, if not):
    shifting old-contract history onto the new contract's price scale. Leave all `main/`
    subfolders raw/as-is — only the *live* parquets shift. Then **copy** the back-adjusted live
    parquets → the new subfolder.
+   - **Re-seed `global.json`**: set `all_time_high` to the back-adjusted live `MNQ_1m` `High`
+     max (= old ATH + gap) so rule2b's ATH / recovery guard stays on the new price scale. The
+     seed's corruption guard (`session_pipeline.on_session_start`) would re-anchor a stale value
+     on the next restart anyway, but set it explicitly here; `session_ath` re-derives from it on
+     the next restart. (This is the GIL-23 recurrence fix — a stale ATH silently disables the
+     recovery guard and the strategy fades the trend.)
 6. **Update `.env`**: `MNQ_CONID`/`MES_CONID` → new conids, `ROLLOVER_PREP_DATE` → next prep date.
 7. **Notify the user**: what rolled, gaps, new conids, new subfolder, next prep date. The next
    orchestrator restart gap-fills forward with the new conids; `daily` re-derives levels from
