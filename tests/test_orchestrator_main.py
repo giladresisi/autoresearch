@@ -57,7 +57,7 @@ def test_main_after_grace_end_skips_to_next_day():
     next_open = _dt(9, 0, date=datetime.date(2026, 4, 22))
     with patch("orchestrator.main._check_parquet_files"), \
          patch("orchestrator.main.get_et_now", return_value=_dt(17, 0)), \
-         patch("orchestrator.main.is_trading_day", return_value=True), \
+         patch("orchestrator.main.is_session_open_day", return_value=True), \
          patch("orchestrator.main.next_session_open", return_value=next_open) as mock_next_open, \
          patch("orchestrator.main.ProcessManager") as mock_pm, \
          patch("orchestrator.main.time.sleep", side_effect=StopIteration):
@@ -83,7 +83,7 @@ def test_main_session_dirs_created(tmp_path):
     with patch("orchestrator.main._check_parquet_files"), \
          patch("orchestrator.main._SESSIONS_DIR", sessions_dir), \
          patch("orchestrator.main.get_et_now", return_value=_dt(9, 25)), \
-         patch("orchestrator.main.is_trading_day", return_value=True), \
+         patch("orchestrator.main.is_session_open_day", return_value=True), \
          patch("orchestrator.main.next_session_open", return_value=next_open), \
          patch("orchestrator.main.ProcessManager", return_value=mock_pm_instance), \
          patch("orchestrator.main.time.sleep", side_effect=StopIteration):
@@ -132,22 +132,22 @@ def test_pre_session_init_called_before_session_loop(tmp_path):
     def record_pre_session():
         call_order.append("pre_session_init")
 
-    def record_is_trading_day(d):
-        call_order.append("is_trading_day")
+    def record_is_session_open_day(d):
+        call_order.append("is_session_open_day")
         return False
 
     next_open = _dt(9, 0, date=datetime.date(2026, 4, 22))
     with patch("orchestrator.main._check_parquet_files"), \
          patch("orchestrator.main._pre_session_init", side_effect=record_pre_session), \
          patch("orchestrator.main.get_et_now", return_value=_dt(10, 0)), \
-         patch("orchestrator.main.is_trading_day", side_effect=record_is_trading_day), \
+         patch("orchestrator.main.is_session_open_day", side_effect=record_is_session_open_day), \
          patch("orchestrator.main.next_session_open", return_value=next_open), \
          patch("orchestrator.main.time.sleep", side_effect=StopIteration):
         with pytest.raises(StopIteration):
             run(summarizer=mock_summarizer)
 
     assert call_order[0] == "pre_session_init"
-    assert "is_trading_day" in call_order
+    assert "is_session_open_day" in call_order
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +163,7 @@ def test_run_exits_3_on_ib_disconnected(tmp_path):
     with patch("orchestrator.main._check_parquet_files"), \
          patch("orchestrator.main._SESSIONS_DIR", tmp_path / "sessions"), \
          patch("orchestrator.main.get_et_now", return_value=_dt(9, 25)), \
-         patch("orchestrator.main.is_trading_day", return_value=True), \
+         patch("orchestrator.main.is_session_open_day", return_value=True), \
          patch("orchestrator.main.next_session_open", return_value=next_open), \
          patch("orchestrator.main.ProcessManager", return_value=mock_pm_instance), \
          patch("orchestrator.main._pre_session_init"), \
@@ -191,7 +191,7 @@ def test_run_closes_position_before_ib_disconnect_exit(tmp_path):
     with patch("orchestrator.main._check_parquet_files"), \
          patch("orchestrator.main._SESSIONS_DIR", tmp_path / "sessions"), \
          patch("orchestrator.main.get_et_now", return_value=_dt(9, 25)), \
-         patch("orchestrator.main.is_trading_day", return_value=True), \
+         patch("orchestrator.main.is_session_open_day", return_value=True), \
          patch("orchestrator.main.next_session_open", return_value=next_open), \
          patch("orchestrator.main.ProcessManager", return_value=mock_pm_instance), \
          patch("orchestrator.main._pre_session_init"), \

@@ -26,7 +26,7 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 from orchestrator.output import FileSink, OutputChannel, StdoutSink, TimestampedFileSink
 from orchestrator.process import ProcessManager
 from orchestrator.relay import SessionRelay
-from orchestrator.scheduler import get_et_now, is_trading_day, next_session_open
+from orchestrator.scheduler import get_et_now, is_session_open_day, next_session_open
 from orchestrator.summarizer import Summarizer
 from session_times import SESSION_OPEN as _SESSION_OPEN_V2, SESSION_CLOSE as _SESSION_CLOSE_V2, cme_session_date
 
@@ -408,13 +408,17 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
             now   = get_et_now()
             today = now.date()
             # `today` (ET calendar date) drives SCHEDULING (session_open_dt, grace_end_dt,
-            # is_trading_day). `session_label` (CME trade date = ET-open-date + 1, stable
+            # is_session_open_day). `session_label` (CME trade date = ET-open-date + 1, stable
             # across the midnight roll) names the session FOLDER, so the orchestrator's
             # state JSONs land in the same folder as automation.main's events/bar_state
             # (which use session_date_str() == cme_session_date(now)).
             session_label = cme_session_date(now)
 
-            if not is_trading_day(today):
+            # A CME index-futures session opens at SESSION_OPEN (18:05 ET) on `today` and
+            # carries the NEXT day's trade date. Run it iff that trade date (today + 1) is an
+            # exchange trading day — this opens the Sunday-evening session (trade date Monday)
+            # and skips Friday/Saturday evenings when CME is closed. (See is_session_open_day.)
+            if not is_session_open_day(today):
                 _pre_src, _pre_thr, _pre_err = _start_pre_session_ib(bar_data_dir)
                 _sleep_until(next_session_open(now), "next trading session",
                              ib_health_check=_make_ib_health_check(_pre_thr, _pre_err))
