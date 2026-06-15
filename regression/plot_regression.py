@@ -44,8 +44,28 @@ MNQ_DOLLARS_PER_POINT_PER_CONTRACT = 2.0
 DEFAULT_CONTRACTS = 2
 
 # ── Price data ─────────────────────────────────────────────────────────────────
-# Price parquets are read from the backtest "main" store (never the live append dir).
-_main = paths.general_main_dir()
+# Price parquets are read from the backtest "main" store (never the live append dir),
+# date-routed to the per-contract rollover subfolder so a session reads its own era's
+# bars (raw pre-roll for older dates, back-adjusted post-roll). Mirrors
+# backtest_smt._main_dir_for_date. Without this the plot reads the top-level live-append
+# working copy, which can be truncated mid-day (e.g. an early orchestrator termination)
+# even though the date-routed subfolder holds the complete session.
+def _main_dir_for_date(date_str: str) -> Path:
+    _m = paths.general_main_dir()
+    _ledger = _m / "rollover_ledger.json"
+    if not _ledger.exists():
+        return _m
+    try:
+        _rows = json.loads(_ledger.read_text(encoding="utf-8"))
+    except Exception:
+        return _m
+    for _row in _rows:
+        if str(date_str) >= str(_row.get("prep_date", "")):
+            _sub = _m / str(_row.get("subfolder", ""))
+            return _sub if _sub.exists() else _m
+    return _m
+
+_main = _main_dir_for_date(DATE)
 if MODE == "1s":
     _parquet_1s = _main / "MNQ_1s.parquet"
     _parquet_1m = _main / "MNQ_1m.parquet"

@@ -57,7 +57,26 @@ _session_end = pd.Timestamp(
     tz=_ET,
 )
 
-df = pd.read_parquet(paths.general_main_dir() / "MNQ_1m.parquet")
+# Date-route the price parquet to the per-contract rollover subfolder (mirrors
+# backtest_smt._main_dir_for_date / plot_regression). The top-level main store is the
+# live-append working copy and can be truncated mid-day (e.g. an early orchestrator
+# termination); the date-routed subfolder holds the complete session.
+def _main_dir_for_date(date_str: str) -> Path:
+    _m = paths.general_main_dir()
+    _ledger = _m / "rollover_ledger.json"
+    if not _ledger.exists():
+        return _m
+    try:
+        _rows = json.loads(_ledger.read_text(encoding="utf-8"))
+    except Exception:
+        return _m
+    for _row in _rows:
+        if str(date_str) >= str(_row.get("prep_date", "")):
+            _sub = _m / str(_row.get("subfolder", ""))
+            return _sub if _sub.exists() else _m
+    return _m
+
+df = pd.read_parquet(_main_dir_for_date(DATE) / "MNQ_1m.parquet")
 # Ensure tz-aware comparison
 if df.index.tz is None:
     df.index = df.index.tz_localize(_ET)
