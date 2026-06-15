@@ -83,9 +83,12 @@ and why the automatic fix failed (check `reason` field in the JSON).
 **Promotion (session-end only) — `promotion` block.** After a SUCCESSFUL session-end
 merge, the script's FINAL step promotes the validated parquets from the **live production**
 dir (`<global>/general/live`, env `ACT_GLOBAL_DIR`; resolved by `paths.general_live_dir()`)
-to the **backtest read source** (`<global>/general/main`; `paths.general_main_dir()`): for
-each `<inst>_1m.parquet` / `<inst>_1s.parquet` present in live it backs up the existing main
-file to `<name>.parquet.bak`, then atomically copies live → main. The `promotion` field:
+to the **backtest read source** — the **current contract subfolder** under
+`<global>/general/main/` (`_current_main_subdir()`: the newest row's `subfolder` in
+`rollover_ledger.json`, e.g. `2026-09`; falls back to `general_main_dir()` itself pre-rollover):
+for each `<inst>_1m.parquet` / `<inst>_1s.parquet` present in live it backs up the existing main
+file to `<name>.parquet.bak`, then atomically copies live → that subfolder. Frozen pre-roll
+subfolders are never overwritten. The `promotion` field:
 - `promote_success: true` + `promoted: {<name>: "ok", ...}` — live→main promotion done.
 - `promote_success: false` + `reason` — promotion failed; main was NOT updated (escalate).
 - `null` — no promotion attempted (dry-run, orchestrator-start mode, or no successful merge).
@@ -147,6 +150,37 @@ above apply to the **tail delta** (the bars appended since the watermark), not t
 whole body. A `full` scope run — or an explicit `--full-validate` — is the periodic
 safety net that re-checks the entire body.
 
+## Contract rollover-prep (quarterly — gated on `ROLLOVER_PREP_DATE`)
+
+**Session-end only.** Read `ROLLOVER_PREP_DATE` from `.env`. If the current date is **on or
+after** it, the quarterly contract has rolled and the data must be migrated. Run this ONCE per
+roll, AFTER the engine's normal merge + promote — so the last old-contract session lands in the
+*current* (old) subfolder before anything is back-adjusted. Before promoting, also confirm the
+live 1m+1s are full through the old contract's last session (gap-fill with the **old** conids,
+which are still in `.env` at this point, if not):
+
+1. **Look up the new front-month conids** (IB `ContFuture` for MNQ + MES) and the new expiry
+   (3rd Friday of the new quarter); next prep date = the **Saturday before** that expiry.
+2. **Measure the per-symbol gap** = (new-front close − current-conid close) at the nearest
+   common 1m bar to the switch (the old contract's last-session close).
+3. **Append a new newest row** to `<main>/rollover_ledger.json`:
+   `{"prep_date":"<this prep date>","subfolder":"<new YYYY-MM>","expiry":"<new expiry>",`
+   `"mnq":{old_conid,new_conid,gap},"mes":{...}}`.
+4. **Create** `<main>/<new YYYY-MM>/`.
+5. **Back-adjust the LIVE parquets** in place: `OHLC += gap` per symbol (volume untouched),
+   shifting old-contract history onto the new contract's price scale. Leave all `main/`
+   subfolders raw/as-is — only the *live* parquets shift. Then **copy** the back-adjusted live
+   parquets → the new subfolder.
+6. **Update `.env`**: `MNQ_CONID`/`MES_CONID` → new conids, `ROLLOVER_PREP_DATE` → next prep date.
+7. **Notify the user**: what rolled, gaps, new conids, new subfolder, next prep date. The next
+   orchestrator restart gap-fills forward with the new conids; `daily` re-derives levels from
+   the now-shifted data.
+
+Backtests then route per date via `backtest_smt._main_dir_for_date` (pre-roll dates → the frozen
+raw subfolder; on/after → the new back-adjusted one). **This rollover-prep is the one exception
+to the no-code-changes HARD RULE below** — it edits `.env` + `rollover_ledger.json` and creates a
+subfolder.
+
 ## Step 4 — Final summary
 
 Output 3–5 concise lines:
@@ -159,7 +193,9 @@ Output 3–5 concise lines:
 **This skill operates on data files only.**
 
 The executing agent MUST NOT use Edit, Write, or any tool that modifies `.py`, `.md`,
-or any non-parquet file.
+or any non-parquet file. **One exception:** the quarterly rollover-prep above, which edits
+`.env` (conids + `ROLLOVER_PREP_DATE`) and `<main>/rollover_ledger.json` and creates a new
+`main/` subfolder — and only when `ROLLOVER_PREP_DATE` has arrived.
 
 **Allowed writes**: parquet files only — the **live production** parquets + session 1s
 files under `<global>/general/live/` (`*.parquet`, `*.parquet.bak`, `*.parquet.tmp`, and

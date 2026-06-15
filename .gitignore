@@ -39,8 +39,15 @@ tests/fixtures/*.parquet
 # LEGACY: live sessions now live in <global>/sessions/ (outside any worktree); kept harmless.
 sessions/
 
-# Parquet data files (large, not committed)
-# LEGACY: production parquets now live in <global>/data/{main,live}/; kept harmless.
+# Parquet data files + their backups/temps (large, machine-local — NEVER committed).
+# Production parquets live in <global>/general/{main,live}/ and its per-contract rollover
+# subfolders (e.g. main/2026-09/) — all OUTSIDE this worktree, so git never sees them. The
+# global patterns below cover any stray parquet/backup/temp anywhere in the tree (incl. the
+# legacy worktree-local data/ leftovers). No parquet is tracked.
+*.parquet
+*.parquet.bak
+*.parquet.tmp
+*.parquet.promote.tmp
 data/*.parquet
 data/historical/*.parquet
 data/realtime/*.parquet

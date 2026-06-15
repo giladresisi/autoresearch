@@ -310,18 +310,41 @@ def backup_main(main_path: Path) -> None:
 PROMOTE_NAMES = ["MNQ_1m.parquet", "MES_1m.parquet", "MNQ_1s.parquet", "MES_1s.parquet"]
 
 
+def _current_main_subdir() -> "Path":
+    """Current parquet-check promote target = the newest rollover-ledger row's subfolder
+    (``general_main_dir()/<subfolder>``), per ``<main>/rollover_ledger.json``. After a
+    quarterly rollover the newest row points at the current contract era, so promotion lands
+    in that era's set while the frozen pre-roll subfolders are never overwritten. Falls back
+    to ``general_main_dir()`` itself when there is no ledger (pre-rollover flat layout)."""
+    main = paths.general_main_dir()
+    ledger = main / "rollover_ledger.json"
+    if not ledger.exists():
+        return main
+    try:
+        rows = json.loads(ledger.read_text(encoding="utf-8"))
+    except Exception:
+        return main
+    if rows:
+        sub = main / str(rows[0].get("subfolder", ""))
+        if sub.exists():
+            return sub
+    return main
+
+
 def promote_live_to_main() -> dict:
-    """Promote validated parquets from general_live_dir() to general_main_dir().
+    """Promote validated parquets from general_live_dir() to the current main subfolder.
 
     This is the FINAL step after a successful session-end merge: the live parquets
     have just been validated + merged, so they are copied into the backtest read
-    source (main). The prior main file is backed up to <name>.parquet.bak first, and
-    the copy is atomic (write to a .tmp in the main dir, then os.replace).
+    source (main). With the contract-rollover layout the target is the newest ledger
+    subfolder (_current_main_subdir); pre-rollover it is general_main_dir() itself. The
+    prior main file is backed up to <name>.parquet.bak first, and the copy is atomic
+    (write to a .tmp in the main dir, then os.replace).
 
     Returns a per-file status dict for the JSON report.
     """
     live_dir = paths.general_live_dir()
-    main_dir = paths.general_main_dir()
+    main_dir = _current_main_subdir()
     promoted: dict = {}
 
     for name in PROMOTE_NAMES:
