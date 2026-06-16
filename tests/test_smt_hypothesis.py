@@ -1054,3 +1054,301 @@ def test_build_hypothesis_targets_drop_invalidated_level():
     names = {t["name"] for t in load_hypothesis()["targets"]}
     assert "prev1_day_high" not in names
     assert "day_high" in names
+
+
+# ══ GIL-32: standing-SMT-conviction override on rule2b's direction ═══════════════
+#
+# These tests drive `_determine_direction` directly through a rule2b high-sweep
+# scenario (price sweeps into weekly premium → rule2b returns "down"), then vary the
+# `smt_conviction` kwarg to exercise the ungated override branch. The default
+# `smt_conviction=0.0` path is asserted byte-identical to the no-conviction call
+# (back-compat).
+
+def _rule2b_down_direction_args():
+    """Build the args for `_determine_direction` for a rule2b high-sweep scenario.
+
+    Bars sweep up through day_high(180)/week_high(200) and close at 175. The scenario
+    reaches the rule2b branch (reason["rule"] == "rule2b"); the tests read the baseline
+    direction it produces and then exercise the override relative to that baseline.
+    Returns a kwargs dict for `_determine_direction`.
+    """
+    save_global(_make_default_global())
+    save_daily({
+        "date": "2026-04-27",
+        "liquidities": [
+            {"name": "week_high", "kind": "level", "price": 200.0},
+            {"name": "week_low",  "kind": "level", "price": 100.0},
+            {"name": "day_high",  "kind": "level", "price": 180.0},
+            {"name": "day_low",   "kind": "level", "price": 120.0},
+        ],
+        "estimated_dir": "up",
+        "opposite_premove": "no",
+    })
+    now = _make_now(time_str="10:10:00")
+    opens  = [150.0] * 5 + [170.0] * 5
+    highs  = [155.0] * 5 + [200.0] * 5
+    lows   = [100.0] * 5 + [165.0] * 5
+    closes = [152.0] * 5 + [175.0] * 5
+    mnq_1m = _make_1m_bars(opens, highs, lows, closes, start_time="2026-04-27 10:00:00")
+    week_ago = _make_1m_bars([100] * 5, [101] * 5, [99] * 5, [100] * 5,
+                             start_time="2026-04-20 10:00:00")
+    pre_sess = _make_pre_session_hist()
+    hist_mnq_1m = pd.concat([week_ago, pre_sess]).sort_index()
+    liquidities = [
+        {"name": "week_high", "kind": "level", "price": 200.0},
+        {"name": "week_low",  "kind": "level", "price": 100.0},
+        {"name": "day_high",  "kind": "level", "price": 180.0},
+        {"name": "day_low",   "kind": "level", "price": 120.0},
+    ]
+    global_state = _make_default_global()
+    current_bar = {
+        "Open": 170.0, "High": 200.0, "Low": 165.0, "Close": 175.0, "Volume": 1000.0,
+    }
+    return {
+        "current_bar":  current_bar,
+        "mnq_1m":       mnq_1m,
+        "hist_mnq_1m":  hist_mnq_1m,
+        "liquidities":  liquidities,
+        "global_state": global_state,
+        "divs":         [],
+        "now":          now,
+    }
+
+
+def _contradicting_conviction(base_dir, mag):
+    """A conviction of magnitude `mag` whose sign CONTRADICTS base_dir
+    ("up"→ +, so contradict with −; "down"→ flip to up with +)."""
+    return -mag if base_dir == "up" else mag
+
+
+def _aligning_conviction(base_dir, mag):
+    """A conviction whose sign AGREES with base_dir."""
+    return mag if base_dir == "up" else -mag
+
+
+def test_gil32_override_flips_contradicting_rule2b_direction():
+    """|conv|>=STRONG and sign CONTRADICTS r2b_dir → flip to the SMT side, smt_override True."""
+    from hypothesis import _determine_direction
+    args = _rule2b_down_direction_args()
+    # Baseline (no conviction) — rule2b's own decision for this synthetic bar.
+    base_dir, base_reason = _determine_direction(**args)
+    assert base_dir in ("up", "down") and base_reason.get("rule") == "rule2b"
+    assert "smt_override" not in base_reason
+
+    conv = _contradicting_conviction(base_dir, 0.8)
+    expected = "down" if conv < 0 else "up"
+    inputs = {"n": 2, "n_bear": 0, "n_bull": 2, "top_tier": "week", "refs": ["x"]}
+    direction, reason = _determine_direction(
+        **_rule2b_down_direction_args(), smt_conviction=conv, smt_conviction_inputs=inputs
+    )
+    assert direction == expected != base_dir, (
+        f"contradicting conviction must flip {base_dir}→{expected}, got {direction}"
+    )
+    assert reason.get("smt_override") is True
+    assert reason.get("smt_conviction") == round(conv, 3)
+    assert reason.get("smt_conviction_inputs") == inputs
+
+
+def test_gil32_override_noop_when_conviction_aligns():
+    """Conviction that AGREES with r2b_dir is a no-op (no flip, no smt_override tag)."""
+    from hypothesis import _determine_direction
+    base_dir, _ = _determine_direction(**_rule2b_down_direction_args())
+    conv = _aligning_conviction(base_dir, 0.8)
+    direction, reason = _determine_direction(
+        **_rule2b_down_direction_args(), smt_conviction=conv, smt_conviction_inputs={"n": 3}
+    )
+    assert direction == base_dir, f"aligned conviction must NOT change direction, got {direction}"
+    assert "smt_override" not in reason
+
+
+def test_gil32_override_noop_when_conviction_weak():
+    """|conv| < STRONG never flips, even when it contradicts r2b_dir."""
+    from hypothesis import _determine_direction
+    import smt_conviction as _sc
+    base_dir, _ = _determine_direction(**_rule2b_down_direction_args())
+    weak = _contradicting_conviction(base_dir, _sc.CONVICTION_STRONG - 0.01)
+    direction, reason = _determine_direction(
+        **_rule2b_down_direction_args(), smt_conviction=weak, smt_conviction_inputs={"n": 1}
+    )
+    assert direction == base_dir, f"weak conviction must NOT flip, got {direction}"
+    assert "smt_override" not in reason
+
+
+def test_gil32_override_absent_when_no_flip_default_is_back_compat():
+    """Default smt_conviction=0.0 is byte-identical to the no-kwargs call (back-compat).
+
+    The mandatory back-compat invariant: with the default conviction (0.0) the
+    direction AND the reason dict are exactly what today's code returns when the new
+    kwargs are not supplied at all.
+    """
+    from hypothesis import _determine_direction
+    # No kwargs at all (the pre-GIL-32 call shape).
+    dir_legacy, reason_legacy = _determine_direction(**_rule2b_down_direction_args())
+    # Explicit default conviction.
+    dir_default, reason_default = _determine_direction(
+        **_rule2b_down_direction_args(), smt_conviction=0.0, smt_conviction_inputs={}
+    )
+    assert dir_legacy == dir_default
+    assert reason_legacy == reason_default, (
+        f"default-conviction reason diverged from legacy: {reason_default} != {reason_legacy}"
+    )
+    assert "smt_override" not in reason_default
+    assert "smt_conviction" not in reason_default
+
+
+def test_gil32_conviction_set_flows_through_run_hypothesis():
+    """Integration: a seeded standing bearish conviction set flips a rule2b "up".
+
+    Build a rule2b scenario that resolves to "up" on its own (a high-sweep WITHOUT
+    weekly premium — close stays in discount), seed a strongly-bearish
+    `smt_conviction_set` on the hypothesis, and assert run_hypothesis emits "down"
+    with the smt_override tag. Exercises Task 2 (state key) + Task 3 (run_hypothesis
+    read + conviction_score + override) end-to-end.
+    """
+    save_global(_make_default_global())
+    save_daily({
+        "date": "2026-04-27",
+        "liquidities": [
+            {"name": "week_high", "kind": "level", "price": 200.0},
+            {"name": "week_low",  "kind": "level", "price": 100.0},
+            {"name": "day_high",  "kind": "level", "price": 130.0},
+            {"name": "day_low",   "kind": "level", "price": 80.0},
+        ],
+        "estimated_dir": "up",
+        "opposite_premove": "no",
+    })
+    now = _make_now(time_str="10:10:00")
+    # Sweep day_high(130) but close at 120 — below weekly mid (150) → discount, so
+    # rule2b's premium guard is False → r2b_dir = "up".
+    opens  = [110.0] * 5 + [125.0] * 5
+    highs  = [115.0] * 5 + [135.0] * 5
+    lows   = [100.0] * 5 + [118.0] * 5
+    closes = [112.0] * 5 + [120.0] * 5
+    mnq_1m = _make_1m_bars(opens, highs, lows, closes, start_time="2026-04-27 10:00:00")
+    mes_1m = _make_1m_bars([60.0] * 10, [61.0] * 10, [59.0] * 10, [60.0] * 10,
+                           start_time="2026-04-27 10:00:00")
+    week_ago = _make_1m_bars([100] * 5, [101] * 5, [99] * 5, [100] * 5,
+                             start_time="2026-04-20 10:00:00")
+    pre_sess = _make_pre_session_hist()
+    hist_mnq_1m = pd.concat([week_ago, pre_sess]).sort_index()
+    hist_mes_1m = _make_1m_bars([50] * 5, [51] * 5, [49] * 5, [50] * 5,
+                                start_time="2026-04-20 10:00:00")
+
+    # Seed a strongly-bearish standing conviction set (two week-tier shorts, unfulfilled).
+    h0 = load_hypothesis()
+    h0["direction"] = "none"
+    h0["smt_conviction_set"] = [
+        {"ref_name": "week_high", "direction": "short", "side": "bearish",
+         "tier": "week", "type": "wick", "fire_iso": "2026-04-27T09:40:00-04:00",
+         "fire_close": 135.0, "adverse_streak": 0, "fulfilled_iso": None},
+        {"ref_name": "day_high", "direction": "short", "side": "bearish",
+         "tier": "day", "type": "wick", "fire_iso": "2026-04-27T09:50:00-04:00",
+         "fire_close": 132.0, "adverse_streak": 0, "fulfilled_iso": None},
+    ]
+    save_hypothesis(h0)
+
+    with patch("hypothesis.detect_smt_divergence", return_value=None):
+        with patch("hypothesis.detect_smt_fill", return_value=None):
+            events = run_hypothesis(now, mnq_1m, mes_1m, hist_mnq_1m, hist_mes_1m)
+
+    assert events, "expected a new-hypothesis event"
+    reason = events[0]["direction_reason"]
+    assert reason.get("rule") == "rule2b", f"expected rule2b, got {reason.get('rule')!r}"
+    assert reason.get("smt_override") is True, f"expected override, reason={reason}"
+    assert events[0].get("direction") == "down" or load_hypothesis()["direction"] == "down"
+
+
+# ===========================================================================
+# GIL-32 Phase-1b: same-liquidity reversal lock (veto in _determine_direction).
+# ===========================================================================
+
+def _rule2b_up_high_sweep_args():
+    """Args for `_determine_direction` that resolve to rule2b "up" on a day_high sweep.
+
+    Mirrors the conviction-flow scenario: sweep day_high(130) with highs to 135 (week_high 200
+    untouched → last_swept_level == "day_high") but close at 120, below weekly mid (150) →
+    weekly discount → rule2b's premium guard is False → r2b_dir = "up".
+    """
+    save_global(_make_default_global())
+    save_daily({
+        "date": "2026-04-27",
+        "liquidities": [
+            {"name": "week_high", "kind": "level", "price": 200.0},
+            {"name": "week_low",  "kind": "level", "price": 100.0},
+            {"name": "day_high",  "kind": "level", "price": 130.0},
+            {"name": "day_low",   "kind": "level", "price": 80.0},
+        ],
+        "estimated_dir": "up",
+        "opposite_premove": "no",
+    })
+    now = _make_now(time_str="10:10:00")
+    opens  = [110.0] * 5 + [125.0] * 5
+    highs  = [115.0] * 5 + [135.0] * 5
+    lows   = [100.0] * 5 + [118.0] * 5
+    closes = [112.0] * 5 + [120.0] * 5
+    mnq_1m = _make_1m_bars(opens, highs, lows, closes, start_time="2026-04-27 10:00:00")
+    week_ago = _make_1m_bars([100] * 5, [101] * 5, [99] * 5, [100] * 5,
+                             start_time="2026-04-20 10:00:00")
+    pre_sess = _make_pre_session_hist()
+    hist_mnq_1m = pd.concat([week_ago, pre_sess]).sort_index()
+    liquidities = [
+        {"name": "week_high", "kind": "level", "price": 200.0},
+        {"name": "week_low",  "kind": "level", "price": 100.0},
+        {"name": "day_high",  "kind": "level", "price": 130.0},
+        {"name": "day_low",   "kind": "level", "price": 80.0},
+    ]
+    current_bar = {"Open": 125.0, "High": 135.0, "Low": 118.0, "Close": 120.0, "Volume": 1000.0}
+    return {
+        "current_bar":  current_bar,
+        "mnq_1m":       mnq_1m,
+        "hist_mnq_1m":  hist_mnq_1m,
+        "liquidities":  liquidities,
+        "global_state": _make_default_global(),
+        "divs":         [],
+        "now":          now,
+    }
+
+
+def _bearish_day_high_lock():
+    return {"level_name": "day_high", "side": "bearish", "locked_dir": "down",
+            "level_price": 130.0, "fire_iso": "2026-04-27T09:50:00-04:00",
+            "armed_iso": "2026-04-27T09:55:00-04:00", "accept_streak": 0,
+            "protecting": True, "keys": ["day_high|short|wick"]}
+
+
+def test_gil32_reversal_lock_forces_up_to_down_on_same_liquidity():
+    """A bearish lock on the swept day_high forces rule2b's "up" → "down" (protect-existing)."""
+    from hypothesis import _determine_direction
+    base_dir, base_reason = _determine_direction(**_rule2b_up_high_sweep_args())
+    assert base_dir == "up" and base_reason.get("rule") == "rule2b"
+    assert base_reason.get("last_swept_level") == "day_high"
+
+    direction, reason = _determine_direction(
+        **_rule2b_up_high_sweep_args(), smt_reversal_locks=[_bearish_day_high_lock()]
+    )
+    assert direction == "down", f"lock must force up→down, got {direction}"
+    assert reason.get("smt_reversal_lock") == "day_high"
+    assert reason.get("smt_reversal_lock_dir") == "down"
+
+
+def test_gil32_reversal_lock_noop_on_different_liquidity():
+    """A lock on a DIFFERENT level than the swept one does not veto."""
+    from hypothesis import _determine_direction
+    other = dict(_bearish_day_high_lock(), level_name="week_high", keys=["week_high|short|wick"])
+    direction, reason = _determine_direction(
+        **_rule2b_up_high_sweep_args(), smt_reversal_locks=[other]
+    )
+    assert direction == "up", f"lock on a different level must NOT veto, got {direction}"
+    assert "smt_reversal_lock" not in reason
+
+
+def test_gil32_reversal_lock_default_is_back_compat():
+    """Default smt_reversal_locks (None) is byte-identical to the no-kwarg call."""
+    from hypothesis import _determine_direction
+    dir_legacy, reason_legacy = _determine_direction(**_rule2b_up_high_sweep_args())
+    dir_default, reason_default = _determine_direction(
+        **_rule2b_up_high_sweep_args(), smt_reversal_locks=None
+    )
+    assert dir_legacy == dir_default
+    assert reason_legacy == reason_default
+    assert "smt_reversal_lock" not in reason_default

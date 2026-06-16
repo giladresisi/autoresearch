@@ -188,6 +188,12 @@ def _detect_yesterday_session_fvgs(
     lows = _hourly["Low"].values
     idx = _hourly.index
 
+    # 1m closes from the yesterday-session window onward — the reference for the far-edge
+    # invalidation filter below (bounded once; the per-FVG slice is a cheap index compare).
+    _chk = combined_1m[combined_1m.index >= _y_start]
+    _chk_idx = _chk.index
+    _chk_close = _chk["Close"].values if not _chk.empty else None
+
     out: list[dict] = []
     seen: set[str] = set()
     for i in range(len(_hourly) - 2):
@@ -203,6 +209,21 @@ def _detect_yesterday_session_fvgs(
         # Formation (completing 3rd bar) must fall in the yesterday-session window.
         if not (_y_start <= formation_ts <= _y_end):
             continue
+        # Invalidation filter: drop a carried FVG once price has CLOSED decisively through its
+        # FAR edge after formation (bullish → a close below the bottom; bearish → a close above
+        # the top). Such a gap is consumed/failed and is no longer a valid imbalance — keeping it
+        # resurrects a dead level as a fill target (e.g. 2026-05-28 carried fvg_20260527_0400_bull,
+        # which 05-27 closed ~250pt below its bottom). This is distinct from the unvisited check
+        # (mere re-entry of the zone): it tests a decisive break of the far edge, the structural
+        # death of the imbalance. Bars at/before formation are excluded.
+        if _chk_close is not None:
+            _pos = _chk_idx.searchsorted(formation_ts, side="right")
+            _post_close = _chk_close[_pos:]
+            if len(_post_close) > 0:
+                if side == "bull" and (_post_close < bottom).any():
+                    continue
+                if side == "bear" and (_post_close > top).any():
+                    continue
         ts_str = formation_ts.strftime("%Y%m%d_%H%M")
         name = f"fvg_{ts_str}_{side}"
         if name in seen:
@@ -2179,12 +2200,67 @@ class SessionPipeline:
                 _active, _leg_state, _now_close)
             _events.extend(_leg_events)
             _dom = _hyp_mod.dominant(_active)
-            # Re-load and store under debug keys only; leave every other field untouched.
+            # --- GIL-32: standing SMT conviction set (separate from smt_active_set) ----
+            # Maintain a SEPARATE standing-conviction set with its own lifecycle (residual
+            # after fulfillment + birth grace + adverse-run sustain). Built from THIS bar's
+            # fired divs (`records`) + a status map over the standing records' detect keys
+            # (so fulfilled/gone are observed), NOT from the relevance-filtered `_active`.
+            # Legacy `smt_active_set` / `_compute_smt_score_v2` / GIL-19 relevance untouched.
+            import smt_conviction as _smt_conv
+            _prev_conv = _hyp.get("smt_conviction_set", []) or []
+            _conv_keys: list = []
+            for _r in _prev_conv:
+                if not isinstance(_r, dict):
+                    continue
+                _ks = _r.get("keys")
+                if not _ks:
+                    _rt = _r.get("type")
+                    if _rt in ("wick", "body"):
+                        _ks = [f"{_r.get('ref_name')}|{_r.get('direction')}|{_rt}"]
+                    else:
+                        _ks = [str(_r.get("ref_name"))]
+                for _k in _ks:
+                    if _k and _k not in _conv_keys:
+                        _conv_keys.append(_k)
+            _conv_status = _smt_detect.smt_status(_conv_keys, self._detect_state)
+            _conv_set = _smt_conv.update_standing(
+                _prev_conv, records, _conv_status,
+                mnq_close=float(mnq_bar_row["Close"]), now_iso=now.isoformat(),
+            )
+            # --- GIL-32 Phase-1b: same-liquidity reversal locks ------------------------
+            # Maintained in lockstep with the conviction set but with a SEPARATE durable
+            # lifecycle keyed on LEVEL ACCEPTANCE (not the conviction set's adverse-run, which
+            # evicts on the very stop-run pop the SMT predicts will reverse). advance() ages /
+            # releases existing locks (acceptance break, fulfill, or age-out); arm() opens a
+            # lock when the current hypothesis is a reversal on a swept level that still has a
+            # live same-side standing SMT. Status for the lock keys is queried directly against
+            # detect_state so a fulfill is seen even after the conviction set dropped the SMT.
+            import smt_reversal_lock as _smt_lock
+            _prev_locks = _hyp.get("smt_reversal_locks", []) or []
+            _lock_keys: list = [k for _l in _prev_locks for k in (_l.get("keys") or [])]
+            _lock_status = _smt_detect.smt_status(_lock_keys, self._detect_state)
+            # (1) advance existing locks (level-acceptance / fulfill / age release), then
+            # (2) ingest THIS bar's reversal-SMT fires (open new non-protecting locks with their
+            #     own durable level-acceptance lifecycle — so a bearish high-SMT survives the
+            #     manipulation pop that the fire-close adverse-run would have evicted it on).
+            _locks = _smt_lock.advance(
+                _prev_locks, _mnq_lvl_px, _lock_status,
+                mnq_close=float(mnq_bar_row["Close"]), now_iso=now.isoformat(),
+            )
+            _locks = _smt_lock.ingest_fires(_locks, records, _mnq_lvl_px, now.isoformat())
+            # (3) promote to PROTECTING when the CURRENT hypothesis is a reversal on the locked
+            #     level (direction + last_liquidity == rule2b's swept level). Only protecting
+            #     locks veto the opposite hypothesis on that liquidity.
             _hyp2 = _smt_state.load_hypothesis()
+            _locks = _smt_lock.mark_protecting(
+                _locks, _hyp2.get("direction"), _hyp2.get("last_liquidity"),
+            )
             _hyp2["smt_active_set"] = _active
             _hyp2["smt_dominant"] = _dom
             _hyp2["smt_leg_state"] = _leg_state
             _hyp2["smt_suppressions"] = _events
+            _hyp2["smt_conviction_set"] = _conv_set
+            _hyp2["smt_reversal_locks"] = _locks
             _smt_state.save_hypothesis(_hyp2)
 
             # GIL-25 Phase 1.2 (cross-session carry, WRITE side): mirror the finalized

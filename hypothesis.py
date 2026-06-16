@@ -251,6 +251,8 @@ from smt_state import (
 import strategy as _strategy
 from strategy_smt import detect_smt_divergence, detect_smt_fill
 from smt_detect import _level_class as _smt_level_class, _record_key as _smt_record_key
+import smt_conviction as _smt_conv  # GIL-32: standing-SMT-conviction override (rule2b)
+import smt_reversal_lock as _smt_lock  # GIL-32 Phase-1b: same-liquidity reversal lock (rule2b veto)
 
 
 # ===========================================================================
@@ -1487,6 +1489,9 @@ def _determine_direction(
     *,
     hist_1hr: "pd.DataFrame | None" = None,
     hist_4hr: "pd.DataFrame | None" = None,
+    smt_conviction: float = 0.0,
+    smt_conviction_inputs: "dict | None" = None,
+    smt_reversal_locks: "list | None" = None,
 ) -> tuple:
     fvg_1hr = _detect_fvg_1hr(hist_mnq_1m, mnq_1m, hist_1hr=hist_1hr)
     levels  = _build_meaningful_levels(liquidities, fvg_1hr)
@@ -1787,6 +1792,28 @@ def _determine_direction(
             reason["is_false_pos_ath"]     = bool(_is_false_pos_ath)
             reason["is_false_pos_morning"] = bool(_is_false_pos_morning)
             reason["is_false_pos_recovery"]= bool(_is_false_pos_recovery)
+            # GIL-32 Phase 1: standing-SMT-conviction override (UNGATED — no daily-trend
+            # gate by design). A meaningful standing conviction (|conv| >= CONVICTION_STRONG)
+            # whose sign CONTRADICTS rule2b's direction flips r2b_dir to the SMT side. Tag
+            # the reason so the flip is reproducible from events.jsonl. Default conviction
+            # 0.0 → no-op → byte-identical to today (back-compat). Applies to rule2b only.
+            if smt_conviction and abs(smt_conviction) >= _smt_conv.CONVICTION_STRONG:
+                smt_dir = "down" if smt_conviction < 0 else "up"
+                if smt_dir != r2b_dir:
+                    reason["smt_override"] = True
+                    reason["smt_conviction"] = round(smt_conviction, 3)
+                    reason["smt_conviction_inputs"] = smt_conviction_inputs
+                    r2b_dir = smt_dir
+            # GIL-32 Phase-1b: same-liquidity reversal lock. A reversal hypothesis already formed
+            # on this swept level (with a live same-side SMT) → disallow the OPPOSITE direction on
+            # that same liquidity until the SMT is level-accepted-through or fulfilled. Force back
+            # to the SMT side; because that side equals the standing hypothesis direction this is a
+            # PROTECT (no reform / no position reset — none->dir gate). Default [] → no-op.
+            _veto_dir = _smt_lock.vetoes(smt_reversal_locks or [], r2b_dir, _last_liq)
+            if _veto_dir is not None and _veto_dir != r2b_dir:
+                reason["smt_reversal_lock"] = _last_liq
+                reason["smt_reversal_lock_dir"] = _veto_dir
+                r2b_dir = _veto_dir
             return r2b_dir, reason
 
     # Rule 2: trending toward an unvisited level with momentum — decisive continuation.
@@ -2060,6 +2087,15 @@ def build_hypothesis_from_direction(
         "cautious_price_secondary_level": cautious_price_secondary_level,
         "entry_ranges":                   entry_ranges,
     }
+    # GIL-32 Phase-1b: carry the same-liquidity reversal locks across a reform. The lock ledger
+    # is maintained by the detection pipeline (session_pipeline._run_smt_v2_detection) under this
+    # debug key; without this preservation a hypothesis reform (a full hypothesis.json rewrite)
+    # would WIPE it, so a lock opened at SMT-fire-time would never survive to the bar the reversal
+    # hypothesis forms — defeating the protect. Additive: absent key → [] → no-op.
+    _existing_hyp = load_hypothesis()
+    _carry_locks = _existing_hyp.get("smt_reversal_locks")
+    if _carry_locks:
+        new_hypothesis["smt_reversal_locks"] = _carry_locks
     save_hypothesis(new_hypothesis)
 
     # Step 10: On none -> up/down transition, reset position state.
@@ -2216,6 +2252,19 @@ def run_hypothesis(
     # passes them) but no longer feed divs.
     divs = hypothesis.get("smt_active_set", []) or []
 
+    # GIL-32: standing-SMT-conviction (separate from `divs`/smt_active_set). Read the
+    # standing set maintained by the detection pipeline and score it; the conviction feeds
+    # the ungated rule2b override in _determine_direction. Default [] → 0.0 → no-op.
+    _conv_set = hypothesis.get("smt_conviction_set", []) or []
+    smt_conviction, smt_conviction_inputs = _smt_conv.conviction_score(
+        _conv_set, now.isoformat() if hasattr(now, "isoformat") else str(now)
+    )
+
+    # GIL-32 Phase-1b: same-liquidity reversal locks (maintained each 1m bar by the detection
+    # pipeline). Read and pass through so _determine_direction can veto an opposite hypothesis
+    # on a locked liquidity. Default [] → no veto → byte-identical direction.
+    _reversal_locks = hypothesis.get("smt_reversal_locks", []) or []
+
     # Step 6: direction — determined by ICT rules (see direction.md).
     # confidence=high overrides all rules: direction follows the global trend unconditionally.
     if global_state.get("confidence") == "high":
@@ -2232,6 +2281,9 @@ def run_hypothesis(
             now          = now,
             hist_1hr     = hist_1hr,
             hist_4hr     = hist_4hr,
+            smt_conviction        = smt_conviction,
+            smt_conviction_inputs = smt_conviction_inputs,
+            smt_reversal_locks    = _reversal_locks,
         )
 
     return build_hypothesis_from_direction(

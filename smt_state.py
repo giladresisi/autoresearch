@@ -181,6 +181,18 @@ DEFAULT_HYPOTHESIS = {
     # drive direction in Phase 2 (forward-compatible; Phase 3 consumes them).
     "smt_active_set": [],
     "smt_dominant":   None,
+    # GIL-32: standing SMT conviction set (separate from smt_active_set; own lifecycle —
+    # residual after fulfillment + birth grace + adverse-run sustain). Maintained each 1m
+    # bar by session_pipeline._run_smt_v2_detection via smt_conviction.update_standing and
+    # consumed by hypothesis._determine_direction to optionally flip rule2b's direction.
+    # Additive / back-compatible: default [] → conviction 0.0 → byte-identical direction.
+    "smt_conviction_set": [],
+    # GIL-32 Phase-1b: same-liquidity reversal locks (separate durable lifecycle keyed on LEVEL
+    # ACCEPTANCE, not the conviction set's adverse-run). Armed when a reversal hypothesis forms on
+    # a level with a live same-side SMT; while armed, _determine_direction forces rule2b back to the
+    # SMT side on that same swept level (protect-existing → no reform). Maintained each 1m bar by
+    # session_pipeline._run_smt_v2_detection via smt_reversal_lock.advance/arm. Default [] → no-op.
+    "smt_reversal_locks": [],
 }
 
 # GIL-25 Phase 1.2: cross-session carry of non-invalidated SMTs. Each entry carries
