@@ -54,7 +54,15 @@ def _write_run_info(run_dir: Path, date: str, mode: str,
 
 
 def _parse_date_tokens(tokens: list[str]) -> list[str]:
-    """Expand a list of date strings and YYYY-MM-DD:YYYY-MM-DD ranges into a flat date list."""
+    """Expand a list of date strings and YYYY-MM-DD:YYYY-MM-DD ranges into a flat date list.
+
+    GIL-25 Phase 1.1.5: a `:` RANGE token is expanded to BUSINESS days only (weekend dates are
+    dropped) so the contiguous-carry routing in run_regression sees an exact Fri->Mon adjacency
+    and never creates empty weekend run dirs. A weekend date in a range was already a no-op
+    (run_backtest_v2(date,date) builds an empty bdate_range → continue), so filtering it is a pure
+    cleanup. Explicit single-date tokens are preserved VERBATIM (a user-typed weekend date is left
+    as-is — still a no-op downstream — rather than silently dropped).
+    """
     dates: list[str] = []
     for token in tokens:
         token = token.strip()
@@ -62,12 +70,28 @@ def _parse_date_tokens(tokens: list[str]) -> list[str]:
             continue
         if ":" in token:
             start_str, end_str = token.split(":", 1)
-            date_range = pd.date_range(start_str.strip(), end_str.strip(), freq="D")
+            # Business days only: Fri->Mon adjacency is exact; Sat/Sun never appear.
+            date_range = pd.bdate_range(start_str.strip(), end_str.strip())
             for d in date_range:
                 dates.append(d.strftime("%Y-%m-%d"))
         else:
             dates.append(token)
     return dates
+
+
+def _is_next_bday(prev: str, cur: str) -> bool:
+    """True iff `cur` is the next BUSINESS day after `prev` (Fri+1 = Mon), i.e. the two dates are
+    contiguous for the cross-session SMT carry. Both are YYYY-MM-DD strings. Total/best-effort:
+    unparseable input → False (treated as a gap → no carry). Pure."""
+    try:
+        p = pd.Timestamp(prev)
+        c = pd.Timestamp(cur)
+    except Exception:
+        return False
+    if p is pd.NaT or c is pd.NaT:
+        return False
+    nxt = (p + pd.offsets.BDay(1)).normalize()
+    return c.normalize() == nxt
 
 
 def _parse_regression_md(path: str) -> list[str]:
@@ -132,8 +156,16 @@ def run_regression(
     # One run timestamp for the whole invocation so every date's outputs share a stamp.
     started = datetime.datetime.now(ZoneInfo("America/New_York"))
 
-    for date in dates:
-        result = run_backtest_v2(date, date, write_events=True, mode=mode, started=started)
+    for i, date in enumerate(dates):
+        # GIL-25 Phase 1.1.5: carry the in-memory pending-SMT store across a CONTIGUOUS
+        # business-day range. The first date (and any date after a gap / non-business jump)
+        # starts clean (reset_pending=True); a date that is the next business day after the
+        # previous (Fri->Mon included) preserves the store (reset_pending=False) so the prior
+        # date's pending SMTs reach this date's cold-start ingest. A non-contiguous explicit list
+        # (e.g. [06-05, 06-10]) does NOT carry across the gap.
+        _reset_pending = (i == 0) or not _is_next_bday(dates[i - 1], date)
+        result = run_backtest_v2(date, date, write_events=True, mode=mode, started=started,
+                                 reset_pending=_reset_pending)
         trades  = result.get("trades", [])
         events  = result.get("events", [])
         metrics = result.get("metrics", {})

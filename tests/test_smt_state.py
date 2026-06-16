@@ -404,6 +404,46 @@ class TestPendingSmtsState:
         finally:
             smt_state.set_in_memory_mode(False)
 
+    # GIL-25 Phase 1.1.5: set_in_memory_mode(reset_pending=...) preserve hook (Change B).
+    def test_set_in_memory_mode_resets_pending_by_default(self):
+        from smt_state import load_pending_smts, save_pending_smts
+        smt_state.set_in_memory_mode(True)
+        try:
+            save_pending_smts({"entries": [{"price": 1.0}], "schema": 1})
+            assert smt_state._PENDING_STORE is not None
+            # Default reset_pending=True wipes the store.
+            smt_state.set_in_memory_mode(True)
+            assert smt_state._PENDING_STORE is None
+            assert load_pending_smts() == smt_state.DEFAULT_PENDING_SMTS
+        finally:
+            smt_state.set_in_memory_mode(False)
+
+    def test_set_in_memory_mode_preserves_pending_when_flagged(self):
+        from smt_state import load_pending_smts, save_pending_smts
+        smt_state.set_in_memory_mode(True)
+        try:
+            payload = {"entries": [{"price": 21000.0, "direction": "long",
+                                    "ref_name": "prev1_day_low"}], "schema": 1}
+            save_pending_smts(payload)
+            # reset_pending=False preserves the carry store across the (re)set.
+            smt_state.set_in_memory_mode(True, reset_pending=False)
+            assert load_pending_smts() == payload
+        finally:
+            smt_state.set_in_memory_mode(False)
+
+    def test_reset_in_memory_still_preserves_pending(self):
+        # Regression for the Phase-1.2 invariant: reset_in_memory() never wipes _PENDING_STORE,
+        # and Change B did not disturb that per-date survive-reset path.
+        from smt_state import load_pending_smts, save_pending_smts
+        smt_state.set_in_memory_mode(True)
+        try:
+            payload = {"entries": [{"price": 1.0, "direction": "long"}], "schema": 1}
+            save_pending_smts(payload)
+            smt_state.reset_in_memory()
+            assert load_pending_smts() == payload
+        finally:
+            smt_state.set_in_memory_mode(False)
+
     def test_pending_disk_roundtrip_live(self, tmp_path, monkeypatch):
         """Live mode goes through _load/_atomic_write against general_live_dir()."""
         import paths

@@ -263,16 +263,28 @@ _hyp_cache: dict | None = None
 _hyp_cache_valid: bool = False
 
 
-def set_in_memory_mode(enabled: bool) -> None:
+def set_in_memory_mode(enabled: bool, *, reset_pending: bool = True) -> None:
+    """Toggle in-memory mode and clear per-run state.
+
+    GIL-25 Phase 1.2: a brand-new backtest invocation starts the cross-session carry clean —
+    set_in_memory_mode is called ONCE at the top of run_backtest_v2 (not per date), so resetting
+    _PENDING_STORE here does NOT break the June8->June9 carry, which crosses the per-date
+    reset_in_memory() loop.
+
+    GIL-25 Phase 1.1.5: `reset_pending` (default True) preserves the existing behavior. When a
+    contiguous-range regression issues per-date run_backtest_v2(date, date) calls (each of which
+    re-enters this function), the 2nd+ date passes reset_pending=False so the in-memory
+    _PENDING_STORE written by the prior date's bars SURVIVES into this date's cold-start ingest —
+    i.e. the carry works across the per-date-CALL boundary too, not just the in-process day loop.
+    Shell-set/standalone callers and all tests keep the default → byte-identical behavior.
+    """
     global _IN_MEMORY, _hyp_cache, _hyp_cache_valid, _PENDING_STORE
     _IN_MEMORY = enabled
     _hyp_cache = None
     _hyp_cache_valid = False
     _STORE.clear()
-    # GIL-25 Phase 1.2: a brand-new backtest invocation starts the cross-session carry clean.
-    # set_in_memory_mode is called ONCE at the top of run_backtest_v2 (not per date), so this
-    # does NOT break the June8->June9 carry, which crosses the per-date reset_in_memory() loop.
-    _PENDING_STORE = None
+    if reset_pending:
+        _PENDING_STORE = None
 
 
 def reset_in_memory() -> None:
