@@ -36,6 +36,22 @@ WATCH_CONFIRM_PTS_MES = 3.0
 FULFILL_PTS_MNQ = {"week": 80.0, "day": 40.0, "session": 20.0}
 FULFILL_PTS_MES = {"week": 12.0, "day": 6.0, "session": 3.0}
 
+# Depletion thresholds (pts) by tier+instrument. Measured from the swept LEVEL (not the fire
+# close): once price runs this far PAST a level it is treated as depleted/consumed → the
+# per-ticker retirement latch fires and the ticker is skipped (the flood-stopper). Split out of
+# FULFILL_PTS (GIL-25 Phase 1.3) so depletion can be tuned independently of fulfillment.
+# Seeded EQUAL to FULFILL_PTS so the split is a pure no-op; tune separately.
+DEPLETE_PTS_MNQ = {"week": 80.0, "day": 40.0, "session": 20.0}
+DEPLETE_PTS_MES = {"week": 12.0, "day":  6.0, "session":  3.0}
+
+# Departure thresholds (pts) by tier+instrument. Measured from the LEVEL: a fired FIXED level
+# becomes re-arm-eligible ("departed") once price leaves the level by this margin. Split out of
+# FULFILL_PTS (GIL-25 Phase 1.3) so the re-arm margin can be tuned independently. Only the MNQ
+# leg is consumed today (site smt_detect.py departure check uses inst="mnq"); the MES table is
+# carried for symmetry/future use. Seeded EQUAL to FULFILL_PTS so the split is a pure no-op.
+DEPART_PTS_MNQ = {"week": 80.0, "day": 40.0, "session": 20.0}
+DEPART_PTS_MES = {"week": 12.0, "day":  6.0, "session":  3.0}
+
 # Adverse-run invalidation — mirror of FULFILL_PTS. A fired, not-yet-fulfilled SMT is
 # "invalidated" when MNQ close runs AGAINST its direction past the fire close by this much.
 # Informational only this iteration (NOT a re-arm trigger; shadow-only — not wired to trades).
@@ -108,6 +124,16 @@ def _fulfill_pts(tier: str, inst: str) -> float:
     return table.get(tier, table["session"])
 
 
+def _deplete_pts(tier: str, inst: str) -> float:
+    table = DEPLETE_PTS_MES if inst == "mes" else DEPLETE_PTS_MNQ
+    return table.get(tier, table["session"])
+
+
+def _depart_pts(tier: str, inst: str) -> float:
+    table = DEPART_PTS_MES if inst == "mes" else DEPART_PTS_MNQ
+    return table.get(tier, table["session"])
+
+
 def _invalidate_pts(tier: str, inst: str) -> float:
     table = INVALIDATE_PTS_MES if inst == "mes" else INVALIDATE_PTS_MNQ
     return table.get(tier, table["session"])
@@ -117,7 +143,7 @@ def pre_session_depleted(
     sub: str, level_price: float, tier: str, inst: str,
     window_high: float, window_low: float,
 ) -> bool:
-    """R2 Phase 1.1 (GIL-25): True if a past liquidity was already run FULFILL_PTS[tier][inst]
+    """R2 Phase 1.1 (GIL-25): True if a past liquidity was already run DEPLETE_PTS[tier][inst]
     beyond before the session opened — i.e. its resting liquidity is depleted and it should be
     seeded invalidated up front (the live/warm-up latch only starts at session open and would
     otherwise miss a prior-session take-out, firing spurious mid-session SMTs).
@@ -126,7 +152,7 @@ def pre_session_depleted(
     source-window end → session open). A `*_high` is depleted once the window High runs
     >= level+thr; a `*_low` once the window Low runs <= level-thr. Pure; total.
     """
-    thr = _fulfill_pts(tier, inst)
+    thr = _deplete_pts(tier, inst)
     if sub == "high":
         return float(window_high) >= float(level_price) + thr
     return float(window_low) <= float(level_price) - thr
@@ -516,7 +542,7 @@ def _detect_level_smts(
         kind_cls, tier = _level_class(name)
 
         # R2 (GIL-25): per-ticker depletion retirement. Once EITHER ticker has run a confirmed
-        # HH/LL FULFILL_PTS[tier] beyond this level (latched at the foot of this loop, in the
+        # HH/LL DEPLETE_PTS[tier] beyond this level (latched at the foot of this loop, in the
         # reserved state["__level_inv__"]), the level's resting liquidity is gone — skip the
         # pair comparison entirely (no fire, no re-arm). This is LEVEL-lifecycle invalidation,
         # distinct from the Part-A adverse-run `st["invalidated"]` flag (a fired SMT *record*).
@@ -613,12 +639,12 @@ def _detect_level_smts(
         # approach direction.
 
         # R2: departure tracking for the FIXED-level re-arm. After a fixed level fires, mark it
-        # "departed" once price leaves the level by the tier margin (reuse FULFILL_PTS). An
+        # "departed" once price leaves the level by the DEPART_PTS[tier] margin. An
         # UPWARD departure of a *_high (or downward of a *_low) also trips the depletion latch
         # below → the level is retired (skipped) before it can re-arm, so in practice a fixed
         # level only re-arms after a genuine REVERSAL away from the level (the level held).
         if kind_cls == "fixed" and st.get("fired") and not st.get("departed"):
-            if abs(mnq_close - mnq_lvl_price) >= _fulfill_pts(tier, "mnq"):
+            if abs(mnq_close - mnq_lvl_price) >= _depart_pts(tier, "mnq"):
                 st["departed"] = True
 
         # (b) Re-arm (only if currently dormant). Dynamic levels re-arm when the swept level
@@ -678,14 +704,14 @@ def _detect_level_smts(
 
         # R2: update the per-ticker depletion latch (WICK pass only — needs bar High/Low; body
         # SMTs only READ it via the skip above). Latched terminal once a ticker runs
-        # FULFILL_PTS[tier] beyond the level (a HH above a *_high, a LL below a *_low), using
+        # DEPLETE_PTS[tier] beyond the level (a HH above a *_high, a LL below a *_low), using
         # each instrument's own wick level price. A flip appends one audit event.
         if not body:
             _liv_all = state.setdefault("__level_inv__", {})
             _ent = _liv_all.setdefault(name, {"mnq": False, "mes": False})
             _was = (_ent["mnq"], _ent["mes"])
-            _thr_mnq = _fulfill_pts(tier, "mnq")
-            _thr_mes = _fulfill_pts(tier, "mes")
+            _thr_mnq = _deplete_pts(tier, "mnq")
+            _thr_mes = _deplete_pts(tier, "mes")
             if sub == "high":
                 if not _ent["mnq"] and float(mnq_bar["high"]) >= mnq_lvl_price + _thr_mnq:
                     _ent["mnq"] = True

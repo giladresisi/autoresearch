@@ -4,7 +4,7 @@
 #
 # Distinct from tests/test_smt_invalidation.py (adverse-run invalidation of a fired SMT
 # *record*). Here we test LEVEL-lifecycle invalidation: once a ticker runs a confirmed
-# HH/LL FULFILL_PTS[tier] beyond a level, that level is retired (latched in the reserved
+# HH/LL DEPLETE_PTS[tier] beyond a level, that level is retired (latched in the reserved
 # state["__level_inv__"]) and the pair comparison is skipped if EITHER ticker retired it.
 
 from __future__ import annotations
@@ -231,3 +231,48 @@ def test_invalidated_fixed_level_never_refires():
     r3, s = detect_regular_smts(
         lm, le, _bar(21001.0, 20990.0, 20995.0, "t3"), _bar(2999.0, 2990.0, 2995.0, "t3"), s)
     assert r3 == []
+
+
+# ---------------------------------------------------------------------------
+# GIL-25 Phase 1.3: decoupled DEPLETE_PTS / DEPART_PTS knobs (no-op seed)
+# ---------------------------------------------------------------------------
+import pytest  # noqa: E402
+
+from smt_detect import (  # noqa: E402
+    DEPLETE_PTS_MNQ,
+    DEPLETE_PTS_MES,
+    DEPART_PTS_MNQ,
+    DEPART_PTS_MES,
+    _deplete_pts,
+    _depart_pts,
+    _fulfill_pts,
+)
+
+_TIERS = ("week", "day", "session")
+_INSTS = ("mnq", "mes")
+
+
+@pytest.mark.parametrize("inst", _INSTS)
+@pytest.mark.parametrize("tier", _TIERS)
+def test_deplete_pts_equals_fulfill_at_init(tier, inst):
+    """No-op seed: depletion knob starts byte-equal to fulfillment for every tier/inst."""
+    assert _deplete_pts(tier, inst) == _fulfill_pts(tier, inst)
+
+
+@pytest.mark.parametrize("inst", _INSTS)
+@pytest.mark.parametrize("tier", _TIERS)
+def test_depart_pts_equals_fulfill_at_init(tier, inst):
+    """No-op seed: departure knob starts byte-equal to fulfillment for every tier/inst."""
+    assert _depart_pts(tier, inst) == _fulfill_pts(tier, inst)
+
+
+def test_deplete_pts_unknown_tier_falls_back():
+    """Unknown tier falls back to the session row (no raise), mirroring _fulfill_pts."""
+    assert _deplete_pts("bogus", "mnq") == DEPLETE_PTS_MNQ["session"]
+    assert _deplete_pts("bogus", "mes") == DEPLETE_PTS_MES["session"]
+
+
+def test_depart_pts_unknown_tier_falls_back():
+    """Unknown tier falls back to the session row (no raise), mirroring _fulfill_pts."""
+    assert _depart_pts("bogus", "mnq") == DEPART_PTS_MNQ["session"]
+    assert _depart_pts("bogus", "mes") == DEPART_PTS_MES["session"]
