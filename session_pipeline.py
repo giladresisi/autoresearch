@@ -2193,12 +2193,23 @@ class SessionPipeline:
             # NEVER break detection. The next session's cold-start _ingest_pending_smts reads
             # this back, re-validates against the overnight gap, and seeds survivors. Shadow:
             # affects only `divs` (not direction) in this branch.
+            # GIL-25 Phase 1.1.5: source LEVEL reversals from the PRODUCER lifecycle
+            # (detect_state) rather than the relevance-gated active set, so a still-unfulfilled
+            # reversal carries forward even after price has backed off far from its level (the
+            # prime carry case — the relevance/proximity gate would otherwise drop it from
+            # _active and it would never be written). Fills keep the existing relevance-gated
+            # active-set carry (their detect_state lifecycle differs — fill_a_fired/entered, not
+            # the level flags). The read-side revalidate_and_filter_pending re-derives
+            # fulfillment/depletion against the overnight gap (terminal state is re-VALIDATED,
+            # not trusted as a stale flag) and dedups level-vs-level / vs fresh.
             _carry_session = cme_session_date(now).isoformat()
-            _pending_entries = [
+            _level_entries = self._detect_state_pending_entries(_carry_session)
+            _fill_entries = [
                 self._active_record_to_pending(r, _carry_session)
-                for r in _active
+                for r in _active if r.get("kind") == "fill"
             ]
-            _smt_state.save_pending_smts({"entries": _pending_entries, "schema": 1})
+            _smt_state.save_pending_smts(
+                {"entries": _level_entries + _fill_entries, "schema": 1})
         except Exception:
             pass
         # --- end SHADOW block ---------------------------------------------------------
@@ -2270,6 +2281,66 @@ class SessionPipeline:
             self._inv_written_n = len(_inv)
 
         return sd_events
+
+    def _detect_state_pending_entries(self, session_date: str) -> "list[dict]":
+        """GIL-25 Phase 1.1.5: build pending_smts entries for every fired & non-terminal LEVEL
+        record in the producer lifecycle (`detect_state`), decoupled from the relevance-gated
+        active set so an unfulfilled reversal carries forward even after price has backed off
+        from its level.
+
+        A level record (detect key ``ref_name|direction|rec_type``) is carried iff it is
+        ``fired`` and not (``fulfilled`` | ``invalidated`` | ``superseded`` |
+        ``retired_depleted``) — i.e. exactly the records ``smt_status`` would report as
+        "unfulfilled". The swept-level anchor (``price``) and fire close (``fire_price``) come
+        straight from detect_state; the cold-start ``revalidate_and_filter_pending`` re-derives
+        terminal state against the overnight gap and dedups wick/body siblings (same
+        ref_name+direction → newest fire_time). Reserved ``__*__`` keys and fills (separate
+        lifecycle) are skipped. Total: malformed keys/states skipped; never raises.
+        """
+        try:
+            from smt_detect import _level_class
+        except Exception:
+            return []
+        out: list[dict] = []
+        ds = self._detect_state if isinstance(self._detect_state, dict) else {}
+        for skey, st in ds.items():
+            if not isinstance(skey, str) or skey.startswith("__") or "|" not in skey:
+                continue
+            if not isinstance(st, dict) or not st.get("fired"):
+                continue
+            if (st.get("fulfilled") or st.get("invalidated")
+                    or st.get("superseded") or st.get("retired_depleted")):
+                continue
+            parts = skey.split("|")
+            if len(parts) != 3:
+                continue
+            ref_name, direction, rec_type = parts
+            try:
+                tier = _level_class(ref_name)[1]
+            except Exception:
+                tier = "session"
+            price = st.get("level_price")
+            if price is None:
+                price = st.get("fire_level_price")
+            fire_price = st.get("fire_mnq_close")
+            if fire_price is None:
+                fire_price = st.get("fire_price")
+            out.append({
+                "price":        price,
+                "fire_price":   fire_price,
+                "direction":    direction,
+                "tier":         tier,
+                "type":         rec_type,
+                "timeframe":    None,
+                "fire_time":    st.get("fire_time"),
+                "ref_name":     ref_name,
+                "side":         "bearish" if direction == "short" else "bullish",
+                "leader":       st.get("fire_leader"),
+                "mes_price":    None,
+                "session_date": session_date,
+                "valid":        True,
+            })
+        return out
 
     def _active_record_to_pending(self, rec: dict, session_date: str) -> dict:
         """GIL-25 Phase 1.2: map one finalized active-set record to a pending_smts entry.

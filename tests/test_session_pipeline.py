@@ -1997,6 +1997,48 @@ def _fire_then_invalidate(pipeline):
     return [ev1] + ev_rest
 
 
+def test_detect_state_pending_entries_sources_unfulfilled_levels(_isolate_state, monkeypatch):
+    """GIL-25 Phase 1.4: the carry WRITE sources LEVEL reversals from detect_state (producer
+    lifecycle), decoupled from the relevance-gated active set. Only fired & non-terminal level
+    records are emitted; fulfilled/invalidated/superseded/retired_depleted and non-fired records
+    are excluded, as are reserved __*__ keys and fill (non-level) keys. The swept level + fire
+    close anchors come straight from detect_state."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    pipeline._detect_state = {
+        # fired & non-terminal → CARRIED (even though price may have backed off — no relevance gate)
+        "week_high|short|wick": {
+            "fired": True, "fulfilled": False, "invalidated": False, "superseded": False,
+            "retired_depleted": False, "level_price": 21010.0, "fire_mnq_close": 21008.0,
+            "fire_time": "2026-06-02T15:00:00-04:00", "fire_leader": "mnq",
+        },
+        # terminal variants → EXCLUDED
+        "day_high|short|wick":  {"fired": True, "fulfilled": True,  "level_price": 1.0},
+        "day_low|long|wick":    {"fired": True, "invalidated": True, "level_price": 1.0},
+        "asia_high|short|body": {"fired": True, "superseded": True, "level_price": 1.0},
+        "asia_low|long|wick":   {"fired": True, "retired_depleted": True, "level_price": 1.0},
+        # not fired → EXCLUDED
+        "london_low|long|wick": {"fired": False, "armed": True, "level_price": 1.0},
+        # reserved + fill keys → EXCLUDED
+        "__level_inv__": {"week_high": {"mnq": False, "mes": False}},
+        "fvg_20260601_1900_bear": {"fill_a_fired": True, "direction": "short"},
+    }
+
+    entries = pipeline._detect_state_pending_entries("2026-06-03")
+
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["ref_name"] == "week_high"
+    assert e["direction"] == "short"
+    assert e["type"] == "wick"
+    assert e["tier"] == "week"
+    assert e["side"] == "bearish"
+    assert e["price"] == 21010.0          # swept level anchor
+    assert e["fire_price"] == 21008.0     # fire close (re-validation reference)
+    assert e["fire_time"] == "2026-06-02T15:00:00-04:00"
+    assert e["session_date"] == "2026-06-03"
+    assert e["valid"] is True
+
+
 def test_smt_invalidations_written_to_state_dir(_isolate_state, monkeypatch):
     """Phase 1.1.5 (GIL-25) REMOVED adverse-run invalidation. Driving a bearish (short) day_high
     SMT then adverse-up bars (MNQ close runs past the old INVALIDATE_PTS threshold, but the bar
