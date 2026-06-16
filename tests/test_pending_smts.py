@@ -33,11 +33,12 @@ class TestPendingTerminal:
                                    window_high=21041.0, window_low=20999.0)
         assert out == "fulfilled"
 
-    def test_pending_terminal_long_invalidated(self):
-        # long, day tier: INVALIDATE mnq = 40. fire=21000 → invalidated if window_low <= 20960.
+    def test_pending_terminal_long_adverse_is_unfulfilled(self):
+        # Phase 1.1.5: the adverse-run "invalidated" branch was REMOVED. A long whose window runs
+        # adverse-down (below the OLD invalidate threshold) is now "unfulfilled" → carryable.
         out = pending_smt_terminal("long", 21000.0, "day",
                                    window_high=21010.0, window_low=20959.0)
-        assert out == "invalidated"
+        assert out == "unfulfilled"
 
     def test_pending_terminal_short_fulfilled(self):
         # short, day tier: fulfilled if window_low <= fire - FULFILL (21000-40=20960).
@@ -45,11 +46,12 @@ class TestPendingTerminal:
                                    window_high=21010.0, window_low=20959.0)
         assert out == "fulfilled"
 
-    def test_pending_terminal_short_invalidated(self):
-        # short, day tier: invalidated if window_high >= fire + INVALIDATE (21000+40=21040).
+    def test_pending_terminal_short_adverse_is_unfulfilled(self):
+        # Phase 1.1.5: short whose window runs adverse-up (above the OLD invalidate threshold) is
+        # now "unfulfilled" (adverse-run no longer kills a carried SMT).
         out = pending_smt_terminal("short", 21000.0, "day",
                                    window_high=21041.0, window_low=20999.0)
-        assert out == "invalidated"
+        assert out == "unfulfilled"
 
     def test_pending_terminal_unfulfilled(self):
         # Within both thresholds either way → unfulfilled.
@@ -150,15 +152,31 @@ class TestRevalidateAndFilter:
         assert survivors == []
         assert any(a["reason"] == "drop_fulfilled" for a in audit)
 
-    def test_ingest_drops_invalidated(self):
+    def test_ingest_drops_depleted(self):
+        # Phase 1.1.5: the carry path now kills ONLY on the level-relative depletion backstop.
+        # entry: long, LEVEL price=21010, day tier → _deplete_pts("day","mnq")=40 → depleted if
+        # window_low <= 21010-40 = 20970. The window low is 20950 (<= 20970) → drop_depleted.
         e = _entry(price=21010.0, fire_price=21000.0, direction="long")
-        # window low runs < fire-INVALIDATE(40) → invalidated → dropped. Bar in-window.
         hist = _hist_1m([("2026-06-08T16:00:00-04:00", 21005.0, 20950.0)])
         survivors, audit = smt_detect.revalidate_and_filter_pending(
             [e], hist, self._session_open(), self._today(), existing_active=[],
         )
         assert survivors == []
-        assert any(a["reason"] == "drop_invalidated" for a in audit)
+        assert any(a["reason"] == "drop_depleted" for a in audit)
+        # And the OLD adverse-run reason no longer appears.
+        assert not any(a["reason"] == "drop_invalidated" for a in audit)
+
+    def test_ingest_keeps_adverse_within_depletion(self):
+        # An adverse-but-not-past-LEVEL window now SURVIVES (overnight-gap adverse no longer kills
+        # the carry). LEVEL=21010, depletion floor = 20970. window_low=20980 (> 20970) → kept,
+        # even though it ran adverse-down past the OLD fire-relative invalidate threshold (20960).
+        e = _entry(price=21010.0, fire_price=21000.0, direction="long")
+        hist = _hist_1m([("2026-06-08T16:00:00-04:00", 21005.0, 20980.0)])
+        survivors, audit = smt_detect.revalidate_and_filter_pending(
+            [e], hist, self._session_open(), self._today(), existing_active=[],
+        )
+        assert len(survivors) == 1
+        assert any(a["reason"] == "ingested" for a in audit)
 
     def test_ingest_empty_window_keeps(self):
         # No bars in (fire_time, session_open) → kept (no evidence of take-out).

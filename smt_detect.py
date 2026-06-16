@@ -171,32 +171,31 @@ def pending_smt_terminal(
 ) -> str:
     """Phase 1.2 (GIL-25): re-validate a carried SMT against the gap/pre-open price window.
 
-    Returns "fulfilled" | "invalidated" | "unfulfilled". Price-anchored on the MNQ leg,
-    measured from the SMT's FIRE close (mirrors _detect_level_smts blocks (a)/(a2)). Pure; total.
+    Returns "fulfilled" | "unfulfilled". Price-anchored on the MNQ leg, measured from the SMT's
+    FIRE close (mirrors _detect_level_smts block (a)). Pure; total.
 
       long : fulfilled if window_high >= fire_price + FULFILL_PTS[tier]["mnq"]
-             invalidated elif window_low  <= fire_price - INVALIDATE_PTS[tier]["mnq"]
       short: fulfilled if window_low  <= fire_price - FULFILL_PTS[tier]["mnq"]
-             invalidated elif window_high >= fire_price + INVALIDATE_PTS[tier]["mnq"]
 
-    Fulfilled takes precedence over invalidated (matching smt_status). Unknown tier falls
-    back to the session row via _fulfill_pts/_invalidate_pts (no raise)."""
+    Phase 1.1.5 lifecycle change (GIL-25): the adverse-run `"invalidated"` branch was REMOVED. A
+    carried SMT is no longer re-killed by an overnight-gap adverse run measured from the fire close
+    (that was the too-tight killer). It is now re-killed at carry ONLY by fulfillment (this helper)
+    OR by the level-relative DEPLETION backstop applied inline in `revalidate_and_filter_pending`
+    (price runs DEPLETE_PTS past the swept LEVEL, mirroring the live `_deplete_pts` latch). Keeping
+    this helper a pure 2-state fulfillment test keeps its signature stable for the unit tests.
+
+    Unknown tier falls back to the session row via _fulfill_pts (no raise)."""
     fp = float(fire_price)
     wh = float(window_high)
     wl = float(window_low)
     ful = _fulfill_pts(tier, "mnq")
-    inv = _invalidate_pts(tier, "mnq")
     if direction == "long":
         if wh >= fp + ful:
             return "fulfilled"
-        if wl <= fp - inv:
-            return "invalidated"
         return "unfulfilled"
-    # short (and any non-"long" treated as the bearish mirror, matching block (a)/(a2))
+    # short (and any non-"long" treated as the bearish mirror, matching block (a))
     if wl <= fp - ful:
         return "fulfilled"
-    if wh >= fp + inv:
-        return "invalidated"
     return "unfulfilled"
 
 
@@ -239,9 +238,16 @@ def revalidate_and_filter_pending(
       1. AGE-CAP   — drop if its CME session is older than `max_age` business days
                      (reason="drop_age").
       2. RE-VALIDATE against the gap/pre-open MNQ window (fire_time, session_open):
-         compute window_high/low over those bars and call `pending_smt_terminal`.
-         Drop terminal results (reason="drop_fulfilled"/"drop_invalidated"). An EMPTY
-         window keeps the entry (no evidence of a take-out).
+         compute window_high/low over those bars, then (Phase 1.1.5 lifecycle) test, in order:
+           (a) FULFILLMENT — `pending_smt_terminal` (fire-close relative) → reason="drop_fulfilled".
+           (b) DEPLETION BACKSTOP — if the level price `e["price"]` is present, the carried SMT is
+               depleted when the window runs DEPLETE_PTS past the swept LEVEL (long swept *_low:
+               window_low <= level - _deplete_pts; short swept *_high: window_high >= level +
+               _deplete_pts) → reason="drop_depleted". This REPLACES the old adverse-run
+               "drop_invalidated" reason: an overnight-gap adverse run no longer kills the carry;
+               only a structural run past the level (mirroring the live `_deplete_pts` latch) does.
+               Skipped when `e["price"]` is absent (no evidence → keep).
+         An EMPTY window keeps the entry (no evidence of a take-out).
       3. DEDUP — drop if its (ref_name, direction) already appears among `existing_active`
          (fresh detection wins) OR a same-direction fresh member's level price is within
          `dedup_tol_pts` of the carried price (reason="drop_dedup"). Carried-vs-carried
@@ -320,17 +326,32 @@ def revalidate_and_filter_pending(
             if ft is not pd.NaT:
                 win = hist_mnq[(hist_mnq.index > ft) & (hist_mnq.index < session_open)]
                 if not win.empty:
+                    _tier = e.get("tier", "session")
+                    _wh = float(win["High"].max())
+                    _wl = float(win["Low"].min())
                     status = pending_smt_terminal(
                         direction, float(e.get("fire_price", e.get("price", 0.0))),
-                        e.get("tier", "session"),
-                        float(win["High"].max()), float(win["Low"].min()),
+                        _tier, _wh, _wl,
                     )
                     if status == "fulfilled":
                         _aud(e, "drop_fulfilled")
                         continue
-                    if status == "invalidated":
-                        _aud(e, "drop_invalidated")
-                        continue
+                    # Phase 1.1.5 depletion backstop: level-relative kill (replaces adverse-run).
+                    _level = e.get("price")
+                    if _level is not None:
+                        try:
+                            _lvl = float(_level)
+                        except (TypeError, ValueError):
+                            _lvl = None
+                        if _lvl is not None:
+                            _dep = _deplete_pts(_tier, "mnq")
+                            if direction == "long":
+                                _depleted = _wl <= _lvl - _dep
+                            else:  # short (swept *_high)
+                                _depleted = _wh >= _lvl + _dep
+                            if _depleted:
+                                _aud(e, "drop_depleted")
+                                continue
 
         # 3. DEDUP vs fresh active set.
         if (e.get("ref_name"), direction) in fresh_logical:
@@ -608,6 +629,12 @@ def _detect_level_smts(
                 "fired": False,
                 "fulfilled": False,
                 "invalidated": False,
+                # Phase 1.1.5 (GIL-25) new terminal flags: superseded by a fresher same-direction
+                # record (§A.2.3); retired by the depletion latch backstop (§A.2.4). Both are
+                # informational (do not affect records/trades) but mark the record TERMINAL for the
+                # active-set consumer (smt_status) so it is not carried.
+                "superseded": False,
+                "retired_depleted": False,
                 "fire_price": None,
                 "fire_level_price": None,
                 "fire_mnq_close": None,
@@ -662,11 +689,15 @@ def _detect_level_smts(
                     st["fired"] = False
                     st["fulfilled"] = False
                     st["invalidated"] = False
+                    st["superseded"] = False
+                    st["retired_depleted"] = False
             elif st.get("departed"):
                 st["armed"] = True
                 st["fired"] = False
                 st["fulfilled"] = False
                 st["invalidated"] = False
+                st["superseded"] = False
+                st["retired_depleted"] = False
                 st["departed"] = False
 
         # (c) Fire on the armed rising edge.
@@ -692,6 +723,8 @@ def _detect_level_smts(
             st["fired"] = True
             st["fulfilled"] = False
             st["invalidated"] = False
+            st["superseded"] = False
+            st["retired_depleted"] = False
             st["departed"] = False
             st["fire_time"] = iso
             st["fire_price"] = lead_price
@@ -723,51 +756,73 @@ def _detect_level_smts(
                 if not _ent["mes"] and float(mes_bar["low"]) <= mes_lvl_price - _thr_mes:
                     _ent["mes"] = True
             if (_ent["mnq"], _ent["mes"]) != _was:
+                # Phase 1.1.5 (GIL-25) structural backstop: when the depletion latch FLIPS for this
+                # level, ALSO mark any fired-open record on THIS level+direction terminal
+                # (retired_depleted). The latch is per-`name` and direction-symmetric, but the
+                # fired record we retire is the one matching the swept side's direction: a `*_high`
+                # → direction="short", a `*_low` → direction="long" (the loop `direction` above).
+                # Both rec_types ("wick"/"body") may have a fired record on this level. INFORMATIONAL
+                # only (no records/fire/armed mutation) — like supersession, it just marks terminal.
+                _retired_keys: list[str] = []
+                for _rt in ("wick", "body"):
+                    _k = f"{_skey(name, direction)}|{_rt}"
+                    _rst = state.get(_k)
+                    if isinstance(_rst, dict) and _rst.get("fired") and not _rst.get("fulfilled"):
+                        if not _rst.get("retired_depleted"):
+                            _rst["retired_depleted"] = True
+                            _retired_keys.append(_k)
                 state.setdefault("__level_retirements__", []).append({
                     "time": iso, "ref_name": name, "tier": tier, "kind": kind_cls,
                     "mnq": _ent["mnq"], "mes": _ent["mes"],
                     "mnq_level_price": mnq_lvl_price, "mes_level_price": mes_lvl_price,
+                    "retired_records": _retired_keys,
                 })
 
-    # (a2) Adverse-run invalidation — the mirror of fulfillment, maintained INDEPENDENTLY of the
-    # per-level loop above. A fired SMT must be invalidated whenever price runs INV_PTS to the
-    # adverse side of its fire close, even on bars where its level is not present/eligible or not
-    # touched (the per-level loop only visits a level when it appears in this batch — e.g. the
-    # prev1_week_high|short 09:49 case ran adverse on later bars where the level was absent). So
-    # sweep EVERY fired-open state of this rec_type each bar and test the adverse-run condition
-    # against the current MNQ close using the state's OWN stored direction (parsed from its key),
-    # regardless of eligibility this bar. Informational only: sets the `invalidated` flag + appends
-    # to the reserved trail key; never touches records/fire/fulfill/re-arm, so trades are unaffected.
-    # Iterate a snapshot (list) because the first event creates the `__invalidations__` key.
-    for skey, st in list(state.items()):
-        if "|" not in skey:
-            continue
-        _parts = skey.split("|")
-        if len(_parts) < 3 or _parts[2] != rec_type:
-            continue
-        if not (st.get("fired") and not st.get("fulfilled") and not st.get("invalidated")):
-            continue
-        fc = st.get("fire_mnq_close")
-        if fc is None:
-            continue
-        _name, _dir = _parts[0], _parts[1]
-        _kind_cls, _tier = _level_class(_name)
-        inv = _invalidate_pts(_tier, "mnq")
-        adverse = (
-            (_dir == "short" and mnq_close >= float(fc) + inv)
-            or (_dir == "long" and mnq_close <= float(fc) - inv)
-        )
-        if adverse:
-            st["invalidated"] = True
-            st["invalidated_time"] = iso
-            st["invalidated_mnq_close"] = mnq_close
-            state.setdefault("__invalidations__", []).append({
-                "time": iso, "key": skey, "ref_name": _name, "tier": _tier,
-                "kind": _kind_cls, "direction": _dir, "type": rec_type,
-                "fire_time": st.get("fire_time"), "fire_mnq_close": float(fc),
-                "trigger_mnq_close": mnq_close, "threshold_pts": inv,
-                "reason": "adverse_run",
-            })
+    # (a2) Adverse-run invalidation REMOVED in Phase 1.1.5 (GIL-25). The old post-loop pass that
+    # set st["invalidated"]=True and appended to state["__invalidations__"] whenever MNQ close ran
+    # _invalidate_pts AGAINST the fire close was the too-tight killer: an overnight-gap adverse run
+    # (or a transient noise bounce) retired a fired SMT prematurely. A fired record now goes
+    # terminal ONLY by fulfillment (block (a)), supersession (the §A.2.3 pass below), or the
+    # depletion backstop (the latch extension above). `st["invalidated"]` is no longer set here;
+    # it stays False (set on fire / re-arm) and `state["__invalidations__"]` may legitimately never
+    # appear. The `_invalidate_pts` helper + INVALIDATE_PTS_* constants stay DEFINED (constraint).
+
+    # (a3) Supersession (NEW, Phase 1.1.5 / GIL-25). When fresh records fire in this batch, retire
+    # any OLDER still-pending fired state of the SAME rec_type + SAME direction (across ANY
+    # level/tier) as redundant — keep only the freshest same-direction fired record. INFORMATIONAL
+    # only: sets st["superseded"]=True + appends an audit row; never touches records/fired/armed/
+    # fulfilled/fire fields/re-arm, so trades stay byte-identical. A superseded record stays in
+    # `state` (its re-arm/fire bookkeeping is intact) but is treated as TERMINAL by the active-set
+    # consumer (smt_status) and thus is not carried.
+    if records:
+        # Exclude EVERY record fired in THIS batch from being superseded: a just-fired record is
+        # the freshest of its direction and must never be retired by a SIBLING that fired the same
+        # bar (the `skey == fresh_key` self-guard alone left two same-direction same-batch fires
+        # superseding EACH OTHER → both dropped). Only OLDER still-pending records are retired.
+        _fresh_keys = {_record_key(r) for r in records}
+        # Snapshot keys first: marking a supersession creates the `__supersessions__` key, which
+        # would mutate `state` during iteration.
+        for r in records:
+            d = r.get("direction")
+            fresh_key = _record_key(r)
+            for skey in list(state.keys()):
+                if "|" not in skey:
+                    continue
+                _parts = skey.split("|")
+                if len(_parts) < 3 or _parts[2] != rec_type:
+                    continue
+                if _parts[1] != d or skey in _fresh_keys:
+                    continue
+                st = state.get(skey)
+                if not isinstance(st, dict):
+                    continue
+                if not (st.get("fired") and not st.get("fulfilled") and not st.get("superseded")):
+                    continue
+                st["superseded"] = True
+                state.setdefault("__supersessions__", []).append({
+                    "time": iso, "key": skey, "superseded_by": fresh_key,
+                    "ref_name": _parts[0], "direction": d, "type": rec_type,
+                })
 
     # Post-pass: an SMT in this batch re-arms any dormant DYNAMIC pair of the OPPOSITE
     # direction (order-independent — the opposite SMT may have been detected after the
@@ -791,6 +846,8 @@ def _detect_level_smts(
                 st["fired"] = False
                 st["fulfilled"] = False
                 st["invalidated"] = False
+                st["superseded"] = False
+                st["retired_depleted"] = False
 
     return records, state
 
@@ -997,13 +1054,22 @@ def smt_status(keys: "list[str] | None", detect_state: dict) -> dict[str, str]:
     Contract C-STATUS. Returns ``{key: "unfulfilled" | "fulfilled" | "invalidated" | "gone"}``:
       - ``"gone"``        — key absent from ``detect_state`` (expired / never fired).
       - ``"fulfilled"``   — present and ``st.get("fulfilled") is True`` (checked FIRST so
-                            fulfilled precedence is preserved over invalidated).
-      - ``"invalidated"`` — present, not fulfilled, and ``st.get("invalidated") is True``.
-      - ``"unfulfilled"`` — present and neither fulfilled nor invalidated.
+                            fulfilled precedence is preserved over the terminal flags).
+      - ``"invalidated"`` — present, not fulfilled, and ANY terminal flag is True:
+                            ``invalidated`` (legacy, no longer produced after Phase 1.1.5),
+                            ``superseded`` (a fresher same-direction record fired), or
+                            ``retired_depleted`` (the depletion latch backstop tripped). All three
+                            collapse to the single ``"invalidated"`` token so ``fulfillment_status``
+                            folds them to ``"unfulfilled"`` and the active-set drop (which drops on
+                            ``!= "unfulfilled"``) removes them — the single integration point that
+                            makes the active set + carry write honor the new Phase-1.1.5 terminal
+                            reasons.
+      - ``"unfulfilled"`` — present and none of the above.
 
-    The ``invalidated`` flag is produced by the SMT V2 Part A producer change. Until that
-    flag is present on ``detect_state`` (forward-compatible / pre-rebase), the
-    ``st.get("invalidated")`` lookup is falsy and a present non-fulfilled key is
+    The legacy ``invalidated`` flag is no longer PRODUCED after Phase 1.1.5 (the adverse-run pass
+    was removed); it is still READ here for backward compatibility, but the live terminal producers
+    are ``superseded`` (a fresher same-direction record fired) and ``retired_depleted`` (the
+    depletion latch backstop). When none of the three flags is present/True, a non-fulfilled key is
     ``"unfulfilled"`` — i.e. NO drop, exactly the legacy behavior.
 
     Fills: fill state dicts (keyed by bare FVG name) have NO ``fulfilled``/``invalidated``
@@ -1021,7 +1087,11 @@ def smt_status(keys: "list[str] | None", detect_state: dict) -> dict[str, str]:
             out[key] = "gone"
         elif isinstance(st, dict) and st.get("fulfilled") is True:
             out[key] = "fulfilled"
-        elif isinstance(st, dict) and st.get("invalidated") is True:
+        elif isinstance(st, dict) and (
+            st.get("invalidated") is True
+            or st.get("superseded") is True
+            or st.get("retired_depleted") is True
+        ):
             out[key] = "invalidated"
         else:
             out[key] = "unfulfilled"

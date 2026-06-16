@@ -1998,9 +1998,10 @@ def _fire_then_invalidate(pipeline):
 
 
 def test_smt_invalidations_written_to_state_dir(_isolate_state, monkeypatch):
-    """Drive a bearish (short) day_high SMT then adverse-up bars; assert smt_invalidations.json
-    exists in paths.state_dir() and parses to a list with one reason=='adverse_run' event."""
-    import json
+    """Phase 1.1.5 (GIL-25) REMOVED adverse-run invalidation. Driving a bearish (short) day_high
+    SMT then adverse-up bars (MNQ close runs past the old INVALIDATE_PTS threshold, but the bar
+    highs stay below the level so neither depletion nor re-arm trips) must NOT write
+    smt_invalidations.json, and the fired record must stay non-terminal (still pending/carryable)."""
     import paths
     pipeline, _ = _smt_v2_pipeline(monkeypatch)
     _freeze_liquidities(monkeypatch, pipeline)
@@ -2009,22 +2010,21 @@ def test_smt_invalidations_written_to_state_dir(_isolate_state, monkeypatch):
     _fire_then_invalidate(pipeline)
 
     inv_path = paths.state_dir() / "smt_invalidations.json"
-    assert inv_path.exists(), "smt_invalidations.json must be written when an SMT invalidates"
-    data = json.loads(inv_path.read_text(encoding="utf-8"))
-    assert isinstance(data, list)
-    adverse = [e for e in data if e.get("reason") == "adverse_run"]
-    assert len(adverse) == 1
-    ev = adverse[0]
-    assert ev["ref_name"] == "day_high"
-    assert ev["direction"] == "short"
-    assert ev["tier"] == "day"
-    assert ev["threshold_pts"] == smt_detect.INVALIDATE_PTS_MNQ["day"]
-    assert "fire_mnq_close" in ev and "trigger_mnq_close" in ev
+    assert not inv_path.exists(), (
+        "Phase 1.1.5 removed adverse-run invalidation: no smt_invalidations.json should be written")
+    # The fired record is no longer retired by the adverse run — it stays pending.
+    st = next(s for k, s in pipeline._detect_state.items()
+              if k.startswith("day_high|short") and isinstance(s, dict) and s.get("fired"))
+    assert st.get("fired") is True
+    assert not st.get("invalidated")
+    assert not st.get("retired_depleted")
+    assert not st.get("fulfilled")
 
 
 def test_invalidation_trail_not_in_sd_events(_isolate_state, monkeypatch):
-    """The invalidation trail is debug-only: no smt-div / event emitted by the adverse bars
-    carries an invalidation record, and the producer's detect_state holds the trail."""
+    """Phase 1.1.5 (GIL-25) REMOVED the adverse-run __invalidations__ trail. No emitted smt-div /
+    event carries an invalidation record (it never did), AND the producer detect_state no longer
+    holds an adverse_run trail (the key may be absent or empty)."""
     pipeline, _ = _smt_v2_pipeline(monkeypatch)
     _freeze_liquidities(monkeypatch, pipeline)
     _seed_day_high(pipeline)
@@ -2037,9 +2037,9 @@ def test_invalidation_trail_not_in_sd_events(_isolate_state, monkeypatch):
             assert "invalidated" not in e
             assert e.get("reason") != "adverse_run"
             assert e.get("kind") != "smt-invalidation"
-    # The trail lives in detect_state (producer side), not in the emitted stream.
+    # The adverse-run trail is gone: no adverse_run entry is recorded on the producer side.
     trail = pipeline._detect_state.get("__invalidations__", [])
-    assert any(e.get("reason") == "adverse_run" for e in trail)
+    assert not any(e.get("reason") == "adverse_run" for e in trail)
 
 
 def test_no_trail_file_when_no_invalidations(_isolate_state, monkeypatch):

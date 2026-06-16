@@ -1,9 +1,19 @@
 # tests/test_smt_invalidation.py
-# Unit tests for adverse-run invalidation in the pure SMT V2 detection engine
-# (smt_detect._detect_level_smts). Invalidation is the mirror of fulfillment: a fired,
-# not-yet-fulfilled SMT whose MNQ close runs AGAINST its direction past the fire close by
-# _invalidate_pts(tier) is flagged st["invalidated"]=True and appends ONE structured event
-# to the reserved state["__invalidations__"] list (no plot, no record change).
+# Unit tests for the Phase 1.1.5 (GIL-25) SMT lifecycle rework in the pure SMT V2 detection
+# engine (smt_detect._detect_level_smts).
+#
+# The adverse-run invalidation mechanism (a fired SMT killed when MNQ close ran _invalidate_pts
+# AGAINST the fire close) was REMOVED in Phase 1.1.5 — it was the too-tight killer. The tests
+# below assert the NEW behavior:
+#   - an adverse run NO LONGER invalidates a fired record (it stays pending);
+#   - the state["__invalidations__"] trail is never created by detection;
+#   - fulfillment is still terminal;
+#   - supersession (a fresher same-direction record retires older ones) marks st["superseded"];
+#   - opposite-direction fires never supersede; supersession is informational (records unchanged);
+#   - a re-armed/re-fired fixed level clears superseded.
+#
+# The depletion-latch backstop (st["retired_depleted"]) is covered in
+# tests/test_smt_level_invalidation.py.
 
 from __future__ import annotations
 
@@ -73,44 +83,32 @@ def _drift_long(state, mnq_close, t):
 
 
 # ===========================================================================
-# 1. short invalidated when close runs UP past threshold
+# 1. adverse run NO LONGER invalidates (short + long mirror)
 # ===========================================================================
-def test_short_invalidated_when_close_runs_up_past_threshold():
+def test_adverse_run_no_longer_invalidates_short():
     state = {}
     recs, state = _fire_short(state)
     assert [r["ref_name"] for r in recs] == ["prev1_day_high"]
     skey = "prev1_day_high|short|wick"
     fc = state[skey]["fire_mnq_close"]
     assert fc == 20995.0
-    inv = _invalidate_pts("day", "mnq")
     assert state[skey]["invalidated"] is False
+    inv = _invalidate_pts("day", "mnq")
 
-    # Adverse-up: close >= fc + inv = 21015.0
+    # Adverse-up: close >= fc + inv = the OLD invalidation trigger.
     recs, state = _drift_short(state, mnq_close=fc + inv, t="2026-06-09T10:01:00")
-    assert recs == []  # invalidation adds no record
-    assert state[skey]["invalidated"] is True
-    trail = state["__invalidations__"]
-    assert len(trail) == 1
-    ev = trail[0]
-    assert ev["reason"] == "adverse_run"
-    assert ev["key"] == skey
-    assert ev["ref_name"] == "prev1_day_high"
-    assert ev["tier"] == "day"
-    assert ev["direction"] == "short"
-    assert ev["type"] == "wick"
-    assert ev["fire_mnq_close"] == 20995.0
-    assert ev["trigger_mnq_close"] == fc + inv
-    assert ev["threshold_pts"] == inv
-    assert ev["fire_time"] == "2026-06-09T10:00:00"
-    assert ev["time"] == "2026-06-09T10:01:00"
-    assert state[skey]["invalidated_time"] == "2026-06-09T10:01:00"
-    assert state[skey]["invalidated_mnq_close"] == fc + inv
+    assert recs == []
+    # NEW: the fired record is NOT invalidated and stays pending (fired & not terminal).
+    assert state[skey]["invalidated"] is False
+    assert state[skey]["fired"] is True
+    assert state[skey]["fulfilled"] is False
+    assert state[skey].get("superseded") is False
+    assert state[skey].get("retired_depleted") is False
+    # NEW: no invalidation trail is created.
+    assert "__invalidations__" not in state
 
 
-# ===========================================================================
-# 2. long invalidated when close runs DOWN past threshold (mirror)
-# ===========================================================================
-def test_long_invalidated_when_close_runs_down_past_threshold():
+def test_adverse_run_no_longer_invalidates_long():
     state = {}
     recs, state = _fire_long(state)
     assert [r["ref_name"] for r in recs] == ["prev1_day_low"]
@@ -119,66 +117,18 @@ def test_long_invalidated_when_close_runs_down_past_threshold():
     assert fc == 21005.0
     inv = _invalidate_pts("day", "mnq")
 
-    # Adverse-down: close <= fc - inv = 20985.0
+    # Adverse-down: close <= fc - inv = the OLD invalidation trigger.
     recs, state = _drift_long(state, mnq_close=fc - inv, t="2026-06-09T10:01:00")
     assert recs == []
-    assert state[skey]["invalidated"] is True
-    trail = state["__invalidations__"]
-    assert len(trail) == 1
-    ev = trail[0]
-    assert ev["reason"] == "adverse_run"
-    assert ev["direction"] == "long"
-    assert ev["fire_mnq_close"] == 21005.0
-    assert ev["trigger_mnq_close"] == fc - inv
-    assert ev["threshold_pts"] == inv
-
-
-# ===========================================================================
-# 3. not invalidated just below threshold
-# ===========================================================================
-def test_not_invalidated_just_below_threshold():
-    state = {}
-    recs, state = _fire_short(state)
-    skey = "prev1_day_high|short|wick"
-    fc = state[skey]["fire_mnq_close"]
-    inv = _invalidate_pts("day", "mnq")
-
-    # close at fc + inv - epsilon → NOT invalidated
-    recs, state = _drift_short(state, mnq_close=fc + inv - 0.25, t="2026-06-09T10:01:00")
     assert state[skey]["invalidated"] is False
-    assert state.get("__invalidations__", []) == []
+    assert state[skey]["fired"] is True
+    assert "__invalidations__" not in state
 
 
 # ===========================================================================
-# 4. fulfillment takes precedence in the same bar
+# 2. no __invalidations__ trail is created across several adverse bars
 # ===========================================================================
-def test_fulfillment_takes_precedence_same_bar():
-    # A long SMT: fulfillment is a FAVORABLE (up) move past fc + FULFILL_PTS["day"]=40.
-    # Invalidation is an ADVERSE (down) move. They can't both numerically trigger on the same
-    # close, so to test precedence we craft a SHORT SMT where a SINGLE bar satisfies both:
-    #   - fulfill (short, favorable=DOWN): close <= fc - 40
-    #   - invalidate (short, adverse=UP): close >= fc + 20
-    # These are mutually exclusive numerically, so precedence is instead proven by construction:
-    # the invalidation branch is guarded by `not st.get("fulfilled")` re-checked AFTER the
-    # fulfillment branch ran this bar. We verify a bar that fulfills never sets invalidated.
-    # R2 note: for a FIXED level a favorable follow-through also DEPARTS the level (price left
-    # the level region) → it re-arms (fired→False). Either way the key guarantee holds: a
-    # favorable move never produces an ADVERSE-run invalidation.
-    state = {}
-    recs, state = _fire_short(state)
-    skey = "prev1_day_high|short|wick"
-    fc = state[skey]["fire_mnq_close"]  # 20995
-    # Favorable DOWN move past fc - 40 = 20955 → fulfilled, then (R2) departed → re-armed.
-    recs, state = _drift_short(state, mnq_close=fc - 45.0, t="2026-06-09T10:01:00")
-    assert state[skey]["armed"] is True          # R2: held reversal re-armed the fixed level
-    assert state[skey]["invalidated"] is False
-    assert state.get("__invalidations__", []) == []
-
-
-# ===========================================================================
-# 5. invalidation event emitted exactly once
-# ===========================================================================
-def test_invalidation_event_emitted_once():
+def test_no_invalidations_trail_created():
     state = {}
     recs, state = _fire_short(state)
     skey = "prev1_day_high|short|wick"
@@ -186,21 +136,38 @@ def test_invalidation_event_emitted_once():
     inv = _invalidate_pts("day", "mnq")
 
     recs, state = _drift_short(state, mnq_close=fc + inv, t="2026-06-09T10:01:00")
-    assert state[skey]["invalidated"] is True
-    assert len(state["__invalidations__"]) == 1
-
-    # Further adverse bars (still above threshold) must NOT append duplicates.
     recs, state = _drift_short(state, mnq_close=fc + inv + 30.0, t="2026-06-09T10:02:00")
     recs, state = _drift_short(state, mnq_close=fc + inv + 50.0, t="2026-06-09T10:03:00")
-    assert len(state["__invalidations__"]) == 1
+    assert "__invalidations__" not in state
+    assert state[skey]["invalidated"] is False
 
 
 # ===========================================================================
-# 6. dynamic re-arm resets invalidated
+# 3. fulfillment is still terminal (UNCHANGED behavior)
 # ===========================================================================
-def test_dynamic_rearm_resets_invalidated():
-    # A DYNAMIC level (day_high, short) fires, gets invalidated by an adverse-up run, then is
-    # re-armed by an opposite-direction (long) SMT in a later batch → invalidated resets False.
+def test_fulfillment_still_terminal():
+    # A SHORT SMT: a FAVORABLE (down) follow-through past fc - FULFILL_PTS["day"]=40 fulfills.
+    # For a FIXED level a favorable follow-through also DEPARTS the level → it re-arms
+    # (fired→False), which is the unchanged Phase-1.3 behavior. The key guarantee: a favorable
+    # move fulfills and never produces an invalidation.
+    state = {}
+    recs, state = _fire_short(state)
+    skey = "prev1_day_high|short|wick"
+    fc = state[skey]["fire_mnq_close"]  # 20995
+    # Favorable DOWN move past fc - 45 → fulfilled, then (R2) departed → re-armed.
+    recs, state = _drift_short(state, mnq_close=fc - 45.0, t="2026-06-09T10:01:00")
+    assert state[skey]["armed"] is True          # held reversal re-armed the fixed level
+    assert state[skey]["invalidated"] is False
+    assert state.get("__invalidations__", []) == []
+
+
+# ===========================================================================
+# 4. dynamic re-arm still resets the lifecycle flags (no invalidation involved)
+# ===========================================================================
+def test_dynamic_rearm_resets_flags_no_invalidation():
+    # A DYNAMIC level (day_high, short) fires; an adverse-up run does NOT invalidate it (new
+    # lifecycle). An opposite-direction (long) SMT in a later batch re-arms it → fired/fulfilled/
+    # superseded/retired_depleted all reset to False, armed=True.
     lm = _levels(day_high=21000.0, day_low=20000.0)
     le = _levels(day_high=3000.0, day_low=2000.0)
     state = {}
@@ -212,130 +179,168 @@ def test_dynamic_rearm_resets_invalidated():
     fc = state[skey]["fire_mnq_close"]  # 20800
     inv = _invalidate_pts("day", "mnq")
 
-    # Bar 2: adverse-up close >= fc + 20 → day_high short invalidated. (No level touched.)
+    # Bar 2: adverse-up close >= fc + 20 → NO invalidation any more.
     recs, state = detect_regular_smts(
         lm, le, _bar(fc + inv, fc + inv - 1.0, fc + inv), _bar(2990.0, 2985.0, 2988.0), state)
-    assert state[skey]["invalidated"] is True
+    assert state[skey]["invalidated"] is False
+    assert "__invalidations__" not in state
 
     # Bar 3: an opposite-direction (long) SMT on day_low fires → re-arms the dynamic day_high
-    # (post-pass), resetting invalidated to False.
+    # (post-pass): fired/fulfilled/superseded/retired_depleted reset.
     recs, state = detect_regular_smts(
         lm, le, _bar(20990.0, 19999.0, 20100.0), _bar(2990.0, 2001.0, 2100.0), state)
     assert any(r["ref_name"] == "day_low" for r in recs)
     assert state[skey]["armed"] is True
-    assert state[skey]["invalidated"] is False
     assert state[skey]["fired"] is False
+    assert state[skey]["fulfilled"] is False
+    assert state[skey]["superseded"] is False
+    assert state[skey]["retired_depleted"] is False
 
 
 # ===========================================================================
-# 7. fixed-level invalidation does not change records
+# 5. records list is byte-identical with/without an adverse run (informational-only guarantee)
 # ===========================================================================
-def test_fixed_level_invalidation_does_not_change_records():
+def test_records_unchanged_by_adverse_run():
     inv = _invalidate_pts("day", "mnq")
 
-    # Run A: fire, then a NON-adverse drift (no invalidation).
+    # Run A: fire, then a NON-adverse drift.
     state_a = {}
     recs_a1, state_a = _fire_short(state_a)
     recs_a2, state_a = _drift_short(state_a, mnq_close=20995.0 + inv - 5.0, t="2026-06-09T10:01:00")
 
-    # Run B: fire, then an ADVERSE drift (invalidation trips).
+    # Run B: fire, then an ADVERSE drift (used to invalidate; now a no-op).
     state_b = {}
     recs_b1, state_b = _fire_short(state_b)
     recs_b2, state_b = _drift_short(state_b, mnq_close=20995.0 + inv, t="2026-06-09T10:01:00")
 
-    # The records list is byte-for-byte identical with/without invalidation.
     assert recs_a1 == recs_b1
     assert recs_a2 == recs_b2 == []
-    # And invalidation only differs in the reserved trail key.
-    assert state_a.get("__invalidations__", []) == []
-    assert len(state_b["__invalidations__"]) == 1
+    # Neither run produced an invalidation trail.
+    assert "__invalidations__" not in state_a
+    assert "__invalidations__" not in state_b
 
 
 # ===========================================================================
-# 8. reserved key skipped by the post-pass + contains no "|"
+# NOTE: the old test_invalidation_survives_direction_flip regression (the 06-03
+# prev1_week_high|short strand bug) is MOOT in Phase 1.1.5 — the adverse-run invalidation
+# mechanism it guarded was removed entirely, so a fired SMT can no longer be "stranded" by a
+# per-bar direction flip (there is nothing to strand). It is intentionally not ported.
 # ===========================================================================
-def test_reserved_key_skipped_by_postpass():
-    # Drive a batch that BOTH invalidates a fired SMT AND triggers the post-pass re-arm
-    # (records non-empty), then assert __invalidations__ is untouched by the post-pass and is
-    # a list (not split/keyed), and its key contains no "|".
-    lm = _levels(day_high=21000.0, day_low=20000.0)
-    le = _levels(day_high=3000.0, day_low=2000.0)
-    state = {}
-    # Bar 1: day_high short fires.
-    recs, state = detect_regular_smts(
-        lm, le, _bar(21001.0, 20500.0, 20800.0), _bar(2999.0, 2500.0, 2800.0), state)
-    skey = "day_high|short|wick"
-    fc = state[skey]["fire_mnq_close"]
-    inv = _invalidate_pts("day", "mnq")
-
-    # Bar 2: adverse-up invalidates day_high short.
-    recs, state = detect_regular_smts(
-        lm, le, _bar(fc + inv, fc + inv - 1.0, fc + inv), _bar(2990.0, 2985.0, 2988.0), state)
-    assert state[skey]["invalidated"] is True
-    assert "__invalidations__" in state
-    assert len(state["__invalidations__"]) == 1
-
-    # Bar 3: a long SMT fires (records non-empty → post-pass runs). The reserved list key must
-    # NOT be treated as a level-SMT entry: it has no "|", so the guard short-circuits before
-    # any .get on the list. The list survives intact.
-    recs, state = detect_regular_smts(
-        lm, le, _bar(20990.0, 19999.0, 20100.0), _bar(2990.0, 2001.0, 2100.0), state)
-    assert any(r["ref_name"] == "day_low" for r in recs)
-    assert isinstance(state["__invalidations__"], list)
-    assert len(state["__invalidations__"]) == 1
-    assert "|" not in "__invalidations__"
-    # No reserved key accidentally split into a level entry.
-    assert all("|" in k or k.startswith("__") for k in state.keys())
 
 
 # ===========================================================================
-# 9. invalidation survives the per-bar direction FLIP (regression for the
-#    prev1_week_high|short 09:49 strand bug)
+# Supersession (NEW, Phase 1.1.5 / GIL-25 §A.2.3)
 # ===========================================================================
-def _cross_bar(state, mnqc, mesc, t):
-    # Both instruments sit clearly ABOVE prev1_day_high (21000 / 3000) with no wick touching
-    # either level, so no new SMT fires — the bar only carries the closes (and the approach
-    # reference) forward. Used to walk price up THROUGH the level after a short has fired.
-    lm = _levels(prev1_day_high=21000.0)
-    le = _levels(prev1_day_high=3000.0)
-    mnq = _bar(mnqc + 1.0, mnqc - 1.0, mnqc, t)
-    mes = _bar(mesc + 1.0, mesc - 1.0, mesc, t)
+def _fire_long_on(state, name, mnq_lvl, mes_lvl, t):
+    """Fire a long (swept *_low) SMT on an arbitrary level name (fixed day tier here)."""
+    lm = _levels(**{name: mnq_lvl})
+    le = _levels(**{name: mes_lvl})
+    # MNQ dips onto its low (touch), MES holds above (no touch) → divergent down-sweep → long.
+    mnq = _bar(high=mnq_lvl + 10.0, low=mnq_lvl - 1.0, close=mnq_lvl + 5.0, time=t)
+    mes = _bar(high=mes_lvl + 10.0, low=mes_lvl + 5.0, close=mes_lvl + 7.0, time=t)
     return detect_regular_smts(lm, le, mnq, mes, state)
 
 
-def test_invalidation_survives_direction_flip():
-    # Fixed-level adverse-run invalidation must NOT be keyed to the CURRENT bar's approach
-    # direction. A short fires while price approaches from below (prev_ref < level ⇒ short).
-    # As price then runs UP THROUGH the level, the approach reference crosses above it, so the
-    # per-bar computed direction flips to LONG and the engine starts keying the |long state —
-    # which would strand the original |short key's invalidation check (the real 06-03 bug where
-    # prev1_week_high|short fired 09:49:25 and never invalidated though price crossed +40 by
-    # 09:51:37). The post-loop maintenance pass must still invalidate the |short SMT.
+def _fire_short_on(state, name, mnq_lvl, mes_lvl, t):
+    """Fire a short (swept *_high) SMT on an arbitrary level name."""
+    lm = _levels(**{name: mnq_lvl})
+    le = _levels(**{name: mes_lvl})
+    mnq = _bar(high=mnq_lvl + 1.0, low=mnq_lvl - 10.0, close=mnq_lvl - 5.0, time=t)
+    mes = _bar(high=mes_lvl - 1.0, low=mes_lvl - 10.0, close=mes_lvl - 5.0, time=t)
+    return detect_regular_smts(lm, le, mnq, mes, state)
+
+
+def test_later_same_direction_supersedes_earlier():
     state = {}
-    recs, state = _fire_short(state)  # close 20995, prev_ref→20995 (< level 21000) ⇒ short
-    skey = "prev1_day_high|short|wick"
-    fc = state[skey]["fire_mnq_close"]  # 20995
-    inv = _invalidate_pts("day", "mnq")  # day INVALIDATE_PTS (threshold-relative; tune-proof)
-    level = 21000.0
-    assert fc < level and fc + inv > level  # bug only reproduces if the threshold is ABOVE the level
-    assert state[skey]["invalidated"] is False
+    # Fire a long on level X (prev1_day_low).
+    r1, state = _fire_long_on(state, "prev1_day_low", 21000.0, 3000.0, "t1")
+    assert [r["ref_name"] for r in r1] == ["prev1_day_low"]
+    kx = "prev1_day_low|long|wick"
+    assert state[kx]["fired"] is True and state[kx]["superseded"] is False
 
-    # Bar 2: ABOVE the level but BELOW the +inv threshold. prev_ref is still 20995 (< level), so
-    # this bar is computed as short; both legs sit above their levels ⇒ no touch, no fire.
-    recs, state = _cross_bar(state, level + 10.0, 3010.0, "2026-06-09T10:01:00")
-    assert recs == []
-    assert state[skey]["invalidated"] is False  # not adverse enough yet
+    # Later fire a long on a DIFFERENT level Y (prev2_day_low) — different level, same direction.
+    r2, state = _fire_long_on(state, "prev2_day_low", 22000.0, 3300.0, "t2")
+    ky = "prev2_day_low|long|wick"
+    assert [r["ref_name"] for r in r2] == ["prev2_day_low"]   # only Y emitted this batch
+    # X is now superseded by Y; Y is fresh (not superseded).
+    assert state[kx]["superseded"] is True
+    assert state[ky]["superseded"] is False
+    sups = state["__supersessions__"]
+    assert len(sups) == 1
+    assert sups[0]["key"] == kx
+    assert sups[0]["superseded_by"] == ky
+    assert sups[0]["direction"] == "long"
+    assert sups[0]["type"] == "wick"
+    assert sups[0]["ref_name"] == "prev1_day_low"
 
-    # Bar 3: close at fc + inv (>= threshold). prev_ref is now level+10 (> level) ⇒ the per-bar
-    # direction FLIPS to long, so the engine keys |long this bar — the OLD in-loop check would
-    # never touch the |short state again. The direction-independent pass must still invalidate it.
-    recs, state = _cross_bar(state, fc + inv, 3015.0, "2026-06-09T10:02:00")
-    assert recs == []  # no new SMT fired on the crossing bar
-    assert state[skey]["invalidated"] is True, "short SMT stranded after direction flip (the bug)"
-    trail = state["__invalidations__"]
-    assert len(trail) == 1
-    ev = trail[0]
-    assert ev["key"] == skey and ev["direction"] == "short" and ev["reason"] == "adverse_run"
-    assert ev["trigger_mnq_close"] == fc + inv
-    assert ev["time"] == "2026-06-09T10:02:00"
-    assert state[skey]["invalidated_time"] == "2026-06-09T10:02:00"
+
+def test_same_batch_same_direction_fires_do_not_supersede_each_other():
+    # Two same-direction (long) levels swept in ONE batch must NOT supersede each other — both
+    # are the freshest of their direction this bar. (Regression: the old `skey == fresh_key`
+    # self-guard left siblings superseding each other → both wrongly dropped from the active set.)
+    lm = _levels(prev1_day_low=21000.0, prev2_day_low=20000.0)
+    le = _levels(prev1_day_low=3000.0, prev2_day_low=2800.0)
+    # MNQ dips onto BOTH lows (touch), MES holds above (no touch) → both fire long this batch.
+    mnq = _bar(21010.0, 19999.0, 20500.0, "t1")
+    mes = _bar(3010.0, 3005.0, 3007.0, "t1")
+    recs, state = detect_regular_smts(lm, le, mnq, mes, {})
+    assert {r["ref_name"] for r in recs} == {"prev1_day_low", "prev2_day_low"}
+    assert state["prev1_day_low|long|wick"]["superseded"] is False
+    assert state["prev2_day_low|long|wick"]["superseded"] is False
+    assert "__supersessions__" not in state
+
+
+def test_opposite_direction_does_not_supersede():
+    state = {}
+    r1, state = _fire_long_on(state, "prev1_day_low", 21000.0, 3000.0, "t1")
+    kx = "prev1_day_low|long|wick"
+    assert state[kx]["fired"] is True
+    # Later fire a SHORT on a different level → opposite direction → must NOT supersede the long.
+    r2, state = _fire_short_on(state, "prev1_day_high", 22000.0, 3300.0, "t2")
+    assert any(r["direction"] == "short" for r in r2)
+    assert state[kx]["superseded"] is False
+    assert "__supersessions__" not in state
+
+
+def test_supersession_does_not_change_records():
+    # The records list of the second (superseding) batch is identical whether or not an older
+    # same-direction record exists to be superseded → informational-only guarantee.
+    # Run A: only the second fire (no prior long to supersede).
+    state_a = {}
+    ra, state_a = _fire_long_on(state_a, "prev2_day_low", 22000.0, 3300.0, "t2")
+    # Run B: an earlier long exists, then the same second fire (which supersedes it).
+    state_b = {}
+    _, state_b = _fire_long_on(state_b, "prev1_day_low", 21000.0, 3000.0, "t1")
+    rb, state_b = _fire_long_on(state_b, "prev2_day_low", 22000.0, 3300.0, "t2")
+    assert ra == rb
+    # The surviving (fresh) record's fire bookkeeping is unaffected by the supersession.
+    ky = "prev2_day_low|long|wick"
+    for f in ("fired", "fulfilled", "armed", "fire_mnq_close", "fire_price", "fire_time"):
+        assert state_a[ky][f] == state_b[ky][f]
+
+
+def test_superseded_cleared_on_refire():
+    # A superseded fixed level that departs + re-touches + re-fires has superseded=False again.
+    state = {}
+    # Bar 1: fire long on X.
+    _, state = _fire_long_on(state, "prev1_day_low", 21000.0, 3000.0, "t1")
+    kx = "prev1_day_low|long|wick"
+    # Bar 2: fire long on Y → supersedes X.
+    _, state = _fire_long_on(state, "prev2_day_low", 22000.0, 3300.0, "t2")
+    assert state[kx]["superseded"] is True
+    # Bar 3: X departs UPWARD (price reverses far ABOVE the low level) — no touch, no depletion
+    # (an upward move past a *_low does not trip its below-level latch). |close-level| = 45 >= 40
+    # → departs, and the fixed re-arm fires on the same bar (departed→armed). The re-arm reset
+    # clears superseded as part of the re-fire lifecycle.
+    lm = _levels(prev1_day_low=21000.0)
+    le = _levels(prev1_day_low=3000.0)
+    _, state = detect_regular_smts(
+        lm, le, _bar(21050.0, 21040.0, 21045.0, "t3"), _bar(3050.0, 3040.0, 3045.0, "t3"), state)
+    assert state[kx]["armed"] is True
+    assert state[kx]["superseded"] is False   # cleared on re-arm
+    # Bar 4: a fresh re-approach on X → re-fires → still not superseded (fresh record).
+    r4, state = detect_regular_smts(
+        lm, le, _bar(21010.0, 20999.0, 21005.0, "t4"), _bar(3010.0, 3005.0, 3007.0, "t4"), state)
+    assert [r["ref_name"] for r in r4] == ["prev1_day_low"]
+    assert state[kx]["fired"] is True
+    assert state[kx]["superseded"] is False
