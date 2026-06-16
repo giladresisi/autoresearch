@@ -132,6 +132,228 @@ def pre_session_depleted(
     return float(window_low) <= float(level_price) - thr
 
 
+# GIL-25 Phase 1.2: how many CME sessions a non-invalidated SMT is carried forward
+# across the cold-start boundary. K=1 carries only the immediately-prior session.
+# Counted in BUSINESS days so Fri->Mon = age 1 (a weekend does not retire a Friday SMT).
+# Tunable.
+PENDING_SMT_MAX_AGE_SESSIONS = 1
+
+
+def pending_smt_terminal(
+    direction: str, fire_price: float, tier: str,
+    window_high: float, window_low: float,
+) -> str:
+    """Phase 1.2 (GIL-25): re-validate a carried SMT against the gap/pre-open price window.
+
+    Returns "fulfilled" | "invalidated" | "unfulfilled". Price-anchored on the MNQ leg,
+    measured from the SMT's FIRE close (mirrors _detect_level_smts blocks (a)/(a2)). Pure; total.
+
+      long : fulfilled if window_high >= fire_price + FULFILL_PTS[tier]["mnq"]
+             invalidated elif window_low  <= fire_price - INVALIDATE_PTS[tier]["mnq"]
+      short: fulfilled if window_low  <= fire_price - FULFILL_PTS[tier]["mnq"]
+             invalidated elif window_high >= fire_price + INVALIDATE_PTS[tier]["mnq"]
+
+    Fulfilled takes precedence over invalidated (matching smt_status). Unknown tier falls
+    back to the session row via _fulfill_pts/_invalidate_pts (no raise)."""
+    fp = float(fire_price)
+    wh = float(window_high)
+    wl = float(window_low)
+    ful = _fulfill_pts(tier, "mnq")
+    inv = _invalidate_pts(tier, "mnq")
+    if direction == "long":
+        if wh >= fp + ful:
+            return "fulfilled"
+        if wl <= fp - inv:
+            return "invalidated"
+        return "unfulfilled"
+    # short (and any non-"long" treated as the bearish mirror, matching block (a)/(a2))
+    if wl <= fp - ful:
+        return "fulfilled"
+    if wh >= fp + inv:
+        return "invalidated"
+    return "unfulfilled"
+
+
+def _pending_age_bdays(session_date: str, today_date) -> "int | None":
+    """Business-day age of a carried entry: bdays from its CME session_date to today's CME
+    session date. Fri->Mon = 1. None if either date is unparseable. Pure; total."""
+    import datetime as _dt
+
+    import pandas as pd
+    try:
+        sd = _dt.date.fromisoformat(str(session_date))
+    except (TypeError, ValueError):
+        return None
+    td = today_date
+    if isinstance(td, str):
+        try:
+            td = _dt.date.fromisoformat(td)
+        except (TypeError, ValueError):
+            return None
+    if sd >= td:
+        return 0
+    # Count business days strictly after sd, up to and including td.
+    rng = pd.bdate_range(start=sd + _dt.timedelta(days=1), end=td)
+    return len(rng)
+
+
+def revalidate_and_filter_pending(
+    entries: "list[dict] | None",
+    hist_mnq: "pd.DataFrame | None",
+    session_open: "pd.Timestamp",
+    today_date,
+    existing_active: "list[dict] | None",
+    *,
+    max_age: int = PENDING_SMT_MAX_AGE_SESSIONS,
+    dedup_tol_pts: float = 5.0,
+) -> "tuple[list[dict], list[dict]]":
+    """Phase 1.2 (GIL-25) pure core of the cross-session SMT carry ingest.
+
+    For each carried `pending_smts` entry, in order:
+      1. AGE-CAP   — drop if its CME session is older than `max_age` business days
+                     (reason="drop_age").
+      2. RE-VALIDATE against the gap/pre-open MNQ window (fire_time, session_open):
+         compute window_high/low over those bars and call `pending_smt_terminal`.
+         Drop terminal results (reason="drop_fulfilled"/"drop_invalidated"). An EMPTY
+         window keeps the entry (no evidence of a take-out).
+      3. DEDUP — drop if its (ref_name, direction) already appears among `existing_active`
+         (fresh detection wins) OR a same-direction fresh member's level price is within
+         `dedup_tol_pts` of the carried price (reason="drop_dedup"). Carried-vs-carried
+         duplicates collapse to the NEWEST `fire_time`.
+      4. REBUILD  — survivors become to_record-shaped active-set members (reason="ingested").
+
+    Returns (survivors, audit). `survivors` are dicts shaped like `to_record` output (so the
+    pipeline can MERGE them straight into smt_active_set). `audit` is a list of
+    {ref_name, direction, reason, fire_time} for the carry events. Pure; total — never raises
+    (degenerate input → ([], [])). Does NOT mutate inputs.
+    """
+    import pandas as pd
+
+    audit: list[dict] = []
+    if not entries:
+        return [], audit
+
+    def _aud(e: dict, reason: str) -> None:
+        audit.append({
+            "ref_name": e.get("ref_name"), "direction": e.get("direction"),
+            "reason": reason, "fire_time": e.get("fire_time"),
+        })
+
+    # --- carried-vs-carried collapse: keep newest fire_time per (ref_name, direction). -----
+    def _ftime(e: dict) -> int:
+        try:
+            ts = pd.Timestamp(e.get("fire_time"))
+            return int(ts.value) if ts is not pd.NaT else 0
+        except Exception:
+            return 0
+
+    by_key: dict = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        k = (e.get("ref_name"), e.get("direction"))
+        cur = by_key.get(k)
+        if cur is None or _ftime(e) > _ftime(cur):
+            by_key[k] = e
+    candidates = list(by_key.values())
+
+    # --- fresh active-set keys for dedup --------------------------------------------------
+    fresh = existing_active or []
+    fresh_logical = set()
+    fresh_prices_by_dir: dict = {}
+    for r in fresh:
+        if not isinstance(r, dict):
+            continue
+        fresh_logical.add((r.get("ref_name"), r.get("direction")))
+        px = r.get("mnq_lvl_price")
+        if px is None:
+            px = r.get("mnq_price")
+        if px is not None:
+            try:
+                fresh_prices_by_dir.setdefault(r.get("direction"), []).append(float(px))
+            except (TypeError, ValueError):
+                pass
+
+    survivors: list[dict] = []
+    has_hist = hist_mnq is not None and not getattr(hist_mnq, "empty", True)
+
+    for e in candidates:
+        direction = e.get("direction")
+        # 1. AGE-CAP
+        age = _pending_age_bdays(e.get("session_date"), today_date)
+        if age is not None and age > max_age:
+            _aud(e, "drop_age")
+            continue
+
+        # 2. RE-VALIDATE against the (fire_time, session_open) window.
+        if has_hist:
+            try:
+                ft = pd.Timestamp(e.get("fire_time"))
+            except Exception:
+                ft = pd.NaT
+            if ft is not pd.NaT:
+                win = hist_mnq[(hist_mnq.index > ft) & (hist_mnq.index < session_open)]
+                if not win.empty:
+                    status = pending_smt_terminal(
+                        direction, float(e.get("fire_price", e.get("price", 0.0))),
+                        e.get("tier", "session"),
+                        float(win["High"].max()), float(win["Low"].min()),
+                    )
+                    if status == "fulfilled":
+                        _aud(e, "drop_fulfilled")
+                        continue
+                    if status == "invalidated":
+                        _aud(e, "drop_invalidated")
+                        continue
+
+        # 3. DEDUP vs fresh active set.
+        if (e.get("ref_name"), direction) in fresh_logical:
+            _aud(e, "drop_dedup")
+            continue
+        carried_px = e.get("price")
+        if carried_px is not None:
+            try:
+                cpx = float(carried_px)
+                if any(abs(cpx - fpx) <= dedup_tol_pts
+                       for fpx in fresh_prices_by_dir.get(direction, [])):
+                    _aud(e, "drop_dedup")
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+        # 4. REBUILD a to_record-shaped active-set member.
+        survivors.append(_pending_entry_to_record(e))
+        _aud(e, "ingested")
+
+    return survivors, audit
+
+
+def _pending_entry_to_record(e: dict) -> dict:
+    """Rebuild a to_record-shaped active-set member from a carried pending entry. The price
+    anchor (`price`) becomes both mnq_price and mnq_lvl_price. carried=True marks provenance."""
+    price = e.get("price")
+    rec = {
+        "kind":          "smt",
+        "type":          e.get("type"),
+        "side":          e.get("side"),
+        "direction":     e.get("direction"),
+        "timeframe":     e.get("timeframe"),
+        "time":          e.get("fire_time"),
+        "leader":        e.get("leader"),
+        "ref_name":      e.get("ref_name"),
+        "tier":          e.get("tier"),
+        "fulfilled":     False,
+        "invalidated":   False,
+        "mnq_price":     price,
+        "mes_price":     e.get("mes_price"),
+        "mnq_lvl_price": price,
+        "carried":       True,
+    }
+    rec["key"] = _record_key(rec)
+    rec["keys"] = [rec["key"]]
+    return rec
+
+
 def _opposite(direction: str) -> str:
     return "short" if direction == "long" else "long"
 

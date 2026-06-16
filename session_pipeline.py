@@ -712,6 +712,13 @@ class SessionPipeline:
         if force_reset:
             save_hypothesis(copy.deepcopy(DEFAULT_HYPOTHESIS))
             save_position(copy.deepcopy(DEFAULT_POSITION))
+            # GIL-25 Phase 1.2: carry forward still-valid SMTs from prior sessions. Must run
+            # AFTER the force_reset save (which overwrites smt_active_set with the default empty
+            # list) and BEFORE run_hypothesis (so `divs` sees the survivors). Cold-start only.
+            # Re-validates against the overnight gap; drops taken-out/aged/duplicate carried
+            # SMTs. Shadow-only (no direction wiring).
+            if _cold_start:
+                self._ingest_pending_smts(now, today_mnq_at_open)
             # Run first hypothesis so direction is populated immediately after force-reset.
             _init_hyp_divs = _hyp_mod.run_hypothesis(
                 now, today_mnq_at_open, self._hist_mes_1m,
@@ -721,6 +728,12 @@ class SessionPipeline:
             for _d in (_init_hyp_divs or []):
                 self._emit(_d)
             return
+
+        # GIL-25 Phase 1.2 (no-force_reset path): carry still-valid SMTs forward, MERGING into
+        # the warm-up's smt_active_set writes (not overwritten here). Cold-start only; BEFORE
+        # run_hypothesis so `divs` sees the survivors. Shadow-only (no direction wiring).
+        if _cold_start:
+            self._ingest_pending_smts(now, today_mnq_at_open)
 
         # No force_reset: run hypothesis to populate direction, then reconcile with active position.
         _init_hyp_divs = _hyp_mod.run_hypothesis(
@@ -2173,6 +2186,19 @@ class SessionPipeline:
             _hyp2["smt_leg_state"] = _leg_state
             _hyp2["smt_suppressions"] = _events
             _smt_state.save_hypothesis(_hyp2)
+
+            # GIL-25 Phase 1.2 (cross-session carry, WRITE side): mirror the finalized
+            # still-valid (unfulfilled) active set into pending_smts.json each completed 1m
+            # bar. INSIDE the same exception-isolated shadow try/except so a defect here can
+            # NEVER break detection. The next session's cold-start _ingest_pending_smts reads
+            # this back, re-validates against the overnight gap, and seeds survivors. Shadow:
+            # affects only `divs` (not direction) in this branch.
+            _carry_session = cme_session_date(now).isoformat()
+            _pending_entries = [
+                self._active_record_to_pending(r, _carry_session)
+                for r in _active
+            ]
+            _smt_state.save_pending_smts({"entries": _pending_entries, "schema": 1})
         except Exception:
             pass
         # --- end SHADOW block ---------------------------------------------------------
@@ -2244,6 +2270,88 @@ class SessionPipeline:
             self._inv_written_n = len(_inv)
 
         return sd_events
+
+    def _active_record_to_pending(self, rec: dict, session_date: str) -> dict:
+        """GIL-25 Phase 1.2: map one finalized active-set record to a pending_smts entry.
+
+        `price` = the swept MNQ level price (mnq_lvl_price, fallback mnq_price). `fire_price`
+        = the MNQ close at fire — the adverse/fulfill reference for re-validation. The active
+        record from to_record does NOT carry the fire close, so it is read from detect_state
+        by the record's detect key (set at smt_detect.py:452 _detect_level_smts), with a
+        fallback to mnq_price. Total: missing fields → None; never raises.
+        """
+        price = rec.get("mnq_lvl_price")
+        if price is None:
+            price = rec.get("mnq_price")
+        # fire_price from detect_state by the record's detect key (collapsed → first of keys).
+        fire_price = None
+        ks = rec.get("keys") or [rec.get("key")]
+        for k in ks:
+            st = self._detect_state.get(k) if isinstance(self._detect_state, dict) else None
+            if isinstance(st, dict) and st.get("fire_mnq_close") is not None:
+                fire_price = st.get("fire_mnq_close")
+                break
+        if fire_price is None:
+            fire_price = rec.get("mnq_price")
+        return {
+            "price":        price,
+            "fire_price":   fire_price,
+            "direction":    rec.get("direction"),
+            "tier":         rec.get("tier"),
+            "type":         rec.get("type"),
+            "timeframe":    rec.get("timeframe"),
+            "fire_time":    rec.get("time"),
+            "ref_name":     rec.get("ref_name"),
+            "side":         rec.get("side"),
+            "leader":       rec.get("leader"),
+            "mes_price":    rec.get("mes_price"),
+            "session_date": session_date,
+            "valid":        True,
+        }
+
+    def _ingest_pending_smts(
+        self, now: pd.Timestamp, today_mnq_at_open: pd.DataFrame,
+    ) -> None:
+        """GIL-25 Phase 1.2 (cross-session carry, READ side). Cold-start only — called from
+        on_session_start AFTER _warmup_replay_smts (so we MERGE into its smt_active_set writes)
+        and BEFORE the first run_hypothesis (so `divs` sees the survivors).
+
+        Loads pending_smts, re-validates each carried SMT against the overnight/gap MNQ window
+        (fire_time, session_open) via the pure smt_detect.revalidate_and_filter_pending (age-cap
+        + drop fulfilled/invalidated + dedup vs today's fresh active set), then MERGES the
+        survivors into hypothesis.json["smt_active_set"] (read-modify-write only that field) and
+        emits a `smt-carry` audit event per ingested/dropped entry. Exception-isolated like the
+        shadow write block — a defect can NEVER break startup. Shadow-only (no direction wiring).
+        """
+        try:
+            import smt_detect as _smt_detect
+            pend = _smt_state.load_pending_smts()
+            entries = pend.get("entries", []) or []
+            if not entries:
+                return
+            session_open = pd.Timestamp(_cme_session_start(now))
+            today_date = cme_session_date(now)
+            existing = _smt_state.load_hypothesis().get("smt_active_set", []) or []
+            survivors, audit = _smt_detect.revalidate_and_filter_pending(
+                entries, self._hist_mnq_1m, session_open, today_date, existing,
+                dedup_tol_pts=DEDUP_TOL_PTS,
+            )
+            if survivors:
+                _hyp = _smt_state.load_hypothesis()
+                _hyp["smt_active_set"] = (_hyp.get("smt_active_set", []) or []) + survivors
+                _smt_state.save_hypothesis(_hyp)
+            for a in audit:
+                self._emit({
+                    "kind":      "smt-carry",
+                    "time":      now.isoformat(),
+                    "reason":    a.get("reason"),
+                    "ref_name":  a.get("ref_name"),
+                    "direction": a.get("direction"),
+                    "fire_time": a.get("fire_time"),
+                    "source":    "v2-carry",
+                })
+        except Exception:
+            pass
 
     def _seed_pre_session_invalidation(self, now: pd.Timestamp) -> None:
         """R2 Phase 1.1 (GIL-25): pre-seed `detect_state["__level_inv__"]` for PAST liquidities
