@@ -68,6 +68,14 @@ def _state_paths() -> dict[str, Path]:
             # isolated and final_snapshot() captures it. _IN_MEMORY is the discriminator.
             "global":     (_base / "global.json") if _IN_MEMORY
                           else (paths.general_live_dir() / "global.json"),
+            # GIL-25 Phase 1.2: cross-session carry of non-invalidated SMTs. Mirrors the
+            # global.json live-vs-backtest branch. In LIVE it lives in the stable general
+            # live folder (crash-safe on disk, survives restart). In BACKTEST (in-memory)
+            # the path is only a placeholder — load/save_pending_smts route through the
+            # dedicated process-wide _PENDING_STORE, NOT _STORE, so the carry survives the
+            # per-date reset_in_memory() (see load_pending_smts).
+            "pending":    (_base / "pending_smts.json") if _IN_MEMORY
+                          else (paths.general_live_dir() / "pending_smts.json"),
         }
         _PATH_CACHE_SD = _sd
         _PATH_CACHE_MEM = _IN_MEMORY
@@ -79,6 +87,7 @@ def _hypothesis_path() -> Path: return _state_paths()["hypothesis"]
 def _position_path() -> Path:   return _state_paths()["position"]
 def _smts_path() -> Path:       return _state_paths()["smts"]
 def _global_path() -> Path:     return _state_paths()["global"]
+def _pending_path() -> Path:    return _state_paths()["pending"]
 
 def _session_folder_date() -> str:
     """ET session date naming the per-session folder (sessions/<date>) for files that may
@@ -174,6 +183,11 @@ DEFAULT_HYPOTHESIS = {
     "smt_dominant":   None,
 }
 
+# GIL-25 Phase 1.2: cross-session carry of non-invalidated SMTs. Each entry carries
+# enough to (a) price-anchored re-validate against the overnight/gap window and (b) rebuild
+# a to_record-shaped active-set member on ingest. See session_pipeline._ingest_pending_smts.
+DEFAULT_PENDING_SMTS = {"entries": [], "schema": 1}
+
 DEFAULT_POSITION = {
     # ``active`` is the open-trade sub-dict. Empty {} when flat. When a fill creates
     # it, it carries these keys:
@@ -236,18 +250,41 @@ def freeze_active_mgmt(active: dict, direction: str, hypothesis: dict) -> None:
 _IN_MEMORY = False
 _STORE: dict[str, dict] = {}
 
+# GIL-25 Phase 1.2: dedicated process-wide slot for the cross-session SMT carry. UNLIKE
+# _STORE (path-keyed, wiped by reset_in_memory each backtest date), this is a single slot
+# that DELIBERATELY survives reset_in_memory so a June-8 write reaches the June-9 ingest
+# within one run_backtest_v2 process. It is reset to None by set_in_memory_mode (a brand-new
+# backtest invocation starts clean). Unused in live mode (live reads/writes the on-disk file).
+_PENDING_STORE: "dict | None" = None
+
 # Process-local hypothesis cache (invalidated on every save_hypothesis call).
 # Not used in _IN_MEMORY mode; not used for position (externally mutated by executor).
 _hyp_cache: dict | None = None
 _hyp_cache_valid: bool = False
 
 
-def set_in_memory_mode(enabled: bool) -> None:
-    global _IN_MEMORY, _hyp_cache, _hyp_cache_valid
+def set_in_memory_mode(enabled: bool, *, reset_pending: bool = True) -> None:
+    """Toggle in-memory mode and clear per-run state.
+
+    GIL-25 Phase 1.2: a brand-new backtest invocation starts the cross-session carry clean —
+    set_in_memory_mode is called ONCE at the top of run_backtest_v2 (not per date), so resetting
+    _PENDING_STORE here does NOT break the June8->June9 carry, which crosses the per-date
+    reset_in_memory() loop.
+
+    GIL-25 Phase 1.1.5: `reset_pending` (default True) preserves the existing behavior. When a
+    contiguous-range regression issues per-date run_backtest_v2(date, date) calls (each of which
+    re-enters this function), the 2nd+ date passes reset_pending=False so the in-memory
+    _PENDING_STORE written by the prior date's bars SURVIVES into this date's cold-start ingest —
+    i.e. the carry works across the per-date-CALL boundary too, not just the in-process day loop.
+    Shell-set/standalone callers and all tests keep the default → byte-identical behavior.
+    """
+    global _IN_MEMORY, _hyp_cache, _hyp_cache_valid, _PENDING_STORE
     _IN_MEMORY = enabled
     _hyp_cache = None
     _hyp_cache_valid = False
     _STORE.clear()
+    if reset_pending:
+        _PENDING_STORE = None
 
 
 def reset_in_memory() -> None:
@@ -255,6 +292,11 @@ def reset_in_memory() -> None:
 
     Called at the start of each backtest run/date so a fresh state_dir starts from a
     clean slate and never inherits the previous run's _STORE entries.
+
+    GIL-25 Phase 1.2: _PENDING_STORE is DELIBERATELY NOT cleared here — it is the one piece
+    of in-memory state that must outlive a per-date reset so a prior-session SMT carries
+    forward into the next date within one run_backtest_v2 process. (Reset only by
+    set_in_memory_mode, i.e. a fresh backtest invocation.)
     """
     global _hyp_cache, _hyp_cache_valid
     _hyp_cache = None
@@ -407,6 +449,30 @@ def load_smts() -> dict:
 
 def save_smts(d: dict) -> None:
     _atomic_write(_smts_path(), d)
+
+
+def load_pending_smts() -> dict:
+    """GIL-25 Phase 1.2: load the cross-session SMT carry.
+
+    In-memory (backtest): return a copy of the dedicated _PENDING_STORE slot (or a copy of
+    DEFAULT_PENDING_SMTS when unset) — NOT routed through _STORE, so it survives the per-date
+    reset_in_memory(). Live: normal on-disk _load against general_live_dir()/pending_smts.json.
+    """
+    if _IN_MEMORY:
+        if _PENDING_STORE is None:
+            return _fast_copy(DEFAULT_PENDING_SMTS)
+        return _fast_copy(_PENDING_STORE)
+    return _load(_pending_path(), DEFAULT_PENDING_SMTS)
+
+
+def save_pending_smts(d: dict) -> None:
+    """GIL-25 Phase 1.2: persist the cross-session SMT carry. In-memory writes the dedicated
+    _PENDING_STORE slot (cross-date survivor); live writes the on-disk file (crash-safe)."""
+    global _PENDING_STORE
+    if _IN_MEMORY:
+        _PENDING_STORE = _fast_copy(d)
+        return
+    _atomic_write(_pending_path(), d)
 
 
 def is_paused() -> bool:

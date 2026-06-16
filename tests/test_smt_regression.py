@@ -29,6 +29,10 @@ _SLICE_END    = pd.Timestamp("2025-11-16", tz="America/New_York")  # 1 day after
 # ── Parser tests ──────────────────────────────────────────────────────────────
 
 def test_parser_strips_comments_and_ranges(tmp_path):
+    # GIL-25 Phase 1.1.5: a `:` RANGE token now expands to BUSINESS days only (weekend dates are
+    # dropped) so contiguous-carry routing sees exact Fri->Mon adjacency. 2026-02-15 is a Sunday,
+    # so the range 2026-02-15:2026-02-17 yields only Mon 02-16 + Tue 02-17. Explicit single-date
+    # tokens (incl. a user-typed weekend) are preserved verbatim.
     md = tmp_path / "regression.md"
     md.write_text(
         "2026-01-08\n"
@@ -41,11 +45,26 @@ def test_parser_strips_comments_and_ranges(tmp_path):
     result = regression._parse_regression_md(str(md))
     assert result == [
         "2026-01-08",
-        "2026-02-15",
         "2026-02-16",
         "2026-02-17",
         "2026-03-12",
     ]
+
+
+def test_parser_range_filters_weekends(tmp_path):
+    # A range spanning a full weekend (Fri 2026-06-05 .. Tue 2026-06-09) drops Sat/Sun.
+    md = tmp_path / "regression.md"
+    md.write_text("2026-06-05:2026-06-09\n", encoding="utf-8")
+    assert regression._parse_regression_md(str(md)) == [
+        "2026-06-05", "2026-06-08", "2026-06-09",
+    ]
+
+
+def test_parser_preserves_explicit_single_dates(tmp_path):
+    # A non-range list keeps every explicit token verbatim, including a weekend single date.
+    md = tmp_path / "regression.md"
+    md.write_text("2026-06-06\n2026-06-08\n", encoding="utf-8")  # 06-06 = Saturday
+    assert regression._parse_regression_md(str(md)) == ["2026-06-06", "2026-06-08"]
 
 
 # ── Regression pass/fail tests ─────────────────────────────────────────────────

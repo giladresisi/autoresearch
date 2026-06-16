@@ -330,3 +330,128 @@ class TestFreezeActiveMgmt:
             a = {}
             smt_state.freeze_active_mgmt(a, "up", {"cautious_price_secondary_level": lv})
             assert a["backing_tier"] == tier, lv
+
+
+# ---------------------------------------------------------------------------
+# GIL-25 Phase 1.2: pending_smts load/save + cross-session _PENDING_STORE
+# ---------------------------------------------------------------------------
+
+class TestPendingSmtsState:
+    def test_pending_default_when_absent(self):
+        from smt_state import DEFAULT_PENDING_SMTS, load_pending_smts
+        result = load_pending_smts()
+        assert result == DEFAULT_PENDING_SMTS
+        # Deep copy: mutating the result must not corrupt the default or a fresh load.
+        result["entries"].append({"x": 1})
+        assert load_pending_smts()["entries"] == []
+        assert DEFAULT_PENDING_SMTS["entries"] == []
+
+    def test_pending_roundtrip_in_memory(self):
+        from smt_state import load_pending_smts, save_pending_smts
+        smt_state.set_in_memory_mode(True)
+        try:
+            payload = {"entries": [{"price": 21000.0, "direction": "long",
+                                    "ref_name": "prev1_day_low"}], "schema": 1}
+            save_pending_smts(payload)
+            assert load_pending_smts() == payload
+        finally:
+            smt_state.set_in_memory_mode(False)
+
+    def test_pending_path_live_vs_backtest(self, tmp_path, monkeypatch):
+        import paths
+        # Live/disk mode → under general_live_dir().
+        monkeypatch.setattr(smt_state, "_IN_MEMORY", False)
+        live_p = smt_state._pending_path()
+        assert live_p == paths.general_live_dir() / "pending_smts.json"
+        # Backtest/in-memory mode → under state_dir() base.
+        monkeypatch.setattr(smt_state, "_IN_MEMORY", True)
+        # Force the path cache to rebuild for the new mode.
+        monkeypatch.setattr(smt_state, "_PATH_CACHE_MEM", None)
+        bt_p = smt_state._pending_path()
+        assert bt_p == paths.state_dir() / "pending_smts.json"
+
+    def test_pending_survives_reset_in_memory(self):
+        """The cross-day mechanism: _PENDING_STORE is NOT wiped by reset_in_memory(),
+        unlike _STORE-backed state (daily/global). Locks the deliberate distinction."""
+        from smt_state import (
+            load_daily, load_pending_smts, save_daily, save_pending_smts,
+        )
+        smt_state.set_in_memory_mode(True)
+        try:
+            pend = {"entries": [{"price": 1.0, "direction": "long"}], "schema": 1}
+            save_pending_smts(pend)
+            save_daily({**DEFAULT_DAILY, "estimated_dir": "down"})
+            smt_state.reset_in_memory()
+            # pending SURVIVES (cross-session carry)...
+            assert load_pending_smts() == pend
+            # ...but ordinary _STORE-backed state is gone (back to default).
+            assert load_daily() == DEFAULT_DAILY
+        finally:
+            smt_state.set_in_memory_mode(False)
+
+    def test_pending_cleared_on_set_in_memory_mode(self):
+        """A brand-new backtest invocation (set_in_memory_mode) starts clean — _PENDING_STORE
+        is reset so June-8's carry never leaks into a SEPARATE backtest run."""
+        from smt_state import load_pending_smts, save_pending_smts
+        smt_state.set_in_memory_mode(True)
+        try:
+            save_pending_smts({"entries": [{"price": 1.0}], "schema": 1})
+            assert smt_state._PENDING_STORE is not None
+            # A fresh invocation toggles the mode again → store reset.
+            smt_state.set_in_memory_mode(True)
+            assert smt_state._PENDING_STORE is None
+            assert load_pending_smts() == smt_state.DEFAULT_PENDING_SMTS
+        finally:
+            smt_state.set_in_memory_mode(False)
+
+    # GIL-25 Phase 1.1.5: set_in_memory_mode(reset_pending=...) preserve hook (Change B).
+    def test_set_in_memory_mode_resets_pending_by_default(self):
+        from smt_state import load_pending_smts, save_pending_smts
+        smt_state.set_in_memory_mode(True)
+        try:
+            save_pending_smts({"entries": [{"price": 1.0}], "schema": 1})
+            assert smt_state._PENDING_STORE is not None
+            # Default reset_pending=True wipes the store.
+            smt_state.set_in_memory_mode(True)
+            assert smt_state._PENDING_STORE is None
+            assert load_pending_smts() == smt_state.DEFAULT_PENDING_SMTS
+        finally:
+            smt_state.set_in_memory_mode(False)
+
+    def test_set_in_memory_mode_preserves_pending_when_flagged(self):
+        from smt_state import load_pending_smts, save_pending_smts
+        smt_state.set_in_memory_mode(True)
+        try:
+            payload = {"entries": [{"price": 21000.0, "direction": "long",
+                                    "ref_name": "prev1_day_low"}], "schema": 1}
+            save_pending_smts(payload)
+            # reset_pending=False preserves the carry store across the (re)set.
+            smt_state.set_in_memory_mode(True, reset_pending=False)
+            assert load_pending_smts() == payload
+        finally:
+            smt_state.set_in_memory_mode(False)
+
+    def test_reset_in_memory_still_preserves_pending(self):
+        # Regression for the Phase-1.2 invariant: reset_in_memory() never wipes _PENDING_STORE,
+        # and Change B did not disturb that per-date survive-reset path.
+        from smt_state import load_pending_smts, save_pending_smts
+        smt_state.set_in_memory_mode(True)
+        try:
+            payload = {"entries": [{"price": 1.0, "direction": "long"}], "schema": 1}
+            save_pending_smts(payload)
+            smt_state.reset_in_memory()
+            assert load_pending_smts() == payload
+        finally:
+            smt_state.set_in_memory_mode(False)
+
+    def test_pending_disk_roundtrip_live(self, tmp_path, monkeypatch):
+        """Live mode goes through _load/_atomic_write against general_live_dir()."""
+        import paths
+        monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path / "_g"))
+        monkeypatch.setattr(smt_state, "_IN_MEMORY", False)
+        monkeypatch.setattr(smt_state, "_PATH_CACHE_MEM", None)
+        from smt_state import load_pending_smts, save_pending_smts
+        payload = {"entries": [{"price": 21000.0, "direction": "short"}], "schema": 1}
+        save_pending_smts(payload)
+        assert smt_state._pending_path().exists()
+        assert load_pending_smts() == payload

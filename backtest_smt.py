@@ -1200,7 +1200,8 @@ def _build_5m_bar_v2(session_bars: "pd.DataFrame", bar_ts: "pd.Timestamp") -> "d
 
 
 def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True,
-                    mode: str = "1m", started: "datetime.datetime | None" = None) -> dict:
+                    mode: str = "1m", started: "datetime.datetime | None" = None,
+                    reset_pending: bool = True) -> dict:
     """SMT v2 backtest: dispatches daily/hypothesis/trend/strategy per bar.
 
     Self-contained — does not use any globals from the existing run_backtest path.
@@ -1216,6 +1217,16 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
              (paths.regression_run_dir). Defaults to now (ET) so direct callers and a
              multi-date regression run group all their per-date outputs under one stamp.
 
+    reset_pending: GIL-25 Phase 1.1.5 — when False, the in-memory cross-session SMT carry store
+             (_PENDING_STORE) is PRESERVED across this call's set_in_memory_mode reset, so a
+             prior date's pending SMTs (written to the in-memory store by its bars) survive into
+             this date's cold-start ingest. run_regression passes reset_pending=False for the 2nd+
+             date of a CONTIGUOUS business-day range. Default True keeps a standalone
+             run_backtest_v2(start,end) and all tests byte-identical. NOTE: a single
+             run_backtest_v2(start,end) already carries internally (its per-date reset_in_memory()
+             does not wipe _PENDING_STORE); reset_pending only matters for the per-date-CALL
+             pattern run_regression uses.
+
     Returns a dict with keys: trades, events, metrics.
     """
     import json as _json
@@ -1229,7 +1240,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         from zoneinfo import ZoneInfo as _ZI
         started = datetime.datetime.now(_ZI("America/New_York"))
 
-    _smt_state.set_in_memory_mode(True)
+    _smt_state.set_in_memory_mode(True, reset_pending=reset_pending)
     # Per-date set_state_dir below mutates the module-global prefix; remember the caller's
     # so we never leak a backtest's per-run folder into live/test module state.
     _prev_state_dir = paths._STATE_DIR
@@ -1580,7 +1591,12 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
     # ------------------------------------------------------------------ #
     # Aggregate metrics                                                     #
     # ------------------------------------------------------------------ #
-    _smt_state.set_in_memory_mode(False)
+    # GIL-25 Phase 1.1.5: the END-of-run teardown must NOT wipe _PENDING_STORE, otherwise the
+    # store a contiguous date just populated is cleared before the next date's run_backtest_v2
+    # start-call can carry it. The START call (set_in_memory_mode(True, reset_pending=...)) is the
+    # SOLE wipe authority: a fresh/non-contiguous date passes reset_pending=True and clears the
+    # stale store there, so a non-wiping teardown stays byte-identical for the no-carry case.
+    _smt_state.set_in_memory_mode(False, reset_pending=False)
     paths.set_state_dir(_prev_state_dir)  # restore caller's prefix (no leak)
     stats = _compute_metrics_v2(all_trades, equity_curve_v2)
 

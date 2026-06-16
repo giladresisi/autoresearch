@@ -4,7 +4,7 @@
 #
 # Distinct from tests/test_smt_invalidation.py (adverse-run invalidation of a fired SMT
 # *record*). Here we test LEVEL-lifecycle invalidation: once a ticker runs a confirmed
-# HH/LL FULFILL_PTS[tier] beyond a level, that level is retired (latched in the reserved
+# HH/LL DEPLETE_PTS[tier] beyond a level, that level is retired (latched in the reserved
 # state["__level_inv__"]) and the pair comparison is skipped if EITHER ticker retired it.
 
 from __future__ import annotations
@@ -179,6 +179,73 @@ def test_body_pass_skips_invalidated_level():
 
 
 # ===========================================================================
+# Phase 1.1.5 (GIL-25 §A.2.4): the depletion latch marks the fired record terminal
+# (retired_depleted) — the structural backstop that replaces adverse-run invalidation.
+# ===========================================================================
+def test_depletion_latch_marks_fired_record_terminal_short():
+    lm = _levels(prev1_day_high=21000.0)
+    le = _levels(prev1_day_high=3000.0)
+    # Bar 1: divergent up-sweep → fires short on prev1_day_high.
+    r1, s = detect_regular_smts(
+        lm, le, _bar(21001.0, 20990.0, 20995.0, "t1"), _bar(2999.0, 2990.0, 2995.0, "t1"), {})
+    assert len(r1) == 1 and r1[0]["direction"] == "short"
+    skey = "prev1_day_high|short|wick"
+    assert s[skey]["fired"] is True
+    assert s[skey].get("retired_depleted") is False
+    # Bar 2: MNQ HIGH runs >= level + _deplete_pts("day","mnq")=40 (latch flips) while the CLOSE
+    # stays within the departure margin (|close-level|=30 < 40) so the record does NOT re-arm and
+    # is still fired-open when the latch trips → record retired by the backstop.
+    r2, s = detect_regular_smts(
+        lm, le, _bar(21045.0, 21025.0, 21030.0, "t2"), _bar(3001.0, 2995.0, 3000.0, "t2"), s)
+    assert _inv(s, "prev1_day_high")["mnq"] is True
+    assert s[skey]["retired_depleted"] is True
+    # The flip event records the retired key(s).
+    rets = s["__level_retirements__"]
+    flip = [e for e in rets if e.get("ref_name") == "prev1_day_high"][-1]
+    assert skey in flip.get("retired_records", [])
+
+
+def test_depletion_latch_marks_fired_record_terminal_long():
+    lm = _levels(prev1_day_low=21000.0)
+    le = _levels(prev1_day_low=3000.0)
+    # Bar 1: divergent down-sweep → fires long on prev1_day_low.
+    r1, s = detect_regular_smts(
+        lm, le, _bar(21010.0, 20999.0, 21005.0, "t1"), _bar(3010.0, 3005.0, 3007.0, "t1"), {})
+    assert len(r1) == 1 and r1[0]["direction"] == "long"
+    skey = "prev1_day_low|long|wick"
+    assert s[skey]["fired"] is True and s[skey].get("retired_depleted") is False
+    # Bar 2: MNQ LOW runs <= level - 40 (latch flips) while CLOSE stays within the departure
+    # margin (|close-level|=30 < 40) so the record stays fired-open → retired by the backstop.
+    r2, s = detect_regular_smts(
+        lm, le, _bar(20985.0, 20955.0, 20970.0, "t2"), _bar(2996.0, 2990.0, 2993.0, "t2"), s)
+    assert _inv(s, "prev1_day_low")["mnq"] is True
+    assert s[skey]["retired_depleted"] is True
+    flip = [e for e in s["__level_retirements__"] if e.get("ref_name") == "prev1_day_low"][-1]
+    assert skey in flip.get("retired_records", [])
+
+
+def test_depletion_backstop_only_on_flip():
+    # Once retired, further depleting bars do not re-append a retirement nor re-mark the record;
+    # retired_depleted stays True (idempotent — the latch only flips once).
+    lm = _levels(prev1_day_high=21000.0)
+    le = _levels(prev1_day_high=3000.0)
+    r1, s = detect_regular_smts(
+        lm, le, _bar(21001.0, 20990.0, 20995.0, "t1"), _bar(2999.0, 2990.0, 2995.0, "t1"), {})
+    skey = "prev1_day_high|short|wick"
+    # Bar 2: HIGH flips the latch (both legs run above level+thr) while CLOSE stays within the
+    # departure margin → record stays fired-open and is retired. 1 retirement event.
+    _, s = detect_regular_smts(
+        lm, le, _bar(21050.0, 21020.0, 21025.0, "t2"), _bar(3010.0, 2995.0, 3000.0, "t2"), s)
+    n_after_flip = len(s["__level_retirements__"])
+    assert s[skey]["retired_depleted"] is True
+    # Bar 3: even deeper run above → no new retirement event (latch already flipped both legs).
+    _, s = detect_regular_smts(
+        lm, le, _bar(21100.0, 21080.0, 21025.0, "t3"), _bar(3020.0, 3010.0, 3000.0, "t3"), s)
+    assert len(s["__level_retirements__"]) == n_after_flip
+    assert s[skey]["retired_depleted"] is True
+
+
+# ===========================================================================
 # Fixed-level re-arm-until-invalidated (AC#3 / GIL-25 2026-06-13 comment)
 # ===========================================================================
 def test_fixed_level_refires_after_departure_and_retouch():
@@ -231,3 +298,48 @@ def test_invalidated_fixed_level_never_refires():
     r3, s = detect_regular_smts(
         lm, le, _bar(21001.0, 20990.0, 20995.0, "t3"), _bar(2999.0, 2990.0, 2995.0, "t3"), s)
     assert r3 == []
+
+
+# ---------------------------------------------------------------------------
+# GIL-25 Phase 1.3: decoupled DEPLETE_PTS / DEPART_PTS knobs (no-op seed)
+# ---------------------------------------------------------------------------
+import pytest  # noqa: E402
+
+from smt_detect import (  # noqa: E402
+    DEPLETE_PTS_MNQ,
+    DEPLETE_PTS_MES,
+    DEPART_PTS_MNQ,
+    DEPART_PTS_MES,
+    _deplete_pts,
+    _depart_pts,
+    _fulfill_pts,
+)
+
+_TIERS = ("week", "day", "session")
+_INSTS = ("mnq", "mes")
+
+
+@pytest.mark.parametrize("inst", _INSTS)
+@pytest.mark.parametrize("tier", _TIERS)
+def test_deplete_pts_equals_fulfill_at_init(tier, inst):
+    """No-op seed: depletion knob starts byte-equal to fulfillment for every tier/inst."""
+    assert _deplete_pts(tier, inst) == _fulfill_pts(tier, inst)
+
+
+@pytest.mark.parametrize("inst", _INSTS)
+@pytest.mark.parametrize("tier", _TIERS)
+def test_depart_pts_equals_fulfill_at_init(tier, inst):
+    """No-op seed: departure knob starts byte-equal to fulfillment for every tier/inst."""
+    assert _depart_pts(tier, inst) == _fulfill_pts(tier, inst)
+
+
+def test_deplete_pts_unknown_tier_falls_back():
+    """Unknown tier falls back to the session row (no raise), mirroring _fulfill_pts."""
+    assert _deplete_pts("bogus", "mnq") == DEPLETE_PTS_MNQ["session"]
+    assert _deplete_pts("bogus", "mes") == DEPLETE_PTS_MES["session"]
+
+
+def test_depart_pts_unknown_tier_falls_back():
+    """Unknown tier falls back to the session row (no raise), mirroring _fulfill_pts."""
+    assert _depart_pts("bogus", "mnq") == DEPART_PTS_MNQ["session"]
+    assert _depart_pts("bogus", "mes") == DEPART_PTS_MES["session"]

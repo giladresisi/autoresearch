@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import copy
 
-from smt_detect import _record_key, fulfillment_status, detect_regular_smts
+from smt_detect import _record_key, fulfillment_status, smt_status, detect_regular_smts
 
 
 # ---------------------------------------------------------------------------
@@ -114,3 +114,32 @@ def test_fulfillment_matches_detection_key():
     assert key == "day_high|short|wick"
     assert key in state
     assert fulfillment_status([key], state) == {key: "unfulfilled"}
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.1.5 (GIL-25 §A.2.6): smt_status honors the new terminal flags
+# (superseded / retired_depleted) so the active-set drop removes them.
+# ---------------------------------------------------------------------------
+def test_smt_status_superseded_is_terminal():
+    ds = {"day_high|short|wick": {"superseded": True}}
+    assert smt_status(["day_high|short|wick"], ds) == {"day_high|short|wick": "invalidated"}
+    # fulfillment_status folds invalidated → unfulfilled (so active-set drop on != unfulfilled).
+    assert fulfillment_status(["day_high|short|wick"], ds) == {"day_high|short|wick": "unfulfilled"}
+
+
+def test_smt_status_retired_depleted_is_terminal():
+    ds = {"day_high|short|wick": {"retired_depleted": True}}
+    assert smt_status(["day_high|short|wick"], ds) == {"day_high|short|wick": "invalidated"}
+    assert fulfillment_status(["day_high|short|wick"], ds) == {"day_high|short|wick": "unfulfilled"}
+
+
+def test_smt_status_fulfilled_precedence_over_new_flags():
+    # fulfilled wins over superseded/retired_depleted (precedence preserved).
+    ds = {"k": {"fulfilled": True, "superseded": True, "retired_depleted": True}}
+    assert smt_status(["k"], ds) == {"k": "fulfilled"}
+
+
+def test_smt_status_plain_unfulfilled_unaffected():
+    ds = {"k": {"fired": True, "fulfilled": False,
+                "superseded": False, "retired_depleted": False}}
+    assert smt_status(["k"], ds) == {"k": "unfulfilled"}

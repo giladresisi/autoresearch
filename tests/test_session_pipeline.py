@@ -1997,10 +1997,53 @@ def _fire_then_invalidate(pipeline):
     return [ev1] + ev_rest
 
 
+def test_detect_state_pending_entries_sources_unfulfilled_levels(_isolate_state, monkeypatch):
+    """GIL-25 Phase 1.4: the carry WRITE sources LEVEL reversals from detect_state (producer
+    lifecycle), decoupled from the relevance-gated active set. Only fired & non-terminal level
+    records are emitted; fulfilled/invalidated/superseded/retired_depleted and non-fired records
+    are excluded, as are reserved __*__ keys and fill (non-level) keys. The swept level + fire
+    close anchors come straight from detect_state."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    pipeline._detect_state = {
+        # fired & non-terminal → CARRIED (even though price may have backed off — no relevance gate)
+        "week_high|short|wick": {
+            "fired": True, "fulfilled": False, "invalidated": False, "superseded": False,
+            "retired_depleted": False, "level_price": 21010.0, "fire_mnq_close": 21008.0,
+            "fire_time": "2026-06-02T15:00:00-04:00", "fire_leader": "mnq",
+        },
+        # terminal variants → EXCLUDED
+        "day_high|short|wick":  {"fired": True, "fulfilled": True,  "level_price": 1.0},
+        "day_low|long|wick":    {"fired": True, "invalidated": True, "level_price": 1.0},
+        "asia_high|short|body": {"fired": True, "superseded": True, "level_price": 1.0},
+        "asia_low|long|wick":   {"fired": True, "retired_depleted": True, "level_price": 1.0},
+        # not fired → EXCLUDED
+        "london_low|long|wick": {"fired": False, "armed": True, "level_price": 1.0},
+        # reserved + fill keys → EXCLUDED
+        "__level_inv__": {"week_high": {"mnq": False, "mes": False}},
+        "fvg_20260601_1900_bear": {"fill_a_fired": True, "direction": "short"},
+    }
+
+    entries = pipeline._detect_state_pending_entries("2026-06-03")
+
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["ref_name"] == "week_high"
+    assert e["direction"] == "short"
+    assert e["type"] == "wick"
+    assert e["tier"] == "week"
+    assert e["side"] == "bearish"
+    assert e["price"] == 21010.0          # swept level anchor
+    assert e["fire_price"] == 21008.0     # fire close (re-validation reference)
+    assert e["fire_time"] == "2026-06-02T15:00:00-04:00"
+    assert e["session_date"] == "2026-06-03"
+    assert e["valid"] is True
+
+
 def test_smt_invalidations_written_to_state_dir(_isolate_state, monkeypatch):
-    """Drive a bearish (short) day_high SMT then adverse-up bars; assert smt_invalidations.json
-    exists in paths.state_dir() and parses to a list with one reason=='adverse_run' event."""
-    import json
+    """Phase 1.1.5 (GIL-25) REMOVED adverse-run invalidation. Driving a bearish (short) day_high
+    SMT then adverse-up bars (MNQ close runs past the old INVALIDATE_PTS threshold, but the bar
+    highs stay below the level so neither depletion nor re-arm trips) must NOT write
+    smt_invalidations.json, and the fired record must stay non-terminal (still pending/carryable)."""
     import paths
     pipeline, _ = _smt_v2_pipeline(monkeypatch)
     _freeze_liquidities(monkeypatch, pipeline)
@@ -2009,22 +2052,21 @@ def test_smt_invalidations_written_to_state_dir(_isolate_state, monkeypatch):
     _fire_then_invalidate(pipeline)
 
     inv_path = paths.state_dir() / "smt_invalidations.json"
-    assert inv_path.exists(), "smt_invalidations.json must be written when an SMT invalidates"
-    data = json.loads(inv_path.read_text(encoding="utf-8"))
-    assert isinstance(data, list)
-    adverse = [e for e in data if e.get("reason") == "adverse_run"]
-    assert len(adverse) == 1
-    ev = adverse[0]
-    assert ev["ref_name"] == "day_high"
-    assert ev["direction"] == "short"
-    assert ev["tier"] == "day"
-    assert ev["threshold_pts"] == smt_detect.INVALIDATE_PTS_MNQ["day"]
-    assert "fire_mnq_close" in ev and "trigger_mnq_close" in ev
+    assert not inv_path.exists(), (
+        "Phase 1.1.5 removed adverse-run invalidation: no smt_invalidations.json should be written")
+    # The fired record is no longer retired by the adverse run — it stays pending.
+    st = next(s for k, s in pipeline._detect_state.items()
+              if k.startswith("day_high|short") and isinstance(s, dict) and s.get("fired"))
+    assert st.get("fired") is True
+    assert not st.get("invalidated")
+    assert not st.get("retired_depleted")
+    assert not st.get("fulfilled")
 
 
 def test_invalidation_trail_not_in_sd_events(_isolate_state, monkeypatch):
-    """The invalidation trail is debug-only: no smt-div / event emitted by the adverse bars
-    carries an invalidation record, and the producer's detect_state holds the trail."""
+    """Phase 1.1.5 (GIL-25) REMOVED the adverse-run __invalidations__ trail. No emitted smt-div /
+    event carries an invalidation record (it never did), AND the producer detect_state no longer
+    holds an adverse_run trail (the key may be absent or empty)."""
     pipeline, _ = _smt_v2_pipeline(monkeypatch)
     _freeze_liquidities(monkeypatch, pipeline)
     _seed_day_high(pipeline)
@@ -2037,9 +2079,9 @@ def test_invalidation_trail_not_in_sd_events(_isolate_state, monkeypatch):
             assert "invalidated" not in e
             assert e.get("reason") != "adverse_run"
             assert e.get("kind") != "smt-invalidation"
-    # The trail lives in detect_state (producer side), not in the emitted stream.
+    # The adverse-run trail is gone: no adverse_run entry is recorded on the producer side.
     trail = pipeline._detect_state.get("__invalidations__", [])
-    assert any(e.get("reason") == "adverse_run" for e in trail)
+    assert not any(e.get("reason") == "adverse_run" for e in trail)
 
 
 def test_no_trail_file_when_no_invalidations(_isolate_state, monkeypatch):
