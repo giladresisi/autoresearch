@@ -2325,17 +2325,20 @@ def _hist_with_yesterday_bull_fvg(base: float = 21000.0):
     a plain unvisited scan would drop it, but the yesterday-session universe keeps it.
     """
     rows = {}
-    # Hourly anchor bars across the window; default flat band well below the gap.
+    # Hourly anchor band (close base+1). The gap bottom (base+1, set via bar1.High below) is
+    # placed AT the band close so post-formation closes never fall BELOW it — a re-test that
+    # HOLDS, not a break. Re-entry alone is not invalidation; only a decisive CLOSE through the
+    # far edge invalidates the carry (see _detect_yesterday_session_fvgs).
     cur = pd.Timestamp("2025-11-12 18:00", tz="America/New_York")
     end = pd.Timestamp("2025-11-13 17:00", tz="America/New_York")
     while cur <= end:
         rows[cur] = (base, base + 2.0, base - 2.0, base + 1.0)
         cur += pd.Timedelta(hours=1)
     # Craft the 3-bar bull FVG ending at 01:00 (bars at 23:00, 00:00, 01:00):
-    #   bar1 (23:00) High = base+5 ; bar3 (01:00) Low = base+20 > base+5 → bull gap.
+    #   bar1 (23:00) High = base+1 ; bar3 (01:00) Low = base+20 > base+1 → bull gap.
     b1 = pd.Timestamp("2025-11-12 23:00", tz="America/New_York")
     b3 = pd.Timestamp("2025-11-13 01:00", tz="America/New_York")
-    rows[b1] = (base, base + 5.0, base - 2.0, base + 1.0)
+    rows[b1] = (base, base + 1.0, base - 2.0, base + 1.0)
     rows[b3] = (base + 25.0, base + 30.0, base + 20.0, base + 25.0)
     # Re-enter (fill) the gap later in the window so an unvisited scan would EXCLUDE it.
     fill_ts = pd.Timestamp("2025-11-13 10:00", tz="America/New_York")
@@ -2362,7 +2365,28 @@ def test_detect_yesterday_session_fvgs_unit():
     assert all(f.get("keep") is True for f in fvgs)
     assert all(f.get("kind") == "fvg" for f in fvgs)
     target = next(f for f in fvgs if f["name"] == "fvg_20251113_0100_bull")
-    assert target["bottom"] == 21005.0 and target["top"] == 21020.0
+    assert target["bottom"] == 21001.0 and target["top"] == 21020.0
+
+
+def test_yesterday_session_fvg_dropped_when_closed_through_far_edge():
+    """A carried bullish FVG is DROPPED once a post-formation bar CLOSES below its bottom
+    (a decisive break of the far edge = the imbalance is consumed). This is the 2026-05-28
+    fvg_20260527_0400_bull case: re-entry alone keeps it, but a close-through retires it."""
+    from session_pipeline import _detect_yesterday_session_fvgs
+    hist = _hist_with_yesterday_bull_fvg()  # bull FVG [21001, 21020], formation 01:00
+    # Drive a post-formation bar that CLOSES below the gap bottom (21001) → break.
+    break_ts = pd.Timestamp("2025-11-13 11:00", tz="America/New_York")
+    h = hist.copy()
+    h.loc[break_ts] = {"Open": 20995.0, "High": 20998.0, "Low": 20980.0,
+                       "Close": 20985.0, "Volume": 100}
+    h = h.sort_index()
+    now = pd.Timestamp("2025-11-13 18:00", tz="America/New_York")
+    names = {f["name"] for f in _detect_yesterday_session_fvgs(h, now)}
+    assert "fvg_20251113_0100_bull" not in names, (
+        f"bull FVG closed-through should be dropped, got {names}")
+    # Sanity: without the break it IS carried (the held-re-entry baseline).
+    names0 = {f["name"] for f in _detect_yesterday_session_fvgs(hist, now)}
+    assert "fvg_20251113_0100_bull" in names0
 
 
 def _seed_pipeline_with_yesterday_fvgs(monkeypatch):
@@ -2388,7 +2412,7 @@ def test_yesterday_session_fvgs_seeded_into_both_blocks(_isolate_state, monkeypa
     and liquidities_mes, keep-flagged, so _pair_fvgs can pair them by name."""
     _seed_pipeline_with_yesterday_fvgs(monkeypatch)
     daily = smt_state.load_daily()
-    for key, scale in (("liquidities", 21005.0), ("liquidities_mes", 3005.0)):
+    for key, scale in (("liquidities", 21001.0), ("liquidities_mes", 3001.0)):
         keep = [l for l in daily[key]
                 if l.get("kind") == "fvg" and l.get("keep")
                 and l["name"] == "fvg_20251113_0100_bull"]
@@ -2431,7 +2455,7 @@ def test_fill_fires_against_yesterday_session_fvg(_isolate_state, monkeypatch):
 
     today_mnq, today_mes = _mnq_mes_today("2025-11-13 18:00", n=1)
     now = pd.Timestamp("2025-11-13 18:01", tz="America/New_York")
-    # Bull FVG zone: MNQ [21005,21020], MES [3005,3020]. A bull FVG is filled by a retrace
+    # Bull FVG zone: MNQ [21001,21020], MES [3001,3020]. A bull FVG is filled by a retrace
     # DOWN. MNQ low dips into its zone (Low 21006 <= top 21020 → entered); MES stays ABOVE
     # its zone (Low 3030 > top 3020 → NOT entered) → leader=mnq fill_a.
     mnq_row = pd.Series({"Open": 21010.0, "High": 21015.0, "Low": 21006.0, "Close": 21010.0})
