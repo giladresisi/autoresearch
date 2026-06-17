@@ -35,6 +35,27 @@ Always pass `--date` explicitly (never rely on the script's default).
 
 4. Report which files were saved and their sizes, or show the error for any that failed.
 
+## Account gone / closed (no Tradovate reports possible)
+
+`get_tradovate_orders` detects when the account in `TRADING_ACCOUNT_IDS` is **absent from the
+Tradovate account selector** — i.e. it was closed/disabled (e.g. an Apex evaluation blown on
+losses). In that case it prints a single machine-detectable line and exits **7** *without*
+downloading another account's data:
+
+```
+TRADOVATE_ACCOUNT_MISSING: Tradovate account '<id>' was not found in the account selector (available: [...]). The account was likely closed/disabled — no reports can be fetched for it.
+```
+
+When you see `TRADOVATE_ACCOUNT_MISSING` (or exit code 7):
+- **Do NOT** treat it as a transient selector bug or retry with `--headed`.
+- **Notify the user clearly**: the configured Tradovate account appears to be closed/disabled,
+  so its Orders / Position History reports cannot be fetched. Quote the `available: [...]` list
+  so they can see which accounts (if any) still exist, and confirm whether `TRADING_ACCOUNT_IDS`
+  in `.env` should point at a different account.
+- **Continue** with whatever reports DID succeed (PMT alerts are keyed by API key, not the
+  Tradovate account, so they fetch independently). A partial report set is fine; downstream
+  analysis (session-analysis) proceeds without the broker reports.
+
 ## Debugging selectors
 
 If a script fails with a selector/timeout error, re-run with `--headed` to watch the browser:

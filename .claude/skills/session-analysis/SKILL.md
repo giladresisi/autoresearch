@@ -64,6 +64,21 @@ uv run python -m reports.get_pickmytrade_alerts --date <date>
 ```
 If fetching fails, note which files are missing and continue with what's available — a partial analysis is more useful than none.
 
+**Account closed / gone — no Tradovate reports.** If `get_tradovate_orders` prints
+`TRADOVATE_ACCOUNT_MISSING` (or exits 7), the configured Tradovate account is closed/disabled
+(e.g. an Apex evaluation blown on losses), so its Orders / Position History CSVs cannot be
+fetched and **do not exist** for this session. When this happens:
+- **Notify the user** plainly that the broker account appears closed/disabled, so there is no
+  Tradovate ground-truth this session (execution-fidelity / slippage / orphaned-fill checks
+  cannot be done). Quote the `available: [...]` accounts from the marker line.
+- **Proceed with the analysis anyway** on the remaining sources (events.jsonl, trades_full.tsv,
+  signals.log, pickmytrade_alerts.csv, levels.json, comments.md, the parquet bars, and the 1s
+  regression). The **Live↔Regression** axis (section B) and the strategy ledger are the focus;
+  **skip section A (Live↔Tradovate)** entirely.
+- In the Step-3 subagent prompt, state explicitly that the Tradovate reports are unavailable
+  because the account was closed, that section A must be skipped, and that `discrepancies.md` +
+  `session-analysis.md` must record the missing broker ground-truth (with the reason).
+
 ---
 
 ## Step 2.1 — Rebuild a complete trade ledger from events.jsonl
