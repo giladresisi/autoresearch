@@ -1478,6 +1478,33 @@ def _compute_smt_score_v2(active_set: list) -> float:
     return max(-1.0, min(1.0, score / max_possible))
 
 
+def _apply_conviction_override(
+    direction: str,
+    reason: dict,
+    rule_name: str,
+    smt_conviction: float,
+    smt_conviction_inputs: "dict | None",
+) -> str:
+    """GIL-33: extend the GIL-32 standing-SMT-conviction override beyond rule2b.
+
+    A meaningful standing conviction (``|conv| >= CONVICTION_STRONG``) whose sign CONTRADICTS
+    ``direction`` flips it to the SMT side and tags ``reason`` so the flip is reproducible from
+    events.jsonl — including ``smt_override_rule`` (which non-rule2b rule was flipped). Mirrors
+    the rule2b inline override (see the rule2b block) byte-for-byte; the reversal-lock veto stays
+    rule2b-scoped (GIL-33 decision 2). Default conviction 0.0 → no-op → byte-identical (back-compat).
+    Mutates ``reason``; returns the (possibly flipped) direction.
+    """
+    if smt_conviction and abs(smt_conviction) >= _smt_conv.CONVICTION_STRONG:
+        smt_dir = "down" if smt_conviction < 0 else "up"
+        if smt_dir != direction:
+            reason["smt_override"] = True
+            reason["smt_conviction"] = round(smt_conviction, 3)
+            reason["smt_conviction_inputs"] = smt_conviction_inputs
+            reason["smt_override_rule"] = rule_name
+            return smt_dir
+    return direction
+
+
 def _determine_direction(
     current_bar: dict,
     mnq_1m: pd.DataFrame,
@@ -1830,7 +1857,11 @@ def _determine_direction(
         reason["rule"]              = "rule2"
         reason["approaching_level"] = r2["approaching_level"]["name"]
         reason["approaching_dist"]  = round(r2["dist"], 1)
-        return r2["direction"], reason
+        # GIL-33: extend the GIL-32 standing-conviction override to rule2 (it was rule2b-only).
+        _dir = _apply_conviction_override(
+            r2["direction"], reason, "rule2", smt_conviction, smt_conviction_inputs
+        )
+        return _dir, reason
 
     # Rules 3+4: multi-TF premium/discount bias + BOS/CHoCH + SMT scoring layer.
     pd_sc = _compute_pd_score(current_close, week_high, week_low, day_high, day_low)
@@ -1861,7 +1892,14 @@ def _determine_direction(
 
     if abs(combined) >= DIRECTION_SCORE_THRESHOLD:
         reason["rule"] = "rule3_4"
-        return ("up" if combined > 0 else "down"), reason
+        # GIL-33: extend the GIL-32 standing-conviction override to rule3_4. The blend above
+        # (which carries the separate active-set `smt_sc`) is already computed, so the standing
+        # conviction is not double-counted — it only flips the committed direction.
+        _dir = _apply_conviction_override(
+            "up" if combined > 0 else "down", reason, "rule3_4",
+            smt_conviction, smt_conviction_inputs,
+        )
+        return _dir, reason
 
     # Rule 5: global trend fallback when no rule commits.
     reason["rule"] = "rule5_trend"
