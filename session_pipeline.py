@@ -320,6 +320,8 @@ class SessionPipeline:
         self._ext_levels: list[tuple[str, float]] = []
         self._last_daily_date: "datetime.date | None" = None
         self._last_daily_minute: "pd.Timestamp | None" = None
+        # O2 (GIL-34): once-per-session guard for the 09:29 ET cautious-target recompute.
+        self._last_0929_recompute_date: "datetime.date | None" = None
         # Tracks whether the previous bar was inside an entry-allowed window.
         # Used to detect window-entry events and clear ghost positions.
         self._was_in_window: "bool | None" = None
@@ -839,6 +841,80 @@ class SessionPipeline:
             cache[freq] = v
         return v
 
+    def _recompute_cautious_at_0929(self, price: float) -> None:
+        """O2 (GIL-34): re-anchor the cautious TARGETS to `price` (the 09:29 ET close),
+        keeping DIRECTION unchanged, so the 09:30-09:45 take-profit-on-touch and any
+        position rolling into the open trade against fresh, reachable levels.
+
+        Two updates: (1) the live hypothesis ladder, anchored at `price` for ITS OWN
+        direction (no-op if direction is none / manual lock — recompute_cautious_for_fill);
+        (2) if a position is open, the FROZEN ladder is re-anchored against the position's
+        mgmt_direction (the trade is managed off the frozen snapshot, whose direction may
+        differ from the live hypothesis).
+
+        Protection guard (open position only): the INITIAL target governs the protective
+        break-even / trailing-stop arming, so on an open position it is left FROZEN entirely —
+        re-anchoring it (even tighter) perturbs the arm chain and can turn a managed win into a
+        raw stop-out (observed 06-16, where a sub-point initial shift broke the +$52 protective
+        exit). Only the SECONDARY target — the level the 09:30-09:45 take-profit-on-touch acts
+        on — is re-anchored on an open position, and then only when the new level is CLOSER to
+        `price` (tighten-only); a farther secondary is kept. The live (flat) hypothesis is fully
+        re-anchored (no open trade to protect). Best-effort; never raises into the bar loop."""
+        try:
+            dly = _smt_state.load_daily() or {}
+            liq = dly.get("liquidities", [])
+            ath = (_smt_state.load_global() or {}).get("all_time_high")
+            # (1) Live hypothesis ladder — own direction (no open position to protect → full re-anchor).
+            hyp = _smt_state.load_hypothesis()
+            _hyp_mod.recompute_cautious_for_fill(hyp, price, liq, ath)
+            _smt_state.save_hypothesis(hyp)
+            # (2) Open position — re-anchor the frozen ladder against mgmt_direction, tighten-only.
+            pos = _smt_state.load_position()
+            active = pos.get("active") or {}
+            mgmt_dir = active.get("mgmt_direction")
+            if active and mgmt_dir in ("up", "down"):
+                _mgmt_hyp = {"direction": mgmt_dir}
+                _hyp_mod.recompute_cautious_for_fill(
+                    _mgmt_hyp, price, liq, ath, pos.get("cautious_dist_shrinks", 0))
+
+                def _to_f(x):
+                    try:
+                        return float(x) if x not in ("", None) else None
+                    except (TypeError, ValueError):
+                        return None
+
+                def _tighter(new_raw, new_lvl, old_raw, old_lvl):
+                    """Keep whichever target is closer to `price` (more protective). Empty new →
+                    keep old; empty old → take new."""
+                    nv, ov = _to_f(new_raw), _to_f(old_raw)
+                    if nv is None:
+                        return old_raw, old_lvl
+                    if ov is None:
+                        return new_raw, new_lvl
+                    return (new_raw, new_lvl) if abs(nv - price) <= abs(ov - price) \
+                        else (old_raw, old_lvl)
+
+                # INITIAL: frozen — the protective layer is never re-anchored on an open trade.
+                ci_raw, ci_lvl = active.get("cautious_initial", ""), active.get("cautious_initial_level", "")
+                # SECONDARY: re-anchored tighten-only (the take-profit-on-touch target).
+                cs_raw, cs_lvl = _tighter(
+                    _mgmt_hyp.get("cautious_price_secondary", ""),
+                    _mgmt_hyp.get("cautious_price_secondary_level", ""),
+                    active.get("cautious_secondary", ""),
+                    active.get("cautious_secondary_level", ""))
+                _chosen = {
+                    "direction": mgmt_dir,
+                    "cautious_price_initial":         ci_raw,
+                    "cautious_price_initial_level":   ci_lvl,
+                    "cautious_price_secondary":       cs_raw,
+                    "cautious_price_secondary_level": cs_lvl,
+                }
+                _smt_state.freeze_active_mgmt(active, mgmt_dir, _chosen)
+                pos["active"] = active
+                _smt_state.save_position(pos)
+        except Exception:
+            pass
+
     def on_1m_bar(
         self,
         now: pd.Timestamp,
@@ -876,6 +952,16 @@ class SessionPipeline:
                 and now.date() != self._last_daily_date):
             self._last_daily_minute = _bar_floor
             self.on_daily_or_startup(now, today_mnq, today_mes)
+
+        # O2 (GIL-34): at 09:29 ET, recompute the cautious TARGETS (not direction)
+        # anchored at the current price, so the 09:30-09:45 take-profit-on-touch and any
+        # position rolling into the open trade against fresh, reachable levels. Once per
+        # session. Gated behind the O2 flag (default OFF → never fires → byte-identical).
+        if (_trend_mod.SECONDARY_TP_ON_TOUCH_0930
+                and now.hour == 9 and now.minute == 29
+                and now.date() != self._last_0929_recompute_date):
+            self._last_0929_recompute_date = now.date()
+            self._recompute_cautious_at_0929(float(mnq_bar_row["Close"]))
 
         _o = float(mnq_bar_row["Open"])
         _h = float(mnq_bar_row["High"])

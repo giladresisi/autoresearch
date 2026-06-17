@@ -60,6 +60,27 @@ def _in_open_window(now: datetime) -> bool:
     et = ts.tz_convert(_ET) if ts.tzinfo is not None else ts
     return _OPEN_WINDOW_START_ET <= et.time() <= _OPEN_WINDOW_END_ET
 
+
+# ---------------------------------------------------------------------------
+# O2 (GIL-34) Rule 1 — secondary cautious = take-profit on touch, 09:30-09:45 ET.
+# Targets the choppy short counter-move right at the 9:30 open (usually after a
+# meaningful SMT, accurate but whippy): the moment the SECONDARY cautious level is
+# touched (wick reach), market-close the position to bank the target instead of
+# arming a protective stop and risking a give-back on the rejection. Initial-level
+# protection is unchanged. The SMT-gated reverse entry (Rule 2) is intentionally
+# NOT implemented here (deferred), so there is no phantom-fill exposure. Default
+# OFF → byte-identical baseline.
+SECONDARY_TP_ON_TOUCH_0930: bool = False
+_SECONDARY_TP_START_ET: _dtime = _dtime(9, 30)
+_SECONDARY_TP_END_ET:   _dtime = _dtime(9, 45)
+
+
+def _in_secondary_tp_window(now: datetime) -> bool:
+    """True when `now` (tz-aware → ET; naive → assumed ET) is inside [09:30, 09:45] ET."""
+    ts = pd.Timestamp(now)
+    et = ts.tz_convert(_ET) if ts.tzinfo is not None else ts
+    return _SECONDARY_TP_START_ET <= et.time() <= _SECONDARY_TP_END_ET
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -423,6 +444,25 @@ def run_trend(
 
         def _reversal(price: float) -> bool:
             return (bar_low <= price) if direction == "up" else (bar_high >= price)
+
+        # ---- O2 (GIL-34) Rule 1: secondary take-profit on touch (09:30-09:45 ET) ----
+        # Placed before the cautious_state branching so it applies uniformly in every
+        # state (no / initial_surpassed / initial / secondary_surpassed / secondary):
+        # the instant the SECONDARY level is touched (wick reach) inside the window,
+        # market-close to bank the target. OFF default short-circuits before the window
+        # check → byte-identical. No reverse entry here (deferred) → no phantom-fill.
+        _secondary_tp_on_touch = (
+            SECONDARY_TP_ON_TOUCH_0930
+            and cautious_secondary is not None
+            and _surpassed(cautious_secondary)
+            and _in_secondary_tp_window(now)
+        )
+        if _secondary_tp_on_touch:
+            _clear_position_and_hypothesis(position, hypothesis, clear_active=True)
+            save_position(position)
+            save_hypothesis(hypothesis)
+            return _market_close_signal(
+                now, bar_mid, reason="secondary_tp_touch", close_reason="secondary-tp-touch")
 
         # ---- 3a: unarmed — check if a cautious level was reached -----------
         if cautious_state == "no":

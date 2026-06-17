@@ -765,3 +765,84 @@ class TestOpenWindowDailyMidSuspend:
         result = run_trend(self._NOW_OUT, self._BAR(), self._RECENT())
         assert result is not None and result["kind"] == "trend-broken"
         assert load_hypothesis()["direction"] == "none"
+
+
+class TestSecondaryTakeProfitOnTouch0930:
+    """O2 (GIL-34) Rule 1: during [09:30,09:45] ET, the instant the SECONDARY cautious
+    level is touched (wick reach), market-close the position. Default OFF → byte-identical.
+    No reverse entry (deferred) — only the take-profit close is implemented here."""
+
+    _NOW_IN  = pd.Timestamp("2026-06-16T09:35:00-04:00")   # in [09:30,09:45]
+    _NOW_OUT = pd.Timestamp("2026-06-16T10:19:00-04:00")   # outside the window
+
+    def _setup_short_secondary(self):
+        """Active SHORT, secondary cautious = day_low @ 80, unarmed."""
+        hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
+        hyp["direction"] = "down"
+        save_hypothesis(hyp)
+        pos = copy.deepcopy(DEFAULT_POSITION)
+        pos["active"] = _active_position(
+            cautious="no", direction="short",
+            cautious_secondary="80", cautious_secondary_level="day_low",
+        )
+        save_position(pos)
+        save_daily(_daily_with_levels([
+            {"name": "day_high", "kind": "level", "price": 120.0},
+            {"name": "day_low",  "kind": "level", "price": 80.0},
+        ]))
+
+    # wick-only touch of secondary: low 78 <= 80 (surpassed), close 84 not < 80 (no close-beyond)
+    _TOUCH = staticmethod(lambda: make_1m_bar(open_=85, high=86, low=78, close=84))
+    _NO_TOUCH = staticmethod(lambda: make_1m_bar(open_=85, high=86, low=82, close=84))  # low 82 > 80
+    _RECENT = staticmethod(lambda: make_recent_bars(closes=[90, 84], opens=[92, 85]))
+
+    def test_flag_off_default_no_tp_close(self):
+        """Default OFF: O2 path inert — a wick-only secondary touch does NOT market-close
+        (normal behavior: position waits in secondary_surpassed)."""
+        import trend
+        from trend import run_trend
+        from smt_state import load_position
+
+        assert trend.SECONDARY_TP_ON_TOUCH_0930 is False
+        self._setup_short_secondary()
+        result = run_trend(self._NOW_IN, self._TOUCH(), self._RECENT())
+        # Not the O2 take-profit close; position still active.
+        assert result is None or result.get("close_reason") != "secondary-tp-touch"
+        assert load_position()["active"] != {}
+
+    def test_flag_on_in_window_market_close_on_touch(self, monkeypatch):
+        """ON + in-window + secondary touched → market-close (take profit), position cleared."""
+        import trend
+        from trend import run_trend
+        from smt_state import load_position
+
+        monkeypatch.setattr(trend, "SECONDARY_TP_ON_TOUCH_0930", True)
+        self._setup_short_secondary()
+        result = run_trend(self._NOW_IN, self._TOUCH(), self._RECENT())
+        assert result is not None and result["kind"] == "market-close"
+        assert result["close_reason"] == "secondary-tp-touch"
+        assert load_position()["active"] == {}
+
+    def test_flag_on_out_of_window_no_tp_close(self, monkeypatch):
+        """ON but OUTSIDE the window: the O2 take-profit close must NOT fire."""
+        import trend
+        from trend import run_trend
+        from smt_state import load_position
+
+        monkeypatch.setattr(trend, "SECONDARY_TP_ON_TOUCH_0930", True)
+        self._setup_short_secondary()
+        result = run_trend(self._NOW_OUT, self._TOUCH(), self._RECENT())
+        assert result is None or result.get("close_reason") != "secondary-tp-touch"
+        assert load_position()["active"] != {}
+
+    def test_flag_on_in_window_no_touch_no_close(self, monkeypatch):
+        """ON + in-window but secondary NOT touched → no take-profit close."""
+        import trend
+        from trend import run_trend
+        from smt_state import load_position
+
+        monkeypatch.setattr(trend, "SECONDARY_TP_ON_TOUCH_0930", True)
+        self._setup_short_secondary()
+        result = run_trend(self._NOW_IN, self._NO_TOUCH(), self._RECENT())
+        assert result is None or result.get("close_reason") != "secondary-tp-touch"
+        assert load_position()["active"] != {}

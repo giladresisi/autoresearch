@@ -2470,3 +2470,137 @@ def test_fill_fires_against_yesterday_session_fvg(_isolate_state, monkeypatch):
     assert f["leader"] == "mnq"
     assert f["price"] is not None  # plot y-coordinate must be set
     assert emitted == events
+
+
+def test_o2_recompute_cautious_at_0929_reanchors_targets_keeps_direction(_isolate_state):
+    """O2 (GIL-34): _recompute_cautious_at_0929 re-anchors the cautious ladder to the
+    given (09:29) price for both the live hypothesis (its own direction) and an open
+    position's FROZEN ladder (its mgmt_direction), WITHOUT changing direction."""
+    import smt_state as _ss
+
+    # Fresh levels: day_low 50 pts below the 09:29 price (21000) → within SECONDARY_MAX_DIST.
+    _ss.save_daily({"liquidities": [
+        {"name": "day_low",  "kind": "level", "price": 20950.0},
+        {"name": "day_high", "kind": "level", "price": 21100.0},
+    ]})
+    _ss.save_global({"all_time_high": 25000.0, "session_ath": 25000.0,
+                     "confidence": "medium", "trend": "down"})
+
+    # Stale ladders on both the hypothesis and the open (short) position.
+    hyp = _ss.load_hypothesis()
+    hyp["direction"] = "down"
+    hyp["cautious_price_secondary"]       = "99999"
+    hyp["cautious_price_secondary_level"] = "stale"
+    _ss.save_hypothesis(hyp)
+
+    pos = _ss.load_position()
+    pos["active"] = {
+        "time": "2026-06-16T03:00:00-04:00", "fill_price": 21080.0,
+        "direction": "short", "stop": 21120.0, "contracts": 2, "cautious": "no",
+        "mgmt_direction": "down",
+        "cautious_initial": "99999", "cautious_initial_level": "stale",
+        "cautious_secondary": "99999", "cautious_secondary_level": "stale",
+        "backing_tier": "day",
+    }
+    _ss.save_position(pos)
+
+    from session_pipeline import SessionPipeline
+    pipe = SessionPipeline.__new__(SessionPipeline)  # helper uses no __init__ state
+    pipe._recompute_cautious_at_0929(21000.0)
+
+    # day_low 20950 + SECONDARY_OFFSET 5 (down) = 20955.0 — fresh, anchored at 21000.
+    hyp2 = _ss.load_hypothesis()
+    assert hyp2["cautious_price_secondary"] == 20955.0
+    assert hyp2["cautious_price_secondary_level"] == "day_low"
+    assert hyp2["direction"] == "down"  # direction untouched
+
+    pos2 = _ss.load_position()
+    act2 = pos2["active"]
+    assert act2["cautious_secondary"] == 20955.0
+    assert act2["cautious_secondary_level"] == "day_low"
+    assert act2["mgmt_direction"] == "down"  # frozen direction untouched
+
+
+def test_o2_recompute_0929_tighten_only_keeps_closer_existing_target(_isolate_state):
+    """O2 (GIL-34): on an OPEN position, the 09:29 recompute must NOT loosen a target —
+    if the re-anchored target would be FARTHER from price than the existing frozen one,
+    keep the existing (tighter / more protective) target. Protects against the disarm
+    side effect seen on 06-16."""
+    import smt_state as _ss
+
+    # day_low 50 pts below price → recompute yields secondary ~20955 (45 pts from price).
+    _ss.save_daily({"liquidities": [
+        {"name": "day_low",  "kind": "level", "price": 20950.0},
+        {"name": "day_high", "kind": "level", "price": 21100.0},
+    ]})
+    _ss.save_global({"all_time_high": 25000.0, "session_ath": 25000.0,
+                     "confidence": "medium", "trend": "down"})
+
+    hyp = _ss.load_hypothesis()
+    hyp["direction"] = "none"   # flat hypothesis (position rode in); recompute no-ops on it
+    _ss.save_hypothesis(hyp)
+
+    # Existing frozen short with a TIGHT secondary at 20990 (10 pts from the 21000 price) —
+    # closer than the recompute's 20955 (45 pts). Tighten-only must keep 20990.
+    pos = _ss.load_position()
+    pos["active"] = {
+        "time": "2026-06-16T03:00:00-04:00", "fill_price": 21080.0,
+        "direction": "short", "stop": 21120.0, "contracts": 2, "cautious": "no",
+        "mgmt_direction": "down",
+        "cautious_initial": "", "cautious_initial_level": "",
+        "cautious_secondary": "20990", "cautious_secondary_level": "prev_tight",
+        "backing_tier": "day",
+    }
+    _ss.save_position(pos)
+
+    from session_pipeline import SessionPipeline
+    pipe = SessionPipeline.__new__(SessionPipeline)
+    pipe._recompute_cautious_at_0929(21000.0)
+
+    act = _ss.load_position()["active"]
+    # The farther recompute (20955) is rejected; the closer existing 20990 is kept.
+    assert float(act["cautious_secondary"]) == 20990.0
+    assert act["cautious_secondary_level"] == "prev_tight"
+    assert act["mgmt_direction"] == "down"
+
+
+def test_o2_recompute_0929_open_position_initial_frozen(_isolate_state):
+    """O2 (GIL-34): on an OPEN position the INITIAL target (protective break-even layer)
+    is NEVER re-anchored by the 09:29 recompute — only the SECONDARY (take-profit target)
+    is. Touching the initial perturbs the protective-stop arming (the 06-16 −$150 cause)."""
+    import smt_state as _ss
+
+    _ss.save_daily({"liquidities": [
+        {"name": "day_low",  "kind": "level", "price": 20950.0},
+        {"name": "day_high", "kind": "level", "price": 21100.0},
+    ]})
+    _ss.save_global({"all_time_high": 25000.0, "session_ath": 25000.0,
+                     "confidence": "medium", "trend": "down"})
+
+    hyp = _ss.load_hypothesis()
+    hyp["direction"] = "none"   # isolate the open-position path (flat recompute no-ops)
+    _ss.save_hypothesis(hyp)
+
+    pos = _ss.load_position()
+    pos["active"] = {
+        "time": "2026-06-16T03:00:00-04:00", "fill_price": 21080.0,
+        "direction": "short", "stop": 21120.0, "contracts": 2, "cautious": "no",
+        "mgmt_direction": "down",
+        "cautious_initial": "88888", "cautious_initial_level": "SENTINEL",
+        "cautious_secondary": "99999", "cautious_secondary_level": "stale",
+        "backing_tier": "day",
+    }
+    _ss.save_position(pos)
+
+    from session_pipeline import SessionPipeline
+    pipe = SessionPipeline.__new__(SessionPipeline)
+    pipe._recompute_cautious_at_0929(21000.0)
+
+    act = _ss.load_position()["active"]
+    # INITIAL untouched (frozen), even though a recompute ran.
+    assert act["cautious_initial"] == "88888"
+    assert act["cautious_initial_level"] == "SENTINEL"
+    # SECONDARY re-anchored to the closer fresh level (20950 + 5 offset for down).
+    assert float(act["cautious_secondary"]) == 20955.0
+    assert act["cautious_secondary_level"] == "day_low"
+    assert act["mgmt_direction"] == "down"
