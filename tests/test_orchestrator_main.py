@@ -256,6 +256,43 @@ def test_stop_pre_session_ib_noop_when_source_none():
 
 
 # ---------------------------------------------------------------------------
+# _make_ib_health_check — maintenance-break shutdown is GRACEFUL, not a CRITICAL failure
+# ---------------------------------------------------------------------------
+
+def test_make_ib_health_check_raises_graceful_stop_on_thread_death(capsys):
+    """A dead pre-session IB accumulator thread triggers a CLEAN shutdown (raise
+    _GracefulStop), routed through run()'s handler → exit 0 + automation.main teardown.
+
+    Regression: previously this printed a CRITICAL "Pre-session IB connection failed …
+    Terminating now" and sys.exit(4)'d — a scary failure for the routine, expected
+    maintenance-break IB drop. It must now raise _GracefulStop with an expected-tone message.
+    """
+    from orchestrator.main import _make_ib_health_check, _GracefulStop
+    thread = MagicMock()
+    thread.is_alive.return_value = False
+    check = _make_ib_health_check(thread, [RuntimeError("IB Gateway closed the connection")])
+    with pytest.raises(_GracefulStop):
+        check()
+    out = capsys.readouterr().out
+    assert "maintenance break" in out.lower()
+    assert "CRITICAL" not in out and "Terminating now" not in out
+
+
+def test_make_ib_health_check_noop_when_thread_alive(capsys):
+    from orchestrator.main import _make_ib_health_check
+    thread = MagicMock()
+    thread.is_alive.return_value = True
+    _make_ib_health_check(thread, [None])()  # alive → no raise, no output
+    assert capsys.readouterr().out == ""
+
+
+def test_kill_automation_main_noop_when_none_running():
+    """No automation.main running in this worktree during tests → must not raise."""
+    from orchestrator.main import _kill_automation_main
+    _kill_automation_main()  # must complete without raising
+
+
+# ---------------------------------------------------------------------------
 # _check_parquet_files tests
 # ---------------------------------------------------------------------------
 

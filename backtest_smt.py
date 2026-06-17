@@ -1199,6 +1199,24 @@ def _build_5m_bar_v2(session_bars: "pd.DataFrame", bar_ts: "pd.Timestamp") -> "d
     }
 
 
+def _ath_as_of(frame, end_pos: int) -> float:
+    """True all-time high (max `High`) over the FULL pre-session history `frame.iloc[:end_pos]`.
+
+    Used to seed a regression run's ATH as of its first replayed date. The 1s-mode `hist_*`
+    frame the pipeline sees is capped at a 60-day lookback (perf), so an ATH older than 60 days
+    would be missed and rule2b's recovery guard would misfire (the GIL-23 windowing flaw). This
+    looks at the whole history before the open instead. Returns 0.0 when there is no prior
+    history (first date) or the slice is empty/NaN — never raises.
+    """
+    if end_pos <= 0:
+        return 0.0
+    _h = frame.iloc[:end_pos]["High"]
+    if _h.empty:
+        return 0.0
+    _m = float(_h.max())
+    return _m if _m == _m else 0.0  # NaN guard (NaN != NaN)
+
+
 def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True,
                     mode: str = "1m", started: "datetime.datetime | None" = None,
                     reset_pending: bool = True) -> dict:
@@ -1336,6 +1354,23 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         day_events: list[dict] = []
         pipeline = SessionPipeline(hist_mnq_1m, hist_mes_1m, day_events.append)
         pipeline.on_session_start(session_start_ts, today_at_open, force_reset=True)
+
+        # Seed this run's ATH from the TRUE all-time high as of the session open (the full
+        # pre-session history), not the 60-day liquidity-lookback window on_session_start saw in
+        # 1s mode — otherwise an ATH older than 60 days is missed and rule2b's recovery guard
+        # misfires (the GIL-23 windowing flaw). Set it AFTER on_session_start (so the corruption
+        # guard, which would nuke a legitimately-higher value as ">3x the window max", can't run
+        # on it); take the max so we never lower what the pipeline already computed.
+        _ath_seed = (
+            _ath_as_of(_mnq_1m_agg, _mnq_hist_end) if mode == "1s"
+            else _ath_as_of(mnq_all, _mnq_pos_sess)
+        )
+        if _ath_seed > 0:
+            _g = _smt_state.load_global()
+            if _ath_seed > float(_g.get("all_time_high", 0) or 0):
+                _g["all_time_high"] = _ath_seed
+                _g["session_ath"]   = _ath_seed
+                _smt_state.save_global(_g)
 
         # Save levels snapshot for chart visualisation (after run_daily populates state)
         if write_events:

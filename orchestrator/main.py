@@ -323,16 +323,30 @@ def _sleep_until(target: datetime.datetime, label: str, ib_health_check=None) ->
 
 
 def _make_ib_health_check(thread: _threading.Thread, thread_exc: list):
-    """Return a callable that terminates the orchestrator if the IB thread died with an error."""
+    """Return a callable that triggers a clean orchestrator shutdown if the pre-session IB
+    accumulator thread dies.
+
+    IB Gateway routinely drops during the nightly CME maintenance break (17:00-18:00 ET,
+    market closed); the watchdog then kills the now-idle connection as a "zombie", ending this
+    accumulator thread. We intentionally do NOT keep the orchestrator running through the
+    maintenance hour — so this is an EXPECTED, graceful shutdown, not a failure. It raises
+    `_GracefulStop`, which routes through run()'s clean-shutdown handler (stop the accumulator,
+    exit 0); run()'s `finally` then terminates any automation.main subprocess so nothing is
+    left orphaned. Relaunch the orchestrator for the next session.
+
+    (Previously this printed a CRITICAL "Pre-session IB connection failed … Terminating now"
+    and `sys.exit(4)`'d — a scary failure for what is a routine, expected maintenance-break
+    shutdown.)
+    """
     def check() -> None:
         if not thread.is_alive() and thread_exc[0] is not None:
             print(
-                f"\n[ORCH] *** CRITICAL: Pre-session IB connection failed: {thread_exc[0]}\n"
-                "[ORCH] *** The strategy cannot run until IB Gateway is active and reachable.\n"
-                "[ORCH] *** Fix IB Gateway and restart the orchestrator. Terminating now. ***",
+                f"[ORCH] Pre-session IB connection ended ({thread_exc[0]}) — expected during the "
+                "17:00-18:00 ET maintenance break. Shutting down cleanly; relaunch for the "
+                "next session.",
                 flush=True,
             )
-            sys.exit(4)
+            raise _GracefulStop()
     return check
 
 
@@ -391,6 +405,46 @@ def _kill_stale_orchestrator() -> None:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     _pidfile().write_text(str(current_pid))
+
+
+def _kill_automation_main() -> None:
+    """Best-effort: terminate any automation.main trading subprocess from THIS worktree.
+
+    Safety net so the trading process never outlives the orchestrator. An orphaned
+    automation.main kept trading while paused after the orchestrator died once (incident
+    2026-06-12 D2). Called from run()'s `finally`, so ANY orchestrator exit — graceful
+    maintenance shutdown, Ctrl-C, or crash — takes the trading subprocess down with it.
+    Worktree-scoped by cwd so a sibling worktree's (possibly live) process is never touched.
+    Never raises.
+    """
+    try:
+        import psutil
+    except Exception:
+        return
+    worktree_root = Path(__file__).resolve().parent.parent
+    killed: list[int] = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if proc.info.get("name", "").lower() not in ("python.exe", "python"):
+                continue
+            cmdline = proc.info.get("cmdline") or []
+            if not any("automation.main" in str(c) for c in cmdline):
+                continue
+            try:
+                if Path(proc.cwd()).resolve() != worktree_root:
+                    continue
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                continue
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except psutil.TimeoutExpired:
+                proc.kill()
+            killed.append(proc.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    if killed:
+        print(f"[ORCH] Terminated orphaned automation.main subprocess(es): {killed}", flush=True)
 
 
 def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_reset: bool = False) -> None:
@@ -539,6 +593,9 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
         )
         raise
     finally:
+        # Never leave the trading subprocess orphaned — kill automation.main on ANY exit
+        # (graceful maintenance shutdown, Ctrl-C, or crash). Best-effort; never raises.
+        _kill_automation_main()
         try:
             _pf = _pidfile()
             if _pf.exists() and _pf.read_text().strip() == str(_os.getpid()):

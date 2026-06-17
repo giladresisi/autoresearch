@@ -15,6 +15,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import paths
 
 
+class AccountNotFoundError(RuntimeError):
+    """The configured Tradovate account is absent from the account selector.
+
+    Raised when the account dropdown opens with other accounts but NOT the one in
+    `TRADING_ACCOUNT_IDS` — i.e. the account was closed/disabled (e.g. an Apex evaluation
+    blown on losses). We fail fast instead of silently downloading another account's data.
+    """
+
+
 def _sessions_dir() -> Path:
     """Session root: the machine-global live sessions root (paths.sessions_dir()).
 
@@ -147,6 +156,25 @@ def run(session_date: datetime.date, *, headed: bool = False) -> list[Path]:
             if acct_link.is_visible():
                 acct_link.click()
                 page.wait_for_timeout(500)
+            else:
+                # Distinguish "account gone" from "dropdown didn't open". List the accounts
+                # the selector actually offers; if it opened with accounts but ours is absent,
+                # the account was closed/disabled (e.g. an Apex eval blown on losses) — fail
+                # fast with a clear, machine-detectable error instead of silently downloading
+                # another account's data. If the dropdown didn't open at all (no a.account
+                # links), keep the old graceful skip (transient UI; current selection may be ok).
+                _avail = page.locator("a.account")
+                _names = [
+                    (_avail.nth(i).text_content() or "").strip()
+                    for i in range(_avail.count())
+                ]
+                _names = [n for n in _names if n]
+                if _names:
+                    raise AccountNotFoundError(
+                        f"Tradovate account '{account_id}' was not found in the account "
+                        f"selector (available: {_names}). The account was likely "
+                        f"closed/disabled — no reports can be fetched for it."
+                    )
 
             # ── Open Reports modal ─────────────────────────────────────────────
             reports_btn.click()
@@ -257,7 +285,13 @@ def main():
         if args.date
         else datetime.date.today() - datetime.timedelta(days=1)
     )
-    paths = run(date, headed=args.headed)
+    try:
+        paths = run(date, headed=args.headed)
+    except AccountNotFoundError as e:
+        # Machine-detectable marker so callers (get-reports / session-analysis skills) can
+        # recognize the account-gone case and proceed without these reports.
+        print(f"TRADOVATE_ACCOUNT_MISSING: {e}", flush=True)
+        sys.exit(7)
     for p in paths:
         print(f"Saved: {p}")
 

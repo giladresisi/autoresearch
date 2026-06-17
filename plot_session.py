@@ -381,7 +381,9 @@ def _closest_level_name(lv: float) -> str | None:
 def _div_scope(e: dict) -> "str | None":
     """Specific level / FVG name this SMT div fired against. Prefers the event's
     ref_name (emitted by the SMT V2 detector); falls back to the nearest named level
-    by price for legacy events. FVG names render as fvg_1hr_<HHMM>."""
+    by price for legacy events. FVG names render as fvg_1hr_<HHMM>, where HHMM is the
+    MIDDLE bar of the 3-candle FVG (matching TradingView/ICT, which anchor the box on the
+    middle candle). The stored name encodes the completing 3rd bar, so we display −1h."""
     name = e.get("ref_name")
     if not name:
         lv = e.get("mnq_div_price")
@@ -389,8 +391,15 @@ def _div_scope(e: dict) -> "str | None":
     if not name:
         return None
     if name.startswith("fvg_"):
-        parts = name.split("_")  # fvg_YYYYMMDD_HHMM_side
-        return f"fvg_1hr_{parts[2]}" if len(parts) >= 3 else name
+        parts = name.split("_")  # fvg_YYYYMMDD_HHMM_side (HHMM = 3rd/completing bar)
+        if len(parts) >= 3:
+            try:
+                from datetime import datetime, timedelta
+                _mid = datetime.strptime(parts[1] + parts[2], "%Y%m%d%H%M") - timedelta(hours=1)
+                return f"fvg_1hr_{_mid.strftime('%H%M')}"
+            except (ValueError, IndexError):
+                return f"fvg_1hr_{parts[2]}"
+        return name
     return LEVEL_STYLE.get(name, (name,))[0]
 
 def _div_label(e: dict) -> str:
