@@ -1809,11 +1809,19 @@ def _determine_direction(
             # that same liquidity until the SMT is level-accepted-through or fulfilled. Force back
             # to the SMT side; because that side equals the standing hypothesis direction this is a
             # PROTECT (no reform / no position reset — none->dir gate). Default [] → no-op.
-            _veto_dir = _smt_lock.vetoes(smt_reversal_locks or [], r2b_dir, _last_liq)
-            if _veto_dir is not None and _veto_dir != r2b_dir:
-                reason["smt_reversal_lock"] = _last_liq
-                reason["smt_reversal_lock_dir"] = _veto_dir
-                r2b_dir = _veto_dir
+            #
+            # PRECEDENCE (GIL-32): the lock exists to stop rule2b's MECHANICAL false-positive flips
+            # — NOT to cancel a fresh strong-conviction override. When `smt_override` already fired,
+            # a meaningful with-trend reversal conviction (|conv|>=STRONG) is the better signal than
+            # an older protected hypothesis, so the lock does NOT veto it (06-15 20:07: a bearish
+            # week_high lock outlived its bearish conviction and was cancelling a correct +1.0
+            # bullish day_low override). Lock-vs-rule2b protection (no override) is unchanged.
+            if not reason.get("smt_override"):
+                _veto_dir = _smt_lock.vetoes(smt_reversal_locks or [], r2b_dir, _last_liq)
+                if _veto_dir is not None and _veto_dir != r2b_dir:
+                    reason["smt_reversal_lock"] = _last_liq
+                    reason["smt_reversal_lock_dir"] = _veto_dir
+                    r2b_dir = _veto_dir
             return r2b_dir, reason
 
     # Rule 2: trending toward an unvisited level with momentum — decisive continuation.
