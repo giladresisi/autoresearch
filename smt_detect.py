@@ -326,18 +326,34 @@ def revalidate_and_filter_pending(
             if ft is not pd.NaT:
                 win = hist_mnq[(hist_mnq.index > ft) & (hist_mnq.index < session_open)]
                 if not win.empty:
-                    _tier = e.get("tier", "session")
+                    _is_fill = e.get("kind") == "fill"
+                    # GIL-25 Phase 1.5: fills re-validate on day-tier FULFILLMENT only — no swept
+                    # level → no depletion/gap-fill/supersession backstop (locked design pt 4).
+                    _tier = "day" if _is_fill else e.get("tier", "session")
                     _wh = float(win["High"].max())
                     _wl = float(win["Low"].min())
-                    status = pending_smt_terminal(
-                        direction, float(e.get("fire_price", e.get("price", 0.0))),
-                        _tier, _wh, _wl,
-                    )
+                    # Defensive coercion: honor the never-raise contract even if a (malformed)
+                    # entry carries fire_price/price=None — dict.get returns the stored None, not
+                    # the default, so float(None) would otherwise raise and the caller's blanket
+                    # except would silently discard ALL carried survivors. A missing fire anchor
+                    # → keep the entry (no fulfillment evidence).
+                    _fp = e.get("fire_price")
+                    if _fp is None:
+                        _fp = e.get("price")
+                    if _fp is None:
+                        status = "unfulfilled"
+                    else:
+                        try:
+                            status = pending_smt_terminal(
+                                direction, float(_fp), _tier, _wh, _wl)
+                        except (TypeError, ValueError):
+                            status = "unfulfilled"
                     if status == "fulfilled":
                         _aud(e, "drop_fulfilled")
                         continue
                     # Phase 1.1.5 depletion backstop: level-relative kill (replaces adverse-run).
-                    _level = e.get("price")
+                    # Skipped for fills (no swept level — `e["price"]` is None anyway).
+                    _level = None if _is_fill else e.get("price")
                     if _level is not None:
                         try:
                             _lvl = float(_level)
@@ -377,25 +393,52 @@ def revalidate_and_filter_pending(
 
 def _pending_entry_to_record(e: dict) -> dict:
     """Rebuild a to_record-shaped active-set member from a carried pending entry. The price
-    anchor (`price`) becomes both mnq_price and mnq_lvl_price. carried=True marks provenance."""
+    anchor (`price`) becomes both mnq_price and mnq_lvl_price. carried=True marks provenance.
+
+    GIL-25 Phase 1.5: a carried FILL (kind=="fill") rebuilds as a fill record — it keeps its
+    `phase`/`type` and the FVG `zone`, and `_record_key` returns the bare FVG name so the fill's
+    detect identity is preserved. A fill has no swept level, so `mnq_price`/`mnq_lvl_price` are
+    `e.get("price")` (None) — only the LEVEL relevance path consumes those downstream."""
     price = e.get("price")
-    rec = {
-        "kind":          "smt",
-        "type":          e.get("type"),
-        "side":          e.get("side"),
-        "direction":     e.get("direction"),
-        "timeframe":     e.get("timeframe"),
-        "time":          e.get("fire_time"),
-        "leader":        e.get("leader"),
-        "ref_name":      e.get("ref_name"),
-        "tier":          e.get("tier"),
-        "fulfilled":     False,
-        "invalidated":   False,
-        "mnq_price":     price,
-        "mes_price":     e.get("mes_price"),
-        "mnq_lvl_price": price,
-        "carried":       True,
-    }
+    if e.get("kind") == "fill":
+        phase = e.get("phase", e.get("type"))
+        rec = {
+            "kind":          "fill",
+            "type":          phase,
+            "phase":         phase,
+            "zone":          e.get("zone"),
+            "side":          e.get("side"),
+            "direction":     e.get("direction"),
+            "timeframe":     e.get("timeframe"),
+            "time":          e.get("fire_time"),
+            "leader":        e.get("leader"),
+            "ref_name":      e.get("ref_name"),
+            "tier":          e.get("tier"),
+            "fulfilled":     False,
+            "invalidated":   False,
+            "mnq_price":     price,
+            "mes_price":     e.get("mes_price"),
+            "mnq_lvl_price": price,
+            "carried":       True,
+        }
+    else:
+        rec = {
+            "kind":          "smt",
+            "type":          e.get("type"),
+            "side":          e.get("side"),
+            "direction":     e.get("direction"),
+            "timeframe":     e.get("timeframe"),
+            "time":          e.get("fire_time"),
+            "leader":        e.get("leader"),
+            "ref_name":      e.get("ref_name"),
+            "tier":          e.get("tier"),
+            "fulfilled":     False,
+            "invalidated":   False,
+            "mnq_price":     price,
+            "mes_price":     e.get("mes_price"),
+            "mnq_lvl_price": price,
+            "carried":       True,
+        }
     rec["key"] = _record_key(rec)
     rec["keys"] = [rec["key"]]
     return rec
@@ -910,6 +953,16 @@ def _fvg_progress(bar: dict, zone: dict, side: str = "bull") -> tuple[bool, bool
     return entered, passed
 
 
+def _fvg_zone(fvg: dict) -> "dict | None":
+    """Defensive read of an FVG's MNQ zone as ``{top, bottom}`` floats. Returns None on a
+    malformed/missing zone (never raises) so fire-state capture stays total."""
+    try:
+        mnq = fvg["mnq"]
+        return {"top": float(mnq["top"]), "bottom": float(mnq["bottom"])}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def detect_fill_smts(
     paired_fvgs: list[dict],
     mnq_bar: dict,
@@ -997,6 +1050,12 @@ def detect_fill_smts(
             # fire_price is the MNQ close at fire time — the re-arm opposite-move gate
             # measures against MNQ consistently (scale-safe regardless of which led).
             st["fire_price"] = mnq_close
+            # GIL-25 Phase 1.5: persist the carry fields so the cross-session fill carry
+            # can source them from detect_state (mirrors the LEVEL fire-state capture).
+            st["fire_time"] = iso
+            st["fire_phase"] = "fill_a"
+            st["fire_zone"] = _fvg_zone(fvg)
+            st["fire_leader"] = leader
 
         # Fill-B: both entered, one passed far edge, other still inside (entered, not passed).
         b_mnq = m_e and s_e and m_p and not s_p
@@ -1018,6 +1077,11 @@ def detect_fill_smts(
             st["fill_b_fired"] = True
             st["armed"] = False
             st["fire_price"] = mnq_close
+            # GIL-25 Phase 1.5: persist the carry fields (phase "fill_b").
+            st["fire_time"] = iso
+            st["fire_phase"] = "fill_b"
+            st["fire_zone"] = _fvg_zone(fvg)
+            st["fire_leader"] = leader
 
     return records, state
 

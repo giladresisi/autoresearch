@@ -2197,17 +2197,17 @@ class SessionPipeline:
             # (detect_state) rather than the relevance-gated active set, so a still-unfulfilled
             # reversal carries forward even after price has backed off far from its level (the
             # prime carry case — the relevance/proximity gate would otherwise drop it from
-            # _active and it would never be written). Fills keep the existing relevance-gated
-            # active-set carry (their detect_state lifecycle differs — fill_a_fired/entered, not
-            # the level flags). The read-side revalidate_and_filter_pending re-derives
-            # fulfillment/depletion against the overnight gap (terminal state is re-VALIDATED,
-            # not trusted as a stale flag) and dedups level-vs-level / vs fresh.
+            # _active and it would never be written). GIL-25 Phase 1.5: FILLS now source from the
+            # producer lifecycle too (their detect_state key is the bare FVG name + fill_a_fired/
+            # fill_b_fired flags, distinct from the level flags). The read-side
+            # revalidate_and_filter_pending re-derives fulfillment against the overnight gap
+            # (terminal state is re-VALIDATED, not trusted as a stale flag) and dedups by
+            # (ref_name, direction); fills skip the level-relative depletion backstop.
             _carry_session = cme_session_date(now).isoformat()
             _level_entries = self._detect_state_pending_entries(_carry_session)
-            _fill_entries = [
-                self._active_record_to_pending(r, _carry_session)
-                for r in _active if r.get("kind") == "fill"
-            ]
+            # GIL-25 Phase 1.5: source FILL carry from the producer lifecycle (detect_state),
+            # mirroring the LEVEL carry, so a backed-off unfulfilled fill still carries forward.
+            _fill_entries = self._detect_state_fill_entries(_carry_session)
             _smt_state.save_pending_smts(
                 {"entries": _level_entries + _fill_entries, "schema": 1})
         except Exception:
@@ -2340,6 +2340,58 @@ class SessionPipeline:
                 "session_date": session_date,
                 "valid":        True,
             })
+        return out
+
+    def _detect_state_fill_entries(self, session_date: str) -> "list[dict]":
+        """GIL-25 Phase 1.5: build pending_smts entries for every FIRED FILL (FVG-divergence)
+        record in the producer lifecycle (`detect_state`), mirroring
+        `_detect_state_pending_entries` for levels. This replaces the old relevance-gated
+        active-set fill carry so a backed-off but still-unfulfilled fill carries forward.
+
+        A fill key is the bare FVG name (no ``|`` parts) whose state carries the fill lifecycle
+        (`fill_a_fired` / `fill_b_fired`). A fill is carried iff it FIRED
+        (`fill_a_fired` OR `fill_b_fired`). The carry fields (`fire_price`, `fire_time`,
+        `fire_phase`, `fire_zone`, `fire_leader`, `direction`) come straight from the fire-state
+        capture in `detect_fill_smts`. `price=None` (no swept level — also makes the read-side
+        depletion backstop a no-op) and `tier="day"` (locked design pt 4: fulfillment only at the
+        day tier). Reserved ``__*__`` keys and LEVEL keys (3 ``|``-parts) are skipped. Total:
+        malformed keys/states skipped; never raises.
+        """
+        out: list[dict] = []
+        ds = self._detect_state if isinstance(self._detect_state, dict) else {}
+        for skey, st in ds.items():
+            try:
+                if not isinstance(skey, str) or skey.startswith("__") or "|" in skey:
+                    continue
+                if not isinstance(st, dict):
+                    continue
+                # A fill state carries the fill lifecycle flags; level states do not.
+                if "fill_a_fired" not in st and "fill_b_fired" not in st:
+                    continue
+                if not (st.get("fill_a_fired") or st.get("fill_b_fired")):
+                    continue
+                direction = st.get("direction")
+                phase = st.get("fire_phase")
+                out.append({
+                    "kind":         "fill",
+                    "price":        None,
+                    "fire_price":   st.get("fire_price"),
+                    "direction":    direction,
+                    "tier":         "day",
+                    "type":         phase,
+                    "phase":        phase,
+                    "zone":         st.get("fire_zone"),
+                    "timeframe":    None,
+                    "fire_time":    st.get("fire_time"),
+                    "ref_name":     skey,
+                    "side":         "bearish" if direction == "short" else "bullish",
+                    "leader":       st.get("fire_leader"),
+                    "mes_price":    None,
+                    "session_date": session_date,
+                    "valid":        True,
+                })
+            except Exception:
+                continue
         return out
 
     def _active_record_to_pending(self, rec: dict, session_date: str) -> dict:

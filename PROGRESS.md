@@ -1,6 +1,23 @@
 ﻿# PROGRESS
 
 
+## Feature: GIL-25 Phase 1.5 — Cross-session carry of FILL (FVG-divergence) SMTs
+### Status: ✅ Complete (unstaged)
+**Started**: 2026-06-17
+**Plan File**: `.agents/plans/6.smt-fill-carry-phase1.5.md`
+**Linear**: GIL-25
+
+Extended the cross-session SMT carry to FILL SMTs, mirroring the merged Phase 1.4 LEVEL carry. Fire-state capture (`fire_time`/`fire_phase`/`fire_zone`/`fire_leader`) added at both fill fire sites in `detect_fill_smts` (+ defensive `_fvg_zone` helper); new `session_pipeline._detect_state_fill_entries` sources fired fills from the producer lifecycle (`detect_state`) and replaces the old relevance-gated active-set fill carry; read-side kind-branching in `revalidate_and_filter_pending` (fills = day-tier fulfillment only, depletion backstop skipped) and `_pending_entry_to_record` (rebuild `kind="fill"` preserving phase/zone/identity). Code-review fix (Medium): `None`-fire-anchor coercion so a malformed entry can't raise and trip the caller's blanket except into discarding all survivors. SHADOW change — trades structurally byte-identical (parent runs the 1s/1m A/B). 10 new tests (10/10 pass); plan-named suite 271 passed / 0 failures (baseline 261); 0 new failures in the broader filtered suite. acceptance ACCEPTED 3/3. Touched only `smt_detect.py`, `session_pipeline.py`, and their tests. All changes UNSTAGED.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/6.smt-fill-carry-phase1.5.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics
+
+---
+
 ## Feature: Evaluate/arm an entry immediately on resume (and flat late startup)
 ### Status: ✅ Complete (unstaged)
 **Started**: 2026-06-12
