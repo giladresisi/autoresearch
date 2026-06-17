@@ -2039,6 +2039,53 @@ def test_detect_state_pending_entries_sources_unfulfilled_levels(_isolate_state,
     assert e["valid"] is True
 
 
+def test_detect_state_fill_entries_sources_fired_fills(_isolate_state, monkeypatch):
+    """GIL-25 Phase 1.5: the carry WRITE sources FILL (FVG-divergence) records from detect_state
+    (producer lifecycle), mirroring the LEVEL carry. Only FIRED fills (fill_a_fired or
+    fill_b_fired True) are emitted; not-fired fills, reserved __*__ keys and LEVEL keys are
+    excluded. The carried entry carries the FVG zone + phase from the fire-state capture."""
+    pipeline, _ = _smt_v2_pipeline(monkeypatch)
+    pipeline._detect_state = {
+        # FIRED fill → CARRIED
+        "fvg_20260602_1500_bear": {
+            "armed": False, "fill_a_fired": True, "direction": "short",
+            "fire_price": 21008.0, "fire_time": "2026-06-02T15:00:00-04:00",
+            "fire_phase": "fill_a", "fire_leader": "mnq",
+            "fire_zone": {"top": 21010.0, "bottom": 21000.0},
+        },
+        # not-fired fill → EXCLUDED
+        "fvg_20260602_1600_bull": {
+            "armed": True, "fill_a_fired": False, "direction": "long",
+            "fire_price": None, "fire_time": None,
+        },
+        # reserved + LEVEL keys → EXCLUDED
+        "__level_inv__": {"week_high": {"mnq": False, "mes": False}},
+        "week_high|short|wick": {
+            "fired": True, "fulfilled": False, "level_price": 21010.0,
+            "fire_mnq_close": 21008.0, "fire_time": "2026-06-02T15:00:00-04:00",
+        },
+    }
+
+    entries = pipeline._detect_state_fill_entries("2026-06-03")
+
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["kind"] == "fill"
+    assert e["ref_name"] == "fvg_20260602_1500_bear"
+    assert e["direction"] == "short"
+    assert e["tier"] == "day"
+    assert e["phase"] == "fill_a"
+    assert e["type"] == "fill_a"
+    assert e["zone"] == {"top": 21010.0, "bottom": 21000.0}
+    assert e["fire_price"] == 21008.0
+    assert e["fire_time"] == "2026-06-02T15:00:00-04:00"
+    assert e["side"] == "bearish"
+    assert e["leader"] == "mnq"
+    assert e["price"] is None
+    assert e["session_date"] == "2026-06-03"
+    assert e["valid"] is True
+
+
 def test_smt_invalidations_written_to_state_dir(_isolate_state, monkeypatch):
     """Phase 1.1.5 (GIL-25) REMOVED adverse-run invalidation. Driving a bearish (short) day_high
     SMT then adverse-up bars (MNQ close runs past the old INVALIDATE_PTS threshold, but the bar

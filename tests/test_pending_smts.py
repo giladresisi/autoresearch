@@ -110,6 +110,34 @@ def _hist_1m(rows):
     )
 
 
+def _fill_entry(fire_price, direction, ref_name="fvg_20260608_1500_bull",
+                phase="fill_a", zone=None, fire_time="2026-06-08T15:14:00-04:00",
+                tier="day", leader="mnq", session_date="2026-06-08", valid=True):
+    """GIL-25 Phase 1.5 FILL pending-entry variant: kind="fill", no swept level (price=None),
+    carries the FVG zone + phase. `tier` is intentionally settable to prove the read side forces
+    "day" regardless."""
+    if zone is None:
+        zone = {"top": 21010.0, "bottom": 21000.0}
+    return {
+        "kind": "fill",
+        "price": None,
+        "fire_price": float(fire_price),
+        "direction": direction,
+        "tier": tier,
+        "type": phase,
+        "phase": phase,
+        "zone": zone,
+        "timeframe": None,
+        "fire_time": fire_time,
+        "ref_name": ref_name,
+        "side": "bearish" if direction == "short" else "bullish",
+        "leader": leader,
+        "mes_price": None,
+        "session_date": session_date,
+        "valid": valid,
+    }
+
+
 # ===========================================================================
 # Task 3 — ingest keeps unfulfilled / drops terminal
 # ===========================================================================
@@ -242,6 +270,114 @@ class TestDedup:
         )
         assert len(survivors) == 1
         assert survivors[0]["time"] == "2026-06-08T15:14:00-04:00"
+
+
+# ===========================================================================
+# Phase 1.5 (GIL-25) — FILL carry: day-tier fulfillment, identity, dedup
+# ===========================================================================
+class TestFillCarry:
+    def _session_open(self):
+        return pd.Timestamp("2026-06-08 18:00", tz=_ET)
+
+    def _today(self):
+        return pd.Timestamp("2026-06-09").date()
+
+    def test_fill_carry_day_tier_fulfillment(self):
+        # A short fill, fire_price=21000. Read side forces tier="day" (FULFILL mnq=40) even though
+        # the entry says tier="week" → fulfilled if window_low <= 21000-40 = 20960. Window low
+        # 20959 (-41 favorable) → drop_fulfilled.
+        e = _fill_entry(fire_price=21000.0, direction="short", tier="week")
+        hist = _hist_1m([("2026-06-08T16:00:00-04:00", 21005.0, 20959.0)])
+        survivors, audit = smt_detect.revalidate_and_filter_pending(
+            [e], hist, self._session_open(), self._today(), existing_active=[],
+        )
+        assert survivors == []
+        assert any(a["reason"] == "drop_fulfilled" for a in audit)
+
+    def test_fill_carry_within_day_survives_as_fill(self):
+        # Same short fill, window stays within 40 of fire (low 20970 > 20960) → survives, and the
+        # rebuilt survivor keeps kind="fill". No swept level → no depletion drop.
+        e = _fill_entry(fire_price=21000.0, direction="short", tier="week")
+        hist = _hist_1m([("2026-06-08T16:00:00-04:00", 21005.0, 20970.0)])
+        survivors, audit = smt_detect.revalidate_and_filter_pending(
+            [e], hist, self._session_open(), self._today(), existing_active=[],
+        )
+        assert len(survivors) == 1
+        assert survivors[0]["kind"] == "fill"
+        assert any(a["reason"] == "ingested" for a in audit)
+
+    def test_fill_no_depletion_backstop(self):
+        # A fill has no swept level (price=None). Even a window that would deplete a LEVEL must NOT
+        # drop a fill (locked design pt 4: fulfillment only). long fire=21000, deeply adverse-down
+        # window → still kept (only fulfillment can drop it, and it is not fulfilled).
+        e = _fill_entry(fire_price=21000.0, direction="long")
+        hist = _hist_1m([("2026-06-08T16:00:00-04:00", 21010.0, 20800.0)])
+        survivors, audit = smt_detect.revalidate_and_filter_pending(
+            [e], hist, self._session_open(), self._today(), existing_active=[],
+        )
+        assert len(survivors) == 1
+        assert survivors[0]["kind"] == "fill"
+        assert not any(a["reason"] == "drop_depleted" for a in audit)
+
+    def test_fill_none_fire_price_does_not_raise(self):
+        # Never-raise contract: a (malformed) fill whose fire_price is present-but-None must NOT
+        # raise (which would let the caller's blanket except discard ALL survivors). With no fire
+        # anchor there is no fulfillment evidence → the entry is kept.
+        e = _fill_entry(fire_price=21000.0, direction="short")
+        e["fire_price"] = None
+        e["price"] = None
+        hist = _hist_1m([("2026-06-08T16:00:00-04:00", 21005.0, 20959.0)])
+        survivors, audit = smt_detect.revalidate_and_filter_pending(
+            [e], hist, self._session_open(), self._today(), existing_active=[],
+        )
+        assert len(survivors) == 1
+        assert survivors[0]["kind"] == "fill"
+        assert any(a["reason"] == "ingested" for a in audit)
+
+    def test_fill_identity_preserved_through_pending_entry_to_record(self):
+        e = _fill_entry(fire_price=21000.0, direction="short",
+                        ref_name="fvg_20260608_1500_bear", phase="fill_b",
+                        zone={"top": 21010.0, "bottom": 21000.0})
+        rec = smt_detect._pending_entry_to_record(e)
+        assert rec["kind"] == "fill"
+        assert rec["phase"] == "fill_b"
+        assert rec["type"] == "fill_b"
+        assert rec["zone"] == {"top": 21010.0, "bottom": 21000.0}
+        assert rec["direction"] == "short"
+        assert rec["ref_name"] == "fvg_20260608_1500_bear"
+        assert rec["carried"] is True
+        assert rec["fulfilled"] is False
+        assert rec["time"] == e["fire_time"]
+        # _record_key for a fill = the bare FVG name → key identity preserved.
+        assert rec["key"] == "fvg_20260608_1500_bear"
+        assert rec["keys"] == ["fvg_20260608_1500_bear"]
+
+    def test_fill_dedup_by_fvg_name(self):
+        # Two carried fills, same (ref_name, direction), different fire_time → collapse to newest.
+        older = _fill_entry(fire_price=21000.0, direction="short",
+                            ref_name="fvg_20260608_1500_bear",
+                            fire_time="2026-06-08T10:00:00-04:00")
+        newer = _fill_entry(fire_price=21000.0, direction="short",
+                            ref_name="fvg_20260608_1500_bear",
+                            fire_time="2026-06-08T15:14:00-04:00")
+        keep = _hist_1m([("2026-06-08T20:00:00-04:00", 21005.0, 20990.0)])
+        survivors, _ = smt_detect.revalidate_and_filter_pending(
+            [older, newer], keep, self._session_open(), self._today(), existing_active=[],
+        )
+        assert len(survivors) == 1
+        assert survivors[0]["time"] == "2026-06-08T15:14:00-04:00"
+
+    def test_fill_dedup_vs_fresh_active(self):
+        # A carried fill whose (ref_name, direction) matches a fresh active-set fill → drop_dedup.
+        e = _fill_entry(fire_price=21000.0, direction="short",
+                        ref_name="fvg_20260608_1500_bear")
+        fresh = [{"kind": "fill", "ref_name": "fvg_20260608_1500_bear", "direction": "short"}]
+        keep = _hist_1m([("2026-06-08T20:00:00-04:00", 21005.0, 20990.0)])
+        survivors, audit = smt_detect.revalidate_and_filter_pending(
+            [e], keep, self._session_open(), self._today(), existing_active=fresh,
+        )
+        assert survivors == []
+        assert any(a["reason"] == "drop_dedup" for a in audit)
 
 
 # ===========================================================================

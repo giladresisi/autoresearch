@@ -803,6 +803,40 @@ def test_fill_state_json_serializable():
     assert json.loads(json.dumps(state)) == state
 
 
+def test_fill_a_captures_fire_state():
+    # GIL-25 Phase 1.5: at Fill-A fire, the producer lifecycle must persist the carry fields
+    # (fire_time / fire_phase / fire_zone / fire_price / fire_leader) into st so the cross-session
+    # carry can source them later from detect_state.
+    p = _pair("fvg_20260609_1000_bull", "bull", 21010, 21000, 3010, 3000)
+    mnq = _bar(high=21015.0, low=21005.0, close=21008.0, time="2026-06-09T10:00:00-04:00")
+    mes = _bar(high=3060.0, low=3050.0, close=3055.0, time="2026-06-09T10:00:00-04:00")
+    recs, state = detect_fill_smts([p], mnq, mes, {})
+    assert [r["type"] for r in recs] == ["fill_a"]
+    st = state["fvg_20260609_1000_bull"]
+    assert st["fill_a_fired"] is True
+    assert st["fire_price"] == 21008.0
+    assert st["fire_time"] == "2026-06-09T10:00:00-04:00"
+    assert st["fire_phase"] == "fill_a"
+    assert st["fire_zone"] == {"top": 21010.0, "bottom": 21000.0}
+    assert st["fire_leader"] == "mnq"
+    assert st["direction"] == "long"
+
+
+def test_fill_b_captures_fire_state():
+    # Fill-B (independent, no prior A) must also persist the carry fields with phase "fill_b".
+    p = _pair("fvg_20260609_1000_bull", "bull", 21010, 21000, 3010, 3000)
+    mnq = _bar(high=21010.0, low=20999.0, close=21001.0, time="2026-06-09T11:00:00-04:00")
+    mes = _bar(high=3010.0, low=3005.0, close=3007.0, time="2026-06-09T11:00:00-04:00")
+    recs, state = detect_fill_smts([p], mnq, mes, {})
+    assert any(r["type"] == "fill_b" for r in recs)
+    st = state["fvg_20260609_1000_bull"]
+    assert st["fire_phase"] == "fill_b"
+    assert st["fire_time"] == "2026-06-09T11:00:00-04:00"
+    assert st["fire_zone"] == {"top": 21010.0, "bottom": 21000.0}
+    assert st["fire_price"] == 21001.0
+    assert st["direction"] == "long"
+
+
 # ===========================================================================
 # SmtBuffer
 # ===========================================================================
