@@ -702,3 +702,66 @@ class TestFrozenSnapshotRegression:
         self._setup_long_initial_arm(live_direction="up")
         baseline = run_trend(NOW, bar, recent)
         assert result == baseline
+
+
+class TestOpenWindowDailyMidSuspend:
+    """O1 (GIL-34): the daily-mid invalidation is suspended inside the 09:15-11:30 ET
+    open window when OPEN_WINDOW_DAILY_MID_SUSPEND is ON, so a fresh directional
+    hypothesis survives the open mayhem. Default OFF → byte-identical to master."""
+
+    # tz-aware ET timestamps: in-window (09:50:02 ET) and out-of-window (08:00 ET).
+    _NOW_IN  = pd.Timestamp("2026-06-16T09:50:02-04:00")
+    _NOW_OUT = pd.Timestamp("2026-06-16T08:00:00-04:00")
+
+    def _setup_down_mid_break(self):
+        """direction=down formed at the daily mid; bar close rises above mid → the
+        daily-mid invalidation would normally fire trend-broken (the O1 occurrence)."""
+        hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
+        hyp["direction"] = "down"
+        hyp["daily_mid"] = "mid"   # _mid_cross_guard arms for direction=down
+        save_hypothesis(hyp)
+        save_position(copy.deepcopy(DEFAULT_POSITION))
+        save_daily(_daily_with_levels([
+            {"name": "day_high", "kind": "level", "price": 120.0},
+            {"name": "day_low",  "kind": "level", "price": 80.0},
+        ]))  # mid = 100
+
+    # bar close=102 > mid 100 → contradicts the down thesis
+    _BAR = staticmethod(lambda: make_1m_bar(open_=99, high=103, low=98, close=102))
+    _RECENT = staticmethod(lambda: make_recent_bars(closes=[99, 102], opens=[98, 99]))
+
+    def test_flag_off_default_fires_trend_broken(self):
+        """Default OFF: identical to master — daily-mid trend-broken fires in-window."""
+        from trend import run_trend
+        from smt_state import load_hypothesis
+
+        assert __import__("trend").OPEN_WINDOW_DAILY_MID_SUSPEND is False
+        self._setup_down_mid_break()
+        result = run_trend(self._NOW_IN, self._BAR(), self._RECENT())
+        assert result is not None and result["kind"] == "trend-broken"
+        assert result["level_name"] == "daily_mid"
+        assert load_hypothesis()["direction"] == "none"
+
+    def test_flag_on_in_window_suspends_invalidation(self, monkeypatch):
+        """ON + in-window: no trend-broken, the down hypothesis survives."""
+        import trend
+        from trend import run_trend
+        from smt_state import load_hypothesis
+
+        monkeypatch.setattr(trend, "OPEN_WINDOW_DAILY_MID_SUSPEND", True)
+        self._setup_down_mid_break()
+        result = run_trend(self._NOW_IN, self._BAR(), self._RECENT())
+        assert result is None or result.get("level_name") != "daily_mid"
+        assert load_hypothesis()["direction"] == "down"
+
+    def test_flag_on_out_of_window_still_fires(self, monkeypatch):
+        """ON but OUTSIDE the window: daily-mid trend-broken still fires (unchanged)."""
+        import trend
+        from trend import run_trend
+        from smt_state import load_hypothesis
+
+        monkeypatch.setattr(trend, "OPEN_WINDOW_DAILY_MID_SUSPEND", True)
+        self._setup_down_mid_break()
+        result = run_trend(self._NOW_OUT, self._BAR(), self._RECENT())
+        assert result is not None and result["kind"] == "trend-broken"
+        assert load_hypothesis()["direction"] == "none"

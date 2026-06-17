@@ -6,8 +6,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time as _dtime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -36,6 +37,28 @@ BREAKEVEN_BUFFER_PTS: float = 5.0
 # any initial-level stop update fires (full arm OR wick-only midpoint).
 # When the initial target is this close, touching it doesn't confirm the move.
 INITIAL_STOP_MIN_DIST_PTS: float = 50.0
+
+# ---------------------------------------------------------------------------
+# O1 (GIL-34): survive the open. At the 9:30 open price oscillates right on the
+# daily mid, so the binary close-vs-mid daily-mid invalidation kills every
+# directional hypothesis ~2s after it forms (flat scan) and force-closes a fresh
+# entry before any cautious level is reached (in-position) — no entry can arm
+# even with the right direction. When ON, the *daily-mid* invalidation (both the
+# flat-scan trend-broken and the unarmed in-position market-close) is suspended
+# for bars whose ET wall-clock time falls inside the open window below. Weekly-mid
+# and every other invalidation are untouched. Default OFF → byte-identical baseline.
+OPEN_WINDOW_DAILY_MID_SUSPEND: bool = False
+_OPEN_WINDOW_START_ET: _dtime = _dtime(9, 15)
+_OPEN_WINDOW_END_ET:   _dtime = _dtime(11, 30)
+_ET = ZoneInfo("America/New_York")
+
+
+def _in_open_window(now: datetime) -> bool:
+    """True when `now` (tz-aware → converted to ET; naive → assumed ET) is inside
+    the [09:15, 11:30] ET open window. Mirrors session_pipeline's ET idiom."""
+    ts = pd.Timestamp(now)
+    et = ts.tz_convert(_ET) if ts.tzinfo is not None else ts
+    return _OPEN_WINDOW_START_ET <= et.time() <= _OPEN_WINDOW_END_ET
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -229,6 +252,11 @@ def run_trend(
         (direction == "down" and _hyp_weekly_mid in ("below", "mid"))
     )
 
+    # O1 (GIL-34): suspend the daily-mid invalidation during the open window.
+    # When the flag is OFF this is always False, so every guarded condition below
+    # is byte-identical to master (and _in_open_window is never even evaluated).
+    _suspend_daily_mid = OPEN_WINDOW_DAILY_MID_SUSPEND and _in_open_window(now)
+
     # ------------------------------------------------------------------
     # ATH maintenance: update dynamic all_time_high; detect two straddle types.
     # Runs on every bar regardless of direction so ATH stays current.
@@ -400,7 +428,8 @@ def run_trend(
         if cautious_state == "no":
             # Daily-mid invalidation: close crossed the mid against direction before any
             # cautious level was reached — the entry thesis is already broken.
-            if daily_mid_price is not None and _mid_cross_guard:
+            # O1 (GIL-34): suspended inside the open window when the flag is ON.
+            if daily_mid_price is not None and _mid_cross_guard and not _suspend_daily_mid:
                 _mid_broken = (direction == "up"   and bar_close < daily_mid_price) or \
                               (direction == "down" and bar_close > daily_mid_price)
                 if _mid_broken:
@@ -700,8 +729,9 @@ def run_trend(
     # Daily-mid invalidation: if the hypothesized direction is contradicted by price
     # crossing the daily mid (e.g. direction=up but close fell below mid), the thesis
     # is stale — reset before placing any new entry. Skipped while the manual
-    # direction lock is set (GIL-8).
-    if daily_mid_price is not None and _mid_cross_guard and not _manual_lock:
+    # direction lock is set (GIL-8). O1 (GIL-34): also suspended inside the open
+    # window when the flag is ON, so a fresh hypothesis survives the open mayhem.
+    if daily_mid_price is not None and _mid_cross_guard and not _manual_lock and not _suspend_daily_mid:
         _mid_broken = (direction == "up"   and bar_close < daily_mid_price) or \
                       (direction == "down" and bar_close > daily_mid_price)
         if _mid_broken:
