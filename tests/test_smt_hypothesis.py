@@ -1259,6 +1259,183 @@ def test_gil32_conviction_set_flows_through_run_hypothesis():
 
 
 # ===========================================================================
+# GIL-33: extend the SMT-conviction override beyond rule2b (rule2 / rule3_4).
+#
+# These build scenarios that reach `_determine_direction`'s rule2 (approaching) and
+# rule3_4 (blended) returns — bypassing the rule2b override block — then vary the
+# `smt_conviction` kwarg to exercise the new shared-helper override at those returns.
+# ===========================================================================
+
+def _flat_band_hist():
+    """Hist (week-ago + pre-session) bars in a tight 148-152 band so NO meaningful level
+    {week 100/200, day 120/180} is ever crossed → `_find_last_liquidity` returns "" →
+    the rule2b block is skipped, letting rule2/rule3_4 own the formation."""
+    week_ago = _make_1m_bars([150] * 5, [152] * 5, [148] * 5, [150] * 5,
+                             start_time="2026-04-20 10:00:00")
+    pre_sess = _make_1m_bars([150] * 5, [152] * 5, [148] * 5, [150] * 5,
+                             start_time="2026-04-26 18:00:00")
+    return pd.concat([week_ago, pre_sess]).sort_index()
+
+
+def _rule2_down_direction_args():
+    """Args for `_determine_direction` that resolve to rule2 "down".
+
+    Price sits in a [148,170] band (no level crossed → rule2b skipped; current_bar touches
+    no level → rule1 None) with a DOWNWARD momentum run, approaching the low side → rule2
+    returns "down". The tests read this baseline, then exercise the conviction override.
+    """
+    save_global(_make_default_global())
+    save_daily(_make_default_daily(week_high=200.0, week_low=100.0,
+                                   day_high=180.0, day_low=120.0))
+    now = _make_now(time_str="10:10:00")
+    # Decreasing closes → downward momentum for the approaching-low check.
+    closes = [168.0, 166.0, 164.0, 162.0, 160.0, 158.0, 156.0, 154.0, 152.0, 150.0]
+    mnq_1m = _make_1m_bars([c + 2 for c in closes], [170.0] * 10, [148.0] * 10, closes,
+                           start_time="2026-04-27 10:00:00")
+    liquidities = [
+        {"name": "week_high", "kind": "level", "price": 200.0},
+        {"name": "week_low",  "kind": "level", "price": 100.0},
+        {"name": "day_high",  "kind": "level", "price": 180.0},
+        {"name": "day_low",   "kind": "level", "price": 120.0},
+    ]
+    current_bar = {"Open": 152.0, "High": 152.0, "Low": 148.0, "Close": 150.0, "Volume": 1000.0}
+    return {
+        "current_bar":  current_bar,
+        "mnq_1m":       mnq_1m,
+        "hist_mnq_1m":  _flat_band_hist(),
+        "liquidities":  liquidities,
+        "global_state": _make_default_global(),
+        "divs":         [],
+        "now":          now,
+    }
+
+
+def _rule3_4_args(divs):
+    """Args that reach `_determine_direction`'s rule3_4 return.
+
+    FLAT momentum (constant closes) → rule2's strict-inequality momentum check fails for
+    every level → rule2 None; band stays inside all levels → rule2b skipped; current_bar
+    touches nothing → rule1 None. The supplied `divs` drive `smt_sc` so `|combined|` clears
+    DIRECTION_SCORE_THRESHOLD and rule3_4 commits a direction.
+    """
+    save_global(_make_default_global())
+    save_daily(_make_default_daily(week_high=300.0, week_low=100.0,
+                                   day_high=260.0, day_low=140.0))
+    now = _make_now(time_str="10:10:00")
+    mnq_1m = _make_1m_bars([150.0] * 10, [151.0] * 10, [149.0] * 10, [150.0] * 10,
+                           start_time="2026-04-27 10:00:00")
+    liquidities = [
+        {"name": "week_high", "kind": "level", "price": 300.0},
+        {"name": "week_low",  "kind": "level", "price": 100.0},
+        {"name": "day_high",  "kind": "level", "price": 260.0},
+        {"name": "day_low",   "kind": "level", "price": 140.0},
+    ]
+    current_bar = {"Open": 150.0, "High": 151.0, "Low": 149.0, "Close": 150.0, "Volume": 1000.0}
+    return {
+        "current_bar":  current_bar,
+        "mnq_1m":       mnq_1m,
+        "hist_mnq_1m":  _flat_band_hist(),
+        "liquidities":  liquidities,
+        "global_state": _make_default_global(),
+        "divs":         divs,
+        "now":          now,
+    }
+
+
+def test_gil33_rule2_override_flips_to_up():
+    """rule2 baseline "down" + strong BULLISH standing conviction → flips to "up", tagged
+    with smt_override + smt_override_rule="rule2" (the 05-08 18:10 target case)."""
+    from hypothesis import _determine_direction
+    base_dir, base_reason = _determine_direction(**_rule2_down_direction_args())
+    assert base_reason.get("rule") == "rule2", f"expected rule2, got {base_reason.get('rule')!r}"
+    assert base_dir == "down", f"expected baseline down, got {base_dir}"
+    assert "smt_override" not in base_reason
+
+    inputs = {"n": 3, "n_bear": 0, "n_bull": 3, "top_tier": "day", "refs": ["day_low"]}
+    direction, reason = _determine_direction(
+        **_rule2_down_direction_args(), smt_conviction=0.8, smt_conviction_inputs=inputs
+    )
+    assert direction == "up", f"strong bullish conviction must flip rule2 down→up, got {direction}"
+    assert reason.get("rule") == "rule2"
+    assert reason.get("smt_override") is True
+    assert reason.get("smt_override_rule") == "rule2"
+    assert reason.get("smt_conviction") == 0.8
+    assert reason.get("smt_conviction_inputs") == inputs
+
+
+def test_gil33_rule2_override_noop_below_threshold():
+    """rule2 baseline "down" + contradicting conviction just under CONVICTION_STRONG → no flip."""
+    from hypothesis import _determine_direction
+    import smt_conviction as _sc
+    weak = _sc.CONVICTION_STRONG - 0.01  # bullish but below threshold
+    direction, reason = _determine_direction(
+        **_rule2_down_direction_args(), smt_conviction=weak, smt_conviction_inputs={"n": 1}
+    )
+    assert direction == "down", f"sub-threshold conviction must NOT flip, got {direction}"
+    assert "smt_override" not in reason
+    assert "smt_override_rule" not in reason
+
+
+def test_gil33_rule2_default_conviction_back_compat():
+    """rule2 with the default conviction (0.0) is byte-identical to the no-kwargs call."""
+    from hypothesis import _determine_direction
+    dir_legacy, reason_legacy = _determine_direction(**_rule2_down_direction_args())
+    dir_default, reason_default = _determine_direction(
+        **_rule2_down_direction_args(), smt_conviction=0.0, smt_conviction_inputs={}
+    )
+    assert dir_legacy == dir_default == "down"
+    assert reason_legacy == reason_default, (
+        f"default-conviction reason diverged: {reason_default} != {reason_legacy}"
+    )
+    assert "smt_override" not in reason_default
+    assert "smt_override_rule" not in reason_default
+
+
+def test_gil33_rule2b_path_unchanged_by_helper():
+    """The rule2b inline override is untouched: a contradicting strong conviction still flips
+    via rule2b and tags `smt_override`, but NOT `smt_override_rule` (that tag is the new
+    rule2/rule3_4-only marker) — confirming the helper is not applied on the rule2b path."""
+    from hypothesis import _determine_direction
+    base_dir, _ = _determine_direction(**_rule2b_down_direction_args())
+    conv = _contradicting_conviction(base_dir, 0.8)
+    direction, reason = _determine_direction(
+        **_rule2b_down_direction_args(), smt_conviction=conv,
+        smt_conviction_inputs={"n": 2},
+    )
+    assert reason.get("rule") == "rule2b"
+    assert reason.get("smt_override") is True
+    assert direction != base_dir
+    assert "smt_override_rule" not in reason
+
+
+def test_gil33_rule3_4_override_flips_and_no_double_count():
+    """rule3_4 baseline "up" (bullish divs) + strong BEARISH standing conviction → flips to
+    "down" (smt_override_rule="rule3_4"); the `combined_score` blend is unchanged by the
+    override (computed before the flip → the standing conviction is NOT double-counted into
+    the rule3_4 blend, which already carries the separate active-set `smt_sc`)."""
+    from hypothesis import _determine_direction
+    divs = [
+        {"tier": "week", "side": "bullish"},
+        {"tier": "week", "side": "bullish"},
+    ]
+    base_dir, base_reason = _determine_direction(**_rule3_4_args(divs))
+    assert base_reason.get("rule") == "rule3_4", f"expected rule3_4, got {base_reason.get('rule')!r}"
+    assert base_dir == "up", f"expected baseline up, got {base_dir}"
+    base_combined = base_reason.get("combined_score")
+
+    direction, reason = _determine_direction(
+        **_rule3_4_args(divs), smt_conviction=-0.8, smt_conviction_inputs={"n": 2},
+    )
+    assert direction == "down", f"strong bearish conviction must flip rule3_4 up→down, got {direction}"
+    assert reason.get("rule") == "rule3_4"
+    assert reason.get("smt_override") is True
+    assert reason.get("smt_override_rule") == "rule3_4"
+    assert reason.get("combined_score") == base_combined, (
+        "combined_score must be unchanged by the override (no double-count of conviction)"
+    )
+
+
+# ===========================================================================
 # GIL-32 Phase-1b: same-liquidity reversal lock (veto in _determine_direction).
 # ===========================================================================
 
