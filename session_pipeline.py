@@ -841,7 +841,7 @@ class SessionPipeline:
             cache[freq] = v
         return v
 
-    def _recompute_cautious_at_0929(self, price: float) -> None:
+    def _recompute_cautious_at_0929(self, price: float, now=None) -> None:
         """O2 (GIL-34): re-anchor the cautious TARGETS to `price` (the 09:29 ET close),
         keeping DIRECTION unchanged, so the 09:30-09:45 take-profit-on-touch and any
         position rolling into the open trade against fresh, reachable levels.
@@ -866,7 +866,7 @@ class SessionPipeline:
             ath = (_smt_state.load_global() or {}).get("all_time_high")
             # (1) Live hypothesis ladder — own direction (no open position to protect → full re-anchor).
             hyp = _smt_state.load_hypothesis()
-            _hyp_mod.recompute_cautious_for_fill(hyp, price, liq, ath)
+            _hyp_mod.recompute_cautious_for_fill(hyp, price, liq, ath, now=now)
             _smt_state.save_hypothesis(hyp)
             # (2) Open position — re-anchor the frozen ladder against mgmt_direction, tighten-only.
             pos = _smt_state.load_position()
@@ -875,7 +875,7 @@ class SessionPipeline:
             if active and mgmt_dir in ("up", "down"):
                 _mgmt_hyp = {"direction": mgmt_dir}
                 _hyp_mod.recompute_cautious_for_fill(
-                    _mgmt_hyp, price, liq, ath, pos.get("cautious_dist_shrinks", 0))
+                    _mgmt_hyp, price, liq, ath, pos.get("cautious_dist_shrinks", 0), now=now)
 
                 def _to_f(x):
                     try:
@@ -961,7 +961,7 @@ class SessionPipeline:
                 and now.hour == 9 and now.minute == 29
                 and now.date() != self._last_0929_recompute_date):
             self._last_0929_recompute_date = now.date()
-            self._recompute_cautious_at_0929(float(mnq_bar_row["Close"]))
+            self._recompute_cautious_at_0929(float(mnq_bar_row["Close"]), now=now)
 
         _o = float(mnq_bar_row["Open"])
         _h = float(mnq_bar_row["High"])

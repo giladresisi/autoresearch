@@ -4,7 +4,7 @@
 # Reads/writes JSON state via smt_state.py. Emits no caller-routable signals.
 
 import copy
-from datetime import datetime, timedelta
+from datetime import datetime, time as _dtime, timedelta
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -20,6 +20,34 @@ CAUTIOUS_MIN_DIST           =  40  # pts — below this secondary distance, skip
 CAUTIOUS_DIST_SHRINK_PCT    = 0.15  # fraction the two max-dist thresholds shrink per failed entry
 CAUTIOUS_INITIAL_OFFSET_PTS   = 2.0  # pts — initial cautious target set this much closer than the level
 CAUTIOUS_SECONDARY_OFFSET_PTS = 5.0  # pts — secondary cautious target set this much closer than the level
+
+# ---------------------------------------------------------------------------
+# O3 (GIL-34): tighter cautious ladder during the 09:15-11:30 ET open window.
+# The open swings are short/whippy, so the standard max-distance ladder picks targets
+# too far to reach before a reversal (06-16 11:15 long: +106pt target vs only +11pt of
+# favorable move). When enabled, the secondary/initial max-distance thresholds are
+# multiplied by OPEN_WINDOW_CAUTIOUS_SCALE inside the window so nearer levels become the
+# targets. Default OFF → _open_window_dist_scale returns 1.0 → byte-identical baseline.
+# (Note: a tighter ladder can push the secondary distance below CAUTIOUS_MIN_DIST, which
+# the Step-8b veto turns into direction="none" — i.e. it can also suppress an open-window
+# entry whose only in-range target is too close. That is intended and measured by the A/B.)
+OPEN_WINDOW_CAUTIOUS_SCALE_ENABLED: bool = False
+OPEN_WINDOW_CAUTIOUS_SCALE: float = 0.7
+_OW_CAUTIOUS_START_ET: _dtime = _dtime(9, 15)
+_OW_CAUTIOUS_END_ET:   _dtime = _dtime(11, 30)
+
+
+def _open_window_dist_scale(now) -> float:
+    """O3: cautious max-distance scale for `now`. Returns OPEN_WINDOW_CAUTIOUS_SCALE inside
+    [09:15, 11:30] ET when enabled, else 1.0 (→ byte-identical). None / parse-fail → 1.0."""
+    if not OPEN_WINDOW_CAUTIOUS_SCALE_ENABLED or now is None:
+        return 1.0
+    try:
+        ts = pd.Timestamp(now)
+        et = ts.tz_convert(_ET) if ts.tzinfo is not None else ts
+        return OPEN_WINDOW_CAUTIOUS_SCALE if _OW_CAUTIOUS_START_ET <= et.time() <= _OW_CAUTIOUS_END_ET else 1.0
+    except Exception:
+        return 1.0
 
 # SMT V2 relevance filter (Phase 2). When ACTIVE (in a position), a new SMT enters the
 # active set only if its ref level is within RELEVANCE_X_PTS of a cautious target OR its
@@ -75,6 +103,7 @@ def compute_cautious_prices(
     ath: float,
     dist_shrinks: int = 0,
     invalidated_names: "set[str] | None" = None,
+    now=None,
 ) -> dict:
     """Return cautious price fields anchored at current_close.
 
@@ -91,7 +120,8 @@ def compute_cautious_prices(
     no drop (PURE; reproduces the legacy output byte-for-byte).
     """
     _inv = invalidated_names or set()
-    _factor = (1.0 - CAUTIOUS_DIST_SHRINK_PCT) ** max(0, dist_shrinks)
+    # O3 (GIL-34): scale the max-distance thresholds down inside the open window (1.0 = OFF).
+    _factor = ((1.0 - CAUTIOUS_DIST_SHRINK_PCT) ** max(0, dist_shrinks)) * _open_window_dist_scale(now)
     _sec_max = max(CAUTIOUS_MIN_DIST, CAUTIOUS_SECONDARY_MAX_DIST * _factor)
     _init_max = max(CAUTIOUS_MIN_DIST, CAUTIOUS_INITIAL_MAX_DIST * _factor)
 
@@ -204,6 +234,7 @@ def recompute_cautious_for_fill(
     liquidities: list,
     ath,
     dist_shrinks: int = 0,
+    now=None,
 ) -> dict:
     """Re-anchor the two-tier cautious ladder to the *actual fill price* (Addendum 4).
 
@@ -221,7 +252,7 @@ def recompute_cautious_for_fill(
     if direction not in ("up", "down") or hypothesis.get("manual"):
         return hypothesis
     cp = compute_cautious_prices(direction, float(fill_price), liquidities, ath, dist_shrinks,
-                                 invalidated_names=_invalidated_target_names())
+                                 invalidated_names=_invalidated_target_names(), now=now)
     hypothesis["cautious_price_initial"]         = cp["cautious_price_initial"]
     hypothesis["cautious_price_initial_level"]   = cp["cautious_price_initial_level"]
     hypothesis["cautious_price_secondary"]       = cp["cautious_price_secondary"]
@@ -2083,7 +2114,7 @@ def build_hypothesis_from_direction(
     ath = global_state["all_time_high"]
     _dist_shrinks = load_position().get("cautious_dist_shrinks", 0)
     _cp = compute_cautious_prices(direction, current_close, liquidities, ath, _dist_shrinks,
-                                  invalidated_names=_inv_names)
+                                  invalidated_names=_inv_names, now=now)
     cautious_price_initial         = _cp["cautious_price_initial"]
     cautious_price_initial_level   = _cp["cautious_price_initial_level"]
     cautious_price_secondary       = _cp["cautious_price_secondary"]
