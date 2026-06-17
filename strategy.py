@@ -405,7 +405,7 @@ def run_strategy(
                 _hyp_mod.recompute_cautious_for_fill(
                     hypothesis, fill_price,
                     _daily.get("liquidities", []), _global.get("all_time_high"),
-                    position.get("cautious_dist_shrinks", 0))
+                    position.get("cautious_dist_shrinks", 0), now=now)
                 smt_state.save_hypothesis(hypothesis)
                 # SMT-v2 Phase 1: freeze the fill-anchored (post-recompute) management
                 # direction + cautious ladder into active — immutable for the life of the
@@ -503,7 +503,7 @@ def run_strategy(
                     _hyp_mod.recompute_cautious_for_fill(
                         hypothesis, bar_mid,
                         _daily.get("liquidities", []), _global.get("all_time_high"),
-                        position.get("cautious_dist_shrinks", 0))
+                        position.get("cautious_dist_shrinks", 0), now=now)
                     smt_state.save_hypothesis(hypothesis)
                     # SMT-v2 Phase 1: freeze the fill-anchored (post-recompute) management
                     # direction + cautious ladder into active — immutable for the life of

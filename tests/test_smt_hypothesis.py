@@ -1529,3 +1529,42 @@ def test_gil32_reversal_lock_default_is_back_compat():
     assert dir_legacy == dir_default
     assert reason_legacy == reason_default
     assert "smt_reversal_lock" not in reason_default
+
+
+class TestOpenWindowCautiousScale:
+    """O3 (GIL-34): inside [09:15,11:30] ET, compute_cautious_prices scales the max-distance
+    thresholds by OPEN_WINDOW_CAUTIOUS_SCALE so nearer levels become the targets. Default
+    OFF → the `now` arg changes nothing (byte-identical)."""
+
+    _LIQ = [
+        {"name": "near_high", "kind": "level", "price": 160.0},  # +60 from close
+        {"name": "far_high",  "kind": "level", "price": 240.0},  # +140 (within 150, beyond scaled 75)
+    ]
+    _IN = pd.Timestamp("2026-06-16T10:00:00-04:00")   # in [09:15,11:30]
+    _OUT = pd.Timestamp("2026-06-16T13:00:00-04:00")  # outside
+
+    def test_flag_off_now_arg_inert(self):
+        import hypothesis as h
+        assert h.OPEN_WINDOW_CAUTIOUS_SCALE_ENABLED is False
+        a = h.compute_cautious_prices("up", 100.0, self._LIQ, 10000.0, 0)
+        b = h.compute_cautious_prices("up", 100.0, self._LIQ, 10000.0, 0, now=self._IN)
+        assert a == b
+        # OFF picks the farthest in-range level (240) as secondary.
+        assert a["cautious_price_secondary_level"] == "far_high"
+        assert float(a["cautious_price_secondary"]) == 235.0  # 240 - 5 offset
+
+    def test_flag_on_in_window_scales_to_nearer_level(self, monkeypatch):
+        import hypothesis as h
+        monkeypatch.setattr(h, "OPEN_WINDOW_CAUTIOUS_SCALE_ENABLED", True)
+        # In-window: scaled _sec_max = 150*0.5 = 75 → far_high (140) excluded, near_high (60) wins.
+        on = h.compute_cautious_prices("up", 100.0, self._LIQ, 10000.0, 0, now=self._IN)
+        assert on["cautious_price_secondary_level"] == "near_high"
+        assert float(on["cautious_price_secondary"]) == 155.0  # 160 - 5 offset
+
+    def test_flag_on_out_of_window_unscaled(self, monkeypatch):
+        import hypothesis as h
+        monkeypatch.setattr(h, "OPEN_WINDOW_CAUTIOUS_SCALE_ENABLED", True)
+        # Outside the window → scale 1.0 → far_high still the secondary (same as OFF).
+        out = h.compute_cautious_prices("up", 100.0, self._LIQ, 10000.0, 0, now=self._OUT)
+        assert out["cautious_price_secondary_level"] == "far_high"
+        assert float(out["cautious_price_secondary"]) == 235.0
