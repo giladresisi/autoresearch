@@ -18,6 +18,7 @@ import smt_state
 from dotenv import load_dotenv
 
 import paths
+import stop_utils
 load_dotenv()
 
 _LIVE = os.getenv("LIVE_TRADING", "false").lower() == "true"
@@ -211,6 +212,22 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float, *, s
         _fill = float(getattr(rec, "fill_price", 0.0) or 0.0)
         if _fill <= 0.0:
             _fill = entry_price  # defensive: executor gave no estimate
+        # Preventive re-anchor (GIL-36): the STP->MKT fill (`_fill`) lands at the market,
+        # which on a downgrade is PAST the trigger — so a stop that looked valid vs the
+        # trigger `entry_price` at :192 can now sit on the WRONG side of the actual fill
+        # (above a long fill / below a short fill). Tradovate then rejects that SL leg,
+        # leaving the entry naked (incident 2026-06-17 10:11). Run the stop through the
+        # single-source-of-truth helper against the assumed fill; it returns the stop
+        # UNCHANGED when already valid, so only the wrong-side/too-close edge changes.
+        safe_stop = stop_utils.valid_stop_for_fill(direction, _fill, stop_price, entry_price)
+        if safe_stop != stop_price:
+            stop_price = safe_stop
+            # The original (wrong-side) SL was already embedded in the MKT order sent at
+            # :205. Re-send the corrected SL immediately so the broker's working stop
+            # matches the re-anchored value before _register_downgraded_fill records it
+            # into position.json active.stop.
+            _executor.update_stop_loss(
+                {"direction": direction, "stop_price": stop_price}, None)
         _register_downgraded_fill(direction, entry_price, stop_price, source, now,
                                   fill_price=_fill)
         return
@@ -397,7 +414,15 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float, *,
     # entry_price when given, else the current market price (manual entries pass entry 0.0);
     # anchoring to 0.0 would defeat the floor. Only widens; far stops are untouched.
     fill_price = entry_price if entry_price != 0.0 else _current_price()
-    stop_price = _floor_stop_distance(direction, fill_price, stop_price)
+    # Preventive re-anchor (GIL-36): the anchor `fill_price` IS the assumed market fill, so
+    # run the stop through the single-source-of-truth helper to guarantee it rests on the
+    # correct side of the fill at the intended risk (not merely the right DISTANCE, which is
+    # all _floor_stop_distance checked). `intended_entry` is the original trigger when given,
+    # else the fill (manual market entries pass entry 0.0 → risk floors to MIN_STOP_DISTANCE,
+    # matching today's floor behavior). Returns the stop unchanged whenever already valid.
+    stop_price = stop_utils.valid_stop_for_fill(
+        direction, fill_price, stop_price,
+        entry_price if entry_price != 0.0 else fill_price)
     pmt_signal = {
         "direction": direction,
         "entry_price": entry_price,
