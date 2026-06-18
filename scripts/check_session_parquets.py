@@ -63,7 +63,12 @@ def _is_expected_closed(gap_start: pd.Timestamp, gap_end: pd.Timestamp) -> bool:
     CLOSE_T     = 17 * 3600
     BREAK_END_T = 18 * 3600
 
-    in_fri_close = dow_start == 4 and t_start >= CLOSE_T
+    # A pre-close 1m bar lands at 16:59 (the session's last bar before the 17:00 ET
+    # close), so the gap into the weekend starts a few minutes before CLOSE_T. Mirror the
+    # maintenance-break grace (CLOSE_T - 300) below so the Friday close is recognized even
+    # though the last bar precedes 17:00 exactly — otherwise the ~49h weekend gap is
+    # misclassified as unexpected and a multi-session 1m tail scores spuriously critical.
+    in_fri_close = dow_start == 4 and t_start >= CLOSE_T - 300
     in_sat       = dow_start == 5
     in_sun_early = dow_start == 6 and t_start < BREAK_END_T
     if in_fri_close or in_sat or in_sun_early:
