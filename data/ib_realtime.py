@@ -148,6 +148,14 @@ class IbRealtimeSource:
                 os.replace(tmp, dst)
             except Exception as exc:
                 print(f"[parquet_write] ERROR writing {dst.name}: {exc}", flush=True)
+                # Remove the orphaned tmp so a failed write does not leak a multi-MB file.
+                # On Windows os.replace fails with WinError 5 when a reader transiently holds
+                # dst; left uncleaned, each per-minute retry strands another ~16MB tmp (one
+                # session leaked 2.2GB this way).
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 raise
         self._parquet_executor.submit(_write)
 

@@ -222,6 +222,29 @@ class TestValidateSessionDf:
         assert result["unexpected_gaps"] == []
         assert result["severity"] == "ok"
 
+    def test_weekend_gap_pre_close_start_ignored(self):
+        from scripts.check_session_parquets import validate_session_df
+
+        # Real-world case: the last 1m bar before the weekend lands at 16:59 ET (a minute
+        # before the 17:00 close), so the gap into Monday's open starts < CLOSE_T. This
+        # must still be recognized as the weekend closure, not flagged as a ~49h hole that
+        # scores the whole tail critical.
+        base_fri = pd.Timestamp("2026-05-15 16:59:00", tz="America/New_York")
+        base_mon = pd.Timestamp("2026-05-18 18:00:00", tz="America/New_York")
+        timestamps = (
+            [base_fri + pd.Timedelta(minutes=i) for i in range(1)]
+            + [base_mon + pd.Timedelta(minutes=i) for i in range(30)]
+        )
+        idx = pd.DatetimeIndex(timestamps)
+        df = pd.DataFrame({
+            "Open": 27000.0, "High": 27010.0, "Low": 26990.0,
+            "Close": 27000.0, "Volume": 100.0,
+        }, index=idx)
+
+        result = validate_session_df(df, price_lo=20000, price_hi=35000)
+        assert result["unexpected_gaps"] == []
+        assert result["severity"] == "ok"
+
     def test_late_start_returns_late_start_hours(self):
         from scripts.check_session_parquets import validate_session_df
 
