@@ -435,6 +435,10 @@ OTHER_MARKER_STYLE = {
     "market-entry":        dict(symbol="circle",              color="#FF9800", size=15),
     "trend-broken":        dict(symbol="diamond-open",        color="#FF9800", size=13),
     "new-hypothesis":      dict(symbol="pentagon",            color="#E040FB", size=15),
+    # GIL-36 broker-reconciliation events (never appear in a pure 1s regression, but the
+    # renderer must handle them gracefully if present in a replayed live event stream).
+    "reconcile-stop-placed": dict(symbol="hexagram",          color="#00BCD4", size=15),
+    "reconcile-flat":        dict(symbol="x-dot",             color="#795548", size=14),
 }
 
 pnl_by_exit = {(p["exit"]["time"], p["exit"]["kind"]): p for p in pairs}
@@ -513,6 +517,14 @@ for kind, style in OTHER_MARKER_STYLE.items():
                 parts.append(f"bar low: {e['bar_low']}")
             if "bar_high" in e:
                 parts.append(f"bar high: {e['bar_high']}")
+        if kind == "reconcile-stop-placed":
+            if "fill" in e:
+                parts.append(f"fill: {e['fill']}")
+            if "intended_stop" in e:
+                parts.append(f"intended_stop: {e['intended_stop']}")
+        if kind == "reconcile-flat":
+            if "entry_price" in e:
+                parts.append(f"entry_price: {e['entry_price']}")
         if kind == "new-hypothesis":
             if e.get("weekly_mid"):
                 parts.append(f"weekly_mid: {e['weekly_mid']}")
