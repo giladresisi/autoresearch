@@ -714,6 +714,25 @@ def test_parquet_write_submitted_to_executor_not_blocking(tmp_path):
     mock_direct.assert_not_called()
 
 
+def test_failed_parquet_write_cleans_up_tmp(tmp_path):
+    """A rename failure (Windows WinError 5 on os.replace) must not leak the .tmp."""
+    src = _make_source(tmp_path)
+    df = pd.DataFrame(
+        {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0]},
+        index=pd.DatetimeIndex([pd.Timestamp("2026-05-08 09:31:00", tz="America/New_York")]),
+    )
+    dst = tmp_path / "MNQ_1m.parquet"
+
+    with patch("data.ib_realtime.os.replace", side_effect=OSError("WinError 5")):
+        src._submit_parquet_write(df, dst)
+        src._parquet_executor.shutdown(wait=True)  # drain the background write
+
+    # os.replace raised, so the target was never created...
+    assert not dst.exists()
+    # ...and the orphaned tmp was cleaned up rather than stranded.
+    assert list(tmp_path.glob("*.parquet.tmp")) == []
+
+
 def test_executor_drained_on_stop(tmp_path):
     src = _make_source(tmp_path)
     src._parquet_executor = MagicMock()
