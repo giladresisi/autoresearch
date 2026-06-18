@@ -81,6 +81,62 @@ def _floor_stop_distance(direction: str, entry_price: float, stop_price: float) 
     return stop_price
 
 
+# ---------------------------------------------------------------------------
+# Broker reconciliation hook (GIL-36) — live-only
+# ---------------------------------------------------------------------------
+# A persistent READ-ONLY Tradovate orders-blotter reader, started lazily on the first live
+# entry. After each entry that carries a protective stop we spawn a daemon-thread verify that
+# reads the broker blotter and corrects a rejected SL leg / rejected entry. Detection-only
+# browser; all correction goes back through PMT (update_stop_loss) / position.json. Guarded so
+# it is a no-op in backtest/simulated mode and can NEVER raise into the trading loop.
+_recon_reader = None
+_recon_reader_started = False
+
+
+def _get_recon_reader():
+    """Lazily start the shared read-only reader (live mode only). Returns None on any failure."""
+    global _recon_reader, _recon_reader_started
+    if not _LIVE:
+        return None
+    if _recon_reader_started:
+        return _recon_reader
+    _recon_reader_started = True
+    try:
+        from broker_recon.reader import TradovateOrderReader
+        r = TradovateOrderReader()
+        if r.start():
+            _recon_reader = r
+    except Exception as exc:  # pragma: no cover - reader is best-effort
+        print(f"[live_orders] reconcile reader start failed (ignored): {exc}", flush=True)
+        _recon_reader = None
+    return _recon_reader
+
+
+def _spawn_reconcile(direction: str, intended_entry: float, intended_stop: float,
+                     fill: float) -> None:
+    """Spawn the post-entry broker reconciliation on a daemon thread (live-only, best-effort).
+
+    Never raises into the caller; a no-op outside live mode or when the reader is unavailable.
+    """
+    if not _LIVE:
+        return
+    try:
+        reader = _get_recon_reader()
+        if reader is None:
+            return
+        from broker_recon import reconcile as _recon
+        entry = {
+            "direction": direction,
+            "intended_entry": float(intended_entry),
+            "intended_stop": float(intended_stop),
+            "symbol": os.environ.get("TRADING_SYMBOL", "MNQ1!"),
+            "time": _now_et(),
+        }
+        _recon.reconcile_after_entry(entry, float(fill), reader=reader)
+    except Exception as exc:  # pragma: no cover - reconciliation must never break a trade
+        print(f"[live_orders] reconcile spawn failed (ignored): {exc}", flush=True)
+
+
 def set_session_date(d: str) -> None:
     global _SESSION_DATE
     _SESSION_DATE = d
@@ -230,6 +286,10 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float, *, s
                 {"direction": direction, "stop_price": stop_price}, None)
         _register_downgraded_fill(direction, entry_price, stop_price, source, now,
                                   fill_price=_fill)
+        # Broker reconciliation (GIL-36): verify the SL leg actually rests at the broker on
+        # this STP->MKT downgrade fill — the exact ex1 case. intended_stop is the post-
+        # preventive stop_price; intended_entry is the trigger; fill is the assumed fill.
+        _spawn_reconcile(direction, entry_price, stop_price, _fill)
         return
     pos = _load_pos()
     pos["stop_entry"] = str(entry_price)
@@ -462,6 +522,11 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float, *,
     _recompute_cautious_at_fill(fill_price)
     _log({"kind": "market-entry", "time": now, "direction": direction,
           "entry_price": entry_price, "stop_price": stop_price})
+    # Broker reconciliation (GIL-36): a market fill must rest a valid SL — verify it at the
+    # broker and correct a rejected leg / rejected entry. intended_entry is the original
+    # trigger when given, else the assumed fill (manual entries pass 0.0).
+    _spawn_reconcile(direction, entry_price if entry_price != 0.0 else fill_price,
+                     stop_price, fill_price)
 
 
 def move_stop_entry(new_entry_price: float, new_stop_price: float, direction: str, *, force: bool = False) -> None:
@@ -519,13 +584,25 @@ def stop_entry_filled(direction: str, stop_price: float, fill_price: float = 0.0
     """
     now = _now_et()
     pos = _load_pos()
+    _entry_anchor = 0.0
     if pos.get("active"):
         pos["active"]["stop"] = stop_price
         _save_pos(pos)
+        try:
+            _entry_anchor = float(pos.get("stop_entry") or 0.0)
+        except (TypeError, ValueError):
+            _entry_anchor = 0.0
     else:
         print("[live_orders] stop_entry_filled: active position absent — position.json not updated", flush=True)
     _log({"kind": "stop-entry-filled", "time": now, "direction": direction,
           "price": fill_price, "stop_price": stop_price})
+    # Broker reconciliation (GIL-36): a normal resting STP just confirmed filled — verify the
+    # SL leg rests at the broker. intended_entry = the resting STP trigger (the stop_entry
+    # anchor from position.json) when known, else the reported fill; intended_stop = the
+    # embedded SL; fill = the reported fill price.
+    _fill_anchor = float(fill_price) if fill_price else _entry_anchor
+    _spawn_reconcile(direction, _entry_anchor if _entry_anchor else _fill_anchor,
+                     stop_price, _fill_anchor)
 
 
 def cancel_stop_entry(reason: str = "user-requested", force: bool = False) -> None:
