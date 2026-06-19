@@ -137,9 +137,9 @@ def test_opp_move_alone_does_not_rearm():
 
 
 def test_rearm_via_opposite_smt():
-    # R2 (GIL-25): an opposite-direction SMT re-arms a DYNAMIC level (day_high); a FIXED level
-    # (ny_evening_high) re-arms via price DEPARTURE (price left the level region after a
-    # reversal), not via the opposite SMT. Both re-fire on a fresh re-touch.
+    # An opposite-direction SMT re-arms a DYNAMIC level (day_high). A FIXED level
+    # (ny_evening_high) is SINGLE-FIRE: it never re-arms — not via the opposite SMT and not via
+    # a price departure — so only the dynamic level re-fires on a fresh re-touch.
     lm = _levels(day_high=21000.0, day_low=20000.0, ny_evening_high=21000.0)
     le = _levels(day_high=3000.0, day_low=2000.0, ny_evening_high=3000.0)
     state = {}
@@ -152,23 +152,23 @@ def test_rearm_via_opposite_smt():
 
     # Bar 2: MNQ no longer touches the highs but touches day_low (long), MES neither. The
     #   day_low long record re-arms the DYNAMIC day_high (opposite-SMT re-arm). The FIXED
-    #   ny_evening_high re-arms because price departed it (close 20100 ≫ FULFILL session=20
-    #   below the 21000 level) — a reversal away, the level held.
+    #   ny_evening_high does NOT re-arm even though price departed it — it is single-fire.
     mnq2 = _bar(high=20990.0, low=19999.0, close=20100.0)
     mes2 = _bar(high=2990.0, low=2001.0, close=2100.0)
     recs, state = detect_regular_smts(lm, le, mnq2, mes2, state)
     assert any(r["ref_name"] == "day_low" for r in recs)
     assert state["day_high|short|wick"]["armed"], "dynamic re-armed by opposite SMT"
-    assert state["ny_evening_high|short|wick"]["armed"], "fixed re-armed by departure (reversal)"
+    assert not state["ny_evening_high|short|wick"]["armed"], "fixed level never re-arms (single-fire)"
 
-    # Bar 3: re-touch the highs → both day_high and ny_evening_high re-fire.
+    # Bar 3: re-touch the highs → only the dynamic day_high re-fires; the fixed ny_evening_high
+    # stays terminal.
     mnq3 = _bar(high=21001.0, low=20800.0, close=20900.0)
     mes3 = _bar(high=2999.0, low=2800.0, close=2900.0)
     recs, state = detect_regular_smts(lm, le, mnq3, mes3, state)
     assert any(r["ref_name"] == "day_high" for r in recs), \
         "opposite SMT re-armed dynamic day_high → re-touch fires"
-    assert any(r["ref_name"] == "ny_evening_high" for r in recs), \
-        "departed fixed ny_evening_high re-fires on a fresh re-touch (R2)"
+    assert not any(r["ref_name"] == "ny_evening_high" for r in recs), \
+        "single-fire fixed ny_evening_high does NOT re-fire on a fresh re-touch"
 
 
 def test_opposite_smt_does_not_rearm_fixed_without_departure():
@@ -191,9 +191,10 @@ def test_opposite_smt_does_not_rearm_fixed_without_departure():
         "opposite SMT must NOT re-arm a fixed level that has not departed"
 
 
-def test_fixed_level_rearms_until_invalidated():
-    # R2 (GIL-25 2026-06-13): a FIXED level no longer fires once-ever. It re-fires on a fresh
-    # re-visit (depart-then-return) while it holds, and is retired only by invalidation.
+def test_fixed_level_single_fire_ever():
+    # A FIXED level fires once per session and never re-arms: a depart-then-return re-visit of a
+    # HELD level does NOT re-fire (only DYNAMIC day_/week_ levels re-arm). The depletion latch is
+    # the level's terminal backstop, not the trigger that stops the second fire.
     lm = _levels(ny_evening_low=21000.0)
     le = _levels(ny_evening_low=3000.0)
     state = {}
@@ -203,28 +204,30 @@ def test_fixed_level_rearms_until_invalidated():
     assert [r["ref_name"] for r in recs] == ["ny_evening_low"]
     assert recs[0]["direction"] == "long"
 
-    # Bar 2: price reverses UP and leaves the level by >= FULFILL session(20) → departed; the
-    # level held (support), not invalidated (a LOW invalidates on a run BELOW it, not above).
+    # Bar 2: price reverses UP and leaves the level by >= FULFILL session(20); the level held
+    # (support), not invalidated (a LOW invalidates on a run BELOW it, not above). A fixed level
+    # does NOT re-arm on this departure.
     recs, state = detect_regular_smts(
         lm, le, _bar(21030.0, 21022.0, 21025.0), _bar(3020.0, 3012.0, 3015.0), state)
-    assert state["ny_evening_low|long|wick"]["armed"], "fixed re-arms after a held reversal"
+    assert not state["ny_evening_low|long|wick"]["armed"], "fixed level never re-arms (single-fire)"
     assert state.get("__level_inv__", {}).get("ny_evening_low", {}).get("mnq") is not True
 
-    # Bar 3: a fresh re-touch from above → RE-FIRES (no longer single-fire-ever).
+    # Bar 3: a fresh re-touch from above → does NOT re-fire (single fire for the session).
     recs, state = detect_regular_smts(
         lm, le, _bar(21010.0, 20999.0, 21005.0), _bar(3010.0, 3001.0, 3005.0), state)
-    assert any(r["ref_name"] == "ny_evening_low" for r in recs), "fixed level re-fires (R2)"
+    assert not any(r["ref_name"] == "ny_evening_low" for r in recs), \
+        "single-fire fixed level does NOT re-fire on a fresh re-touch"
 
-    # Bar 4: MNQ runs FULFILL session(20) BELOW the level (low <= 20980) → retired for MNQ.
+    # Bar 4: MNQ runs FULFILL session(20) BELOW the level (low <= 20980) → depletion latch trips.
     recs, state = detect_regular_smts(
         lm, le, _bar(20985.0, 20975.0, 20980.0), _bar(2999.0, 2990.0, 2995.0), state)
     assert state["__level_inv__"]["ny_evening_low"]["mnq"] is True
 
-    # Bar 5: a fresh re-touch → NO fire (terminal: invalidation, not the first fire).
+    # Bar 5: a fresh re-touch → still NO fire (retired by depletion as well).
     recs, state = detect_regular_smts(
         lm, le, _bar(21010.0, 20999.0, 21005.0), _bar(3010.0, 3001.0, 3005.0), state)
     assert not any(r["ref_name"] == "ny_evening_low" for r in recs), \
-        "an invalidated fixed level is retired forever"
+        "a depleted fixed level stays retired"
 
 
 def test_dynamic_rearms_on_fulfillment():

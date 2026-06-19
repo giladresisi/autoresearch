@@ -708,40 +708,25 @@ def _detect_level_smts(
         # below) — NOT here — because it must be checked independently of the current bar's
         # approach direction.
 
-        # R2: departure tracking for the FIXED-level re-arm. After a fixed level fires, mark it
-        # "departed" once price leaves the level by the DEPART_PTS[tier] margin. An
-        # UPWARD departure of a *_high (or downward of a *_low) also trips the depletion latch
-        # below → the level is retired (skipped) before it can re-arm, so in practice a fixed
-        # level only re-arms after a genuine REVERSAL away from the level (the level held).
-        if kind_cls == "fixed" and st.get("fired") and not st.get("departed"):
-            if abs(mnq_close - mnq_lvl_price) >= _depart_pts(tier, "mnq"):
-                st["departed"] = True
-
-        # (b) Re-arm (only if currently dormant). Dynamic levels re-arm when the swept level
-        # was fulfilled OR an opposite-direction SMT is present in this batch (a genuine regime
-        # flip). FIXED levels re-arm on a fresh re-visit (depart-then-return) — replacing the
-        # old single-fire-ever rule (GIL-25 2026-06-13): a fired SMT followed by a reversal
-        # means the level held (its liquidity was NOT consumed), so a later re-approach may
-        # legitimately fire again. The terminal state that stops further fires is per-ticker
-        # invalidation (the skip at the top of this loop), NOT the first fire.
-        if not st["armed"]:
-            if kind_cls == "dynamic":
-                opp_present = any(r.get("direction") == _opposite(direction) for r in records)
-                if st.get("fulfilled") or opp_present:
-                    st["armed"] = True
-                    st["fired"] = False
-                    st["fulfilled"] = False
-                    st["invalidated"] = False
-                    st["superseded"] = False
-                    st["retired_depleted"] = False
-            elif st.get("departed"):
+        # (b) Re-arm (only if currently dormant). DYNAMIC levels (running day_/week_ extremes)
+        # re-arm when the swept level was fulfilled OR an opposite-direction SMT is present in
+        # this batch (a genuine regime flip), so a session can carry several SMTs on the same
+        # running level. FIXED levels (prev-day/prev-week and the per-session asia/london/ny_*
+        # extremes) are SINGLE-FIRE: they fire at most once per session and never re-arm — a
+        # prior period's resting liquidity is a one-shot, so a depart-then-return re-visit of a
+        # HELD level is NOT a fresh SMT. The only terminal state beyond that first fire is
+        # per-ticker depletion (the skip at the top of this loop). (A fixed-level depart-then-
+        # return re-arm was tried in GIL-25 2026-06-13 but produced multiple same-session SMTs on
+        # a single held level, e.g. prev1_day_high firing 3× on 2026-06-18 — reverted.)
+        if not st["armed"] and kind_cls == "dynamic":
+            opp_present = any(r.get("direction") == _opposite(direction) for r in records)
+            if st.get("fulfilled") or opp_present:
                 st["armed"] = True
                 st["fired"] = False
                 st["fulfilled"] = False
                 st["invalidated"] = False
                 st["superseded"] = False
                 st["retired_depleted"] = False
-                st["departed"] = False
 
         # (c) Fire on the armed rising edge.
         if cond and not st["last_cond"] and st["armed"]:

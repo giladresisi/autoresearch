@@ -246,9 +246,9 @@ def test_depletion_backstop_only_on_flip():
 
 
 # ===========================================================================
-# Fixed-level re-arm-until-invalidated (AC#3 / GIL-25 2026-06-13 comment)
+# Fixed-level SINGLE-FIRE (only DYNAMIC day_/week_ levels re-arm in a session)
 # ===========================================================================
-def test_fixed_level_refires_after_departure_and_retouch():
+def test_fixed_level_single_fire_no_refire_after_departure_and_retouch():
     lm = _levels(prev1_day_high=21000.0)
     le = _levels(prev1_day_high=3000.0)
     # Bar 1: divergent up-sweep → fires short.
@@ -259,10 +259,11 @@ def test_fixed_level_refires_after_departure_and_retouch():
     r2, s = detect_regular_smts(
         lm, le, _bar(20958.0, 20945.0, 20950.0, "t2"), _bar(2985.0, 2980.0, 2982.0, "t2"), s)
     assert r2 == []
-    # Bar 3: a fresh re-approach, divergent again → re-fires (fixed re-arm on a fresh re-visit).
+    # Bar 3: a fresh divergent re-approach → does NOT re-fire. A fixed level is single-fire for
+    # the whole session: a depart-then-return re-visit of a HELD level is not a fresh SMT.
     r3, s = detect_regular_smts(
         lm, le, _bar(21001.0, 20990.0, 20995.0, "t3"), _bar(2999.0, 2990.0, 2995.0, "t3"), s)
-    assert len(r3) == 1
+    assert r3 == []
 
 
 def test_fixed_level_no_refire_without_departure():
