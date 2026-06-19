@@ -1,70 +1,89 @@
-# Feature: Per-ticker liquidity-level invalidation / depletion retirement (R2)
+# Experiment: SMT conviction-seed (warmup + carry, incl. fills) + suppress weekly-mid trend-broken
 
-> **Source of truth: Linear GIL-25** — https://linear.app/gilad-resisi/issue/GIL-25
-> Read the issue AND its comments first (esp. the 2026-06-13 re-arm refinement: fixed levels
-> re-arm and may fire repeatedly *until invalidated* — invalidation, not the first fire, is
-> terminal). This file is a thin runbook; the full spec/design lives in GIL-25.
+**Linear issue (source of truth):** `GIL-39` — https://linear.app/gilad-resisi/issue/GIL-39
+**Worktree / branch:** `autoresearch/smt-conv-seed-wkmid-trendbroken` (off `origin/master` @ e9272a3)
+**Status:** set up — ready for a separate main agent to execute in THIS worktree.
 
-- **Branch:** `autoresearch/smt-level-invalidation` (off `live` @ f475455 — has R1 unidirectional
-  + master SMT-v2 merge + R3 1m-cadence detection + the keep:True FVG fix).
-- **Status:** spec-only / handoff. A separate agent implements here. Nothing committed yet.
-- **Foundation for:** GIL-26 (R4) — R4's FVG-edge invalidation reuses this machinery. Land R2
-  first; R4 plugs FVG edges into it.
-- **Shadow change:** SMT detection does NOT drive hypothesis/entry yet → **verify by the
-  SMT-div stream, NOT P&L.** An A/B P&L delta is meaningless here; do not use it as the pass
-  criterion.
+> Read GIL-39 first. It holds the full context: both changes' problems, the `file.py:line`
+> anchors, the fix recommendations, the regression-testability nuance, and the example
+> occurrences. This file is just how to *proceed*.
 
-## What to build (summary — full detail in GIL-25)
-Track per-ticker level state: mark a level "destroyed/invalidated" for a ticker once that
-ticker runs a confirmed HH/LL **well beyond** it (reuse the existing `FULFILL_PTS` /
-`INVALIDATE_PTS` tier thresholds in `smt_detect.py`). Fan out to **three** consumers:
-(1) SMT detection `smt_detect.py::_detect_level_smts` — skip a level if **either** ticker has
-it invalidated; (2) cautious-target selection; (3) hypothesis target lists. Also change the
-**fixed-level re-arm rule** (GIL-25 2026-06-13 comment): a fixed level re-arms on a fresh
-re-visit (depart-then-return) and may fire again **until invalidated** — replace the current
-"single fire ever" (`smt_detect.py` re-arm only `kind_cls=="dynamic"`, ~line 348). Distinguish
-from the existing Part-A adverse-run `invalidated` flag (that invalidates a fired SMT *record*;
-this invalidates the *level*).
+**Two flag-gated changes, ONE combined 1s A/B screening run (with plots).** The user will
+co-analyze the chain of events to attribute each changed trade to Change A vs Change B (they
+fire via different mechanisms at different times), then decide which graduates to full
+regression — judged by causal reasoning, NOT purely P&L deltas.
 
-## Code anchors (backtest vs live)
-Backtests run `regression.py` → `backtest_smt.run_backtest_v2` (SimulatedBrokerExecutor); live
-runs `automation.main`. Detection is shared. Anchors: `smt_detect.py::_detect_level_smts`
-(direction/fire/re-arm; the dynamic-only re-arm gate ~348), `FULFILL_PTS_*` / `INVALIDATE_PTS_*`
-(reuse for the "well beyond" threshold), `eligible_levels` (recency gate); cautious-target +
-hypothesis-target assembly in `session_pipeline.py` (consumers to gate). State: `daily.json`
-(`liquidities`, `liquidities_mes`, universe keys), `smts.json` (detect_state).
+- **Change A** — seed the standing-SMT conviction set from still-standing (unfulfilled, not
+  invalidated, not depleted) SMTs **and fills** so they affect hypothesis direction via the
+  existing rule2b conviction override. New `smt_conviction.seed_from_standing(...)`, called
+  AFTER the force-reset `save_hypothesis` and BEFORE `run_hypothesis` (cold AND warm starts).
+  Survivor source: `_detect_state_pending_entries` + `_detect_state_fill_entries`
+  (`session_pipeline.py` ~2447/2507). **Flag-gate it.**
+- **Change B** — suppress the trend-broken signal emitted on a weekly-mid cross
+  (`session_pipeline.py:1345` mid-invalidation path; `trend.py:259-272` `_weekly_mid_cross_guard`).
+  **Flag-gate it independently** (so A and B can be ablated separately if needed).
 
-## Runbook
-- **A — Plan.** Turn GIL-25 + this file into `.agents/plans/<slug>.md` (`/plan-feature` if
-  large/cross-cutting); stamp EXECUTION_MODE + executor directive.
-- **B — Implement.** Per the plan; leave changes UNSTAGED. Skip IB-touching tests
-  (`--ignore=tests/test_ib_realtime.py --ignore=tests/test_ib_integration.py`); the 24
-  master-inherited wall-clock/V1 failures are pre-existing (flag only NEW failures).
-- **C — Regression (SMT-stream, NOT P&L).** Run a 1s **and** 1m regression for 2026-06-12
-  (`run_regression(dates=["2026-06-12"], mode="1s"/"1m", skip_lock=True)`). Inspect the
-  smt-div stream + `daily.json`.
-- **D — Verify (SMT-stream).** At each occurrence below assert the desired SMT-stream effect
-  (the spurious SMTs are gone). Write `experiment-verification.md`.
-- **E — Notify** the user with the one-line verdict + comment on GIL-25.
+> **CRITICAL nuance for Change A:** the warmup-late-start facet is **LIVE-ONLY** and will NOT
+> show in a full-day regression (replay builds conviction from session open). The
+> **cross-session carry-seed** facet (carried prior-session unfulfilled SMTs/fills seeding
+> conviction at each day's OPEN) **is** regression-testable — inspect the session-open
+> hypothesis. Don't conclude "no effect" without checking the open. `conviction_score` is a
+> consensus ratio, so an all-bullish carried set → +1.0 → can flip rule2b; consider a gate
+> (e.g. `top_tier>=day` OR `>=2` concurring records) so one weak session-tier fill can't flip a day.
+
+---
+
+## Runbook — you are the main agent running this experiment here
+
+Work the stages in order. After **each** stage, post a concise comment to **GIL-39**. When all
+done, **notify the user** (push) with the one-line verdict. Leave ALL changes **UNSTAGED** —
+never commit, merge, or push.
+
+> **SAFETY (the live orchestrator is trading the 2026-06-19 session right now):** Do NOT start
+> the live orchestrator. Do NOT touch `general_live_dir` / the live `global.json`. Regression
+> replays from MAIN parquets read-only (no IB) and writes to the worktree-local regression dir;
+> pytest is isolated via the autouse `_isolate_global_state` conftest fixture (present on
+> master). Set `ACT_*` env appropriately. **Never `git stash`** (shared stash store with the
+> live worktree). Use the `regression-runner` agent for the A/B.
+
+- **Stage A — Plan.** Spawn the **`experiment-planner`** subagent on this `feature.md` + GIL-39.
+  It writes `.agents/plans/<slug>.md` with `EXECUTION_MODE` + an executor directive. → Comment:
+  plan path, `EXECUTION_MODE`, one-line approach.
+- **Stage B — Implement.** Spawn the **`plan-executor`** subagent on the plan; honor its
+  `EXECUTION_MODE` (`team` → `/execute`; `lightweight` → implement directly). Both changes
+  behind independent flags (default OFF → byte-identical baseline). Add unit tests for
+  `seed_from_standing` (incl. a fills-only case) and the weekly-mid trend-broken suppression.
+  Confirm flags-OFF is byte-identical. Leave changes UNSTAGED. → Comment: files changed, flag
+  names, test results, flags-OFF byte-identical confirmation.
+- **Stage C — A/B regression.** Spawn the **`regression-runner`** agent, `ab-working-change`,
+  `1s`, WITH PLOTS, over: **2026-06-10, 2026-05-28, 2026-05-20** (change arm = BOTH flags ON).
+  → Comment: per-day baseline vs change `n_trades`/`pnl`, the event/trade diff, chart paths.
+- **Stage D — Verify the occurrences.** Spawn the **`experiment-verifier`** agent with this
+  `feature.md` + the baseline/change run dirs. For each occurrence below, check at the
+  timestamp/window whether behavior flipped current→desired, and report whole-day delta. It
+  writes `experiment-verification.md`. → Comment: per-occurrence PASS/FAIL + whole-day delta.
+  **Attribution:** for each changed trade, trace the chain of events and label the root-cause
+  mechanism (A: conviction-seed/direction at open or override; B: weekly-mid trend-broken
+  suppression). Note any day where both touch the same trades (the only ambiguous cases).
+- **Stage E — Notify.** Push the user a one-line verdict (which change did the desired thing,
+  at what whole-day cost/benefit, and which looks worth graduating to full regression). Leave
+  everything UNSTAGED; the user reviews and decides.
+
+---
 
 ## Example Occurrences
-| date | time (ET) | source | current behavior | desired behavior | window |
-|---|---|---|---|---|---|
-| 2026-06-12 | 05:35 | live-session:2026-06-12 | spurious bullish `asia_high` SMT (lead=mnq): MES is far above its asia_high 7421.5 (cleared it earlier) while MNQ oscillates at its asia_high 29647.5 → false divergence | with per-ticker invalidation, MES's asia_high is retired → the pair is skipped → **no `asia_high` SMT fires at 05:35** | ±8m |
-| 2026-06-12 | 04:19 | live-session:2026-06-12 | `prev1_day_high` SMTs fire @ 04:19 (wick) / 04:20 (body) though both tickers already crossed below it (depleted pool) | the depleted prev1_day_high is invalidated/retired → **no prev1_day_high SMT fires @ 04:19/04:20** | ±8m |
-| 2026-06-12 | 00:05 | live-session:2026-06-12 | `prev2_day_high` SMTs fire @ 00:05/00:06 though price is already above it (depleted) | invalidated/retired → **no prev2_day_high SMT @ 00:05/00:06** | ±8m |
+| date | time (ET) | source | change | window | current behavior | desired behavior |
+|---|---|---|---|---|---|---|
+| 2026-06-10 | 10:45 | live-session:2026-06-10 | B | ±8m | weekly-mid cross emits trend-broken (dir=up) → resets/churns direction | trend-broken suppressed on weekly-mid cross; hypothesis direction persists |
+| 2026-05-28 | 09:33 | live-session:2026-05-28 | B | ±8m | weekly-mid cross emits trend-broken (dir=up) | trend-broken suppressed; direction persists |
+| 2026-05-20 | 09:36 | live-session:2026-05-20 | B | ±8m | weekly-mid cross emits trend-broken (dir=up) | trend-broken suppressed; direction persists |
+| 2026-06-10 | 00:00 | live-session:2026-06-10 | A | session-open±30m | session opens; carried prior-session unfulfilled SMTs/fills do NOT seed conviction → rule2b unchallenged | carried standing SMTs/fills seed conviction; override can flip rule2b when consensus is strong |
 
-## Acceptance criteria
-- [ ] Per-ticker level invalidation state; a level is skipped in `_detect_level_smts` if either
-      ticker has it invalidated.
-- [ ] Fan-out to cautious-target selection + hypothesis target lists (invalidated levels dropped).
-- [ ] Fixed-level re-arm: fires repeatedly on fresh re-visits until invalidated (no longer
-      single-fire-ever); invalidation is terminal.
-- [ ] 2026-06-12 1s+1m regression: the spurious SMTs above (asia_high 05:35, prev1_day_high
-      04:19/04:20, prev2_day_high 00:05/00:06) no longer fire.
-- [ ] Unit tests for invalidation + re-arm; SMT/pipeline suite green except known pre-existing
-      failures.
+> Regression dates = 2026-06-10, 2026-05-28, 2026-05-20 (prior, complete, both-mechanism days).
+> DO NOT use 2026-06-19 (live/incomplete, not in main parquets). If a day turns out not to
+> exhibit a carry-seed (Change A) opening, say so — Change A's regression signal only appears on
+> days that open with standing carried SMTs/fills.
 
 ## Out of scope
-- GIL-26 (R4) FVG-edge levels (separate worktree; depends on this). Wiring SMTs into
-  hypothesis/entry direction. Any P&L-affecting change (shadow detection only).
+- The warmup-late-start facet of Change A (live-only; not regression-verifiable here).
+- Committing/merging/pushing. Shipping decisions are the user's after the screening.
