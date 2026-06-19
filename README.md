@@ -63,6 +63,23 @@ uv run prepare.py
 uv run train.py
 ```
 
+### Troubleshooting: `import ssl` fails / `_ssl.pyd` blocked
+
+On some machines — notably **Windows with Smart App Control enabled** — the OS blocks the
+*unsigned* `_ssl.pyd` / OpenSSL DLLs that ship with uv's managed CPython, so `import ssl`
+fails and nothing can run (`An Application Control policy has blocked this file`). Fix it with:
+
+```bash
+python scripts/bootstrap_env.py
+```
+
+It's a **no-op on machines that aren't affected** (Linux, macOS, Windows without Smart App
+Control). Where the block exists, it pins uv to a PSF-signed *system* Python 3.10 via a
+machine-level uv config and rebuilds `.venv`. If no signed Python 3.10 is installed it prints
+the one manual step (install [python.org 3.10](https://www.python.org/downloads/release/python-31011/)),
+then re-run. The fix is intentionally machine-scoped (not committed), since the block is a
+property of the machine, not the project — run this script once per affected machine.
+
 ---
 
 ## Running the optimization agent
