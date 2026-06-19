@@ -1,5 +1,0 @@
-# TEMP (2026-06-19): Smart App Control now blocks uv's unsigned managed-CPython _ssl.pyd.
-# Force uv to use the PSF-signed python.org interpreter (system) and never the blocked
-# managed download. Rollback: delete this file and restore the original .venv from .venv.uvbak.
-python-preference = "only-system"
-python-downloads = "never"
