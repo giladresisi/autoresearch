@@ -240,3 +240,113 @@ def test_update_never_raises_on_garbage():
     assert sc.update_standing(None, None, None, mnq_close=0.0, now_iso="") == []
     out = sc.update_standing([{"bad": "rec"}], [{"also": "bad"}], {}, 0.0, _iso(10, 0))
     assert isinstance(out, list)
+
+
+# ══ seed_from_standing (GIL-39 Change A) ══════════════════════════════════════
+
+def _survivor(ref_name, direction, tier, type_="wick", time=None,
+              mnq_price=100.0, kind="smt"):
+    """A `_pending_entry_to_record`-shaped carried survivor (level SMT or fill)."""
+    side = "bearish" if direction == "short" else "bullish"
+    return {
+        "kind": kind, "type": type_, "phase": type_, "side": side,
+        "direction": direction, "ref_name": ref_name, "tier": tier,
+        "time": time or _iso(9, 30), "mnq_price": mnq_price,
+    }
+
+
+def test_seed_from_standing_off_is_noop():
+    """Flag OFF → returns `prev` unchanged even with non-empty survivors."""
+    assert sc.SMT_CONVICTION_SEED_CARRY is False
+    prev = [_standing("week_high", "short", "week")]
+    survivors = [_survivor("day_high", "long", "day")]
+    out = sc.seed_from_standing(prev, survivors, _iso(10, 0))
+    assert out == prev
+
+
+def test_seed_from_standing_levels_consensus(monkeypatch):
+    """Flag ON, two bullish week/day-tier level survivors → 2 seeded records with the
+    correct schema; conviction_score == +1.0."""
+    monkeypatch.setattr(sc, "SMT_CONVICTION_SEED_CARRY", True)
+    survivors = [
+        _survivor("week_low", "long", "week", time=_iso(9, 30), mnq_price=120.0),
+        _survivor("day_low", "long", "day", time=_iso(9, 35), mnq_price=118.0),
+    ]
+    out = sc.seed_from_standing([], survivors, _iso(10, 0))
+    assert len(out) == 2
+    for r in out:
+        assert r["fire_iso"] in (_iso(9, 30), _iso(9, 35))
+        assert r["tier"] in ("week", "day")
+        assert r["keys"] and isinstance(r["keys"], list)
+        assert r["fulfilled_iso"] is None
+        assert r["adverse_streak"] == 0
+        assert r["direction"] == "long" and r["side"] == "bullish"
+    # fire_close carried from the survivor mnq_price.
+    closes = sorted(r["fire_close"] for r in out)
+    assert closes == [118.0, 120.0]
+    score, _ = sc.conviction_score(out, _iso(10, 0))
+    assert score == 1.0
+
+
+def test_seed_from_standing_fills_only(monkeypatch):
+    """REQUIRED fills-only case: survivors are ONLY carried fills (kind='fill',
+    tier='day', phase set, mnq_price=None) all bullish → seeded with tier='day',
+    type=phase, bare-ref_name fill detect key; conviction_score == +1.0. A single
+    day-tier fill passes the consensus gate (top_tier=='day')."""
+    monkeypatch.setattr(sc, "SMT_CONVICTION_SEED_CARRY", True)
+    fill = {
+        "kind": "fill", "type": "ce", "phase": "ce", "side": "bullish",
+        "direction": "long", "ref_name": "fvg_20260610_1100_bull", "tier": "day",
+        "time": _iso(9, 40), "mnq_price": None,
+    }
+    out = sc.seed_from_standing([], [fill], _iso(10, 0))
+    assert len(out) == 1
+    rec = out[0]
+    assert rec["tier"] == "day"
+    assert rec["type"] == "ce"  # fill phase preserved as type
+    assert rec["keys"] == ["fvg_20260610_1100_bull"]  # bare ref_name (fill detect key)
+    assert rec["fire_close"] == 0.0  # mnq_price None → 0.0 (None-safe)
+    score, _ = sc.conviction_score(out, _iso(10, 0))
+    assert score == 1.0
+
+
+def test_seed_from_standing_weak_single_session_dropped(monkeypatch):
+    """Flag ON, one lone session-tier record → consensus gate not met → empty."""
+    monkeypatch.setattr(sc, "SMT_CONVICTION_SEED_CARRY", True)
+    survivors = [_survivor("ny_morning_high", "short", "session")]
+    out = sc.seed_from_standing([], survivors, _iso(10, 0))
+    assert out == []
+    # ...but two concurring session-tier records meet the n_concur>=2 branch.
+    survivors2 = [
+        _survivor("ny_morning_high", "short", "session", time=_iso(9, 30)),
+        _survivor("ny_evening_high", "short", "session", time=_iso(9, 35)),
+    ]
+    out2 = sc.seed_from_standing([], survivors2, _iso(10, 0))
+    assert len(out2) == 2
+
+
+def test_seed_from_standing_single_fill_tier_dropped(monkeypatch):
+    """A single `fill`-tier (not 'day') record is below the strong tiers and alone →
+    consensus gate not met → dropped."""
+    monkeypatch.setattr(sc, "SMT_CONVICTION_SEED_CARRY", True)
+    survivors = [_survivor("fvg_x", "long", "fill", type_="ce", kind="fill")]
+    out = sc.seed_from_standing([], survivors, _iso(10, 0))
+    assert out == []
+
+
+def test_seed_from_standing_merges_with_prev(monkeypatch):
+    """Flag ON: a new survivor on a different (ref_name, direction) is added; a survivor
+    colliding on the logical key collapses (wick supersedes body) — no duplicates."""
+    monkeypatch.setattr(sc, "SMT_CONVICTION_SEED_CARRY", True)
+    prev = [_standing("week_low", "long", "week", type_="body")]
+    survivors = [
+        # collides with prev on (week_low, long): wick supersedes the prev body.
+        _survivor("week_low", "long", "week", type_="wick", time=_iso(9, 45)),
+        # new logical key — added.
+        _survivor("day_low", "long", "day", type_="wick"),
+    ]
+    out = sc.seed_from_standing(prev, survivors, _iso(10, 0))
+    keys = sorted((r["ref_name"], r["direction"]) for r in out)
+    assert keys == [("day_low", "long"), ("week_low", "long")]
+    wk = next(r for r in out if r["ref_name"] == "week_low")
+    assert wk["type"] == "wick"  # wick superseded the prev body

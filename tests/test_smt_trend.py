@@ -846,3 +846,88 @@ class TestSecondaryTakeProfitOnTouch0930:
         result = run_trend(self._NOW_IN, self._NO_TOUCH(), self._RECENT())
         assert result is None or result.get("close_reason") != "secondary-tp-touch"
         assert load_position()["active"] != {}
+
+
+class TestSuppressWeeklyMidTrendBroken:
+    """GIL-39 Change B: when SUPPRESS_WEEKLY_MID_TREND_BROKEN is ON, the weekly-mid
+    invalidation is suppressed (no trend-broken / market-close on a weekly-mid cross);
+    the daily-mid and every other invalidation are untouched. Default OFF → byte-identical."""
+
+    _NOW = pd.Timestamp("2026-06-16T13:00:00-04:00")  # outside the open window
+
+    def _setup_up_weekly_break(self):
+        """Flat (no active position). direction=up formed at the weekly mid; bar close
+        falls below the weekly mid → the weekly-mid invalidation would normally fire
+        trend-broken (the Change B occurrence). week_high=120/week_low=80 → weekly mid=100."""
+        hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
+        hyp["direction"] = "up"
+        hyp["weekly_mid"] = "mid"   # _weekly_mid_cross_guard arms for direction=up
+        save_hypothesis(hyp)
+        save_position(copy.deepcopy(DEFAULT_POSITION))  # no active → Step-4 flat scan
+        save_daily(_daily_with_levels([
+            {"name": "week_high", "kind": "level", "price": 120.0},
+            {"name": "week_low",  "kind": "level", "price": 80.0},
+        ]))
+
+    def _setup_up_daily_break(self):
+        """Flat (no active position). direction=up at BOTH the daily and weekly mid; bar
+        close falls below both. Used to prove the daily-mid invalidation still fires while
+        the weekly-mid one is suppressed. day_high=110/day_low=90 → daily mid=100;
+        week_high=130/week_low=70 → weekly mid=100."""
+        hyp = copy.deepcopy(DEFAULT_HYPOTHESIS)
+        hyp["direction"] = "up"
+        hyp["daily_mid"] = "mid"
+        hyp["weekly_mid"] = "mid"
+        save_hypothesis(hyp)
+        save_position(copy.deepcopy(DEFAULT_POSITION))
+        save_daily(_daily_with_levels([
+            {"name": "day_high",  "kind": "level", "price": 110.0},
+            {"name": "day_low",   "kind": "level", "price": 90.0},
+            {"name": "week_high", "kind": "level", "price": 130.0},
+            {"name": "week_low",  "kind": "level", "price": 70.0},
+        ]))
+
+    # bar close=95 < mid 100 → contradicts the up thesis (crosses the mid downward)
+    _BAR = staticmethod(lambda: make_1m_bar(open_=101, high=102, low=94, close=95))
+    _RECENT = staticmethod(lambda: make_recent_bars(closes=[101, 95], opens=[100, 101]))
+
+    def test_weekly_mid_trend_broken_default_off(self):
+        """Default OFF: assert the flag is False and the weekly-mid trend-broken fires
+        (baseline behavior preserved)."""
+        import trend
+        from trend import run_trend
+        from smt_state import load_hypothesis
+
+        assert trend.SUPPRESS_WEEKLY_MID_TREND_BROKEN is False
+        self._setup_up_weekly_break()
+        result = run_trend(self._NOW, self._BAR(), self._RECENT())
+        assert result is not None and result["kind"] == "trend-broken"
+        assert result["level_name"] == "weekly_mid"
+        assert load_hypothesis()["direction"] == "none"
+
+    def test_weekly_mid_trend_broken_suppressed_when_on(self, monkeypatch):
+        """REQUIRED suppression case: flag ON → no weekly-mid signal, the up hypothesis
+        PERSISTS (not reset to 'none')."""
+        import trend
+        from trend import run_trend
+        from smt_state import load_hypothesis
+
+        monkeypatch.setattr(trend, "SUPPRESS_WEEKLY_MID_TREND_BROKEN", True)
+        self._setup_up_weekly_break()
+        result = run_trend(self._NOW, self._BAR(), self._RECENT())
+        assert result is None or result.get("level_name") != "weekly_mid"
+        assert load_hypothesis()["direction"] == "up"
+
+    def test_daily_mid_still_fires_when_weekly_suppressed(self, monkeypatch):
+        """Flag ON: a DAILY-mid cross still emits its trend-broken (Change B must not
+        suppress daily-mid)."""
+        import trend
+        from trend import run_trend
+        from smt_state import load_hypothesis
+
+        monkeypatch.setattr(trend, "SUPPRESS_WEEKLY_MID_TREND_BROKEN", True)
+        self._setup_up_daily_break()
+        result = run_trend(self._NOW, self._BAR(), self._RECENT())
+        assert result is not None and result["kind"] == "trend-broken"
+        assert result["level_name"] == "daily_mid"
+        assert load_hypothesis()["direction"] == "none"

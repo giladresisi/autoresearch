@@ -48,6 +48,13 @@ INITIAL_STOP_MIN_DIST_PTS: float = 50.0
 # for bars whose ET wall-clock time falls inside the open window below. Weekly-mid
 # and every other invalidation are untouched. Default OFF → byte-identical baseline.
 OPEN_WINDOW_DAILY_MID_SUSPEND: bool = False
+
+# GIL-39 Change B: suppress the trend-broken emitted on a weekly-mid cross. When ON, the
+# weekly-mid invalidation (both the flat-scan market-close and the in-position trend-broken
+# reset) is skipped; daily-mid and every other invalidation are untouched. Default OFF →
+# byte-identical baseline.
+SUPPRESS_WEEKLY_MID_TREND_BROKEN: bool = False
+
 _OPEN_WINDOW_START_ET: _dtime = _dtime(9, 15)
 _OPEN_WINDOW_END_ET:   _dtime = _dtime(11, 30)
 _ET = ZoneInfo("America/New_York")
@@ -278,6 +285,10 @@ def run_trend(
     # is byte-identical to master (and _in_open_window is never even evaluated).
     _suspend_daily_mid = OPEN_WINDOW_DAILY_MID_SUSPEND and _in_open_window(now)
 
+    # GIL-39 Change B: suppress the weekly-mid trend-broken entirely when ON. When the flag
+    # is OFF this is always False, so both weekly-mid guards below are byte-identical to master.
+    _suppress_weekly_mid = SUPPRESS_WEEKLY_MID_TREND_BROKEN
+
     # ------------------------------------------------------------------
     # ATH maintenance: update dynamic all_time_high; detect two straddle types.
     # Runs on every bar regardless of direction so ATH stays current.
@@ -479,7 +490,7 @@ def run_trend(
                     return _market_close_signal(now, bar_mid, reason="daily_mid_cross", close_reason="daily-mid-cross")
 
             # Weekly-mid invalidation: same logic applied to the broader weekly range.
-            if weekly_mid_price is not None and _weekly_mid_cross_guard:
+            if weekly_mid_price is not None and _weekly_mid_cross_guard and not _suppress_weekly_mid:
                 _wm_broken = (direction == "up"   and bar_close < weekly_mid_price) or \
                              (direction == "down" and bar_close > weekly_mid_price)
                 if _wm_broken:
@@ -794,7 +805,7 @@ def run_trend(
 
     # Weekly-mid invalidation: same logic applied to the broader weekly range.
     # Skipped while the manual direction lock is set (GIL-8).
-    if weekly_mid_price is not None and _weekly_mid_cross_guard and not _manual_lock:
+    if weekly_mid_price is not None and _weekly_mid_cross_guard and not _manual_lock and not _suppress_weekly_mid:
         _wm_broken = (direction == "up"   and bar_close < weekly_mid_price) or \
                      (direction == "down" and bar_close > weekly_mid_price)
         if _wm_broken:

@@ -742,6 +742,17 @@ class SessionPipeline:
             # SMTs. Shadow-only (no direction wiring).
             if _cold_start:
                 self._ingest_pending_smts(now, today_mnq_at_open)
+                # GIL-39 Change A: seed standing conviction from the just-merged carried
+                # survivors so the rule2b override can challenge direction at the open.
+                # No-op when the flag is OFF.
+                import smt_conviction as _smt_conv
+                _hyp_seed = _smt_state.load_hypothesis()
+                _survivors = _hyp_seed.get("smt_active_set", []) or []
+                _seeded = _smt_conv.seed_from_standing(
+                    _hyp_seed.get("smt_conviction_set", []) or [], _survivors, now.isoformat()
+                )
+                _hyp_seed["smt_conviction_set"] = _seeded
+                _smt_state.save_hypothesis(_hyp_seed)
             # Run first hypothesis so direction is populated immediately after force-reset.
             _init_hyp_divs = _hyp_mod.run_hypothesis(
                 now, today_mnq_at_open, self._hist_mes_1m,
@@ -757,6 +768,16 @@ class SessionPipeline:
         # run_hypothesis so `divs` sees the survivors. Shadow-only (no direction wiring).
         if _cold_start:
             self._ingest_pending_smts(now, today_mnq_at_open)
+            # GIL-39 Change A: seed standing conviction from the just-merged carried survivors
+            # so the rule2b override can challenge direction at the open. No-op when flag OFF.
+            import smt_conviction as _smt_conv
+            _hyp_seed = _smt_state.load_hypothesis()
+            _survivors = _hyp_seed.get("smt_active_set", []) or []
+            _seeded = _smt_conv.seed_from_standing(
+                _hyp_seed.get("smt_conviction_set", []) or [], _survivors, now.isoformat()
+            )
+            _hyp_seed["smt_conviction_set"] = _seeded
+            _smt_state.save_hypothesis(_hyp_seed)
 
         # No force_reset: run hypothesis to populate direction, then reconcile with active position.
         _init_hyp_divs = _hyp_mod.run_hypothesis(

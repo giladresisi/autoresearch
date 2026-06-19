@@ -34,6 +34,10 @@ CONVICTION_RESIDUAL_MIN = 180  # minutes a *fulfilled* SMT keeps a linearly-deca
 CONVICTION_GRACE_MIN = 5       # no adverse-run drop within this many min of fire (the sweep).
 CONVICTION_SUSTAIN = 2         # adverse-run drop requires this many consecutive adverse closes.
 
+# GIL-39 Change A flag — seed the standing conviction set from carried survivors at the open.
+# Default OFF → `seed_from_standing` returns the prior set unchanged (byte-identical baseline).
+SMT_CONVICTION_SEED_CARRY: bool = False
+
 # Tier weights — reuse the live SMT-V2 tier authority so conviction weighting matches the
 # rest of the engine (ATH/week 3, day 2, fill 1.5, session 1).
 _TIER_WEIGHT = {"ATH": 3.0, "week": 3.0, "day": 2.0, "fill": 1.5, "session": 1.0}
@@ -367,3 +371,135 @@ def conviction_score(standing: "list[dict] | None", now_iso: str) -> "tuple[floa
         return (score, inputs)
     except Exception:
         return empty
+
+
+# ---------------------------------------------------------------------------
+# seed_from_standing — GIL-39 Change A: seed the standing set from carried survivors
+# ---------------------------------------------------------------------------
+# Tiers that are strong enough for a single seeded record to drive an override.
+_SEED_STRONG_TIERS = frozenset({"ATH", "week", "day"})
+
+
+def seed_from_standing(
+    prev: "list[dict] | None",
+    survivors: "list[dict] | None",
+    now_iso: str,
+    *,
+    require_consensus: bool = True,
+) -> list[dict]:
+    """GIL-39 Change A — seed the standing conviction set from carried survivor records.
+
+    Maps each ``_pending_entry_to_record``-shaped survivor (carried SMT or fill) into a
+    conviction record matching ``update_standing``'s new-div schema, then MERGES onto
+    ``prev`` using the same logical-key collapse (``(ref_name, direction)``, wick supersedes
+    body, newer time wins). When ``SMT_CONVICTION_SEED_CARRY`` is False → returns
+    ``list(prev or [])`` unchanged (no-op).
+
+    ``require_consensus`` gate (default ON): a single weak session/fill-tier record must not
+    flip a day. Over the SEEDED records only, compute ``top_tier`` (highest of ATH/week/day/
+    fill/session) and ``n_concur`` (count of the dominant sign). If NOT (``top_tier`` in
+    {ATH, week, day} OR ``n_concur >= 2``), the seeded records are DROPPED (only ``prev`` is
+    returned) so the set stays unchallenged. Dropping keeps the gate fully inside Change A —
+    no edit to ``conviction_score`` / ``hypothesis.py`` is needed.
+
+    Total: degenerate input → safe; never raises.
+    """
+    try:
+        base = list(prev or [])
+        if not SMT_CONVICTION_SEED_CARRY:
+            return base
+
+        # --- Map survivors → conviction records (new-rec schema) ----------------------
+        seeded: list[dict] = []
+        for raw in (survivors or []):
+            if not isinstance(raw, dict):
+                continue
+            ref_name = raw.get("ref_name")
+            direction = raw.get("direction")
+            if not ref_name or not direction:
+                continue
+            rec_type = raw.get("type")
+            tier = _tier_of(ref_name, raw.get("kind"), raw.get("tier"))
+            fire_iso = raw.get("time") or now_iso
+            fire_close = raw.get("mnq_price")
+            try:
+                fire_close = float(fire_close) if fire_close is not None else 0.0
+            except (TypeError, ValueError):
+                fire_close = 0.0
+            keys = raw.get("keys")
+            if not keys:
+                keys = [_detect_key(ref_name, direction, rec_type)]
+            seeded.append({
+                "ref_name": ref_name,
+                "direction": direction,
+                "side": raw.get("side") or ("bearish" if direction == "short" else "bullish"),
+                "tier": tier,
+                "type": rec_type,
+                "fire_iso": fire_iso,
+                "fire_close": fire_close,
+                "adverse_streak": 0,
+                "fulfilled_iso": None,
+                "keys": list(keys),
+            })
+
+        if not seeded:
+            return base
+
+        # --- Consensus gate: one weak session/fill record must not flip a day ---------
+        if require_consensus:
+            _rank = {"ATH": 4, "week": 4, "day": 3, "fill": 2, "session": 1}
+            top_tier = None
+            top_rank = -1
+            n_bull = 0
+            n_bear = 0
+            for r in seeded:
+                rk = _rank.get(r.get("tier") or "", 0)
+                if rk > top_rank:
+                    top_rank = rk
+                    top_tier = r.get("tier")
+                if r.get("direction") == "long" or r.get("side") == "bullish":
+                    n_bull += 1
+                else:
+                    n_bear += 1
+            n_concur = max(n_bull, n_bear)
+            if not (top_tier in _SEED_STRONG_TIERS or n_concur >= 2):
+                # Gate not met → drop the seeded records (leave the prior set unchallenged).
+                return base
+
+        # --- Merge seeded records onto `prev` (same collapse as update_standing) ------
+        by_key: dict = {}
+        order: list = []
+        for r in base:
+            if not isinstance(r, dict):
+                continue
+            lk = _logical_key(r)
+            if lk not in by_key:
+                order.append(lk)
+            by_key[lk] = dict(r)
+
+        for new_rec in seeded:
+            lk = _logical_key(new_rec)
+            existing = by_key.get(lk)
+            if existing is None:
+                by_key[lk] = new_rec
+                order.append(lk)
+            else:
+                # wick supersedes body; equal strength → newer time wins (>=).
+                ns = _confirm_strength(new_rec.get("type"))
+                os_ = _confirm_strength(existing.get("type"))
+                supersede = ns > os_
+                if ns == os_:
+                    nm = _minutes_between(existing.get("fire_iso"), new_rec.get("fire_iso"))
+                    supersede = nm is None or nm >= 0
+                merged_keys: list = list(existing.get("keys") or [])
+                for k in (new_rec.get("keys") or []):
+                    if k not in merged_keys:
+                        merged_keys.append(k)
+                survivor = new_rec if supersede else existing
+                survivor["keys"] = merged_keys
+                by_key[lk] = survivor
+
+        return [by_key[lk] for lk in order]
+    except Exception:
+        # Total: on any unexpected error, preserve the prior set unchanged (fail-safe).
+        return list(prev or [])
