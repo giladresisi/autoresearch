@@ -147,16 +147,17 @@ def test_no_invalidations_trail_created():
 # ===========================================================================
 def test_fulfillment_still_terminal():
     # A SHORT SMT: a FAVORABLE (down) follow-through past fc - FULFILL_PTS["day"]=40 fulfills.
-    # For a FIXED level a favorable follow-through also DEPARTS the level → it re-arms
-    # (fired→False), which is the unchanged Phase-1.3 behavior. The key guarantee: a favorable
-    # move fulfills and never produces an invalidation.
+    # A FIXED level is SINGLE-FIRE: fulfillment marks it fulfilled but never re-arms it (only
+    # DYNAMIC day_/week_ levels re-arm). The key guarantee: a favorable move fulfills and never
+    # produces an invalidation.
     state = {}
     recs, state = _fire_short(state)
     skey = "prev1_day_high|short|wick"
     fc = state[skey]["fire_mnq_close"]  # 20995
-    # Favorable DOWN move past fc - 45 → fulfilled, then (R2) departed → re-armed.
+    # Favorable DOWN move past fc - 45 → fulfilled; the fixed level stays fired (no re-arm).
     recs, state = _drift_short(state, mnq_close=fc - 45.0, t="2026-06-09T10:01:00")
-    assert state[skey]["armed"] is True          # held reversal re-armed the fixed level
+    assert state[skey]["fulfilled"] is True
+    assert state[skey]["armed"] is False         # fixed level is single-fire — never re-arms
     assert state[skey]["invalidated"] is False
     assert state.get("__invalidations__", []) == []
 
@@ -319,8 +320,10 @@ def test_supersession_does_not_change_records():
         assert state_a[ky][f] == state_b[ky][f]
 
 
-def test_superseded_cleared_on_refire():
-    # A superseded fixed level that departs + re-touches + re-fires has superseded=False again.
+def test_superseded_fixed_level_stays_terminal_no_refire():
+    # A fixed level superseded by a fresher same-direction record is SINGLE-FIRE: a later
+    # depart + re-touch does NOT re-arm or re-fire it, and superseded stays True (only DYNAMIC
+    # day_/week_ levels re-arm and clear superseded).
     state = {}
     # Bar 1: fire long on X.
     _, state = _fire_long_on(state, "prev1_day_low", 21000.0, 3000.0, "t1")
@@ -329,18 +332,17 @@ def test_superseded_cleared_on_refire():
     _, state = _fire_long_on(state, "prev2_day_low", 22000.0, 3300.0, "t2")
     assert state[kx]["superseded"] is True
     # Bar 3: X departs UPWARD (price reverses far ABOVE the low level) — no touch, no depletion
-    # (an upward move past a *_low does not trip its below-level latch). |close-level| = 45 >= 40
-    # → departs, and the fixed re-arm fires on the same bar (departed→armed). The re-arm reset
-    # clears superseded as part of the re-fire lifecycle.
+    # (an upward move past a *_low does not trip its below-level latch). A fixed level never
+    # re-arms, so the departure changes nothing.
     lm = _levels(prev1_day_low=21000.0)
     le = _levels(prev1_day_low=3000.0)
     _, state = detect_regular_smts(
         lm, le, _bar(21050.0, 21040.0, 21045.0, "t3"), _bar(3050.0, 3040.0, 3045.0, "t3"), state)
-    assert state[kx]["armed"] is True
-    assert state[kx]["superseded"] is False   # cleared on re-arm
-    # Bar 4: a fresh re-approach on X → re-fires → still not superseded (fresh record).
+    assert state[kx]["armed"] is False        # fixed level never re-arms
+    assert state[kx]["superseded"] is True    # stays terminal
+    # Bar 4: a fresh re-approach on X → does NOT re-fire (single fire for the session).
     r4, state = detect_regular_smts(
         lm, le, _bar(21010.0, 20999.0, 21005.0, "t4"), _bar(3010.0, 3005.0, 3007.0, "t4"), state)
-    assert [r["ref_name"] for r in r4] == ["prev1_day_low"]
+    assert r4 == []
     assert state[kx]["fired"] is True
-    assert state[kx]["superseded"] is False
+    assert state[kx]["superseded"] is True
