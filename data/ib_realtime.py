@@ -1111,6 +1111,23 @@ def gap_fill_1m_ib(bar_data_dir: Path) -> None:
                     next_start = _start_ts_for(combined)
                     if (now - next_start).total_seconds() <= 120:
                         pending.discard(instrument)
+                    elif next_start <= start_ts:
+                        # No forward progress: the fetch returned bars but the gap
+                        # pointer did not advance, so the remaining gap is a
+                        # permanently-empty window (closed market — e.g. a holiday
+                        # early close that runs into the weekend, like the Juneteenth
+                        # 13:00 ET close into the Sunday 18:00 reopen, which
+                        # _gap_is_expected does not match). Retrying cannot fill it,
+                        # so stop now instead of spinning to the 30-min deadline. A
+                        # transient IB 0-bar response takes the `actual == 0` branch
+                        # above and is still retried.
+                        print(
+                            f"[gap_fill_1m_ib] {instrument}: gap at "
+                            f"{next_start.strftime('%m-%d %H:%M')} unfillable "
+                            f"(market closed) - stopping retry",
+                            flush=True,
+                        )
+                        pending.discard(instrument)
                     else:
                         print(
                             f"[gap_fill_1m_ib] {instrument}: gap remains at "
