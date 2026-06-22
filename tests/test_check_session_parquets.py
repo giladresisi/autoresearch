@@ -344,6 +344,34 @@ class TestIsExpectedClosed:
         gap_end   = pd.Timestamp("2026-05-19 19:00:00", tz="America/New_York")
         assert _is_expected_closed(gap_start, gap_end) is False
 
+    def test_juneteenth_friday_early_close_into_weekend_expected(self):
+        from scripts.check_session_parquets import _is_expected_closed
+
+        # 2026-06-19 (Fri, Juneteenth) early close ~13:00 ET → Sunday 18:00 ET reopen.
+        # Last 1m bar before the early close is 12:59; the gap runs to the weekend
+        # reopen. Must be recognized as expected, not a spurious "critical" gap.
+        gap_start = pd.Timestamp("2026-06-19 12:59:00", tz="America/New_York")
+        gap_end   = pd.Timestamp("2026-06-21 18:00:00", tz="America/New_York")
+        assert _is_expected_closed(gap_start, gap_end) is True
+
+    def test_weekday_early_close_into_next_reopen_expected(self):
+        from scripts.check_session_parquets import _is_expected_closed
+
+        # A weekday holiday early close (~13:00 ET) into the next regular 18:00 ET
+        # reopen (e.g. July 3 / Christmas Eve when they fall mid-week).
+        gap_start = pd.Timestamp("2026-05-19 13:00:00", tz="America/New_York")
+        gap_end   = pd.Timestamp("2026-05-20 18:00:00", tz="America/New_York")
+        assert _is_expected_closed(gap_start, gap_end) is True
+
+    def test_afternoon_hole_not_ending_at_reopen_unexpected(self):
+        from scripts.check_session_parquets import _is_expected_closed
+
+        # Guard: a mid-afternoon hole that does NOT terminate at a reopen is still a
+        # real, unexpected data gap — the early-close branch must not mask it.
+        gap_start = pd.Timestamp("2026-05-19 12:00:00", tz="America/New_York")
+        gap_end   = pd.Timestamp("2026-05-19 15:00:00", tz="America/New_York")
+        assert _is_expected_closed(gap_start, gap_end) is False
+
 
 # ---------------------------------------------------------------------------
 # TestWriteAtomicAndBackup
