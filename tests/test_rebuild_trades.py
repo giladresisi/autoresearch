@@ -83,6 +83,24 @@ def test_bad_entry_price_is_flagged_suspect_no_pnl(tmp_path):
     assert trades[0]["pnl_dollars"] == "" and trades[0]["pnl_points"] == ""
 
 
+def test_market_entry_reads_entry_price_field(tmp_path):
+    """Live market-entry events log the fill under 'entry_price' (not 'price'); the rebuild
+    must read it, else the trade is mis-flagged suspect:bad-price with a 0.0 entry (D2,
+    2026-06-22 10:06 re-entry). stop-entry-filled still uses 'price'."""
+    events = [
+        {"kind": "market-entry", "time": "2026-06-22T10:06:01-04:00", "direction": "long",
+         "entry_price": 30938.125, "stop_price": 30909.25},
+        {"kind": "stop-exit", "time": "2026-06-22T10:12:00-04:00", "direction": "up",
+         "price": 30950.5, "reason": "cautious-secondary-break"},
+    ]
+    trades = rebuild_trades_from_events(_write_events(tmp_path, events), contracts=2)
+    assert len(trades) == 1
+    assert trades[0]["entry_price"] == 30938.125
+    assert "suspect" not in trades[0]["exit_reason"]
+    # (30950.5 - 30938.125) * +1 * 2 * 2.0 = 49.5
+    assert trades[0]["pnl_dollars"] == 49.5
+
+
 def test_long_hold_is_flagged_suspect_no_pnl(tmp_path):
     """A fill whose only following exit is hours later (a phantom that absorbed a later
     stop-out, like 2026-06-05 04:21 -> 09:28) is tagged suspect:long-hold, P&L blanked."""
