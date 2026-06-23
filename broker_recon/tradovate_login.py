@@ -17,7 +17,7 @@ class AccountNotFoundError(RuntimeError):
 
 
 def login_and_select_account(page, username: str, password: str, account_id: str) -> None:
-    """Perform the cookie-accept → login → trading-mode interstitial → account-select flow
+    """Perform the cookie-accept -> login -> trading-mode interstitial -> account-select flow
     on an already-created Playwright ``page``, leaving the platform loaded with the correct
     account selected.
 

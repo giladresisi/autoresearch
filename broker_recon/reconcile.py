@@ -5,8 +5,8 @@
 # strategy never learns and broker↔strategy state diverges. This module reads the Tradovate
 # orders blotter (via a READ-ONLY reader behind an interface) and corrects the two failure
 # modes seen live on 2026-06-17:
-#   SL_REJECTED   — entry filled, protective S/L leg rejected/missing → place a valid stop.
-#   ENTRY_REJECTED— the entry order itself rejected → reconcile position.json to flat.
+#   SL_REJECTED   — entry filled, protective S/L leg rejected/missing -> place a valid stop.
+#   ENTRY_REJECTED— the entry order itself rejected -> reconcile position.json to flat.
 #
 # All correction goes through PMT (live_orders) — the browser is detection-only and NEVER
 # places orders. The orchestration runs on a daemon thread and never blocks or crashes the
@@ -46,7 +46,7 @@ _PRICE_TOL = 5.0
 # is read/written only while holding the per-key lock (see _reconcile_worker), so it needs no
 # separate guard; `_locks_guard` only protects the lock-map setdefault.
 _locks_guard = threading.Lock()
-_position_locks: dict = {}      # position-key → threading.Lock
+_position_locks: dict = {}      # position-key -> threading.Lock
 _handled_keys: set = set()      # position-keys already corrected (one correction each)
 
 
@@ -114,7 +114,7 @@ def classify(entry: dict, fill: float, orders: list) -> str:
 
     Returns one of OK / SL_REJECTED / ENTRY_REJECTED:
       - ENTRY_REJECTED: the entry order (matching side, ~price) is in a rejected/cancelled
-        terminal status and there is NO filled entry → the position does not exist.
+        terminal status and there is NO filled entry -> the position does not exist.
       - SL_REJECTED:    the entry IS filled but no working protective stop rests on the
         correct side of the fill (the SL leg was rejected/absent).
       - OK:             entry filled AND a working protective stop rests correctly.
@@ -268,7 +268,7 @@ def reconcile_after_entry(entry: dict, fill: float, *, reader=None,
 
 
 def _reconcile_worker(entry: dict, fill: float, reader) -> None:
-    """The daemon-thread body. Settle → poll blotter to terminal → classify → act.
+    """The daemon-thread body. Settle -> poll blotter to terminal -> classify -> act.
 
     Idempotent per position (a module lock + handled-set), graceful on every failure.
     """
@@ -296,7 +296,7 @@ def _run_classification_and_act(entry: dict, fill: float, reader) -> None:
     symbol = entry.get("symbol", "")
 
     if reader is None or getattr(reader, "disabled", False):
-        return  # no detection source → degrade gracefully (preventive layer is primary)
+        return  # no detection source -> degrade gracefully (preventive layer is primary)
 
     time.sleep(SETTLE_S)
 

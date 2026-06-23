@@ -1471,6 +1471,20 @@ class SessionPipeline:
                 self._swept_levels_since_hyp.clear()
             _hyp_dir = _new_5m_dir
 
+        # GIL-42 (live-only, backtest-inert): if the close-reconcile ADOPTED a live broker
+        # position (a phantom close), DISARM the pending re-entry force-eval so we don't
+        # spuriously re-evaluate an entry after the adopted position later closes. ADOPT
+        # already restored active (so run_strategy won't open a NEW entry while a position is
+        # held — the primary suppression), this just clears the stale arming. Byte-identical
+        # offline: backtest never writes recon_suppress_force_entry (only the live
+        # apply_correction does); the read is a cheap no-op key check.
+        if _smt_state.load_position_ro().get("recon_suppress_force_entry"):
+            self._force_entry_eval_after = None
+            self._force_market_entry = False
+            _p = _smt_state.load_position()
+            _p.pop("recon_suppress_force_entry", None)
+            _smt_state.save_position(_p)
+
         # Fix #1: run_strategy on every 1m bar; full entry logic only at 5m boundaries.
         # After an exit, force-eval re-opens the entry gate before the next 5m boundary.
         # market-close fires immediately; stopped-out waits for the next minute boundary
