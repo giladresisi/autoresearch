@@ -1072,6 +1072,13 @@ def main() -> None:
     import live_orders as _lo_mod, smt_state as _smt_state_mod
     _lo_mod.set_session_date(today_str)
     _smt_state_mod.set_session_date(today_str)
+    # Daily realized-loss kill switch (live-only): pause new automatic entries once the
+    # assumed (script-calculated, no broker reconciliation) realized session P&L drops to
+    # or below LOSS_LIMIT_DOLLARS. Acts through the same pause sentinel as `trade.py pause`,
+    # so exits/management stay active and backtests are unaffected (is_paused() is always
+    # False in in-memory mode). Daemon thread; auto-clears a stale prior-session pause first.
+    import loss_limit as _loss_limit
+    _loss_limit.start_monitor(today_str)
     _account_ids = [s.strip() for s in os.environ.get("TRADING_ACCOUNT_IDS", "").split(",") if s.strip()]
     _executor = PickMyTradeExecutor(
         webhook_url=os.environ["PMT_WEBHOOK_URL"],
