@@ -22,7 +22,7 @@ class TradovateOrderReader:
     Lifecycle:
         r = TradovateOrderReader()
         r.start()                       # login once (headed chromium)
-        rows = r.query_orders("MNQ")    # read the live orders grid → list[dict]
+        rows = r.query_orders("MNQ")    # read the live orders grid -> list[dict]
         r.stop()
 
     `query_orders` returns a list of dicts:
@@ -42,7 +42,7 @@ class TradovateOrderReader:
         self._browser = None
         self._ctx = None
         self._page = None
-        self._disabled = False   # set True on AccountNotFoundError → reconciler degrades
+        self._disabled = False   # set True on AccountNotFoundError -> reconciler degrades
         self._lock = threading.Lock()
 
     # -- internal logging (silent-by-default; warnings only) --------------------
@@ -62,7 +62,7 @@ class TradovateOrderReader:
 
         On AccountNotFoundError the reader marks itself disabled (the configured account is
         gone) so the caller degrades gracefully for the session. Any other failure also
-        returns False and leaves the reader unusable (query_orders → []).
+        returns False and leaves the reader unusable (query_orders -> []).
         """
         from playwright.sync_api import sync_playwright
 
@@ -87,12 +87,12 @@ class TradovateOrderReader:
                 self._page, self._username, self._password, self._account_id)
             return True
         except AccountNotFoundError as exc:
-            self._warn(f"account gone → reconciler disabled for the session: {exc}")
+            self._warn(f"account gone -> reconciler disabled for the session: {exc}")
             self._disabled = True
             self.stop()
             return False
         except Exception as exc:  # pragma: no cover - browser/login flakiness
-            self._warn(f"start() failed → reader unavailable: {exc}")
+            self._warn(f"start() failed -> reader unavailable: {exc}")
             self.stop()
             return False
 
@@ -107,7 +107,7 @@ class TradovateOrderReader:
                 self._page, self._username, self._password, self._account_id)
             return True
         except AccountNotFoundError as exc:
-            self._warn(f"account gone on re-login → disabled: {exc}")
+            self._warn(f"account gone on re-login -> disabled: {exc}")
             self._disabled = True
             return False
         except Exception as exc:  # pragma: no cover
@@ -115,7 +115,7 @@ class TradovateOrderReader:
             return False
 
     def query_orders(self, symbol: str | None = None, since=None) -> list[dict]:
-        """Read the live Orders panel from the DOM → list of order dicts.
+        """Read the live Orders panel from the DOM -> list of order dicts.
 
         Never raises: on any failure returns []. Serialized by a lock so concurrent
         reconcile threads don't drive the single page at once.

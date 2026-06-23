@@ -137,6 +137,36 @@ def _spawn_reconcile(direction: str, intended_entry: float, intended_stop: float
         print(f"[live_orders] reconcile spawn failed (ignored): {exc}", flush=True)
 
 
+# ---------------------------------------------------------------------------
+# Reconcile-on-close (GIL-42) — live-only, SYNCHRONOUS
+# ---------------------------------------------------------------------------
+# A bar-assumed phantom close (the IB feed printed a level Tradovate never traded through)
+# marks the strategy flat while the broker is still in the position, then a re-entry STACKS
+# on the live lot and the FIFO stop match realizes an outsized loss (verified -$428 on
+# 2026-06-22). Before every close we fetch a detection-only broker snapshot and either ADOPT
+# the live position (phantom close), flatten state without an order (broker already flat), or
+# resize. Synchronous because the post-close cooldown / re-entry happens on the SAME or NEXT
+# bar in the same thread — running inline guarantees the broker is reconciled before any entry
+# fires. The fetch is bounded (short Playwright timeout) and fails safe: any failure returns
+# False so the close proceeds as the strategy intended. No-op outside live mode.
+
+def _reconcile_on_close(close_event: dict) -> bool:
+    """Live-only synchronous close reconcile. Returns True iff the pending broker
+    close must be SUPPRESSED. No-op (returns False) outside live mode or on any failure."""
+    if not _LIVE:
+        return False
+    try:
+        from broker_recon import broker_state, recon_on_close
+        symbol = os.environ.get("TRADING_SYMBOL", "MNQ1!")
+        broker = broker_state.fetch_broker_state(symbol)   # None on failure -> noop
+        strat_active = _load_pos().get("active") or {}
+        decision = recon_on_close.decide_correction(strat_active, broker)
+        return recon_on_close.apply_correction(decision, intended_close_event=close_event)
+    except Exception as exc:  # pragma: no cover - reconcile must never break a close
+        print(f"[live_orders] close reconcile failed (ignored): {exc}", flush=True)
+        return False
+
+
 def set_session_date(d: str) -> None:
     global _SESSION_DATE
     _SESSION_DATE = d
@@ -289,6 +319,10 @@ def place_stop_entry(direction: str, entry_price: float, stop_price: float, *, s
         # Broker reconciliation (GIL-36): verify the SL leg actually rests at the broker on
         # this STP->MKT downgrade fill — the exact ex1 case. intended_stop is the post-
         # preventive stop_price; intended_entry is the trigger; fill is the assumed fill.
+        # GIL-42 note: NO close-reconcile (_reconcile_on_close) call here — the STP->MKT
+        # downgrade is an ENTRY, not a close, and is only reached when the strategy believed
+        # it was flat; the close that made it flat already ran the synchronous close-reconcile
+        # in dispatch. The GIL-36 after-entry verify below remains the right tool here.
         _spawn_reconcile(direction, entry_price, stop_price, _fill)
         return
     pos = _load_pos()
@@ -725,6 +759,20 @@ def dispatch(sig: dict) -> None:
         return
 
     if kind == "market-entry":
+        # GIL-42 belt-and-suspenders: if the close that immediately preceded this entry
+        # ADOPTED a live broker position (sentinel set by recon_on_close.apply_correction),
+        # SKIP the market entry — do NOT stack onto the adopted lot. The same-bar direction
+        # flip (market-close -> market-entry with flatten_first) inherits this because the
+        # flip's close ran _reconcile_on_close synchronously between the close and the paired
+        # entry within the same dispatch/bar sequence. Clear the sentinel after honoring it so
+        # a later legitimate entry is not blocked.
+        if _LIVE:
+            _pos = _load_pos()
+            if _pos.get("recon_suppress_force_entry"):
+                _pos.pop("recon_suppress_force_entry", None)
+                _save_pos(_pos)
+                _log(sig)
+                return
         stop = sig.get("stop")
         if direction and stop is not None:
             place_market_entry(direction, float(sig["price"]), float(stop),
@@ -742,6 +790,12 @@ def dispatch(sig: dict) -> None:
             except Exception:
                 pass
         _pending_close_after = None  # clear regardless after processing
+        # GIL-42: reconcile the broker BEFORE the close. If the close was a phantom
+        # (broker still holds / already flat), adopt or flat the state without sending an
+        # order and suppress the close-MKT entirely.
+        if _reconcile_on_close(sig):
+            _log(sig)
+            return
         close_position(float(sig.get("price", 0.0)), sig.get("reason", "strategy"))
         return
 
@@ -757,6 +811,10 @@ def dispatch(sig: dict) -> None:
                     return     # but don't send the close (too soon after fill)
             except Exception:
                 pass
+        # GIL-42: reconcile the broker BEFORE the safety-net close.
+        if _reconcile_on_close(sig):
+            _log(sig)
+            return
         _executor.place_close("close")
         _log(sig)
         return
@@ -839,6 +897,27 @@ def dispatch(sig: dict) -> None:
     if kind == "stopped-out":
         # IB's protective stop already executed — clear position state and log.
         _fill_bar_time = None
+        # Capture the cautious flag BEFORE the reconcile (which may clear active): a real
+        # cautious stop must still reset the hypothesis even when the reconcile takes over
+        # the state clear (see below).
+        _pre_cautious = _load_pos().get("active", {}).get("cautious", "no") not in ("no", "")
+        # GIL-42: reconcile the broker BEFORE clearing state. ADOPT restores active (the
+        # stop was a phantom and the broker still holds the lot) -> the hypothesis must NOT
+        # be reset (the position is real). SUPPRESS_CLOSE confirms a real stop (broker flat)
+        # and leaves active empty -> we must still run the cautious-stop hypothesis reset
+        # the normal clear below would have done, so the strategy doesn't re-enter on a stale
+        # direction after a real cautious stop (GIL-8 manual-lock release preserved).
+        if _reconcile_on_close(sig):
+            if not _load_pos().get("active"):
+                # Reconcile flattened (real stop confirmed) — preserve the cautious reset.
+                if _pre_cautious:
+                    from smt_state import load_hypothesis, save_hypothesis
+                    hyp = load_hypothesis()
+                    hyp["direction"] = "none"
+                    hyp["manual"] = False  # GIL-8: direction cleared -> release manual lock
+                    save_hypothesis(hyp)
+            _log(sig)
+            return
         pos = _load_pos()
         if pos.get("active", {}).get("cautious", "no") not in ("no", ""):
             # Cautious stop fired: also reset hypothesis so the strategy doesn't re-enter

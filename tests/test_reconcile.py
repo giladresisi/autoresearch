@@ -319,3 +319,27 @@ def test_disabled_reader_no_action(_session):
             entry, 30366.25, reader=_FakeReader([], disabled=True), _sync=True)
     seam.assert_not_called()
     assert _read_events(_session / "sessions", _FIXED_DATE) == []
+
+
+# ---------------------------------------------------------------------------
+# Arrow-char guard (GIL-42): a literal '->' arrow (U+2192) inside a broker_recon f-string
+# crashed the live orchestrator's cp1252 stdout, killing the reconciler all session. The
+# crash sites were printed/logged strings, so the fix sweeps the arrow from every
+# broker_recon source. Lock it: no U+2192 may reappear (a copy into a print would re-crash).
+# ---------------------------------------------------------------------------
+
+def test_broker_recon_sources_no_arrow_char():
+    import broker_recon
+    pkg_dir = Path(broker_recon.__file__).parent
+    offenders = [py.name for py in sorted(pkg_dir.glob("*.py"))
+                 if "→" in py.read_text(encoding="utf-8")]
+    assert not offenders, f"U+2192 ('->') remains in broker_recon sources: {offenders}"
+
+
+def test_broker_recon_modules_import_cleanly():
+    # All three new/edited modules import without error (no charmap crash on load).
+    import importlib
+    for name in ("broker_recon.reader", "broker_recon.reconcile",
+                 "broker_recon.tradovate_login", "broker_recon.broker_state",
+                 "broker_recon.recon_on_close"):
+        importlib.import_module(name)
