@@ -5,10 +5,13 @@ description: >
   orchestrator or trading system — including after a crash. Handles the full startup sequence:
   kills any existing instance, launches the orchestrator with stdout capture, then arms a
   persistent monitor that sends push notifications at each session milestone (gap-fill complete,
-  session started, daily.py done, first directed hypothesis, orchestrator death). Trigger phrases
-  include "start the orchestrator", "run the orchestrator", "kick it off", "bring it back up",
-  "restart after crash", or any request to get the trading system running. Never touches
-  session_times.py — session window is whatever is already configured there.
+  session started, daily.py done, first directed hypothesis, orchestrator death). At the CME
+  17:00–18:00 ET maintenance break it runs a post-session cycle (parquet-check, session-analysis,
+  pull+rebase onto master) and auto-restarts the orchestrator for the next session once IB
+  realtime data is confirmed live again at the reopen. Trigger phrases include "start the
+  orchestrator", "run the orchestrator", "kick it off", "bring it back up", "restart after crash",
+  or any request to get the trading system running. Does not edit session_times.py at runtime —
+  the session window is whatever is configured there.
 ---
 
 # Run Orchestrator
@@ -29,9 +32,10 @@ files left over by a previous run on the same calendar day.
 | daily.py complete | `[EMIT] daily complete` | Printed by automation.main after run_daily |
 | First directed hypothesis | `"kind": "new-hypothesis"` + `"direction": "up\|down"` | JSON line emitted by automation.main |
 | Startup fatal | `FATAL` | IB unreachable or other hard failure; monitor exits immediately |
-| IB zombie suspected | `[ib-watchdog] No data for` | Bar feed silent; 30s recovery window open |
-| IB watchdog killed | `[ib-watchdog] No recovery after` | Watchdog killed connection as zombie; orchestrator will restart |
-| Orchestrator died | PID snapshotted at startup + `powershell Get-Process` | Checked every iteration from startup |
+| IB zombie suspected | `[ib-watchdog] No data for` | Bar feed silent; 30s recovery window open. **Suppressed after `[ORCH] Session ended`** — expected during the maintenance break |
+| IB watchdog killed | `[ib-watchdog] No recovery after` | Watchdog killed connection as zombie. **Suppressed after session end** — expected during maintenance |
+| Maintenance break started | `Pre-session IB connection ended`, OR orchestrator exit after `[ORCH] Session ended` | Clean shutdown for the CME 17:00–18:00 ET break — NOT a crash. Triggers the post-session cycle (Step 4); monitor exits |
+| Orchestrator died | PID snapshotted at startup + `powershell Get-Process` | Checked every iteration from startup. After session end → reported as maintenance, not a death |
 | automation.main died | PID parsed from `[ORCH] automation.main started (pid=…)` + `powershell Get-Process` | Checked every iteration after session start |
 
 ## Step 1 — Start the orchestrator via trade.py
@@ -137,6 +141,7 @@ daily_done=false
 hyp_done=false
 ib_zombie_suspected=false
 ib_watchdog_killed=false
+maint_done=false
 
 # Snapshot PID before the loop — pid file may be deleted on clean exit
 ORCH_PID=$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null)
@@ -149,6 +154,24 @@ last_reported_dead_auto_pid=""
 # Works for any process name (python.exe, uv.exe, etc.).
 is_alive() {
     powershell.exe -NoProfile -Command "if (Get-Process -Id $1 -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" 2>/dev/null
+}
+
+# True once the orchestrator has logged a clean session close. After this point the IB
+# feed dropping out / the orchestrator exiting is the EXPECTED CME maintenance-break
+# shutdown, not a crash — used to suppress zombie/death alarms and to recognise the break.
+session_is_over() { cur | grep -qF "[ORCH] Session ended"; }
+
+# Maintenance-break trigger. After the clean session close the orchestrator runs
+# pre-session accumulate, then IB Gateway closes the feed at the 17:00 ET maintenance
+# break and the orchestrator exits cleanly ("Pre-session IB connection ended ... expected
+# during the 17:00-18:00 ET maintenance break"). Emit ONE maintenance event and exit so
+# the agent runs the Step-4 post-session cycle. NOT a crash.
+check_maintenance() {
+    if [ "$maint_done" = false ] && cur | grep -qF "Pre-session IB connection ended"; then
+        maint_done=true
+        echo "[MAINTENANCE] break started — orchestrator shut down cleanly for the CME 17:00-18:00 ET maintenance break; run the post-session cycle"
+        exit 0
+    fi
 }
 
 # Find where the current run starts in the stdout log (after last RESTART marker).
@@ -164,6 +187,8 @@ cur() { tail -n "+$((startup_log_offset+1))" "$STARTUP_LOG" 2>/dev/null; }
 
 # --- Immediate catch-up check (before the loop) ---
 # Fires notifications for any milestone that already completed before this monitor armed.
+
+check_maintenance   # if we armed right at the maintenance break, hand off immediately
 
 if cur | grep -q "IB 1m gap fill complete"; then
     gap_fill_done=true
@@ -188,12 +213,12 @@ if cur | grep -q "FATAL"; then
     exit 0
 fi
 
-if cur | grep -q "\[ib-watchdog\] No data for"; then
+if cur | grep -q "\[ib-watchdog\] No data for" && ! session_is_over; then
     ib_zombie_suspected=true
     echo "[MONITOR] IB watchdog: zombie suspected — no bar data received"
 fi
 
-if cur | grep -q "\[ib-watchdog\] No recovery after"; then
+if cur | grep -q "\[ib-watchdog\] No recovery after" && ! session_is_over; then
     ib_watchdog_killed=true
     echo "[KEEPALIVE] IB watchdog: connection killed as zombie — orchestrator restarting"
 fi
@@ -225,12 +250,15 @@ fi
 while true; do
     sleep 5
 
-    # IB watchdog events — checked every iteration regardless of session state
-    if [ "$ib_zombie_suspected" = false ] && cur | grep -q "\[ib-watchdog\] No data for"; then
+    check_maintenance   # clean shutdown for the CME maintenance break → hand off to Step 4
+
+    # IB watchdog events — only meaningful DURING the active session. After a clean session
+    # close they are the expected maintenance-break teardown, so suppress them there.
+    if [ "$ib_zombie_suspected" = false ] && cur | grep -q "\[ib-watchdog\] No data for" && ! session_is_over; then
         ib_zombie_suspected=true
         echo "[MONITOR] IB watchdog: zombie suspected — no bar data received"
     fi
-    if [ "$ib_watchdog_killed" = false ] && cur | grep -q "\[ib-watchdog\] No recovery after"; then
+    if [ "$ib_watchdog_killed" = false ] && cur | grep -q "\[ib-watchdog\] No recovery after" && ! session_is_over; then
         ib_watchdog_killed=true
         echo "[KEEPALIVE] IB watchdog: connection killed as zombie — orchestrator restarting"
     fi
@@ -275,9 +303,13 @@ while true; do
         fi
     fi
 
-    # Keepalive — orchestrator: always active from startup
+    # Keepalive — orchestrator: always active from startup. After a clean session close,
+    # the orchestrator exiting is the expected CME maintenance-break shutdown → emit the
+    # maintenance event (run Step 4), NOT a crash alarm.
     if [ -n "$ORCH_PID" ] && ! is_alive "$ORCH_PID"; then
-        if [ "$session_started" = true ]; then
+        if [ "$maint_done" = true ] || session_is_over; then
+            echo "[MAINTENANCE] break started — orchestrator exited for the CME 17:00-18:00 ET maintenance break; run the post-session cycle"
+        elif [ "$session_started" = true ]; then
             echo "[KEEPALIVE] Orchestrator (pid=$ORCH_PID) has DIED"
         else
             echo "[KEEPALIVE] Orchestrator (pid=$ORCH_PID) died before session start — check stdout log"
@@ -343,3 +375,75 @@ As each line arrives from the Monitor, call `PushNotification` for EVERY milesto
 | `[KEEPALIVE] Orchestrator … died before session start …` | `CRITICAL: Orchestrator died before session start — check stdout log` |
 | `[KEEPALIVE] Orchestrator … has DIED` | `CRITICAL: Orchestrator died during session` |
 | `[KEEPALIVE] automation.main … has DIED` | `WARNING: automation.main died — orchestrator should restart it` |
+| `[MAINTENANCE] break started …` | `Maintenance break — running parquet-check, session-analysis, rebase; will auto-restart at the 18:00 ET reopen` — then **run Step 4** |
+| `[REOPEN] IB realtime data confirmed …` | `IB live after maintenance — restarting orchestrator for the next session` — then **restart (Step 1) and re-arm this Monitor (Step 2)** |
+| `[REOPEN] WARN: no IB realtime data …` | `WARNING: IB data not back after the maintenance break — manual check needed` |
+
+The `[MAINTENANCE]` and `[REOPEN]` events are not just notifications — they drive the
+Step-4 cycle below. The keepalive Monitor (this step) exits when it emits `[MAINTENANCE]`.
+
+## Step 4 — Maintenance-break cycle (CME 17:00–18:00 ET) and auto-restart
+
+The keepalive Monitor emits `[MAINTENANCE] break started` once per day, when the
+orchestrator shuts down cleanly for the CME daily maintenance break (~17:00 ET): IB
+Gateway closes the feed, the watchdog reports "no bar data", and the orchestrator exits.
+**This is EXPECTED — not a crash.** The preceding `[ib-watchdog] No data for` /
+`No recovery after` lines in this window are normal and are already suppressed by the
+Monitor. On the `[MAINTENANCE]` event, run the post-session cycle, then auto-restart for
+the next session.
+
+**1. Post-session housekeeping (run now, while the market is closed):**
+
+  a. Invoke the **`parquet-check`** skill (validate/repair the session + main parquets).
+
+  b. Invoke the **`session-analysis`** skill (discrepancies / optimizations / digest for
+     the session that just closed).
+
+  c. Pull + rebase the worktree onto remote master so the next session runs the latest
+     code:
+
+  ```bash
+  git fetch origin && git rebase origin/master
+  ```
+
+  If the rebase reports conflicts, run `git rebase --abort`, notify the user, and proceed
+  on the CURRENT code — never start the next session on a half-rebased tree, and never
+  skip the session over a rebase conflict.
+
+**2. Wait for the reopen, then verify IB realtime data is live again.** IB Gateway
+auto-restarts during the break and stays logged in, but **no bars flow until the 18:00 ET
+reopen**. Arm a second Monitor (`persistent: true`) that polls the IB realtime
+verification script — it returns no-data throughout the break and only succeeds once bars
+actually resume, so it pinpoints the reopen without any clock math:
+
+```bash
+BASE="$(pwd)"
+VERIFY="$BASE/.claude/skills/run-orchestrator/scripts/verify_ib_realtime.py"
+echo "[REOPEN-WAIT] polling IB realtime data until the CME maintenance break ends (~18:00 ET)"
+for i in $(seq 1 75); do
+    # verify_ib_realtime.py: exit 0 = MNQ+MES ticks flowing; 2 = connected, no data;
+    # 3 = connect failed (IB mid-restart). Only exit 0 means the feed is live again.
+    if uv run python "$VERIFY" --timeout 20 >/dev/null 2>&1; then
+        echo "[REOPEN] IB realtime data confirmed — restart the orchestrator for the next session"
+        exit 0
+    fi
+    sleep 40
+done
+echo "[REOPEN] WARN: no IB realtime data ~75 min after the break started — manual check needed"
+exit 0
+```
+
+**3. On `[REOPEN] IB realtime data confirmed`:** restart the orchestrator for the next
+session by repeating **Step 1** (`uv run python trade.py start --force --resume`, record
+the running-commit note, report the session window) and **re-arm the Step-2 keepalive
+Monitor**. The full cycle then repeats automatically each trading day:
+
+```
+session running → [ORCH] Session ended (16:55) → pre-session accumulate →
+[MAINTENANCE] break started (~17:00) → parquet-check + session-analysis + rebase →
+[REOPEN-WAIT] poll verify script → [REOPEN] data confirmed (~18:00) →
+trade.py start + re-arm Monitor → session running …
+```
+
+On `[REOPEN] WARN`, do NOT auto-restart — alert the user that IB never came back and let
+them investigate (Gateway may not have logged back in after the break).

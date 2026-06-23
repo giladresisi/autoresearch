@@ -129,7 +129,11 @@ def rebuild_trades_from_events(events_path: Path, *, contracts: int | None = Non
         if kind in _ENTRY_KINDS:
             entry = {
                 "time":  e.get("time", ""),
-                "price": float(e.get("price", 0.0)),
+                # stop-entry-filled logs the fill under "price"; market-entry logs it under
+                # "entry_price". Read both so a market-entry isn't mis-flagged suspect:bad-price
+                # with a 0.0 entry (D2, 2026-06-22 10:06 re-entry). A genuinely missing/0 price
+                # still falls through to 0.0 and is flagged suspect downstream.
+                "price": float(e.get("price") or e.get("entry_price") or 0.0),
                 "dir":   _norm_dir(e.get("direction", "")),
             }
             if open_entry is not None:

@@ -107,19 +107,25 @@ class PickMyTradeExecutor:
             _current = float(signal.get("current_price", 0.0))
             _bar_high = float(signal.get("bar_high", 0.0))
             _bar_low = float(signal.get("bar_low", 0.0))
-            # Downgrade STP -> MKT when the live market has REACHED the trigger. Key off the
-            # bar EXTREME toward the trigger (high for longs, low for shorts) in addition to
-            # the current close: the close lags within the bar, so a stop the live price has
-            # already touched intrabar was being placed as a resting STP and rejected by
-            # Tradovate (a stop at/past the market is invalid). 2026-06-11 (four rejected
-            # brackets). bar_high/bar_low default to 0.0 (absent) -> falls back to close-only.
+            # Downgrade STP -> MKT only when the CURRENT price is at/through the trigger —
+            # the one case Tradovate rejects a resting stop (a trigger at/past the market
+            # is invalid). Do NOT downgrade on a bar EXTREME (wick) alone: a high/low that
+            # touched the trigger but whose close pulled back below it is a FAILED breakout,
+            # and market-filling there enters at the pulled-back price right on top of the
+            # protective stop -> instant stop-out + same-minute re-entry churn (incident
+            # 2026-06-22 10:05: trigger 30935.5 wicked to 30936 but close 30922 -> MKT fill
+            # ~13pts under the trigger -> stopped out in 19s -> re-entry). When the trigger is
+            # still above the market the resting STP is legal and fills AT the trigger on a
+            # genuine breakout, matching the backtest/broker fill model (no live<->regression
+            # divergence). TRADE-OFF: a genuine breakout whose 1m close lags below the trigger
+            # now rests a STP the broker may reject (reached intrabar, stale-low close); that
+            # is recovered on the next bar's re-evaluation and is preferable to the bad
+            # pulled-back fill. This reverts the 2026-06-11 bar-extreme downgrade in favor of
+            # the close-based R1 rule. (_bar_high/_bar_low kept for the diagnostic log only.)
             if direction == "long":
-                _reach = max(_current, _bar_high)
-                _trigger_reached = _reach > 0 and _reach >= entry_price
+                _trigger_reached = _current > 0 and _current >= entry_price
             else:
-                _cands = [_p for _p in (_current, _bar_low) if _p > 0]
-                _reach = min(_cands) if _cands else 0.0
-                _trigger_reached = _reach > 0 and _reach <= entry_price
+                _trigger_reached = _current > 0 and _current <= entry_price
             if _trigger_reached:
                 # Market fills at the live market, not the wick extreme — anchor the assumed
                 # fill to the current price (fall back to the trigger if no current price).

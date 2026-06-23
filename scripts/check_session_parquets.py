@@ -79,6 +79,31 @@ def _is_expected_closed(gap_start: pd.Timestamp, gap_end: pd.Timestamp) -> bool:
     if in_maint_start and in_maint_end and duration <= pd.Timedelta("75min"):
         return True
 
+    # CME holiday early close (e.g. Juneteenth 13:00 ET, July 3, the day after
+    # Thanksgiving, Christmas Eve): the equity-index complex closes early in the
+    # afternoon and stays shut until the next regular 18:00 ET reopen — the Sunday
+    # weekend reopen when the early close falls on a Friday (Juneteenth 2026), else the
+    # next day's reopen. The branches above key off the regular 17:00 close, so this
+    # early-afternoon-close → reopen window is otherwise scored as an unexpected
+    # (critical) gap on the 1m tail on every run, and the 1m validation watermark never
+    # advances past it. (exchange_calendars' CMES calendar does not carry these early
+    # closes, so we cannot key off a holiday calendar — recognize the pattern by its
+    # endpoints instead: an early-afternoon weekday start running to a regular reopen.)
+    # KNOWN LIMITATION: this also accepts a genuine loss of an afternoon's bars that
+    # happens to terminate exactly at a reopen. That is acceptable — the live gap-fill
+    # and check_parquet_gaps are the primary guards for missing in-session data; this
+    # post-hoc validator must not raise "critical" every run for the recurring,
+    # legitimate holiday early close.
+    EARLY_CLOSE_MIN_T = int(11.5 * 3600)  # 11:30 ET — earliest plausible CME early close
+    end_is_reopen = end_et.hour == 18 and end_et.minute <= 5
+    if (
+        dow_start <= 4                              # weekday session start
+        and EARLY_CLOSE_MIN_T <= t_start < CLOSE_T  # early-afternoon close (before 17:00)
+        and end_is_reopen                           # runs to a regular 18:00 ET reopen
+        and duration >= pd.Timedelta(hours=4)       # spans the closed window, not a blip
+    ):
+        return True
+
     return False
 
 

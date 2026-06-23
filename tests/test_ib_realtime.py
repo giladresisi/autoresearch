@@ -94,6 +94,75 @@ def test_gap_fill_skipped_if_fresh_parquet(tmp_path):
         mock_gap.assert_called_once()
 
 
+def test_gap_fill_1m_ib_stops_on_unfillable_gap(tmp_path, monkeypatch, capsys):
+    """gap_fill_1m_ib must not spin to its 30-min deadline on a permanently-empty
+    gap (e.g. a Friday holiday early-close that runs into the weekend — closed
+    market, no data to fetch). When a fill returns bars but the gap pointer does
+    not advance, the instrument is dropped from the retry set immediately.
+
+    Regression: the 2026-06-19 Juneteenth early close (13:00 ET) into the Sunday
+    18:00 reopen is not matched by _gap_is_expected, so before this fix every
+    startup spun for ~30 min before 'proceeding with partial data'.
+    """
+    import time as _time
+    import ib_insync
+    from data import ib_realtime as ir
+
+    monkeypatch.setenv("MNQ_CONID", "111")
+    monkeypatch.setenv("MES_CONID", "222")
+
+    now = pd.Timestamp.now(tz="America/New_York")
+
+    # Build an UNEXPECTED, unfillable gap: a contiguous block ending at a Wednesday
+    # 10:00 ET (mid-session — never an "expected" gap), a long gap, then a fresh
+    # recent block ending ~2 min before now. IB is mocked to return only the recent
+    # block, so the Wednesday gap point can never advance.
+    d = now.normalize()
+    while d.weekday() != 2 or (now - d).days < 3:
+        d -= pd.Timedelta(days=1)
+    gap_point = d + pd.Timedelta(hours=10)
+
+    pre = pd.date_range(gap_point - pd.Timedelta(hours=2), gap_point, freq="1min", tz="America/New_York")
+    recent = pd.date_range(
+        now.floor("min") - pd.Timedelta(minutes=30),
+        now.floor("min") - pd.Timedelta(minutes=2),
+        freq="1min", tz="America/New_York",
+    )
+    idx = pre.append(recent)
+    df = pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1.0}, index=idx)
+    for fname in ("MNQ_1m.parquet", "MES_1m.parquet"):
+        df.to_parquet(tmp_path / fname, use_dictionary=False)
+
+    # Every fetch returns the recent block (already present) → dedup leaves the
+    # parquet unchanged → the gap pointer never advances.
+    recent_raw = pd.DataFrame({
+        "date": recent, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+    })
+    monkeypatch.setattr(ib_insync.util, "df", lambda bars: recent_raw.copy())
+
+    fake_ib = MagicMock()
+    fake_ib.connect.return_value = None
+    fake_ib.isConnected.return_value = True
+    fake_ib.reqHistoricalData.return_value = ["bar"]  # non-empty → actual > 0
+    monkeypatch.setattr(ib_insync, "IB", lambda: fake_ib)
+
+    # No real waiting; advance monotonic so a spin WOULD reach the 30-min deadline.
+    monkeypatch.setattr(_time, "sleep", lambda *_: None)
+    clock = {"t": 0.0}
+
+    def _fake_monotonic():
+        clock["t"] += 300.0
+        return clock["t"]
+
+    monkeypatch.setattr(_time, "monotonic", _fake_monotonic)
+
+    ir.gap_fill_1m_ib(tmp_path)
+
+    out = capsys.readouterr().out
+    assert "30-min cap reached" not in out, "gap_fill_1m_ib spun to its deadline on an unfillable gap"
+    assert "unfillable" in out, "expected the no-progress stop to be logged"
+
+
 # on_bar callback
 
 def test_on_bar_callback_fired_on_second_boundary(tmp_path):

@@ -6,8 +6,8 @@ from zoneinfo import ZoneInfo
 _ET = ZoneInfo("America/New_York")
 _TH = ZoneInfo("Asia/Bangkok")
 
-SESSION_OPEN  = datetime.time(18, 5)   # 18:05 ET on the previous trading day
-SESSION_CLOSE = datetime.time(16, 55)  # 16:55 ET (maintenance window 16:55–18:05)
+SESSION_OPEN  = datetime.time(18, 0)   # 18:00 ET — the CME reopen, right after the maintenance break
+SESSION_CLOSE = datetime.time(16, 55)  # 16:55 ET (maintenance window 16:55–18:00)
 
 
 def cme_session_date(ts: datetime.datetime) -> datetime.date:

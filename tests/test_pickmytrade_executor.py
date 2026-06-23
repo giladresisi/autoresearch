@@ -173,32 +173,38 @@ def test_r1_short_at_or_below_trigger_downgrades():
 
 
 # ---------------------------------------------------------------------------
-# O2/D1: STP->MKT downgrade keys off the bar EXTREME (high for longs, low for shorts),
-# not just the lagging close — a stop the live market already touched intrabar must go MKT
-# instead of resting as a STP that Tradovate rejects (2026-06-11, four rejected brackets).
-# bar_high/bar_low absent (0.0) -> falls back to the close-only behavior above.
+# STP->MKT downgrade keys off the CURRENT price only — NOT the bar extreme (wick).
+# A high/low that touched the trigger but whose close pulled back below it is a failed
+# breakout: market-filling there enters at the pulled-back price on top of the stop
+# (instant stop-out + re-entry churn, incident 2026-06-22). It must rest the STP at the
+# trigger (legal, fills at the trigger on a real breakout — matches the backtest). This
+# reverted the 2026-06-11 bar-extreme downgrade; the accepted trade-off is that a genuine
+# breakout with a stale-low 1m close now rests a STP the broker may reject, recovered on
+# the next bar's re-evaluation.
 # ---------------------------------------------------------------------------
 
-def test_stp_mkt_long_downgrades_on_bar_high_even_if_close_below():
-    # 2026-06-11 12:45: entry 28896.25, close 28885.5 (below) but bar high 28898 reached it.
+def test_stp_mkt_long_wick_then_close_below_rests_stop():
+    # Was the 2026-06-11 12:45 bar-extreme downgrade case; now the wick alone must NOT
+    # force MKT — close 28885.5 is below the trigger 28896.25, so rest the STP.
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     sig = _stop_signal("long", entry_price=28896.25, current_price=28885.5)
     sig["bar_high"], sig["bar_low"] = 28898.0, 28872.75
     rec = ex.place_entry(sig, _bar())
     _drain(ex)
-    assert rec.order_type == "market"
+    assert rec.order_type == "stop"
 
 
-def test_stp_mkt_short_downgrades_on_bar_low_even_if_close_above():
-    # 2026-06-11 13:55: entry 29174.0, close 29184.75 (above) but bar low 29163.75 reached it.
+def test_stp_mkt_short_wick_then_close_above_rests_stop():
+    # Short mirror: close 29184.75 is above the trigger 29174.0, so the bar-low wick alone
+    # must NOT force MKT — rest the STP.
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())
     sig = _stop_signal("short", entry_price=29174.0, current_price=29184.75)
     sig["bar_high"], sig["bar_low"] = 29192.0, 29163.75
     rec = ex.place_entry(sig, _bar())
     _drain(ex)
-    assert rec.order_type == "market"
+    assert rec.order_type == "stop"
 
 
 def test_stp_mkt_long_stays_stop_when_neither_close_nor_bar_high_reach():
@@ -207,6 +213,34 @@ def test_stp_mkt_long_stays_stop_when_neither_close_nor_bar_high_reach():
     ex._http.post = MagicMock(return_value=_ok_response())
     sig = _stop_signal("long", entry_price=28900.0, current_price=28885.0)
     sig["bar_high"], sig["bar_low"] = 28895.0, 28870.0
+    rec = ex.place_entry(sig, _bar())
+    _drain(ex)
+    assert rec.order_type == "stop"
+
+
+def test_stp_mkt_long_wick_pullback_rests_not_mkt():
+    # D2 regression (2026-06-22 10:05): the bar HIGH wicked the trigger (30936 >= 30935.5)
+    # but the close pulled back well below it (30922.25). Downgrading to MKT here fills at
+    # the pulled-back price ~13 pts under the trigger, leaving the entry on top of the
+    # protective stop -> instant stop-out + same-minute re-entry churn. A resting STP at the
+    # trigger is still legal (trigger above market) and fills AT the trigger on a genuine
+    # breakout (matching the backtest fill model). So it must REST, not downgrade to MKT.
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    sig = _stop_signal("long", entry_price=30935.5, current_price=30922.25)
+    sig["bar_high"], sig["bar_low"] = 30936.0, 30915.5
+    rec = ex.place_entry(sig, _bar())
+    _drain(ex)
+    assert rec.order_type == "stop"
+
+
+def test_stp_mkt_short_wick_pullback_rests_not_mkt():
+    # Short mirror of the D2 wick-pullback: bar LOW wicked the trigger but the close pulled
+    # back well above it -> rest the STP at the trigger instead of a bad MKT fill.
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    sig = _stop_signal("short", entry_price=30532.25, current_price=30545.0)
+    sig["bar_high"], sig["bar_low"] = 30548.0, 30531.0
     rec = ex.place_entry(sig, _bar())
     _drain(ex)
     assert rec.order_type == "stop"
