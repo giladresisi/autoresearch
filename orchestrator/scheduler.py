@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
 
-from session_times import SESSION_OPEN
+from session_times import SESSION_OPEN, SESSION_CLOSE
 
 _CALENDAR = xcals.get_calendar("XNYS")
 _ET = ZoneInfo("America/New_York")
@@ -30,6 +30,23 @@ def is_session_open_day(date: datetime.date) -> bool:
     Monday and never spuriously opens on Friday evening.
     """
     return is_trading_day(date + datetime.timedelta(days=1))
+
+
+def is_session_in_progress(now: datetime.datetime | None = None) -> bool:
+    """True if `now` is inside the post-midnight tail of an overnight session that opened the
+    PREVIOUS evening and has not yet reached today's SESSION_CLOSE.
+
+    A CME session opens at SESSION_OPEN on day D-1 (carrying trade date D) and runs until
+    SESSION_CLOSE on day D, so any moment on a trading day D before SESSION_CLOSE is inside
+    that in-progress session — even when is_session_open_day(D) is False (Friday, or the
+    morning before a holiday, whose own evening opens nothing). Lets a crash-restart in that
+    window resume the live session instead of sleeping to the next open.
+    """
+    if now is None:
+        now = get_et_now()
+    today = now.date()
+    close_dt = datetime.datetime.combine(today, SESSION_CLOSE, tzinfo=_ET)
+    return is_trading_day(today) and now < close_dt
 
 
 def next_session_open(now: datetime.datetime | None = None) -> datetime.datetime:
