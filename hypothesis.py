@@ -125,7 +125,10 @@ def compute_cautious_prices(
     _sec_max = max(CAUTIOUS_MIN_DIST, CAUTIOUS_SECONDARY_MAX_DIST * _factor)
     _init_max = max(CAUTIOUS_MIN_DIST, CAUTIOUS_INITIAL_MAX_DIST * _factor)
 
-    _cautious_all = []
+    # Build the full in-direction candidate universe (uncapped), then take the within-cap
+    # subset as the actionable pool. _all_in_dir is reused by the empty-pool fallback below
+    # so that fallback searches the SAME universe as the capped pool — just without the cap.
+    _all_in_dir = []
     for liq in liquidities:
         if liq.get("name") in _inv:
             continue   # R2: depleted level — not a cautious target
@@ -142,10 +145,20 @@ def compute_cautious_prices(
             continue
         if p is None:
             continue
-        if direction == "up" and current_close < p <= current_close + _sec_max:
-            _cautious_all.append((p, liq.get("name", "")))
-        elif direction == "down" and current_close - _sec_max <= p < current_close:
-            _cautious_all.append((p, liq.get("name", "")))
+        if direction == "up" and p > current_close:
+            _all_in_dir.append((p, liq.get("name", "")))
+        elif direction == "down" and p < current_close:
+            _all_in_dir.append((p, liq.get("name", "")))
+
+    if direction == "up":
+        _cautious_all = [(p, n) for p, n in _all_in_dir if p <= current_close + _sec_max]
+    else:
+        _cautious_all = [(p, n) for p, n in _all_in_dir if p >= current_close - _sec_max]
+    # ATH joins the CAPPED pool only (up only) — exactly as before, so the main path is
+    # byte-identical. It is deliberately kept OUT of _all_in_dir (the empty-pool fallback
+    # universe): an uncapped ATH could itself sit hundreds of pts away and recreate the very
+    # unreachable-target failure this fallback exists to prevent. The fallback uses real
+    # structural levels / FVG edges only.
     if direction == "up" and current_close < ath <= current_close + _sec_max:
         _cautious_all.append((ath, "ATH"))
 
@@ -192,33 +205,26 @@ def compute_cautious_prices(
                     else current_close + _syn_dist
                 )
                 cautious_price_initial_level = "synthetic_85pct"
-    else:
-        _terminal_names = {"day_low", "week_low"} if direction == "down" else {"day_high", "week_high"}
-        _terminal_candidates = []
-        for liq in liquidities:
-            if liq.get("name") in _inv:
-                continue   # R2: depleted level — not a terminal cautious target
-            if liq.get("name") in _terminal_names and liq.get("kind") == "level":
-                p = liq.get("price")
-                if p is None:
-                    continue
-                if direction == "down" and p < current_close:
-                    _terminal_candidates.append((p, liq["name"]))
-                elif direction == "up" and p > current_close:
-                    _terminal_candidates.append((p, liq["name"]))
-        if _terminal_candidates:
-            _sec = max(_terminal_candidates, key=lambda x: x[0]) if direction == "down" \
-                   else min(_terminal_candidates, key=lambda x: x[0])
-            cautious_price_secondary       = _sec[0] - CAUTIOUS_SECONDARY_OFFSET_PTS if direction == "up" \
-                                             else _sec[0] + CAUTIOUS_SECONDARY_OFFSET_PTS
-            cautious_price_secondary_level = _sec[1]
-            _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
-            if _syn_dist >= CAUTIOUS_MIN_DIST:
-                cautious_price_initial = (
-                    current_close - _syn_dist if direction == "down"
-                    else current_close + _syn_dist
-                )
-                cautious_price_initial_level = "synthetic_85pct"
+    elif _all_in_dir:
+        # In-cap pool empty (e.g. the per-failed-entry dist-shrink starved it below the
+        # nearest real level). Fall back to the CLOSEST in-direction liquidity beyond the
+        # threshold as the secondary, and set the initial via the 85% rule on it. Since
+        # _cautious_all is empty, every _all_in_dir entry is beyond the threshold, so the
+        # closest is "the first beyond the threshold". (Replaces the old uncapped
+        # day_high/week_high terminal fallback that could place targets hundreds of pts out
+        # of reach when the shrink excluded the nearest real level — 2026-06-24 O2/GIL-37.)
+        _sec = min(_all_in_dir, key=lambda x: x[0]) if direction == "up" \
+               else max(_all_in_dir, key=lambda x: x[0])
+        cautious_price_secondary       = _sec[0] - CAUTIOUS_SECONDARY_OFFSET_PTS if direction == "up" \
+                                         else _sec[0] + CAUTIOUS_SECONDARY_OFFSET_PTS
+        cautious_price_secondary_level = _sec[1]
+        _syn_dist = 0.85 * abs(float(cautious_price_secondary) - current_close)
+        if _syn_dist >= CAUTIOUS_MIN_DIST:
+            cautious_price_initial = (
+                current_close - _syn_dist if direction == "down"
+                else current_close + _syn_dist
+            )
+            cautious_price_initial_level = "synthetic_85pct"
 
     return {
         "cautious_price_initial":        cautious_price_initial,

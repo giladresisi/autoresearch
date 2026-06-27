@@ -908,12 +908,17 @@ def test_cautious_dist_shrinks_zero_is_unchanged():
 
 
 def test_cautious_dist_shrinks_one_excludes_far_level():
-    """dist_shrinks=1 → secondary max = 150*0.85 = 127.5; the 140pt level that
-    qualified at shrinks=0 is now excluded (no secondary found)."""
+    """dist_shrinks=1 → secondary max = 150*0.85 = 127.5; the 140pt level that qualified at
+    shrinks=0 is dropped from the in-cap pool, so a nearer 120pt level (still within 127.5)
+    becomes the secondary instead. (The far level is no longer SELECTED while a nearer one is
+    actionable; the empty-pool fallback is covered separately below.)"""
     from hypothesis import compute_cautious_prices
-    r = compute_cautious_prices("up", 20000.0, _shrink_liqs(), 999999.0, 1)
-    assert r["cautious_price_secondary"] == ""
-    assert r["cautious_price_secondary_level"] == ""
+    liqs = [
+        {"name": "L120", "kind": "level", "price": 20120.0},  # within shrunk cap (127.5)
+        {"name": "L140", "kind": "level", "price": 20140.0},  # beyond shrunk cap
+    ]
+    r = compute_cautious_prices("up", 20000.0, liqs, 999999.0, 1)
+    assert r["cautious_price_secondary_level"] == "L120"
 
 
 def test_cautious_dist_shrinks_includes_level_within_shrunk_max():
@@ -936,11 +941,15 @@ def test_cautious_dist_shrinks_large_clamps_to_min():
         "up", 20000.0, [{"name": "Lnear", "kind": "level", "price": 20039.0}],
         999999.0, 20)
     assert r_in["cautious_price_secondary_level"] == "Lnear"
-    # 41pt level is just beyond the floored max(40) → excluded.
+    # With both a 39pt (within floored 40) and a 41pt (just beyond) level present, the 41pt
+    # level is excluded from the in-cap pool, so the 39pt level is selected as secondary —
+    # proving the cap floored at 40, not lower.
     r_out = compute_cautious_prices(
-        "up", 20000.0, [{"name": "Lfar", "kind": "level", "price": 20041.0}],
+        "up", 20000.0,
+        [{"name": "Lnear", "kind": "level", "price": 20039.0},
+         {"name": "Lfar",  "kind": "level", "price": 20041.0}],
         999999.0, 20)
-    assert r_out["cautious_price_secondary_level"] == ""
+    assert r_out["cautious_price_secondary_level"] == "Lnear"
 
 
 def test_cautious_dist_shrinks_reset_by_session_helper():
@@ -966,15 +975,19 @@ def test_cautious_dist_shrinks_reset_by_new_hypothesis_helper():
 
 
 def test_recompute_cautious_for_fill_honors_dist_shrinks():
-    """recompute_cautious_for_fill threads dist_shrinks into the recomputed ladder:
-    a far level present at shrinks=0 is dropped at a high shrink count."""
+    """recompute_cautious_for_fill threads dist_shrinks into the recomputed ladder: the far
+    level chosen at shrinks=0 is dropped from the in-cap pool at a higher shrink count, so a
+    nearer level (still within the shrunk cap) is selected instead."""
     from hypothesis import recompute_cautious_for_fill
     hyp = {"direction": "up", "manual": False}
-    liqs = _shrink_liqs()  # 140pt level
+    liqs = [
+        {"name": "L120", "kind": "level", "price": 20120.0},  # within shrunk cap (127.5)
+        {"name": "L140", "kind": "level", "price": 20140.0},  # farthest within 150 at shrinks=0
+    ]
     out0 = recompute_cautious_for_fill(dict(hyp), 20000.0, liqs, 999999.0, 0)
     assert out0["cautious_price_secondary_level"] == "L140"
     out1 = recompute_cautious_for_fill(dict(hyp), 20000.0, liqs, 999999.0, 1)
-    assert out1["cautious_price_secondary_level"] == ""
+    assert out1["cautious_price_secondary_level"] == "L120"
 
 
 # ══ R2 (GIL-25): drop per-ticker-invalidated levels from cautious + hypothesis targets ═══
@@ -1006,6 +1019,71 @@ def test_compute_cautious_invalidated_default_is_noop():
     b = compute_cautious_prices("up", 20000.0, liqs, 999999.0, invalidated_names=None)
     c = compute_cautious_prices("up", 20000.0, liqs, 999999.0, invalidated_names=set())
     assert a == b == c
+
+
+# ══ Empty-in-cap-pool fallback: nearest level beyond the (shrunk) threshold ════════
+# When the dist-shrink starves the in-cap candidate pool to empty, the ladder must fall
+# back to the CLOSEST in-direction liquidity beyond the threshold (not the old uncapped
+# day_high/week_high terminal branch), with the initial set via the 85% rule on it.
+
+from hypothesis import (
+    CAUTIOUS_SECONDARY_OFFSET_PTS as _SEC_OFF,
+    CAUTIOUS_MIN_DIST as _MIN_DIST,
+)
+
+
+def test_cautious_empty_pool_falls_back_to_nearest_level_up():
+    """Up: in-cap pool empty (dist_shrinks=3 → max≈92). The nearest beyond-threshold level
+    (london_low ~139 above) becomes the secondary, NOT the far day_high (~410 above)."""
+    from hypothesis import compute_cautious_prices
+    close = 29636.75
+    liqs = [
+        {"name": "london_low", "kind": "level", "price": 29776.0},   # ~139 above → beyond 92
+        {"name": "day_high",   "kind": "level", "price": 30046.75},  # ~410 above (the old trap)
+    ]
+    r = compute_cautious_prices("up", close, liqs, 999999.0, dist_shrinks=3)
+    assert r["cautious_price_secondary_level"] == "london_low"
+    assert r["cautious_price_secondary"] == 29776.0 - _SEC_OFF
+    assert r["cautious_price_initial_level"] == "synthetic_85pct"
+    assert r["cautious_price_initial"] == pytest.approx(
+        close + 0.85 * ((29776.0 - _SEC_OFF) - close))
+
+
+def test_cautious_empty_pool_falls_back_to_nearest_level_down():
+    """Down: nearest beyond-threshold level below the close is chosen over a farther one."""
+    from hypothesis import compute_cautious_prices
+    close = 20000.0
+    liqs = [
+        {"name": "L_near", "kind": "level", "price": 19850.0},  # 150 below → beyond 92
+        {"name": "L_far",  "kind": "level", "price": 19600.0},  # 400 below
+    ]
+    r = compute_cautious_prices("down", close, liqs, 1.0, dist_shrinks=3)
+    assert r["cautious_price_secondary_level"] == "L_near"
+    assert r["cautious_price_secondary"] == 19850.0 + _SEC_OFF
+
+
+def test_cautious_empty_pool_blank_when_no_in_direction_level():
+    """No in-direction liquidity at all → ladder stays blank (no fabricated target)."""
+    from hypothesis import compute_cautious_prices
+    # Down with only an ABOVE level (and ath above, which down ignores) → nothing below.
+    liqs = [{"name": "above", "kind": "level", "price": 20100.0}]
+    r = compute_cautious_prices("down", 20000.0, liqs, 999999.0, dist_shrinks=3)
+    assert r["cautious_price_secondary"] == ""
+    assert r["cautious_price_secondary_level"] == ""
+    assert r["cautious_price_initial"] == ""
+
+
+def test_cautious_empty_pool_fallback_skips_invalidated():
+    """The nearest-level fallback honors invalidated_names (depleted levels are skipped)."""
+    from hypothesis import compute_cautious_prices
+    close = 20000.0
+    liqs = [
+        {"name": "L140", "kind": "level", "price": 20140.0},  # nearest, beyond cap
+        {"name": "L200", "kind": "level", "price": 20200.0},  # farther
+    ]
+    r = compute_cautious_prices("up", close, liqs, 999999.0, dist_shrinks=3,
+                                invalidated_names={"L140"})
+    assert r["cautious_price_secondary_level"] == "L200"
 
 
 def test_compute_cautious_drops_invalidated_in_terminal_fallback():
