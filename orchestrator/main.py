@@ -26,7 +26,7 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 from orchestrator.output import FileSink, OutputChannel, StdoutSink, TimestampedFileSink
 from orchestrator.process import ProcessManager
 from orchestrator.relay import SessionRelay
-from orchestrator.scheduler import get_et_now, is_session_open_day, next_session_open
+from orchestrator.scheduler import get_et_now, is_session_in_progress, is_session_open_day, next_session_open
 from orchestrator.summarizer import Summarizer
 from session_times import SESSION_OPEN as _SESSION_OPEN_V2, SESSION_CLOSE as _SESSION_CLOSE_V2, cme_session_date
 
@@ -472,7 +472,13 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
             # carries the NEXT day's trade date. Run it iff that trade date (today + 1) is an
             # exchange trading day — this opens the Sunday-evening session (trade date Monday)
             # and skips Friday/Saturday evenings when CME is closed. (See is_session_open_day.)
-            if not is_session_open_day(today):
+            # Sleep to the next open only when today neither opens an evening session NOR is
+            # mid-way through one that opened last evening. is_session_in_progress catches the
+            # post-midnight tail (Friday morning, or the morning before a holiday): without it a
+            # crash-restart there sleeps to the next open and abandons the rest of the
+            # in-progress session. When in progress, fall through to the existing
+            # now < session_open_dt early-gap-fill / run-session path (grace_end_dt = today 16:55).
+            if not is_session_open_day(today) and not is_session_in_progress(now):
                 _pre_src, _pre_thr, _pre_err = _start_pre_session_ib(bar_data_dir)
                 _sleep_until(next_session_open(now), "next trading session",
                              ib_health_check=_make_ib_health_check(_pre_thr, _pre_err))

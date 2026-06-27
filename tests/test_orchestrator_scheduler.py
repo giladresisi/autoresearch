@@ -1,7 +1,12 @@
 import datetime
 from zoneinfo import ZoneInfo
 
-from orchestrator.scheduler import is_session_open_day, is_trading_day, next_session_open
+from orchestrator.scheduler import (
+    is_session_in_progress,
+    is_session_open_day,
+    is_trading_day,
+    next_session_open,
+)
 from session_times import SESSION_OPEN
 
 ET = ZoneInfo("America/New_York")
@@ -82,3 +87,42 @@ def test_next_session_open_friday_evening_skips_to_sunday():
 def test_next_session_open_saturday_skips_to_sunday():
     now = datetime.datetime(2026, 4, 18, 12, 0, tzinfo=ET)
     assert next_session_open(now) == _open(datetime.date(2026, 4, 19))
+
+
+# --- is_session_in_progress: the post-midnight tail of an overnight session ---
+
+def test_is_session_in_progress_friday_morning():
+    # Friday 10:00 ET is inside the Thu-evening→Fri-16:55 session, even though Friday evening
+    # itself opens nothing — the exact gap a crash-restart must not sleep through.
+    now = datetime.datetime(2026, 4, 17, 10, 0, tzinfo=ET)
+    assert is_session_in_progress(now) is True
+    assert is_session_open_day(now.date()) is False
+
+
+def test_is_session_in_progress_friday_after_close():
+    # Friday 17:30 ET — past the 16:55 close, before the (non-)open → not in progress.
+    now = datetime.datetime(2026, 4, 17, 17, 30, tzinfo=ET)
+    assert is_session_in_progress(now) is False
+
+
+def test_is_session_in_progress_saturday():
+    now = datetime.datetime(2026, 4, 18, 10, 0, tzinfo=ET)
+    assert is_session_in_progress(now) is False
+
+
+def test_is_session_in_progress_sunday_morning():
+    # Sunday daytime: the session opens Sunday EVENING, so the morning is not in progress.
+    now = datetime.datetime(2026, 4, 19, 10, 0, tzinfo=ET)
+    assert is_session_in_progress(now) is False
+
+
+def test_is_session_in_progress_weekday_morning():
+    # Tuesday 10:00 ET is inside the Mon-evening→Tue-16:55 session.
+    now = datetime.datetime(2026, 4, 21, 10, 0, tzinfo=ET)
+    assert is_session_in_progress(now) is True
+
+
+def test_is_session_in_progress_weekday_between_close_and_open():
+    # Tuesday 17:30 ET — after the 16:55 close, before the evening open → not in progress.
+    now = datetime.datetime(2026, 4, 21, 17, 30, tzinfo=ET)
+    assert is_session_in_progress(now) is False
