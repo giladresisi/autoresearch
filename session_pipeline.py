@@ -578,6 +578,13 @@ class SessionPipeline:
         # OUT of `liquidities` so the strategy's failed-entry sweep (_ext_levels) is
         # byte-identical and trades are unchanged.
         _state["liquidities_universe"] = _daily_mod.compute_universe_levels(_combined, now.date())
+        # GIL-43: prior CME session's 6hr sub-session highs/lows (yesterday's asia/london/
+        # ny_morning/ny_evening), additive detection-only key. Trade-date lookback bridges the
+        # weekend (Sunday reopen → Friday's session), so SMTs against e.g. yesterday's
+        # ny_evening_high fire during tonight's Asia window — which eligible_levels already
+        # expects but the current-date-only session builder never produced.
+        _state["liquidities_session_prior"] = _daily_mod.compute_prior_session_levels(
+            _combined, cme_session_date(now))
         save_daily(_state)
 
         # ── SMT V2: seed parallel MES day/week/session levels + 1hr FVGs ─────────
@@ -641,6 +648,10 @@ class SessionPipeline:
         if not _combined_mes.empty:
             _state["liquidities_universe_mes"] = _daily_mod.compute_universe_levels(
                 _combined_mes, now.date())
+            # GIL-43: MES counterpart of the prior-session 6hr sub-session levels, so the
+            # intersection in _detect_level_smts sees the same names on both legs.
+            _state["liquidities_session_prior_mes"] = _daily_mod.compute_prior_session_levels(
+                _combined_mes, cme_session_date(now))
         save_daily(_state)
 
         # Write levels.json snapshot for plot_session.py / regression plots. Lands under
@@ -2195,8 +2206,15 @@ class SessionPipeline:
         # Universe (B) fixed levels are an additive block merged ONLY here (never into the
         # strategy's `liquidities`/_ext_levels), so SMT detection sees the prev-day/week
         # extremes while trades stay unchanged. eligible_levels dedups by name.
-        liq_mnq = (daily.get("liquidities", []) or []) + (daily.get("liquidities_universe", []) or [])
-        liq_mes = (daily.get("liquidities_mes", []) or []) + (daily.get("liquidities_universe_mes", []) or [])
+        # GIL-43: prior-session 6hr sub-session levels prepended FIRST so that on any name
+        # collision (e.g. asia_high once the current Asia has formed) the current `liquidities`
+        # entry — iterated later — wins in eligible_levels' last-write dedup.
+        liq_mnq = ((daily.get("liquidities_session_prior", []) or [])
+                   + (daily.get("liquidities", []) or [])
+                   + (daily.get("liquidities_universe", []) or []))
+        liq_mes = ((daily.get("liquidities_session_prior_mes", []) or [])
+                   + (daily.get("liquidities_mes", []) or [])
+                   + (daily.get("liquidities_universe_mes", []) or []))
 
         levels_mnq = eligible_levels(liq_mnq, now)
         levels_mes = eligible_levels(liq_mes, now)
@@ -2691,9 +2709,11 @@ class SessionPipeline:
         daily = _smt_state.load_daily()
         sources = (
             ("mnq", self._hist_mnq_1m,
-             (daily.get("liquidities", []) or []) + (daily.get("liquidities_universe", []) or [])),
+             (daily.get("liquidities_session_prior", []) or [])
+             + (daily.get("liquidities", []) or []) + (daily.get("liquidities_universe", []) or [])),
             ("mes", self._hist_mes_1m,
-             (daily.get("liquidities_mes", []) or []) + (daily.get("liquidities_universe_mes", []) or [])),
+             (daily.get("liquidities_session_prior_mes", []) or [])
+             + (daily.get("liquidities_mes", []) or []) + (daily.get("liquidities_universe_mes", []) or [])),
         )
         liv = self._detect_state.setdefault("__level_inv__", {})
         for inst, hist, levels in sources:
