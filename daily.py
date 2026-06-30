@@ -203,6 +203,53 @@ def compute_universe_levels(
     return out
 
 
+def compute_prior_session_levels(
+    hist_1m: pd.DataFrame,
+    today: datetime.date,
+) -> list[dict]:
+    """Prior CME session's 6hr sub-session (asia/london/ny_morning/ny_evening) high/low
+    extremes as FIXED SMT levels — an ADDITIVE detection-only block (liquidities_session_prior).
+
+    `today` is the CURRENT trade date (cme_session_date(now)). The prior session is the last
+    *trading* date strictly before it (`_last_n_trading_dates(today, 1)`), so the lookback
+    bridges weekends/holidays — for a Sunday reopen this is Friday, not the empty Saturday
+    window. Each sub-session window is computed via `_session_bars` on that prior date.
+
+    Names are BARE (`ny_evening_high`, …) so `eligible_levels` admits them as "yesterday's NY
+    sessions" during the current Asia window (18:00-24:00 ET) — exactly the levels that filter
+    already expects but the current-date-only builder never produced. The additive key keeps
+    these out of the strategy's `liquidities`/`_ext_levels` (no trade-sweep impact); detection
+    unions it in with current `liquidities` taking precedence on any name collision.
+
+    Mirrors `compute_universe_levels`' entry shape: {name, kind:'level', price (wick extreme),
+    close_price (body extreme), window_end (session close, for the depletion seeder)}.
+    """
+    out: list[dict] = []
+    if hist_1m is None or hist_1m.empty:
+        return out
+    _prior = _last_n_trading_dates(today, 1)
+    if not _prior:
+        return out
+    pdate = _prior[0]
+    for session in ("asia", "london", "ny_morning", "ny_evening"):
+        bars = _session_bars(hist_1m, session, pdate)
+        if bars.empty:
+            continue
+        _, _, end_h, end_m = TIME_WINDOWS[session]
+        # window_end = session close on pdate (asia closes at pdate 00:00; others at pdate HH:00).
+        window_end = pd.Timestamp(
+            datetime.datetime(pdate.year, pdate.month, pdate.day, end_h, end_m, 0),
+            tz="America/New_York",
+        ).isoformat()
+        out.append({"name": f"{session}_high", "kind": "level",
+                    "price": float(bars["High"].max()),
+                    "close_price": float(bars["Close"].max()), "window_end": window_end})
+        out.append({"name": f"{session}_low", "kind": "level",
+                    "price": float(bars["Low"].min()),
+                    "close_price": float(bars["Close"].min()), "window_end": window_end})
+    return out
+
+
 def _detect_fvgs(
     hourly_bars: pd.DataFrame,
     mnq_1m: pd.DataFrame,
