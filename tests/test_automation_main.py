@@ -170,6 +170,10 @@ def test_executor_started_before_ib_source(monkeypatch, tmp_path):
          patch("automation.main.HypothesisManager"), \
          patch("automation.main._load_hist_mnq", return_value=pd.DataFrame()):
         import automation.main as am
+        import live_orders
+        # Executor is now the single shared live_orders singleton (automation reuses it rather
+        # than constructing its own) — inject the mock there so main() picks it up.
+        monkeypatch.setattr(live_orders, "_executor", mock_executor)
         # Ensure no leftover position file from previous tests
         monkeypatch.setattr(am, "POSITION_FILE", tmp_path / "live_position.json")
         am.main()
@@ -194,6 +198,9 @@ def test_executor_stopped_in_finally_on_ib_error(monkeypatch, tmp_path):
          patch("automation.main.HypothesisManager"), \
          patch("automation.main._load_hist_mnq", return_value=pd.DataFrame()):
         import automation.main as am
+        import live_orders
+        # Executor is now the single shared live_orders singleton — inject the mock there.
+        monkeypatch.setattr(live_orders, "_executor", mock_executor)
         monkeypatch.setattr(am, "POSITION_FILE", tmp_path / "live_position.json")
         with pytest.raises(RuntimeError, match="IB connection failed"):
             am.main()
@@ -753,6 +760,8 @@ def test_ib_disconnect_v1_position_open_sends_close_after_30s(monkeypatch, tmp_p
     import live_orders
 
     mock_executor, mock_ib = _setup_ib_disconnect(monkeypatch, tmp_path, with_v1_position=True)
+    # Executor is now the single shared live_orders singleton — inject the mock there.
+    monkeypatch.setattr(live_orders, "_executor", mock_executor)
     monkeypatch.setattr(live_orders, "has_active_position", lambda: False)
 
     sleep_mock = MagicMock()
@@ -797,6 +806,8 @@ def test_ib_disconnect_v2_position_open_sends_close(monkeypatch, tmp_path):
     import live_orders
 
     mock_executor, mock_ib = _setup_ib_disconnect(monkeypatch, tmp_path, with_v1_position=False)
+    # Executor is now the single shared live_orders singleton — inject the mock there.
+    monkeypatch.setattr(live_orders, "_executor", mock_executor)
     monkeypatch.setattr(live_orders, "has_active_position", lambda: True)
 
     sleep_mock = MagicMock()
@@ -820,6 +831,8 @@ def test_ib_disconnect_close_failure_still_exits(monkeypatch, tmp_path):
 
     mock_executor, mock_ib = _setup_ib_disconnect(monkeypatch, tmp_path, with_v1_position=True)
     mock_executor.place_close.side_effect = RuntimeError("PMT unreachable")
+    # Executor is now the single shared live_orders singleton — inject the mock there.
+    monkeypatch.setattr(live_orders, "_executor", mock_executor)
     monkeypatch.setattr(live_orders, "has_active_position", lambda: False)
 
     sleep_mock = MagicMock()

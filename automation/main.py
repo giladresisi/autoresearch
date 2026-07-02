@@ -1079,25 +1079,18 @@ def main() -> None:
     # False in in-memory mode). Daemon thread; auto-clears a stale prior-session pause first.
     import loss_limit as _loss_limit
     _loss_limit.start_monitor(today_str)
-    _account_ids = [s.strip() for s in os.environ.get("TRADING_ACCOUNT_IDS", "").split(",") if s.strip()]
-    # Shadow-live: DISCONNECTED=true runs resumed but suppresses every send to the PMT webhook
-    # (see execution/pickmytrade._post_order). Read once here so it is fixed for this run.
-    _disconnected = os.environ.get("DISCONNECTED", "false").strip().lower() in ("1", "true", "yes", "on")
-    if _disconnected:
-        print(
-            "[PMT] DISCONNECTED mode ON — strategy runs resumed but NO orders are sent to the "
-            "broker (shadow-live; compare live intent vs regression in retrospect)",
-            flush=True,
-        )
-    _executor = PickMyTradeExecutor(
-        webhook_url=os.environ["PMT_WEBHOOK_URL"],
-        api_key=os.environ["PMT_API_KEY"],
-        symbol=os.environ.get("TRADING_SYMBOL", "MNQ1!"),
-        account_ids=_account_ids,
-        contracts=int(os.environ.get("TRADING_CONTRACTS", "1")),
-        entry_slip_ticks=int(os.environ.get("PMT_ENTRY_SLIP_TICKS", "2")),
-        disconnected=_disconnected,
-    )
+    # Executor: reuse the SINGLE shared live_orders singleton — do NOT construct a second
+    # PickMyTradeExecutor here. live_orders builds THE executor once at import, and it is the one
+    # the v2 pipeline actually routes orders through (via live_orders.dispatch). It is also
+    # DISCONNECTED-aware (reads the DISCONNECTED env var). Creating another executor here produced
+    # two independent HTTP clients / thread pools, and — worse — in DISCONNECTED (shadow-live)
+    # mode a second, non-disconnected executor could still leak an order to the broker (e.g. the
+    # ib-disconnect hard close below). Reuse the singleton so start()/stop(), the ib-disconnect
+    # close, and the v1 path all operate on the one gated executor.
+    # NOTE: the previous `PickMyTradeExecutor(...)` construction lived here — intentionally
+    # removed; the executor is now owned solely by live_orders (see live_orders.py).
+    import live_orders as _live_orders
+    _executor = _live_orders._executor
     if _smtv2_pipeline == "v2":
         _smtv2_dispatcher = SmtV2Dispatcher()
 

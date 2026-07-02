@@ -22,9 +22,21 @@ import stop_utils
 load_dotenv()
 
 _LIVE = os.getenv("LIVE_TRADING", "false").lower() == "true"
+# Shadow-live: DISCONNECTED=true runs the strategy fully in resumed mode but suppresses every
+# send to the PMT webhook (execution/pickmytrade._post_order) AND every broker reconcile/read
+# below — so the broker stays completely silent while we record what live WOULD have done, for a
+# retrospective compare vs the regression. Read once at import → fixed for the orchestrator's
+# lifetime (toggling .env mid-run has no effect until the next restart).
+_DISCONNECTED = os.getenv("DISCONNECTED", "false").strip().lower() in ("1", "true", "yes", "on")
 
 if _LIVE:
     from execution.pickmytrade import PickMyTradeExecutor
+    if _DISCONNECTED:
+        print(
+            "[PMT] DISCONNECTED mode ON — strategy runs resumed but NO orders are sent to the "
+            "broker and broker reconcile/reads are skipped (shadow-live; compare vs regression)",
+            flush=True,
+        )
     _account_ids = [s.strip() for s in os.environ.get("TRADING_ACCOUNT_IDS", "").split(",") if s.strip()]
     _executor = PickMyTradeExecutor(
         webhook_url=os.environ["PMT_WEBHOOK_URL"],
@@ -33,6 +45,7 @@ if _LIVE:
         account_ids=_account_ids,
         contracts=int(os.environ.get("TRADING_CONTRACTS", "2")),
         entry_slip_ticks=int(os.environ.get("PMT_ENTRY_SLIP_TICKS", "2")),
+        disconnected=_DISCONNECTED,
     )
 else:
     from execution.simulated import SimulatedBrokerExecutor
@@ -96,7 +109,8 @@ _recon_reader_started = False
 def _get_recon_reader():
     """Lazily start the shared read-only reader (live mode only). Returns None on any failure."""
     global _recon_reader, _recon_reader_started
-    if not _LIVE:
+    if not _LIVE or _DISCONNECTED:
+        # DISCONNECTED: broker is silent (no orders sent) → nothing to read/reconcile.
         return None
     if _recon_reader_started:
         return _recon_reader
@@ -118,7 +132,8 @@ def _spawn_reconcile(direction: str, intended_entry: float, intended_stop: float
 
     Never raises into the caller; a no-op outside live mode or when the reader is unavailable.
     """
-    if not _LIVE:
+    if not _LIVE or _DISCONNECTED:
+        # DISCONNECTED: no order was sent to the broker → nothing to reconcile against.
         return
     try:
         reader = _get_recon_reader()
@@ -153,7 +168,9 @@ def _spawn_reconcile(direction: str, intended_entry: float, intended_stop: float
 def _reconcile_on_close(close_event: dict) -> bool:
     """Live-only synchronous close reconcile. Returns True iff the pending broker
     close must be SUPPRESSED. No-op (returns False) outside live mode or on any failure."""
-    if not _LIVE:
+    if not _LIVE or _DISCONNECTED:
+        # DISCONNECTED: no close was sent to the broker and the broker holds no position we
+        # placed → there is nothing to reconcile; let the strategy's intended close stand.
         return False
     try:
         from broker_recon import broker_state, recon_on_close
