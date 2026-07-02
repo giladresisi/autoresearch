@@ -33,7 +33,8 @@ class PickMyTradeExecutor:
                  request_timeout_s: float = 10.0,
                  max_retries: int = 3,
                  entry_slip_ticks: int = 2,
-                 tick_size: float = 0.25):
+                 tick_size: float = 0.25,
+                 disconnected: bool = False):
         self._webhook_url       = webhook_url
         self._api_key           = api_key
         self._symbol            = symbol
@@ -43,6 +44,10 @@ class PickMyTradeExecutor:
         self._max_retries       = max_retries
         self._entry_slip_ticks  = entry_slip_ticks
         self._tick_size         = tick_size
+        # Shadow-live: when True, _post_order logs the order it WOULD send but never POSTs to
+        # PMT, so the broker sees nothing while the strategy runs fully. Fixed for this run's
+        # lifetime (set once at construction from the DISCONNECTED env var).
+        self._disconnected      = disconnected
         # Persistent HTTP client reuses TCP connections across order calls (keep-alive)
         self._http = httpx.Client()
         # Thread pool for non-blocking order dispatch — bar callback returns immediately
@@ -259,7 +264,25 @@ class PickMyTradeExecutor:
         self._order_pool.submit(self._post_order, order_id, payload)
         self._entry_is_live = True
 
+    def _describe_order(self, payload: dict) -> str:
+        if payload.get("update_sl") or payload.get("update_tp"):
+            return f"update_sl={payload.get('sl')} update_tp={payload.get('tp')}"
+        return f"{payload.get('data')} {payload.get('order_type', 'MKT')} @ {payload.get('price', 'mkt')}"
+
     def _post_order(self, order_id: str, payload: dict) -> tuple:
+        # Shadow-live (DISCONNECTED): every external send funnels through here, so gating at
+        # this single choke point suppresses ALL broker traffic — entries, closes, cancels and
+        # SL updates alike. Log what WOULD have gone out and return a synthetic 200 so callers
+        # (and the strategy's own state) proceed exactly as if the order were placed, letting a
+        # retrospective compare live-intent vs regression without touching the broker.
+        if self._disconnected:
+            print(
+                f"[PMT] DISCONNECTED — order {order_id} NOT sent "
+                f"(would be: {self._describe_order(payload)})",
+                flush=True,
+            )
+            return 200, "disconnected: not sent"
+
         headers = {"Content-Type": "application/json"}
         last_exc = None
         for attempt in range(self._max_retries):

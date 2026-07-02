@@ -1080,6 +1080,15 @@ def main() -> None:
     import loss_limit as _loss_limit
     _loss_limit.start_monitor(today_str)
     _account_ids = [s.strip() for s in os.environ.get("TRADING_ACCOUNT_IDS", "").split(",") if s.strip()]
+    # Shadow-live: DISCONNECTED=true runs resumed but suppresses every send to the PMT webhook
+    # (see execution/pickmytrade._post_order). Read once here so it is fixed for this run.
+    _disconnected = os.environ.get("DISCONNECTED", "false").strip().lower() in ("1", "true", "yes", "on")
+    if _disconnected:
+        print(
+            "[PMT] DISCONNECTED mode ON — strategy runs resumed but NO orders are sent to the "
+            "broker (shadow-live; compare live intent vs regression in retrospect)",
+            flush=True,
+        )
     _executor = PickMyTradeExecutor(
         webhook_url=os.environ["PMT_WEBHOOK_URL"],
         api_key=os.environ["PMT_API_KEY"],
@@ -1087,6 +1096,7 @@ def main() -> None:
         account_ids=_account_ids,
         contracts=int(os.environ.get("TRADING_CONTRACTS", "1")),
         entry_slip_ticks=int(os.environ.get("PMT_ENTRY_SLIP_TICKS", "2")),
+        disconnected=_disconnected,
     )
     if _smtv2_pipeline == "v2":
         _smtv2_dispatcher = SmtV2Dispatcher()
