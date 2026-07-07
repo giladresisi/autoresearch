@@ -746,16 +746,23 @@ class IbRealtimeSource:
 
         This is the fill prologue start() runs at orchestrator startup, factored out so it
         can also be invoked standalone (e.g. gap_fill.gap_fill_until_now / `trade.py gap-fill`)
-        for a fill-only pass without opening real-time subscriptions. Raises RuntimeError if
-        the 1s fill returns no bars (IB unreachable / no data), which blocks the 1m fill.
+        for a fill-only pass without opening real-time subscriptions.
+
+        Degrades gracefully: an incomplete 1s fill (IB pacing / no data) no longer raises and
+        crashes the session. It logs a WARN and proceeds to the 1m fill and live streaming —
+        realtime 1s fills forward from now, and the session-end parquet-check backfills the
+        residual historical 1s gap. Keeps automation.main alive exactly like the orchestrator.
         """
         self._load_parquets()
-        if not self._gap_fill_1s_ib():
-            raise RuntimeError(
-                "[gap_fill_1s_ib] failed to fill any 1s bars — "
-                "IB unreachable or returned no data; 1m gap-fill blocked"
+        if self._gap_fill_1s_ib():
+            print("[gap_fill_1s_ib] complete", flush=True)
+        else:
+            print(
+                "[gap_fill_1s_ib] WARN: 1s fill incomplete (IB pacing / no data) — proceeding "
+                "with partial 1s history; realtime fills forward and the session-end "
+                "parquet-check backfills the residual gap",
+                flush=True,
             )
-        print("[gap_fill_1s_ib] complete", flush=True)
         gap_fill_1m_ib(self._bar_data_dir)  # calls check_parquet_gaps internally
         print("[gap_fill_1m_ib] IB 1m gap fill complete", flush=True)
         # Reload 1m dfs so the in-memory state matches the gap-filled parquet files.
