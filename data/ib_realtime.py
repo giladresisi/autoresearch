@@ -8,6 +8,13 @@ from __future__ import annotations
 _IB_1S_CHUNK_SECONDS = 1800
 # Earliest timestamp for 1s gap-fill — prevents requesting unbounded historical data
 _1S_EARLIEST = "2026-05-01"
+# 1s gap-fill pacing: IB throttles historical requests (~60 / 10 min). A small delay
+# between requests keeps the burst rate down; on an explicit pacing violation (error 162)
+# we back off and RETRY the same chunk instead of misreading the empty result as
+# end-of-data. Prevents the multi-day-gap pacing crash (2026-07-07 post-holiday fill).
+_IB_1S_REQUEST_PACING_S = 0.3     # throttle between consecutive historical requests
+_IB_1S_PACING_BACKOFF_S = 15.0    # wait after an IB pacing violation before retrying the chunk
+_IB_1S_MAX_PACING_RETRIES = 6     # per-chunk pacing retries before giving up on that chunk
 
 import os
 import threading
@@ -275,6 +282,15 @@ class IbRealtimeSource:
         ib = IB()
         try:
             ib.connect(self._host, self._port, clientId=self._client_id + 1)
+            # Count IB pacing violations (error 162) so the chunk loop can distinguish a
+            # transient throttle (back off + retry the same chunk) from a genuine no-data
+            # boundary. errorEvent signature varies by ib_insync version, so read positionally.
+            _pacing = {"n": 0}
+            def _on_ib_error(*args):
+                # errorEvent(reqId, errorCode, errorString, contract) — 162 = historical pacing
+                if len(args) >= 2 and args[1] == 162:
+                    _pacing["n"] += 1
+            ib.errorEvent += _on_ib_error
             for instrument, df_attr, parquet_name, conid in pairs:
                 if self._stopping:
                     return True  # clean stop, not a failure
@@ -288,6 +304,7 @@ class IbRealtimeSource:
                     all_bars: list = []
                     chunk_start = start_dt
                     consecutive_skips = 0
+                    pacing_retries = 0
                     requested_any = False
                     while chunk_start < now:
                         if self._stopping:
@@ -302,6 +319,7 @@ class IbRealtimeSource:
                         chunk_end = min(chunk_start + pd.Timedelta(seconds=_IB_1S_CHUNK_SECONDS), now)
                         chunk_s = max(1, int((chunk_end - chunk_start).total_seconds()))
                         requested_any = True
+                        _pacing_before = _pacing["n"]
                         bars = ib.reqHistoricalData(
                             contract,
                             endDateTime=chunk_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
@@ -312,7 +330,22 @@ class IbRealtimeSource:
                             formatDate=2,
                             keepUpToDate=False,
                         )
+                        ib.sleep(_IB_1S_REQUEST_PACING_S)  # throttle to stay under IB's pacing limit
                         if not bars:
+                            # IB pacing violation (error 162) during this request → back off and
+                            # retry the SAME chunk rather than misreading the empty result as a
+                            # data boundary. Keeps the fill progressing instead of giving up.
+                            if _pacing["n"] > _pacing_before and pacing_retries < _IB_1S_MAX_PACING_RETRIES:
+                                pacing_retries += 1
+                                print(
+                                    f"[gap_fill_1s_ib] {instrument}: IB pacing violation at "
+                                    f"{chunk_end.strftime('%m-%d %H:%M ET')} — backing off "
+                                    f"{_IB_1S_PACING_BACKOFF_S:.0f}s "
+                                    f"(retry {pacing_retries}/{_IB_1S_MAX_PACING_RETRIES})",
+                                    flush=True,
+                                )
+                                ib.sleep(_IB_1S_PACING_BACKOFF_S)
+                                continue  # retry the same window — do NOT advance chunk_start
                             lag_min = int((now - chunk_end).total_seconds() / 60)
                             if lag_min > 65:
                                 # Far from now: expected gap (maintenance window, holiday).
@@ -334,6 +367,7 @@ class IbRealtimeSource:
                             )
                             break
                         consecutive_skips = 0
+                        pacing_retries = 0
                         all_bars.extend(bars)
                         chunk_start = chunk_end
 

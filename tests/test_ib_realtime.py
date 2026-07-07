@@ -602,6 +602,49 @@ def test_gap_fill_1s_ib_paginates_in_1800s_chunks(tmp_path):
         assert seconds <= 1800, f"Chunk {seconds}s exceeds 1800s limit"
 
 
+def test_gap_fill_1s_ib_backs_off_and_retries_on_pacing_violation(tmp_path):
+    """An IB pacing violation (error 162) must trigger a back-off + retry of the SAME chunk,
+    not be misread as end-of-data. Regression guard for the 2026-07-07 post-holiday crash."""
+    from data import ib_realtime as _ib_mod
+    src = _make_source(tmp_path)
+    old_ts = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(minutes=20)
+    src._mnq_1s_df = pd.DataFrame(
+        {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0]},
+        index=pd.DatetimeIndex([old_ts]),
+    )  # MES stays empty → only MNQ fills, a single ~20-min chunk
+
+    class _FakeEvent:
+        def __init__(self): self._h = []
+        def __iadd__(self, h): self._h.append(h); return self
+        def _emit(self, *a):
+            for h in self._h:
+                h(*a)
+
+    class _FakeIB:
+        def __init__(self):
+            self.errorEvent = _FakeEvent()
+            self.calls = 0
+            self.sleeps = []
+        def connect(self, *a, **k): pass
+        def disconnect(self): pass
+        def isConnected(self): return True
+        def sleep(self, s): self.sleeps.append(s)
+        def reqHistoricalData(self, *a, **k):
+            self.calls += 1
+            if self.calls == 1:
+                self.errorEvent._emit(1, 162, "pacing violation", None)  # throttle on first try
+            return []  # both empty: 2nd (no 162) falls through to the boundary → loop ends
+
+    fake = _FakeIB()
+    with patch("ib_insync.IB", return_value=fake), patch("ib_insync.Contract"):
+        src._gap_fill_1s_ib()
+
+    # The paced-out chunk was retried (≥2 requests for the same window), after a real back-off.
+    assert fake.calls >= 2, f"expected a retry after the pacing violation, got {fake.calls} request(s)"
+    assert any(s >= _ib_mod._IB_1S_PACING_BACKOFF_S for s in fake.sleeps), \
+        "expected a pacing back-off sleep before the retry"
+
+
 # ── RAM reduction tests ──────────────────────────────────────────────────────
 
 def _make_bar_df(days_ago_start: int, days_ago_end: int = 0) -> pd.DataFrame:
