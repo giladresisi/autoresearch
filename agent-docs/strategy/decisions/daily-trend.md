@@ -28,7 +28,7 @@ Fresh tape (~last 3h) belongs to next-move — never consume it here.
 | D2 | Weekly equilibrium acceptance | 2 | which side of the weekly mid closes are ACCEPTED on (majority over recent hours) + failed reclaims. **Sign = DELIVERY: vote WITH the accepted side's travel** (accepted below = down). The discount-buys/premium-sells prior belongs to sweep classification (D4/next-move), not here. Week anchor = ENGINE convention (equilibrium.md §1) |
 | D3 | Prior-day / week context | 1 | where yesterday closed in its range; expansion vs balance week |
 | D4 | Overnight sweep complex | 2 | Asia/London manipulation legs as ONE unit: pools swept then accepted-beyond (continuation) vs rejected-back (grab). **Owns events before 06:00 ET only**; post-06:00 action may only CLASSIFY those sweeps — post-06:00 events belong to next-move |
-| D5 | Standing SMT / RS residue | 1 | standing unfulfilled week/day-tier divergences; persistent (>1 day) cross-ticker RS regimes |
+| D5 | Standing SMT / RS residue | 1 | standing unfulfilled week/day-tier divergences; persistent (>1 day) cross-ticker RS regimes. No standing-SMT/conviction data in the fact sheet → vote 0 (conservative fallback); NEVER infer this vote from price action in other sections |
 | D6 | ATH / recovery regime | 1 | vs scripts' `all_time_high`: ATH-expansion week = up-by-construction; >2–3% below = recovery (up-drift with violent shakeouts). If ATH not provided as hard truth: SKIP + confidence cap (§3) |
 
 **Correlation audit (mandatory):** list each driver's underlying price events. An event

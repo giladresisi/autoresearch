@@ -90,6 +90,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--replicates-only", action="store_true",
                     help="only add __rN replicate folders to existing cuts/")
+    ap.add_argument("--only-dates", default=None,
+                    help="comma-separated DATE[THH:MM[:SS]] cut points (e.g. "
+                         "2026-06-25T08:50,2026-06-23T13:00): generate ONLY these cut "
+                         "folders — no cuts/ wipe, EXCLUDE ignored, truth rows merged "
+                         "into the existing TSV, no replicates")
     args = ap.parse_args()
     template = open(TEMPLATE, encoding="utf-8").read()
     if args.replicates_only:
@@ -97,16 +102,28 @@ def main():
         return
 
     cuts_root = os.path.join(HERE, "cuts")
-    if os.path.exists(cuts_root):
-        shutil.rmtree(cuts_root)  # stale cuts from a previous docs/facts version
     mnq = load_full("MNQ")
     mes = load_full("MES")
-    tds = [d for d in trade_dates(mnq)
-           if DATE_FROM <= d <= DATE_TO and d not in EXCLUDE]
+    if args.only_dates:
+        pairs = []
+        for item in args.only_dates.split(","):
+            item = item.strip()
+            if "T" in item:
+                dpart, tpart = item.split("T", 1)
+                parts = [int(p) for p in tpart.split(":")]
+                t = datetime.time(*parts)
+            else:
+                dpart, t = item, CUT_TIMES[0]
+            pairs.append((datetime.date.fromisoformat(dpart), t))
+    else:
+        if os.path.exists(cuts_root):
+            shutil.rmtree(cuts_root)  # stale cuts from a previous docs/facts version
+        tds = [d for d in trade_dates(mnq)
+               if DATE_FROM <= d <= DATE_TO and d not in EXCLUDE]
+        pairs = [(d, CUT_TIMES[i % len(CUT_TIMES)]) for i, d in enumerate(tds)]
 
     rows = []
-    for i, d in enumerate(tds):
-        cut_t = CUT_TIMES[i % len(CUT_TIMES)]
+    for d, cut_t in pairs:
         cut = pd.Timestamp(datetime.datetime.combine(d, cut_t), tz=ET)
         # require live data just before the cut (skip holidays/early closes)
         pre = mnq[(mnq.index >= cut - pd.Timedelta(minutes=10)) & (mnq.index < cut)]
@@ -175,10 +192,21 @@ def main():
         print(f"OK {cut_id}  cut_close={cut_close}  h4 +{e4['up_exc']}/-{e4['dn_exc']}  "
               f"eod {round(eod - cut_close, 2) if eod else '?'}")
 
-    pd.DataFrame(rows).to_csv(TRUTH_TSV, sep="\t", index=False)
+    truth = pd.DataFrame(rows)
+    if args.only_dates:
+        if not len(truth):
+            print("\nno cuts generated — truth TSV left untouched")
+            return
+        # merge into the existing sweep TSV (replace rows for regenerated cut_ids)
+        if os.path.exists(TRUTH_TSV):
+            old = pd.read_csv(TRUTH_TSV, sep="\t")
+            truth = pd.concat([old[~old["cut_id"].isin(truth["cut_id"])], truth],
+                              ignore_index=True).sort_values("cut_id")
+    truth.to_csv(TRUTH_TSV, sep="\t", index=False)
     print(f"\n{len(rows)} cuts prepared under {os.path.join(HERE, 'cuts')}")
     print(f"ground truth -> {TRUTH_TSV}")
-    make_replicates(template)
+    if not args.only_dates:
+        make_replicates(template)
 
 
 if __name__ == "__main__":
