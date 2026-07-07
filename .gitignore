@@ -75,3 +75,6 @@ regression.md
 
 # POC/blind-test working folder (slices, per-run facts, agent outputs) - never tracked
 agent-docs/strategy/poc/
+
+# Calibration sweep cut folders (regenerable facts + per-run agent outputs) - never tracked
+calibration/cuts/
