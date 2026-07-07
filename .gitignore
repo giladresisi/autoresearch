@@ -72,3 +72,6 @@ orchestrator.pid
 
 # Local regression notes
 regression.md
+
+# POC/blind-test working folder (slices, per-run facts, agent outputs) - never tracked
+agent-docs/strategy/poc/
