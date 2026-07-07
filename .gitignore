@@ -78,8 +78,3 @@ agent-docs/strategy/poc/
 
 # Calibration sweep cut folders (regenerable facts + per-run agent outputs) - never tracked
 calibration/cuts/
-
-# GIL-44 worktree-local planning/analysis docs - never tracked (feature.md IS tracked repo-wide)
-prod-agent.md
-agent-optimizations.md
-requests/
