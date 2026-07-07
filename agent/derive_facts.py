@@ -236,6 +236,23 @@ def main():
 
     levels = {}       # levels[tkr][name] = (price, body_price, side, tier, active_from)
     sess_cache = {}
+    cards = []        # S3b candidate item cards (precomputed scoring inputs)
+    TIER_W = {"week": 3.0, "day": 2.0, "session": 1.0}   # next-move.md §2 (fill 1.5 = FVGs, not carded)
+
+    def window_of(ts):
+        return ("asia" if ts.hour >= 18 else "london" if ts.hour < 6
+                else "ny_morning" if ts.hour < 12 else "ny_evening")
+
+    def add_card(kind, tkr_, name_, price_, side_, ts_, tier_, note_=""):
+        age = age_min(ts_, now)
+        if age > 360:
+            return                                        # spent (~2× the 3h decay horizon)
+        w = TIER_W[tier_]
+        fresh = 2 ** (-age / 180)
+        cards.append(
+            f"{tkr_} {name_} {price_} [{side_}] {kind}: window={window_of(ts_)} @ {ts_} | "
+            f"age {age:.0f}m | tier={tier_} w={w} | freshness={fresh:.3f} | "
+            f"base(w×freshness)={w * fresh:.2f}{note_}")
     for tkr, df in data.items():
         sess_now = session_frame(df, td_now)
         sess_cache[tkr] = sess_now
@@ -323,6 +340,8 @@ def main():
             print(f"{name} {price} [{side}]: swept {t} (age {age_min(t, now):.0f}m) | "
                   f"max excursion beyond {exc:.2f} "
                   f"({'DEPLETED' if exc >= thr else 'not depleted'}, thr {thr:.1f}) | body15m: {tb_s}")
+            add_card("sweep", tkr, name, price, side, t, tier,
+                     " | DEPLETED" if exc >= thr else "")
 
     print("\n## S3 CROSS-TICKER SWEEP MATRIX (same level name; one swept + other not = divergence candidate)")
     shared = sorted(set(levels["MNQ"]) & set(levels["MES"]))
@@ -353,6 +372,28 @@ def main():
                 if dist is not None:
                     print(f"{'':>{len(name)}}   laggard {lg} max reach: {dist:.2f} short of "
                           f"{pp} @ {ats} (age {age_min(ats, now):.0f}m)")
+                    # laggard test-and-fail candidate: other ticker swept, this one
+                    # reached within 25% of its depletion threshold and failed
+                    other_swept = (t2 if lg == "MNQ" else t1) is not None
+                    gate = 0.25 * DEPLETE[lg][tier]
+                    if other_swept and dist <= gate:
+                        add_card("CANDIDATE laggard-fail", lg, name, pp, side, ats, tier,
+                                 f" | reach {dist:.2f} short (25%-of-thr gate {gate:.2f}: QUALIFIES)")
+
+    print("\n## S3b CANDIDATE ITEM CARDS (precomputed scoring inputs; multipliers per decisions/next-move.md §2)")
+    print("score = tier_weight × session_side × alignment × freshness × whipsaw = base × session_side × alignment × whipsaw")
+    print("Copy tier w and freshness from the card — do NOT recompute the exponent. session_side/")
+    print("alignment/whipsaw are read-dependent: take them from the next-move.md tables.")
+    print("REMINDER: whipsaw ×0.5 applies ONLY to intraday STRUCTURE items inside 09:15-11:30;")
+    print("level sweeps/SMTs are NOT structure items (their whipsaw = 1.0).")
+    print("Cards cover swept fixed levels (freshness = sweep time) and qualifying laggard-fail")
+    print("candidates (freshness = failure time); items >6h old omitted (spent). Dynamic-extreme")
+    print("events and continuation items are not carded — compute their freshness from S4/S5 times.")
+    if cards:
+        for line in cards:
+            print(line)
+    else:
+        print("(no candidate items within the 6h window)")
 
     print("\n## S4 EQUILIBRIUM (1m closes vs RUNNING mids, current session; weekly mid = ENGINE anchor)")
     for tkr, df in data.items():
