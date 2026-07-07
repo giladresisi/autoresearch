@@ -146,8 +146,13 @@ def test_source_gap_fill_runs_1s_then_1m(monkeypatch, tmp_path):
     assert calls == ["load", "1s", f"1m:{tmp_path}", "load"]
 
 
-def test_source_gap_fill_raises_when_1s_fails(monkeypatch, tmp_path):
-    """1s fill returning False raises and blocks the 1m fill."""
+def test_source_gap_fill_degrades_when_1s_fails(monkeypatch, tmp_path):
+    """An incomplete 1s fill must NOT raise — it WARNs and still runs the 1m fill.
+
+    Graceful degradation so automation.main stays alive (like the orchestrator) instead of
+    crashing on IB pacing / no-data over a large gap; realtime 1s fills forward and the
+    session-end parquet-check backfills the residual historical 1s gap.
+    """
     src = _make_source(tmp_path)
     monkeypatch.setattr(src, "_load_parquets", lambda: None)
     monkeypatch.setattr(src, "_gap_fill_1s_ib", lambda: False)
@@ -155,6 +160,6 @@ def test_source_gap_fill_raises_when_1s_fails(monkeypatch, tmp_path):
     import data.ib_realtime as _ir
     monkeypatch.setattr(_ir, "gap_fill_1m_ib", one_m)
 
-    with pytest.raises(RuntimeError):
-        src.gap_fill()
-    one_m.assert_not_called()
+    # Must not raise, and the 1m fill must still run despite the 1s shortfall.
+    src.gap_fill()
+    one_m.assert_called_once()
