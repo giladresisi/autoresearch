@@ -4,7 +4,7 @@ from compare import build_comparison, render_comparison_table
 from records import write_audit_record
 
 
-def _rec(hyp_dir, ai_dir, agree, verdict="clean", cached=False, realized="up",
+def _rec(hyp_dir, ai_dir, agree, verdict="clean", realized="up",
          ai_correct=True):
     return {
         "trigger_ts": "2026-05-19 09:27:59-04:00", "arrival_ts": "2026-05-19 09:29:18-04:00",
@@ -12,7 +12,7 @@ def _rec(hyp_dir, ai_dir, agree, verdict="clean", cached=False, realized="up",
         "facts_snapshot_ref": {}, "attempts": [], "latency_total_sec": 70.0,
         "usage_total": {"input_tokens": 12000, "output_tokens": 400,
                         "cache_read_input_tokens": 11000},
-        "decision": {}, "verdict": verdict, "fallback": False, "cached": cached,
+        "decision": {}, "verdict": verdict, "fallback": False,
         "error": None,
         "paired_diff": {"direction": {"hypothesis": hyp_dir, "ai": ai_dir, "agree": agree},
                         "move_target": {"hypothesis": "L1", "ai": "L1", "agree": True},
@@ -25,7 +25,7 @@ def _rec(hyp_dir, ai_dir, agree, verdict="clean", cached=False, realized="up",
 def test_build_comparison_counts_and_cost(tmp_path):
     path = tmp_path / "audit.jsonl"
     write_audit_record(path, _rec("up", "up", True))
-    write_audit_record(path, _rec("down", "neutral", False, cached=True))
+    write_audit_record(path, _rec("down", "neutral", False))
 
     comp = build_comparison(path)
     s = comp["summary"]
@@ -33,7 +33,7 @@ def test_build_comparison_counts_and_cost(tmp_path):
     assert s["agree"]["direction"] == 1
     assert s["disagree"]["direction"] == 1
     assert s["agree"]["move_target"] == 2
-    assert s["api_calls"] == 1 and s["cache_hits"] == 1
+    assert s["api_calls"] == 2
     assert s["mean_latency_sec"] == 70.0
     assert s["est_cost_usd"] > 0
     assert s["ai_correct"] == 2 and s["scored"] == 2

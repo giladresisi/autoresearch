@@ -1,4 +1,4 @@
-"""ShadowEngine tests (Wave 2.3) — all offline via the StubBackend."""
+"""DecisionEngine tests (Wave 2.3) — all offline via the StubBackend."""
 
 import os
 import sys
@@ -9,11 +9,11 @@ import pytest
 from conftest import DOCS_ROOT, fixtures_present, load_live_frames
 
 import engine as engine_mod
-from engine import ShadowEngine
+from engine import DecisionEngine
 from facts_adapter import Snapshot
 from records import read_audit_records
 from run_agent import StubBackend
-from shadow_config import ShadowConfig
+from decisions_config import DecisionsConfig
 
 pytestmark = pytest.mark.skipif(not fixtures_present(), reason="golden fixtures absent")
 
@@ -22,10 +22,9 @@ _HYP = {"kind": "new-hypothesis", "time": "2026-05-19 09:27:59-04:00", "directio
 
 
 def _make_engine(tmp_path, backend=None, churn_guard=False):
-    config = ShadowConfig(real_api=False, churn_guard=churn_guard, latency_sec=79.0,
-                          cache_dir=str(tmp_path / "cache"))
-    return ShadowEngine(config, backend or StubBackend(), DOCS_ROOT,
-                        out_dir=str(tmp_path / "out"), cache_dir=str(tmp_path / "cache"))
+    config = DecisionsConfig(real_api=False, churn_guard=churn_guard, latency_sec=79.0)
+    return DecisionEngine(config, backend or StubBackend(), DOCS_ROOT,
+                        out_dir=str(tmp_path / "out"))
 
 
 def test_checkpoint_then_trigger_carries_both(tmp_path):

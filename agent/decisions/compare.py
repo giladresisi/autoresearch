@@ -2,7 +2,7 @@
 
 Produces the side-by-side table — per trigger, the hypothesis output vs the AI decision
 as of arrival — plus per-day cost/latency stats and paired-diff agree/disagree counts by
-field. Consumes shadow_audit.jsonl (and, optionally, the baseline events.jsonl for the
+field. Consumes ai_decisions_audit.jsonl (and, optionally, the baseline events.jsonl for the
 hypothesis side, though the paired_diff already carries it).
 """
 
@@ -35,7 +35,7 @@ def build_comparison(audit_path, baseline_events_path=None) -> dict:
     disagree = {"direction": 0, "move_target": 0}
     latencies = []
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0}
-    api_calls = cache_hits = 0
+    api_calls = 0
     n_triggers = n_checkpoints = 0
 
     for r in records:
@@ -59,7 +59,6 @@ def build_comparison(audit_path, baseline_events_path=None) -> dict:
             "ai_confidence": entry.get("ai_confidence"),
             "verdict": r.get("verdict"),
             "latency_sec": r.get("latency_total_sec"),
-            "cached": r.get("cached"),
             "realized": oc.get("realized_direction"),
             "ai_correct": oc.get("ai_correct"),
             "hyp_correct": oc.get("hypothesis_correct"),
@@ -76,10 +75,7 @@ def build_comparison(audit_path, baseline_events_path=None) -> dict:
         u = r.get("usage_total") or {}
         for k in usage:
             usage[k] += u.get(k, 0) or 0
-        if r.get("cached"):
-            cache_hits += 1
-        else:
-            api_calls += 1
+        api_calls += 1
 
     # Aggregate AI-vs-hypothesis correctness where outcomes are annotated.
     ai_hits = sum(1 for row in rows if row["ai_correct"] is True)
@@ -95,7 +91,6 @@ def build_comparison(audit_path, baseline_events_path=None) -> dict:
         "mean_latency_sec": round(mean(latencies), 1) if latencies else None,
         "usage": usage,
         "api_calls": api_calls,
-        "cache_hits": cache_hits,
         "est_cost_usd": _est_cost(usage["input_tokens"], usage["output_tokens"],
                                   usage["cache_read_input_tokens"]),
         "scored": scored,
@@ -121,7 +116,7 @@ def render_comparison_table(comparison: dict) -> str:
     lines.append(
         f"triggers={s['n_triggers']} dir_agree={s['agree']['direction']} "
         f"dir_disagree={s['disagree']['direction']} mean_latency={s['mean_latency_sec']}s "
-        f"api_calls={s['api_calls']} cache_hits={s['cache_hits']} "
+        f"api_calls={s['api_calls']} "
         f"est_cost=${s['est_cost_usd']} "
         f"ai_correct={s['ai_correct']}/{s['scored']} hyp_correct={s['hypothesis_correct']}/{s['scored']}")
     return "\n".join(lines)

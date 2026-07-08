@@ -1,15 +1,14 @@
 """Decision core + standing daily-trend mini-orchestrator (GIL-44 Phase 2, Wave 2.3).
 
-The ShadowEngine runs the two-call state machine ALONGSIDE the hypothesis engine:
+The DecisionEngine runs the two-call state machine ALONGSIDE the hypothesis engine:
   - on_checkpoint  → the daily-trend call over checkpoint-truncated facts; stores the
                      STANDING daily-trend (fires once per configured ET checkpoint).
   - on_hypothesis_trigger → the next-move call consuming the standing daily-trend, at the
-                     same trigger a `new-hypothesis` fired; returns a ShadowRecord with the
+                     same trigger a `new-hypothesis` fired; returns a DecisionRecord with the
                      paired diff vs the hypothesis event.
 
 It never mutates strategy state and never raises into the pipeline: any exception /
-guard-kill / repeated-invalid yields a NEUTRAL/LOW failsafe record with the reason. All
-draws go through the content-addressed replay cache (deterministic re-replays, no spend).
+guard-kill / repeated-invalid yields a NEUTRAL/LOW failsafe record with the reason.
 """
 
 from __future__ import annotations
@@ -32,11 +31,10 @@ for _p in (_HERE, _AGENT):
 from run_agent import decide_daily, decide_next, failsafe_decision  # noqa: E402
 from derive_facts import TZ, trade_date  # noqa: E402
 
-from cache import ReplayCache  # noqa: E402
 from facts_adapter import Snapshot, build_snapshot  # noqa: E402
 from guard import LookaheadError, assert_no_lookahead  # noqa: E402
 from records import (  # noqa: E402
-    ShadowRecord,
+    DecisionRecord,
     build_ai_daily_trend_event,
     build_ai_hypothesis_event,
     build_paired_diff,
@@ -47,7 +45,7 @@ from records import (  # noqa: E402
 
 @dataclass
 class _Decision:
-    """A CallOutcome flattened to a serialisable form (cache payload + audit)."""
+    """A CallOutcome flattened to a serialisable form (audit payload)."""
 
     block: dict
     verdict: str
@@ -57,7 +55,6 @@ class _Decision:
     attempts: list = field(default_factory=list)
     latency_total_sec: float = 0.0
     usage_total: dict = field(default_factory=dict)
-    cached: bool = False
 
     @classmethod
     def from_outcome(cls, o) -> "_Decision":
@@ -65,30 +62,15 @@ class _Decision:
                    retries=o.retries, reasoning=o.reasoning, attempts=o.attempts,
                    latency_total_sec=o.latency_total, usage_total=o.usage_total)
 
-    @classmethod
-    def from_cache(cls, d: dict) -> "_Decision":
-        return cls(block=d["block"], verdict=d["verdict"], fallback=d["fallback"],
-                   retries=d.get("retries", 0), reasoning=d.get("reasoning"),
-                   attempts=d.get("attempts", []),
-                   latency_total_sec=d.get("latency_total_sec", 0.0),
-                   usage_total=d.get("usage_total", {}), cached=True)
 
-    def to_cache(self) -> dict:
-        return {"block": self.block, "verdict": self.verdict, "fallback": self.fallback,
-                "retries": self.retries, "reasoning": self.reasoning,
-                "attempts": self.attempts, "latency_total_sec": self.latency_total_sec,
-                "usage_total": self.usage_total}
-
-
-class ShadowEngine:
-    def __init__(self, config, backend, docs_root, out_dir, cache_dir=None):
+class DecisionEngine:
+    def __init__(self, config, backend, docs_root, out_dir):
         self.config = config
         self.backend = backend
         self.docs_root = docs_root
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.cache = ReplayCache(cache_dir or config.cache_dir)
-        self.audit_path = self.out_dir / "shadow_audit.jsonl"
+        self.audit_path = self.out_dir / "ai_decisions_audit.jsonl"
         self.snapshots_dir = self.out_dir / "snapshots"
 
         self.standing_daily_trend: Optional[dict] = None
@@ -100,7 +82,7 @@ class ShadowEngine:
 
         self.records: list = []
         self.events_native: list = []
-        self.stats = {"api_calls": 0, "cache_hits": 0, "guard_kills": 0,
+        self.stats = {"api_calls": 0, "guard_kills": 0,
                       "failsafes": 0, "checkpoints": 0, "triggers": 0}
 
     # ------------------------------------------------------------------ #
@@ -170,7 +152,7 @@ class ShadowEngine:
                 error = snap.error
             else:
                 assert_no_lookahead(snap, ts)
-                dec = self._daily_decision_cached(snap, trigger_kind)
+                dec = self._daily_decision(snap)
         except LookaheadError:
             self.stats["guard_kills"] += 1
             dec = _Decision(block=fs["daily_trend"], verdict="guard-kill", fallback=True)
@@ -196,7 +178,7 @@ class ShadowEngine:
     # Hypothesis trigger                                                   #
     # ------------------------------------------------------------------ #
     def on_hypothesis_trigger(self, now: pd.Timestamp, frames: dict, hyp_event: dict,
-                              trigger_kind: str) -> ShadowRecord:
+                              trigger_kind: str) -> DecisionRecord:
         self.stats["triggers"] += 1
         fs = failsafe_decision()
         snap = self._safe_snapshot(frames)          # never raises → contract honoured
@@ -207,13 +189,13 @@ class ShadowEngine:
         if (self.config.churn_guard and self._last_trigger_hash == snap.content_hash
                 and self.records):
             prev = self.records[-1]
-            suppressed = ShadowRecord(
+            suppressed = DecisionRecord(
                 trigger_ts=now.isoformat(),
                 arrival_ts=(now + pd.Timedelta(seconds=self.config.latency_sec)).isoformat(),
                 trigger_kind=trigger_kind, facts_content_hash=snap.content_hash,
                 decision=prev.decision, paired_diff=prev.paired_diff,
                 verdict="churn-suppressed", fallback=False,
-                standing_daily_trend=standing, cached=True, audit={})
+                standing_daily_trend=standing, audit={})
             self.records.append(suppressed)
             return suppressed
         self._last_trigger_hash = snap.content_hash
@@ -225,7 +207,7 @@ class ShadowEngine:
                 error = snap.error
             else:
                 assert_no_lookahead(snap, now)
-                dec = self._next_decision_cached(snap, trigger_kind, standing)
+                dec = self._next_decision(snap, standing)
         except LookaheadError:
             self.stats["guard_kills"] += 1
             dec = _Decision(block=fs["next_move"], verdict="guard-kill", fallback=True)
@@ -248,41 +230,29 @@ class ShadowEngine:
                             paired_diff=paired, error=error, standing=standing)
         write_audit_record(self.audit_path, audit)
 
-        record = ShadowRecord(
+        record = DecisionRecord(
             trigger_ts=now.isoformat(), arrival_ts=arrival.isoformat(),
             trigger_kind=trigger_kind, facts_content_hash=snap.content_hash,
             decision={"daily_trend": standing, "next_move": dec.block},
             paired_diff=paired, verdict=dec.verdict, fallback=dec.fallback, error=error,
-            standing_daily_trend=standing, cached=dec.cached, audit=audit)
+            standing_daily_trend=standing, audit=audit)
         self.records.append(record)
         return record
 
     # ------------------------------------------------------------------ #
-    # Cached decision calls                                                #
+    # Decision calls                                                       #
     # ------------------------------------------------------------------ #
-    def _daily_decision_cached(self, snap, trigger_kind) -> _Decision:
-        cached = self.cache.get(trigger_kind, snap.content_hash)
-        if cached is not None:
-            self.stats["cache_hits"] += 1
-            return _Decision.from_cache(cached)
+    def _daily_decision(self, snap) -> _Decision:
         outcome = decide_daily(snap.text, "", snap.validator_dict, self.backend,
                                docs_root=self.docs_root)
         self.stats["api_calls"] += 1
-        dec = _Decision.from_outcome(outcome)
-        self.cache.put(trigger_kind, snap.content_hash, dec.to_cache())
-        return dec
+        return _Decision.from_outcome(outcome)
 
-    def _next_decision_cached(self, snap, trigger_kind, standing) -> _Decision:
-        cached = self.cache.get(trigger_kind, snap.content_hash)
-        if cached is not None:
-            self.stats["cache_hits"] += 1
-            return _Decision.from_cache(cached)
+    def _next_decision(self, snap, standing) -> _Decision:
         outcome = decide_next(snap.text, "", snap.validator_dict, standing, self.backend,
                               docs_root=self.docs_root)
         self.stats["api_calls"] += 1
-        dec = _Decision.from_outcome(outcome)
-        self.cache.put(trigger_kind, snap.content_hash, dec.to_cache())
-        return dec
+        return _Decision.from_outcome(outcome)
 
     # ------------------------------------------------------------------ #
     # Audit assembly                                                       #
@@ -314,7 +284,6 @@ class ShadowEngine:
             "paired_diff": paired_diff,
             "verdict": primary.verdict if primary else "failsafe",
             "fallback": primary.fallback if primary else True,
-            "cached": primary.cached if primary else False,
             "error": error,
             "outcome": None,          # filled by the Phase-4 annotation job
         }

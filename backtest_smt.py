@@ -1217,37 +1217,36 @@ def _ath_as_of(frame, end_pos: int) -> float:
     return _m if _m == _m else 0.0  # NaN guard (NaN != NaN)
 
 
-def _shadow_enabled() -> bool:
-    """Read the AI-shadow master flag. shadow_config only imports os/dataclasses, so
+def _ai_decisions_enabled() -> bool:
+    """Read the AI-decisions master flag. decisions_config only imports os/dataclasses, so
     this is cheap and side-effect-free; default OFF keeps regressions byte-identical."""
     try:
         _agent_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
         if _agent_dir not in sys.path:
             sys.path.insert(0, _agent_dir)
-        import shadow_config as _sc
-        return bool(_sc.AI_SHADOW_ENABLED)
+        import decisions_config as _sc
+        return bool(_sc.AI_DECISIONS_ENABLED)
     except Exception:
-        # Fall back to the raw env read so a shadow_config import problem can never
+        # Fall back to the raw env read so a decisions_config import problem can never
         # flip the flag on (or break a flag-OFF regression).
-        val = os.environ.get("ACT_AI_SHADOW")
+        val = os.environ.get("ACT_AI_DECISIONS")
         return val is not None and val.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _build_shadow_engine(run_dir):
-    """Construct a ShadowEngine for one day's run, or None if disabled / unavailable.
-    Only called when the flag is ON, so the shadow stack is imported lazily."""
+def _build_decision_engine(run_dir):
+    """Construct a DecisionEngine for one day's run, or None if disabled / unavailable.
+    Only called when the flag is ON, so the AI-decisions stack is imported lazily."""
     _agent_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
     if _agent_dir not in sys.path:
         sys.path.insert(0, _agent_dir)
-    import shadow_config as _sc
-    from shadow.engine import ShadowEngine
+    import decisions_config as _sc
+    from decisions.engine import DecisionEngine
     from run_agent import make_backend, DOCS_ROOT
 
-    config = _sc.ShadowConfig()
+    config = _sc.DecisionsConfig()
     backend = make_backend("stub") if not config.real_api else make_backend(config.backend,
                                                                             config.model)
-    return ShadowEngine(config, backend, DOCS_ROOT, out_dir=str(run_dir),
-                        cache_dir=config.cache_dir)
+    return DecisionEngine(config, backend, DOCS_ROOT, out_dir=str(run_dir))
 
 
 def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True,
@@ -1385,16 +1384,16 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
         # Pipeline handles state reset, ATH seeding, resamples, and run_daily.
         day_events: list[dict] = []
-        # A shadow-init failure (e.g. flag ON but no API key) must NEVER abort the
-        # backtest — degrade to no-shadow instead of killing the trading-side run.
-        _shadow_engine = None
-        if _shadow_enabled():
+        # An engine-init failure (e.g. flag ON but no API key) must NEVER abort the
+        # backtest — degrade to no-engine instead of killing the trading-side run.
+        _decision_engine = None
+        if _ai_decisions_enabled():
             try:
-                _shadow_engine = _build_shadow_engine(_run_dir)
+                _decision_engine = _build_decision_engine(_run_dir)
             except Exception:
-                _shadow_engine = None
+                _decision_engine = None
         pipeline = SessionPipeline(hist_mnq_1m, hist_mes_1m, day_events.append,
-                                   shadow=_shadow_engine)
+                                   ai_decisions=_decision_engine)
         pipeline.on_session_start(session_start_ts, today_at_open, force_reset=True)
 
         # Seed this run's ATH from the TRUE all-time high as of the session open (the full
@@ -1632,18 +1631,18 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                 })
                 entry_event = None
 
-        # GIL-44 Phase-3: day-end shadow finalize + dual logging. The shadow decision is
+        # GIL-44 Phase-3: day-end AI-decisions finalize + dual logging. The AI decision is
         # NEVER read back into strategy logic, and AI events-native lines are appended
         # ONLY here (after trade pairing → trades byte-identical), each carrying
-        # source:"ai-shadow" so the non-AI event subsequence is unchanged (filter it out
+        # source:"ai-decisions" so the non-AI event subsequence is unchanged (filter it out
         # to recover the flag-OFF baseline).
-        if _shadow_engine is not None:
+        if _decision_engine is not None:
             try:
                 _sess_parquet = _mnq_today if mode == "1s" else mnq_1m_today
-                _shadow_engine.finalize(session_parquet=_sess_parquet)
+                _decision_engine.finalize(session_parquet=_sess_parquet)
             except Exception:
                 pass
-            day_events.extend(_shadow_engine.events_native)
+            day_events.extend(_decision_engine.events_native)
 
         all_events.extend(day_events)
         all_trades.extend(day_trades)

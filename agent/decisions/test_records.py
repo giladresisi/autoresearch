@@ -31,7 +31,7 @@ def _sample_daily():
 
 
 def test_audit_record_round_trip(tmp_path):
-    path = tmp_path / "shadow_audit.jsonl"
+    path = tmp_path / "ai_decisions_audit.jsonl"
     record = {
         "trigger_ts": "2026-05-19 09:27:59-04:00",
         "arrival_ts": "2026-05-19 09:29:18-04:00",
@@ -61,7 +61,7 @@ def test_events_native_new_hypothesis_shape():
                                    hyp_event=real, now_price=30001.0)
     for k in REAL_HYP_EVENT_KEYS:
         assert k in ai                       # carries every key the real event has
-    assert ai["source"] == "ai-shadow"
+    assert ai["source"] == "ai-decisions"
     assert ai["kind"] == "new-hypothesis"
     assert ai["direction"] == "up"           # next.direction up → hyp none↔ maps up
     assert ai["price"] == 30001.0            # decision-time price from the snapshot
@@ -69,7 +69,7 @@ def test_events_native_new_hypothesis_shape():
 
 def test_events_native_daily_trend_shape():
     ai = build_ai_daily_trend_event(_sample_daily(), time_iso="t")
-    assert ai["kind"] == "daily-trend" and ai["source"] == "ai-shadow"
+    assert ai["kind"] == "daily-trend" and ai["source"] == "ai-decisions"
     assert ai["direction"] == "up" and ai["regime"] == "trend"
 
 

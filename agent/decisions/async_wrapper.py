@@ -1,7 +1,7 @@
-"""Live async wrapper (GIL-44 Phase 5).
+"""Async worker wrapper for the AI decisions engine (observation-only mode).
 
-`prod-agent.md` shadow "respects the contention prerequisite": on the 16 GB live box the
-1s loop must NOT block on the ~75 s LLM cycle. The wrapper puts the SAME ShadowEngine
+`prod-agent.md` Phase 3 "respects the contention prerequisite": on the 16 GB live box the
+1s loop must NOT block on the ~75 s LLM cycle. The wrapper puts the SAME DecisionEngine
 behind a single worker thread — on_hypothesis_trigger/on_checkpoint enqueue a job and
 return immediately; the worker computes off the loop.
 
@@ -29,8 +29,8 @@ def _hyp_id(hyp_event: Optional[dict]) -> str:
     return f"{he.get('time')}|{he.get('direction')}"
 
 
-class ShadowWorker:
-    """Single-worker async front end for a ShadowEngine. The submit_* calls are
+class DecisionWorker:
+    """Single-worker async front end for a DecisionEngine. The submit_* calls are
     non-blocking; the worker drains the queue off the caller's thread."""
 
     def __init__(self, engine):
@@ -41,7 +41,7 @@ class ShadowWorker:
         self.records: list = []
         self.discarded: list = []
         self.errors: list = []
-        self._thread = threading.Thread(target=self._run, name="shadow-worker", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="ai-decisions-worker", daemon=True)
         self._thread.start()
 
     # -- non-blocking submit API (called from the 1s loop) ------------------ #

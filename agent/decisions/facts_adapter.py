@@ -9,7 +9,7 @@ aligned.
 build_snapshot returns a Snapshot{text, validator_dict, content_hash, max_ts, ...}:
   - text            — the rendered fact sheet (identical bytes to the offline slice path)
   - validator_dict  — the JSON view validator._check_semantic consumes
-  - content_hash    — sha256 of the canonical validator_dict → replay-cache key + drift
+  - content_hash    — sha256 of the canonical validator_dict → churn-guard key + drift
                       detector (same trigger + same facts always hashes identically)
   - max_ts          — the true max bar timestamp that fed the snapshot (no-lookahead guard)
 

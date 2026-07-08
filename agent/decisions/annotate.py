@@ -2,7 +2,7 @@
 
 Fills each audit record's `outcome` slot from bars AFTER `arrival_ts` over the finished
 session parquet. Truth labels REUSE the calibration constants (score_results.py
-MOVE_MIN / RATIO / DAY_MIN) so shadow outcomes are directly comparable to the Phase-4
+MOVE_MIN / RATIO / DAY_MIN) so logged-run outcomes are directly comparable to the Phase-4
 calibration ground truth (decision D5).
 
 Outcome captures: the realized direction at the 4h horizon (calibration label), whether

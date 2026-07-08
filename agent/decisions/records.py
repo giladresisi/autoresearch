@@ -3,9 +3,9 @@
 Two writers:
   (a) events-native — AI decisions rendered into the SAME event shapes the hypothesis
       engine emits (a new-hypothesis-shaped dict + a daily-trend-shaped dict), marked
-      "source":"ai-shadow" so existing analysis/plot/replay tooling reads them natively.
+      "source":"ai-decisions" so existing analysis/plot/replay tooling reads them natively.
       Emitted into events.jsonl ONLY when the flag is ON (Phase 3).
-  (b) AI-only audit JSONL (shadow_audit.jsonl) — one self-contained record per call,
+  (b) AI-only audit JSONL (ai_decisions_audit.jsonl) — one self-contained record per call,
       designed from day one for the future evals/self-improvement loop. The `outcome`
       slot is null on write and filled by the Phase-4 annotation job.
 """
@@ -32,8 +32,8 @@ _NEXT_TO_HYP_DIR = {"neutral": "none", "up": "up", "down": "down"}
 
 
 @dataclass
-class ShadowRecord:
-    """The engine's in-memory record for one shadow decision (also serialised to the
+class DecisionRecord:
+    """The engine's in-memory record for one AI decision (also serialised to the
     audit JSONL). `outcome` is filled later by the Phase-4 annotation job."""
 
     trigger_ts: Optional[str]
@@ -42,11 +42,10 @@ class ShadowRecord:
     facts_content_hash: str
     decision: dict                       # {"daily_trend": ..., "next_move": ...}
     paired_diff: dict
-    verdict: str                         # "clean" | "failsafe" | "cached" | "guard-kill"
+    verdict: str                         # "clean" | "failsafe" | "guard-kill" | "churn-suppressed"
     fallback: bool
     error: Optional[str] = None
     standing_daily_trend: Optional[dict] = None
-    cached: bool = False
     audit: dict = field(default_factory=dict)
     outcome: Optional[dict] = None
 
@@ -65,7 +64,7 @@ def build_ai_hypothesis_event(next_block: dict, *, time_iso: Optional[str],
     targets = [mt] if mt.get("level") else []
     evt = {
         "kind": "new-hypothesis",
-        "source": "ai-shadow",
+        "source": "ai-decisions",
         "time": time_iso,
         "direction": direction,
         "price": now_price if now_price is not None else he.get("price"),
@@ -90,7 +89,7 @@ def build_ai_daily_trend_event(daily_block: dict, *, time_iso: Optional[str]) ->
     """The AI daily-trend rendered into a `daily-trend`-shaped event, source-marked."""
     return {
         "kind": "daily-trend",
-        "source": "ai-shadow",
+        "source": "ai-decisions",
         "time": time_iso,
         "direction": daily_block.get("direction"),
         "confidence": daily_block.get("confidence"),

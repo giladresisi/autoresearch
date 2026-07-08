@@ -87,7 +87,7 @@ def ohlc(df, rule, offset=None):
 
 def session_frame(df, td):
     # Vectorised trade-date mask (identical values to df.index.map(trade_date), but a
-    # single C-level shift+.date instead of a Python per-row call — this is on the shadow
+    # single C-level shift+.date instead of a Python per-row call — this is on the AI-decisions
     # hot path, called dozens of times per snapshot).
     tds = (df.index + pd.Timedelta(hours=7)).date
     return df[tds == td]

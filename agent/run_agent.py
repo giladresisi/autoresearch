@@ -411,10 +411,10 @@ class AnthropicBackend(Backend):
 
 
 class StubBackend(Backend):
-    """Offline, key-free backend for tests/CI and SHADOW_REAL_API=False.
+    """Offline, key-free backend for tests/CI and DECISIONS_REAL_API=False.
 
     With no `responses` it returns a DETERMINISTIC schema-valid NEUTRAL/LOW block
-    (the fail-safe shape) for whichever schema it is handed — so the shadow module
+    (the fail-safe shape) for whichever schema it is handed — so the decisions engine
     can run end-to-end with no network and no API spend. An optional `responses`
     queue lets a test inject a scripted sequence of parsed decision dicts (e.g. a
     protocol-violating block to exercise the validate-and-retry / failsafe path).
@@ -612,7 +612,7 @@ def decide_daily(facts_text: str, context_text: str, facts: dict, backend: Backe
                  docs_root: str = DOCS_ROOT) -> CallOutcome:
     """The daily-trend call in isolation (validate-and-retry, failsafe on repeat).
 
-    Returns the CallOutcome (block + audit). The shadow engine calls this at each
+    Returns the CallOutcome (block + audit). The decisions engine calls this at each
     checkpoint to (re)compute the STANDING daily-trend; run_cut/decide compose it
     with decide_next. A neutral failsafe next_move keeps validation scoped to daily.
     """
@@ -631,7 +631,7 @@ def decide_next(facts_text: str, context_text: str, facts: dict, standing_daily:
                 backend: Backend, *, docs_root: str = DOCS_ROOT) -> CallOutcome:
     """The next-move call in isolation, CONSUMING a standing daily-trend verbatim.
 
-    The shadow engine calls this at each hypothesis trigger with the standing
+    The decisions engine calls this at each hypothesis trigger with the standing
     daily-trend from the most recent checkpoint (or a neutral default before the
     first checkpoint)."""
     system = build_system_prompt(docs_root)
@@ -655,7 +655,7 @@ def decide(facts_text: str, context_text: str, facts: dict, backend: Backend, *,
     or derive_facts.facts_to_validator_dict) enabling the semantic validator. Returns
     the SAME decision dict `run_cut` assembles, minus the `cut` key (the caller adds
     it): backend/model/protocol_clean/facts_checkpoint/system_prompt_bytes/daily_trend/
-    next_move/calls. The shadow module and run_cut both go through here.
+    next_move/calls. The decisions engine and run_cut both go through here.
     """
     daily = decide_daily(facts_text, context_text, facts, backend, docs_root=docs_root)
     nxt = decide_next(facts_text, context_text, facts, daily.block, backend,

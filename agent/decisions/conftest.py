@@ -1,4 +1,4 @@
-"""Shared helpers/fixtures for the shadow unit tests.
+"""Shared helpers/fixtures for the AI-decisions unit tests.
 
 All tests run OFFLINE with the StubBackend (no keys, no network, no spend). Live frames
 are simulated from the committed derive_facts golden slices (capitalised OHLCV columns,

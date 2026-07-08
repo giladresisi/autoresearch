@@ -49,7 +49,7 @@ def test_truncated_when_no_post_arrival_bars():
 
 
 def test_annotate_session_fills_outcome_slot(tmp_path):
-    path = tmp_path / "shadow_audit.jsonl"
+    path = tmp_path / "ai_decisions_audit.jsonl"
     rec = _record("up", 30120)
     rec.update({"trigger_ts": "2026-05-19 09:59:00", "trigger_kind": "new-hypothesis",
                 "facts_content_hash": "h", "facts_snapshot_ref": {}, "verdict": "clean",

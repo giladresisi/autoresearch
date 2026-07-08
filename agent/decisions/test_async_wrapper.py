@@ -5,12 +5,12 @@ import time
 
 import pytest
 
-from live_wrapper import ShadowWorker
-from records import ShadowRecord
+from async_wrapper import DecisionWorker
+from records import DecisionRecord
 
 
 def _rec(kind="new-hypothesis"):
-    return ShadowRecord(trigger_ts="t", arrival_ts="t2", trigger_kind=kind,
+    return DecisionRecord(trigger_ts="t", arrival_ts="t2", trigger_kind=kind,
                         facts_content_hash="h", decision={}, paired_diff={},
                         verdict="clean", fallback=False)
 
@@ -33,7 +33,7 @@ class _FakeEngine:
 def test_job_computed_off_thread_loop_returns_immediately():
     gate = threading.Event()
     eng = _FakeEngine(gate=gate)
-    w = ShadowWorker(eng)
+    w = DecisionWorker(eng)
     try:
         w.submit_hypothesis_trigger("t", {}, {"time": "t", "direction": "up"},
                                     "new-hypothesis", hyp_id="H1")
@@ -50,7 +50,7 @@ def test_job_computed_off_thread_loop_returns_immediately():
 def test_staleness_flags_discarded():
     gate = threading.Event()
     eng = _FakeEngine(gate=gate)
-    w = ShadowWorker(eng)
+    w = DecisionWorker(eng)
     try:
         w.submit_hypothesis_trigger("t", {}, {"time": "t1", "direction": "up"},
                                     "new-hypothesis", hyp_id="H1")
@@ -78,7 +78,7 @@ def test_worker_survives_exception():
         def on_checkpoint(self, now, frames):
             pass
 
-    w = ShadowWorker(_Raising())
+    w = DecisionWorker(_Raising())
     try:
         w.submit_hypothesis_trigger("t", {}, {"time": "t"}, "new-hypothesis", hyp_id="H1")
         w.drain()
@@ -92,7 +92,7 @@ def test_worker_survives_exception():
 
 def test_shutdown_drains_queue():
     eng = _FakeEngine()
-    w = ShadowWorker(eng)
+    w = DecisionWorker(eng)
     for _ in range(5):
         w.submit_checkpoint("t", {})
     w.shutdown()

@@ -253,22 +253,22 @@ class SessionPipeline:
         hist_mnq_1m: pd.DataFrame,
         hist_mes_1m: pd.DataFrame,
         emit_fn: Callable[[dict], None],
-        shadow=None,
+        ai_decisions=None,
     ) -> None:
         self._hist_mnq_1m = hist_mnq_1m
         self._hist_mes_1m = hist_mes_1m
-        # GIL-44 Phase-3 AI shadow-decisions observer (flag-gated, default OFF). When
-        # None the pipeline does ZERO extra work and touches ZERO state → byte-identical
-        # by construction. When set, new-hypothesis emits and 1m checkpoints are mirrored
-        # to the shadow engine, which NEVER mutates strategy state (trades unchanged).
-        self._shadow = shadow
-        if shadow is None:
+        # GIL-44 Phase-3 AI decisions engine, observation-only (flag-gated, default OFF).
+        # When None the pipeline does ZERO extra work and touches ZERO state → byte-
+        # identical by construction. When set, new-hypothesis emits and 1m checkpoints are
+        # mirrored to the engine, which NEVER mutates strategy state (trades unchanged).
+        self._ai_decisions = ai_decisions
+        if ai_decisions is None:
             self._emit = emit_fn
         else:
             self._raw_emit = emit_fn
-            self._emit = self._emit_with_shadow
-            self._shadow_ctx: dict | None = None
-            self._shadow_last_min: pd.Timestamp | None = None
+            self._emit = self._emit_with_ai_decisions
+            self._ai_decisions_ctx: dict | None = None
+            self._ai_decisions_last_min: pd.Timestamp | None = None
         self._daily_triggered = False
         # GIL-27: per-bar Timestamp.floor() cache. The same `now` is floored to the same
         # freq at several call sites within one on_1m_bar pass (1min ×2, 5min ×2, 1h across
@@ -960,27 +960,27 @@ class SessionPipeline:
             pass
 
     # ------------------------------------------------------------------ #
-    # GIL-44 Phase-3 AI shadow-decisions hooks (only reached when shadow set) #
+    # GIL-44 Phase-3 AI-decisions hooks (only reached when the engine is set) #
     # ------------------------------------------------------------------ #
-    def _emit_with_shadow(self, evt: dict) -> None:
+    def _emit_with_ai_decisions(self, evt: dict) -> None:
         """Emit as normal, then — for a new-hypothesis event fired DURING 1m-bar
-        processing — mirror the trigger to the shadow engine. The shadow observes only;
-        it never changes `evt` or any strategy state. Any shadow error is swallowed so
-        it can never affect trades (the shadow is observation-only)."""
+        processing — mirror the trigger to the AI decisions engine. The engine observes
+        only; it never changes `evt` or any strategy state. Any engine error is
+        swallowed so it can never affect trades (observation-only)."""
         self._raw_emit(evt)
         if evt.get("kind") != "new-hypothesis":
             return
-        ctx = self._shadow_ctx
+        ctx = self._ai_decisions_ctx
         if ctx is None:                       # emitted outside on_1m_bar (e.g. session
             return                            # open force-reset) — no frame context yet
         try:
-            frames = self._build_shadow_frames(ctx["now"], ctx["today_mnq"],
+            frames = self._build_ai_decisions_frames(ctx["now"], ctx["today_mnq"],
                                                ctx["today_mes"])
-            self._shadow.on_hypothesis_trigger(ctx["now"], frames, evt, "new-hypothesis")
+            self._ai_decisions.on_hypothesis_trigger(ctx["now"], frames, evt, "new-hypothesis")
         except Exception:
             pass
 
-    def _build_shadow_frames(self, now, today_mnq, today_mes) -> dict:
+    def _build_ai_decisions_frames(self, now, today_mnq, today_mes) -> dict:
         ath_mnq = None
         try:
             from smt_state import load_global as _lg
@@ -994,16 +994,16 @@ class SessionPipeline:
             "ath_mnq": ath_mnq, "ath_mes": None, "now": now,
         }
 
-    def _shadow_on_bar(self, now, today_mnq, today_mes) -> None:
-        """Per-bar shadow bookkeeping: stash the frame context for the new-hypothesis
-        hook and drive the checkpoint cadence once per new minute."""
-        self._shadow_ctx = {"now": now, "today_mnq": today_mnq, "today_mes": today_mes}
+    def _ai_decisions_on_bar(self, now, today_mnq, today_mes) -> None:
+        """Per-bar AI-decisions bookkeeping: stash the frame context for the
+        new-hypothesis hook and drive the checkpoint cadence once per new minute."""
+        self._ai_decisions_ctx = {"now": now, "today_mnq": today_mnq, "today_mes": today_mes}
         _min = self._floor(now, "1min")
-        if _min != self._shadow_last_min:
-            self._shadow_last_min = _min
+        if _min != self._ai_decisions_last_min:
+            self._ai_decisions_last_min = _min
             try:
-                frames = self._build_shadow_frames(now, today_mnq, today_mes)
-                self._shadow.on_checkpoint(now, frames)
+                frames = self._build_ai_decisions_frames(now, today_mnq, today_mes)
+                self._ai_decisions.on_checkpoint(now, frames)
             except Exception:
                 pass
 
@@ -1031,8 +1031,8 @@ class SessionPipeline:
         if not self._daily_triggered:
             return []
 
-        if self._shadow is not None:
-            self._shadow_on_bar(now, today_mnq, today_mes)
+        if self._ai_decisions is not None:
+            self._ai_decisions_on_bar(now, today_mnq, today_mes)
 
         # Re-run daily level computation at two transitions per CME session day.
         # 00:00 ET (London session start): today's midnight open is now available as TDO,
