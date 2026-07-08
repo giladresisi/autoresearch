@@ -78,3 +78,6 @@ agent-docs/strategy/poc/
 
 # Calibration sweep cut folders (regenerable facts + per-run agent outputs) - never tracked
 calibration/cuts/
+
+# AI shadow replay cache (runtime artifact: content-addressed LLM outputs; deletable)
+agent/shadow_cache/

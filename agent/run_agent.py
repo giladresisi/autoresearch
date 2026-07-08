@@ -28,6 +28,7 @@ silent; only the CLI prints a one-line summary.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -409,6 +410,43 @@ class AnthropicBackend(Backend):
                             model=resp.model)
 
 
+class StubBackend(Backend):
+    """Offline, key-free backend for tests/CI and SHADOW_REAL_API=False.
+
+    With no `responses` it returns a DETERMINISTIC schema-valid NEUTRAL/LOW block
+    (the fail-safe shape) for whichever schema it is handed — so the shadow module
+    can run end-to-end with no network and no API spend. An optional `responses`
+    queue lets a test inject a scripted sequence of parsed decision dicts (e.g. a
+    protocol-violating block to exercise the validate-and-retry / failsafe path).
+    """
+
+    name = "stub"
+
+    def __init__(self, responses: Optional[list] = None, model: str = "stub-model"):
+        self.model = model
+        self._queue = ([copy.deepcopy(r) for r in responses]
+                       if responses is not None else None)
+
+    def _canned(self, schema: dict) -> dict:
+        fs = failsafe_decision()
+        props = schema.get("properties", {})
+        block = fs["daily_trend"] if "drivers" in props else fs["next_move"]
+        out = copy.deepcopy(block)
+        out["reasoning"] = "stub deterministic neutral/low decision (offline backend)"
+        return out
+
+    def complete(self, *, system: str, messages: list[dict], schema: dict,
+                 max_tokens: int = MAX_TOKENS) -> CallResponse:
+        parsed = self._queue.pop(0) if self._queue is not None else self._canned(schema)
+        return CallResponse(
+            parsed=parsed,
+            raw_text=json.dumps(parsed),
+            usage={"input_tokens": 0, "output_tokens": 0,
+                   "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            model=self.model,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # .env loading — shell-set vars WIN (setdefault semantics), key never logged.  #
 # --------------------------------------------------------------------------- #
@@ -439,6 +477,8 @@ def make_backend(backend: Optional[str] = None, model: Optional[str] = None,
     ANTHROPIC_API_KEY present -> Anthropic; else a clear error. An explicit
     `backend` (the --backend flag) overrides the auto-selection.
     """
+    if backend == "stub":
+        return StubBackend(model=model)          # offline; no .env / key needed
     load_env_file(env_path or os.path.join(REPO_ROOT, ".env"))
     if backend is None:
         if os.environ.get("OPENROUTER_API_KEY"):
@@ -561,9 +601,90 @@ def _next_only(result: ValidationResult) -> ValidationResult:
 # --------------------------------------------------------------------------- #
 # Orchestration                                                                #
 # --------------------------------------------------------------------------- #
+def _facts_context(facts_text: str, context_text: str) -> str:
+    return (
+        f"## FACT SHEET (deterministic)\n\n{facts_text}\n\n"
+        f"## CONTEXT AT CUT\n\n{context_text}\n\n"
+    )
+
+
+def decide_daily(facts_text: str, context_text: str, facts: dict, backend: Backend, *,
+                 docs_root: str = DOCS_ROOT) -> CallOutcome:
+    """The daily-trend call in isolation (validate-and-retry, failsafe on repeat).
+
+    Returns the CallOutcome (block + audit). The shadow engine calls this at each
+    checkpoint to (re)compute the STANDING daily-trend; run_cut/decide compose it
+    with decide_next. A neutral failsafe next_move keeps validation scoped to daily.
+    """
+    system = build_system_prompt(docs_root)
+    fs = failsafe_decision()
+    daily_user = _facts_context(facts_text, context_text) + _TASK_DAILY
+    return _run_call(
+        backend, system, daily_user, DAILY_TREND_SCHEMA,
+        validate_block=lambda d: validate(
+            {"daily_trend": d, "next_move": fs["next_move"]}, facts=facts),
+        failsafe_block=fs["daily_trend"],
+    )
+
+
+def decide_next(facts_text: str, context_text: str, facts: dict, standing_daily: dict,
+                backend: Backend, *, docs_root: str = DOCS_ROOT) -> CallOutcome:
+    """The next-move call in isolation, CONSUMING a standing daily-trend verbatim.
+
+    The shadow engine calls this at each hypothesis trigger with the standing
+    daily-trend from the most recent checkpoint (or a neutral default before the
+    first checkpoint)."""
+    system = build_system_prompt(docs_root)
+    fs = failsafe_decision()
+    standing = json.dumps(standing_daily, indent=2, sort_keys=True)
+    next_user = _facts_context(facts_text, context_text) + _TASK_NEXT + standing
+    return _run_call(
+        backend, system, next_user, NEXT_MOVE_SCHEMA,
+        validate_block=lambda n: _next_only(
+            validate({"daily_trend": standing_daily, "next_move": n}, facts=facts)),
+        failsafe_block=fs["next_move"],
+    )
+
+
+def decide(facts_text: str, context_text: str, facts: dict, backend: Backend, *,
+           docs_root: str = DOCS_ROOT) -> dict:
+    """The two-call daily-trend→next-move sequence + validate-and-retry, with NO file
+    I/O — the importable LLM call-core (GIL-44 Phase 1, Wave 1.2).
+
+    `facts` is the parsed fact-dict (calibration.validate_results.parse_facts output,
+    or derive_facts.facts_to_validator_dict) enabling the semantic validator. Returns
+    the SAME decision dict `run_cut` assembles, minus the `cut` key (the caller adds
+    it): backend/model/protocol_clean/facts_checkpoint/system_prompt_bytes/daily_trend/
+    next_move/calls. The shadow module and run_cut both go through here.
+    """
+    daily = decide_daily(facts_text, context_text, facts, backend, docs_root=docs_root)
+    nxt = decide_next(facts_text, context_text, facts, daily.block, backend,
+                      docs_root=docs_root)
+
+    protocol_clean = not daily.fallback and not nxt.fallback
+    return {
+        "backend": backend.name,
+        "model": backend.model,
+        "protocol_clean": protocol_clean,
+        "facts_checkpoint": facts.get("checkpoint"),
+        "system_prompt_bytes": len(build_system_prompt(docs_root).encode("utf-8")),
+        "daily_trend": daily.block,
+        "next_move": nxt.block,
+        "calls": {
+            "daily_trend": _call_audit(daily),
+            "next_move": _call_audit(nxt),
+        },
+    }
+
+
 def run_cut(cut_dir: str, backend: Backend, *, docs_root: str = DOCS_ROOT,
             write: bool = True) -> dict:
-    """Run both decision calls for one cut, validate, and assemble decision.json."""
+    """Run both decision calls for one cut, validate, and assemble decision.json.
+
+    A thin cut-coupled wrapper over `decide`: reads facts.txt/context-at-cut.md,
+    parses facts, delegates the two calls to `decide`, prepends the `cut` label, and
+    writes decision.json.
+    """
     with open(os.path.join(cut_dir, "facts.txt"), encoding="utf-8") as fh:
         facts_text = fh.read()
     context_path = os.path.join(cut_dir, "context-at-cut.md")
@@ -573,48 +694,8 @@ def run_cut(cut_dir: str, backend: Backend, *, docs_root: str = DOCS_ROOT,
             context_text = fh.read()
 
     facts = parse_facts(facts_text)
-    system = build_system_prompt(docs_root)
-    fs = failsafe_decision()
-
-    facts_context = (
-        f"## FACT SHEET (deterministic)\n\n{facts_text}\n\n"
-        f"## CONTEXT AT CUT\n\n{context_text}\n\n"
-    )
-
-    # ---- Call 1: daily_trend (failsafe next_move stub keeps validation scoped) --
-    daily_user = facts_context + _TASK_DAILY
-    daily = _run_call(
-        backend, system, daily_user, DAILY_TREND_SCHEMA,
-        validate_block=lambda d: validate(
-            {"daily_trend": d, "next_move": fs["next_move"]}, facts=facts),
-        failsafe_block=fs["daily_trend"],
-    )
-
-    # ---- Call 2: next_move (consumes the standing daily-trend verbatim) ---------
-    standing = json.dumps(daily.block, indent=2, sort_keys=True)
-    next_user = facts_context + _TASK_NEXT + standing
-    nxt = _run_call(
-        backend, system, next_user, NEXT_MOVE_SCHEMA,
-        validate_block=lambda n: _next_only(
-            validate({"daily_trend": daily.block, "next_move": n}, facts=facts)),
-        failsafe_block=fs["next_move"],
-    )
-
-    protocol_clean = not daily.fallback and not nxt.fallback
-    decision = {
-        "cut": os.path.basename(os.path.normpath(cut_dir)),
-        "backend": backend.name,
-        "model": backend.model,
-        "protocol_clean": protocol_clean,
-        "facts_checkpoint": facts.get("checkpoint"),
-        "system_prompt_bytes": len(system.encode("utf-8")),
-        "daily_trend": daily.block,
-        "next_move": nxt.block,
-        "calls": {
-            "daily_trend": _call_audit(daily),
-            "next_move": _call_audit(nxt),
-        },
-    }
+    core = decide(facts_text, context_text, facts, backend, docs_root=docs_root)
+    decision = {"cut": os.path.basename(os.path.normpath(cut_dir)), **core}
 
     if write:
         with open(os.path.join(cut_dir, "decision.json"), "w", encoding="utf-8") as fh:

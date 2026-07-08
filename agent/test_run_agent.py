@@ -19,7 +19,9 @@ from run_agent import (
     Backend,
     CallResponse,
     OpenRouterBackend,
+    StubBackend,
     build_system_prompt,
+    decide,
     load_env_file,
     make_backend,
     run_cut,
@@ -262,3 +264,83 @@ def test_backend_flag_overrides_autoselect(tmp_path, monkeypatch):
 
     backend = make_backend(backend="anthropic", env_path=str(empty_env))
     assert isinstance(backend, AnthropicBackend)
+
+
+# --------------------------------------------------------------------------- #
+# Wave 1.2 — decide() call-core extraction + offline stub backend.            #
+# --------------------------------------------------------------------------- #
+def _strip_latency(decision: dict) -> dict:
+    """Zero every timing field so two runs of the SAME deterministic decision compare
+    equal (latency is wall-clock and never reproducible)."""
+    d = copy.deepcopy(decision)
+    for call in d.get("calls", {}).values():
+        call["latency_total_sec"] = 0.0
+        for att in call.get("attempts", []):
+            att["latency_sec"] = 0.0
+    return d
+
+
+def test_decide_equals_run_cut_on_same_cut(tmp_path):
+    """decide() on a cut's in-memory facts == run_cut() on the same cut (minus the
+    `cut` label and wall-clock latency), stub backend — the extraction is behaviour-
+    preserving."""
+    cut = _make_cut(tmp_path)
+    with open(os.path.join(cut, "facts.txt"), encoding="utf-8") as fh:
+        facts_text = fh.read()
+    with open(os.path.join(cut, "context-at-cut.md"), encoding="utf-8") as fh:
+        context_text = fh.read()
+    facts = run_agent.parse_facts(facts_text)
+
+    core = decide(facts_text, context_text, facts, StubBackend())
+    full = run_cut(cut, StubBackend())
+
+    assert full["cut"] == "cut"
+    full_no_cut = {k: v for k, v in full.items() if k != "cut"}
+    assert _strip_latency(full_no_cut) == _strip_latency(core)
+    assert core["protocol_clean"] is True
+    assert core["daily_trend"]["direction"] == "neutral"
+    assert core["next_move"]["direction"] == "neutral"
+
+
+def test_stub_backend_failsafe_on_repeated_invalid(tmp_path):
+    cut = _make_cut(tmp_path)
+    with open(os.path.join(cut, "facts.txt"), encoding="utf-8") as fh:
+        facts_text = fh.read()
+    facts = run_agent.parse_facts(facts_text)
+    # daily fails validation on all 3 attempts (fractional vote) → failsafe; next clean.
+    backend = StubBackend(responses=[_invalid_daily(), _invalid_daily(),
+                                     _invalid_daily(), _valid_next()])
+    core = decide(facts_text, "", facts, backend)
+
+    assert core["calls"]["daily_trend"]["verdict"] == "failsafe"
+    assert core["calls"]["daily_trend"]["fallback"] is True
+    assert core["calls"]["daily_trend"]["retries"] == 2
+    assert core["protocol_clean"] is False
+    assert core["daily_trend"] == run_agent.failsafe_decision()["daily_trend"]
+
+
+def test_stub_backend_retry_then_clean(tmp_path):
+    cut = _make_cut(tmp_path)
+    with open(os.path.join(cut, "facts.txt"), encoding="utf-8") as fh:
+        facts_text = fh.read()
+    facts = run_agent.parse_facts(facts_text)
+    backend = StubBackend(responses=[_invalid_daily(), _valid_daily(), _valid_next()])
+    core = decide(facts_text, "", facts, backend)
+
+    assert core["calls"]["daily_trend"]["retries"] == 1
+    assert core["calls"]["daily_trend"]["verdict"] == "clean"
+    assert core["calls"]["daily_trend"]["fallback"] is False
+    assert core["protocol_clean"] is True
+
+
+def test_make_backend_stub_needs_no_keys(tmp_path, monkeypatch):
+    """make_backend('stub') returns an offline backend without any API key."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    backend = make_backend(backend="stub")
+    assert isinstance(backend, StubBackend)
+    # And a real backend with no keys still errors (the Wave-1.2 error path).
+    empty_env = tmp_path / ".env"
+    empty_env.write_text("", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="No API key found"):
+        make_backend(env_path=str(empty_env))

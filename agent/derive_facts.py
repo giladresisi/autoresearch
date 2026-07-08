@@ -34,6 +34,9 @@ Engine-grounded conventions (v2 — aligned to the live engine after POC run 3):
 import argparse
 import datetime
 import os
+import sys
+from dataclasses import dataclass, field
+from typing import Optional
 
 import pandas as pd
 
@@ -83,8 +86,11 @@ def ohlc(df, rule, offset=None):
 
 
 def session_frame(df, td):
-    tds = pd.Series(df.index.map(trade_date), index=df.index)
-    return df[tds.values == td]
+    # Vectorised trade-date mask (identical values to df.index.map(trade_date), but a
+    # single C-level shift+.date instead of a Python per-row call — this is on the shadow
+    # hot path, called dozens of times per snapshot).
+    tds = (df.index + pd.Timedelta(hours=7)).date
+    return df[tds == td]
 
 
 def sub_blocks(sess):
@@ -180,26 +186,87 @@ def compute_two(df, week_tds, now):
     return (float(wk["open"].iloc[0]), wk.index[0]) if len(wk) else (None, None)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", default=os.path.dirname(os.path.abspath(__file__)))
-    ap.add_argument("--ath-mnq", type=float, default=None)
-    ap.add_argument("--ath-mes", type=float, default=None)
-    ap.add_argument("--hist-dir", default=None,
-                    help="Optional dir with full {MNQ,MES}_1s.parquet for the long-horizon "
-                         "daily/weekly tables (S5b). Data is truncated at 'now' — no lookahead.")
-    args = ap.parse_args()
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(HERE)
 
-    data = {
-        "MNQ": load(os.path.join(args.dir, "MNQ_1s_slice.parquet")),
-        "MES": load(os.path.join(args.dir, "MES_1s_slice.parquet")),
-    }
-    now = min(df.index[-1] for df in data.values())
+
+@dataclass
+class FactsBundle:
+    """Structured result of compute_facts: the rendered fact-sheet lines plus the
+    load-bearing structured values (used by the online adapter, records, and the
+    validator view). `lines` reproduces the exact stdout the print-script emitted."""
+
+    lines: list = field(default_factory=list)
+    now: Optional[pd.Timestamp] = None
+    td_now: Optional[datetime.date] = None
+    ckpt: Optional[pd.Timestamp] = None
+    # levels[tkr][name] = (price, body_price, side, tier, active_from) — the S1 map.
+    levels: dict = field(default_factory=dict)
+    now_price: Optional[float] = None   # MNQ last close (the decision ticker's price)
+
+
+def render_facts_text(bundle: FactsBundle) -> str:
+    """Reproduce the exact stdout the print-script produced (byte-for-byte).
+
+    Each captured line corresponds to one `print(...)` call; joining with a
+    newline and a trailing newline reconstructs stdout exactly.
+    """
+    return "\n".join(bundle.lines) + "\n"
+
+
+def _parse_facts():
+    """Lazily import calibration.validate_results.parse_facts (the text→dict
+    reverse the semantic validator consumes) without a hard module dependency."""
+    calib = os.path.join(REPO_ROOT, "calibration")
+    if calib not in sys.path:
+        sys.path.insert(0, calib)
+    from validate_results import parse_facts  # noqa: E402
+    return parse_facts
+
+
+def facts_to_validator_dict(bundle: FactsBundle) -> dict:
+    """The JSON view the semantic validator (validator._check_semantic) + the audit
+    consume: {now_price, checkpoint, whipsaw, levels{name:{price, side, swept,
+    depleted}}}.
+
+    Implemented as parse_facts(render_facts_text(bundle)) ON PURPOSE — "one source,
+    two views" (prod-agent.md). Deriving the validator view from the SAME rendered
+    text the offline calibration bench parses is what guarantees the online semantic
+    layer behaves identically to the bench (HOLE H4); it also makes the Wave-1.1
+    validator-dict-parity test true by construction. tier is intentionally omitted
+    here (the validator never reads it — richer per-level data lives in
+    bundle.levels for the records/audit layer).
+    """
+    return _parse_facts()(render_facts_text(bundle))
+
+
+def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
+                  ath_mnq: Optional[float] = None, ath_mes: Optional[float] = None,
+                  hist_mnq: Optional[pd.DataFrame] = None,
+                  hist_mes: Optional[pd.DataFrame] = None,
+                  now: Optional[pd.Timestamp] = None) -> FactsBundle:
+    """Pure fact computation: the S0–S7 + S3b schema over two load()-normalised bar
+    frames (lowercase o/h/l/c, tz-aware ET, CME-maintenance bars already dropped).
+
+    Returns a FactsBundle carrying the rendered lines (render_facts_text) and the
+    structured values. No maths changed vs the original print-script — the print
+    statements now append to bundle.lines. `now` defaults to the earliest last-bar
+    across the two frames; everything after `now` is dropped (no-lookahead).
+    """
+    bundle = FactsBundle()
+    L = bundle.lines.append
+
+    data = {"MNQ": mnq_df, "MES": mes_df}
+    if now is None:
+        now = min(df.index[-1] for df in data.values())
+    # No-lookahead precondition: nothing strictly after `now` enters the bundle.
+    data = {k: v[v.index <= now] for k, v in data.items()}
+    hist = {"MNQ": hist_mnq, "MES": hist_mes}
     td_now = trade_date(now)
 
     # Trading-date universe: Mon-Fri only, real sessions only (>=1000 bars) — stray
     # ticks must not mint phantom prev-days (POC run-3 G12).
-    counts = pd.Series(data["MNQ"].index.map(trade_date)).value_counts()
+    counts = pd.Series((data["MNQ"].index + pd.Timedelta(hours=7)).date).value_counts()
     all_tds = sorted(d for d, n in counts.items()
                      if (d.weekday() < 5 and n >= 1000) or d == td_now)
     past_tds = [d for d in all_tds if d < td_now]
@@ -222,17 +289,22 @@ def main():
     sess_now_start = session_frame(data["MNQ"], td_now).index[0]
     ckpt = max(cands) if cands else sess_now_start
 
-    print("## S0 META")
-    print(f"now = {now}  (trade date {td_now}, {now.strftime('%A')})")
+    bundle.now = now
+    bundle.td_now = td_now
+    bundle.ckpt = ckpt
+    bundle.now_price = float(data["MNQ"]["close"].iloc[-1])
+
+    L("## S0 META")
+    L(f"now = {now}  (trade date {td_now}, {now.strftime('%A')})")
     subsess = ("asia" if now.hour >= 18 else "london" if now.hour < 6
                else "ny_morning" if now.hour < 12 else "ny_evening")
     in_whip = (now.hour, now.minute) >= (9, 15) and (now.hour, now.minute) < (11, 30)
-    print(f"sub-session at cut: {subsess} | inside 09:15-11:30 whipsaw window: {in_whip}")
-    print(f"daily-trend checkpoint (most recent at/before now): {ckpt}")
-    print(f"current session first bar: {sess_now_start}")
-    print(f"prev1 trade date: {prev1_td} | prev2: {prev2_td}")
-    print(f"current-week trade dates: {week_tds} | prev1-week: {prev1_week_tds}")
-    print(f"ENGINE week anchor (session_pipeline._week_start_ts): {wk_anchor}")
+    L(f"sub-session at cut: {subsess} | inside 09:15-11:30 whipsaw window: {in_whip}")
+    L(f"daily-trend checkpoint (most recent at/before now): {ckpt}")
+    L(f"current session first bar: {sess_now_start}")
+    L(f"prev1 trade date: {prev1_td} | prev2: {prev2_td}")
+    L(f"current-week trade dates: {week_tds} | prev1-week: {prev1_week_tds}")
+    L(f"ENGINE week anchor (session_pipeline._week_start_ts): {wk_anchor}")
 
     levels = {}       # levels[tkr][name] = (price, body_price, side, tier, active_from)
     sess_cache = {}
@@ -256,11 +328,11 @@ def main():
     for tkr, df in data.items():
         sess_now = session_frame(df, td_now)
         sess_cache[tkr] = sess_now
-        print(f"\n## S1 LEVELS {tkr} (price = wick extreme; body = close extreme)")
+        L(f"\n## S1 LEVELS {tkr} (price = wick extreme; body = close extreme)")
         tdo = float(sess_now["open"].iloc[0])
-        print(f"TDO (session open {sess_now.index[0]}): {tdo}")
+        L(f"TDO (session open {sess_now.index[0]}): {tdo}")
         two, two_ts = compute_two(df, week_tds, now)
-        print(f"TWO (bar {two_ts}): {two}")
+        L(f"TWO (bar {two_ts}): {two}")
 
         lv = {}
         lv["TDO"] = (tdo, None, None, "session", sess_now.index[0])
@@ -273,26 +345,26 @@ def main():
             h, l, ch, cl = hl(s)
             c = float(s["close"].iloc[-1])
             pos = (c - l) / (h - l) if h != l else float("nan")
-            print(f"{lbl} ({d}): high={h} (body {ch}) low={l} (body {cl}) close={c} (range pos {pos:.2f})")
+            L(f"{lbl} ({d}): high={h} (body {ch}) low={l} (body {cl}) close={c} (range pos {pos:.2f})")
             lv[f"{lbl}_high"] = (h, ch, "above", "day", sess_now.index[0])
             lv[f"{lbl}_low"] = (l, cl, "below", "day", sess_now.index[0])
         if prev1_week_tds:
             pw = pd.concat([session_frame(df, d) for d in prev1_week_tds])
             h, l, ch, cl = hl(pw)
-            print(f"prev1_week ({prev1_week_tds[0]}..{prev1_week_tds[-1]}): high={h} (body {ch}) low={l} (body {cl})")
+            L(f"prev1_week ({prev1_week_tds[0]}..{prev1_week_tds[-1]}): high={h} (body {ch}) low={l} (body {cl})")
             lv["prev1_week_high"] = (h, ch, "above", "week", sess_now.index[0])
             lv["prev1_week_low"] = (l, cl, "below", "week", sess_now.index[0])
 
         wkf = df.loc[wk_anchor:now]
         h, l, ch, cl = hl(wkf)
-        print(f"week running [ENGINE anchor {wk_anchor}]: high={h} low={l} mid={(h + l) / 2:.3f}")
+        L(f"week running [ENGINE anchor {wk_anchor}]: high={h} low={l} mid={(h + l) / 2:.3f}")
         dh, dl, dch, dcl = hl(sess_now)
-        print(f"day running: high={dh} (at {sess_now['high'].idxmax()}) low={dl} "
+        L(f"day running: high={dh} (at {sess_now['high'].idxmax()}) low={dl} "
               f"(at {sess_now['low'].idxmin()}) mid={(dh + dl) / 2}")
-        print(f"last close: {float(df['close'].iloc[-1])}")
-        ath = args.ath_mnq if tkr == "MNQ" else args.ath_mes
+        L(f"last close: {float(df['close'].iloc[-1])}")
+        ath = ath_mnq if tkr == "MNQ" else ath_mes
         if ath:
-            print(f"ATH {ath}: last close is {(ath - float(df['close'].iloc[-1])) / ath * 100:.2f}% below")
+            L(f"ATH {ath}: last close is {(ath - float(df['close'].iloc[-1])) / ath * 100:.2f}% below")
 
         if prev1_td is not None:
             pblocks = sub_blocks(session_frame(df, prev1_td))
@@ -300,7 +372,7 @@ def main():
                 h, l, ch, cl = hl(frame)
                 if h is None:
                     continue
-                print(f"{name}(prev1): high={h} (body {ch}) low={l} (body {cl})")
+                L(f"{name}(prev1): high={h} (body {ch}) low={l} (body {cl})")
                 lv[f"{name}(prev1)_high"] = (h, ch, "above", "session", sess_now.index[0])
                 lv[f"{name}(prev1)_low"] = (l, cl, "below", "session", sess_now.index[0])
         cblocks = sub_blocks(sess_now)
@@ -312,18 +384,18 @@ def main():
             if len(frame) == 0 or closes_at[name] > now:
                 continue
             h, l, ch, cl = hl(frame)
-            print(f"{name}(cur, closed): high={h} (body {ch}) low={l} (body {cl})")
+            L(f"{name}(cur, closed): high={h} (body {ch}) low={l} (body {cl})")
             lv[f"{name}(cur)_high"] = (h, ch, "above", "session", closes_at[name])
             lv[f"{name}(cur)_low"] = (l, cl, "below", "session", closes_at[name])
         levels[tkr] = lv
 
-        print(f"\n## S2 SWEEPS {tkr} (current True Day; inclusive wick cross; body = first 15m close beyond; ages vs now)")
+        L(f"\n## S2 SWEEPS {tkr} (current True Day; inclusive wick cross; body = first 15m close beyond; ages vs now)")
         for name, (price, body, side, tier, active_from) in sorted(lv.items(), key=lambda kv: -kv[1][0]):
             if side is None:
                 for s in ("above", "below"):
                     t = first_cross(sess_now.loc[active_from:], price, s)
                     if t is not None:
-                        print(f"{name} {price}: first {s}-cross {t} (age {age_min(t, now):.0f}m)")
+                        L(f"{name} {price}: first {s}-cross {t} (age {age_min(t, now):.0f}m)")
                 continue
             frame = sess_now.loc[active_from:]
             t = first_cross(frame, price, side)
@@ -331,19 +403,21 @@ def main():
                 dist, ats = closest_approach(frame, price, side)
                 extra = (f" (closest approach {dist:.2f} short @ {ats}, age {age_min(ats, now):.0f}m)"
                          if dist is not None else "")
-                print(f"{name} {price} [{side}]: NOT swept{extra}")
+                L(f"{name} {price} [{side}]: NOT swept{extra}")
                 continue
             exc = excursion_beyond(frame.loc[t:], price, side)
             thr = DEPLETE[tkr][tier]
             tb = first_body_cross_15m(frame, price, side)
             tb_s = f"{tb} (age {age_min(tb, now):.0f}m)" if tb is not None else "—"
-            print(f"{name} {price} [{side}]: swept {t} (age {age_min(t, now):.0f}m) | "
+            L(f"{name} {price} [{side}]: swept {t} (age {age_min(t, now):.0f}m) | "
                   f"max excursion beyond {exc:.2f} "
                   f"({'DEPLETED' if exc >= thr else 'not depleted'}, thr {thr:.1f}) | body15m: {tb_s}")
             add_card("sweep", tkr, name, price, side, t, tier,
                      " | DEPLETED" if exc >= thr else "")
 
-    print("\n## S3 CROSS-TICKER SWEEP MATRIX (same level name; one swept + other not = divergence candidate)")
+    bundle.levels = levels
+
+    L("\n## S3 CROSS-TICKER SWEEP MATRIX (same level name; one swept + other not = divergence candidate)")
     shared = sorted(set(levels["MNQ"]) & set(levels["MES"]))
     for name in shared:
         p1, b1, side, tier, af1 = levels["MNQ"][name]
@@ -362,15 +436,15 @@ def main():
         btag = ""
         if (tb1 is None) != (tb2 is None):
             btag = "  <-- BODY(15m) DIVERGENCE CANDIDATE (lead " + ("MNQ" if tb1 is not None else "MES") + ")"
-        print(f"{name} [{side}, {tier}]: wick MNQ {t1 or 'not swept'} | MES {t2 or 'not swept'}{tag}")
-        print(f"{'':>{len(name)}}   body MNQ {tb1 or '—'} | MES {tb2 or '—'}{btag}")
+        L(f"{name} [{side}, {tier}]: wick MNQ {t1 or 'not swept'} | MES {t2 or 'not swept'}{tag}")
+        L(f"{'':>{len(name)}}   body MNQ {tb1 or '—'} | MES {tb2 or '—'}{btag}")
         # Laggard reach: how close the NON-sweeping ticker came, and when — the freshness of
         # the FAILURE leg (laggard test-and-fail candidate item, next-move.md §2).
         for lg, tl, ff, pp in (("MNQ", t1, f1, p1), ("MES", t2, f2, p2)):
             if tl is None:
                 dist, ats = closest_approach(ff, pp, side)
                 if dist is not None:
-                    print(f"{'':>{len(name)}}   laggard {lg} max reach: {dist:.2f} short of "
+                    L(f"{'':>{len(name)}}   laggard {lg} max reach: {dist:.2f} short of "
                           f"{pp} @ {ats} (age {age_min(ats, now):.0f}m)")
                     # laggard test-and-fail candidate: other ticker swept, this one
                     # reached within 25% of its depletion threshold and failed
@@ -380,22 +454,22 @@ def main():
                         add_card("CANDIDATE laggard-fail", lg, name, pp, side, ats, tier,
                                  f" | reach {dist:.2f} short (25%-of-thr gate {gate:.2f}: QUALIFIES)")
 
-    print("\n## S3b CANDIDATE ITEM CARDS (precomputed scoring inputs; multipliers per decisions/next-move.md §2)")
-    print("score = tier_weight × session_side × alignment × freshness × whipsaw = base × session_side × alignment × whipsaw")
-    print("Copy tier w and freshness from the card — do NOT recompute the exponent. session_side/")
-    print("alignment/whipsaw are read-dependent: take them from the next-move.md tables.")
-    print("REMINDER: whipsaw ×0.5 applies ONLY to intraday STRUCTURE items inside 09:15-11:30;")
-    print("level sweeps/SMTs are NOT structure items (their whipsaw = 1.0).")
-    print("Cards cover swept fixed levels (freshness = sweep time) and qualifying laggard-fail")
-    print("candidates (freshness = failure time); items >6h old omitted (spent). Dynamic-extreme")
-    print("events and continuation items are not carded — compute their freshness from S4/S5 times.")
+    L("\n## S3b CANDIDATE ITEM CARDS (precomputed scoring inputs; multipliers per decisions/next-move.md §2)")
+    L("score = tier_weight × session_side × alignment × freshness × whipsaw = base × session_side × alignment × whipsaw")
+    L("Copy tier w and freshness from the card — do NOT recompute the exponent. session_side/")
+    L("alignment/whipsaw are read-dependent: take them from the next-move.md tables.")
+    L("REMINDER: whipsaw ×0.5 applies ONLY to intraday STRUCTURE items inside 09:15-11:30;")
+    L("level sweeps/SMTs are NOT structure items (their whipsaw = 1.0).")
+    L("Cards cover swept fixed levels (freshness = sweep time) and qualifying laggard-fail")
+    L("candidates (freshness = failure time); items >6h old omitted (spent). Dynamic-extreme")
+    L("events and continuation items are not carded — compute their freshness from S4/S5 times.")
     if cards:
         for line in cards:
-            print(line)
+            L(line)
     else:
-        print("(no candidate items within the 6h window)")
+        L("(no candidate items within the 6h window)")
 
-    print("\n## S4 EQUILIBRIUM (1m closes vs RUNNING mids, current session; weekly mid = ENGINE anchor)")
+    L("\n## S4 EQUILIBRIUM (1m closes vs RUNNING mids, current session; weekly mid = ENGINE anchor)")
     for tkr, df in data.items():
         sess_now = sess_cache[tkr]
         m1 = df["close"].resample("1min").last()
@@ -406,20 +480,20 @@ def main():
                  + wkf["low"].resample("1min").min().cummin()) / 2).loc[sess_now.index[0]:]
         for label, mid in (("daily", dmid), ("weekly[engine anchor]", wmid)):
             j, flips = mid_cross_table(m1.reindex(mid.index), mid)
-            print(f"\n{tkr} {label} mid crosses (last {len(flips)}):")
+            L(f"\n{tkr} {label} mid crosses (last {len(flips)}):")
             for ts, row in flips.iterrows():
-                print(f"  {ts}  close {row['close']:.2f} {'ABOVE' if row['above'] else 'below'} mid {row['mid']:.2f}")
+                L(f"  {ts}  close {row['close']:.2f} {'ABOVE' if row['above'] else 'below'} mid {row['mid']:.2f}")
             for a, b, lbl in ((sess_now.index[0], ckpt, "session->ckpt"),
                               (ckpt - pd.Timedelta(hours=6), ckpt, "6h->ckpt"),
                               (ckpt, now, "ckpt->now")):
                 seg = j.loc[a:b]
                 if len(seg):
-                    print(f"  acceptance {lbl}: {seg['above'].mean() * 100:.0f}% of closes above (n={len(seg)})")
+                    L(f"  acceptance {lbl}: {seg['above'].mean() * 100:.0f}% of closes above (n={len(seg)})")
 
-    print("\n## S5 STRUCTURE BARS (MNQ; 4hr/1hr are MIDNIGHT-anchored = engine convention)")
+    L("\n## S5 STRUCTURE BARS (MNQ; 4hr/1hr are MIDNIGHT-anchored = engine convention)")
     df = data["MNQ"]
-    print("\nTrue-Day bars (rows = session open time):")
-    tds_series = pd.Series(df.index.map(trade_date), index=df.index)
+    L("\nTrue-Day bars (rows = session open time):")
+    tds_series = pd.Series((df.index + pd.Timedelta(hours=7)).date, index=df.index)
     rows = []
     for d in all_tds:
         s = df[tds_series.values == d]
@@ -427,29 +501,26 @@ def main():
             continue
         rows.append((s.index[0], float(s['open'].iloc[0]), float(s['high'].max()),
                      float(s['low'].min()), float(s['close'].iloc[-1])))
-    print(pd.DataFrame(rows, columns=["open_ts", "open", "high", "low", "close"]).to_string(index=False))
+    L(pd.DataFrame(rows, columns=["open_ts", "open", "high", "low", "close"]).to_string(index=False))
     h4 = ohlc(df, "4h")
-    print("\n4hr bars (midnight-anchored, ENGINE), last 24:")
-    print(h4.tail(24).to_string())
+    L("\n4hr bars (midnight-anchored, ENGINE), last 24:")
+    L(h4.tail(24).to_string())
     h1 = ohlc(df, "1h")
-    print("\n1hr bars, last 24:")
-    print(h1.tail(24).to_string())
-    print("\n30m bars, last 16:")
-    print(ohlc(df, "30min").tail(16).to_string())
-    print("\n15m bars, last 16:")
-    print(ohlc(df, "15min").tail(16).to_string())
-    print(f"\n5m bars, checkpoint {ckpt} -> now:")
-    print(ohlc(df.loc[ckpt - pd.Timedelta(minutes=5):], "5min").loc[ckpt:].to_string())
+    L("\n1hr bars, last 24:")
+    L(h1.tail(24).to_string())
+    L("\n30m bars, last 16:")
+    L(ohlc(df, "30min").tail(16).to_string())
+    L("\n15m bars, last 16:")
+    L(ohlc(df, "15min").tail(16).to_string())
+    L(f"\n5m bars, checkpoint {ckpt} -> now:")
+    L(ohlc(df.loc[ckpt - pd.Timedelta(minutes=5):], "5min").loc[ckpt:].to_string())
 
-    if args.hist_dir:
-        print("\n## S5b LONG-HORIZON CONTEXT (full history truncated at now; True-Day daily bars + trade-week weekly bars)")
+    if hist["MNQ"] is not None and hist["MES"] is not None:
+        L("\n## S5b LONG-HORIZON CONTEXT (full history truncated at now; True-Day daily bars + trade-week weekly bars)")
         for tkr in ("MNQ", "MES"):
-            hp = os.path.join(args.hist_dir, f"{tkr}_1s_slice.parquet")
-            if not os.path.exists(hp):
-                hp = os.path.join(args.hist_dir, f"{tkr}_1s.parquet")
-            hf = load(hp)
+            hf = hist[tkr]
             hf = hf[hf.index <= now]
-            htd = pd.Series(hf.index.map(trade_date), index=hf.index)
+            htd = pd.Series((hf.index + pd.Timedelta(hours=7)).date, index=hf.index)
             counts = htd.value_counts()
             days = sorted(d for d, n in counts.items() if d.weekday() < 5 and n >= 1000)
             rows = []
@@ -458,16 +529,16 @@ def main():
                 rows.append((d, float(s["open"].iloc[0]), float(s["high"].max()),
                              float(s["low"].min()), float(s["close"].iloc[-1])))
             dtab = pd.DataFrame(rows, columns=["trade_date", "open", "high", "low", "close"])
-            print(f"\n{tkr} daily (True-Day) bars, last {len(dtab)} sessions:")
-            print(dtab.to_string(index=False))
+            L(f"\n{tkr} daily (True-Day) bars, last {len(dtab)} sessions:")
+            L(dtab.to_string(index=False))
             dtab["iso"] = dtab["trade_date"].map(lambda d: d.isocalendar()[:2])
             wk = dtab.groupby("iso").agg(
                 start=("trade_date", "first"), open=("open", "first"), high=("high", "max"),
                 low=("low", "min"), close=("close", "last"))
-            print(f"\n{tkr} weekly bars (trade weeks), last {min(len(wk), 12)}:")
-            print(wk.tail(12).to_string(index=False))
+            L(f"\n{tkr} weekly bars (trade weeks), last {min(len(wk), 12)}:")
+            L(wk.tail(12).to_string(index=False))
 
-    print("\n## S6 FVGs (both tickers, completed bars only; visited = 1s tape re-entered zone after the 3rd bar's OPEN label — daily.py convention)")
+    L("\n## S6 FVGs (both tickers, completed bars only; visited = 1s tape re-entered zone after the 3rd bar's OPEN label — daily.py convention)")
     for tkr, dft in data.items():
         h1t = ohlc(dft, "1h")
         h4t = ohlc(dft, "4h")
@@ -476,17 +547,48 @@ def main():
             for ts, kind, lo, hi, third_ts in fvgs(recent):
                 seg = dft[dft.index > third_ts]
                 touched = bool(((seg["low"] <= hi) & (seg["high"] >= lo)).any()) if len(seg) else False
-                print(f"{label} {ts} {kind} zone {lo}-{hi} -> {'visited' if touched else 'UNVISITED'}")
+                L(f"{label} {ts} {kind} zone {lo}-{hi} -> {'visited' if touched else 'UNVISITED'}")
 
-    print("\n## S7 CHECKPOINT SNAPSHOT")
+    L("\n## S7 CHECKPOINT SNAPSHOT")
     for tkr, dft in data.items():
         m1 = dft["close"].resample("1min").last().dropna()
-        print(f"{tkr} close at checkpoint {ckpt}: {m1.asof(ckpt)} | at now: {float(dft['close'].iloc[-1])}")
-    print("\nReminders (facts end here — decisions are yours):")
-    print("- SMT fire adjudication, votes, correlation audit, ledgers, vetoes: NOT computed here.")
-    print("- Week extremes/mid use the ENGINE anchor printed in S0 (equilibrium.md pins this).")
-    print("- Dynamic day/week extremes and re-arm/depart states must be reasoned from S1/S5 times.")
-    print("- Depletion uses exact per-ticker engine tables; boundary is >= (depleted at exactly thr).")
+        L(f"{tkr} close at checkpoint {ckpt}: {m1.asof(ckpt)} | at now: {float(dft['close'].iloc[-1])}")
+    L("\nReminders (facts end here — decisions are yours):")
+    L("- SMT fire adjudication, votes, correlation audit, ledgers, vetoes: NOT computed here.")
+    L("- Week extremes/mid use the ENGINE anchor printed in S0 (equilibrium.md pins this).")
+    L("- Dynamic day/week extremes and re-arm/depart states must be reasoned from S1/S5 times.")
+    L("- Depletion uses exact per-ticker engine tables; boundary is >= (depleted at exactly thr).")
+
+    return bundle
+
+
+def _load_hist(hist_dir: str, tkr: str) -> pd.DataFrame:
+    hp = os.path.join(hist_dir, f"{tkr}_1s_slice.parquet")
+    if not os.path.exists(hp):
+        hp = os.path.join(hist_dir, f"{tkr}_1s.parquet")
+    return load(hp)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dir", default=os.path.dirname(os.path.abspath(__file__)))
+    ap.add_argument("--ath-mnq", type=float, default=None)
+    ap.add_argument("--ath-mes", type=float, default=None)
+    ap.add_argument("--hist-dir", default=None,
+                    help="Optional dir with full {MNQ,MES}_1s.parquet for the long-horizon "
+                         "daily/weekly tables (S5b). Data is truncated at 'now' — no lookahead.")
+    args = ap.parse_args()
+
+    mnq_df = load(os.path.join(args.dir, "MNQ_1s_slice.parquet"))
+    mes_df = load(os.path.join(args.dir, "MES_1s_slice.parquet"))
+    hist_mnq = _load_hist(args.hist_dir, "MNQ") if args.hist_dir else None
+    hist_mes = _load_hist(args.hist_dir, "MES") if args.hist_dir else None
+
+    bundle = compute_facts(mnq_df, mes_df, ath_mnq=args.ath_mnq, ath_mes=args.ath_mes,
+                           hist_mnq=hist_mnq, hist_mes=hist_mes)
+    # end="" — render_facts_text already terminates with the trailing newline that
+    # the original per-print stdout carried, so the byte stream is identical.
+    print(render_facts_text(bundle), end="")
 
 
 if __name__ == "__main__":

@@ -253,10 +253,22 @@ class SessionPipeline:
         hist_mnq_1m: pd.DataFrame,
         hist_mes_1m: pd.DataFrame,
         emit_fn: Callable[[dict], None],
+        shadow=None,
     ) -> None:
         self._hist_mnq_1m = hist_mnq_1m
         self._hist_mes_1m = hist_mes_1m
-        self._emit = emit_fn
+        # GIL-44 Phase-3 AI shadow-decisions observer (flag-gated, default OFF). When
+        # None the pipeline does ZERO extra work and touches ZERO state → byte-identical
+        # by construction. When set, new-hypothesis emits and 1m checkpoints are mirrored
+        # to the shadow engine, which NEVER mutates strategy state (trades unchanged).
+        self._shadow = shadow
+        if shadow is None:
+            self._emit = emit_fn
+        else:
+            self._raw_emit = emit_fn
+            self._emit = self._emit_with_shadow
+            self._shadow_ctx: dict | None = None
+            self._shadow_last_min: pd.Timestamp | None = None
         self._daily_triggered = False
         # GIL-27: per-bar Timestamp.floor() cache. The same `now` is floored to the same
         # freq at several call sites within one on_1m_bar pass (1min ×2, 5min ×2, 1h across
@@ -947,6 +959,54 @@ class SessionPipeline:
         except Exception:
             pass
 
+    # ------------------------------------------------------------------ #
+    # GIL-44 Phase-3 AI shadow-decisions hooks (only reached when shadow set) #
+    # ------------------------------------------------------------------ #
+    def _emit_with_shadow(self, evt: dict) -> None:
+        """Emit as normal, then — for a new-hypothesis event fired DURING 1m-bar
+        processing — mirror the trigger to the shadow engine. The shadow observes only;
+        it never changes `evt` or any strategy state. Any shadow error is swallowed so
+        it can never affect trades (the shadow is observation-only)."""
+        self._raw_emit(evt)
+        if evt.get("kind") != "new-hypothesis":
+            return
+        ctx = self._shadow_ctx
+        if ctx is None:                       # emitted outside on_1m_bar (e.g. session
+            return                            # open force-reset) — no frame context yet
+        try:
+            frames = self._build_shadow_frames(ctx["now"], ctx["today_mnq"],
+                                               ctx["today_mes"])
+            self._shadow.on_hypothesis_trigger(ctx["now"], frames, evt, "new-hypothesis")
+        except Exception:
+            pass
+
+    def _build_shadow_frames(self, now, today_mnq, today_mes) -> dict:
+        ath_mnq = None
+        try:
+            from smt_state import load_global as _lg
+            ath_mnq = _lg().get("all_time_high")
+        except Exception:
+            ath_mnq = self._session_ath
+        return {
+            "mnq_today": today_mnq, "mes_today": today_mes,
+            "hist_mnq": self._hist_mnq_1m, "hist_mes": self._hist_mes_1m,
+            "hist_1hr": self._hist_1hr, "hist_4hr": self._hist_4hr,
+            "ath_mnq": ath_mnq, "ath_mes": None, "now": now,
+        }
+
+    def _shadow_on_bar(self, now, today_mnq, today_mes) -> None:
+        """Per-bar shadow bookkeeping: stash the frame context for the new-hypothesis
+        hook and drive the checkpoint cadence once per new minute."""
+        self._shadow_ctx = {"now": now, "today_mnq": today_mnq, "today_mes": today_mes}
+        _min = self._floor(now, "1min")
+        if _min != self._shadow_last_min:
+            self._shadow_last_min = _min
+            try:
+                frames = self._build_shadow_frames(now, today_mnq, today_mes)
+                self._shadow.on_checkpoint(now, frames)
+            except Exception:
+                pass
+
     def on_1m_bar(
         self,
         now: pd.Timestamp,
@@ -970,6 +1030,9 @@ class SessionPipeline:
         every call regardless of `bar_complete` (1s-cadence fidelity preserved)."""
         if not self._daily_triggered:
             return []
+
+        if self._shadow is not None:
+            self._shadow_on_bar(now, today_mnq, today_mes)
 
         # Re-run daily level computation at two transitions per CME session day.
         # 00:00 ET (London session start): today's midnight open is now available as TDO,

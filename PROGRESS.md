@@ -1,6 +1,23 @@
 ﻿# PROGRESS
 
 
+## Feature: GIL-44 — AI Shadow-Decisions Module (Phase 3, step 1)
+### Status: ✅ Complete (unstaged)
+**Started**: 2026-07-07
+**Plan File**: `.agents/plans/7.ai-shadow-decisions.md`
+**Linear**: GIL-44
+
+Flag-gated (`AI_SHADOW_ENABLED=False` default) AI decision module that runs a two-call daily-trend→next-move mini-orchestrator ALONGSIDE the hypothesis engine at the same triggers, logs paired records (hypothesis said X, AI said Y, price did Z), and changes NOTHING about trades/P&L. Phase 1 refactored `agent/derive_facts.py` into importable `compute_facts`/`render_facts_text`/`facts_to_validator_dict` (main() byte-identical) + `agent/run_agent.py` `decide()` cores and an offline StubBackend; Phase 2 built the `agent/shadow/` package (facts_adapter, guard, cache, records, ShadowEngine); Phase 3 wired an optional `shadow=None` pipeline hook (byte-identical when None) + latency-arrival bookkeeping; Phase 4 annotation/comparison/consistency; Phase 5 live worker-thread wrapper (smoke deferred behind D4 gate). Trades byte-identical by construction. All four mandated validations PASS: flag-OFF 1s A/B byte-identical on 2026-05-19 (trend) + 2026-05-18 (chop); flag-ON trades + non-AI events unchanged; real-API day 2026-05-01 (20 cycles, mean 21.2 s, ≈$0.81 < $2 cap). Code-review 6 findings, all fixed (top: vectorised `derive_facts.session_frame` 25s→0.68s, byte-identical). 51 new tests; final agent+shadow+integration suite 96 passed. `SHADOW_DECISION_LATENCY_SEC=79` (measured rounded mean). All changes UNSTAGED.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/7.ai-shadow-decisions.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics
+
+---
+
 ## Feature: GIL-25 Phase 1.5 — Cross-session carry of FILL (FVG-divergence) SMTs
 ### Status: ✅ Complete (unstaged)
 **Started**: 2026-06-17
