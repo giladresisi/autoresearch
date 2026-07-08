@@ -83,7 +83,9 @@ def test_snapshot_ref_inline_and_file(tmp_path):
     ref_big = snapshot_ref(big, "h2", tmp_path / "snaps", inline_max=4000)
     assert "ref" in ref_big and "inline" not in ref_big
     assert (tmp_path / "snaps" / "h2.txt").exists()
-    assert resolve_snapshot(ref_big) == big
+    # ref is RELATIVE to the run dir (byte-stable audit across timestamped run dirs)
+    assert ref_big["ref"] == "snaps/h2.txt"
+    assert resolve_snapshot(ref_big, base_dir=tmp_path) == big
 
 
 def test_outcome_slot_empty_then_fillable(tmp_path):

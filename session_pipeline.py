@@ -968,15 +968,23 @@ class SessionPipeline:
         only; it never changes `evt` or any strategy state. Any engine error is
         swallowed so it can never affect trades (observation-only)."""
         self._raw_emit(evt)
-        if evt.get("kind") != "new-hypothesis":
+        kind = evt.get("kind")
+        if kind not in ("new-hypothesis", "trend-broken"):
             return
         ctx = self._ai_decisions_ctx
         if ctx is None:                       # emitted outside on_1m_bar (e.g. session
             return                            # open force-reset) — no frame context yet
         try:
-            frames = self._build_ai_decisions_frames(ctx["now"], ctx["today_mnq"],
-                                               ctx["today_mes"])
-            self._ai_decisions.on_hypothesis_trigger(ctx["now"], frames, evt, "new-hypothesis")
+            if kind == "new-hypothesis":
+                # _build_ai_decisions_frames FREEZES today_* (copy) so the off-loop worker
+                # reads a stable snapshot (H1/H6); dict() additionally decouples the mapping
+                # from _ai_decisions_ctx being overwritten on the next bar (D-A).
+                frames = self._build_ai_decisions_frames(ctx["now"], ctx["today_mnq"],
+                                                   ctx["today_mes"])
+                self._ai_decisions.submit_hypothesis_trigger(
+                    ctx["now"], dict(frames), evt, "new-hypothesis")
+            else:                             # trend-broken supersedes the standing hypothesis
+                self._ai_decisions.note_hypothesis_superseded(None, now=ctx["now"])
         except Exception:
             pass
 
@@ -987,8 +995,15 @@ class SessionPipeline:
             ath_mnq = _lg().get("all_time_high")
         except Exception:
             ath_mnq = self._session_ath
+        # FREEZE the intra-session today_* frames at submit (determinism, H1/H6). The worker
+        # reads these off-loop AFTER replay/live advances; the backtest 1s loop hands out
+        # today_mnq DataFrames that SHARE a preallocated numpy buffer it mutates in place each
+        # second (backtest_smt.py partial-bar building), so a shared reference would let the
+        # worker see a moving frame → non-deterministic now_price/facts. Copy only the SMALL
+        # today_* frames (one session of 1m rows); hist_* are replaced-not-mutated → by ref.
         return {
-            "mnq_today": today_mnq, "mes_today": today_mes,
+            "mnq_today": today_mnq.copy() if today_mnq is not None else today_mnq,
+            "mes_today": today_mes.copy() if today_mes is not None else today_mes,
             "hist_mnq": self._hist_mnq_1m, "hist_mes": self._hist_mes_1m,
             "hist_1hr": self._hist_1hr, "hist_4hr": self._hist_4hr,
             "ath_mnq": ath_mnq, "ath_mes": None, "now": now,
@@ -1003,7 +1018,7 @@ class SessionPipeline:
             self._ai_decisions_last_min = _min
             try:
                 frames = self._build_ai_decisions_frames(now, today_mnq, today_mes)
-                self._ai_decisions.on_checkpoint(now, frames)
+                self._ai_decisions.submit_checkpoint(now, dict(frames))
             except Exception:
                 pass
 

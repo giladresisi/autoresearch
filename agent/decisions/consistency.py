@@ -74,7 +74,7 @@ def check_consistency(audit_path, mnq_frame, mes_frame, *, hist_mnq=None, hist_m
         ref = r.get("facts_snapshot_ref") or {}
         online_text = ""
         try:
-            online_text = resolve_snapshot(ref)
+            online_text = resolve_snapshot(ref, base_dir=os.path.dirname(str(audit_path)))
         except Exception:
             online_text = ""
         drift.append({

@@ -127,7 +127,11 @@ def build_paired_diff(hyp_event: Optional[dict], next_block: dict,
 
 def snapshot_ref(snapshot_text: str, content_hash: str, snapshots_dir,
                  inline_max: int) -> dict:
-    """Small snapshot → inline; large snapshot → stored by reference (file+hash)."""
+    """Small snapshot → inline; large snapshot → stored by reference (file+hash).
+
+    The ref is stored RELATIVE to the snapshots dir's parent (the run dir), so the
+    audit JSONL is byte-stable across runs of the same day (the run-dir name is
+    timestamped) and stays valid if the run folder is moved/archived."""
     if len(snapshot_text) <= inline_max:
         return {"inline": snapshot_text, "hash": content_hash}
     snapshots_dir = Path(snapshots_dir)
@@ -136,14 +140,19 @@ def snapshot_ref(snapshot_text: str, content_hash: str, snapshots_dir,
     if not path.exists():
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(snapshot_text)
-    return {"ref": str(path), "hash": content_hash}
+    return {"ref": f"{snapshots_dir.name}/{path.name}", "hash": content_hash}
 
 
-def resolve_snapshot(ref: dict) -> str:
-    """Re-resolve a snapshot_ref (inline or file) back to its text."""
+def resolve_snapshot(ref: dict, base_dir=None) -> str:
+    """Re-resolve a snapshot_ref (inline or file) back to its text. Relative refs
+    resolve against `base_dir` (the run dir holding the audit JSONL); absolute refs
+    (pre-relative-ref audit files) resolve as-is."""
     if "inline" in ref:
         return ref["inline"]
-    with open(ref["ref"], encoding="utf-8", newline="") as fh:
+    path = Path(ref["ref"])
+    if not path.is_absolute() and base_dir is not None:
+        path = Path(base_dir) / path
+    with open(path, encoding="utf-8", newline="") as fh:
         return fh.read()
 
 

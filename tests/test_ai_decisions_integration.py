@@ -27,18 +27,23 @@ from decisions_config import DecisionsConfig  # noqa: E402
 
 
 class _FakeEngine:
-    """Records the hooks the pipeline fires; never computes (no LLM, no facts)."""
+    """Records the worker submit hooks the pipeline fires; never computes (no LLM, no
+    facts). Mirrors the DecisionWorker submit API (C1) the pipeline now depends on."""
 
     def __init__(self):
         self.triggers = []
         self.checkpoints = []
+        self.supersedes = []
         self.events_native = [{"kind": "new-hypothesis", "source": "ai-decisions"}]
 
-    def on_hypothesis_trigger(self, now, frames, hyp_event, trigger_kind):
+    def submit_hypothesis_trigger(self, now, frames, hyp_event, trigger_kind):
         self.triggers.append((now, frames, hyp_event, trigger_kind))
 
-    def on_checkpoint(self, now, frames):
+    def submit_checkpoint(self, now, frames):
         self.checkpoints.append(now)
+
+    def note_hypothesis_superseded(self, new_hyp_id, now=None):
+        self.supersedes.append((new_hyp_id, now))
 
 
 def test_flag_off_leaves_emit_untouched():
@@ -68,14 +73,48 @@ def test_ai_decisions_mirrors_new_hypothesis_without_mutating_event():
     assert fake.triggers[0][2] is evt         # the hypothesis event was mirrored verbatim
     assert fake.triggers[0][3] == "new-hypothesis"
 
-    # A non-hypothesis event is emitted but NOT mirrored to the engine.
+    # W1-Tt7: the frames dict is a NEW mapping, and today_* are FROZEN copies (not the ctx
+    # objects) so the off-loop worker reads a stable snapshot.
+    passed_frames = fake.triggers[0][1]
+    assert passed_frames is not p._ai_decisions_ctx
+    assert passed_frames["mnq_today"] is not p._ai_decisions_ctx["today_mnq"]  # copied
+
+    # W1-Tt8: trend-broken supersedes the standing hypothesis (does NOT add a trigger).
     p._emit({"kind": "trend-broken"})
     assert len(fake.triggers) == 1
+    assert fake.supersedes == [(None, now)]
+
+    # A non-hypothesis, non-trend-broken event does neither.
+    p._emit({"kind": "trend-updated"})
+    assert len(fake.triggers) == 1
+    assert len(fake.supersedes) == 1
 
     # A new-hypothesis emitted OUTSIDE on_1m_bar (no frame ctx) is not mirrored.
     p._ai_decisions_ctx = None
     p._emit({"kind": "new-hypothesis"})
     assert len(fake.triggers) == 1
+
+
+def test_frames_frozen_snapshot_decouples_from_source_mutation():
+    """W3-T7 / H1+H6 guard: today_* frames are COPIED at submit, so mutating the source
+    frame's data in place after submit — exactly what the backtest 1s loop does to its shared
+    numpy buffer every second — can NEVER change the snapshot the off-loop worker captured.
+    This pins the determinism invariant; without the copy, now_price/facts drift run-to-run."""
+    fake = _FakeEngine()
+    p = SessionPipeline(pd.DataFrame(), pd.DataFrame(), (lambda e: None), ai_decisions=fake)
+    now = pd.Timestamp("2026-05-19 09:27:00", tz="America/New_York")
+    original_mnq = pd.DataFrame({"Close": [1.0, 2.0]})
+    p._ai_decisions_ctx = {"now": now, "today_mnq": original_mnq,
+                           "today_mes": pd.DataFrame()}
+
+    p._emit({"kind": "new-hypothesis", "time": now.isoformat()})
+    captured = fake.triggers[0][1]["mnq_today"]    # the frame the worker received
+
+    # The backtest mutates its shared source buffer in place on the next second …
+    original_mnq.iloc[-1, original_mnq.columns.get_loc("Close")] = 999.0
+    # … but the worker's captured frame is a frozen copy — unchanged.
+    assert captured is not original_mnq
+    assert captured["Close"].iloc[-1] == 2.0
 
 
 def test_ai_decisions_checkpoint_driven_once_per_minute():

@@ -171,6 +171,9 @@ def _on_bar(bar, mes_partial) -> None:
             _lo_sc.cancel_stop_entry("session-end")
         if _lo_sc.has_active_position():
             _lo_sc.close_position(float(getattr(bar, "Close", 0.0)), reason="session-end")
+        # GIL-44 Phase-3: tear down the AI decision worker (idempotent — runs once). Ordered
+        # AFTER position/limit cleanup so a wedged worker can never delay it.
+        _smtv2_dispatcher.on_session_end(_bar_ts)
         return
 
     _mnq_df = _ib_source.mnq_1m_df if _ib_source is not None else pd.DataFrame()
@@ -973,6 +976,33 @@ class SmtV2Dispatcher:
         self._pipeline = None
         self._session_date = None
         self._force_reset = os.environ.get("FORCE_RESET", "").lower() == "true"
+        # GIL-44 Phase-3 async decision worker (observation-only, flag-gated OFF). None ⇒
+        # zero code path, byte-identical live. _session_closed guards the idempotent
+        # per-second session-end teardown.
+        self._worker = None
+        self._session_closed = False
+
+    @staticmethod
+    def _build_worker(out_dir):
+        """Build the async decision worker via the shared factory (never imports the heavy
+        backtest module). Returns None if disabled or on any construction failure — the live
+        session is NEVER aborted by an AI-decisions init problem."""
+        # Raw env pre-check BEFORE any sys.path mutation/import: flag OFF must leave the
+        # live process's import state completely untouched (review finding N2).
+        if os.environ.get("ACT_AI_DECISIONS", "0").strip().lower() not in (
+                "1", "true", "yes", "on"):     # same accepted set as decisions_config
+            return None
+        _agent_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agent")
+        if _agent_dir not in sys.path:
+            sys.path.insert(0, _agent_dir)
+        from decisions.live_factory import ai_decisions_enabled, build_decision_worker
+        if not ai_decisions_enabled():
+            return None
+        try:
+            return build_decision_worker(out_dir)
+        except Exception:
+            return None
 
     def on_session_start(self, now: pd.Timestamp, mnq_1m_df: pd.DataFrame, mes_1m_df: pd.DataFrame) -> None:
         """Initialize pipeline with current history snapshot and seed session state.
@@ -986,14 +1016,71 @@ class SmtV2Dispatcher:
         if today == self._session_date:
             return
         from session_pipeline import SessionPipeline
-        self._pipeline = SessionPipeline(mnq_1m_df, mes_1m_df, self._emit)
-        _cme_start = pd.Timestamp(cme_session_start(now))
-        today_at_open = mnq_1m_df[
-            (mnq_1m_df.index >= _cme_start) & (mnq_1m_df.index <= now)
-        ]
-        self._pipeline.on_session_start(now, today_at_open, force_reset=self._force_reset)
+        # Build the decision worker (flag-gated) before the pipeline so it can be attached.
+        # out_dir = the live per-session folder (audit JSONL + snapshots land next to
+        # comments.md). Degrade-to-None on any failure keeps live running.
+        self._worker = None
+        try:
+            self._worker = self._build_worker(SESSIONS_DIR / str(today))
+        except Exception:
+            self._worker = None
+        # If pipeline init raises, the exception propagates to the tick callback and this
+        # method retries every second — close the just-built worker first, or each retry
+        # leaks one polling daemon thread (review finding: worker-thread churn).
+        try:
+            self._pipeline = SessionPipeline(mnq_1m_df, mes_1m_df, self._emit,
+                                             ai_decisions=self._worker)
+            _cme_start = pd.Timestamp(cme_session_start(now))
+            today_at_open = mnq_1m_df[
+                (mnq_1m_df.index >= _cme_start) & (mnq_1m_df.index <= now)
+            ]
+            self._pipeline.on_session_start(now, today_at_open, force_reset=self._force_reset)
+        except Exception:
+            if self._worker is not None:
+                try:
+                    self._worker.close(timeout=1.0, session_parquet=None)
+                except Exception:
+                    pass
+                self._worker = None
+            raise
         print(f"[EMIT] daily complete date={today}", flush=True)
         self._session_date = today
+        self._session_closed = False        # genuinely new session → re-arm teardown
+
+    def on_session_end(self, now: pd.Timestamp) -> None:
+        """Bounded, idempotent session-end teardown of the decision worker. Called every
+        second in the session-closed window, so it must run exactly once: drain (bounded) →
+        deterministic finalize → shutdown, then dump the sorted AI events-native to a NEW
+        <session>/ai_events.jsonl (never touches strategy outputs). A wedged in-flight LLM
+        call is abandoned at shutdown_timeout so position/limit cleanup is never delayed."""
+        if self._session_closed or self._worker is None:
+            return
+        self._session_closed = True
+        worker = self._worker
+        try:
+            _agent_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agent")
+            if _agent_dir not in sys.path:
+                sys.path.insert(0, _agent_dir)
+            import decisions_config as _sc
+            _timeout = _sc.DecisionsConfig().shutdown_timeout
+        except Exception:
+            _timeout = 8.0
+        try:
+            worker.close(timeout=_timeout, session_parquet=None)
+        except Exception:
+            pass
+        try:
+            self._dump_ai_events(worker)
+        except Exception:
+            pass
+
+    def _dump_ai_events(self, worker) -> None:
+        out_path = SESSIONS_DIR / str(self._session_date) / "ai_events.jsonl"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as fh:
+            for evt in worker.events_native:
+                fh.write(json.dumps(evt, default=str) + "\n")
 
     def on_1m_bar(
         self,

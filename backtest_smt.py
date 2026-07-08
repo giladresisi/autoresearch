@@ -1233,20 +1233,15 @@ def _ai_decisions_enabled() -> bool:
         return val is not None and val.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _build_decision_engine(run_dir):
-    """Construct a DecisionEngine for one day's run, or None if disabled / unavailable.
-    Only called when the flag is ON, so the AI-decisions stack is imported lazily."""
+def _build_decision_worker(run_dir):
+    """Wrap the day's DecisionEngine in the async DecisionWorker — THE execution model in
+    both modes (prod-agent.md:82). Shares the construction site with the live dispatcher via
+    decisions.live_factory. Raises on failure — the caller degrades to None."""
     _agent_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
     if _agent_dir not in sys.path:
         sys.path.insert(0, _agent_dir)
-    import decisions_config as _sc
-    from decisions.engine import DecisionEngine
-    from run_agent import make_backend, DOCS_ROOT
-
-    config = _sc.DecisionsConfig()
-    backend = make_backend("stub") if not config.real_api else make_backend(config.backend,
-                                                                            config.model)
-    return DecisionEngine(config, backend, DOCS_ROOT, out_dir=str(run_dir))
+    from decisions.live_factory import build_decision_worker
+    return build_decision_worker(run_dir)
 
 
 def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True,
@@ -1386,14 +1381,14 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         day_events: list[dict] = []
         # An engine-init failure (e.g. flag ON but no API key) must NEVER abort the
         # backtest — degrade to no-engine instead of killing the trading-side run.
-        _decision_engine = None
+        _decision_worker = None
         if _ai_decisions_enabled():
             try:
-                _decision_engine = _build_decision_engine(_run_dir)
+                _decision_worker = _build_decision_worker(_run_dir)
             except Exception:
-                _decision_engine = None
+                _decision_worker = None
         pipeline = SessionPipeline(hist_mnq_1m, hist_mes_1m, day_events.append,
-                                   ai_decisions=_decision_engine)
+                                   ai_decisions=_decision_worker)
         pipeline.on_session_start(session_start_ts, today_at_open, force_reset=True)
 
         # Seed this run's ATH from the TRUE all-time high as of the session open (the full
@@ -1636,13 +1631,19 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         # ONLY here (after trade pairing → trades byte-identical), each carrying
         # source:"ai-decisions" so the non-AI event subsequence is unchanged (filter it out
         # to recover the flag-OFF baseline).
-        if _decision_engine is not None:
+        if _decision_worker is not None:
             try:
                 _sess_parquet = _mnq_today if mode == "1s" else mnq_1m_today
-                _decision_engine.finalize(session_parquet=_sess_parquet)
+                # drain (unbounded) → deterministic finalize (sort audit + events_native,
+                # recompute discarded from the arrival-vs-supersede timeline). Per-day
+                # shutdown so a multi-date range never leaks worker threads (H7).
+                _decision_worker.finalize_deterministic(session_parquet=_sess_parquet)
             except Exception:
                 pass
-            day_events.extend(_decision_engine.events_native)
+            try:
+                day_events.extend(_decision_worker.events_native)
+            finally:
+                _decision_worker.shutdown()
 
         all_events.extend(day_events)
         all_trades.extend(day_trades)

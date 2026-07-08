@@ -51,6 +51,12 @@ DECISIONS_REAL_API: bool = _env_flag("ACT_AI_DECISIONS_REAL_API", True)
 # rather than inlined (records.py).
 SNAPSHOT_INLINE_MAX_CHARS = 4000
 
+# Bounded session-end teardown budget (seconds): the live dispatcher's worker.close() drains
+# at most this long before abandoning a wedged in-flight LLM call, so session close (position
+# / limit cleanup) is never delayed by the AI worker. Numeric env override only, no secrets.
+DECISIONS_SHUTDOWN_TIMEOUT: float = float(
+    os.environ.get("ACT_AI_DECISIONS_SHUTDOWN_TIMEOUT", "8.0"))
+
 
 @dataclass
 class DecisionsConfig:
@@ -65,6 +71,7 @@ class DecisionsConfig:
     model: object = DECISIONS_MODEL
     real_api: bool = DECISIONS_REAL_API
     snapshot_inline_max_chars: int = SNAPSHOT_INLINE_MAX_CHARS
+    shutdown_timeout: float = DECISIONS_SHUTDOWN_TIMEOUT
 
 
 def default_config() -> DecisionsConfig:
