@@ -46,6 +46,41 @@ def test_hash_stability_and_drift():
     assert build_snapshot(changed).content_hash != h1
 
 
+def test_history_supplies_prior_day_levels():
+    """The online-thinness regression (2026-06-25 finding): a SESSION-ONLY today frame
+    plus the 1m history must yield the same prev-day/week level universe as the offline
+    slice — a session-only primary df silently drops every prior-day level."""
+    from derive_facts import session_frame, trade_date
+
+    frames = load_live_frames()
+    now = frames["now"]
+
+    # Split the golden slice the way the pipeline sees it: today = session bars only,
+    # hist = everything before the session, resampled to 1m (the rolling-history shape).
+    for tkr in ("mnq", "mes"):
+        full = frames[f"{tkr}_today"]
+        sess = session_frame(full.rename(columns=str.lower), trade_date(now))
+        today = full.loc[sess.index[0]:]
+        hist_1s = full.loc[:sess.index[0] - pd.Timedelta(seconds=1)]
+        hist_1m = hist_1s.resample("1min").agg(
+            {"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
+        frames[f"{tkr}_today"] = today
+        frames[f"hist_{tkr}"] = hist_1m
+
+    snap = build_snapshot(frames)
+    assert not snap.degraded
+    # The golden fixture spans ~1.5 days, so exactly ONE prior day is reachable;
+    # prev2_day/prev1_week need the pipeline's real 60-day history (validated E2E).
+    assert "prev1_day" in snap.text, "prev1_day missing from history-fed snapshot"
+    assert "asia(prev1)" in snap.text, "prev-day sub-session levels missing"
+    # And the failure mode stays detectable: without hist, prev-day levels vanish.
+    bare = load_live_frames()
+    bare["mnq_today"] = frames["mnq_today"]
+    bare["mes_today"] = frames["mes_today"]
+    thin = build_snapshot(bare)
+    assert "prev1_day" not in thin.text
+
+
 def test_empty_mes_frame_handled():
     frames = load_live_frames()
     frames["mes_today"] = frames["mes_today"].iloc[0:0]   # empty MES (session open)

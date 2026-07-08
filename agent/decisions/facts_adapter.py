@@ -48,6 +48,10 @@ from derive_facts import (  # noqa: E402
 _MAINT_LO = datetime.time(16, 55)
 _MAINT_HI = datetime.time(18, 0)
 
+# Primary-df lookback for compute_facts — same horizon as the offline cut slices
+# (prepare_cuts.LOOKBACK_DAYS = 17), so prev1/prev2-day and prev1-week levels exist.
+_PRIMARY_LOOKBACK = pd.Timedelta(days=17)
+
 
 @dataclass
 class Snapshot:
@@ -73,6 +77,19 @@ def _normalize(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
     t = d.index.time
     keep = (t <= _MAINT_LO) | (t >= _MAINT_HI)
     return d[keep]
+
+
+def _with_history(today: Optional[pd.DataFrame], hist: Optional[pd.DataFrame],
+                  now: pd.Timestamp) -> Optional[pd.DataFrame]:
+    """Concatenate the 1m history (prior days) with today's session bars into the
+    primary compute_facts df — today's bars win on index overlap — truncated to the
+    offline slice horizon so online and offline see the same level universe."""
+    parts = [f for f in (hist, today) if f is not None and len(f)]
+    if not parts:
+        return today
+    df = pd.concat(parts)
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    return df[df.index >= now - _PRIMARY_LOOKBACK]
 
 
 def _has_session(df: Optional[pd.DataFrame], now: pd.Timestamp) -> bool:
@@ -113,8 +130,15 @@ def build_snapshot(frames: dict, *, checkpoint: Optional[pd.Timestamp] = None) -
     hist_mnq = _normalize(frames.get("hist_mnq"))
     hist_mes = _normalize(frames.get("hist_mes"))
 
-    mnq_t = mnq[mnq.index <= now] if mnq is not None else None
-    mes_t = mes[mes.index <= now] if mes is not None else None
+    # Primary df = prior days (1m history) + today's session bars. compute_facts derives
+    # prev1/prev2-day and prev1-week levels from the PRIMARY df's trade-date universe —
+    # a session-only primary silently drops every prior-day level (and with them their
+    # sweeps, cross-ticker rows, and laggard-fail cards; found on the 2026-06-25 run).
+    mnq_p = _with_history(mnq, hist_mnq, now)
+    mes_p = _with_history(mes, hist_mes, now)
+
+    mnq_t = mnq_p[mnq_p.index <= now] if mnq_p is not None else None
+    mes_t = mes_p[mes_p.index <= now] if mes_p is not None else None
 
     # Degraded: either ticker lacks bars in the current session (e.g. empty MES at the
     # 18:00 open, backtest_smt.py:1336). Return a marked snapshot; the engine records a

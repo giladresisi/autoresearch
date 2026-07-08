@@ -5,6 +5,7 @@ import math as _math
 import os
 import statistics
 import sys
+import traceback
 from pathlib import Path
 
 import pandas as pd
@@ -1386,7 +1387,16 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             try:
                 _decision_worker = _build_decision_worker(_run_dir)
             except Exception:
+                # Degrade to no-engine (never abort the trading run) but leave a
+                # structured breadcrumb — a silent total loss of the AI run is
+                # indistinguishable from flag-OFF otherwise.
                 _decision_worker = None
+                try:
+                    with open(os.path.join(_run_dir, "ai_decisions_init_error.txt"),
+                              "w", encoding="utf-8") as _fh:
+                        _fh.write(traceback.format_exc())
+                except Exception:
+                    pass
         pipeline = SessionPipeline(hist_mnq_1m, hist_mes_1m, day_events.append,
                                    ai_decisions=_decision_worker)
         pipeline.on_session_start(session_start_ts, today_at_open, force_reset=True)

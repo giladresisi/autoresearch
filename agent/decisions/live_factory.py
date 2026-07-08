@@ -54,5 +54,6 @@ def build_decision_engine(out_dir):
 def build_decision_worker(out_dir):
     """Wrap a fresh DecisionEngine in the async DecisionWorker (THE execution model in both
     modes). Raises on engine-build failure — CALLERS catch and degrade to None."""
+    _ensure_path()          # async_wrapper's own imports need agent/decisions on sys.path
     from decisions.async_wrapper import DecisionWorker
     return DecisionWorker(build_decision_engine(out_dir))
