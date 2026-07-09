@@ -498,6 +498,104 @@ def make_backend(backend: Optional[str] = None, model: Optional[str] = None,
 
 
 # --------------------------------------------------------------------------- #
+# Code-derived arithmetic — the model judges, code computes                     #
+# --------------------------------------------------------------------------- #
+# The model's judgment lives in item selection and the multiplier CHOICES
+# (session_side / alignment / whipsaw, votes, vetoes); the arithmetic over them
+# (item score products, N/S sums, the confidence ceiling) is pure computation and
+# was the dominant retry/failsafe cause (ARI_N_MISMATCH + dependents — a failsafe
+# DISCARDS correctly-gathered evidence, observed 2026-06-25 08:30). The model still
+# emits its own arithmetic as a self-check; code overrides it and records every
+# disagreement in the attempt audit ("arith_overrides"). Direction is deliberately
+# NOT overridden: a declared direction inconsistent with the computed net score is
+# a judgment/form error (targets and resolution follow direction), so it stays a
+# validator retry — now quoted against the CORRECT net score.
+_CONF_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def _min_conf(a: str, b: str) -> str:
+    return a if _CONF_RANK.get(a, 0) <= _CONF_RANK.get(b, 0) else b
+
+
+def _derive_next_arithmetic(block: dict) -> tuple[dict, list]:
+    """Compute item scores, N, and the confidence ceiling from the model's declared
+    judgments (next-move.md §2-§4). Returns (block, override_notes)."""
+    notes: list = []
+    totals = {}
+    for side in ("bull_ledger", "bear_ledger"):
+        total = 0.0
+        for i, item in enumerate(block.get(side) or []):
+            try:
+                computed = (float(item["tier"]) * float(item["session_side"])
+                            * float(item["alignment"]) * float(item["freshness"])
+                            * float(item["whipsaw"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            declared = item.get("score")
+            if not isinstance(declared, (int, float)) or abs(declared - computed) > 1e-9:
+                notes.append(f"{side}[{i}].score {declared} -> {computed:.6g}")
+                item["score"] = computed
+            total += computed
+        totals[side] = total
+    n = totals.get("bull_ledger", 0.0) - totals.get("bear_ledger", 0.0)
+    if not isinstance(block.get("N"), (int, float)) or abs(block["N"] - n) > 1e-9:
+        notes.append(f"N {block.get('N')} -> {n:.6g}")
+        block["N"] = n
+
+    # Confidence ceiling (§3) + veto caps (§4) — mechanical given the declared items.
+    win = max(totals.values(), default=0.0)
+    lose = min(totals.values(), default=0.0)
+    if abs(n) >= 6 and (win <= 0 or lose <= 0.5 * win):
+        ceiling = "high"
+    elif abs(n) >= 3:
+        ceiling = "medium"
+    else:
+        ceiling = "low"
+    for veto in block.get("vetoes") or []:
+        if veto.get("triggered") and veto.get("effect") == "cap_to_low":
+            ceiling = "low"
+        elif veto.get("triggered") and veto.get("effect") == "cap_to_medium":
+            ceiling = _min_conf(ceiling, "medium")
+    declared_conf = block.get("confidence")
+    final = _min_conf(str(declared_conf), ceiling)
+    if final != declared_conf:
+        notes.append(f"confidence {declared_conf} -> {final} (ceiling {ceiling})")
+        block["confidence"] = final
+    return block, notes
+
+
+def _derive_daily_arithmetic(block: dict) -> tuple[dict, list]:
+    """Compute S and the confidence ceiling from the declared driver contributions
+    (daily-trend.md §3). Contributions themselves stay model-owned — they encode the
+    D1 halving and correlation-discount judgments the validator checks separately."""
+    notes: list = []
+    drivers = block.get("drivers") or []
+    contribs = [d.get("contribution") for d in drivers
+                if isinstance(d.get("contribution"), (int, float))]
+    s = float(sum(contribs))
+    if not isinstance(block.get("S"), (int, float)) or abs(block["S"] - s) > 1e-9:
+        notes.append(f"S {block.get('S')} -> {s:.6g}")
+        block["S"] = s
+
+    opposer = any(isinstance(d.get("weight"), (int, float)) and d["weight"] >= 2
+                  and isinstance(d.get("vote"), (int, float)) and d["vote"] != 0
+                  and (d["vote"] > 0) != (s > 0)
+                  for d in drivers) if s != 0 else False
+    if abs(s) >= 6 and not opposer:
+        ceiling = "high"
+    elif abs(s) >= 3:
+        ceiling = "medium"
+    else:
+        ceiling = "low"
+    declared_conf = block.get("confidence")
+    final = _min_conf(str(declared_conf), ceiling)
+    if final != declared_conf:
+        notes.append(f"confidence {declared_conf} -> {final} (ceiling {ceiling})")
+        block["confidence"] = final
+    return block, notes
+
+
+# --------------------------------------------------------------------------- #
 # Validate-and-retry — the trust boundary                                      #
 # --------------------------------------------------------------------------- #
 def _retry_prompt(violations: list[str]) -> str:
@@ -541,13 +639,14 @@ def _sum_usage(attempts: list) -> dict:
 
 def _run_call(backend: Backend, system: str, base_user: str, schema: dict,
               validate_block, failsafe_block: dict,
-              max_retries: int = MAX_RETRIES) -> CallOutcome:
+              max_retries: int = MAX_RETRIES, derive_block=None) -> CallOutcome:
     """One decision call with a bounded correction loop.
 
-    validate_block(parsed_block) -> ValidationResult scoped to THIS call. On a
-    validation failure we echo the model's own (invalid) JSON back and quote the
-    exact violations; after max_retries failures we fall back to the NEUTRAL/LOW
-    scripts baseline and record it.
+    derive_block(parsed) -> (parsed, override_notes) runs FIRST (code-derived
+    arithmetic overriding the model's self-check numbers). validate_block(parsed_block)
+    -> ValidationResult scoped to THIS call. On a validation failure we echo the
+    model's own (invalid) JSON back and quote the exact violations; after max_retries
+    failures we fall back to the NEUTRAL/LOW scripts baseline and record it.
     """
     messages = [{"role": "user", "content": base_user}]
     attempts: list = []
@@ -561,6 +660,9 @@ def _run_call(backend: Backend, system: str, base_user: str, schema: dict,
 
         parsed = dict(resp.parsed)
         reasoning = parsed.pop("reasoning", None)     # audit-only; never validated
+        overrides: list = []
+        if derive_block is not None:
+            parsed, overrides = derive_block(parsed)
         result = validate_block(parsed)
         attempts.append({
             "usage": resp.usage,
@@ -568,6 +670,7 @@ def _run_call(backend: Backend, system: str, base_user: str, schema: dict,
             "model": resp.model,
             "ok": result.ok,
             "violations": result.messages(),
+            "arith_overrides": overrides,
         })
 
         if result.ok:
@@ -624,6 +727,7 @@ def decide_daily(facts_text: str, context_text: str, facts: dict, backend: Backe
         validate_block=lambda d: validate(
             {"daily_trend": d, "next_move": fs["next_move"]}, facts=facts),
         failsafe_block=fs["daily_trend"],
+        derive_block=_derive_daily_arithmetic,
     )
 
 
@@ -643,6 +747,7 @@ def decide_next(facts_text: str, context_text: str, facts: dict, standing_daily:
         validate_block=lambda n: _next_only(
             validate({"daily_trend": standing_daily, "next_move": n}, facts=facts)),
         failsafe_block=fs["next_move"],
+        derive_block=_derive_next_arithmetic,
     )
 
 

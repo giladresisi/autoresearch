@@ -344,3 +344,111 @@ def test_make_backend_stub_needs_no_keys(tmp_path, monkeypatch):
     empty_env.write_text("", encoding="utf-8")
     with pytest.raises(RuntimeError, match="No API key found"):
         make_backend(env_path=str(empty_env))
+
+
+# --------------------------------------------------------------------------- #
+# 8. Code-derived arithmetic — model judges, code computes                     #
+# --------------------------------------------------------------------------- #
+def _ledger_item(tier=2.0, side=1.0, align=1.0, fresh=0.5, whip=1.0, score=None):
+    return {"type": "sweep", "tier": tier, "session_side": side, "alignment": align,
+            "freshness": fresh, "whipsaw": whip,
+            "score": score if score is not None else tier * side * align * fresh * whip,
+            "note": "t"}
+
+
+def test_derive_next_fixes_scores_and_n():
+    """The 2026-06-25 08:30 failure shape: correct bearish ledger, wrong declared
+    N/score — code overrides both and records the disagreement."""
+    block = {
+        "direction": "down", "confidence": "medium",
+        "bull_ledger": [],
+        "bear_ledger": [_ledger_item(tier=3.0, fresh=1.0, score=0.95),   # wrong score
+                        _ledger_item(tier=2.0, fresh=1.0)],
+        "N": 5.4,                                                        # wrong sign
+        "vetoes": [],
+    }
+    out, notes = run_agent._derive_next_arithmetic(block)
+    assert out["bear_ledger"][0]["score"] == 3.0
+    assert out["N"] == -5.0
+    assert any("N 5.4" in n for n in notes)
+    assert any(".score" in n for n in notes)
+    # |N| = 5 → ceiling medium; declared medium stands.
+    assert out["confidence"] == "medium"
+
+
+def test_derive_next_confidence_ceiling_and_caps():
+    # |N| = 2 → ceiling low even though the model claimed high.
+    weak = {"direction": "neutral", "confidence": "high",
+            "bull_ledger": [_ledger_item(tier=2.0, fresh=1.0)], "bear_ledger": [],
+            "N": 2.0, "vetoes": []}
+    out, notes = run_agent._derive_next_arithmetic(weak)
+    assert out["confidence"] == "low" and any("confidence high -> low" in n for n in notes)
+
+    # |N| ≥ 6 with empty losing ledger → high allowed... unless a cap_to_medium veto.
+    strong = {"direction": "down", "confidence": "high",
+              "bull_ledger": [],
+              "bear_ledger": [_ledger_item(tier=3.0, side=1.5, fresh=1.0),
+                              _ledger_item(tier=2.0, fresh=1.0)],
+              "N": -6.5, "vetoes": [{"name": "v3", "triggered": True,
+                                     "effect": "cap_to_medium"}]}
+    out, _ = run_agent._derive_next_arithmetic(strong)
+    assert out["confidence"] == "medium"
+
+    # cap_to_low beats everything.
+    strong["vetoes"] = [{"name": "v1", "triggered": True, "effect": "cap_to_low"}]
+    strong["confidence"] = "high"
+    out, _ = run_agent._derive_next_arithmetic(strong)
+    assert out["confidence"] == "low"
+
+
+def test_derive_next_never_touches_direction():
+    block = {"direction": "up", "confidence": "low",
+             "bull_ledger": [], "bear_ledger": [_ledger_item(tier=3.0, fresh=1.0)],
+             "N": 3.0, "vetoes": []}
+    out, _ = run_agent._derive_next_arithmetic(block)
+    assert out["direction"] == "up"          # left for the validator/retry (judgment)
+    assert out["N"] == -3.0                  # but the arithmetic is corrected
+
+
+def test_derive_daily_fixes_s_and_clamps_confidence():
+    d = _valid_daily()
+    d["drivers"][0].update(vote=-1, contribution=-3.0)   # D1 w3
+    d["drivers"][1].update(vote=-1, contribution=-2.0)   # D2 w2
+    d["drivers"][3].update(vote=-1, contribution=-2.0)   # D4 w2
+    d["S"] = -4.0                                        # wrong: sums to -7
+    d["confidence"] = "high"                             # allowed: |S|>=6, no opposer
+    out, notes = run_agent._derive_daily_arithmetic(d)
+    assert out["S"] == -7.0 and any("S -4.0" in n for n in notes)
+    assert out["confidence"] == "high"
+
+    # A weight-≥2 opposer denies high even at |S| ≥ 6.
+    d2 = _valid_daily()
+    d2["drivers"][0].update(vote=-1, contribution=-3.0)
+    d2["drivers"][1].update(vote=-1, contribution=-2.0)
+    d2["drivers"][3].update(vote=-1, contribution=-2.0)
+    d2["drivers"][2].update(vote=1, contribution=1.0)    # D3 w1 opposer — too light
+    d2["S"] = -6.0
+    d2["confidence"] = "high"
+    out2, _ = run_agent._derive_daily_arithmetic(d2)
+    assert out2["confidence"] == "high"                  # w1 opposer doesn't deny
+    d2["drivers"][4].update(vote=1, weight=2, contribution=2.0)  # w2 opposer
+    out3, _ = run_agent._derive_daily_arithmetic(d2)
+    assert out3["confidence"] == "medium"
+
+
+def test_run_call_derive_prevents_retry_on_bad_n(tmp_path):
+    """End-to-end: a response with wrong N/scores but a consistent direction is now a
+    clean ONE-SHOT (pre-derive it burned all retries and failsafed)."""
+    cut = _make_cut(tmp_path)
+    bad_n = _valid_next()
+    bad_n["bear_ledger"] = [_ledger_item(tier=2.0, fresh=1.0)]
+    bad_n["bull_ledger"] = []
+    bad_n["N"] = 7.7                                     # nonsense; computes to -2.0
+    bad_n["direction"] = "neutral"                       # consistent with computed N
+    bad_n["confidence"] = "low"
+    backend = StubBackend(responses=[_valid_daily(), bad_n])
+    decision = run_cut(cut, backend)
+    call = decision["calls"]["next_move"]
+    assert call["retries"] == 0 and call["verdict"] == "clean"
+    assert decision["next_move"]["N"] == -2.0
+    assert any("N 7.7" in n for n in call["attempts"][0]["arith_overrides"])
