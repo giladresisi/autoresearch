@@ -87,4 +87,5 @@ def gap_fill_until_now(
         bar_data_dir=bar_data_dir,
         on_bar=lambda *_: None,  # fill-only: no live subscriptions opened
     )
-    source.gap_fill()
+    from data.ib_realtime import run_gap_fill_with_retries
+    run_gap_fill_with_retries(source.gap_fill, bar_data_dir)

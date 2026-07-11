@@ -75,6 +75,7 @@ def _close_session_position(log_ch: OutputChannel) -> None:
 
 
 from gap_fill import check_ib_reachable as _check_ib_reachable
+from data.ib_realtime import GapFillFailedError
 
 
 def _pre_session_init() -> None:
@@ -239,7 +240,12 @@ _STOP_FILE = Path(__file__).resolve().parent.parent / "orchestrator_stop.req"
 
 
 class _GracefulStop(Exception):
-    """Raised when trade.py terminate writes the stop-request sentinel file."""
+    """Raised when trade.py terminate writes the stop-request sentinel file, or when a
+    background thread signals a condition that should cleanly end this orchestrator run."""
+
+    def __init__(self, exit_code: int = 0) -> None:
+        self.exit_code = exit_code
+        super().__init__()
 
 
 def _check_stop_requested() -> None:
@@ -340,8 +346,17 @@ def _make_ib_health_check(thread: _threading.Thread, thread_exc: list):
     """
     def check() -> None:
         if not thread.is_alive() and thread_exc[0] is not None:
+            exc = thread_exc[0]
+            if isinstance(exc, GapFillFailedError):
+                print(
+                    "[ORCH] *** Gap-fill failed 5 consecutive rounds — "
+                    f"last error: {exc.last_error}; gaps (hours): {exc.gaps_hours}. "
+                    "Run 'python trade.py gap-fill' manually, then relaunch the orchestrator. ***",
+                    flush=True,
+                )
+                raise _GracefulStop(exit_code=11)
             print(
-                f"[ORCH] Pre-session IB connection ended ({thread_exc[0]}) — expected during the "
+                f"[ORCH] Pre-session IB connection ended ({exc}) — expected during the "
                 "17:00-18:00 ET maintenance break. Shutting down cleanly; relaunch for the "
                 "next session.",
                 flush=True,
@@ -574,10 +589,10 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
             _sleep_until(next_session_open(get_et_now()), "next trading session",
                          ib_health_check=_make_ib_health_check(_pre_thr, _pre_err))
             _stop_pre_session_ib(_pre_src, _pre_thr)
-    except _GracefulStop:
+    except _GracefulStop as _stop:
         print("\n[ORCH] Stop requested — shutting down gracefully.", flush=True)
         _stop_pre_session_ib(_pre_src, _pre_thr)
-        sys.exit(0)
+        sys.exit(_stop.exit_code)
     except KeyboardInterrupt:
         print("\n[ORCH] Shutting down.", flush=True)
         _stop_pre_session_ib(_pre_src, _pre_thr)

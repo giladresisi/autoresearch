@@ -37,7 +37,7 @@ from strategy_smt import (
 # strategy_smt attributes in tests affects this module without a re-import.
 import strategy_smt
 from hypothesis_smt import HypothesisManager
-from data.ib_realtime import IbGatewayDisconnectedError, IbRealtimeSource
+from data.ib_realtime import GapFillFailedError, IbGatewayDisconnectedError, IbRealtimeSource
 from execution.pickmytrade import PickMyTradeExecutor
 
 # ── Connection constants ──────────────────────────────────────────────────────
@@ -1183,6 +1183,15 @@ def main() -> None:
         # Gateway shut down — executor.stop() runs in finally; exit code 2 signals orchestrator
         print("[automation] IB Gateway disconnected — exiting with code 2", flush=True)
         sys.exit(2)
+    except GapFillFailedError as exc:
+        print(
+            "[automation] *** Gap-fill failed 5 consecutive rounds — "
+            f"last error: {exc.last_error}; gaps (hours): {exc.gaps_hours}. "
+            "Run 'python trade.py gap-fill' manually, then restart. "
+            "Exiting with code 11. ***",
+            flush=True,
+        )
+        sys.exit(11)
     finally:
         # Disconnect IB before executor cleanup so the client ID is released immediately.
         # Without this, SIGTERM raises SystemExit which bypasses IbRealtimeSource's except

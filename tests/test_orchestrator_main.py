@@ -271,8 +271,9 @@ def test_make_ib_health_check_raises_graceful_stop_on_thread_death(capsys):
     thread = MagicMock()
     thread.is_alive.return_value = False
     check = _make_ib_health_check(thread, [RuntimeError("IB Gateway closed the connection")])
-    with pytest.raises(_GracefulStop):
+    with pytest.raises(_GracefulStop) as exc_info:
         check()
+    assert exc_info.value.exit_code == 0
     out = capsys.readouterr().out
     assert "maintenance break" in out.lower()
     assert "CRITICAL" not in out and "Terminating now" not in out
@@ -284,6 +285,31 @@ def test_make_ib_health_check_noop_when_thread_alive(capsys):
     thread.is_alive.return_value = True
     _make_ib_health_check(thread, [None])()  # alive → no raise, no output
     assert capsys.readouterr().out == ""
+
+
+def test_make_ib_health_check_gap_fill_failed_exits_11(capsys):
+    """A GapFillFailedError from the pre-session thread prints a specific message and
+    raises _GracefulStop with exit_code=11 (not the generic maintenance-break 0)."""
+    from data.ib_realtime import GapFillFailedError
+    from orchestrator.main import _make_ib_health_check, _GracefulStop
+
+    thread = MagicMock()
+    thread.is_alive.return_value = False
+    exc = GapFillFailedError({"MES_1s.parquet": 200.0}, RuntimeError("ib broke"))
+    check = _make_ib_health_check(thread, [exc])
+
+    with pytest.raises(_GracefulStop) as exc_info:
+        check()
+
+    assert exc_info.value.exit_code == 11
+    out = capsys.readouterr().out
+    assert "trade.py gap-fill" in out
+    assert "maintenance break" not in out.lower()
+
+
+def test_graceful_stop_defaults_to_exit_code_0():
+    from orchestrator.main import _GracefulStop
+    assert _GracefulStop().exit_code == 0
 
 
 def test_kill_automation_main_noop_when_none_running():

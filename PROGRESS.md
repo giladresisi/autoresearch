@@ -1,6 +1,25 @@
 ﻿# PROGRESS
 
 
+## Feature: Gap-Fill Retry Loop
+### Status: ✅ Complete (unstaged)
+**Started**: 2026-07-11
+**Plan File**: `.agents/plans/gap-fill-retry-loop.md`
+
+Unifies production (`IbRealtimeSource.start()`) and offline (`trade.py gap-fill`) IB historical-data gap-fill behavior behind one shared `run_gap_fill_with_retries()` loop in `data/ib_realtime.py`. Both now retry the existing single-pass `gap_fill()` primitive every ~10.8 min (IB pacing-safe) until all 4 main parquets are caught up, instead of production giving up after one pass or offline requiring manual re-invocation. New `GapFillFailedError` (after 5 consecutive round failures) propagates to `automation/main.py` and `orchestrator/main.py` (via `_GracefulStop(exit_code)`), both exiting with new dedicated code 11. 7/7 tasks; 12 new tests + 6 updated, all passing; full suite 1386 passed / 2 pre-existing failures / 16 pre-existing errors (all unrelated, byte-identical to baseline) / 0 new failures. Code review: no issues found. Acceptance: 9/9 ACCEPTED.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/gap-fill-retry-loop.md`
+- 7/7 tasks completed sequentially; 12 new tests + 6 updated (all passing); 0 regressions
+- One environmental divergence: plan-cited line numbers shifted after earlier tasks' insertions (expected, handled via name-based re-location, zero risk)
+- Manual live-IB-Gateway sanity check (plan's own optional Task 7 Step 2) deferred — live trading process may be running on this machine
+- Alignment score: 10/10
+
+**Acceptance Validation:** `.agents/acceptance-validations/gap-fill-retry-loop-validation.md` (9/9 PASS — ACCEPTED)
+
+---
+
 ## Feature: GIL-25 Phase 1.5 — Cross-session carry of FILL (FVG-divergence) SMTs
 ### Status: ✅ Complete (unstaged)
 **Started**: 2026-06-17

@@ -67,6 +67,117 @@ class IbGatewayDisconnectedError(Exception):
     """Raised when IB Gateway closes the connection (not a transient network error)."""
 
 
+_GAP_FILE_NAMES = ["MNQ_1s.parquet", "MES_1s.parquet", "MNQ_1m.parquet", "MES_1m.parquet"]
+_GAP_HEADSUP_HOURS = 24    # informational: gap this large likely needs multiple rounds
+_GAP_CAUGHT_UP_HOURS = 1   # loop's convergence target
+
+
+def gap_hours_by_file(bar_data_dir: Path) -> dict:
+    """Hours between now and the last bar in each of the 4 main parquets.
+
+    A missing, empty, or unreadable file returns float('inf') for that entry rather
+    than raising — a first-ever run with no existing parquet naturally reads as
+    "needs multiple rounds," consistent with how the existing fill logic already
+    creates files from scratch when absent.
+    """
+    now = pd.Timestamp.now(tz="UTC")
+    gaps: dict = {}
+    for name in _GAP_FILE_NAMES:
+        path = bar_data_dir / name
+        if not path.exists():
+            gaps[name] = float("inf")
+            continue
+        try:
+            df = pd.read_parquet(path)
+        except Exception:
+            gaps[name] = float("inf")
+            continue
+        if df.empty:
+            gaps[name] = float("inf")
+            continue
+        last = df.index[-1]
+        if last.tzinfo is None:
+            last = last.tz_localize("UTC")
+        gaps[name] = (now - last.tz_convert("UTC")).total_seconds() / 3600.0
+    return gaps
+
+
+class GapFillFailedError(Exception):
+    """Raised when gap-fill hits 5 consecutive round failures without closing the gap."""
+
+    def __init__(self, gaps_hours: dict, last_error: Exception) -> None:
+        self.gaps_hours = gaps_hours
+        self.last_error = last_error
+        super().__init__(
+            f"gap-fill failed 5 consecutive rounds; last error: {last_error}; "
+            f"gaps: {gaps_hours}"
+        )
+
+
+def run_gap_fill_with_retries(
+    do_one_round,
+    bar_data_dir: Path,
+    *,
+    max_consecutive_failures: int = 5,
+    round_spacing_s: float = 650.0,
+) -> None:
+    """Run do_one_round() repeatedly, spaced to respect IB's historical-data pacing
+    limit (~60 requests / rolling 10-min window), until all 4 main parquets are
+    within _GAP_CAUGHT_UP_HOURS of now.
+
+    Used by both the offline `trade.py gap-fill` path (gap_fill.gap_fill_until_now)
+    and the production path (IbRealtimeSource.start()) so both behave identically —
+    the only difference is where the loop runs.
+
+    Raises GapFillFailedError after max_consecutive_failures consecutive rounds that
+    raise an exception. A round that completes without an exception but leaves the
+    gap open is NOT a failure — that is expected for a large gap and simply triggers
+    another round with no cap on total round count.
+    """
+    gaps = gap_hours_by_file(bar_data_dir)
+    if max(gaps.values(), default=0.0) > _GAP_HEADSUP_HOURS:
+        print(
+            f"[gap_fill] Large gap detected ({gaps}) — this may take several rounds "
+            f"spaced ~{round_spacing_s / 60:.0f} min apart to respect IB's pacing limit. "
+            "Sitting tight...",
+            flush=True,
+        )
+
+    consecutive_failures = 0
+    last_error = None
+    round_num = 1
+    while True:
+        try:
+            do_one_round()
+            consecutive_failures = 0
+        except Exception as exc:
+            consecutive_failures += 1
+            last_error = exc
+            print(
+                f"[gap_fill] round {round_num} failed ({exc}) — "
+                f"{consecutive_failures}/{max_consecutive_failures} consecutive failures",
+                flush=True,
+            )
+            if consecutive_failures >= max_consecutive_failures:
+                raise GapFillFailedError(gap_hours_by_file(bar_data_dir), last_error)
+
+        gaps = gap_hours_by_file(bar_data_dir)
+        if max(gaps.values(), default=0.0) <= _GAP_CAUGHT_UP_HOURS:
+            print(
+                f"[gap_fill] Caught up — all parquets within {_GAP_CAUGHT_UP_HOURS}h of now.",
+                flush=True,
+            )
+            return
+
+        print(
+            f"[gap_fill] round {round_num} done — gap remaining: {gaps} — "
+            f"next round in ~{round_spacing_s / 60:.0f} min",
+            flush=True,
+        )
+        time.sleep(round_spacing_s)
+        round_num += 1
+
+
 class IbRealtimeSource:
     def __init__(
         self,
@@ -776,7 +887,7 @@ class IbRealtimeSource:
         # non-main threads have no loop, so create one before the import.
         asyncio.set_event_loop(asyncio.new_event_loop())
         from ib_insync import IB, Future, util
-        self.gap_fill()
+        run_gap_fill_with_retries(self.gap_fill, self._bar_data_dir)
         # Release ~70 MB: history only needed by _gap_fill_1s_ib; live signal path reads parquet
         self._mnq_1s_df = self._empty_bar_df()
         self._mes_1s_df = self._empty_bar_df()

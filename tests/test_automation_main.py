@@ -800,6 +800,33 @@ def test_ib_disconnect_already_flat_exits_immediately(monkeypatch, tmp_path):
     mock_executor.place_close.assert_not_called()
 
 
+def test_gap_fill_failed_exits_11(monkeypatch, tmp_path):
+    """GapFillFailedError from _ib_source.start() prints a loud message and exits 11."""
+    from data.ib_realtime import GapFillFailedError
+    import automation.main as am
+
+    monkeypatch.setenv("PMT_WEBHOOK_URL", "https://example.com")
+    monkeypatch.setenv("PMT_API_KEY", "test-key")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir(exist_ok=True)
+    monkeypatch.setattr(am, "POSITION_FILE", tmp_path / "data" / "live_position.json")
+
+    mock_executor = MagicMock()
+    mock_ib = MagicMock()
+    mock_ib.start.side_effect = GapFillFailedError(
+        {"MES_1s.parquet": 200.0}, RuntimeError("ib broke")
+    )
+
+    with patch("automation.main.PickMyTradeExecutor", return_value=mock_executor), \
+         patch("automation.main.IbRealtimeSource", return_value=mock_ib), \
+         patch("automation.main.HypothesisManager"), \
+         patch("automation.main._load_hist_mnq", return_value=pd.DataFrame()):
+        with pytest.raises(SystemExit) as exc_info:
+            am.main()
+
+    assert exc_info.value.code == 11
+
+
 def test_ib_disconnect_v2_position_open_sends_close(monkeypatch, tmp_path):
     """IB disconnect with V2 active position (smt_state): sleeps 30s then places close."""
     import automation.main as am

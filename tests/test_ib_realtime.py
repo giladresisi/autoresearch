@@ -221,6 +221,8 @@ def test_gap_fill_not_called_from_start(tmp_path):
          patch("ib_insync.util") as util_mock, \
          patch.object(src, "gap_fill") as mock_public_gap_fill, \
          patch.object(src, "_gap_fill") as mock_gap_fill, \
+         patch("data.ib_realtime.run_gap_fill_with_retries",
+               side_effect=lambda fn, *_a, **_kw: fn()), \
          patch.object(src, "_setup_subscriptions"):
         # start() calls the PUBLIC gap_fill(); stub it so the test stays hermetic (no real
         # IB connection / 1s+1m backfill, which otherwise hangs on time.sleep retry loops).
@@ -268,6 +270,8 @@ def test_gateway_disconnect_raises_ibgateway_disconnected_error(tmp_path):
          patch("ib_insync.Future"), \
          patch("ib_insync.util") as util_mock, \
          patch.object(src, "gap_fill"), \
+         patch("data.ib_realtime.run_gap_fill_with_retries",
+               side_effect=lambda fn, *_a, **_kw: fn()), \
          patch.object(src, "_setup_subscriptions"):
         util_mock.run.side_effect = fake_util_run
         util_mock.stop = MagicMock()
@@ -330,6 +334,8 @@ def test_ibgateway_disconnected_error_not_retried(tmp_path):
          patch("ib_insync.Future"), \
          patch("ib_insync.util") as util_mock, \
          patch.object(src, "gap_fill"), \
+         patch("data.ib_realtime.run_gap_fill_with_retries",
+               side_effect=lambda fn, *_a, **_kw: fn()), \
          patch.object(src, "_setup_subscriptions"):
         # Raise IbGatewayDisconnectedError from util.run() — simulates the check
         # "if self._disconnected_by_gateway: raise IbGatewayDisconnectedError(...)"
@@ -690,6 +696,8 @@ def test_1s_dfs_freed_after_gap_fill_in_start(tmp_path):
          patch("ib_insync.Future"), \
          patch("ib_insync.util") as util_mock, \
          patch.object(src, "gap_fill"), \
+         patch("data.ib_realtime.run_gap_fill_with_retries",
+               side_effect=lambda fn, *_a, **_kw: fn()), \
          patch.object(src, "_setup_subscriptions"):
         def _fake_run():
             src._stopping = True
