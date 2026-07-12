@@ -206,6 +206,7 @@ class FactsBundle:
     now_price: Optional[float] = None   # MNQ last close (the decision ticker's price)
     day_mid: Optional[float] = None     # MNQ running day mid at now (S8 menu input)
     weekly_mid: Optional[float] = None  # MNQ running week mid at now (thesis.md P3/P4 input)
+    swept_at: dict = field(default_factory=dict)  # swept_at[tkr][name] = ts | None
     # S8 menus (plan 11): computed lazily by facts_to_validator_dict / render_menus_text.
     menus: Optional[dict] = None
 
@@ -627,6 +628,7 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
         levels[tkr] = lv
 
         L(f"\n## S2 SWEEPS {tkr} (current True Day; inclusive wick cross; body = first 15m close beyond; ages vs now)")
+        bundle.swept_at.setdefault(tkr, {})
         for name, (price, body, side, tier, active_from) in sorted(lv.items(), key=lambda kv: -kv[1][0]):
             if side is None:
                 for s in ("above", "below"):
@@ -637,11 +639,13 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
             frame = sess_now.loc[active_from:]
             t = first_cross(frame, price, side)
             if t is None:
+                bundle.swept_at[tkr][name] = None
                 dist, ats = closest_approach(frame, price, side)
                 extra = (f" (closest approach {dist:.2f} short @ {ats}, age {age_min(ats, now):.0f}m)"
                          if dist is not None else "")
                 L(f"{name} {price} [{side}]: NOT swept{extra}")
                 continue
+            bundle.swept_at[tkr][name] = t
             exc = excursion_beyond(frame.loc[t:], price, side)
             thr = DEPLETE[tkr][tier]
             tb = first_body_cross_15m(frame, price, side)

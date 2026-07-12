@@ -185,3 +185,36 @@ def test_weekly_mid_matches_rendered_week_running_line():
     assert m is not None
     high, low = float(m.group(1)), float(m.group(2))
     assert bundle.weekly_mid == round((high + low) / 2.0, 2)
+
+
+# --------------------------------------------------------------------------- #
+# 7. swept_at fact field — per-level sweep timestamps.                       #
+# --------------------------------------------------------------------------- #
+def test_swept_at_matches_rendered_sweep_lines():
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    text = render_facts_text(bundle)
+    assert "MNQ" in bundle.swept_at and "MES" in bundle.swept_at
+    for tkr in ("MNQ", "MES"):
+        start = text.index(f"## S2 SWEEPS {tkr} ")
+        end = text.index("## S", start + 5)
+        section = text[start:end]
+        for line in section.splitlines():
+            line = line.strip()
+            if not line or line.startswith("##"):
+                continue
+            name = line.split(" ", 1)[0]
+            if ": NOT swept" in line:
+                assert bundle.swept_at[tkr].get(name) is None, line
+            elif ": swept " in line:
+                assert bundle.swept_at[tkr].get(name) is not None, line
+
+
+def test_swept_at_covers_every_sided_level():
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    for tkr in ("MNQ", "MES"):
+        for name, tup in bundle.levels[tkr].items():
+            if tup[2] is None:          # side is None -> not tracked (matches S2's own skip)
+                continue
+            assert name in bundle.swept_at[tkr]
