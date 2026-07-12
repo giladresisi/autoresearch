@@ -307,3 +307,41 @@ def test_smt_candidates_body_count_matches_rendered_tags():
     text = render_facts_text(bundle)
     body_candidates = [c for c in bundle.smt_candidates if c["type"] == "body"]
     assert len(body_candidates) == text.count("BODY(15m) DIVERGENCE CANDIDATE")
+
+
+# --------------------------------------------------------------------------- #
+# 9. render_evidence_text — S9 additive block for thesis.md P1-P4 evidence.  #
+# --------------------------------------------------------------------------- #
+def test_evidence_text_separate_from_core_and_menus():
+    import hashlib
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    core = render_facts_text(bundle)
+    core_hash = hashlib.sha256(core.encode("utf-8")).hexdigest()
+    vd = facts_to_validator_dict(bundle)
+    ev = derive_facts.render_evidence_text(bundle)
+    assert render_facts_text(bundle) == core
+    assert hashlib.sha256(render_facts_text(bundle).encode("utf-8")).hexdigest() == core_hash
+    assert facts_to_validator_dict(bundle) == vd and "menus" not in facts_to_validator_dict(bundle)
+    assert "## S9" not in core
+    assert ev.startswith("## S9 THESIS EVIDENCE")
+
+
+def test_evidence_text_deterministic():
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    a = derive_facts.render_evidence_text(bundle)
+    b = derive_facts.render_evidence_text(bundle)
+    assert a == b
+
+
+def test_evidence_text_flags_immature_and_shows_leader_lagger_labels():
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    ev = derive_facts.render_evidence_text(bundle)
+    has_immature = any(v is None for tkr in bundle.htf_close_status.values()
+                       for tf_map in tkr.values() for v in tf_map.values())
+    if has_immature:
+        assert "immature" in ev
+    if bundle.smt_candidates:
+        assert "(lagger)" in ev and "(leader)" in ev

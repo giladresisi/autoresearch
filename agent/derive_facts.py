@@ -581,6 +581,45 @@ def _fmt_predicate(pred: dict) -> str:
     return json.dumps(pred, sort_keys=True)
 
 
+def render_evidence_text(bundle: FactsBundle) -> str:
+    """Render the S9 thesis-evidence block (decisions/thesis.md P1/P3/P4 inputs): weekly
+    mid, per-level HTF close-status on BOTH tickers, and SMT candidates with tier
+    eligibility. Kept SEPARATE from render_facts_text (S0-S7 stays byte-identical) and
+    from render_menus_text (S8) — additive, never hashed, never in bundle.lines."""
+    out: list = []
+    A = out.append
+    A("## S9 THESIS EVIDENCE (decisions/thesis.md P1-P4 inputs)")
+    A(f"weekly_mid = {bundle.weekly_mid}")
+    A("\nHTF close-status per swept level (maturity gate: 'immature' = no qualifying HTF "
+      "close yet since the sweep -> NOT usable evidence, decisions/thesis.md §3):")
+    for tkr in ("MNQ", "MES"):
+        status = (bundle.htf_close_status or {}).get(tkr, {})
+        if not status:
+            A(f"  {tkr}: (none)")
+            continue
+        for name, tf_map in status.items():
+            for tf in ("1h", "4h"):
+                info = (tf_map or {}).get(tf)
+                if info is None:
+                    A(f"  {tkr} {name} [{tf}]: immature (no qualifying close yet)")
+                else:
+                    read = "ACCEPTED beyond" if info["beyond"] else "REJECTED (closed before)"
+                    A(f"  {tkr} {name} [{tf}]: close={info['close']} @ {info['closed_at']} "
+                      f"(n={info['n_closed_since']}) -> {read}")
+    A("\nSMT candidates (meaningful = day/week tier, eligible for thesis.md P2; "
+      "swept_ticker = confirmed/pushed through (lagger); unswept_ticker = failed to "
+      "confirm (leader)):")
+    if not bundle.smt_candidates:
+        A("  (none)")
+    for cand in bundle.smt_candidates:
+        A(f"  {cand['level']} [{cand['side']}, {cand['tier']}]: "
+          f"swept_ticker={cand['swept_ticker']} (lagger) "
+          f"unswept_ticker={cand['unswept_ticker']} (leader) "
+          f"type={cand['type']} swept_at={cand['swept_at']} "
+          f"meaningful={cand['meaningful']}")
+    return "\n".join(out) + "\n"
+
+
 def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
                   ath_mnq: Optional[float] = None, ath_mes: Optional[float] = None,
                   hist_mnq: Optional[pd.DataFrame] = None,
