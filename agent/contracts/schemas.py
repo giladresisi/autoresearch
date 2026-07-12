@@ -50,6 +50,27 @@ DOL_FALSIFIED_ACTIONS = {"MARKET_CLOSE", "TIGHTEN_STOP"}
 # data-only change in the failsafe factory.
 FAILSAFE_RECALL_MAX_AGE_MIN = 60
 
+# plan 12 Fix 1 — code-enforced default recall max-age for EVERY non-standing (valid
+# low-conf / NEUTRAL / waiting) thesis, not just the failsafe. Spec §2.1 gives the model a
+# `recall.max_age_min`, but a VALID low-conf thesis whose model-authored max_age is 0/absent
+# and whose recall events never fire otherwise waits forever (07-02 diag: th_04 waited 20.5h
+# to session end). The default (same value as the failsafe) is the cap: a missing / zero /
+# absurdly-large declared max_age is clamped DOWN to it, while a smaller declared value is
+# respected (the model may ask to be re-called sooner). Enforced in code, never trusted from
+# the model output.
+DEFAULT_LOWCONF_RECALL_MAX_AGE_MIN = 60
+
+
+def effective_recall_max_age(declared, default: float = DEFAULT_LOWCONF_RECALL_MAX_AGE_MIN):
+    """The code-enforced effective recall max-age (minutes) for a non-standing thesis:
+    `min(declared, default)` when `declared` is a positive number, else `default`. A
+    missing / zero / negative / non-numeric declared value falls back to the default; a
+    declared value larger than the default is clamped down to it; a smaller declared value
+    is respected. `default` doubles as the cap (spec §2.1; plan 12 Fix 1)."""
+    if not isinstance(declared, (int, float)) or isinstance(declared, bool) or declared <= 0:
+        return default
+    return min(declared, default)
+
 
 # --------------------------------------------------------------------------- #
 # Dataclasses                                                                  #

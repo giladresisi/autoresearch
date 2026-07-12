@@ -1,5 +1,43 @@
 ﻿# PROGRESS
 
+## Feature: L1 mechanical fixes — default low-conf TTL + wrong-side DOL — Plan 12
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/12.l1-mechanical-fixes.md`
+**Execution Report**: `.agents/execution-reports/12.l1-mechanical-fixes.md`
+
+Two correctness/structure fixes surfaced by the 07-02 diag bench run, deliberately free of
+strategy content. **Fix 1 — code-enforced default recall TTL** for ALL non-standing (valid
+low-conf / NEUTRAL / waiting) theses, not just failsafes: constant
+`DEFAULT_LOWCONF_RECALL_MAX_AGE_MIN=60` + pure helper `effective_recall_max_age` in
+`schemas.py` (`min(declared, 60)` when declared>0, else 60 — smaller respected, missing/0/large
+clamped to the cap). The 07-02 `th_04` (NEUTRAL/LOW, `max_age=0`, no events) had waited **20.5h**
+to session end. Executor clamps in `_maybe_recall_l1` only (standing-thesis TTL `_ttl_expired`
+untouched); bench bakes the clamp into the logged thesis in `make_live_provider` — DELIBERATELY at
+generation time, NOT in `_run_waiting`, so `rescore` of prior runs stays byte-stable (a clamp in
+the replayed engine would retroactively rewrite logged lifecycles; the fix manifests only in NEW
+runs). **Fix 2 — wrong-side/race DOL.** Root cause of the th_02 bogus 2-min "completion": a
+FRESHNESS RACE, not a menu or validator bug — the DOL (`prev1_day_low`) was a correct-side unswept
+below-pool only **0.75 pts** below price at facts build (menu + validator both correct), and price
+crossed it during the 90 s call latency before the thesis stood, so the arrival-bar DOL-touch
+fired instantly. Three layers: menu proximity guard (`DOL_MIN_DRAW_DISTANCE_PTS=5.0` in
+`_dol_menu` — the layer that removes th_02's D1); validator `SEM_DOL_WRONG_SIDE` (DOL must be on
+the bias side of facts price); scoring `suspect_completion` flag + count (additive — signed
+draw-distance ≤0 at arrival AND completed within 5 min; `completion_rate` untouched for rescore
+value-stability).
+
+Verification ($0): root-cause regression feeds the verbatim logged th_02 levels through the menu
+builder → `prev1_day_low` no longer offered as a DOWN DOL while the genuine farther `prev2_day_low`
+(74.75 pts) still is. Rescore of `test_0702_run2_diag` — `th_04` stays `session_end` (Fix-1 fidelity),
+`th_02` now flags `suspect_completion=True` with cause/boundaries unchanged; per-record diff shows
+ONLY the additive field, and `run1d_standdir` (4 dates) rescore matches its plan-11 reference
+exactly. Stub 2-date run deterministic; valid low-conf theses now re-call at 60 min. Gates:
+`pytest agent/` = **264 passed** (251 + 13 new; run under system py312 — the repo `.venv` lacks
+`jsonschema`); `pytest tests/` = **2F/1379P/10S/16E — baseline unchanged**. Total real-API spend
+**$0.00** (validation is unit tests + stub + rescore only). Review pipeline: code-review
+**PASSED** (2 LOW doc nits fixed), acceptance-criteria **ACCEPTED 13/13** (independently re-ran the
+rescore fidelity check + sanctioned the generation-time clamp placement as the correct
+replay-fidelity reading). All changes UNSTAGED; nothing committed/pushed.
+
 ## Feature: L1 predicate vocabulary — schema + menus + failsafe recall — Plan 11
 ### Status: ✅ Complete (unstaged)
 **Plan File**: `.agents/plans/11.l1-vocab-schema-menus.md`

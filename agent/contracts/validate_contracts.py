@@ -116,6 +116,25 @@ def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
                   f"level '{name}' referenced by the thesis is not present in the facts",
                   "thesis")
 
+    # SEM_DOL_WRONG_SIDE (plan 12 Fix 2): a directional thesis's DOL (draw-on-liquidity) must
+    # sit on the bias side of the current price — an UP thesis draws to a pool ABOVE price, a
+    # DOWN thesis to a pool BELOW price. A DOL on the wrong side is already reached (or being
+    # reached against the bias), so the exhaustion (`price_beyond(DOL)`) is trivially/instantly
+    # satisfiable — a bogus "completion". This hard-rejects the class regardless of menu
+    # correctness (belt-and-suspenders to the menu's proximity guard).
+    now_price = facts.get("now_price")
+    dol_price = (t.dol or {}).get("price") if isinstance(t.dol, dict) else None
+    if t.is_directional() and isinstance(now_price, (int, float)) \
+            and isinstance(dol_price, (int, float)):
+        if t.bias == "UP" and dol_price < now_price - _EPS:
+            r.add("semantic", "SEM_DOL_WRONG_SIDE",
+                  f"UP thesis but DOL {dol_price} is below current price {now_price} "
+                  "(a draw must sit above price)", "thesis.dol")
+        elif t.bias == "DOWN" and dol_price > now_price + _EPS:
+            r.add("semantic", "SEM_DOL_WRONG_SIDE",
+                  f"DOWN thesis but DOL {dol_price} is above current price {now_price} "
+                  "(a draw must sit below price)", "thesis.dol")
+
 
 # --------------------------------------------------------------------------- #
 # Trade plan                                                                   #

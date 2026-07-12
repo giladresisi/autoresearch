@@ -143,6 +143,34 @@ def test_low_conf_max_age_recalls_l1():
     assert d.state == State.THESIS_LOW_CONF
 
 
+def test_low_conf_default_max_age_recalls_l1():
+    """Plan 12 Fix 1: a valid low-conf thesis with a 0/absent model-authored max_age (and no
+    firing recall event) re-calls L1 at the code-enforced default (60m) instead of leaving the
+    executor blind all session (the THESIS_LOW_CONF analog of the 07-02 th_04 20.5h wait)."""
+    d = _director()
+    d.on_session_open(T0, "facts")
+    d.on_thesis_arrived(_thesis(confidence="LOW", recall={"events": [], "max_age_min": 0}), ts=T0)
+    assert d.state == State.THESIS_LOW_CONF
+    before = len(d.provider.thesis_reqs)
+    d.on_bar(T0, _mv(now=T0 + pd.Timedelta(minutes=59)))
+    assert len(d.provider.thesis_reqs) == before        # default TTL not yet reached
+    d.on_bar(T0, _mv(now=T0 + pd.Timedelta(minutes=61)))
+    assert len(d.provider.thesis_reqs) == before + 1     # re-asked at the default
+    assert d.state == State.THESIS_LOW_CONF              # a re-ask, not a death
+
+
+def test_low_conf_sooner_max_age_respected():
+    """A declared max_age BELOW the default is respected (re-call sooner)."""
+    d = _director()
+    d.on_session_open(T0, "facts")
+    d.on_thesis_arrived(_thesis(confidence="LOW", recall={"events": [], "max_age_min": 15}), ts=T0)
+    before = len(d.provider.thesis_reqs)
+    d.on_bar(T0, _mv(now=T0 + pd.Timedelta(minutes=14)))
+    assert len(d.provider.thesis_reqs) == before
+    d.on_bar(T0, _mv(now=T0 + pd.Timedelta(minutes=16)))
+    assert len(d.provider.thesis_reqs) == before + 1
+
+
 def test_failsafe_thesis_schedules_l1_recall_at_max_age():
     # Plan 11 Phase 4: the failsafe thesis now carries recall.max_age_min=60, so a
     # failsafed L1 call re-asks at +60 instead of leaving the executor blind all session.

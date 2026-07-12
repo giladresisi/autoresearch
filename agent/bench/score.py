@@ -40,11 +40,38 @@ def estimate_cost(usage: dict, model: str = "default") -> float:
     ) / 1_000_000.0
 
 
+# plan 12 Fix 2 — a completion is SUSPECT when it fired within this many minutes of arrival
+# AND the DOL was already reached (non-positive signed distance) at arrival. Such a lifecycle
+# never actually drew to its DOL (07-02 th_02: DOL crossed during the call-latency window →
+# bogus 2-minute completion); the flag lets metrics exclude it.
+SUSPECT_COMPLETION_MAX_MIN = 5.0
+
+
 def _ts(v) -> Optional[pd.Timestamp]:
     if v is None:
         return None
     t = pd.Timestamp(v)
     return t.tz_localize("America/New_York") if t.tzinfo is None else t
+
+
+def _suspect_completion(lc: dict, max_min: float = SUSPECT_COMPLETION_MAX_MIN) -> Optional[bool]:
+    """True iff a `completed` directional lifecycle is a race artifact: the DOL was already at
+    or beyond the arrival price (signed draw-distance <= 0) AND the completion fired within
+    `max_min` minutes of arrival. None for non-completions / non-directional. (plan 12 Fix 2)"""
+    if lc.get("cause") != "completed":
+        return None
+    bias, dol, arr = lc.get("bias"), lc.get("dol_price"), lc.get("arrival_price")
+    if bias not in ("UP", "DOWN") or not isinstance(dol, (int, float)) \
+            or not isinstance(arr, (int, float)):
+        return None
+    arrival_ts, died = _ts(lc.get("arrival_ts")), _ts(lc.get("died_ts"))
+    if arrival_ts is None or died is None:
+        return None
+    # signed distance the price still had to draw toward the DOL at arrival (>0 = a real draw
+    # ahead; <=0 = DOL already reached / on the wrong side).
+    signed_dist = (dol - arr) if bias == "UP" else (arr - dol)
+    minutes = (died - arrival_ts).total_seconds() / 60.0
+    return bool(signed_dist <= 0 and minutes <= max_min)
 
 
 def _false_kill(lc: dict, bars: pd.DataFrame, horizon: pd.Timedelta) -> Optional[bool]:
@@ -109,6 +136,7 @@ def score_date(summary: dict, source, cfg) -> dict:
         lc["false_kill"] = _false_kill(lc, bars, horizon)
         lc["late_kill_adverse"] = _late_kill_adverse(lc, bars)
         lc["lookahead_truncated"] = _lookahead_truncated(lc, bars, horizon)
+        lc["suspect_completion"] = _suspect_completion(lc)
 
     stood = [lc for lc in lifecycles if lc.get("stood")]
     completed = [lc for lc in stood if lc.get("cause") == "completed"]
@@ -156,6 +184,11 @@ def score_date(summary: dict, source, cfg) -> dict:
         "n_directional": len(stood),
         "n_completed": len(completed),
         "completion_rate": round(len(completed) / len(stood), 3) if stood else None,
+        # plan 12 Fix 2 — race-artifact completions (additive telemetry; completion_rate is
+        # deliberately left untouched so rescore of prior runs stays value-stable — the flag is
+        # the substrate for excluding these in a later metric).
+        "suspect_completion_count": sum(1 for lc in lifecycles
+                                        if lc.get("suspect_completion") is True),
         "false_kill_count": sum(1 for lc in lifecycles if lc.get("false_kill") is True),
         "median_late_kill_adverse": round(statistics.median(late_vals), 2) if late_vals else None,
         "churn": summary.get("n_calls", 0),

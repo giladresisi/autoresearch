@@ -42,7 +42,7 @@ from facts import ParquetFactsSource  # noqa: E402
 
 from confidence import confidence  # noqa: E402  (agent/confidence.py)
 from run_agent import decide_thesis, make_backend  # noqa: E402
-from schemas import failsafe_thesis  # noqa: E402  (agent/contracts)
+from schemas import effective_recall_max_age, failsafe_thesis  # noqa: E402  (agent/contracts)
 from validate_contracts import classify_predicates  # noqa: E402  (agent/contracts)
 
 RUNS_ROOT = os.path.join(_HERE, "runs")
@@ -53,6 +53,26 @@ RUNS_ROOT = os.path.join(_HERE, "runs")
 # --------------------------------------------------------------------------- #
 def _decision_id(date: str, i: int) -> str:
     return f"th_{date.replace('-', '')}_{i:02d}"
+
+
+def _enforce_default_recall(thesis: dict) -> None:
+    """Plan 12 Fix 1 — clamp the thesis's `recall.max_age_min` to the code-enforced default
+    in place (spec §2.1). A non-standing thesis whose model-authored max_age is 0/absent and
+    whose recall events never fire otherwise waits forever (07-02 diag: th_04 waited 20.5h).
+
+    Applied at GENERATION time (here), NOT in the lifecycle engine, ON PURPOSE: the bench
+    engine (_run_waiting) + `rescore` replay logged decisions verbatim, so a clamp inside
+    _run_waiting would retroactively rewrite the lifecycle boundaries of ALREADY-LOGGED runs
+    on rescore (breaking replay fidelity — plan 12 Fix-1 REQUIRED). Baking the clamped value
+    into the logged thesis instead makes the default TTL manifest only in NEW runs while
+    rescore of prior runs (whose logged max_age is untouched) stays byte-stable. Harmless for
+    a standing (HIGH/MEDIUM directional) thesis — _run_standing ignores recall entirely."""
+    recall = thesis.get("recall")
+    if not isinstance(recall, dict):
+        recall = {}
+    recall.setdefault("events", [])
+    recall["max_age_min"] = effective_recall_max_age(recall.get("max_age_min"))
+    thesis["recall"] = recall
 
 
 _EMPTY_MENU = {"n_menu_hit": 0, "n_escape_hatch": 0, "menu_hit_ratio": None,
@@ -150,6 +170,7 @@ def make_live_provider(source: ParquetFactsSource, backend, cfg: BenchConfig,
         thesis["issued_at"] = trigger_ts.isoformat()
         thesis["thesis_id"] = did
         thesis["facts_hash"] = fr.content_hash
+        _enforce_default_recall(thesis)        # plan 12 Fix 1 — default low-conf recall TTL
         calibrated_gate = confidence(thesis, fr.validator_dict)   # production value (audit)
         gate = _effective_gate(cfg, calibrated_gate, thesis, outcome.fallback)
         self_report = thesis.get("confidence")

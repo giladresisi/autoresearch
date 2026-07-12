@@ -25,6 +25,7 @@ def _metrics_lines(m: dict) -> list:
         f"- lifecycles: {m['n_lifecycles']}  (directional standing: {m['n_directional']})",
         f"- completion rate (directional): {_fmt(m['completion_rate'])}"
         f"  ({m['n_completed']}/{m['n_directional']})",
+        f"- suspect completions (race artifacts): {m.get('suspect_completion_count', 0)}",
         f"- false-kill count: {m['false_kill_count']}",
         f"- median late-kill adverse (pts): {_fmt(m['median_late_kill_adverse'])}",
         f"- churn (L1 calls): {m['churn']}",
@@ -43,7 +44,7 @@ def _metrics_lines(m: dict) -> list:
 _LC_COLS = ("decision_id", "cause", "cause_detail", "bias", "gate", "self_report",
             "born_ts", "arrival_ts", "died_ts", "time_alive_min", "arrival_price",
             "dol_level", "dol_price", "mfe", "mae", "dist_to_dol_pct",
-            "false_kill", "lookahead_truncated", "late_kill_adverse")
+            "false_kill", "lookahead_truncated", "late_kill_adverse", "suspect_completion")
 
 
 def _lifecycle_table(lifecycles: list) -> list:

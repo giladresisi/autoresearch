@@ -27,7 +27,7 @@ for _p in (_HERE, _AGENT, os.path.join(_AGENT, "contracts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from schemas import Thesis, TradePlan          # noqa: E402
+from schemas import Thesis, TradePlan, effective_recall_max_age  # noqa: E402
 from predicates import MarketView, eval_any    # noqa: E402
 from risk_gate import RiskGate, RiskGateConfig  # noqa: E402
 
@@ -360,7 +360,7 @@ class TradeDirector:
         if t is None:
             return
         events = (t.recall or {}).get("events")
-        if eval_any(events, mv) or self._ttl_expired(t.recall, self.thesis_issued_at, mv):
+        if eval_any(events, mv) or self._lowconf_ttl_expired(t.recall, self.thesis_issued_at, mv):
             self._call_l1(facts_ref, "recall", ts)
 
     def _maybe_recall_l2(self, ts, mv, facts_ref) -> None:
@@ -372,7 +372,10 @@ class TradeDirector:
             self._call_l2(facts_ref, "recall", ts)
 
     def _ttl_expired(self, recall, issued_at, mv) -> bool:
-        """max_age TTL: elapsed minutes since the decision issued >= max_age_min."""
+        """max_age TTL: elapsed minutes since the decision issued >= max_age_min. Used for
+        the standing-decision hard-expiry paths (confident thesis / plan / WAIT), which honor
+        the declared max_age verbatim and do NOT apply the low-conf default (spec §5: no
+        change to standing-thesis TTL tiers)."""
         if not recall or issued_at is None or mv is None or mv.now is None:
             return False
         max_age = recall.get("max_age_min")
@@ -380,6 +383,18 @@ class TradeDirector:
             return False
         elapsed = (mv.now - issued_at).total_seconds() / 60.0
         return elapsed >= max_age
+
+    def _lowconf_ttl_expired(self, recall, issued_at, mv) -> bool:
+        """Plan 12 Fix 1 — the THESIS_LOW_CONF re-ask TTL, code-enforced to a default so a
+        valid low-conf thesis with a 0/absent model-authored max_age (and no firing recall
+        event) is re-called at the default instead of leaving the executor blind all session.
+        A smaller declared max_age is respected; a missing/zero/large one is clamped to the
+        default (schemas.effective_recall_max_age)."""
+        if issued_at is None or mv is None or mv.now is None:
+            return False
+        eff = effective_recall_max_age((recall or {}).get("max_age_min"))
+        elapsed = (mv.now - issued_at).total_seconds() / 60.0
+        return elapsed >= eff
 
     # ------------------------------------------------------------------ #
     # Risk gate                                                            #

@@ -255,6 +255,16 @@ def facts_to_validator_dict(bundle: FactsBundle) -> dict:
 # --------------------------------------------------------------------------- #
 _EPS = 1e-6
 
+# plan 12 Fix 2 — minimum distance (pts) a DOL pool must sit beyond current price to be offered
+# as a draw. A pool nearer than this is one that price is effectively already sitting on: there
+# is no forward draw to it, and offering it is race-prone — price can cross the level within the
+# call-latency window before the thesis stands, satisfying `price_beyond(DOL)` at arrival for a
+# bogus minutes-long "completion" (07-02 th_02: DOL was 0.75 pts away). Deliberately conservative
+# (catches the already-at-the-pool case without over-excluding legitimate near-term targets); the
+# validator's SEM_DOL_WRONG_SIDE check + the scoring suspect_completion flag are the
+# belt-and-suspenders for the residual latency race.
+DOL_MIN_DRAW_DISTANCE_PTS = 5.0
+
 # Predicate-menu generation config: families × level-classes × param variants. Adding a
 # family / level-class / variant here changes the menu WITHOUT touching the generator, and
 # nothing here names a specific level — level names are resolved from the facts at build
@@ -280,7 +290,16 @@ def _thesis_side(direction: str) -> str:
 
 def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float) -> dict:
     """Eligible target pools per direction: in-facts, unswept AND undepleted, on the
-    correct side of current price. UP draws sit above price (nearest first); DOWN below."""
+    correct side of current price, AND at least DOL_MIN_DRAW_DISTANCE_PTS away. UP draws sit
+    above price (nearest first); DOWN below.
+
+    Proximity guard (plan 12 Fix 2): a pool nearer than DOL_MIN_DRAW_DISTANCE_PTS to price is
+    EXCLUDED — price is already sitting on it, so there is no forward draw, and offering it is
+    race-prone: between the facts snapshot and the thesis's arrival (born + call latency) price
+    can cross the level, so the exhaustion (`price_beyond(DOL)`) is already satisfied at arrival
+    and the thesis "completes" in minutes on a level it never actually drew to. This was the
+    07-02 th_02 bug: DOL prev1_day_low was 0.75 pts below price at facts build; price crossed it
+    during the latency window → bogus 2-minute completion."""
     out = {"UP": [], "DOWN": []}
     if not isinstance(now_price, (int, float)):
         return out
@@ -290,6 +309,9 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float) -> dict:
             continue
         v = vlevels.get(name, {})
         if v.get("swept") or v.get("depleted"):
+            continue
+        # Too close to be a draw (price is already sitting on the pool) → race-prone, spent.
+        if abs(price - now_price) < DOL_MIN_DRAW_DISTANCE_PTS:
             continue
         # A draw is a resistance ABOVE price (up) or a support BELOW price (down); a
         # level whose price sits on the wrong side of its own tag (a resistance now below

@@ -10,10 +10,35 @@ import jsonschema
 from jsonschema import Draft202012Validator as V
 
 from schemas import (
-    _ATOM_REFS, THESIS_SCHEMA, TRADE_PLAN_SCHEMA, predicate_schema,
-    failsafe_plan, failsafe_thesis,
+    _ATOM_REFS, DEFAULT_LOWCONF_RECALL_MAX_AGE_MIN, THESIS_SCHEMA, TRADE_PLAN_SCHEMA,
+    effective_recall_max_age, predicate_schema, failsafe_plan, failsafe_thesis,
 )
 from predicates import validate_predicate
+
+
+# --------------------------------------------------------------------------- #
+# Plan 12 Fix 1 — code-enforced default low-conf recall max-age                 #
+# --------------------------------------------------------------------------- #
+def test_effective_recall_max_age_clamps_to_default():
+    D = DEFAULT_LOWCONF_RECALL_MAX_AGE_MIN
+    assert D == 60
+    # missing / zero / negative / non-numeric → default.
+    assert effective_recall_max_age(None) == D
+    assert effective_recall_max_age(0) == D
+    assert effective_recall_max_age(-5) == D
+    assert effective_recall_max_age("x") == D
+    assert effective_recall_max_age(True) == D          # bool is not a valid duration
+    # larger than the cap → clamped DOWN to the default.
+    assert effective_recall_max_age(600) == D
+    assert effective_recall_max_age(120) == D
+    # smaller than the default → respected (the model may ask to be re-called sooner).
+    assert effective_recall_max_age(30) == 30
+    assert effective_recall_max_age(1) == 1
+    assert effective_recall_max_age(60) == 60
+    # a custom cap is honored both ways.
+    assert effective_recall_max_age(0, default=45) == 45
+    assert effective_recall_max_age(90, default=45) == 45
+    assert effective_recall_max_age(20, default=45) == 20
 
 _PV = V(predicate_schema())
 

@@ -245,3 +245,46 @@ def test_failsafe_recall_max_age_re_calls(monkeypatch=None):
     res = run_day(bars, provider, cfg(latency_sec=0), open_ts, end_ts, "2026-06-25")
     assert res.n_calls >= 2
     assert all(lc.cause == "failsafe" for lc in res.lifecycles)
+
+
+def test_enforce_default_recall_clamps():
+    """Plan 12 Fix 1: the provider-side clamp bakes the effective max_age into the logged
+    thesis (0/absent → default 60; smaller respected; larger clamped down)."""
+    from run_bench import _enforce_default_recall
+    t0 = {"recall": {"events": [], "max_age_min": 0}}
+    _enforce_default_recall(t0)
+    assert t0["recall"]["max_age_min"] == 60
+    t30 = {"recall": {"events": [], "max_age_min": 30}}
+    _enforce_default_recall(t30)
+    assert t30["recall"]["max_age_min"] == 30
+    t600 = {"recall": {"events": [], "max_age_min": 600}}
+    _enforce_default_recall(t600)
+    assert t600["recall"]["max_age_min"] == 60
+    tmiss = {}                                    # no recall block at all → synthesized
+    _enforce_default_recall(tmiss)
+    assert tmiss["recall"] == {"events": [], "max_age_min": 60}
+
+
+def test_default_lowconf_recall_re_calls_at_default():
+    """Plan 12 Fix 1: a VALID (non-failsafe) low-conf thesis whose model-authored recall
+    never fires (max_age 0, no events) is re-called at the code-enforced default (60m) once
+    the provider bakes the clamp — not left waiting to session end (07-02 th_04 waited 20.5h).
+    """
+    from run_bench import _enforce_default_recall
+    bars = mkbars("2026-06-25 09:00", closes=[50] * 200)    # 200 min > 3× 60
+    open_ts = pd.Timestamp("2026-06-25 09:00", tz=TZ)
+    end_ts = pd.Timestamp("2026-06-25 12:20", tz=TZ)
+
+    def provider(trigger_ts):
+        th = thesis(bias="NEUTRAL", dol_price=None, confidence="LOW",
+                    recall={"events": [], "max_age_min": 0})
+        _enforce_default_recall(th)               # provider-side clamp (Design B)
+        assert th["recall"]["max_age_min"] == 60
+        return decision(trigger_ts, th, gate="LOW",
+                        decision_id=f"lc_{trigger_ts.strftime('%H%M')}")
+
+    res = run_day(bars, provider, cfg(latency_sec=0), open_ts, end_ts, "2026-06-25")
+    assert res.n_calls >= 2                        # re-called, not one span
+    assert res.lifecycles[0].cause == "recall"     # non-failsafe waiting death
+    assert res.lifecycles[0].stood is False
+    assert res.lifecycles[0].died_ts == open_ts + pd.Timedelta(minutes=60)

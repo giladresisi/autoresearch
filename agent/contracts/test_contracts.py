@@ -123,6 +123,40 @@ def test_thesis_level_not_in_facts_rejected():
     assert "SEM_LEVEL_NOT_IN_FACTS" in validate_thesis(t, FACTS).codes()
 
 
+def test_thesis_dol_wrong_side_down_rejected():
+    # DOWN thesis but the DOL sits ABOVE current price (19800) → SEM_DOL_WRONG_SIDE. This is
+    # the 07-02 th_02 class: a "low" pool above price is already reached, so the exhaustion is
+    # trivially satisfied and the thesis "completes" bogusly.
+    t = {
+        "bias": "DOWN", "regime": "RANGE", "confidence": "MEDIUM",
+        "dol": {"level": "prev_day_high", "price": 20000.0},         # above 19800 — wrong side
+        "falsified_if": [],
+        "exhausted_if": [{"type": "price_beyond", "price": 20000, "side": "below"}],
+        "recall": {"events": [], "max_age_min": 60}, "reasoning": "x",
+    }
+    assert "SEM_DOL_WRONG_SIDE" in validate_thesis(t, FACTS).codes()
+
+
+def test_thesis_dol_wrong_side_up_rejected():
+    t = valid_thesis()                                              # UP
+    t["dol"] = {"level": "prev_day_low", "price": 19500.0}          # below 19800 — wrong for UP
+    assert "SEM_DOL_WRONG_SIDE" in validate_thesis(t, FACTS).codes()
+
+
+def test_thesis_dol_correct_side_accepted():
+    # A DOWN thesis whose DOL sits below price is on the correct side (no SEM_DOL_WRONG_SIDE).
+    t = {
+        "bias": "DOWN", "regime": "RANGE", "confidence": "MEDIUM",
+        "dol": {"level": "prev_day_low", "price": 19500.0},         # below 19800 — correct
+        "falsified_if": [],
+        "exhausted_if": [{"type": "price_beyond", "price": 19500, "side": "below"}],
+        "recall": {"events": [], "max_age_min": 60}, "reasoning": "x",
+    }
+    r = validate_thesis(t, FACTS)
+    assert "SEM_DOL_WRONG_SIDE" not in r.codes()
+    assert r.ok, r.messages()
+
+
 def test_target_wrong_side_rejected():
     p = valid_setup()
     p["exit"]["target"] = {"level": "prev_day_low", "price": 19500.0}   # below price, LONG

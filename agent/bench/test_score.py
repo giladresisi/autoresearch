@@ -114,6 +114,34 @@ def test_distance_covered_arithmetic():
     assert 0.0 <= lc.dist_to_dol_pct <= 100.0
 
 
+def test_suspect_completion_flags_race_artifact():
+    # th_02-shaped: DOWN thesis whose DOL (100) already sits ABOVE the arrival price (90) — the
+    # draw is already reached — and the completion fires 1.5 min after arrival → suspect.
+    bars = mkbars("2026-06-25 09:00", closes=[90] * 20)
+    src = FakeSource(bars, OPEN, END)
+    lc = _lc("completed", bias="DOWN", dol=100.0, died="2026-06-25 09:03", arrival_price=90.0)
+    enriched = score.score_date(_summary([lc]), src, _cfg())
+    assert enriched["lifecycles"][0]["suspect_completion"] is True
+    assert enriched["metrics"]["suspect_completion_count"] == 1
+
+
+def test_normal_completion_not_suspect():
+    # UP thesis, DOL 60 well above arrival 50 (a real 10-pt draw), completes 8.5 min later.
+    bars = mkbars("2026-06-25 09:00", closes=[50] * 20, highs=[61] * 20)
+    src = FakeSource(bars, OPEN, END)
+    lc = _lc("completed", bias="UP", dol=60.0, died="2026-06-25 09:10", arrival_price=50.0)
+    enriched = score.score_date(_summary([lc]), src, _cfg())
+    assert enriched["lifecycles"][0]["suspect_completion"] is False
+    assert enriched["metrics"]["suspect_completion_count"] == 0
+
+
+def test_suspect_completion_none_for_non_completion():
+    bars = mkbars("2026-06-25 09:00", closes=[50] * 20, highs=[51] * 20, lows=[49] * 20)
+    src = FakeSource(bars, OPEN, END)
+    enriched = score.score_date(_summary([_lc("falsified")]), src, _cfg())
+    assert enriched["lifecycles"][0]["suspect_completion"] is None
+
+
 def test_late_kill_adverse_computed_for_falsified():
     # ref 50, peak favorable +5 (high 55), falsified at a bar with high 50 → give-back 5.
     bars = mkbars("2026-06-25 09:00", closes=[50] * 12,
