@@ -248,6 +248,7 @@ class FactsBundle:
     weekly_mid: Optional[float] = None  # MNQ running week mid at now (thesis.md P3/P4 input)
     swept_at: dict = field(default_factory=dict)  # swept_at[tkr][name] = ts | None
     htf_close_status: dict = field(default_factory=dict)  # [tkr][name] = {"1h":.., "4h":..}
+    smt_candidates: list = field(default_factory=list)     # cross-ticker divergence candidates
     # S8 menus (plan 11): computed lazily by facts_to_validator_dict / render_menus_text.
     menus: Optional[dict] = None
 
@@ -722,11 +723,25 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
         tag = ""
         if (t1 is None) != (t2 is None):
             tag = "  <-- WICK DIVERGENCE CANDIDATE (lead " + ("MNQ" if t1 is not None else "MES") + ")"
+            swept_tkr, unswept_tkr = ("MNQ", "MES") if t1 is not None else ("MES", "MNQ")
+            bundle.smt_candidates.append({
+                "level": name, "tier": tier, "side": side,
+                "swept_ticker": swept_tkr, "unswept_ticker": unswept_tkr,
+                "swept_at": t1 if t1 is not None else t2, "type": "wick",
+                "meaningful": tier in ("day", "week"),
+            })
         elif t1 is not None and t2 is not None and abs((t1 - t2).total_seconds()) > 900:
             tag = "  <-- both swept, >15min apart (transient divergence window)"
         btag = ""
         if (tb1 is None) != (tb2 is None):
             btag = "  <-- BODY(15m) DIVERGENCE CANDIDATE (lead " + ("MNQ" if tb1 is not None else "MES") + ")"
+            swept_tkr_b, unswept_tkr_b = ("MNQ", "MES") if tb1 is not None else ("MES", "MNQ")
+            bundle.smt_candidates.append({
+                "level": name, "tier": tier, "side": side,
+                "swept_ticker": swept_tkr_b, "unswept_ticker": unswept_tkr_b,
+                "swept_at": tb1 if tb1 is not None else tb2, "type": "body",
+                "meaningful": tier in ("day", "week"),
+            })
         L(f"{name} [{side}, {tier}]: wick MNQ {t1 or 'not swept'} | MES {t2 or 'not swept'}{tag}")
         L(f"{'':>{len(name)}}   body MNQ {tb1 or '—'} | MES {tb2 or '—'}{btag}")
         # Laggard reach: how close the NON-sweeping ticker came, and when — the freshness of

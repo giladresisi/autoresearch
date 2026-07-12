@@ -281,3 +281,29 @@ def test_htf_close_status_wired_into_compute_facts_both_tickers():
             assert status is not None, name
             if swept_ts is None:
                 assert status == {"1h": None, "4h": None}
+
+
+def test_smt_candidates_meaningful_flag_matches_tier():
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    for cand in bundle.smt_candidates:
+        assert cand["meaningful"] == (cand["tier"] in ("day", "week"))
+        assert cand["swept_ticker"] != cand["unswept_ticker"]
+        assert cand["swept_ticker"] in ("MNQ", "MES")
+        assert cand["type"] in ("wick", "body")
+
+
+def test_smt_candidates_wick_count_matches_rendered_tags():
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    text = render_facts_text(bundle)
+    wick_candidates = [c for c in bundle.smt_candidates if c["type"] == "wick"]
+    assert len(wick_candidates) == text.count("WICK DIVERGENCE CANDIDATE")
+
+
+def test_smt_candidates_body_count_matches_rendered_tags():
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    text = render_facts_text(bundle)
+    body_candidates = [c for c in bundle.smt_candidates if c["type"] == "body"]
+    assert len(body_candidates) == text.count("BODY(15m) DIVERGENCE CANDIDATE")
