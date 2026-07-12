@@ -62,3 +62,13 @@ def test_degraded_before_data_start(source):
     res = source.build_facts(pd.Timestamp("2026-04-20 12:00:00", tz=TZ))
     assert res.degraded
     assert res.error
+
+
+def test_evidence_text_populated_and_not_in_content_hash(source):
+    boundary = pd.Timestamp("2026-06-25 08:50:00", tz=TZ)
+    res = source.build_facts(boundary)
+    assert not res.degraded
+    assert res.evidence_text
+    assert res.evidence_text.startswith("## S9 THESIS EVIDENCE")
+    # the core content_hash (S0-S7 only) must not change when evidence_text exists.
+    assert res.content_hash == hashlib.sha256(res.text.encode("utf-8")).hexdigest()
