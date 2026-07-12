@@ -1,0 +1,179 @@
+"""Phase-1 schema + cross-level contract validation tests (plan §Phase 1)."""
+
+from schemas import Thesis, TradePlan
+from validate_contracts import validate_thesis, validate_trade_plan
+
+
+# --------------------------------------------------------------------------- #
+# Fixtures                                                                     #
+# --------------------------------------------------------------------------- #
+FACTS = {
+    "now_price": 19800.0,
+    "levels": {
+        "prev_day_high": {"price": 20000.0, "side": "high", "swept": False, "depleted": False},
+        "intraday_high": {"price": 19950.0, "side": "high", "swept": False, "depleted": False},
+        "prev_day_low": {"price": 19500.0, "side": "low", "swept": False, "depleted": False},
+        "spent_pool": {"price": 19960.0, "side": "high", "swept": True, "depleted": True},
+    },
+}
+
+
+def valid_thesis() -> dict:
+    return {
+        "bias": "UP", "regime": "TREND", "confidence": "HIGH",
+        "dol": {"level": "prev_day_high", "price": 20000.0},
+        "falsified_if": [{"type": "n_closes_beyond", "price": 19500, "side": "below",
+                          "tf": "5m", "n": 2}],
+        "exhausted_if": [{"type": "price_beyond", "price": 20000, "side": "above"}],
+        "recall": {"events": [], "max_age_min": 60},
+        "reasoning": "audit",
+    }
+
+
+def valid_setup() -> dict:
+    return {
+        "plan_id": "pl_1", "thesis_id": "th_1", "verdict": "SETUP",
+        "entry": {"direction": "LONG",
+                  "mechanisms": [{"kind": "confirmation_bar", "params": {"tf": "5m"},
+                                  "valid_while": []}]},
+        "stop": {"price": 19600.0},                 # above the 19500 falsification level
+        "breakeven": {"raise_to_be_if": []},
+        "exit": {"target": {"level": "intraday_high", "price": 19950.0},
+                 "management": [{"kind": "raise_to_breakeven", "params": {}, "when": []}]},
+        "setup_falsified_if": [],
+        "setup_exhausted_if": [],
+        "on_dol_falsified": {"action": "MARKET_CLOSE", "params": {}},
+        "recall": None, "reasoning": "audit",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Schema tests                                                                 #
+# --------------------------------------------------------------------------- #
+def test_valid_thesis_accepted():
+    assert validate_thesis(valid_thesis(), FACTS).ok
+
+
+def test_valid_setup_accepted():
+    r = validate_trade_plan(valid_setup(), thesis=valid_thesis(), facts=FACTS)
+    assert r.ok, r.messages()
+
+
+def test_unknown_mechanism_kind_rejected():
+    p = valid_setup()
+    p["entry"]["mechanisms"][0]["kind"] = "telepathy"
+    r = validate_trade_plan(p, thesis=valid_thesis(), facts=FACTS)
+    assert "SYN_UNKNOWN_MECHANISM" in r.codes()
+
+
+def test_setup_missing_on_dol_falsified_rejected():
+    p = valid_setup()
+    p["on_dol_falsified"] = None
+    r = validate_trade_plan(p, thesis=valid_thesis(), facts=FACTS)
+    assert "SYN_MISSING_ON_DOL_FALSIFIED" in r.codes()
+
+
+def test_setup_bad_on_dol_action_rejected():
+    p = valid_setup()
+    p["on_dol_falsified"] = {"action": "PRAY", "params": {}}
+    r = validate_trade_plan(p, thesis=valid_thesis(), facts=FACTS)
+    assert "SYN_MISSING_ON_DOL_FALSIFIED" in r.codes()
+
+
+def test_wait_with_no_recall_rejected():
+    plan = {"verdict": "WAIT", "recall": None, "reasoning": "x"}
+    r = validate_trade_plan(plan, thesis=valid_thesis(), facts=FACTS)
+    assert "SYN_WAIT_MISSING_RECALL" in r.codes()
+
+
+def test_wait_with_recall_accepted():
+    plan = {"verdict": "WAIT",
+            "recall": {"events": [{"type": "level_swept", "name": "prev_day_low"}],
+                       "max_age_min": 30},
+            "reasoning": "x"}
+    r = validate_trade_plan(plan, thesis=valid_thesis(), facts=FACTS)
+    assert r.ok, r.messages()
+
+
+def test_setup_bad_predicate_rejected():
+    p = valid_setup()
+    p["setup_falsified_if"] = [{"type": "not_a_predicate"}]
+    r = validate_trade_plan(p, thesis=valid_thesis(), facts=FACTS)
+    assert "SYN_BAD_PREDICATE" in r.codes()
+
+
+def test_thesis_directional_missing_dol_rejected():
+    t = valid_thesis()
+    t["dol"] = None
+    assert "SYN_DIRECTIONAL_MISSING_DOL" in validate_thesis(t, FACTS).codes()
+
+
+def test_thesis_bad_bias_rejected():
+    t = valid_thesis()
+    t["bias"] = "SIDEWAYS"
+    assert "SYN_BAD_BIAS" in validate_thesis(t, FACTS).codes()
+
+
+# --------------------------------------------------------------------------- #
+# Semantic tests                                                               #
+# --------------------------------------------------------------------------- #
+def test_thesis_level_not_in_facts_rejected():
+    t = valid_thesis()
+    t["falsified_if"] = [{"type": "level_swept", "name": "ghost_level"}]
+    assert "SEM_LEVEL_NOT_IN_FACTS" in validate_thesis(t, FACTS).codes()
+
+
+def test_target_wrong_side_rejected():
+    p = valid_setup()
+    p["exit"]["target"] = {"level": "prev_day_low", "price": 19500.0}   # below price, LONG
+    r = validate_trade_plan(p, thesis=valid_thesis(), facts=FACTS)
+    assert "SEM_TARGET_WRONG_SIDE" in r.codes()
+
+
+def test_target_swept_depleted_rejected():
+    p = valid_setup()
+    p["exit"]["target"] = {"level": "spent_pool", "price": 19960.0}
+    r = validate_trade_plan(p, thesis=valid_thesis(), facts=FACTS)
+    assert "SEM_TARGET_SWEPT_DEPLETED" in r.codes()
+
+
+# --------------------------------------------------------------------------- #
+# Cross-level tests                                                            #
+# --------------------------------------------------------------------------- #
+def test_stop_trips_thesis_falsification_rejected():
+    p = valid_setup()
+    p["stop"] = {"price": 19400.0}          # below 19500 → trips n_closes_beyond(below)
+    r = validate_trade_plan(p, thesis=valid_thesis(), facts=FACTS)
+    assert "XL_STOP_TRIPS_THESIS_FALSIFICATION" in r.codes()
+
+
+def test_target_equal_to_dol_exhaustion_rejected():
+    p = valid_setup()
+    p["exit"]["target"] = {"level": "prev_day_high", "price": 20000.0}   # == DOL price
+    r = validate_trade_plan(p, thesis=valid_thesis(), facts=FACTS)
+    assert "XL_TARGET_AT_DOL" in r.codes()
+
+
+def test_target_beyond_exhaustion_rejected():
+    p = valid_setup()
+    # exhausted_if fires strictly above 20000; a target past it trips the predicate check.
+    p["exit"]["target"] = {"level": "prev_day_high", "price": 20100.0}
+    r = validate_trade_plan(p, thesis=valid_thesis(), facts=FACTS)
+    assert "XL_TARGET_IS_THESIS_EXHAUSTION" in r.codes()
+
+
+def test_valid_pair_accepted():
+    r = validate_trade_plan(valid_setup(), thesis=valid_thesis(), facts=FACTS)
+    assert r.ok, r.messages()
+
+
+def test_dataclass_roundtrip():
+    t = Thesis.from_dict(valid_thesis())
+    assert Thesis.from_dict(t.to_dict()).bias == "UP"
+    p = TradePlan.from_dict(valid_setup())
+    assert p.is_setup() and p.direction() == "LONG"
+    assert TradePlan.from_dict(p.to_dict()).plan_id == "pl_1"
+    # to_dict is stable (no mutation of the source).
+    src = valid_setup()
+    TradePlan.from_dict(src).to_dict()
+    assert src == valid_setup()

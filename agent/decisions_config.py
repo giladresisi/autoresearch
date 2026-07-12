@@ -23,8 +23,38 @@ def _env_flag(name: str, default: bool) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
-# Master flag: env ACT_AI_DECISIONS=1 overrides the default-OFF constant.
-AI_DECISIONS_ENABLED: bool = _env_flag("ACT_AI_DECISIONS", False)
+# AI-trader v2 operating mode (spec §3): off | shadow | primary, default off.
+#   off      — byte-identical to the hypothesis-driven system (regression gate).
+#   shadow   — the v1 observation-only decisions engine runs as today (no trades from AI).
+#   primary  — the v2 loop (TradeDirector) drives entries/management.
+# ACT_AI_MODE takes precedence; the legacy ACT_AI_DECISIONS=1 flag aliases to `shadow`
+# so existing shadow runs keep working unchanged.
+_AI_MODES = ("off", "shadow", "primary")
+
+
+def resolve_ai_mode() -> str:
+    m = os.environ.get("ACT_AI_MODE")
+    if m is not None:
+        ml = m.strip().lower()
+        if ml in _AI_MODES:
+            return ml
+        if ml:                              # set but unrecognized (e.g. a typo "primry"):
+            import warnings                 # warn (not stdout) so a typo never silently
+            warnings.warn(                  # disables primary — then fall through to legacy/off.
+                f"ACT_AI_MODE={m!r} is not one of {_AI_MODES}; treating as 'off'/legacy. "
+                "Check for a typo (e.g. 'primary').", RuntimeWarning, stacklevel=2)
+    if _env_flag("ACT_AI_DECISIONS", False):
+        return "shadow"                     # legacy alias
+    return "off"
+
+
+AI_MODE: str = resolve_ai_mode()
+
+# Master flag: True while the v1 observation engine (shadow) should be constructed. Kept
+# for backward compatibility with existing call sites (default OFF ⇒ byte-identical).
+AI_DECISIONS_ENABLED: bool = (AI_MODE == "shadow")
+# The v2 primary loop construction gate.
+AI_PRIMARY_ENABLED: bool = (AI_MODE == "primary")
 
 # Phase-0 measured mean of the two-call cycle (min 66.1 / mean 78.7 / max 106.8 s over
 # the 5 calibration decision.json audits) → rounded to 79. arrival = trigger + this.
@@ -64,6 +94,7 @@ class DecisionsConfig:
     and a test can override a field without mutating global module state."""
 
     enabled: bool = AI_DECISIONS_ENABLED
+    mode: str = AI_MODE
     latency_sec: float = DECISION_LATENCY_SEC
     churn_guard: bool = DECISIONS_CHURN_GUARD
     checkpoints_et: tuple = DECISIONS_CHECKPOINTS_ET

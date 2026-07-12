@@ -43,7 +43,8 @@ from typing import Any, Optional
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 _CALIB_DIR = os.path.join(REPO_ROOT, "calibration")
-for _p in (HERE, _CALIB_DIR):
+_CONTRACTS_DIR = os.path.join(HERE, "contracts")
+for _p in (HERE, _CALIB_DIR, _CONTRACTS_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -428,8 +429,19 @@ class StubBackend(Backend):
                        if responses is not None else None)
 
     def _canned(self, schema: dict) -> dict:
-        fs = failsafe_decision()
         props = schema.get("properties", {})
+        # v2 thesis / trade-plan schemas (spec §2) — first-class stub paths.
+        if "bias" in props:
+            from schemas import failsafe_thesis
+            out = copy.deepcopy(failsafe_thesis())
+            out["reasoning"] = "stub deterministic neutral/low thesis (offline backend)"
+            return out
+        if "verdict" in props:
+            from schemas import failsafe_plan
+            out = copy.deepcopy(failsafe_plan())
+            out["reasoning"] = "stub deterministic WAIT plan (offline backend)"
+            return out
+        fs = failsafe_decision()
         block = fs["daily_trend"] if "drivers" in props else fs["next_move"]
         out = copy.deepcopy(block)
         out["reasoning"] = "stub deterministic neutral/low decision (offline backend)"
@@ -748,6 +760,70 @@ def decide_next(facts_text: str, context_text: str, facts: dict, standing_daily:
             validate({"daily_trend": standing_daily, "next_move": n}, facts=facts)),
         failsafe_block=fs["next_move"],
         derive_block=_derive_next_arithmetic,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# AI-trader v2 call types (spec §2) — thesis (L1) + trade plan (L2).           #
+# These reuse the SAME backend / caching / validate-retry machinery; the KB    #
+# system prompt is unchanged (KB restructuring is out of scope). The task tail #
+# is a minimal skeleton — level internals (prompt content, calibration) are    #
+# deferred; StubBackend paths are first-class (offline determinism).           #
+# --------------------------------------------------------------------------- #
+_TASK_THESIS = (
+    "TASK — L1 thesis decision (AI-trader v2).\n"
+    "Decide where the market is going and what would prove you wrong, as of 'now' (the "
+    "last S0 timestamp). Return a thesis JSON matching the schema: bias (UP/DOWN/NEUTRAL), "
+    "regime, a DOL (draw-on-liquidity: a level present in the facts, with its price) when "
+    "directional, and structured falsified_if / exhausted_if / recall predicates drawn "
+    "ONLY from the closed predicate vocabulary. Every level named in a predicate or the "
+    "DOL must exist in the facts. confidence is your self-report (audit-only; the executor "
+    "computes the effective gate). Return JSON matching the schema."
+)
+_TASK_PLAN = (
+    "TASK — L2 trade-plan decision (AI-trader v2).\n"
+    "Given the standing thesis below, decide whether and how to engage: return SETUP or "
+    "WAIT matching the schema. A SETUP carries entry mechanisms (closed enum kinds), a "
+    "direction, a stop, an exit target (a level in the facts, unswept/undepleted, on the "
+    "correct side of price and BEFORE the thesis DOL), management mechanisms, structured "
+    "setup_falsified_if / setup_exhausted_if predicates, and a MANDATORY on_dol_falsified "
+    "action. The stop must NOT sit where a thesis falsified_if predicate would fire. A WAIT "
+    "carries a recall (events + max_age_min). Return JSON matching the schema.\n\n"
+    "STANDING THESIS (verbatim):\n"
+)
+
+
+def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Backend, *,
+                  docs_root: str = DOCS_ROOT) -> CallOutcome:
+    """The L1 thesis call in isolation (validate-and-retry, failsafe on repeat).
+
+    Validation is the deterministic contract validator (schemas + predicate vocabulary +
+    semantic level checks). No code-derived arithmetic: the thesis carries no ledger; its
+    effective confidence is computed later by the calibration module (spec §8)."""
+    from schemas import THESIS_SCHEMA, failsafe_thesis
+    from validate_contracts import validate_thesis
+    system = build_system_prompt(docs_root)
+    user = _facts_context(facts_text, context_text) + _TASK_THESIS
+    return _run_call(
+        backend, system, user, THESIS_SCHEMA,
+        validate_block=lambda d: validate_thesis(d, facts),
+        failsafe_block=failsafe_thesis(),
+    )
+
+
+def decide_plan(facts_text: str, context_text: str, facts: dict, standing_thesis: dict,
+                backend: Backend, *, docs_root: str = DOCS_ROOT) -> CallOutcome:
+    """The L2 trade-plan call in isolation, CONSUMING a standing thesis verbatim. Validated
+    against the full contract (syntactic + semantic + cross-level vs the thesis)."""
+    from schemas import TRADE_PLAN_SCHEMA, failsafe_plan
+    from validate_contracts import validate_trade_plan
+    system = build_system_prompt(docs_root)
+    standing = json.dumps(standing_thesis, indent=2, sort_keys=True, default=str)
+    user = _facts_context(facts_text, context_text) + _TASK_PLAN + standing
+    return _run_call(
+        backend, system, user, TRADE_PLAN_SCHEMA,
+        validate_block=lambda p: validate_trade_plan(p, thesis=standing_thesis, facts=facts),
+        failsafe_block=failsafe_plan(),
     )
 
 

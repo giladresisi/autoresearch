@@ -254,9 +254,15 @@ class SessionPipeline:
         hist_mes_1m: pd.DataFrame,
         emit_fn: Callable[[dict], None],
         ai_decisions=None,
+        trade_primary=None,
     ) -> None:
         self._hist_mnq_1m = hist_mnq_1m
         self._hist_mes_1m = hist_mes_1m
+        # AI-trader v2 PRIMARY runner (spec §3 `primary`, flag-gated, default None). When set
+        # the v2 loop owns entries/management and the legacy hypothesis execution is bypassed
+        # (one-brain, spec §4); None ⇒ zero extra work, byte-identical by construction.
+        self._trade_primary = trade_primary
+        self._primary_opened = False
         # GIL-44 Phase-3 AI decisions engine, observation-only (flag-gated, default OFF).
         # When None the pipeline does ZERO extra work and touches ZERO state → byte-
         # identical by construction. When set, new-hypothesis emits and 1m checkpoints are
@@ -1044,6 +1050,22 @@ class SessionPipeline:
         ORDER EXECUTION (trend / hypothesis / strategy below) is UNCHANGED — it runs on
         every call regardless of `bar_complete` (1s-cadence fidelity preserved)."""
         if not self._daily_triggered:
+            return []
+
+        # PRIMARY mode (spec §3): the v2 loop owns entries/management; the legacy
+        # hypothesis/strategy execution below is bypassed (one-brain). Facts are recomputed
+        # from frames by the runner, so this needs no pipeline level state. Any failure is
+        # swallowed — the primary runner must never crash the bar loop.
+        if self._trade_primary is not None:
+            try:
+                frames = self._build_ai_decisions_frames(now, today_mnq, today_mes)
+                if not self._primary_opened:
+                    self._primary_opened = True
+                    self._trade_primary.on_session_open(now, frames)
+                else:
+                    self._trade_primary.on_bar(now, frames)
+            except Exception:
+                pass
             return []
 
         if self._ai_decisions is not None:

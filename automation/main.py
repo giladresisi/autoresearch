@@ -980,7 +980,30 @@ class SmtV2Dispatcher:
         # zero code path, byte-identical live. _session_closed guards the idempotent
         # per-second session-end teardown.
         self._worker = None
+        # AI-trader v2 PRIMARY runner (ACT_AI_MODE=primary; live enablement user-gated).
+        # Default OFF ⇒ never constructed ⇒ byte-identical live.
+        self._primary = None
         self._session_closed = False
+
+    @staticmethod
+    def _build_primary(out_dir, date):
+        """Build the v2 PrimaryRunner via the shared factory (never imports the heavy
+        backtest module). Returns None if disabled or on any construction failure — the live
+        session is NEVER aborted by an AI init problem. Uses the RecordingMechanismAdapter,
+        so constructing it has no broker side effects (the wire-but-do-not-enable path)."""
+        if os.environ.get("ACT_AI_MODE", "").strip().lower() != "primary":
+            return None
+        _agent_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agent")
+        if _agent_dir not in sys.path:
+            sys.path.insert(0, _agent_dir)
+        from decisions.live_factory import ai_primary_enabled, build_primary_runner
+        if not ai_primary_enabled():
+            return None
+        try:
+            return build_primary_runner(out_dir, date=str(date), threaded=True)
+        except Exception:
+            return None
 
     @staticmethod
     def _build_worker(out_dir):
@@ -1020,16 +1043,20 @@ class SmtV2Dispatcher:
         # out_dir = the live per-session folder (audit JSONL + snapshots land next to
         # comments.md). Degrade-to-None on any failure keeps live running.
         self._worker = None
+        self._primary = None
         try:
             self._worker = self._build_worker(SESSIONS_DIR / str(today))
+            self._primary = self._build_primary(SESSIONS_DIR / str(today), today)
         except Exception:
             self._worker = None
+            self._primary = None
         # If pipeline init raises, the exception propagates to the tick callback and this
         # method retries every second — close the just-built worker first, or each retry
         # leaks one polling daemon thread (review finding: worker-thread churn).
         try:
             self._pipeline = SessionPipeline(mnq_1m_df, mes_1m_df, self._emit,
-                                             ai_decisions=self._worker)
+                                             ai_decisions=self._worker,
+                                             trade_primary=self._primary)
             _cme_start = pd.Timestamp(cme_session_start(now))
             today_at_open = mnq_1m_df[
                 (mnq_1m_df.index >= _cme_start) & (mnq_1m_df.index <= now)
@@ -1042,6 +1069,12 @@ class SmtV2Dispatcher:
                 except Exception:
                     pass
                 self._worker = None
+            if self._primary is not None:
+                try:
+                    self._primary.finalize()
+                except Exception:
+                    pass
+                self._primary = None
             raise
         print(f"[EMIT] daily complete date={today}", flush=True)
         self._session_date = today
@@ -1053,10 +1086,18 @@ class SmtV2Dispatcher:
         deterministic finalize → shutdown, then dump the sorted AI events-native to a NEW
         <session>/ai_events.jsonl (never touches strategy outputs). A wedged in-flight LLM
         call is abandoned at shutdown_timeout so position/limit cleanup is never delayed."""
-        if self._session_closed or self._worker is None:
+        if self._session_closed or (self._worker is None and self._primary is None):
             return
         self._session_closed = True
+        if self._primary is not None:
+            try:
+                self._primary.finalize()      # stop the v2 worker thread cleanly
+            except Exception:
+                pass
+            self._primary = None
         worker = self._worker
+        if worker is None:
+            return
         try:
             _agent_dir = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agent")

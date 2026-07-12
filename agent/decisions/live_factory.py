@@ -57,3 +57,40 @@ def build_decision_worker(out_dir):
     _ensure_path()          # async_wrapper's own imports need agent/decisions on sys.path
     from decisions.async_wrapper import DecisionWorker
     return DecisionWorker(build_decision_engine(out_dir))
+
+
+def ai_primary_enabled() -> bool:
+    """Read the v2 primary-mode gate (ACT_AI_MODE=primary). Default OFF ⇒ callers never
+    build the v2 stack ⇒ zero code path, byte-identical backtest + live."""
+    try:
+        _ensure_path()
+        import decisions_config as _sc
+        return bool(_sc.AI_PRIMARY_ENABLED)
+    except Exception:
+        return os.environ.get("ACT_AI_MODE", "").strip().lower() == "primary"
+
+
+def build_primary_runner(out_dir, *, date: str = "", threaded: bool = False,
+                         confidence_fn=None):
+    """Construct the v2 PrimaryRunner (bus + async DecisionService + TradeDirector +
+    mechanism adapter). Stub backend unless real_api is on. Only called when ACT_AI_MODE=
+    primary, so the v2 stack is imported lazily. Raises on failure — CALLERS degrade to None
+    (the trading run is never aborted by an AI init problem)."""
+    _ensure_path()
+    for _p in (_AGENT, os.path.join(_AGENT, "executor")):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+    import decisions_config as _sc
+    from run_agent import make_backend
+    from executor.primary_runner import PrimaryRunner
+
+    config = _sc.DecisionsConfig()
+    backend = (make_backend("stub") if not config.real_api
+               else make_backend(config.backend, config.model))
+    if confidence_fn is None:
+        try:
+            from confidence import confidence as confidence_fn  # Phase-5 gate (if present)
+        except Exception:
+            confidence_fn = None
+    return PrimaryRunner(out_dir, backend, date=date, confidence_fn=confidence_fn,
+                         latency_sec=config.latency_sec, threaded=threaded)

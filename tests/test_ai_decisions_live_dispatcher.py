@@ -29,9 +29,10 @@ class _FakePipeline:
 
     last = {}
 
-    def __init__(self, mnq, mes, emit, ai_decisions=None):
-        _FakePipeline.last = {"ai_decisions": ai_decisions}
+    def __init__(self, mnq, mes, emit, ai_decisions=None, trade_primary=None):
+        _FakePipeline.last = {"ai_decisions": ai_decisions, "trade_primary": trade_primary}
         self.ai_decisions = ai_decisions
+        self.trade_primary = trade_primary
 
     def on_session_start(self, now, today_at_open, force_reset=False):
         pass

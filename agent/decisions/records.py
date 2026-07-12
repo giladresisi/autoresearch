@@ -125,6 +125,64 @@ def build_paired_diff(hyp_event: Optional[dict], next_block: dict,
     }
 
 
+# --------------------------------------------------------------------------- #
+# AI-trader v2 audit records (spec §10) — one self-contained record per L1/L2   #
+# call, extending the ai_decisions_audit.jsonl conventions with thesis/plan     #
+# linkage. `outcome` is null on write; the post-session annotation job fills it. #
+# --------------------------------------------------------------------------- #
+def build_thesis_audit_record(*, block: dict, trigger, trigger_ts, arrival_ts,
+                              facts_hash, thesis_id=None, attempts=None,
+                              latency_total_sec=0.0, usage_total=None, verdict="clean",
+                              fallback=False, stale=False, error=None) -> dict:
+    return {
+        "call_type": "decide_thesis",
+        "level": "L1",
+        "trigger": trigger,
+        "trigger_ts": str(trigger_ts) if trigger_ts is not None else None,
+        "arrival_ts": str(arrival_ts) if arrival_ts is not None else None,
+        "facts_hash": facts_hash,
+        "thesis_id": thesis_id or block.get("thesis_id"),
+        "bias": block.get("bias"),
+        "regime": block.get("regime"),
+        "self_report_confidence": block.get("confidence"),
+        "decision": block,
+        "attempts": attempts or [],
+        "latency_total_sec": latency_total_sec,
+        "usage_total": usage_total or {},
+        "verdict": verdict,
+        "fallback": fallback,
+        "stale": stale,
+        "error": error,
+        "outcome": None,
+    }
+
+
+def build_plan_audit_record(*, block: dict, trigger, trigger_ts, arrival_ts, facts_hash,
+                            thesis_id, plan_id=None, attempts=None, latency_total_sec=0.0,
+                            usage_total=None, verdict="clean", fallback=False,
+                            stale=False, error=None) -> dict:
+    return {
+        "call_type": "decide_plan",
+        "level": "L2",
+        "trigger": trigger,
+        "trigger_ts": str(trigger_ts) if trigger_ts is not None else None,
+        "arrival_ts": str(arrival_ts) if arrival_ts is not None else None,
+        "facts_hash": facts_hash,
+        "thesis_id": thesis_id,                 # parent linkage
+        "plan_id": plan_id or block.get("plan_id"),
+        "verdict_kind": block.get("verdict"),   # SETUP | WAIT
+        "decision": block,
+        "attempts": attempts or [],
+        "latency_total_sec": latency_total_sec,
+        "usage_total": usage_total or {},
+        "verdict": verdict,
+        "fallback": fallback,
+        "stale": stale,
+        "error": error,
+        "outcome": None,
+    }
+
+
 def snapshot_ref(snapshot_text: str, content_hash: str, snapshots_dir,
                  inline_max: int) -> dict:
     """Small snapshot → inline; large snapshot → stored by reference (file+hash).

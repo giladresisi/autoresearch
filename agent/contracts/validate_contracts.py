@@ -1,0 +1,294 @@
+"""Deterministic validator for the v2 thesis / trade-plan contracts (spec §2, §6).
+
+Three layers, mirroring the v1 `agent/validator.py` shape:
+
+  1. Syntactic  — enums, required fields per form, closed mechanism kinds, mandatory
+                  `on_dol_falsified` on a SETUP, WAIT requires a recall, every predicate
+                  in the closed vocabulary.
+  2. Semantic   — every level referenced (dol, target, predicates) exists in the facts;
+                  the entry target is unswept/undepleted and on the correct side of price
+                  (carries the v1 TARGET CONTRACT).
+  3. Cross-level — the stop must NOT satisfy any thesis `falsified_if` predicate, and the
+                  exit target must NOT satisfy any thesis `exhausted_if` predicate (spec §6).
+
+Public API mirrors `validator.py`: `validate_thesis`, `validate_trade_plan`, and a
+combined `validate_contracts`. All return a `ContractValidation` (list of violations).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+from schemas import (
+    BIASES, CONFIDENCES, DAILY_REGIMES, DIRECTIONS, DOL_FALSIFIED_ACTIONS,
+    ENTRY_MECHANISMS, MGMT_MECHANISMS, VERDICTS, Thesis, TradePlan,
+)
+from predicates import (
+    MarketView, eval_any, referenced_levels, validate_predicate_list,
+)
+
+_EPS = 1e-6
+
+
+@dataclass
+class ContractViolation:
+    layer: str            # "syntactic" | "semantic" | "cross_level"
+    code: str
+    message: str
+    where: str = ""
+
+    def __str__(self) -> str:
+        loc = f" ({self.where})" if self.where else ""
+        return f"[{self.code}]{loc} {self.message}"
+
+
+@dataclass
+class ContractValidation:
+    violations: list = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.violations
+
+    def codes(self) -> set:
+        return {v.code for v in self.violations}
+
+    def messages(self) -> list:
+        return [str(v) for v in self.violations]
+
+    def add(self, layer: str, code: str, message: str, where: str = "") -> None:
+        self.violations.append(ContractViolation(layer, code, message, where))
+
+
+def _enum(value, allowed, where, code, r: ContractValidation) -> None:
+    if value is None or value not in allowed:
+        r.add("syntactic", code, f"{value!r} not in {sorted(allowed)}", where)
+
+
+# --------------------------------------------------------------------------- #
+# Thesis                                                                       #
+# --------------------------------------------------------------------------- #
+def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
+    r = ContractValidation()
+    d = thesis.to_dict() if isinstance(thesis, Thesis) else (thesis or {})
+    t = Thesis.from_dict(d)
+
+    _enum(t.bias, BIASES, "thesis.bias", "SYN_BAD_BIAS", r)
+    _enum(t.regime, DAILY_REGIMES, "thesis.regime", "SYN_BAD_REGIME", r)
+    _enum(t.confidence, CONFIDENCES, "thesis.confidence", "SYN_BAD_CONFIDENCE", r)
+
+    # A directional thesis requires a DOL (day draw-on-liquidity) with a level + price.
+    if t.is_directional():
+        if not isinstance(t.dol, dict) or not t.dol.get("level") \
+                or not isinstance(t.dol.get("price"), (int, float)):
+            r.add("syntactic", "SYN_DIRECTIONAL_MISSING_DOL",
+                  "directional thesis requires dol.level and dol.price", "thesis.dol")
+
+    for msg in validate_predicate_list(t.falsified_if, "thesis.falsified_if"):
+        r.add("syntactic", "SYN_BAD_PREDICATE", msg, "thesis.falsified_if")
+    for msg in validate_predicate_list(t.exhausted_if, "thesis.exhausted_if"):
+        r.add("syntactic", "SYN_BAD_PREDICATE", msg, "thesis.exhausted_if")
+
+    # recall: when present, its events must be a valid predicate list.
+    if t.recall is not None:
+        for msg in validate_predicate_list((t.recall or {}).get("events"),
+                                           "thesis.recall.events"):
+            r.add("syntactic", "SYN_BAD_PREDICATE", msg, "thesis.recall.events")
+
+    if facts is not None:
+        _semantic_thesis(t, facts, r)
+    return r
+
+
+def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
+    levels = facts.get("levels") or {}
+    names = set(_iter_predicate_levels(t.falsified_if)) \
+        | set(_iter_predicate_levels(t.exhausted_if))
+    if t.recall:
+        names |= set(_iter_predicate_levels((t.recall or {}).get("events") or []))
+    if isinstance(t.dol, dict) and t.dol.get("level"):
+        names.add(t.dol["level"])
+    for name in sorted(names):
+        if name not in levels:
+            r.add("semantic", "SEM_LEVEL_NOT_IN_FACTS",
+                  f"level '{name}' referenced by the thesis is not present in the facts",
+                  "thesis")
+
+
+# --------------------------------------------------------------------------- #
+# Trade plan                                                                   #
+# --------------------------------------------------------------------------- #
+def validate_trade_plan(plan, thesis=None, facts: Optional[dict] = None
+                        ) -> ContractValidation:
+    r = ContractValidation()
+    d = plan.to_dict() if isinstance(plan, TradePlan) else (plan or {})
+    p = TradePlan.from_dict(d)
+
+    _enum(p.verdict, VERDICTS, "trade_plan.verdict", "SYN_BAD_VERDICT", r)
+
+    if p.verdict == "WAIT":
+        if not p.recall or not isinstance((p.recall or {}).get("events"), list) \
+                or not p.recall["events"]:
+            r.add("syntactic", "SYN_WAIT_MISSING_RECALL",
+                  "a WAIT trade_plan requires a non-empty recall.events", "trade_plan.recall")
+        else:
+            for msg in validate_predicate_list(p.recall["events"], "trade_plan.recall.events"):
+                r.add("syntactic", "SYN_BAD_PREDICATE", msg, "trade_plan.recall.events")
+    elif p.verdict == "SETUP":
+        _syn_setup(p, r)
+
+    if p.verdict in VERDICTS and facts is not None:
+        _semantic_plan(p, facts, r)
+    if p.verdict == "SETUP" and thesis is not None:
+        _cross_level(p, thesis, r)
+    return r
+
+
+def _syn_setup(p: TradePlan, r: ContractValidation) -> None:
+    # entry present, direction valid, at least one mechanism with a closed kind.
+    entry = p.entry or {}
+    _enum(entry.get("direction"), DIRECTIONS, "trade_plan.entry.direction",
+          "SYN_BAD_DIRECTION", r)
+    mechs = entry.get("mechanisms")
+    if not isinstance(mechs, list) or not mechs:
+        r.add("syntactic", "SYN_SETUP_MISSING_MECHANISM",
+              "a SETUP requires at least one entry mechanism", "trade_plan.entry.mechanisms")
+    else:
+        for i, m in enumerate(mechs):
+            where = f"trade_plan.entry.mechanisms[{i}]"
+            if not isinstance(m, dict) or m.get("kind") not in ENTRY_MECHANISMS:
+                r.add("syntactic", "SYN_UNKNOWN_MECHANISM",
+                      f"entry mechanism kind {(m or {}).get('kind')!r} not in "
+                      f"{sorted(ENTRY_MECHANISMS)}", where)
+            for msg in validate_predicate_list((m or {}).get("valid_while"),
+                                               f"{where}.valid_while"):
+                r.add("syntactic", "SYN_BAD_PREDICATE", msg, where)
+
+    # stop with a numeric price is required.
+    if not isinstance(p.stop, dict) or not isinstance(p.stop.get("price"), (int, float)):
+        r.add("syntactic", "SYN_SETUP_MISSING_STOP",
+              "a SETUP requires stop.price (number)", "trade_plan.stop")
+
+    # mandatory on_dol_falsified (refinement locked 2026-07-11).
+    odf = p.on_dol_falsified
+    if not isinstance(odf, dict) or odf.get("action") not in DOL_FALSIFIED_ACTIONS:
+        r.add("syntactic", "SYN_MISSING_ON_DOL_FALSIFIED",
+              f"a SETUP requires on_dol_falsified.action in {sorted(DOL_FALSIFIED_ACTIONS)}",
+              "trade_plan.on_dol_falsified")
+
+    # exit management mechanisms must use closed kinds.
+    exit_blk = p.exit or {}
+    for i, m in enumerate(exit_blk.get("management") or []):
+        where = f"trade_plan.exit.management[{i}]"
+        if not isinstance(m, dict) or m.get("kind") not in MGMT_MECHANISMS:
+            r.add("syntactic", "SYN_UNKNOWN_MECHANISM",
+                  f"management kind {(m or {}).get('kind')!r} not in "
+                  f"{sorted(MGMT_MECHANISMS)}", where)
+        for msg in validate_predicate_list((m or {}).get("when"), f"{where}.when"):
+            r.add("syntactic", "SYN_BAD_PREDICATE", msg, where)
+
+    for fld in ("setup_falsified_if", "setup_exhausted_if"):
+        for msg in validate_predicate_list(getattr(p, fld), f"trade_plan.{fld}"):
+            r.add("syntactic", "SYN_BAD_PREDICATE", msg, f"trade_plan.{fld}")
+
+    if isinstance(p.breakeven, dict):
+        for msg in validate_predicate_list(p.breakeven.get("raise_to_be_if"),
+                                           "trade_plan.breakeven.raise_to_be_if"):
+            r.add("syntactic", "SYN_BAD_PREDICATE", msg, "trade_plan.breakeven")
+
+
+def _semantic_plan(p: TradePlan, facts: dict, r: ContractValidation) -> None:
+    levels = facts.get("levels") or {}
+    now_price = facts.get("now_price")
+
+    # every level referenced by the plan's predicates must exist in the facts.
+    names = set()
+    for fld in ("setup_falsified_if", "setup_exhausted_if"):
+        names |= set(_iter_predicate_levels(getattr(p, fld)))
+    for m in (p.entry or {}).get("mechanisms") or []:
+        names |= set(_iter_predicate_levels((m or {}).get("valid_while") or []))
+    if p.recall:
+        names |= set(_iter_predicate_levels((p.recall or {}).get("events") or []))
+    for name in sorted(names):
+        if name not in levels:
+            r.add("semantic", "SEM_LEVEL_NOT_IN_FACTS",
+                  f"level '{name}' referenced by the plan is not present in the facts",
+                  "trade_plan")
+
+    # TARGET CONTRACT: entry target must exist, be unswept/undepleted, correct side.
+    target = ((p.exit or {}).get("target")) if p.is_setup() else None
+    if isinstance(target, dict) and target.get("level"):
+        name = target["level"]
+        lvl = levels.get(name)
+        if lvl is None:
+            r.add("semantic", "SEM_TARGET_NOT_IN_FACTS",
+                  f"exit target level '{name}' is not present in the facts",
+                  "trade_plan.exit.target")
+        elif isinstance(lvl, dict) and lvl.get("swept") and lvl.get("depleted"):
+            r.add("semantic", "SEM_TARGET_SWEPT_DEPLETED",
+                  f"exit target level '{name}' is already swept and depleted (spent pool)",
+                  "trade_plan.exit.target")
+        direction = (p.entry or {}).get("direction")
+        price = target.get("price")
+        if isinstance(now_price, (int, float)) and isinstance(price, (int, float)):
+            if direction == "LONG" and price < now_price - _EPS:
+                r.add("semantic", "SEM_TARGET_WRONG_SIDE",
+                      f"LONG but target {price} is below current price {now_price}",
+                      "trade_plan.exit.target")
+            elif direction == "SHORT" and price > now_price + _EPS:
+                r.add("semantic", "SEM_TARGET_WRONG_SIDE",
+                      f"SHORT but target {price} is above current price {now_price}",
+                      "trade_plan.exit.target")
+
+
+def _cross_level(p: TradePlan, thesis, r: ContractValidation) -> None:
+    """Spec §6 cross-level consistency, evaluated against a price-only hypothetical view."""
+    t = thesis if isinstance(thesis, Thesis) else Thesis.from_dict(thesis or {})
+
+    stop_price = (p.stop or {}).get("price")
+    if isinstance(stop_price, (int, float)) and t.falsified_if:
+        if eval_any(t.falsified_if, MarketView.price_only(float(stop_price))):
+            r.add("cross_level", "XL_STOP_TRIPS_THESIS_FALSIFICATION",
+                  f"stop price {stop_price} would itself satisfy a thesis falsified_if "
+                  "predicate (getting stopped out == thesis death — stop is redundant)",
+                  "trade_plan.stop")
+
+    target = ((p.exit or {}).get("target")) or {}
+    target_price = target.get("price")
+    if isinstance(target_price, (int, float)):
+        tp = float(target_price)
+        # (a) strict-beyond exhaustion terms: does price AT the target trip exhausted_if.
+        if t.exhausted_if and eval_any(t.exhausted_if, MarketView.price_only(tp)):
+            r.add("cross_level", "XL_TARGET_IS_THESIS_EXHAUSTION",
+                  f"exit target {target_price} would satisfy a thesis exhausted_if "
+                  "predicate (targeting the thesis exhaustion point)",
+                  "trade_plan.exit.target")
+        # (b) the DOL-touch case: exhausted_if is "typically DOL touch" (spec §2.1), which
+        # a strict price_beyond can't fire at equality — the target must sit STRICTLY before
+        # the DOL, never AT it (targeting the exhaustion draw itself).
+        dol_price = (t.dol or {}).get("price")
+        if t.is_directional() and isinstance(dol_price, (int, float)) \
+                and abs(tp - float(dol_price)) <= _EPS:
+            r.add("cross_level", "XL_TARGET_AT_DOL",
+                  f"exit target {target_price} equals the thesis DOL price {dol_price} "
+                  "(the exhaustion draw) — target must sit before the DOL",
+                  "trade_plan.exit.target")
+
+
+def _iter_predicate_levels(preds) -> set:
+    out: set = set()
+    for p in preds or []:
+        out |= referenced_levels(p)
+    return out
+
+
+def validate_contracts(thesis=None, plan=None, facts: Optional[dict] = None
+                       ) -> ContractValidation:
+    """Validate a thesis and/or a dependent plan together, sharing the facts."""
+    r = ContractValidation()
+    if thesis is not None:
+        r.violations.extend(validate_thesis(thesis, facts).violations)
+    if plan is not None:
+        r.violations.extend(validate_trade_plan(plan, thesis=thesis, facts=facts).violations)
+    return r

@@ -1245,6 +1245,30 @@ def _build_decision_worker(run_dir):
     return build_decision_worker(run_dir)
 
 
+def _ai_primary_enabled() -> bool:
+    """Read the v2 primary-mode gate (ACT_AI_MODE=primary). Default OFF ⇒ never build the
+    v2 stack ⇒ byte-identical regressions."""
+    try:
+        _agent_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
+        if _agent_dir not in sys.path:
+            sys.path.insert(0, _agent_dir)
+        import decisions_config as _sc
+        return bool(_sc.AI_PRIMARY_ENABLED)
+    except Exception:
+        return os.environ.get("ACT_AI_MODE", "").strip().lower() == "primary"
+
+
+def _build_primary_runner(run_dir, date):
+    """Construct the v2 PrimaryRunner (backtest = synchronous, deterministic). Shares the
+    construction site with the live dispatcher via decisions.live_factory. Raises on failure
+    — the caller degrades to None (the trading run is never aborted by an AI init problem)."""
+    _agent_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
+    if _agent_dir not in sys.path:
+        sys.path.insert(0, _agent_dir)
+    from decisions.live_factory import build_primary_runner
+    return build_primary_runner(run_dir, date=str(date), threaded=False)
+
+
 def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True,
                     mode: str = "1m", started: "datetime.datetime | None" = None,
                     reset_pending: bool = True) -> dict:
@@ -1383,6 +1407,7 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         # An engine-init failure (e.g. flag ON but no API key) must NEVER abort the
         # backtest — degrade to no-engine instead of killing the trading-side run.
         _decision_worker = None
+        _primary_runner = None
         if _ai_decisions_enabled():
             try:
                 _decision_worker = _build_decision_worker(_run_dir)
@@ -1397,8 +1422,20 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                         _fh.write(traceback.format_exc())
                 except Exception:
                     pass
+        elif _ai_primary_enabled():
+            try:
+                _primary_runner = _build_primary_runner(_run_dir, date)
+            except Exception:
+                _primary_runner = None
+                try:
+                    with open(os.path.join(_run_dir, "ai_primary_init_error.txt"),
+                              "w", encoding="utf-8") as _fh:
+                        _fh.write(traceback.format_exc())
+                except Exception:
+                    pass
         pipeline = SessionPipeline(hist_mnq_1m, hist_mes_1m, day_events.append,
-                                   ai_decisions=_decision_worker)
+                                   ai_decisions=_decision_worker,
+                                   trade_primary=_primary_runner)
         pipeline.on_session_start(session_start_ts, today_at_open, force_reset=True)
 
         # Seed this run's ATH from the TRUE all-time high as of the session open (the full
@@ -1654,6 +1691,14 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                 day_events.extend(_decision_worker.events_native)
             finally:
                 _decision_worker.shutdown()
+
+        # PRIMARY: standing state + audit already went to the JSON bus / audit JSONL; the
+        # v2 loop emits no legacy events (zero trades under stub). Just finalize the runner.
+        if _primary_runner is not None:
+            try:
+                _primary_runner.finalize()
+            except Exception:
+                pass
 
         all_events.extend(day_events)
         all_trades.extend(day_trades)

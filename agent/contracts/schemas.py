@@ -1,0 +1,274 @@
+"""Thesis / trade-plan contracts (spec §2.1, §2.2, §7).
+
+Dataclasses + structured-output JSON schemas for the two AI decision levels. The
+dataclasses are thin typed views over the JSON blocks the model returns (parsed via
+`Thesis.from_dict` / `TradePlan.from_dict`); the JSON schemas mirror them for the
+backend's strict structured-output mode. Level INTERNALS (how the model reasons, KB
+content, calibration) are out of scope — this is the field-level shape only.
+
+The mechanism enums (spec §7) are the closed executor toolbox the plan may arm. An
+unknown `kind` is a validation reject, never a best-effort interpretation.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+# --------------------------------------------------------------------------- #
+# Enums (closed per release)                                                    #
+# --------------------------------------------------------------------------- #
+BIASES = {"UP", "DOWN", "NEUTRAL"}
+DAILY_REGIMES = {"TREND", "RANGE", "HYBRID"}
+CONFIDENCES = {"HIGH", "MEDIUM", "LOW"}
+VERDICTS = {"SETUP", "WAIT"}
+DIRECTIONS = {"LONG", "SHORT"}
+
+# spec §7 — entry mechanisms (map to existing code paths via the Phase-4 adapter).
+ENTRY_MECHANISMS = {
+    "confirmation_bar",
+    "fvg_retrace",
+    "level_break_stop_entry",
+    "market_on_condition",
+}
+# spec §7 — management / exit mechanisms.
+MGMT_MECHANISMS = {
+    "take_profit",
+    "move_stop",
+    "raise_to_breakeven",
+    "trail",
+    "market_close_on",
+}
+# spec §2.2 — mandatory on_dol_falsified actions.
+DOL_FALSIFIED_ACTIONS = {"MARKET_CLOSE", "TIGHTEN_STOP"}
+
+
+# --------------------------------------------------------------------------- #
+# Dataclasses                                                                  #
+# --------------------------------------------------------------------------- #
+@dataclass
+class Thesis:
+    """Level-1 standing decision (spec §2.1). `confidence` here is the model's
+    self-report — audit-only; the executor gates on the code-derived confidence
+    (spec §8)."""
+
+    thesis_id: Optional[str] = None
+    issued_at: Optional[str] = None
+    facts_hash: Optional[str] = None
+    bias: Optional[str] = None
+    regime: Optional[str] = None
+    dol: Optional[dict] = None                       # {"level": str, "price": float}
+    falsified_if: list = field(default_factory=list)  # [predicate]
+    exhausted_if: list = field(default_factory=list)  # [predicate]
+    confidence: Optional[str] = None
+    recall: Optional[dict] = None                    # {"events": [pred], "max_age_min": int}
+    reasoning: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Thesis":
+        d = d or {}
+        return cls(
+            thesis_id=d.get("thesis_id"), issued_at=d.get("issued_at"),
+            facts_hash=d.get("facts_hash"), bias=d.get("bias"), regime=d.get("regime"),
+            dol=d.get("dol"), falsified_if=list(d.get("falsified_if") or []),
+            exhausted_if=list(d.get("exhausted_if") or []),
+            confidence=d.get("confidence"), recall=d.get("recall"),
+            reasoning=d.get("reasoning"))
+
+    def to_dict(self) -> dict:
+        return {
+            "thesis_id": self.thesis_id, "issued_at": self.issued_at,
+            "facts_hash": self.facts_hash, "bias": self.bias, "regime": self.regime,
+            "dol": self.dol, "falsified_if": self.falsified_if,
+            "exhausted_if": self.exhausted_if, "confidence": self.confidence,
+            "recall": self.recall, "reasoning": self.reasoning,
+        }
+
+    def is_directional(self) -> bool:
+        return self.bias in ("UP", "DOWN")
+
+
+@dataclass
+class TradePlan:
+    """Level-2 decision (spec §2.2): a SETUP or a WAIT, parented to a thesis."""
+
+    plan_id: Optional[str] = None
+    thesis_id: Optional[str] = None
+    verdict: Optional[str] = None
+    entry: Optional[dict] = None                     # {"mechanisms": [...], "direction": ...}
+    stop: Optional[dict] = None                      # {"price": float}
+    breakeven: Optional[dict] = None
+    exit: Optional[dict] = None                      # {"target": {...}, "management": [...]}
+    setup_falsified_if: list = field(default_factory=list)
+    setup_exhausted_if: list = field(default_factory=list)
+    on_dol_falsified: Optional[dict] = None          # mandatory on SETUP
+    recall: Optional[dict] = None                    # WAIT only
+    reasoning: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TradePlan":
+        d = d or {}
+        return cls(
+            plan_id=d.get("plan_id"), thesis_id=d.get("thesis_id"),
+            verdict=d.get("verdict"), entry=d.get("entry"), stop=d.get("stop"),
+            breakeven=d.get("breakeven"), exit=d.get("exit"),
+            setup_falsified_if=list(d.get("setup_falsified_if") or []),
+            setup_exhausted_if=list(d.get("setup_exhausted_if") or []),
+            on_dol_falsified=d.get("on_dol_falsified"), recall=d.get("recall"),
+            reasoning=d.get("reasoning"))
+
+    def to_dict(self) -> dict:
+        return {
+            "plan_id": self.plan_id, "thesis_id": self.thesis_id,
+            "verdict": self.verdict, "entry": self.entry, "stop": self.stop,
+            "breakeven": self.breakeven, "exit": self.exit,
+            "setup_falsified_if": self.setup_falsified_if,
+            "setup_exhausted_if": self.setup_exhausted_if,
+            "on_dol_falsified": self.on_dol_falsified, "recall": self.recall,
+            "reasoning": self.reasoning,
+        }
+
+    def is_setup(self) -> bool:
+        return self.verdict == "SETUP"
+
+    def direction(self) -> Optional[str]:
+        return (self.entry or {}).get("direction")
+
+
+# --------------------------------------------------------------------------- #
+# Structured-output JSON schemas (mirror the validator's canonical shape)       #
+# --------------------------------------------------------------------------- #
+def failsafe_thesis() -> dict:
+    """The L1 fail-safe: a NEUTRAL / LOW standing thesis (no directional commitment, no
+    entries follow). Itself a valid thesis (validate_thesis(failsafe_thesis()).ok)."""
+    return {
+        "bias": "NEUTRAL", "regime": "RANGE", "dol": None,
+        "falsified_if": [], "exhausted_if": [], "confidence": "LOW",
+        "recall": {"events": [], "max_age_min": 0},
+        "reasoning": "fail-safe neutral/low thesis (offline/failsafe)",
+    }
+
+
+def failsafe_plan() -> dict:
+    """The L2 fail-safe: a WAIT (no setup armed). Its recall re-asks after a short TTL."""
+    return {
+        "verdict": "WAIT", "entry": None, "stop": None, "breakeven": None, "exit": None,
+        "setup_falsified_if": [], "setup_exhausted_if": [], "on_dol_falsified": None,
+        "recall": {"events": [{"type": "time_elapsed", "minutes": 30}], "max_age_min": 30},
+        "reasoning": "fail-safe WAIT (offline/failsafe)",
+    }
+
+
+def _nullable(schema: dict) -> dict:
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+# A predicate is free-form structured JSON (its own closed vocab is checked by the
+# predicate validator, not the backend schema), so schema-side it is an open object.
+_PREDICATE = {"type": "object"}
+_PRED_LIST = {"type": "array", "items": _PREDICATE}
+
+_DOL = _nullable({
+    "type": "object",
+    "properties": {"level": {"type": "string"}, "price": {"type": "number"}},
+    "required": ["level", "price"],
+    "additionalProperties": False,
+})
+
+_RECALL = {
+    "type": "object",
+    "properties": {"events": _PRED_LIST, "max_age_min": {"type": "number"}},
+    "required": ["events", "max_age_min"],
+    "additionalProperties": False,
+}
+
+THESIS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "bias": {"enum": sorted(BIASES)},
+        "regime": {"enum": sorted(DAILY_REGIMES)},
+        "dol": _DOL,
+        "falsified_if": _PRED_LIST,
+        "exhausted_if": _PRED_LIST,
+        "confidence": {"enum": sorted(CONFIDENCES)},
+        "recall": _RECALL,
+        "reasoning": {"type": "string"},
+    },
+    "required": ["bias", "regime", "dol", "falsified_if", "exhausted_if",
+                 "confidence", "recall", "reasoning"],
+    "additionalProperties": False,
+}
+
+_MECHANISM = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string"},
+        "params": {"type": "object"},
+        "valid_while": _PRED_LIST,
+    },
+    "required": ["kind", "params", "valid_while"],
+    "additionalProperties": False,
+}
+
+_MGMT = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string"},
+        "params": {"type": "object"},
+        "when": _PRED_LIST,
+    },
+    "required": ["kind", "params", "when"],
+    "additionalProperties": False,
+}
+
+TRADE_PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"enum": sorted(VERDICTS)},
+        "entry": _nullable({
+            "type": "object",
+            "properties": {
+                "mechanisms": {"type": "array", "items": _MECHANISM},
+                "direction": {"enum": sorted(DIRECTIONS)},
+            },
+            "required": ["mechanisms", "direction"],
+            "additionalProperties": False,
+        }),
+        "stop": _nullable({
+            "type": "object",
+            "properties": {"price": {"type": "number"}},
+            "required": ["price"], "additionalProperties": False,
+        }),
+        "breakeven": _nullable({
+            "type": "object",
+            "properties": {"raise_to_be_if": _PRED_LIST},
+            "required": ["raise_to_be_if"], "additionalProperties": False,
+        }),
+        "exit": _nullable({
+            "type": "object",
+            "properties": {
+                "target": _nullable({
+                    "type": "object",
+                    "properties": {"level": {"type": "string"}, "price": {"type": "number"}},
+                    "required": ["level", "price"], "additionalProperties": False,
+                }),
+                "management": {"type": "array", "items": _MGMT},
+            },
+            "required": ["target", "management"], "additionalProperties": False,
+        }),
+        "setup_falsified_if": _PRED_LIST,
+        "setup_exhausted_if": _PRED_LIST,
+        "on_dol_falsified": _nullable({
+            "type": "object",
+            "properties": {"action": {"enum": sorted(DOL_FALSIFIED_ACTIONS)},
+                           "params": {"type": "object"}},
+            "required": ["action", "params"], "additionalProperties": False,
+        }),
+        "recall": _nullable(_RECALL),
+        "reasoning": {"type": "string"},
+    },
+    "required": ["verdict", "entry", "stop", "breakeven", "exit",
+                 "setup_falsified_if", "setup_exhausted_if", "on_dol_falsified",
+                 "recall", "reasoning"],
+    "additionalProperties": False,
+}
