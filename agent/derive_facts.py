@@ -321,6 +321,16 @@ _MENU_PREDICATE_CFG = (
     ("exhaustion", "X", "dol_pools", "price_beyond", ({},), None),
     ("recall", "R", "daily_mid", "n_closes_beyond", ({"tf": "5m", "n": 3},), None),
     ("recall", "R", "clock", "time_elapsed", ({"minutes": 60}, {"minutes": 120}), None),
+    # --- decisions/thesis.md P1/P3/P4 additions (plan 13) ---
+    ("falsification", "F", "daily_mid", "n_closes_beyond",
+     ({"tf": "1h", "n": 1}, {"tf": "4h", "n": 1}), None),
+    ("falsification", "F", "weekly_mid", "n_closes_beyond",
+     ({"tf": "5m", "n": 2}, {"tf": "1h", "n": 1}, {"tf": "4h", "n": 1}), None),
+    ("recall", "R", "weekly_mid", "n_closes_beyond", ({"tf": "5m", "n": 3},), None),
+    ("evidence", "E", "swept_levels", "n_closes_beyond",
+     ({"tf": "1h", "n": 1}, {"tf": "4h", "n": 1}), None),
+    ("evidence", "E", "meaningful_smt_pools", "n_closes_beyond",
+     ({"tf": "1h", "n": 1}, {"tf": "4h", "n": 1}), None),
 )
 
 
@@ -379,12 +389,18 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float) -> dict:
 
 def _resolve_level_class(level_class: str, direction: str, mnq_levels: dict,
                          vlevels: dict, now_price: float, day_mid, dol_menu: dict,
-                         max_levels) -> list:
+                         max_levels, *, weekly_mid=None, mes_levels=None,
+                         mnq_swept_at=None, mes_swept_at=None,
+                         smt_candidates=None) -> list:
     """Resolve a level-class to a list of (price, side) the builder fills into predicates."""
     if level_class == "daily_mid":
         if not isinstance(day_mid, (int, float)):
             return []
         return [(day_mid, _anti_side(direction))]
+    if level_class == "weekly_mid":
+        if not isinstance(weekly_mid, (int, float)):
+            return []
+        return [(weekly_mid, _anti_side(direction))]
     if level_class == "clock":
         return [(None, None)]
     if level_class == "dol_pools":
@@ -412,6 +428,39 @@ def _resolve_level_class(level_class: str, direction: str, mnq_levels: dict,
         if max_levels:
             pools = pools[:max_levels]
         return [(p, side) for p in pools]
+    if level_class == "swept_levels":
+        # thesis.md P1: any swept, in-facts level on EITHER ticker whose maturity gate
+        # (>=1 qualifying HTF close since the sweep) has passed — enforced here by
+        # requiring a swept_at entry, not merely a bundle.levels entry. Direction-neutral:
+        # both UP and DOWN offer the same swept-level pools (P1 scores whichever side the
+        # model's read matches; the level's own `side` decides "beyond" vs "before").
+        out = []
+        for levels_, swept_map in ((mnq_levels, mnq_swept_at or {}),
+                                   (mes_levels or {}, mes_swept_at or {})):
+            for name, tup in levels_.items():
+                price, _body, lside, _tier, _active = tup
+                if lside not in ("above", "below") or not isinstance(price, (int, float)):
+                    continue
+                if swept_map.get(name) is None:
+                    continue
+                out.append((price, lside))
+        return out
+    if level_class == "meaningful_smt_pools":
+        # thesis.md P2: week/day-tier SMT candidates only, tested on the SWEPT ticker's
+        # own price at the ANTI-side (a close BEFORE the liquidity on the unswept/
+        # leader's side is what P2 scores as a reversal tell).
+        out = []
+        levels_by_tkr = {"MNQ": mnq_levels, "MES": mes_levels or {}}
+        for cand in smt_candidates or []:
+            if not cand.get("meaningful"):
+                continue
+            tup = levels_by_tkr.get(cand["swept_ticker"], {}).get(cand["level"])
+            if tup is None:
+                continue
+            price = tup[0]
+            anti_side = "below" if cand["side"] == "above" else "above"
+            out.append((price, anti_side))
+        return out
     return []
 
 
@@ -427,9 +476,13 @@ def _build_predicate(builder: str, price, side, variant: dict) -> Optional[dict]
 
 
 def _predicate_menu(mnq_levels: dict, vlevels: dict, now_price: float, day_mid,
-                    dol_menu: dict) -> dict:
-    """Per-direction candidate falsification / exhaustion / recall predicates with unique
-    IDs and concrete params, generated from _MENU_PREDICATE_CFG (config-driven)."""
+                    dol_menu: dict, *, weekly_mid=None, mes_levels=None,
+                    mnq_swept_at=None, mes_swept_at=None, smt_candidates=None) -> dict:
+    """Per-direction candidate falsification / exhaustion / recall / evidence predicates
+    with unique IDs and concrete params, generated from _MENU_PREDICATE_CFG (config-driven).
+    `evidence` family (thesis.md P1/P2) is informational scoring input, like the S3b
+    candidate cards — not meant to be copied verbatim into falsified_if/exhausted_if/
+    recall, though nothing prevents reusing the same predicate there via the escape hatch."""
     out = {}
     for direction in ("UP", "DOWN"):
         entries = []
@@ -437,7 +490,10 @@ def _predicate_menu(mnq_levels: dict, vlevels: dict, now_price: float, day_mid,
         seen = set()
         for family, prefix, level_class, builder, variants, max_levels in _MENU_PREDICATE_CFG:
             targets = _resolve_level_class(level_class, direction, mnq_levels, vlevels,
-                                           now_price, day_mid, dol_menu, max_levels)
+                                           now_price, day_mid, dol_menu, max_levels,
+                                           weekly_mid=weekly_mid, mes_levels=mes_levels,
+                                           mnq_swept_at=mnq_swept_at, mes_swept_at=mes_swept_at,
+                                           smt_candidates=smt_candidates)
             for price, side in targets:
                 for variant in variants:
                     pred = _build_predicate(builder, price, side, variant)
@@ -457,15 +513,24 @@ def _predicate_menu(mnq_levels: dict, vlevels: dict, now_price: float, day_mid,
 def build_menus(bundle: FactsBundle, vd: dict) -> dict:
     """The S8 menu object: {now_price, dol{UP,DOWN}, predicates{UP,DOWN}} — the structured
     menu shared by the rendered facts text (render_menus_text) and the validator's
-    menu-membership check. Deterministic given the same facts."""
+    menu-membership check. Deterministic given the same facts. DOL remains MNQ-only (MNQ
+    is the decision/executed ticker) — only the PREDICATE menu gains MES/weekly_mid/
+    swept-level/SMT-candidate families (decisions/thesis.md P1-P4 both-asset requirement)."""
     mnq_levels = (bundle.levels or {}).get("MNQ", {})
+    mes_levels = (bundle.levels or {}).get("MES", {})
     vlevels = vd.get("levels", {}) if isinstance(vd, dict) else {}
     now_price = vd.get("now_price") if isinstance(vd, dict) else bundle.now_price
     if not isinstance(now_price, (int, float)):
         now_price = bundle.now_price
     dol = _dol_menu(mnq_levels, vlevels, now_price)
-    preds = _predicate_menu(mnq_levels, vlevels, now_price, bundle.day_mid, dol)
+    mnq_swept_at = (bundle.swept_at or {}).get("MNQ", {})
+    mes_swept_at = (bundle.swept_at or {}).get("MES", {})
+    preds = _predicate_menu(mnq_levels, vlevels, now_price, bundle.day_mid, dol,
+                           weekly_mid=bundle.weekly_mid, mes_levels=mes_levels,
+                           mnq_swept_at=mnq_swept_at, mes_swept_at=mes_swept_at,
+                           smt_candidates=bundle.smt_candidates)
     return {"now_price": now_price, "daily_mid": bundle.day_mid,
+            "weekly_mid": bundle.weekly_mid,
             "dol": dol, "predicates": preds}
 
 

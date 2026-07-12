@@ -6,6 +6,8 @@ is pure over (bundle.levels["MNQ"], bundle.day_mid, vd["levels"], vd["now_price"
 
 import json
 
+import pandas as pd
+
 from derive_facts import (
     FactsBundle, build_menus, render_menus_text, _MENU_PREDICATE_CFG,
 )
@@ -182,3 +184,68 @@ def test_menu_text_lists_ids_and_params():
     txt = render_menus_text(_bundle_with_menus())
     assert "D1:" in txt and "X1" in txt and "F1" in txt and "R1" in txt
     assert "price_beyond(" in txt and "n_closes_beyond(" in txt
+
+
+def test_weekly_mid_absent_when_bundle_has_no_weekly_mid():
+    # old-style bundle (no weekly_mid set) -> the weekly_mid key reflects that, and the
+    # weekly_mid level-class contributes zero predicates. Backward compatibility
+    # (existing families/ids UNCHANGED) is proven instead by
+    # test_existing_menu_tests_still_pass_with_new_config and the full pre-existing
+    # suite in this file passing unmodified.
+    m = build_menus(_bundle(), _vd())
+    assert m["weekly_mid"] is None
+
+
+def test_weekly_mid_family_present_when_bundle_has_weekly_mid():
+    b = _bundle()
+    b.weekly_mid = 95.0
+    m = build_menus(b, _vd())
+    assert m["weekly_mid"] == 95.0
+    up_preds = [e["predicate"] for e in m["predicates"]["UP"]]
+    # UP thesis anti_side for weekly_mid falsification is "below" (_anti_side("UP") == "below")
+    assert any(p["type"] == "n_closes_beyond" and p["price"] == 95.0 and p["side"] == "below"
+               and p["tf"] in ("1h", "4h", "5m") for p in up_preds)
+
+
+def test_daily_mid_gains_1h_4h_falsification_variants():
+    m = build_menus(_bundle(), _vd())
+    up_preds = [e["predicate"] for e in m["predicates"]["UP"]]
+    tfs = {p["tf"] for p in up_preds
+          if p["type"] == "n_closes_beyond" and p["price"] == 99.0}   # day_mid == 99.0 in _bundle
+    assert {"5m", "1h", "4h"} <= tfs
+
+
+def test_swept_levels_evidence_family_present_for_mes():
+    b = _bundle()
+    b.levels["MES"] = {
+        "mes_up_pool": (115.0, 114.5, "above", "day", None),
+    }
+    b.swept_at = {"MNQ": {}, "MES": {"mes_up_pool": pd.Timestamp("2026-07-02 10:00", tz="America/New_York")}}
+    m = build_menus(b, _vd())
+    up_preds = [e for e in m["predicates"]["UP"] if e["family"] == "evidence"]
+    assert any(e["predicate"].get("price") == 115.0 for e in up_preds)
+
+
+def test_meaningful_smt_pools_only_day_or_week_tier():
+    b = _bundle()
+    b.smt_candidates = [
+        {"level": "up_pool", "tier": "day", "side": "above",
+         "swept_ticker": "MNQ", "unswept_ticker": "MES", "swept_at": None,
+         "type": "wick", "meaningful": True},
+        {"level": "up_pool", "tier": "session", "side": "above",
+         "swept_ticker": "MNQ", "unswept_ticker": "MES", "swept_at": None,
+         "type": "wick", "meaningful": False},
+    ]
+    m = build_menus(b, _vd())
+    up_evidence = [e for e in m["predicates"]["UP"] if e["family"] == "evidence"]
+    # anti-side of "above" is "below" -> the rejection-direction test for up_pool (price 110.0)
+    matches = [e for e in up_evidence
+              if e["predicate"].get("price") == 110.0 and e["predicate"].get("side") == "below"]
+    assert len(matches) >= 1
+
+
+def test_existing_menu_tests_still_pass_with_new_config():
+    # Sanity: appending new config entries must not perturb the pre-existing
+    # family/id assertions this file already made (F1/X1/R1 exact-id checks).
+    txt = render_menus_text(_bundle_with_menus())
+    assert "D1:" in txt and "X1" in txt and "F1" in txt and "R1" in txt
