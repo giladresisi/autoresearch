@@ -205,6 +205,7 @@ class FactsBundle:
     levels: dict = field(default_factory=dict)
     now_price: Optional[float] = None   # MNQ last close (the decision ticker's price)
     day_mid: Optional[float] = None     # MNQ running day mid at now (S8 menu input)
+    weekly_mid: Optional[float] = None  # MNQ running week mid at now (thesis.md P3/P4 input)
     # S8 menus (plan 11): computed lazily by facts_to_validator_dict / render_menus_text.
     menus: Optional[dict] = None
 
@@ -590,6 +591,8 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
         wkf = df.loc[wk_anchor:now]
         h, l, ch, cl = hl(wkf)
         L(f"week running [ENGINE anchor {wk_anchor}]: high={h} low={l} mid={(h + l) / 2:.3f}")
+        if tkr == "MNQ" and h is not None and l is not None:
+            bundle.weekly_mid = round((h + l) / 2.0, 2)   # thesis.md input (not rendered in S1)
         dh, dl, dch, dcl = hl(sess_now)
         L(f"day running: high={dh} (at {sess_now['high'].idxmax()}) low={dl} "
               f"(at {sess_now['low'].idxmin()}) mid={(dh + dl) / 2}")

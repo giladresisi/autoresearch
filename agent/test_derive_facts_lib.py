@@ -163,3 +163,25 @@ def test_now_truncation_no_lookahead():
     mnq_trunc = mnq[mnq.index <= earlier]
     assert trunc.now_price == float(mnq_trunc["close"].iloc[-1])
     assert f"now = {earlier}" in render_facts_text(trunc)
+
+
+# --------------------------------------------------------------------------- #
+# 6. weekly_mid fact field — MNQ running week mid at now.                     #
+# --------------------------------------------------------------------------- #
+def test_weekly_mid_computed_for_mnq():
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    assert bundle.weekly_mid is not None
+    assert isinstance(bundle.weekly_mid, float)
+
+
+def test_weekly_mid_matches_rendered_week_running_line():
+    import re
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    text = render_facts_text(bundle)
+    m = re.search(
+        r"week running \[ENGINE anchor [^\]]+\]: high=([\-0-9.]+) low=([\-0-9.]+)", text)
+    assert m is not None
+    high, low = float(m.group(1)), float(m.group(2))
+    assert bundle.weekly_mid == round((high + low) / 2.0, 2)
