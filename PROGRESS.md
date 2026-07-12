@@ -1,5 +1,85 @@
 ﻿# PROGRESS
 
+## Feature: L1 lifecycle bench — Plan 10
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/10.l1-lifecycle-bench.md`
+**Execution Report**: `.agents/execution-reports/10.l1-lifecycle-bench.md`
+
+The measurement instrument for the coming L1-internals effort. NEW code only, entirely under
+`agent/bench/` (+ one `.gitignore` line for `agent/bench/runs/`); NO production module
+touched — it reuses `eval_predicate`/`MarketView` (contracts), the confidence gate,
+`decide_thesis`/`make_backend` (run_agent), and `compute_facts` (derive_facts). It replays
+full days through the L1 thesis lifecycle (call → standing thesis → code-evaluated predicates
+per bar → death by falsification/exhaustion/safety-net/TTL/churn → re-call) and scores
+lifecycle quality, so every internals iteration shows up as metric deltas on the same days.
+Shipped: **`lifecycle.py`** (the L1-subset state machine — arrival gating, per-bar predicate
+eval, code-injected safety nets [ttl / acceptance_flip / opposite_extreme], confidence-tiered
+TTL, churn cap, MFE/MAE + distance-to-DOL); **`facts.py`** (offline 17-day-1s facts builder,
+byte-parity with `calibration/prepare_cuts.py` proven on a burned cut; degraded snapshots →
+failsafe, no lookahead); **`run_bench.py`** (stub/real/rescore modes + CLI + provider +
+decisions.jsonl logging + $0 byte-stable replay); **`score.py`/`report.py`** (false_kill H=4h
++ late_kill_adverse enrichment, per-day scorecard, aggregate + per-regime split).
+
+Validations: facts byte-parity ✓; stub determinism ✓ (0% coverage); real-API smoke 2026-06-25
+**$0.1123** (one failsafe lifecycle, full decisions.jsonl reconstruction, arrival=trigger+90s);
+rescore byte-identical at $0; **run-#0 baseline** 2026-06-25/05-19/05-18 real-API **$0.2604**,
+0% coverage every regime, 66.7% failsafe (the EXPECTED skeleton-prompt anchor — L1 either
+fails the closed-vocab validator or is gated LOW by the placeholder calibration table). Total
+real spend $0.3727 (< $4). `pytest agent/bench/` = 27 passed; full `pytest tests/` =
+**2F/1379P/10S/16E — baseline unchanged** (0 new failures); `pytest agent/` green (220 = 193 + 27 bench).
+Code review: no high/critical; 2 MEDIUM (stub decisions.jsonl latency-determinism; real-mode
+shell-key spend guardrail) + 3 LOW (enriched lifecycles.jsonl rewrite; lookahead-truncation flag;
+CLI cosmetic) all fixed + tested; acceptance-criteria validation ACCEPTED 22/22.
+Divergence: engine file named `lifecycle.py` (not `engine.py`) to avoid shadowing the
+production `agent/decisions/engine.py` bare module name (scope guard forbids touching it).
+All UNSTAGED; nothing committed/pushed; `agent/bench/runs/` gitignored.
+
+## Feature: AI Trader v2 Structure (thesis / trade-plan / executor) — Plan 9
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/9.ai-trader-v2-structure.md`
+**Spec**: `agent-optimizations.md` (v2 structure specification)
+
+Flag-gated (`ACT_AI_MODE=off` default; off = byte-identical) v2 trader STRUCTURE: a
+deterministic sandwich where code computes facts, the AI judges a standing thesis (L1) +
+trade plan (L2), and a deterministic executor validates/gates/executes. Level internals
+(KB/prompt content, predicate-vocab tuning, mechanism params, calibration values) are
+deferred by design — every AI call runs on the offline StubBackend by default. Shipped:
+**Contracts** (`agent/contracts/`) thesis/trade_plan schemas + closed predicate language
+(`eval_predicate`) + validator (syntactic incl. mandatory `on_dol_falsified`, semantic
+level-in-facts, cross-level stop/target-vs-thesis); **Executor** (`agent/executor/`)
+`TradeDirector` spec-§5 state machine + attempt counter + `RiskGate` (§9) + `DecisionBus`
+atomic thesis.json/trade_plan.json + `DecisionService` async provider (per-level coalescing,
+supersede-in-flight staleness, latency-gated delivery) + `MechanismAdapter` (§7 enum→code
+path) + `PrimaryRunner`; **Plumbing** `run_agent.decide_thesis/decide_plan`, `records.py` v2
+audit builders; **Flag** `ACT_AI_MODE=off|shadow|primary` in `decisions_config.py` (legacy
+`ACT_AI_DECISIONS=1` → shadow), primary wired in `session_pipeline.py` (bypasses legacy
+hypothesis execution — one-brain), `backtest_smt.py`, `automation/main.py` (live, user-gated,
+disconnected-safe); **Confidence** (`agent/confidence.py`) features→calibration-table→gate,
+bootstrap table from 569 labelled batch triggers (`agent/calibration_table.json`).
+
+Validations: full `pytest tests/` = 2 failed / 1379 passed / 16 errors = **baseline unchanged**
+(0 new failures; those are pre-existing `test_smt_fill_plot`/`test_smt_decouple_active`); new
+tests under `agent/` (222 passed). **Flag-OFF byte-identity PASS** — 1s events+trades
+byte-identical to pre-change HEAD on 2026-05-19 / 2026-05-18 / 2026-06-25 / 2026-05-01 (verified
+before AND after the code-review fixes). **Primary+stub determinism PASS** (2026-05-19 /
+2026-05-01, 0 trades). **Primary+real-API** 2026-05-19 1m: 1 L1 call, $0.096, 3 attempts →
+NEUTRAL failsafe (model predicates outside the closed vocab → validator rejected — constraints
+in code, not prompts). Code-review: 7 findings, 6 fixed (2 MEDIUM threaded-race + backtest
+latency-parity, 4 LOW/NIT) + tests; 1 documented limitation (see report). Acceptance: 24/25 PASS.
+
+Known limitation (POC scope): the runtime cannot reach `IN_POSITION` yet — armed mechanisms
+are not wired to fills, so `on_fill/on_stop_out/on_profitable_exit` + `RiskGate.record_exit`
+(placeholder `-1.0`) are unit-tested only and the daily-loss dollar cap is inert until fills
+land. First internals task: L1/L2 KB content teaching the closed predicate/mechanism vocab.
+
+### Reports Generated
+**Execution Report:** `.agents/execution-reports/9.ai-trader-v2-structure.md`
+
+All changes UNSTAGED; nothing committed/pushed. `agent-optimizations.md` and worktree meta docs untracked.
+
+---
+
+
 
 ## Feature: GIL-44 — AI Shadow-Decisions Module (Phase 3, step 1)
 ### Status: ✅ Complete (unstaged)

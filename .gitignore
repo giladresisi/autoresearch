@@ -78,3 +78,6 @@ agent-docs/strategy/poc/
 
 # Calibration sweep cut folders (regenerable facts + per-run agent outputs) - never tracked
 calibration/cuts/
+
+# L1 lifecycle bench run artifacts (plan 10; per-run lifecycles/decisions/scorecards) - never tracked
+agent/bench/runs/
