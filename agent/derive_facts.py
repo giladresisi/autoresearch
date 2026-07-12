@@ -429,11 +429,17 @@ def _resolve_level_class(level_class: str, direction: str, mnq_levels: dict,
             pools = pools[:max_levels]
         return [(p, side) for p in pools]
     if level_class == "swept_levels":
-        # thesis.md P1: any swept, in-facts level on EITHER ticker whose maturity gate
-        # (>=1 qualifying HTF close since the sweep) has passed — enforced here by
-        # requiring a swept_at entry, not merely a bundle.levels entry. Direction-neutral:
-        # both UP and DOWN offer the same swept-level pools (P1 scores whichever side the
-        # model's read matches; the level's own `side` decides "beyond" vs "before").
+        # thesis.md P1: any level on EITHER ticker that has been SWEPT (a swept_at entry
+        # exists, not merely a bundle.levels entry) — this does NOT require the maturity
+        # gate (>=1 qualifying HTF close since the sweep) to have passed. Maturity gating
+        # is enforced only in render_evidence_text (Task 6), which reads htf_close_status
+        # to flag "immature"; htf_close_status is not consumed here or anywhere in the
+        # predicate-menu code. This is an intentional scope boundary for this stage of the
+        # work: the menu offers a forward-looking n_closes_beyond predicate for any swept
+        # level, mature or not, and the model/validator judges maturity from S9 evidence
+        # text separately. Direction-neutral: both UP and DOWN offer the same swept-level
+        # pools (P1 scores whichever side the model's read matches; the level's own `side`
+        # decides "beyond" vs "before").
         out = []
         for levels_, swept_map in ((mnq_levels, mnq_swept_at or {}),
                                    (mes_levels or {}, mes_swept_at or {})):
@@ -594,10 +600,12 @@ def render_evidence_text(bundle: FactsBundle) -> str:
       "close yet since the sweep -> NOT usable evidence, decisions/thesis.md §3):")
     for tkr in ("MNQ", "MES"):
         status = (bundle.htf_close_status or {}).get(tkr, {})
-        if not status:
-            A(f"  {tkr}: (none)")
-            continue
+        swept_map = (bundle.swept_at or {}).get(tkr, {})
+        rendered_any = False
         for name, tf_map in status.items():
+            if swept_map.get(name) is None:      # never swept -> not evidence, skip entirely
+                continue
+            rendered_any = True
             for tf in ("1h", "4h"):
                 info = (tf_map or {}).get(tf)
                 if info is None:
@@ -606,6 +614,8 @@ def render_evidence_text(bundle: FactsBundle) -> str:
                     read = "ACCEPTED beyond" if info["beyond"] else "REJECTED (closed before)"
                     A(f"  {tkr} {name} [{tf}]: close={info['close']} @ {info['closed_at']} "
                       f"(n={info['n_closed_since']}) -> {read}")
+        if not rendered_any:
+            A(f"  {tkr}: (none)")
     A("\nSMT candidates (meaningful = day/week tier, eligible for thesis.md P2; "
       "swept_ticker = confirmed/pushed through (lagger); unswept_ticker = failed to "
       "confirm (leader)):")

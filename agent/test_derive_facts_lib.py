@@ -336,12 +336,47 @@ def test_evidence_text_deterministic():
 
 
 def test_evidence_text_flags_immature_and_shows_leader_lagger_labels():
+    # NOTE: htf_close_status[tkr][name] == None for a (tf) entry means EITHER "never
+    # swept" OR "swept but no qualifying HTF close yet" — the two are indistinguishable
+    # from htf_close_status alone (bundle.swept_at disambiguates them). Since the S9
+    # block only renders swept levels (never-swept levels are skipped entirely — see
+    # test_evidence_text_never_swept_level_omitted_but_swept_immature_shown below),
+    # "immature" can only legitimately appear in `ev` when a GENUINELY SWEPT level has a
+    # None tf entry. Restrict has_immature to swept levels so this test's premise matches
+    # post-fix rendering behavior (a never-swept-only fixture would make has_immature
+    # False here, correctly expecting no "immature" text).
     mnq, mes = _load_fixture_slices()
     bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
     ev = derive_facts.render_evidence_text(bundle)
-    has_immature = any(v is None for tkr in bundle.htf_close_status.values()
-                       for tf_map in tkr.values() for v in tf_map.values())
+    has_immature = any(
+        v is None
+        for tkr, status in bundle.htf_close_status.items()
+        for name, tf_map in status.items()
+        if bundle.swept_at.get(tkr, {}).get(name) is not None
+        for v in tf_map.values()
+    )
     if has_immature:
         assert "immature" in ev
     if bundle.smt_candidates:
         assert "(lagger)" in ev and "(leader)" in ev
+
+
+def test_evidence_text_never_swept_level_omitted_but_swept_immature_shown():
+    # Finding 1 fix: never-swept levels must not appear in the HTF close-status section
+    # at all (they are indistinguishable from genuinely-swept-but-immature levels
+    # otherwise), while a genuinely swept-but-immature level must still render as
+    # "immature" — that IS real, gate-relevant evidence (thesis.md P1's maturity gate).
+    bundle = derive_facts.FactsBundle()
+    bundle.swept_at = {"MNQ": {"never_swept_pool": None, "swept_immature_pool": pd.Timestamp(
+        "2026-07-02 10:00", tz="America/New_York")}, "MES": {}}
+    bundle.htf_close_status = {
+        "MNQ": {
+            "never_swept_pool": {"1h": None, "4h": None},
+            "swept_immature_pool": {"1h": None, "4h": None},
+        },
+        "MES": {},
+    }
+    ev = derive_facts.render_evidence_text(bundle)
+    assert "never_swept_pool" not in ev
+    assert "swept_immature_pool" in ev
+    assert "immature" in ev
