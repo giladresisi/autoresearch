@@ -141,6 +141,46 @@ def closest_approach(frame, level, side):
     return level - float(frame["high"].max()), frame["high"].idxmax()
 
 
+def _beyond_side(value: float, price: float, side: str) -> bool:
+    return value > price if side == "above" else value < price
+
+
+def _htf_close_status(df: pd.DataFrame, swept_at: Optional[pd.Timestamp], *,
+                       price: float, side: str, now: pd.Timestamp) -> dict:
+    """For a level swept at `swept_at`, classify the most recent COMPLETED 1h/4h bar
+    (midnight-anchored, engine convention) that CLOSED strictly after the sweep and at/
+    before `now`. Returns {"1h": None, "4h": None} when `swept_at` is None (never swept)
+    or when no qualifying bar has closed yet since the sweep — the maturity gate
+    (decisions/thesis.md §3): an immature sweep is not usable evidence in either
+    direction. Otherwise {tf: {"close": float, "beyond": bool, "closed_at": Timestamp,
+    "n_closed_since": int}} — `beyond` reflects the MOST RECENT qualifying close (a
+    running/current-state read, matching the RUNNING-mid convention used elsewhere in
+    this module), `n_closed_since` is how many qualifying bars exist (>=1 by
+    construction when not None)."""
+    out: dict = {}
+    if swept_at is None:
+        return {"1h": None, "4h": None}
+    for tf, freq in (("1h", pd.Timedelta(hours=1)), ("4h", pd.Timedelta(hours=4))):
+        bars = ohlc(df, tf).iloc[:-1]              # drop the still-forming trailing bar
+        if len(bars) == 0:
+            out[tf] = None
+            continue
+        closed_at = bars.index + freq              # left-labeled bin -> actual close time
+        mask = (closed_at > swept_at) & (closed_at <= now)
+        eligible = bars[mask]
+        if len(eligible) == 0:
+            out[tf] = None
+            continue
+        close = float(eligible.iloc[-1]["close"])
+        out[tf] = {
+            "close": close,
+            "beyond": _beyond_side(close, price, side),
+            "closed_at": (eligible.index + freq)[-1],
+            "n_closed_since": int(len(eligible)),
+        }
+    return out
+
+
 def age_min(ts, now):
     return (now - ts).total_seconds() / 60.0
 
@@ -207,6 +247,7 @@ class FactsBundle:
     day_mid: Optional[float] = None     # MNQ running day mid at now (S8 menu input)
     weekly_mid: Optional[float] = None  # MNQ running week mid at now (thesis.md P3/P4 input)
     swept_at: dict = field(default_factory=dict)  # swept_at[tkr][name] = ts | None
+    htf_close_status: dict = field(default_factory=dict)  # [tkr][name] = {"1h":.., "4h":..}
     # S8 menus (plan 11): computed lazily by facts_to_validator_dict / render_menus_text.
     menus: Optional[dict] = None
 
@@ -657,6 +698,15 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
                      " | DEPLETED" if exc >= thr else "")
 
     bundle.levels = levels
+
+    bundle.htf_close_status = {}
+    for tkr in ("MNQ", "MES"):
+        bundle.htf_close_status[tkr] = {}
+        for name, (price, body, side, tier, active_from) in levels[tkr].items():
+            if side is None:
+                continue
+            bundle.htf_close_status[tkr][name] = _htf_close_status(
+                data[tkr], bundle.swept_at[tkr].get(name), price=price, side=side, now=now)
 
     L("\n## S3 CROSS-TICKER SWEEP MATRIX (same level name; one swept + other not = divergence candidate)")
     shared = sorted(set(levels["MNQ"]) & set(levels["MES"]))

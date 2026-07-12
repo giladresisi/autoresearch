@@ -218,3 +218,66 @@ def test_swept_at_covers_every_sided_level():
             if tup[2] is None:          # side is None -> not tracked (matches S2's own skip)
                 continue
             assert name in bundle.swept_at[tkr]
+
+
+# --------------------------------------------------------------------------- #
+# 8. htf_close_status fact field — maturity gate + accept/reject per level.   #
+# --------------------------------------------------------------------------- #
+def test_htf_close_status_immature_when_no_htf_bar_closed_since_sweep():
+    ts = pd.date_range("2026-07-02 09:00:00", periods=40, freq="1min", tz="America/New_York")
+    price = pd.Series([100.0] * 40, index=ts)
+    df = pd.DataFrame({"open": price, "high": price + 0.5, "low": price - 0.5, "close": price},
+                      index=ts)
+    swept_at = ts[5]
+    now = ts[-1]
+    status = derive_facts._htf_close_status(df, swept_at, price=100.0, side="above", now=now)
+    assert status["1h"] is None
+    assert status["4h"] is None
+
+
+def test_htf_close_status_accept_beyond_after_1h_close():
+    ts = pd.date_range("2026-07-02 09:00:00", periods=180, freq="1min", tz="America/New_York")
+    price = pd.Series([99.0] * 60 + [101.0] * 60 + [101.0] * 60, index=ts)
+    df = pd.DataFrame({"open": price, "high": price + 0.5, "low": price - 0.5, "close": price},
+                      index=ts)
+    swept_at = ts[30]      # 09:30, mid the first (09:00-10:00) hour
+    now = ts[-1]           # 11:59
+    status = derive_facts._htf_close_status(df, swept_at, price=100.0, side="above", now=now)
+    assert status["1h"] is not None
+    assert status["1h"]["beyond"] is True
+    assert status["1h"]["close"] == 101.0
+    assert status["1h"]["n_closed_since"] == 2   # the 09:00-10:00 and 10:00-11:00 bars
+
+
+def test_htf_close_status_reject_before_after_1h_close():
+    ts = pd.date_range("2026-07-02 09:00:00", periods=180, freq="1min", tz="America/New_York")
+    price = pd.Series([99.0] * 25 + [101.0] * 5 + [99.5] * 150, index=ts)
+    df = pd.DataFrame({"open": price, "high": price + 0.5, "low": price - 0.5, "close": price},
+                      index=ts)
+    swept_at = ts[26]      # 09:26
+    now = ts[-1]           # 11:59
+    status = derive_facts._htf_close_status(df, swept_at, price=100.0, side="above", now=now)
+    assert status["1h"] is not None
+    assert status["1h"]["beyond"] is False
+    assert status["1h"]["close"] == 99.5
+
+
+def test_htf_close_status_none_swept_at_is_immature():
+    ts = pd.date_range("2026-07-02 09:00:00", periods=180, freq="1min", tz="America/New_York")
+    price = pd.Series([100.0] * 180, index=ts)
+    df = pd.DataFrame({"open": price, "high": price + 0.5, "low": price - 0.5, "close": price},
+                      index=ts)
+    status = derive_facts._htf_close_status(df, None, price=100.0, side="above", now=ts[-1])
+    assert status == {"1h": None, "4h": None}
+
+
+def test_htf_close_status_wired_into_compute_facts_both_tickers():
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    assert "MNQ" in bundle.htf_close_status and "MES" in bundle.htf_close_status
+    for tkr in ("MNQ", "MES"):
+        for name, swept_ts in bundle.swept_at[tkr].items():
+            status = bundle.htf_close_status[tkr].get(name)
+            assert status is not None, name
+            if swept_ts is None:
+                assert status == {"1h": None, "4h": None}
