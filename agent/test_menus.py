@@ -52,6 +52,70 @@ def test_dol_menu_only_eligible_pools():
         assert bad not in up_levels and bad not in down_levels
 
 
+def test_dol_menu_proximity_guard_excludes_too_close_pools():
+    """Plan 12 Fix 2: a pool nearer than DOL_MIN_DRAW_DISTANCE_PTS to price is NOT offered as
+    a same-direction DOL — it's a level price is already on (no forward draw, race-prone).
+    Covered both directions and for the wick/body distinction (the guard uses the wick, the
+    price that actually gets touched first)."""
+    from derive_facts import DOL_MIN_DRAW_DISTANCE_PTS as G, build_menus, FactsBundle as FB
+    b = FB()
+    b.now_price = 100.0
+    b.day_mid = 100.0
+    b.levels = {"MNQ": {
+        # wick within the guard (body would be farther) → excluded: the wick is the draw.
+        "up_close":   (100.0 + G - 0.5, 100.0 + G + 3.0, "above", "day", None),
+        "up_far":     (100.0 + G + 10.0, 100.0 + G + 9.0, "above", "day", None),   # eligible
+        "down_close": (100.0 - G + 0.5, 100.0 - G - 3.0, "below", "day", None),    # excluded
+        "down_far":   (100.0 - G - 10.0, 100.0 - G - 9.0, "below", "day", None),   # eligible
+    }}
+    vd = {"now_price": 100.0, "levels": {
+        "up_close":   {"price": 100.0 + G - 0.5, "side": "high", "swept": False, "depleted": False},
+        "up_far":     {"price": 100.0 + G + 10.0, "side": "high", "swept": False, "depleted": False},
+        "down_close": {"price": 100.0 - G + 0.5, "side": "low", "swept": False, "depleted": False},
+        "down_far":   {"price": 100.0 - G - 10.0, "side": "low", "swept": False, "depleted": False},
+    }}
+    m = build_menus(b, vd)
+    up = {e["level"] for e in m["dol"]["UP"]}
+    down = {e["level"] for e in m["dol"]["DOWN"]}
+    assert up == {"up_far"}, up
+    assert down == {"down_far"}, down
+
+
+def test_th_02_root_cause_regression_dol_absent():
+    """Plan 12 Fix 2 root-cause proof ($0): reproduce the logged 07-02 th_02 facts geometry
+    through the menu builder and assert the offending DOL (prev1_day_low, 0.75 pts below price
+    at facts build) is NO LONGER offered as a DOWN draw — so the race that produced the bogus
+    2-minute "completion" can no longer originate from the menu. A farther unswept low
+    (prev2_day_low, 74.75 pts away) is still offered, proving the guard is targeted, not blunt.
+
+    The level table is the verbatim th_02 snapshot logged in
+    agent/bench/runs/test_0702_run2_diag/2026-07-02/decisions.jsonl (bench.levels); now_price
+    at build was 30010.0 (price had tested prev1_day_low 30009.25 to within 0.75; sess_lo
+    30010.0), so the DOL sat 0.75 pts below price — a correct-side pool the OLD menu offered."""
+    now_price = 30010.0
+    # (name -> (price, side, swept0, threshold)) copied from the logged th_02 bench.levels.
+    logged = {
+        "prev1_day_low": (30009.25, "below", False, 40.0),   # the offending DOL — 0.75 away
+        "prev2_day_low": (29935.25, "below", False, 40.0),   # a genuine farther draw
+        "prev1_day_high": (30555.75, "above", False, 40.0),
+        "ny_evening(prev1)_low": (30009.25, "below", False, 20.0),
+    }
+    _thr_tier = {80.0: "week", 40.0: "day", 20.0: "session"}
+    b = FactsBundle()
+    b.now_price = now_price
+    b.day_mid = 30063.0
+    mnq, vd_levels = {}, {}
+    for name, (price, side, swept, thr) in logged.items():
+        mnq[name] = (price, price, side, _thr_tier[thr], None)
+        vd_levels[name] = {"price": price, "side": "high" if side == "above" else "low",
+                           "swept": swept, "depleted": False}
+    b.levels = {"MNQ": mnq}
+    m = build_menus(b, {"now_price": now_price, "levels": vd_levels})
+    down = {e["level"] for e in m["dol"]["DOWN"]}
+    assert "prev1_day_low" not in down, "the 0.75-pt-away DOL must no longer be offered"
+    assert "prev2_day_low" in down, "a genuine farther low draw should still be offered"
+
+
 def test_dol_menu_nearest_first_and_ids():
     m = build_menus(_bundle(), _vd())
     up = m["dol"]["UP"]
