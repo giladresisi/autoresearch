@@ -42,6 +42,14 @@ MGMT_MECHANISMS = {
 # spec §2.2 — mandatory on_dol_falsified actions.
 DOL_FALSIFIED_ACTIONS = {"MARKET_CLOSE", "TIGHTEN_STOP"}
 
+# plan 11 Phase 4 — failsafe recall max-age. A failsafed L1 call must schedule its own
+# retry (event-driven design: a failsafe leaves the system blind until it re-asks). The
+# 07-02 bench run showed a failsafed 18:00 call with max_age_min=0 stayed blind all
+# session. Both the bench engine (_run_waiting) and the production TradeDirector
+# (_ttl_expired / _maybe_recall_l1) already honor recall.max_age_min, so this is a
+# data-only change in the failsafe factory.
+FAILSAFE_RECALL_MAX_AGE_MIN = 60
+
 
 # --------------------------------------------------------------------------- #
 # Dataclasses                                                                  #
@@ -144,7 +152,7 @@ def failsafe_thesis() -> dict:
     return {
         "bias": "NEUTRAL", "regime": "RANGE", "dol": None,
         "falsified_if": [], "exhausted_if": [], "confidence": "LOW",
-        "recall": {"events": [], "max_age_min": 0},
+        "recall": {"events": [], "max_age_min": FAILSAFE_RECALL_MAX_AGE_MIN},
         "reasoning": "fail-safe neutral/low thesis (offline/failsafe)",
     }
 
@@ -163,10 +171,84 @@ def _nullable(schema: dict) -> dict:
     return {"anyOf": [schema, {"type": "null"}]}
 
 
-# A predicate is free-form structured JSON (its own closed vocab is checked by the
-# predicate validator, not the backend schema), so schema-side it is an open object.
-_PREDICATE = {"type": "object"}
+# --------------------------------------------------------------------------- #
+# Strict predicate schema fragment (spec §6; plan 11 Phase 1)                   #
+# --------------------------------------------------------------------------- #
+# The predicate vocabulary is enforced AT GENERATION TIME: each `*_if` / recall.events
+# field is an `anyOf` of the six atoms (each with `type` as a const + exactly its
+# required params) plus the two composites (`all_of` / `any_of`) whose items are ATOMS
+# ONLY. Composition depth is capped at 1 (a composite may not nest a composite) — this
+# avoids the recursive schemas that structured-output backends handle poorly. The
+# contracts evaluator (`predicates.eval_predicate`) still supports arbitrary nesting, so
+# depth-1 is a SCHEMA restriction only (documented in agent-optimizations.md §6). An
+# unknown predicate `type` is now impossible to generate, killing the SYN_BAD_PREDICATE
+# → failsafe class the bench saw on every date.
+_SIDE = {"enum": ["above", "below"]}
+_TF = {"enum": ["1m", "5m", "15m", "1h", "4h"]}
+
+
+def _atom(ptype: str, props: dict) -> dict:
+    """One atom shape: `type` const + exactly `props` (all required, no extras)."""
+    properties = {"type": {"const": ptype}, **props}
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties.keys()),
+        "additionalProperties": False,
+    }
+
+
+# The six atoms (mirror predicates._ATOM_PARAMS exactly). NOTE: numeric bound keywords
+# (minimum / exclusiveMinimum) and array minItems are deliberately OMITTED — the Anthropic
+# structured-output backend rejects `minimum` on integers, and these bounds are enforced by
+# the deterministic predicate validator anyway (`predicates.validate_predicate`: n >= 1,
+# minutes > 0, non-empty `of`) — "constraints live in code, not the schema" (spec §5).
+#
+# The atoms live in `$defs` and every predicate field references `#/$defs/predicate` — WITHOUT
+# $defs the union is inlined into each of falsified_if / exhausted_if / recall.events (and the
+# composites re-inline all six atoms), and the Anthropic constrained-decoding grammar compiler
+# rejects the result as "grammar too large". $ref keeps the compiled grammar small.
+_ATOM_PROPS = {
+    "price_beyond": {"price": {"type": "number"}, "side": _SIDE},
+    "n_closes_beyond": {"price": {"type": "number"}, "side": _SIDE, "tf": _TF,
+                        "n": {"type": "integer"}},
+    "level_swept": {"name": {"type": "string"}},
+    "level_depleted": {"name": {"type": "string"}},
+    "time_elapsed": {"minutes": {"type": "number"}},
+    "clock_after": {"et_time": {"type": "string"}},
+}
+_ATOM_DEF_NAMES = {t: f"pred_{t}" for t in _ATOM_PROPS}
+_ATOM_DEFS = {_ATOM_DEF_NAMES[t]: _atom(t, props) for t, props in _ATOM_PROPS.items()}
+_ATOM_REFS = [{"$ref": f"#/$defs/{_ATOM_DEF_NAMES[t]}"} for t in _ATOM_PROPS]
+
+
+def _composite_def(ptype: str) -> dict:
+    """A depth-1 composite: `type` const + `of` array of ATOMS ONLY (atom $refs — no nested
+    composite)."""
+    return {
+        "type": "object",
+        "properties": {
+            "type": {"const": ptype},
+            "of": {"type": "array", "items": {"anyOf": list(_ATOM_REFS)}},
+        },
+        "required": ["type", "of"],
+        "additionalProperties": False,
+    }
+
+
+# The predicate def: any atom, or a depth-1 all_of/any_of over atoms.
+_PREDICATE_DEF = {"anyOf": [*_ATOM_REFS, _composite_def("all_of"), _composite_def("any_of")]}
+# All predicate $defs to embed at each top-level schema's root ($ref resolves against it).
+_PRED_DEFS = {**_ATOM_DEFS, "predicate": _PREDICATE_DEF}
+
+# In a FIELD position: reference the shared def (keeps the compiled grammar small).
+_PREDICATE = {"$ref": "#/$defs/predicate"}
 _PRED_LIST = {"type": "array", "items": _PREDICATE}
+
+# A SELF-CONTAINED predicate schema (carries its own $defs) for standalone jsonschema
+# validation + tests — `validate(inst, predicate_schema())`.
+def predicate_schema() -> dict:
+    return {"$defs": dict(_PRED_DEFS), **_PREDICATE_DEF}
 
 _DOL = _nullable({
     "type": "object",
@@ -184,6 +266,7 @@ _RECALL = {
 
 THESIS_SCHEMA = {
     "type": "object",
+    "$defs": dict(_PRED_DEFS),
     "properties": {
         "bias": {"enum": sorted(BIASES)},
         "regime": {"enum": sorted(DAILY_REGIMES)},
@@ -223,6 +306,7 @@ _MGMT = {
 
 TRADE_PLAN_SCHEMA = {
     "type": "object",
+    "$defs": dict(_PRED_DEFS),
     "properties": {
         "verdict": {"enum": sorted(VERDICTS)},
         "entry": _nullable({

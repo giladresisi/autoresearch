@@ -43,6 +43,7 @@ from facts import ParquetFactsSource  # noqa: E402
 from confidence import confidence  # noqa: E402  (agent/confidence.py)
 from run_agent import decide_thesis, make_backend  # noqa: E402
 from schemas import failsafe_thesis  # noqa: E402  (agent/contracts)
+from validate_contracts import classify_predicates  # noqa: E402  (agent/contracts)
 
 RUNS_ROOT = os.path.join(_HERE, "runs")
 
@@ -54,14 +55,37 @@ def _decision_id(date: str, i: int) -> str:
     return f"th_{date.replace('-', '')}_{i:02d}"
 
 
-def _bench_block(gate, self_report, failsafe, levels, daily_mid, sess_hi, sess_lo) -> dict:
+_EMPTY_MENU = {"n_menu_hit": 0, "n_escape_hatch": 0, "menu_hit_ratio": None,
+               "dol_menu_hit": False, "dol_menu_id": None}
+
+
+def _bench_block(gate, self_report, failsafe, levels, daily_mid, sess_hi, sess_lo, *,
+                 gate_source="calibrated", calibrated_gate=None, menu=None) -> dict:
     """The engine-facing inputs, logged so `rescore` can replay the lifecycle without
-    rebuilding facts or calling the API."""
+    rebuilding facts or calling the API. `gate` is the EFFECTIVE gate the engine uses
+    (post gate-source override); `calibrated_gate` records the production value for
+    reference; `menu` is the menu-hit / escape-hatch telemetry (plan 11)."""
     return {
         "gate": gate, "self_report": self_report, "failsafe": bool(failsafe),
+        "gate_source": gate_source, "calibrated_gate": calibrated_gate,
         "levels": levels or {}, "daily_mid": daily_mid,
         "sess_hi": sess_hi, "sess_lo": sess_lo,
+        "menu": menu or dict(_EMPTY_MENU),
     }
+
+
+def _effective_gate(cfg, calibrated_gate, thesis, failsafe: bool) -> str:
+    """Resolve the effective standing gate under the (bench-only) gate-source override."""
+    src = getattr(cfg, "gate_source", "calibrated")
+    if src == "self":
+        if failsafe:
+            return "LOW"                              # a failsafe never stands, regardless
+        sr = (thesis or {}).get("confidence")
+        return sr if sr in ("HIGH", "MEDIUM", "LOW") else "LOW"
+    if src == "stand-directional":
+        bias = (thesis or {}).get("bias")
+        return "HIGH" if (not failsafe and bias in ("UP", "DOWN")) else "LOW"
+    return calibrated_gate                                   # calibrated (production default)
 
 
 def make_live_provider(source: ParquetFactsSource, backend, cfg: BenchConfig,
@@ -91,7 +115,8 @@ def make_live_provider(source: ParquetFactsSource, backend, cfg: BenchConfig,
                 "degraded_reason": fr.error, "verdict": "failsafe", "fallback": True,
                 "retries": 0, "latency_total_sec": 0.0, "usage_total": {},
                 "attempts": [], "reasoning": None, "thesis": th,
-                "bench": _bench_block("LOW", "LOW", True, {}, None, None, None),
+                "bench": _bench_block("LOW", "LOW", True, {}, None, None, None,
+                                      gate_source=cfg.gate_source, calibrated_gate="LOW"),
             })
             return BenchDecision(did, trigger_ts, th, "LOW", "LOW", failsafe=True,
                                  facts_hash=fr.content_hash)
@@ -99,7 +124,9 @@ def make_live_provider(source: ParquetFactsSource, backend, cfg: BenchConfig,
         # Spec §4 failure policy: an API/transport error degrades this call to a failsafe
         # (no thesis stands) rather than aborting the whole multi-date run.
         try:
-            outcome = decide_thesis(fr.text, "", fr.validator_dict, backend)
+            # Model prompt = S0–S7 core + the S8 menu block; validator_dict carries the
+            # structured menu for the menu-membership check + escape-hatch tagging.
+            outcome = decide_thesis(fr.text + fr.menu_text, "", fr.validator_dict, backend)
         except Exception as exc:  # noqa: BLE001 — any backend/transport failure → failsafe
             th = failsafe_thesis()
             th["issued_at"] = trigger_ts.isoformat()
@@ -113,7 +140,8 @@ def make_live_provider(source: ParquetFactsSource, backend, cfg: BenchConfig,
                 "verdict": "failsafe", "fallback": True, "retries": 0,
                 "latency_total_sec": 0.0, "usage_total": {}, "attempts": [],
                 "reasoning": None, "thesis": th,
-                "bench": _bench_block("LOW", "LOW", True, {}, None, None, None),
+                "bench": _bench_block("LOW", "LOW", True, {}, None, None, None,
+                                      gate_source=cfg.gate_source, calibrated_gate="LOW"),
             })
             return BenchDecision(did, trigger_ts, th, "LOW", "LOW", failsafe=True,
                                  facts_hash=fr.content_hash)
@@ -122,8 +150,15 @@ def make_live_provider(source: ParquetFactsSource, backend, cfg: BenchConfig,
         thesis["issued_at"] = trigger_ts.isoformat()
         thesis["thesis_id"] = did
         thesis["facts_hash"] = fr.content_hash
-        gate = confidence(thesis, fr.validator_dict)
+        calibrated_gate = confidence(thesis, fr.validator_dict)   # production value (audit)
+        gate = _effective_gate(cfg, calibrated_gate, thesis, outcome.fallback)
         self_report = thesis.get("confidence")
+        # Menu-hit / escape-hatch telemetry over the FINAL (validated) thesis predicates.
+        audit = classify_predicates(thesis, fr.validator_dict)
+        menu = {"n_menu_hit": audit["n_menu_hit"],
+                "n_escape_hatch": audit["n_escape_hatch"],
+                "menu_hit_ratio": audit["menu_hit_ratio"],
+                "dol_menu_hit": audit["dol_menu_hit"], "dol_menu_id": audit["dol_menu_id"]}
 
         attempts = outcome.attempts
         latency_total = outcome.latency_total
@@ -141,7 +176,9 @@ def make_live_provider(source: ParquetFactsSource, backend, cfg: BenchConfig,
             "usage_total": outcome.usage_total, "attempts": attempts,
             "reasoning": outcome.reasoning, "thesis": thesis,
             "bench": _bench_block(gate, self_report, outcome.fallback, fr.levels,
-                                  fr.daily_mid, fr.sess_hi, fr.sess_lo),
+                                  fr.daily_mid, fr.sess_hi, fr.sess_lo,
+                                  gate_source=cfg.gate_source,
+                                  calibrated_gate=calibrated_gate, menu=menu),
         })
         return BenchDecision(
             did, trigger_ts, thesis, gate, self_report, failsafe=outcome.fallback,
@@ -230,9 +267,19 @@ def rescore_date(source: ParquetFactsSource, cfg: BenchConfig, date: str,
     lifecycles = [lc.to_record() for lc in day.lifecycles]
     _write_jsonl(os.path.join(date_dir, "lifecycles.jsonl"), lifecycles)
     _write_jsonl(os.path.join(date_dir, "decisions.jsonl"), logged)
+    # A rescore REPRODUCES the logged run, so scorecards must be stamped with the gate
+    # source the decisions were produced under — not the CLI cfg (which defaults to
+    # "calibrated"). Recover it from the logged bench block so a rescored diagnostic run
+    # keeps its [DIAGNOSTIC] header (run_bench threads this into the scoring cfg).
+    logged_gate = "calibrated"
+    for rec in logged:
+        gs = (rec.get("bench") or {}).get("gate_source")
+        if gs:
+            logged_gate = gs
+            break
     return {"date": date, "day_outcome": day.day_outcome, "n_calls": day.n_calls,
             "lifecycles": lifecycles, "decisions": logged,
-            "session_end": end_ts.isoformat()}
+            "session_end": end_ts.isoformat(), "logged_gate_source": logged_gate}
 
 
 _REAL_KEYS = {"openrouter": ("OPENROUTER_API_KEY",),
@@ -258,7 +305,16 @@ def _with_churn(cfg: BenchConfig, churn_cap: int) -> BenchConfig:
     return BenchConfig(
         latency_sec=cfg.latency_sec, ttl_minutes=dict(cfg.ttl_minutes),
         safety_nets=tuple(cfg.safety_nets), acceptance_flip_n=cfg.acceptance_flip_n,
-        churn_cap=churn_cap, regime_map=dict(cfg.regime_map), lookahead_h=cfg.lookahead_h)
+        churn_cap=churn_cap, regime_map=dict(cfg.regime_map), lookahead_h=cfg.lookahead_h,
+        gate_source=cfg.gate_source)
+
+
+def _with_gate(cfg: BenchConfig, gate_source: str) -> BenchConfig:
+    return BenchConfig(
+        latency_sec=cfg.latency_sec, ttl_minutes=dict(cfg.ttl_minutes),
+        safety_nets=tuple(cfg.safety_nets), acceptance_flip_n=cfg.acceptance_flip_n,
+        churn_cap=cfg.churn_cap, regime_map=dict(cfg.regime_map), lookahead_h=cfg.lookahead_h,
+        gate_source=gate_source)
 
 
 # --------------------------------------------------------------------------- #
@@ -288,6 +344,17 @@ def run_bench(dates: list, mode: str, run_id: str, cfg: BenchConfig, *,
         for date in dates:
             summary = rescore_date(source, cfg, date, os.path.join(src_root, date), run_dir)
             per_date.append(summary)
+        # Rescore reproduces the logged run → stamp the LOGGED gate source, not the CLI
+        # default. Adopt it for scoring/reporting; if an explicit non-default --gate
+        # conflicts with the logged gate, that is a user error (the replay is fixed).
+        logged_gates = {s.get("logged_gate_source", "calibrated") for s in per_date}
+        logged_gate = logged_gates.pop() if len(logged_gates) == 1 else "mixed"
+        if cfg.gate_source != "calibrated" and cfg.gate_source != logged_gate:
+            raise ValueError(
+                f"--gate {cfg.gate_source!r} conflicts with the rescored run's logged gate "
+                f"{logged_gate!r}; omit --gate to reuse the logged one (rescore replays the "
+                "logged decisions verbatim).")
+        cfg = _with_gate(cfg, logged_gate)
     else:
         if mode == "real":
             _require_shell_key(backend_name)      # fail fast — no silent .env spend
@@ -333,6 +400,10 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--safety-net", default="ttl",
                     help="comma-separated enabled nets (ttl,acceptance_flip,opposite_extreme)")
     ap.add_argument("--churn-cap", type=int, default=20)
+    ap.add_argument("--gate", default="calibrated",
+                    choices=["calibrated", "self", "stand-directional"],
+                    help="bench-only diagnostic gate source (default calibrated = "
+                         "production). Stamped into run metadata + scorecard headers.")
     ap.add_argument("--backend", default=None, choices=["openrouter", "anthropic"])
     ap.add_argument("--model", default=None)
     ap.add_argument("--main-dir", default=None, help="override the main parquet dir")
@@ -343,7 +414,7 @@ def main(argv: Optional[list] = None) -> int:
     dates = [d.strip() for d in args.dates.split(",") if d.strip()]
     cfg = BenchConfig(latency_sec=args.latency_sec,
                       safety_nets=_parse_safety_nets(args.safety_net),
-                      churn_cap=args.churn_cap)
+                      churn_cap=args.churn_cap, gate_source=args.gate)
     run_id = args.run_id or f"{args.mode}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"
 
     out = run_bench(dates, args.mode, run_id, cfg, main_dir=args.main_dir,
@@ -352,9 +423,11 @@ def main(argv: Optional[list] = None) -> int:
     agg = out["aggregate"]
     fs = agg.get("failsafe_pct")
     fs_str = "n/a" if fs is None else f"{fs}%"
-    print(f"[{run_id}] mode={args.mode} dates={len(dates)} "
+    mh, eh = agg.get("menu_hit", 0), agg.get("escape_hatch", 0)
+    mh_ratio = f"{mh / (mh + eh):.2f}" if (mh + eh) else "n/a"
+    print(f"[{run_id}] mode={args.mode} gate={args.gate} dates={len(dates)} "
           f"lifecycles={agg.get('n_lifecycles')} coverage={agg.get('coverage_pct')}% "
-          f"failsafe={fs_str} cost=${agg.get('api_cost_usd', 0):.4f}")
+          f"failsafe={fs_str} menu_hit={mh_ratio} cost=${agg.get('api_cost_usd', 0):.4f}")
     print(f"  -> {out['run_dir']}")
     return 0
 

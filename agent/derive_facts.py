@@ -33,6 +33,7 @@ Engine-grounded conventions (v2 — aligned to the live engine after POC run 3):
 
 import argparse
 import datetime
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -203,6 +204,9 @@ class FactsBundle:
     # levels[tkr][name] = (price, body_price, side, tier, active_from) — the S1 map.
     levels: dict = field(default_factory=dict)
     now_price: Optional[float] = None   # MNQ last close (the decision ticker's price)
+    day_mid: Optional[float] = None     # MNQ running day mid at now (S8 menu input)
+    # S8 menus (plan 11): computed lazily by facts_to_validator_dict / render_menus_text.
+    menus: Optional[dict] = None
 
 
 def render_facts_text(bundle: FactsBundle) -> str:
@@ -236,8 +240,214 @@ def facts_to_validator_dict(bundle: FactsBundle) -> dict:
     validator-dict-parity test true by construction. tier is intentionally omitted
     here (the validator never reads it — richer per-level data lives in
     bundle.levels for the records/audit layer).
+
+    NOTE (plan 11): the S8 `menus` block is NOT injected here — this dict is hashed as
+    the shadow engine's facts identity (facts_adapter._canonical_hash), so it must stay
+    byte-stable. Menus are an additive, bench/L1-only overlay: build them with
+    `build_menus(bundle, facts_to_validator_dict(bundle))` and attach under a "menus"
+    key on a COPY (the bench does this; render_menus_text caches it on the bundle).
     """
     return _parse_facts()(render_facts_text(bundle))
+
+
+# --------------------------------------------------------------------------- #
+# S8 menus (plan 11): DOL menu + predicate menu, config-driven                 #
+# --------------------------------------------------------------------------- #
+_EPS = 1e-6
+
+# Predicate-menu generation config: families × level-classes × param variants. Adding a
+# family / level-class / variant here changes the menu WITHOUT touching the generator, and
+# nothing here names a specific level — level names are resolved from the facts at build
+# time (the "config-driven, not hardcoded per level name" requirement).
+_MENU_PREDICATE_CFG = (
+    # (family, id_prefix, level_class, builder, variants, max_levels)
+    ("falsification", "F", "daily_mid", "n_closes_beyond",
+     ({"tf": "5m", "n": 2},), None),
+    ("falsification", "F", "anti_pools", "price_beyond", ({},), 3),
+    ("exhaustion", "X", "dol_pools", "price_beyond", ({},), None),
+    ("recall", "R", "daily_mid", "n_closes_beyond", ({"tf": "5m", "n": 3},), None),
+    ("recall", "R", "clock", "time_elapsed", ({"minutes": 60}, {"minutes": 120}), None),
+)
+
+
+def _anti_side(direction: str) -> str:
+    return "below" if direction == "UP" else "above"
+
+
+def _thesis_side(direction: str) -> str:
+    return "above" if direction == "UP" else "below"
+
+
+def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float) -> dict:
+    """Eligible target pools per direction: in-facts, unswept AND undepleted, on the
+    correct side of current price. UP draws sit above price (nearest first); DOWN below."""
+    out = {"UP": [], "DOWN": []}
+    if not isinstance(now_price, (int, float)):
+        return out
+    for name, tup in mnq_levels.items():
+        price, body, side, tier, _active = tup
+        if side not in ("above", "below") or not isinstance(price, (int, float)):
+            continue
+        v = vlevels.get(name, {})
+        if v.get("swept") or v.get("depleted"):
+            continue
+        # A draw is a resistance ABOVE price (up) or a support BELOW price (down); a
+        # level whose price sits on the wrong side of its own tag (a resistance now below
+        # price, or vice-versa) is spent, not a draw — excluded.
+        if side == "above" and price > now_price + _EPS:
+            out["UP"].append((name, price, body, tier, side))
+        elif side == "below" and price < now_price - _EPS:
+            out["DOWN"].append((name, price, body, tier, side))
+    # Nearest draw first (UP ascending, DOWN descending), then assign stable IDs.
+    out["UP"].sort(key=lambda e: e[1])
+    out["DOWN"].sort(key=lambda e: -e[1])
+    menu = {}
+    for direction, entries in out.items():
+        menu[direction] = [
+            {"id": f"D{i + 1}", "level": name, "price": price,
+             "body": body, "tier": tier, "side": side}
+            for i, (name, price, body, tier, side) in enumerate(entries)
+        ]
+    return menu
+
+
+def _resolve_level_class(level_class: str, direction: str, mnq_levels: dict,
+                         vlevels: dict, now_price: float, day_mid, dol_menu: dict,
+                         max_levels) -> list:
+    """Resolve a level-class to a list of (price, side) the builder fills into predicates."""
+    if level_class == "daily_mid":
+        if not isinstance(day_mid, (int, float)):
+            return []
+        return [(day_mid, _anti_side(direction))]
+    if level_class == "clock":
+        return [(None, None)]
+    if level_class == "dol_pools":
+        side = _thesis_side(direction)
+        return [(e["price"], side) for e in dol_menu.get(direction, [])]
+    if level_class == "anti_pools":
+        # Nearest unswept pools on the ANTI-thesis side of price (support below an UP
+        # thesis / resistance above a DOWN thesis); breaking them falsifies the thesis.
+        side = _anti_side(direction)
+        pools = []
+        for name, tup in mnq_levels.items():
+            price, _body, lside, _tier, _active = tup
+            if lside not in ("above", "below") or not isinstance(price, (int, float)):
+                continue
+            v = vlevels.get(name, {})
+            if v.get("swept") or v.get("depleted"):
+                continue
+            # Anti-thesis pools are the support UNDER an up-thesis (side below, below
+            # price) or the resistance OVER a down-thesis (side above, above price).
+            if direction == "UP" and lside == "below" and price < now_price - _EPS:
+                pools.append(price)
+            elif direction == "DOWN" and lside == "above" and price > now_price + _EPS:
+                pools.append(price)
+        pools.sort(key=lambda p: abs(p - now_price))   # nearest first
+        if max_levels:
+            pools = pools[:max_levels]
+        return [(p, side) for p in pools]
+    return []
+
+
+def _build_predicate(builder: str, price, side, variant: dict) -> Optional[dict]:
+    if builder == "price_beyond":
+        return {"type": "price_beyond", "price": price, "side": side}
+    if builder == "n_closes_beyond":
+        return {"type": "n_closes_beyond", "price": price, "side": side,
+                "tf": variant["tf"], "n": variant["n"]}
+    if builder == "time_elapsed":
+        return {"type": "time_elapsed", "minutes": variant["minutes"]}
+    return None
+
+
+def _predicate_menu(mnq_levels: dict, vlevels: dict, now_price: float, day_mid,
+                    dol_menu: dict) -> dict:
+    """Per-direction candidate falsification / exhaustion / recall predicates with unique
+    IDs and concrete params, generated from _MENU_PREDICATE_CFG (config-driven)."""
+    out = {}
+    for direction in ("UP", "DOWN"):
+        entries = []
+        counters = {}
+        seen = set()
+        for family, prefix, level_class, builder, variants, max_levels in _MENU_PREDICATE_CFG:
+            targets = _resolve_level_class(level_class, direction, mnq_levels, vlevels,
+                                           now_price, day_mid, dol_menu, max_levels)
+            for price, side in targets:
+                for variant in variants:
+                    pred = _build_predicate(builder, price, side, variant)
+                    if pred is None:
+                        continue
+                    key = json.dumps(pred, sort_keys=True)
+                    if key in seen:            # dedupe identical concrete predicates
+                        continue
+                    seen.add(key)
+                    counters[prefix] = counters.get(prefix, 0) + 1
+                    entries.append({"id": f"{prefix}{counters[prefix]}",
+                                    "family": family, "predicate": pred})
+        out[direction] = entries
+    return out
+
+
+def build_menus(bundle: FactsBundle, vd: dict) -> dict:
+    """The S8 menu object: {now_price, dol{UP,DOWN}, predicates{UP,DOWN}} — the structured
+    menu shared by the rendered facts text (render_menus_text) and the validator's
+    menu-membership check. Deterministic given the same facts."""
+    mnq_levels = (bundle.levels or {}).get("MNQ", {})
+    vlevels = vd.get("levels", {}) if isinstance(vd, dict) else {}
+    now_price = vd.get("now_price") if isinstance(vd, dict) else bundle.now_price
+    if not isinstance(now_price, (int, float)):
+        now_price = bundle.now_price
+    dol = _dol_menu(mnq_levels, vlevels, now_price)
+    preds = _predicate_menu(mnq_levels, vlevels, now_price, bundle.day_mid, dol)
+    return {"now_price": now_price, "daily_mid": bundle.day_mid,
+            "dol": dol, "predicates": preds}
+
+
+def render_menus_text(bundle: FactsBundle) -> str:
+    """Render the S8 menu block (compact tables with IDs). Byte-stable given the same
+    facts. Kept SEPARATE from render_facts_text so the S0–S7 core (and its content hash)
+    is unchanged — this block is appended to the model-facing prompt, not to bundle.lines."""
+    if bundle.menus is None:
+        bundle.menus = build_menus(bundle, facts_to_validator_dict(bundle))
+    m = bundle.menus or {}
+    out: list = []
+    A = out.append
+    A("## S8 MENUS (candidate DOLs + predicates; select by copying params exactly; "
+      "escape hatch = any schema-valid, facts-grounded predicate)")
+    A(f"now_price = {m.get('now_price')} | daily_mid = {m.get('daily_mid')}")
+    dol = m.get("dol") or {}
+    for direction in ("UP", "DOWN"):
+        A(f"\nDOL menu [{direction}] (eligible draws: in-facts, unswept, undepleted, "
+          f"correct side):")
+        rows = dol.get(direction) or []
+        if not rows:
+            A("  (none eligible)")
+        for e in rows:
+            body = "" if e.get("body") is None else f" body={e['body']}"
+            A(f"  {e['id']}: {e['level']} price={e['price']}{body} "
+              f"[{e['side']}, {e['tier']}]")
+    preds = m.get("predicates") or {}
+    for direction in ("UP", "DOWN"):
+        A(f"\nPredicate menu [{direction}] (falsification F / exhaustion X / recall R):")
+        rows = preds.get(direction) or []
+        if not rows:
+            A("  (none)")
+        for e in rows:
+            A(f"  {e['id']} [{e['family']}]: {_fmt_predicate(e['predicate'])}")
+    return "\n".join(out) + "\n"
+
+
+def _fmt_predicate(pred: dict) -> str:
+    """Compact human form of a predicate for the menu table (params echo the JSON)."""
+    t = pred.get("type")
+    if t == "price_beyond":
+        return f"price_beyond(price={pred['price']}, side={pred['side']})"
+    if t == "n_closes_beyond":
+        return (f"n_closes_beyond(price={pred['price']}, side={pred['side']}, "
+                f"tf={pred['tf']}, n={pred['n']})")
+    if t == "time_elapsed":
+        return f"time_elapsed(minutes={pred['minutes']})"
+    return json.dumps(pred, sort_keys=True)
 
 
 def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
@@ -361,6 +571,8 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
         dh, dl, dch, dcl = hl(sess_now)
         L(f"day running: high={dh} (at {sess_now['high'].idxmax()}) low={dl} "
               f"(at {sess_now['low'].idxmin()}) mid={(dh + dl) / 2}")
+        if tkr == "MNQ" and dh is not None and dl is not None:
+            bundle.day_mid = round((dh + dl) / 2.0, 2)   # S8 menu input (not rendered in S1)
         L(f"last close: {float(df['close'].iloc[-1])}")
         ath = ath_mnq if tkr == "MNQ" else ath_mes
         if ath:

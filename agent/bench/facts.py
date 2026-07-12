@@ -31,8 +31,8 @@ for _p in (_AGENT, os.path.join(_AGENT, "contracts"), os.path.join(_REPO, "calib
         sys.path.insert(0, _p)
 
 from derive_facts import (  # noqa: E402
-    DEPLETE, TZ, compute_facts, facts_to_validator_dict, load, render_facts_text,
-    session_frame, trade_date,
+    DEPLETE, TZ, build_menus, compute_facts, facts_to_validator_dict, load,
+    render_facts_text, render_menus_text, session_frame, trade_date,
 )
 
 DEFAULT_MAIN = os.path.expanduser(
@@ -46,6 +46,7 @@ _MAINT_HI = datetime.time(18, 0)
 class FactsResult:
     boundary: pd.Timestamp
     text: str = ""
+    menu_text: str = ""              # S8 menu block (appended to the model prompt; NOT hashed)
     validator_dict: dict = field(default_factory=dict)
     content_hash: str = ""
     max_ts: Optional[pd.Timestamp] = None
@@ -122,8 +123,13 @@ class ParquetFactsSource:
             return res
 
         res.text = render_facts_text(bundle)
-        res.validator_dict = facts_to_validator_dict(bundle)
-        res.content_hash = _sha(res.text)
+        res.validator_dict = facts_to_validator_dict(bundle)   # core view (shadow-parity)
+        # S8 menus: an additive L1 overlay on the bench's OWN validator_dict copy (the
+        # shared facts_to_validator_dict stays byte-stable for the shadow engine's hash).
+        bundle.menus = build_menus(bundle, res.validator_dict)
+        res.validator_dict["menus"] = bundle.menus
+        res.menu_text = render_menus_text(bundle)              # reuses cached bundle.menus
+        res.content_hash = _sha(res.text)                      # core hash: S0–S7 only (parity)
         res.now = bundle.now
         res.max_ts = bundle.now
         res.now_price = bundle.now_price

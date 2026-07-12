@@ -125,11 +125,13 @@ def score_date(summary: dict, source, cfg) -> dict:
             standing_min += max(0.0, (d - a).total_seconds() / 60.0)
     coverage_pct = round(min(100.0, standing_min / session_min * 100.0), 1)
 
-    # API cost + tokens + latency (over the decisions).
+    # API cost + tokens + latency + menu-hit telemetry (over the decisions).
     decisions = summary.get("decisions") or []
     cost = 0.0
     tin = tout = cread = 0
     latencies = []
+    menu_hit = menu_esc = 0                 # predicates copied from a menu / off-menu
+    dol_hits = n_directional_calls = 0      # DOL menu-hits over directional (non-failsafe) calls
     for rec in decisions:
         u = rec.get("usage_total") or {}
         cost += estimate_cost(u)
@@ -139,6 +141,15 @@ def score_date(summary: dict, source, cfg) -> dict:
         lt = rec.get("latency_total_sec")
         if isinstance(lt, (int, float)) and lt > 0:
             latencies.append(lt)
+        b = rec.get("bench") or {}
+        menu = b.get("menu") or {}
+        menu_hit += menu.get("n_menu_hit") or 0
+        menu_esc += menu.get("n_escape_hatch") or 0
+        if not b.get("failsafe") and (rec.get("thesis") or {}).get("bias") in ("UP", "DOWN"):
+            n_directional_calls += 1
+            if menu.get("dol_menu_hit"):
+                dol_hits += 1
+    menu_total = menu_hit + menu_esc
 
     metrics = {
         "n_lifecycles": len(lifecycles),
@@ -156,6 +167,12 @@ def score_date(summary: dict, source, cfg) -> dict:
         "tokens_in": tin, "tokens_out": tout, "cache_read": cread,
         "latency_mean": round(statistics.mean(latencies), 2) if latencies else None,
         "latency_median": round(statistics.median(latencies), 2) if latencies else None,
+        # Menu-hit telemetry (plan 11): predicate-level menu-hit ratio + DOL menu-hit rate.
+        "menu_hit": menu_hit, "escape_hatch": menu_esc,
+        "menu_hit_ratio": round(menu_hit / menu_total, 3) if menu_total else None,
+        "dol_menu_hit_rate": round(dol_hits / n_directional_calls, 3)
+        if n_directional_calls else None,
+        "gate_source": getattr(cfg, "gate_source", "calibrated"),
     }
 
     return {

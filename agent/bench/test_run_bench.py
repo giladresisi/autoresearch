@@ -34,7 +34,11 @@ def source():
 
 
 def _cfg():
-    return BenchConfig(latency_sec=90, safety_nets=("ttl",), churn_cap=20)
+    # churn_cap=2: since plan 11 the stub failsafe carries recall.max_age_min=60, so a
+    # failsafe day RE-CALLS (no longer one call spanning the session) — cap it low to keep
+    # the full-day stub build fast (each facts build is ~8 s) while still exercising the
+    # re-call loop. The determinism / linked-id / coverage assertions hold at any cap.
+    return BenchConfig(latency_sec=90, safety_nets=("ttl",), churn_cap=2)
 
 
 def _read(path):
@@ -106,3 +110,32 @@ def test_rescore_byte_stability(source, tmp_path):
     report.write_scorecard(os.path.join(r2, DATE), score.score_date(s2, source, cfg), cfg)
     assert _read(os.path.join(r1, DATE, "scorecard.md")) == \
         _read(os.path.join(r2, DATE, "scorecard.md"))
+
+
+def test_rescore_carries_logged_gate_source(source, tmp_path):
+    # A rescore must stamp the LOGGED gate source, not the CLI default — a rescored
+    # stand-directional (diagnostic) run keeps its [DIAGNOSTIC] header even when --gate
+    # is omitted (defaults to calibrated).
+    from config import BenchConfig
+    diag = BenchConfig(latency_sec=90, safety_nets=("ttl",), churn_cap=2,
+                       gate_source="stand-directional")
+    run_bench.run_bench([DATE], "stub", "gate_src", diag, runs_root=str(tmp_path))
+    default = BenchConfig(latency_sec=90, safety_nets=("ttl",), churn_cap=2)   # calibrated
+    run_bench.run_bench([DATE], "rescore", "gate_rescore", default,
+                        source_run="gate_src", runs_root=str(tmp_path))
+    sc = _read(os.path.join(str(tmp_path), "gate_rescore", DATE, "scorecard.md"))
+    agg = _read(os.path.join(str(tmp_path), "gate_rescore", "aggregate.md"))
+    assert "stand-directional" in sc and "DIAGNOSTIC" in sc
+    assert "stand-directional" in agg and "DIAGNOSTIC" in agg
+
+
+def test_rescore_conflicting_explicit_gate_errors(source, tmp_path):
+    from config import BenchConfig
+    diag = BenchConfig(latency_sec=90, safety_nets=("ttl",), churn_cap=2,
+                       gate_source="stand-directional")
+    run_bench.run_bench([DATE], "stub", "gate_src2", diag, runs_root=str(tmp_path))
+    conflicting = BenchConfig(latency_sec=90, safety_nets=("ttl",), churn_cap=2,
+                              gate_source="self")     # explicit, != logged
+    with pytest.raises(ValueError, match="conflicts with the rescored"):
+        run_bench.run_bench([DATE], "rescore", "gate_rescore2", conflicting,
+                            source_run="gate_src2", runs_root=str(tmp_path))

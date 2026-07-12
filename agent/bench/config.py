@@ -17,6 +17,16 @@ import pandas as pd
 # `acceptance_flip` / `opposite_extreme` are the standing code-injected nets.
 SAFETY_NETS = ("ttl", "acceptance_flip", "opposite_extreme")
 
+# Bench-only diagnostic gate sources (plan 11). PRODUCTION gate behavior is unchanged —
+# this override only decides which confidence value the BENCH engine uses for `stands()`:
+#   calibrated       — the code-computed confidence gate (spec §8; default = production).
+#   self             — the model's self-reported confidence (audit-only in production).
+#   stand-directional— any valid directional thesis stands (lifecycle observation while
+#                      the calibration table is placeholder).
+# The source is stamped into run metadata + every scorecard header so a diagnostic run is
+# never mistaken for a production-config run.
+GATE_SOURCES = ("calibrated", "self", "stand-directional")
+
 # false_kill / late_kill lookahead horizon — reuse annotate.py's HORIZON convention.
 LOOKAHEAD_H = pd.Timedelta(hours=4)
 
@@ -44,6 +54,7 @@ class BenchConfig:
     churn_cap: int = 20
     regime_map: dict = field(default_factory=lambda: dict(DEFAULT_REGIME_MAP))
     lookahead_h: pd.Timedelta = LOOKAHEAD_H
+    gate_source: str = "calibrated"          # bench-only diagnostic override (see GATE_SOURCES)
 
     def latency(self) -> pd.Timedelta:
         return pd.Timedelta(seconds=self.latency_sec)

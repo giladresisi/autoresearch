@@ -143,6 +143,24 @@ def test_low_conf_max_age_recalls_l1():
     assert d.state == State.THESIS_LOW_CONF
 
 
+def test_failsafe_thesis_schedules_l1_recall_at_max_age():
+    # Plan 11 Phase 4: the failsafe thesis now carries recall.max_age_min=60, so a
+    # failsafed L1 call re-asks at +60 instead of leaving the executor blind all session.
+    from schemas import failsafe_thesis
+    fs = failsafe_thesis()
+    assert fs["recall"]["max_age_min"] == 60
+    d = _director()
+    d.on_session_open(T0, "facts")
+    d.on_thesis_arrived(fs, ts=T0)                 # NEUTRAL/LOW → THESIS_LOW_CONF
+    assert d.state == State.THESIS_LOW_CONF
+    before = len(d.provider.thesis_reqs)
+    d.on_bar(T0, _mv(now=T0 + pd.Timedelta(minutes=59)))
+    assert len(d.provider.thesis_reqs) == before   # not yet
+    d.on_bar(T0, _mv(now=T0 + pd.Timedelta(minutes=61)))
+    assert len(d.provider.thesis_reqs) == before + 1
+    assert d.state == State.THESIS_LOW_CONF
+
+
 # --------------------------------------------------------------------------- #
 # AWAITING_SETUP → SETUP / WAIT                                                #
 # --------------------------------------------------------------------------- #

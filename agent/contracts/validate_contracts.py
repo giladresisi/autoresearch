@@ -17,6 +17,7 @@ combined `validate_contracts`. All return a `ContractValidation` (list of violat
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -292,3 +293,88 @@ def validate_contracts(thesis=None, plan=None, facts: Optional[dict] = None
     if plan is not None:
         r.violations.extend(validate_trade_plan(plan, thesis=thesis, facts=facts).violations)
     return r
+
+
+# --------------------------------------------------------------------------- #
+# Menu-membership audit (plan 11 Phase 3) — telemetry, not a gate.             #
+# --------------------------------------------------------------------------- #
+def _canon(pred) -> str:
+    """Canonical form of a predicate for exact menu matching: numbers normalised to
+    float (so 20000 == 20000.0), keys sorted, composites recursed."""
+    def norm(v):
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, dict):
+            return {k: norm(v[k]) for k in sorted(v)}
+        if isinstance(v, list):
+            return [norm(x) for x in v]
+        return v
+    return json.dumps(norm(pred), sort_keys=True)
+
+
+def _menu_index(facts: Optional[dict], direction: Optional[str]) -> dict:
+    """canonical-predicate -> menu id, for the thesis direction's predicate menu."""
+    if not direction:
+        return {}
+    menus = (facts or {}).get("menus") or {}
+    entries = (menus.get("predicates") or {}).get(direction) or []
+    idx = {}
+    for e in entries:
+        pred = e.get("predicate")
+        if isinstance(pred, dict):
+            idx.setdefault(_canon(pred), e.get("id"))
+    return idx
+
+
+def classify_predicates(thesis, facts: Optional[dict] = None) -> dict:
+    """Tag every thesis predicate as `menu_hit` (params exactly match a menu entry for the
+    thesis direction) or `escape_hatch` (schema-valid + facts-grounded, but off-menu). This
+    is PURE TELEMETRY for iteration — it adds no rejections; the schema (generation-time) and
+    validate_thesis (grounding) are the gates. A failsafe/NEUTRAL thesis (no direction, no
+    predicates) yields empty tags. Also tags whether the chosen DOL is a DOL-menu entry.
+
+    Returns {direction, dol_menu_hit, dol_menu_id, fields{falsified_if/exhausted_if/recall:
+    [{predicate, tag, menu_id}]}, n_menu_hit, n_escape_hatch, menu_hit_ratio}.
+    """
+    d = thesis.to_dict() if isinstance(thesis, Thesis) else (thesis or {})
+    t = Thesis.from_dict(d)
+    direction = t.bias if t.bias in ("UP", "DOWN") else None
+    idx = _menu_index(facts, direction)
+
+    fields = {}
+    n_hit = n_esc = 0
+    field_map = {
+        "falsified_if": t.falsified_if,
+        "exhausted_if": t.exhausted_if,
+        "recall": ((t.recall or {}).get("events") or []),
+    }
+    for fname, preds in field_map.items():
+        tagged = []
+        for p in preds or []:
+            menu_id = idx.get(_canon(p)) if isinstance(p, dict) else None
+            if menu_id is not None:
+                tag, n_hit = "menu_hit", n_hit + 1
+            else:
+                tag, n_esc = "escape_hatch", n_esc + 1
+            tagged.append({"predicate": p, "tag": tag, "menu_id": menu_id})
+        fields[fname] = tagged
+
+    # DOL menu membership (telemetry only).
+    dol_menu_hit, dol_menu_id = False, None
+    if direction and isinstance(t.dol, dict) and t.dol.get("level"):
+        dol_menu = ((facts or {}).get("menus") or {}).get("dol") or {}
+        for e in dol_menu.get(direction) or []:
+            if e.get("level") == t.dol.get("level"):
+                dol_menu_hit, dol_menu_id = True, e.get("id")
+                break
+
+    total = n_hit + n_esc
+    return {
+        "direction": direction,
+        "dol_menu_hit": dol_menu_hit, "dol_menu_id": dol_menu_id,
+        "fields": fields,
+        "n_menu_hit": n_hit, "n_escape_hatch": n_esc,
+        "menu_hit_ratio": round(n_hit / total, 4) if total else None,
+    }

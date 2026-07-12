@@ -1,5 +1,42 @@
 ﻿# PROGRESS
 
+## Feature: L1 predicate vocabulary — schema + menus + failsafe recall — Plan 11
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/11.l1-vocab-schema-menus.md`
+**Execution Report**: `.agents/execution-reports/11.l1-vocab-schema-menus.md`
+
+The first L1-INTERNALS slice on top of the plan-10 bench. Three layers: (1) **Syntax → JSON
+schema** — every `*_if`/`recall.events` field is a strict `anyOf` of the six predicate atoms
+(type const + exact params) + depth-1 `all_of`/`any_of`, via `$defs`/`$ref` (the `$ref` and the
+dropped numeric-bound keywords were both FORCED by the Anthropic structured-output backend:
+inlined union → "grammar too large", `minimum` on integers unsupported — bounds moved to the
+deterministic predicate validator, spec §5). An unknown predicate type is now un-generatable,
+killing the `SYN_BAD_PREDICATE → failsafe` class. (2) **Grounding → menus** — `derive_facts` S8:
+a DOL menu (eligible draws per direction: in-facts, unswept/undepleted, correct side) + a
+config-driven predicate menu (F/X/R families, no hardcoded level names); rendered into the
+model prompt + the bench validator_dict; `validate_contracts.classify_predicates` tags each
+predicate menu-hit/escape-hatch (pure telemetry). CRITICAL: the shared `facts_to_validator_dict`
++ `render_facts_text` (S0–S7) stay byte-identical (shadow engine hashes them) — menus are a
+bench/L1 overlay only. (3) **Failsafe recall** — `failsafe_thesis()` gains `recall.max_age_min=60`
+so a failsafe schedules its own retry (bench + TradeDirector already honor max_age). Plus a
+**bench-only `--gate calibrated|self|stand-directional`** diagnostic override, stamped in every
+scorecard/aggregate header; production gate behaviour unchanged.
+
+Measurement (real API, OpenRouter Haiku 4.5, <$6 budget → **$1.73** total): structured-output
+sanity ✓ (clean UP thesis, 0 retries, 4/4 menu-hit — SYN_BAD_PREDICATE gone). **Run #1**
+(calibrated, 4 dates): failsafe **66.7–100% → 4.2%**, menu-hit **0.989**, coverage 0% (placeholder
+calibration still gates LOW — expected). **Run #1d** (stand-directional, 4 dates): 23 directional
+standing, completion **0.348** (trend 0.80 / reversal 0.0 / chop+07-02 0.333), **0 false-kills**,
+median late-kill 20.5 pts, coverage 23.4%, menu-hit 0.946. NB: `--churn-cap 6` (budget) truncates
+each ~23h session to its first 2.7–9.1h (overnight/Asia–London, not NY) — the rapid re-calls are
+real recall/TTL/falsification churn, but full-day metrics need an uncapped run next iteration.
+
+Gates: flag-OFF 1s byte-identity 05-19/05-18 **PASS** (events+trades identical to pre-change HEAD);
+full `pytest tests/` = **2F/1379P/10S/16E — baseline unchanged** (0 new failures); `pytest agent/`
+= **251 passed** (220 + 31 new). Review pipeline: acceptance **ACCEPTED 25/25**; code-review fixed
+1 MEDIUM (rescore now stamps the logged gate source, not the CLI default) + 1 LOW (`_effective_gate`
+self-branch failsafe guard) with regression tests. All changes UNSTAGED; nothing committed/pushed.
+
 ## Feature: L1 lifecycle bench — Plan 10
 ### Status: ✅ Complete (unstaged)
 **Plan File**: `.agents/plans/10.l1-lifecycle-bench.md`

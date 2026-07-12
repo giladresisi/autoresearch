@@ -30,6 +30,9 @@ def _metrics_lines(m: dict) -> list:
         f"- churn (L1 calls): {m['churn']}",
         f"- coverage (session min under a standing thesis): {_fmt(m['coverage_pct'])}%",
         f"- failsafe rate: {_fmt(m['failsafe_rate'])}",
+        f"- menu-hit ratio (predicates): {_fmt(m.get('menu_hit_ratio'))}  "
+        f"(menu-hit {m.get('menu_hit', 0)} / escape-hatch {m.get('escape_hatch', 0)})",
+        f"- DOL menu-hit rate (directional calls): {_fmt(m.get('dol_menu_hit_rate'))}",
         f"- API cost: ${m['api_cost_usd']:.6f}  "
         f"(tok in {m['tokens_in']} / out {m['tokens_out']} / cache-read {m['cache_read']})",
         f"- per-call latency (s): mean {_fmt(m['latency_mean'])} / "
@@ -60,8 +63,12 @@ def _lifecycle_table(lifecycles: list) -> list:
 def write_scorecard(date_dir: str, enriched: dict, cfg) -> str:
     os.makedirs(date_dir, exist_ok=True)
     m = enriched["metrics"]
+    gate_src = m.get("gate_source") or getattr(cfg, "gate_source", "calibrated")
+    gate_note = "" if gate_src == "calibrated" else "  **[DIAGNOSTIC GATE]**"
     lines = [
         f"# Bench scorecard — {enriched['date']} ({enriched['regime']})",
+        "",
+        f"Gate source: **{gate_src}**{gate_note}",
         "",
         f"Day outcome: **{enriched['day_outcome']}**  ·  "
         f"session {enriched['session_open'][11:16]}→{enriched['session_end'][11:16]} "
@@ -116,6 +123,8 @@ def _agg_over(scored: list) -> dict:
         "coverage_pct": round(statistics.mean(cov), 1) if cov else 0.0,
         "failsafe_pct": round(statistics.mean(fr) * 100.0, 1) if fr else None,
         "api_cost_usd": round(cost, 6),
+        "menu_hit": sum(s["metrics"].get("menu_hit", 0) for s in scored),
+        "escape_hatch": sum(s["metrics"].get("escape_hatch", 0) for s in scored),
     }
 
 
@@ -149,9 +158,12 @@ def write_aggregate(run_dir: str, scored: list, cfg, *, run_id: str = "",
             f"{_fmt(a['completion_rate'])} | {a['false_kill_count']} | "
             f"{_fmt(a['coverage_pct'])} | {_fmt(a['failsafe_pct'])} |")
 
+    gate_src = getattr(cfg, "gate_source", "calibrated")
+    gate_note = "" if gate_src == "calibrated" else "  **[DIAGNOSTIC — not production config]**"
     md = [
         f"# Bench aggregate — {run_id} ({mode})",
         "",
+        f"Gate source: **{gate_src}**{gate_note}",
         f"Dates: {', '.join(sorted(s['date'] for s in scored))}",
         "",
         "## Overall",
@@ -163,6 +175,9 @@ def write_aggregate(run_dir: str, scored: list, cfg, *, run_id: str = "",
         f"- churn (total L1 calls): {overall['churn']}",
         f"- coverage (mean of per-day): {_fmt(overall['coverage_pct'])}%",
         f"- failsafe rate (mean of per-day): {_fmt(overall['failsafe_pct'])}%",
+        f"- menu-hit ratio (predicates): "
+        f"{_fmt(round(overall['menu_hit'] / (overall['menu_hit'] + overall['escape_hatch']), 3) if (overall['menu_hit'] + overall['escape_hatch']) else None)}"
+        f"  (menu-hit {overall['menu_hit']} / escape-hatch {overall['escape_hatch']})",
         f"- API cost (total): ${overall['api_cost_usd']:.6f}",
         "",
         "## Per-regime split",
@@ -186,6 +201,6 @@ def write_aggregate(run_dir: str, scored: list, cfg, *, run_id: str = "",
         fh.write("\n".join(md))
 
     return {**overall, "coverage_pct": overall["coverage_pct"],
-            "failsafe_pct": overall["failsafe_pct"]}
+            "failsafe_pct": overall["failsafe_pct"], "gate_source": gate_src}
 
 

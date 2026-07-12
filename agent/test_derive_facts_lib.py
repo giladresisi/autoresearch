@@ -76,6 +76,27 @@ def test_validator_dict_matches_parse_facts_fixture():
     assert got["levels"] == ref["levels"]
 
 
+def test_menus_do_not_change_s0_s7_or_validator_dict():
+    # Plan 11: the S8 menus are a separate, additive overlay — computing them must not
+    # change render_facts_text (S0–S7) or the shared facts_to_validator_dict (which is
+    # hashed as the shadow engine's facts identity).
+    import hashlib
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    core = render_facts_text(bundle)
+    core_hash = hashlib.sha256(core.encode("utf-8")).hexdigest()
+    vd = facts_to_validator_dict(bundle)                 # this triggers no menu injection
+    assert "menus" not in vd                             # shared view stays menu-free
+    # Building + rendering the menu leaves the S0–S7 core byte-identical.
+    menu_text = derive_facts.render_menus_text(bundle)
+    assert render_facts_text(bundle) == core
+    assert hashlib.sha256(render_facts_text(bundle).encode("utf-8")).hexdigest() == core_hash
+    assert facts_to_validator_dict(bundle) == vd and "menus" not in facts_to_validator_dict(bundle)
+    # S8 lives ONLY in the separate block, never in the S0–S7 render.
+    assert "## S8" not in core and "MENU" not in core
+    assert menu_text.startswith("## S8 MENUS")
+
+
 def test_validator_dict_parity_on_committed_cuts():
     """Cross-view consistency on >=3 real committed cut fact sheets: a bundle whose
     lines ARE a committed facts.txt renders back to it, so facts_to_validator_dict

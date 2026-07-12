@@ -224,3 +224,24 @@ def test_failsafe_decision_recorded_as_failsafe():
                   gate="LOW", failsafe=True)
     lc2 = run_lifecycle(d2, short, cfg(), SESS_END)
     assert lc2.cause == "failsafe"
+
+
+def test_failsafe_recall_max_age_re_calls(monkeypatch=None):
+    """Plan 11 Phase 4: a failsafed day RE-CALLS at +max_age (failsafe_thesis carries
+    recall.max_age_min=60), instead of one call spanning the session. run_day over a
+    3-hour span at the 60-min failsafe recall must produce >=2 L1 calls."""
+    from schemas import failsafe_thesis
+    assert failsafe_thesis()["recall"]["max_age_min"] == 60
+    bars = mkbars("2026-06-25 09:00", closes=[50] * 200)     # 200 min > 3× 60
+    open_ts = pd.Timestamp("2026-06-25 09:00", tz=TZ)
+    end_ts = pd.Timestamp("2026-06-25 12:20", tz=TZ)
+
+    def provider(trigger_ts):
+        th = failsafe_thesis()
+        return decision(trigger_ts, th, gate="LOW", failsafe=True,
+                        decision_id=f"fs_{trigger_ts.strftime('%H%M')}")
+
+    # latency 0 so the recall math is clean; each failsafe dies at born+60 → re-call.
+    res = run_day(bars, provider, cfg(latency_sec=0), open_ts, end_ts, "2026-06-25")
+    assert res.n_calls >= 2
+    assert all(lc.cause == "failsafe" for lc in res.lifecycles)
