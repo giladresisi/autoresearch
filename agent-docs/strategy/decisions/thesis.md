@@ -14,7 +14,7 @@
 > Prefer S8 menu items (IDs `D*`/`F*`/`X*`/`R*`, `derive_facts.render_menus_text`) when a menu
 > item fits; otherwise use the documented escape hatch — any schema-valid, facts-grounded
 > predicate built from the same atoms (e.g. `n_closes_beyond(tf="1h"/"4h")`, not yet a generated
-> menu family — see §7 gaps).
+> menu family — see §8 gaps).
 
 ## 1. Cadence
 
@@ -34,10 +34,66 @@ daily-trend vs next-move) — one evidence ledger, scored per call, gated by the
 
 | # | Criterion | Definition |
 |---|---|---|
-| P1 | **HTF close beyond/before at any liquidity sweep** | General acceptance/rejection test at ANY swept level (fixed or running, either asset) — independent of whether an SMT is present there. `n_closes_beyond(price=level, side=sweep_direction, tf, n=1)` true → **accepted beyond** (continuation-leaning); the SAME check on the opposite `side` true instead → **rejected/closed before** (reversal-leaning). Gated by the maturity rule (§3) — a sweep with no qualifying HTF close yet scores ZERO, not a default direction. 4hr close scores more than 1hr (§4). |
+| P1 | **HTF close beyond/before at any liquidity sweep** | General acceptance/rejection test at ANY swept level (fixed or running, either asset) — independent of whether an SMT is present there. `n_closes_beyond(price=level, side=sweep_direction, tf, n=1)` true → **accepted beyond** (continuation-leaning); the SAME check on the opposite `side` true instead → **rejected/closed before** (reversal-leaning). Gated by the maturity rule (§3) — a sweep with no qualifying HTF close yet scores ZERO, not a default direction. 4hr close scores more than 1hr (§4). Evaluated PER ASSET, on that asset's own copy of the level (§5) — see §6 for what it means when the two assets' P1 reads disagree. |
 | P2 | **Meaningful SMT + HTF rejection at that liquidity** | Requires ALL of: (a) an SMT divergence present at the level, (b) the level is week-or-day tier or higher (`prev1/2_day_high/low`, `prev1_week_high/low`, `TDO`/`TWO`, running `day_high/low`/`week_high/low`) — explicitly EXCLUDING session-tier (6hr sub-session extremes, `liquidities_session_prior`) and fill/FVG tier, (c) the relevant HTF bar (4hr if it exists over the window, else 1hr) on the LAGGER (see §5 leader/lagger) closed BEFORE — not beyond — the liquidity. Reversal-only by design (no symmetric "SMT + accept-beyond" bonus form — an accepted push is scored by P1 on its own). Points scale with tier (week > day). **Deliberately stacks with P1** when both independently fire on the same physical sweep — this is not double-counting-as-bug, it is P2 rewarding the specific SMT-plus-genuine-rejection combination as a stronger tell than either alone; do not dedupe P1↔P2. |
-| P3 | **Position vs. equilibrium** | Current price vs. daily mid AND vs. weekly mid (`equilibrium.md` §1 definitions: running-extreme midpoints). Daily and weekly weighted EQUALLY (v1 seed — not yet established that weekly should outweigh daily). **Gap:** `weekly_mid` is not currently an exposed fact field (only `day_mid` is — `derive_facts.py` `FactsBundle.day_mid`); a code addition is needed before this half of P3 is machine-checkable. Until then, treat the weekly leg as context-only / low-confidence input, flagged as unverifiable load-bearing (one confidence tier down, per the existing veto pattern). |
+| P3 | **Position vs. equilibrium — daily/weekly weight set by phase, not fixed** | Current price vs. daily mid AND vs. weekly mid (`equilibrium.md` §1 definitions: running-extreme midpoints), evaluated PER ASSET. The daily-vs-weekly split is NOT fixed 50/50 — see §2.1a for the phase rule that sets which one dominates a given call. See §6 for what it means when the two assets agree on one equilibrium (e.g. both above weekly mid) but disagree on the other (e.g. split daily-mid placement). |
 | P4 | **Reclaim / failed reclaim of daily or weekly mid, HTF-confirmed** | A close-beyond-then-fails-back (or fails-to-reclaim) sequence on the daily OR weekly mid, confirmed specifically by an HTF (1h/4h) close — not any close. Daily and weekly weighted equally; 4hr scores more than 1hr (same scaling as P1). Note: `equilibrium.md` §3 and `next-move.md` mark plain weekly-mid TOUCH/CROSS as proven noise (GIL-39 B, +$83 shipped suppressing it as a trigger) — P4's weekly leg is a materially different, stricter signal (HTF-close-confirmed reclaim/failed-reclaim, not a bare touch/cross), so it is enabled alongside the daily leg without a separate gate. The daily half is parallel to the existing "failed reclaim of daily mid" item in `next-move.md` §2 (weight 2, "the strongest intraday tell"). |
+
+### 2.1a P3 daily/weekly weighting — set by which reference was touched most recently
+
+P3's daily-vs-weekly weight is dynamic, not fixed equal. Compare, across BOTH assets, the most
+recent time price touched a DAILY EXTREME (running `day_high`/`day_low` — the extreme-set
+timestamp already rendered in S1) against the most recent time price touched/crossed the DAILY
+EQUILIBRIUM (the daily mid — the mid-cross timestamps already rendered in S4). Take the single
+most recent of the four candidate timestamps (MNQ-extreme, MNQ-mid, MES-extreme, MES-mid):
+
+- **Most recent touch was the DAILY EQUILIBRIUM** → price has just left the mid and is now
+  moving TOWARD a daily extreme. How far that move ultimately reaches is governed more by the
+  broader weekly context than by the day's own range — weight the **weekly** equilibrium
+  position HIGHER than the daily for this call.
+- **Most recent touch was a DAILY EXTREME** → price has just left the extreme and is now moving
+  back TOWARD the daily equilibrium (intraday mean-reversion). That move is a narrower, day-scoped
+  dynamic, less governed by the weekly trend — weight the **daily** equilibrium position HIGHER
+  than the weekly for this call.
+
+**Gap:** neither "latest daily-extreme touch time" nor "latest daily-mid touch/cross time" is
+currently a structured `FactsBundle` field per asset — both exist only in RENDERED TEXT today
+(S1's extreme-set timestamps, S4's mid-cross tables). A facts-layer addition (parallel to
+`weekly_mid`/`swept_at`) is needed before this phase check is machine-checkable; until then it's
+a reasoning-time read off the rendered S1/S4 text — flag it unverifiable-load-bearing (one
+confidence tier down, existing veto pattern) if the model can't cite the exact timestamps it
+compared.
+
+### 2.1b Nested/superseded prior-liquidity levels are IGNORED, not scored
+
+Within a same-side family of prior-liquidity levels — prev-day highs (`prev1_day_high`,
+`prev2_day_high`, ...), prev-day lows, prev-week highs/lows, and any deeper history the facts
+track — a level is eligible evidence for P1/P2/P4/DOL ONLY if it sits BEYOND every MORE RECENT
+level in that same family. Scan a family from most-recent to oldest; drop any level that does not
+exceed (is not beyond) the extreme already established by a more recent one in the same family —
+it is nested inside already-superseded liquidity, not an independent pool. Applies per asset
+(MNQ's own family, MES's own family, separately).
+
+**Worked example:** `prev1_day_high` (yesterday's high) sits ABOVE `prev2_day_high` (the day
+before). `prev1_day_high` is the relevant, farther-out high-side pool; `prev2_day_high` does NOT
+extend beyond it, so **`prev2_day_high` is IGNORED** — it must not be scored as an independent P1
+accept/reject event, must not count toward P2's meaningful-tier check on its own, and must not be
+offered as a DOL. The identical rule applies to prev-day lows (the most recent low is relevant
+unless an older low sits farther below it) and prev-week highs/lows.
+
+This filter is orthogonal to, not a replacement for, tier weighting (§4) — it prunes WHICH levels
+within a family are even eligible before tier weight is applied to whichever survives. It does
+NOT extend to session-tier sub-blocks (`asia`/`london`/`ny_morning`/`ny_evening` `(cur)`/`(prev1)`
+highs/lows) — those are a different, non-chronological-family naming scheme and P2 already
+excludes session-tier outright (§2.1); this filter is specifically about prev-day/prev-week
+nesting.
+
+**Why this matters:** without it, a pile of nested, lower-significance echoes of the SAME
+underlying extreme can numerically out-tally one genuinely meaningful (often week-tier) signal.
+This is exactly what happened in the 2026-07-01 12:00 ET test (§6's worked example): the model's
+own tally counted MNQ's accept on `prev2_day_high` as independent UP-supporting evidence, when
+`prev2_day_high` sat below `prev1_day_high` and should have been dropped entirely — removing one
+of the lower-tier accepts that out-voted the single meaningful week-tier reject.
 
 ### 2.2 Secondary criteria (lower max weight; accumulate only if aligned)
 
@@ -55,7 +111,8 @@ primary mover:
 - All existing multipliers still apply within this secondary pool: tier weight, session-side,
   alignment-vs-standing-bias, freshness decay, whipsaw dampener (`next-move.md` §2–3).
 - Vetoes/caps (`next-move.md` §4) still apply post-scoring: fresh top-pocket counter-signal,
-  unverifiable load-bearing input, low/neutral standing bias, range/hybrid regime.
+  unverifiable load-bearing input, low/neutral standing bias, range/hybrid regime. §6's
+  contradiction cap is a NEW addition to this list, not a replacement for it.
 
 ## 3. Maturity gate (applies to P1, P2, and the HTF-close half of P4)
 
@@ -71,7 +128,10 @@ contributes zero to P1/P2/P4, not a partial or default-direction score.
 ## 4. Weighting
 
 - **P1–P4 are weighted EQUALLY against each other** (same max achievable points per criterion) —
-  no criterion among the four is a priori stronger; whichever fire, fire at par.
+  no criterion among the four is a priori stronger; whichever fire, fire at par. This net score
+  still determines DIRECTION even under a §6 cross-asset contradiction — §6 caps the confidence
+  CEILING after scoring (same as any other veto/cap), it does not override or replace the net
+  score itself.
 - Within P1, P2, and P4: a qualifying **4hr** close scores strictly more than a qualifying
   **1hr** close (both are eligible per the maturity gate in §3; 4hr is simply worth more).
 - Within P2: points scale further by liquidity tier — week-tier scores more than day-tier (both
@@ -81,7 +141,7 @@ contributes zero to P1/P2/P4, not a partial or default-direction score.
   confidence — they cannot outweigh the primary four on their own.
 - Exact point values are v1 seeds pending a dedicated calibration/bench pass (same status as
   every number in `daily-trend.md`/`next-move.md`) — this doc fixes the STRUCTURE (equal-weight
-  primaries, subordinate secondaries, the maturity gate), not final numbers.
+  primaries, subordinate secondaries, the maturity gate, the §6 cap), not final numbers.
 
 ## 5. Both-asset requirement (leader/lagger)
 
@@ -94,13 +154,97 @@ discount is preserved for the SECONDARY criteria in §2.2 only (unchanged from `
 
 **Leader/lagger, for P1/P2's close-beyond/before read specifically:** in a live (unresolved) SMT,
 the leader is the asset that failed to reach/confirm the level — it never traded through it, so
-there is no accept-vs-reject close question to ask on the leader's side at that level. Only the
-lagger (the asset that actually pushed through) has price action there to classify via P1/P2.
-This is distinct from the SMT's own negation/expiry condition (§6) — whether the LEADER later
-also confirms beyond the level, dissolving the divergence entirely — which is a different check,
-not a close/wick read of the same push. P2's "relevant HTF bar" (§2.1) is always the lagger's.
+there is no accept-vs-reject close question to ask on the leader's side at THAT cross-ticker
+comparison. Only the lagger (the asset that actually pushed through) has price action there to
+classify via P1/P2's cross-ticker read. This is distinct from the SMT's own negation/expiry
+condition (§7) — whether the LEADER later also confirms beyond the level, dissolving the
+divergence entirely — which is a different check, not a close/wick read of the same push. P2's
+"relevant HTF bar" (§2.1) is always the lagger's.
 
-## 6. SMT lifecycle (pending → confirmed → expired)
+**This does NOT mean the leader's own price is unreadable.** §2.1's P1 runs per-asset on EACH
+asset's own copy of a level (level names are shared, e.g. `prev1_day_high`, but each ticker's
+price against that name is its own read). An asset can simultaneously (a) be the unswept
+leader relative to the OTHER asset's cross-ticker sweep comparison at a shared level, while (b)
+its own price still touches/wicks its own copy of that same level without closing beyond it —
+both facts are real and both get read; see §6 for why the combination matters more than either
+one alone.
+
+## 6. Cross-asset primary-evidence contradiction (P1/P3 disagreement across MNQ/MES)
+
+Running P1 and P3 per-asset (§5) can surface **direct disagreement between the two assets at the
+same or an analogous meaningful level** — one asset's HTF read is ACCEPTED beyond, the other's is
+REJECTED (wicked, closed back before); or the two assets agree on one equilibrium (e.g. both
+above weekly mid) but disagree on the other (split daily-mid placement). This is a different
+state from "evidence is thin" or "a veto fired" — it is evidence that directly opposes itself
+across two correlated assets, and simply netting points across it treats a genuine unresolved
+contradiction as noise to average out.
+
+**Detection.** A primary-criterion contradiction exists when, at a shared level name (or its
+per-asset analog):
+- P1 fires ACCEPT-beyond on one asset's own qualifying HTF close and REJECT-before on the other
+  asset's own qualifying HTF close at that level — the per-asset read from §5, not only the
+  cross-ticker sweep/no-sweep comparison that feeds P2 — OR
+- P3's daily-equilibrium placement disagrees between the two assets while their weekly-equilibrium
+  placement agrees (or vice versa).
+
+**Effect — tally normally, but cap the ceiling.** A contradiction does NOT mean discarding §4's
+equal-weight net score in favor of a pure LTF read — score P1/P2/P3/P4 as usual, per-asset where
+§5 applies. P2 is reversal-only by construction (§2.1), so a meaningful SMT ALWAYS adds real
+weight to the reversal side specifically — it is not neutralized just because the OTHER asset's
+P1 separately accepted-beyond; that is a genuine second, independent point on the reversal side,
+not a wash against the accept. What the contradiction DOES do is cap the confidence CEILING: even
+a clear net-score lean (e.g. 2 primary points one way vs 1 the other) tops out at MEDIUM, never
+HIGH, while the contradiction is live. If the net score itself is genuinely thin even after
+correct tallying (no clear lean either way), confidence drops to LOW instead.
+
+**Direction — the net score, corroborated (not decided) by LTF.** Direction follows whichever
+side the net score leans, same as any normal call (§4) — a contradiction changes the confidence
+CEILING, not how direction is picked. Use the shortest available LTF read (30m–1h price drift on
+both assets) as corroboration only: agreeing with the net-score lean is consistent with MEDIUM;
+LTF disagreeing with the net-score lean too is a second, independent disagreement and drops
+confidence to LOW instead of MEDIUM.
+
+**Recall — short, and the trigger for raising to HIGH.** A thesis issued in a contradiction state
+must set a SHORT `recall.max_age_min` (~30 minutes, not the standard longer window), specifically
+to re-check whether the contradiction is resolving — whether the asset that had been
+accepting-beyond starts showing its own rejection symptoms (closing back below/before a level it
+had just accepted, even a partial one), and/or the rejecting asset's read holds or strengthens (a
+decisive close with no contrary wick). Raise confidence to HIGH on the FIRST subsequent call
+where the drag is unambiguous — a clean, aligned bar on BOTH assets in the net score's direction —
+not merely "still not falsified." A partial/early drag sign (one asset starting to crack but not
+yet a clean aligned bar) keeps confidence at MEDIUM with another short recall, rather than jumping
+straight to HIGH.
+
+**Worked example (2026-07-01 12:00→12:30 ET; user chart review, not independently re-verified
+against raw bars the way §7's July 1/July 2 example was):**
+
+*12:00 ET call.* Net-score tally: DOWN gets 2 primary points — MNQ's own P1 REJECT (wicked above
+its own copy of yesterday's/the week's high on 1h/4h, closed back below/under equilibrium, not
+reclaimed) PLUS a meaningful week-tier P2 SMT (MES swept/lagger, MNQ unswept/leader at that same
+level — P2 is reversal-only, so it adds weight specifically to DOWN). UP gets 1 primary point —
+MES's own P1 ACCEPT (both 1h and 4h closed beyond the same weekly high). Both assets sat above
+weekly equilibrium (counted toward UP here) but split on daily-equilibrium placement — a P3
+contradiction on the daily leg specifically, not the weekly leg. Net score: DOWN leans 2-to-1; 30m
+LTF drift corroborated, already drifting down on both assets. Correct call: **bias DOWN,
+confidence MEDIUM** (a real net-score lean, but the live P1 contradiction caps it below HIGH),
+`recall.max_age_min` ≈30.
+
+*12:30 ET recall.* MNQ's next 30m bar closed below equilibrium WITHOUT even wicking above (its
+rejection read holds and strengthens — no contrary wick this time). MES's next 30m bar closed
+below the new high it had just accepted-beyond, despite a slight wick still poking above it (the
+accepting asset starting to crack — the drag signal). This is a clean, aligned bar on the DOWN
+side for both assets with no meaningful contradiction remaining. Correct call: **raise to HIGH**
+on this recall. (A further 13:00 ET bar showing a strong decisive down move on both assets — the
+drag completing outright — reinforces an already-HIGH read at that point; the trigger was the
+first clean aligned bar, which arrived at 12:30, not that later one.)
+
+The live manual test on the original 12:00 timestamp (`manual-l1-thesis/`) returned bias UP at
+MEDIUM confidence before this section existed — the miss that motivated writing it. This section's
+own first draft then over-corrected into discarding the net score in favor of a pure LTF
+tie-break under any contradiction, capping confidence at LOW/MEDIUM with no path back to HIGH —
+the revision above (tally normally, cap the ceiling, raise on a clean drag) is the fix.
+
+## 7. SMT lifecycle (pending → confirmed → expired)
 
 1. **Discovery** — a raw cross-ticker divergence at a level is a bias flag only, never acted on
    at discovery (~9% of raw fires precede an actual trend change; ~15% are wrong-way).
@@ -124,7 +268,7 @@ not a close/wick read of the same push. P2's "relevant HTF bar" (§2.1) is alway
    discovery and confirmation (observed: >1 day) — lag alone is never invalidation, only this
    explicit re-alignment is.
 
-## 7. Predicate mapping & known gaps
+## 8. Predicate mapping & known gaps
 
 - P1/P4's HTF close tests map directly to `n_closes_beyond(price, side, tf, n=1)` with
   `tf="1h"` or `tf="4h"` — both already valid atoms in the closed vocabulary
@@ -136,14 +280,17 @@ not a close/wick read of the same push. P2's "relevant HTF bar" (§2.1) is alway
   in `falsified_if`/`exhausted_if`/`recall.events` — this doc does not invent a new predicate
   type, it composes existing atoms the generator hasn't been configured to enumerate yet.
 - P3's weekly-mid leg needs the `weekly_mid` fact field added to `FactsBundle` (parallel to the
-  existing `day_mid`) before it is machine-checkable — see §2.1 P3 gap note. Per the sandwich
-  principle (`agent-optimizations.md` §1), the model must not compute this itself; it is a facts
-  layer prerequisite.
+  existing `day_mid`) before it is machine-checkable. Per the sandwich principle
+  (`agent-optimizations.md` §1), the model must not compute this itself; it is a facts layer
+  prerequisite.
+- §2.1a's daily/weekly phase weighting needs per-asset "latest daily-extreme touch" and "latest
+  daily-mid touch/cross" as structured facts (currently rendered-text-only in S1/S4) — see §2.1a's
+  own gap note.
 - DOL selection is unchanged from the existing S8 `_dol_menu`/validator contract: nearest
   meaningful, in-facts, unswept, undepleted, correct-side pool ≥ `DOL_MIN_DRAW_DISTANCE_PTS`
   (5.0) away — prefer the DOL menu's `D*` IDs directly.
 
-## 8. Output schema
+## 9. Output schema
 
 Per `agent-optimizations.md` §2.1 exactly — this doc does not alter the contract, only how the
 model should arrive at the values:
@@ -156,23 +303,32 @@ thesis:
   falsified_if: [ <predicate> ]           # closed vocab, §6/§7; prefer menu IDs, else escape hatch
   exhausted_if: [ <predicate> ]           # typically DOL touch + optional beyond/time terms
   confidence: HIGH | MEDIUM | LOW          # code-derived (agent-optimizations.md §8); self-report audit-only
-  recall: {events: [ <predicate> ], max_age_min}
+                                           # net score still applies under a §6 contradiction; the
+                                           # contradiction caps the CEILING at MEDIUM (LOW if the net
+                                           # score is itself thin) until a clean aligned bar raises it
+  recall: {events: [ <predicate> ], max_age_min}  # ≈30min under a §6 contradiction — the check for
+                                                  # whether it has resolved (drag), not just a re-ask
   reasoning: audit-only
   # audit-only evidence table (not part of thesis.json; logged for calibration/backtest):
   evidence:
     P1..P4: <criterion, asset, tier/tf, direction, points, maturity-gate status>
     secondary: <criterion, points, alignment>
+    contradiction: <none | P1 | P3 | both — §6 detection result, and the LTF tie-break used>
 ```
 
-## 9. Failure modes this doc encodes
+## 10. Failure modes this doc encodes
 
-Acting on raw SMT at discovery (Phase-3, −$3,756/5d) → §6 confirmation gate · immature-sweep
+Acting on raw SMT at discovery (Phase-3, −$3,756/5d) → §7 confirmation gate · immature-sweep
 false signal (no HTF close yet, direction assumed) → §3 maturity gate · HTF-close-as-hard-gate
 falsified by the July 1 vs July 2 case (close-beyond followed by a BIGGER reversal, not a
-negation) → §6 step 3 corrected model · MES treated as a discounted echo when it was the actual
+negation) → §7 step 3 corrected model · MES treated as a discounted echo when it was the actual
 trigger → §5 both-asset requirement · conflating plain weekly-mid touch/cross (proven noise,
 GIL-39) with the HTF-close-confirmed reclaim/failed-reclaim P4 actually scores → §2.1 P4 note,
-these are different signals · one-event-many-votes (daily-trend.md run-1 failure) → §2.2
-secondary pool retains the correlation-audit/dedup discipline; P1↔P2 stacking is the ONE
-deliberate exception, called out explicitly in §2.1 P2 so it is never "fixed" as if it were the
-same bug.
+these are different signals · netting a genuine cross-asset P1/P3 contradiction into a
+false-confident directional score (2026-07-01 12:00 ET case: bias UP/MEDIUM when the correct read
+was DOWN/MEDIUM, raised to HIGH at the 12:30 recall on a clean aligned bar) → §6 contradiction cap
+· discarding the net score entirely under a contradiction in favor of a pure LTF tie-break with no
+path back to HIGH (this section's own first draft) → §6's revised Effect/Direction/Recall rules ·
+one-event-many-votes (daily-trend.md run-1 failure) → §2.2 secondary pool retains the
+correlation-audit/dedup discipline; P1↔P2 stacking is the ONE deliberate exception, called out
+explicitly in §2.1 P2 so it is never "fixed" as if it were the same bug.
