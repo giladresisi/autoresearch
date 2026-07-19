@@ -402,37 +402,57 @@ class IbRealtimeSource:
                 if len(args) >= 2 and args[1] == 162:
                     _pacing["n"] += 1
             ib.errorEvent += _on_ib_error
+
+            # One fill-state per instrument that needs data. Chunks are then requested
+            # round-robin across instruments — IB's historical pacing budget is shared
+            # per connection, so filling one instrument to completion first can exhaust
+            # it and starve the other for the whole round.
+            states: list[dict] = []
             for instrument, df_attr, parquet_name, conid in pairs:
-                if self._stopping:
-                    return True  # clean stop, not a failure
+                df = getattr(self, df_attr)
+                earliest = pd.Timestamp(_1S_EARLIEST, tz="America/New_York")
+                start_dt = earliest if df.empty else max(df.index[-1], earliest)
+                if (now - start_dt).total_seconds() <= 60:
+                    continue
+                states.append({
+                    "instrument": instrument, "df_attr": df_attr, "parquet_name": parquet_name,
+                    "contract": _IBContract(conId=int(conid), exchange="CME"),
+                    "chunk_start": start_dt, "all_bars": [],
+                    "consecutive_skips": 0, "pacing_retries": 0,
+                    "requested_any": False, "active": True,
+                })
+
+            turn = 0
+            while any(st["active"] for st in states) and not self._stopping:
+                st = states[turn % len(states)]
+                turn += 1
+                if not st["active"]:
+                    continue
+                instrument = st["instrument"]
                 try:
-                    df = getattr(self, df_attr)
-                    earliest = pd.Timestamp(_1S_EARLIEST, tz="America/New_York")
-                    start_dt = earliest if df.empty else max(df.index[-1], earliest)
-                    if (now - start_dt).total_seconds() <= 60:
+                    # Skip weekends and the daily maintenance break without issuing
+                    # IB requests — closed-window endDateTimes return stale prior-session
+                    # bars that waste the pacing budget (see _next_trading_open).
+                    while st["chunk_start"] < now:
+                        adj = _next_trading_open(st["chunk_start"])
+                        if adj <= st["chunk_start"]:
+                            break
+                        st["chunk_start"] = adj
+                    if st["chunk_start"] >= now:
+                        st["active"] = False
                         continue
-                    contract = _IBContract(conId=int(conid), exchange="CME")
-                    all_bars: list = []
-                    chunk_start = start_dt
-                    consecutive_skips = 0
-                    pacing_retries = 0
-                    requested_any = False
-                    while chunk_start < now:
+
+                    chunk_end = min(st["chunk_start"] + pd.Timedelta(seconds=_IB_1S_CHUNK_SECONDS), now)
+                    chunk_s = max(1, int((chunk_end - st["chunk_start"]).total_seconds()))
+                    st["requested_any"] = True
+                    # One chunk per turn; pacing-violation retries of the same chunk stay
+                    # inline — the budget is shared, so yielding the turn wouldn't help.
+                    while True:
                         if self._stopping:
                             break
-                        # Skip weekends and the daily maintenance break without issuing
-                        # IB requests — closed-window endDateTimes return stale prior-session
-                        # bars that waste the pacing budget (see _next_trading_open).
-                        adj = _next_trading_open(chunk_start)
-                        if adj > chunk_start:
-                            chunk_start = adj
-                            continue
-                        chunk_end = min(chunk_start + pd.Timedelta(seconds=_IB_1S_CHUNK_SECONDS), now)
-                        chunk_s = max(1, int((chunk_end - chunk_start).total_seconds()))
-                        requested_any = True
                         _pacing_before = _pacing["n"]
                         bars = ib.reqHistoricalData(
-                            contract,
+                            st["contract"],
                             endDateTime=chunk_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
                             durationStr=f"{chunk_s} S",
                             barSizeSetting="1 secs",
@@ -446,13 +466,13 @@ class IbRealtimeSource:
                             # IB pacing violation (error 162) during this request → back off and
                             # retry the SAME chunk rather than misreading the empty result as a
                             # data boundary. Keeps the fill progressing instead of giving up.
-                            if _pacing["n"] > _pacing_before and pacing_retries < _IB_1S_MAX_PACING_RETRIES:
-                                pacing_retries += 1
+                            if _pacing["n"] > _pacing_before and st["pacing_retries"] < _IB_1S_MAX_PACING_RETRIES:
+                                st["pacing_retries"] += 1
                                 print(
                                     f"[gap_fill_1s_ib] {instrument}: IB pacing violation at "
                                     f"{chunk_end.strftime('%m-%d %H:%M ET')} — backing off "
                                     f"{_IB_1S_PACING_BACKOFF_S:.0f}s "
-                                    f"(retry {pacing_retries}/{_IB_1S_MAX_PACING_RETRIES})",
+                                    f"(retry {st['pacing_retries']}/{_IB_1S_MAX_PACING_RETRIES})",
                                     flush=True,
                                 )
                                 ib.sleep(_IB_1S_PACING_BACKOFF_S)
@@ -461,29 +481,44 @@ class IbRealtimeSource:
                             if lag_min > 65:
                                 # Far from now: expected gap (maintenance window, holiday).
                                 # Skip and continue — don't treat this as recency boundary.
-                                consecutive_skips += 1
-                                if consecutive_skips > 3:
+                                st["consecutive_skips"] += 1
+                                if st["consecutive_skips"] > 3:
                                     print(
                                         f"[gap_fill_1s_ib] {instrument}: >3 consecutive zero-bar chunks "
                                         f"far from now — stopping at {chunk_end.strftime('%H:%M ET')}",
                                         flush=True,
                                     )
+                                    st["active"] = False
                                     break
-                                chunk_start = chunk_end
-                                continue
+                                st["chunk_start"] = chunk_end
+                                break
                             print(
                                 f"[gap_fill_1s_ib] {instrument}: IB recency boundary "
                                 f"~{lag_min} min before now — stopping forward fill",
                                 flush=True,
                             )
+                            st["active"] = False
                             break
-                        consecutive_skips = 0
-                        pacing_retries = 0
-                        all_bars.extend(bars)
-                        chunk_start = chunk_end
+                        st["consecutive_skips"] = 0
+                        st["pacing_retries"] = 0
+                        st["all_bars"].extend(bars)
+                        st["chunk_start"] = chunk_end
+                        if st["chunk_start"] >= now:
+                            st["active"] = False
+                        break
+                except Exception as exc:
+                    print(f"[gap_fill_1s_ib] {instrument}: error: {exc}", flush=True)
+                    st["active"] = False
+                    st["failed"] = True
+                    all_filled = False
 
-                    if not all_bars:
-                        if not requested_any:
+            for st in states:
+                instrument = st["instrument"]
+                if st.get("failed"):
+                    continue
+                try:
+                    if not st["all_bars"]:
+                        if not st["requested_any"]:
                             # Entire fill window was non-trading (e.g. started over a
                             # weekend) — nothing to fill, not an IB failure.
                             print(f"[gap_fill_1s_ib] {instrument}: market closed across fill window — nothing to fill", flush=True)
@@ -491,7 +526,7 @@ class IbRealtimeSource:
                             print(f"[gap_fill_1s_ib] {instrument}: 0 bars returned — IB unavailable", flush=True)
                             all_filled = False
                         continue
-                    new_df = _util.df(all_bars).rename(columns={
+                    new_df = _util.df(st["all_bars"]).rename(columns={
                         "date": "datetime", "open": "Open", "high": "High",
                         "low": "Low", "close": "Close", "volume": "Volume",
                     }).set_index("datetime")
@@ -499,11 +534,12 @@ class IbRealtimeSource:
                         new_df.index = new_df.index.tz_localize("America/New_York")
                     else:
                         new_df.index = new_df.index.tz_convert("America/New_York")
+                    df = getattr(self, st["df_attr"])
                     combined = pd.concat([df, new_df[["Open", "High", "Low", "Close", "Volume"]]]).sort_index()
                     combined = combined[~combined.index.duplicated(keep="last")]
-                    setattr(self, df_attr, combined)
+                    setattr(self, st["df_attr"], combined)
                     self._bar_data_dir.mkdir(parents=True, exist_ok=True)
-                    self._submit_parquet_write(combined.copy(), self._bar_data_dir / parquet_name)
+                    self._submit_parquet_write(combined.copy(), self._bar_data_dir / st["parquet_name"])
                     print(f"[gap_fill_1s_ib] {instrument}: +{len(new_df)} 1s bars", flush=True)
                 except Exception as exc:
                     print(f"[gap_fill_1s_ib] {instrument}: error: {exc}", flush=True)

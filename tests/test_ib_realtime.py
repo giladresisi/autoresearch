@@ -651,6 +651,52 @@ def test_gap_fill_1s_ib_backs_off_and_retries_on_pacing_violation(tmp_path):
         "expected a pacing back-off sleep before the retry"
 
 
+def test_gap_fill_1s_ib_interleaves_instruments(tmp_path, monkeypatch):
+    """When both MNQ and MES need a 1s fill, chunk requests must alternate between the
+    two contracts (round-robin) so the first instrument cannot exhaust IB's shared
+    historical-data pacing budget before the second issues its first request."""
+    from data import ib_realtime as _ib_mod
+    from ib_insync import BarData
+    src = _make_source(tmp_path)
+    now = pd.Timestamp.now(tz="America/New_York")
+    old_ts = now - pd.Timedelta(hours=2)
+    for attr in ("_mnq_1s_df", "_mes_1s_df"):
+        setattr(src, attr, pd.DataFrame(
+            {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0]},
+            index=pd.DatetimeIndex([old_ts]),
+        ))
+    # Neutralize the trading-calendar skip so the test is deterministic on weekends.
+    monkeypatch.setattr(_ib_mod, "_next_trading_open", lambda ts: ts)
+
+    class _FakeContract:
+        def __init__(self, conId=None, exchange=None):
+            self.conId = conId
+
+    order = []
+
+    def _req(contract, *a, **k):
+        order.append(contract.conId)
+        return [BarData(
+            date=pd.Timestamp.utcnow() - pd.Timedelta(hours=2) + pd.Timedelta(seconds=len(order)),
+            open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0, average=1.0, barCount=1,
+        )]
+
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+    mock_ib.reqHistoricalData.side_effect = _req
+
+    with patch("ib_insync.IB", return_value=mock_ib), \
+         patch("ib_insync.Contract", _FakeContract):
+        src._gap_fill_1s_ib()
+
+    mnq, mes = 770561201, 770561194
+    assert set(order) == {mnq, mes}, f"both contracts must be requested, got {order}"
+    assert len(order) >= 6, f"expected ≥3 chunks per instrument, got {order}"
+    adjacent_repeats = [i for i in range(len(order) - 1) if order[i] == order[i + 1]]
+    assert not adjacent_repeats, \
+        f"requests must alternate MNQ/MES while both instruments are filling, got {order}"
+
+
 # ── RAM reduction tests ──────────────────────────────────────────────────────
 
 def _make_bar_df(days_ago_start: int, days_ago_end: int = 0) -> pd.DataFrame:
