@@ -452,3 +452,54 @@ def test_run_call_derive_prevents_retry_on_bad_n(tmp_path):
     assert call["retries"] == 0 and call["verdict"] == "clean"
     assert decision["next_move"]["N"] == -2.0
     assert any("N 7.7" in n for n in call["attempts"][0]["arith_overrides"])
+
+
+# --------------------------------------------------------------------------- #
+# _derive_thesis_arithmetic (decisions/thesis.md §2.1/§4 evidence ledger)      #
+# --------------------------------------------------------------------------- #
+def _ev_item(level="prev_day_high", direction="accept", tier="week", tf="4h", mature=True,
+            asset="MNQ", criterion="P1"):
+    return {"criterion": criterion, "asset": asset, "level": level, "tier": tier,
+            "tf": tf, "direction": direction, "mature": mature}
+
+
+def test_derive_thesis_noop_on_empty_evidence():
+    block = {"bias": "NEUTRAL", "confidence": "LOW", "evidence": []}
+    out, notes = run_agent._derive_thesis_arithmetic(block)
+    assert out is block and notes == []
+
+
+def test_derive_thesis_clamps_confidence_to_ceiling():
+    # A single day-tier/1h item nets 1.5 -> LOW ceiling, even though the model claimed HIGH.
+    block = {"bias": "UP", "confidence": "HIGH",
+             "evidence": [_ev_item(tier="day", tf="1h")]}
+    out, notes = run_agent._derive_thesis_arithmetic(block)
+    assert out["confidence"] == "LOW"
+    assert any("confidence HIGH -> LOW" in n for n in notes)
+
+
+def test_derive_thesis_leaves_high_confidence_when_ceiling_allows():
+    block = {"bias": "UP", "confidence": "HIGH",
+             "evidence": [_ev_item(asset="MNQ", tier="week", tf="4h"),
+                          _ev_item(asset="MES", tier="week", tf="4h")]}
+    out, notes = run_agent._derive_thesis_arithmetic(block)
+    assert out["confidence"] == "HIGH"
+    assert notes == []
+
+
+def test_derive_thesis_never_touches_bias():
+    # Evidence nets DOWN (low-side accept) but bias is left UP for the validator retry to
+    # catch (ARI_THESIS_BIAS) — mirrors _derive_next_arithmetic's direction contract.
+    block = {"bias": "UP", "confidence": "LOW",
+             "evidence": [_ev_item(level="prev_day_low", direction="accept")]}
+    out, _ = run_agent._derive_thesis_arithmetic(block)
+    assert out["bias"] == "UP"
+
+
+def test_derive_thesis_annotates_evidence_with_points_and_side():
+    block = {"bias": "DOWN", "confidence": "LOW",
+             "evidence": [_ev_item(level="prev_day_low", direction="accept")]}
+    out, _ = run_agent._derive_thesis_arithmetic(block)
+    item = out["evidence"][0]
+    assert item["side"] == "DOWN"
+    assert item["points"] == 3.0   # 2.0 base * 1.5 (4h) * 1.0 (week)

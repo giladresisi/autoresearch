@@ -23,7 +23,8 @@ from typing import Optional
 
 from schemas import (
     BIASES, CONFIDENCES, DAILY_REGIMES, DIRECTIONS, DOL_FALSIFIED_ACTIONS,
-    ENTRY_MECHANISMS, MGMT_MECHANISMS, VERDICTS, Thesis, TradePlan,
+    ENTRY_MECHANISMS, EVIDENCE_ASSETS, EVIDENCE_CRITERIA, EVIDENCE_DIRECTIONS,
+    EVIDENCE_TFS, EVIDENCE_TIERS, MGMT_MECHANISMS, VERDICTS, Thesis, TradePlan,
 )
 from predicates import (
     MarketView, eval_any, referenced_levels, validate_predicate_list,
@@ -97,9 +98,46 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
                                            "thesis.recall.events"):
             r.add("syntactic", "SYN_BAD_PREDICATE", msg, "thesis.recall.events")
 
+    for i, item in enumerate(t.evidence or []):
+        _validate_evidence_item(item, f"thesis.evidence[{i}]", r)
+
+    # ARI_THESIS_BIAS (§4/§9): the declared bias must match the sign of the code-computed
+    # net score over the evidence ledger — the SAME retry-not-override pattern as
+    # daily_trend/next_move's direction-vs-N check (agent/validator.py _check_arithmetic).
+    # A thin/empty ledger (nothing declared yet, e.g. the NEUTRAL failsafe) is exempt.
+    if t.evidence:
+        scoring = score_thesis_evidence(t.evidence)
+        if t.bias in BIASES and t.bias != scoring["expected_bias"]:
+            r.add("arithmetic", "ARI_THESIS_BIAS",
+                  f"bias '{t.bias}' inconsistent with the evidence ledger's net score "
+                  f"{scoring['net_score']} (expected '{scoring['expected_bias']}')",
+                  "thesis.bias")
+
     if facts is not None:
         _semantic_thesis(t, facts, r)
     return r
+
+
+def _validate_evidence_item(item, where: str, r: ContractValidation) -> None:
+    if not isinstance(item, dict):
+        r.add("syntactic", "SYN_BAD_EVIDENCE_ITEM",
+              f"evidence item must be an object, got {type(item).__name__}", where)
+        return
+    checks = (
+        ("criterion", EVIDENCE_CRITERIA), ("asset", EVIDENCE_ASSETS),
+        ("tier", EVIDENCE_TIERS), ("tf", EVIDENCE_TFS),
+        ("direction", EVIDENCE_DIRECTIONS),
+    )
+    for field_name, allowed in checks:
+        if item.get(field_name) not in allowed:
+            r.add("syntactic", "SYN_BAD_EVIDENCE_ITEM",
+                  f"{field_name} {item.get(field_name)!r} not in {sorted(allowed)}", where)
+    if not isinstance(item.get("level"), str) or not item.get("level"):
+        r.add("syntactic", "SYN_BAD_EVIDENCE_ITEM",
+              "'level' must be a non-empty string", where)
+    if not isinstance(item.get("mature"), bool):
+        r.add("syntactic", "SYN_BAD_EVIDENCE_ITEM",
+              "'mature' must be a boolean", where)
 
 
 def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
@@ -110,11 +148,34 @@ def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
         names |= set(_iter_predicate_levels((t.recall or {}).get("events") or []))
     if isinstance(t.dol, dict) and t.dol.get("level"):
         names.add(t.dol["level"])
+    for item in t.evidence or []:
+        if isinstance(item, dict) and isinstance(item.get("level"), str) and item["level"]:
+            names.add(item["level"])
     for name in sorted(names):
         if name not in levels:
             r.add("semantic", "SEM_LEVEL_NOT_IN_FACTS",
                   f"level '{name}' referenced by the thesis is not present in the facts",
                   "thesis")
+
+    # XL_FALSIFIED_IF_ALREADY_TRUE / XL_EXHAUSTED_IF_ALREADY_TRUE: a thesis whose own
+    # falsified_if/exhausted_if already evaluates true against the CURRENT price is
+    # self-invalidating (or self-completing) at issuance — the 2026-07-02 08:00 bug, where
+    # falsified_if was anchored 5pts from a price already on the wrong side of it and fired
+    # 10 minutes later regardless of what the market actually did. Reuses the same
+    # MarketView.price_only() hypothetical the trade-plan cross-level check already uses for
+    # "does the stop trip thesis falsification" (predicates.MarketView.price_only), just
+    # applied one level earlier, against the thesis's own current price.
+    now_price = facts.get("now_price")
+    if isinstance(now_price, (int, float)):
+        view = MarketView.price_only(float(now_price))
+        if t.falsified_if and eval_any(t.falsified_if, view):
+            r.add("cross_level", "XL_FALSIFIED_IF_ALREADY_TRUE",
+                  f"falsified_if would already be satisfied at the current price {now_price} "
+                  "(thesis self-invalidates at issuance)", "thesis.falsified_if")
+        if t.exhausted_if and eval_any(t.exhausted_if, view):
+            r.add("cross_level", "XL_EXHAUSTED_IF_ALREADY_TRUE",
+                  f"exhausted_if would already be satisfied at the current price {now_price} "
+                  "(thesis is already exhausted at issuance)", "thesis.exhausted_if")
 
     # SEM_DOL_WRONG_SIDE (plan 12 Fix 2): a directional thesis's DOL (draw-on-liquidity) must
     # sit on the bias side of the current price — an UP thesis draws to a pool ABOVE price, a
@@ -134,6 +195,99 @@ def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
             r.add("semantic", "SEM_DOL_WRONG_SIDE",
                   f"DOWN thesis but DOL {dol_price} is above current price {now_price} "
                   "(a draw must sit below price)", "thesis.dol")
+
+
+# --------------------------------------------------------------------------- #
+# Evidence-ledger scoring (decisions/thesis.md §2.1/§4/§6) — the model judges,      #
+# code computes. Self-contained: recomputes from t.evidence alone (no dependency   #
+# on run_agent.py having run first), the same way agent/validator.py's             #
+# _check_arithmetic independently recomputes S/N rather than trusting the block.   #
+# --------------------------------------------------------------------------- #
+_TF_MULT = {"1h": 1.0, "4h": 1.5}          # thesis.md §4: 4hr scores more than 1hr
+_TIER_MULT = {"session": 0.5, "day": 0.75, "week": 1.0}   # §4: week > day > session
+_BASE_POINTS = 2.0                          # v1 seed, pending calibration (thesis.md §4)
+
+
+def _level_polarity(name) -> Optional[str]:
+    """'high' | 'low' | None from the level NAME's naming convention (prev1_day_high,
+    asia(cur)_low, week_high, TDO, ...) — the level's own high/low identity is stable
+    regardless of where price currently sits, unlike a level's transient 'side' (above/
+    below price) which flips once the level is swept. Used to mechanically derive each
+    evidence item's UP/DOWN sign so the model cannot mis-classify it (thesis.md §2.1 P1's
+    own accept/reject rule; the 2026-07-02 08:00 bug labeled a rejected LOW sweep
+    'bearish' when rejecting a low sweep is bullish)."""
+    lname = (name or "").lower()
+    if "high" in lname:
+        return "high"
+    if "low" in lname:
+        return "low"
+    return None
+
+
+def _evidence_side(item: dict) -> Optional[str]:
+    """UP or DOWN — mechanically derived from level polarity + accept/reject, never
+    model-declared. accept-beyond continues the sweep's own direction; reject-before
+    reverses it (thesis.md §2.1 P1)."""
+    polarity = _level_polarity(item.get("level"))
+    direction = item.get("direction")
+    if polarity is None or direction not in EVIDENCE_DIRECTIONS:
+        return None
+    if polarity == "high":
+        return "UP" if direction == "accept" else "DOWN"
+    return "DOWN" if direction == "accept" else "UP"
+
+
+def score_thesis_evidence(evidence: list) -> dict:
+    """Pure computation over the model-declared P1/P2 evidence ledger: per-item points
+    (tier x tf multiplier, zeroed if immature — enforcing the §3 maturity gate in code,
+    not trust), the net score, the expected bias sign, and the §6 cross-asset
+    contradiction cap on confidence. Returns {net_score, expected_bias, contradiction,
+    confidence_ceiling, scored_evidence}. `scored_evidence` echoes each item with its
+    computed `points`/`side` attached, for the audit trail."""
+    scored = []
+    net = 0.0
+    by_level: dict = {}   # level -> {asset: direction}, for the §6 contradiction check
+    for item in evidence or []:
+        if not isinstance(item, dict):
+            continue
+        tf_mult = _TF_MULT.get(item.get("tf"), 0.0)
+        tier_mult = _TIER_MULT.get(item.get("tier"), 0.0)
+        mature = bool(item.get("mature"))
+        points = round(_BASE_POINTS * tf_mult * tier_mult, 4) if mature else 0.0
+        side = _evidence_side(item)
+        if side == "UP":
+            net += points
+        elif side == "DOWN":
+            net -= points
+        scored.append({**item, "points": points, "side": side})
+
+        level, asset, direction = item.get("level"), item.get("asset"), item.get("direction")
+        if item.get("criterion") == "P1" and mature and level and asset:
+            by_level.setdefault(level, {})[asset] = direction
+
+    contradiction = any(len(set(d.values())) > 1 for d in by_level.values() if len(d) > 1)
+    net = round(net, 4)
+    if net > _EPS:
+        expected_bias = "UP"
+    elif net < -_EPS:
+        expected_bias = "DOWN"
+    else:
+        expected_bias = "NEUTRAL"
+
+    if contradiction:
+        # §6: tally normally, cap the ceiling — never HIGH while a live contradiction stands.
+        ceiling = "MEDIUM" if abs(net) >= 2.0 else "LOW"
+    elif abs(net) >= 4.0:
+        ceiling = "HIGH"
+    elif abs(net) >= 2.0:
+        ceiling = "MEDIUM"
+    else:
+        ceiling = "LOW"
+
+    return {
+        "net_score": net, "expected_bias": expected_bias, "contradiction": contradiction,
+        "confidence_ceiling": ceiling, "scored_evidence": scored,
+    }
 
 
 # --------------------------------------------------------------------------- #

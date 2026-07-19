@@ -34,7 +34,7 @@ daily-trend vs next-move) — one evidence ledger, scored per call, gated by the
 
 | # | Criterion | Definition |
 |---|---|---|
-| P1 | **HTF close beyond/before at any liquidity sweep** | General acceptance/rejection test at ANY swept level (fixed or running, either asset) — independent of whether an SMT is present there. `n_closes_beyond(price=level, side=sweep_direction, tf, n=1)` true → **accepted beyond** (continuation-leaning); the SAME check on the opposite `side` true instead → **rejected/closed before** (reversal-leaning). Gated by the maturity rule (§3) — a sweep with no qualifying HTF close yet scores ZERO, not a default direction. 4hr close scores more than 1hr (§4). Evaluated PER ASSET, on that asset's own copy of the level (§5) — see §6 for what it means when the two assets' P1 reads disagree. |
+| P1 | **HTF close beyond/before at any liquidity sweep** | General acceptance/rejection test at ANY swept level (fixed or running, either asset) — independent of whether an SMT is present there. `n_closes_beyond(price=level, side=sweep_direction, tf, n=1)` true → **accepted beyond** (continuation-leaning); the SAME check on the opposite `side` true instead → **rejected/closed before** (reversal-leaning). Gated by the maturity rule (§3) — a sweep with no qualifying HTF close yet scores ZERO, not a default direction. 4hr close scores more than 1hr (§4). Unlike P2, P1 has NO tier floor — session-tier sweeps still qualify — but points scale by tier (session < day < week, same ladder as P2 — §4), so a pile of session-tier reads cannot numerically out-tally one week-tier read. Evaluated PER ASSET, on that asset's own copy of the level (§5) — see §6 for what it means when the two assets' P1 reads disagree. |
 | P2 | **Meaningful SMT + HTF rejection at that liquidity** | Requires ALL of: (a) an SMT divergence present at the level, (b) the level is week-or-day tier or higher (`prev1/2_day_high/low`, `prev1_week_high/low`, `TDO`/`TWO`, running `day_high/low`/`week_high/low`) — explicitly EXCLUDING session-tier (6hr sub-session extremes, `liquidities_session_prior`) and fill/FVG tier, (c) the relevant HTF bar (4hr if it exists over the window, else 1hr) on the LAGGER (see §5 leader/lagger) closed BEFORE — not beyond — the liquidity. Reversal-only by design (no symmetric "SMT + accept-beyond" bonus form — an accepted push is scored by P1 on its own). Points scale with tier (week > day). **Deliberately stacks with P1** when both independently fire on the same physical sweep — this is not double-counting-as-bug, it is P2 rewarding the specific SMT-plus-genuine-rejection combination as a stronger tell than either alone; do not dedupe P1↔P2. |
 | P3 | **Position vs. equilibrium — daily/weekly weight set by phase, not fixed** | Current price vs. daily mid AND vs. weekly mid (`equilibrium.md` §1 definitions: running-extreme midpoints), evaluated PER ASSET. The daily-vs-weekly split is NOT fixed 50/50 — see §2.1a for the phase rule that sets which one dominates a given call. See §6 for what it means when the two assets agree on one equilibrium (e.g. both above weekly mid) but disagree on the other (e.g. split daily-mid placement). |
 | P4 | **Reclaim / failed reclaim of daily or weekly mid, HTF-confirmed** | A close-beyond-then-fails-back (or fails-to-reclaim) sequence on the daily OR weekly mid, confirmed specifically by an HTF (1h/4h) close — not any close. Daily and weekly weighted equally; 4hr scores more than 1hr (same scaling as P1). Note: `equilibrium.md` §3 and `next-move.md` mark plain weekly-mid TOUCH/CROSS as proven noise (GIL-39 B, +$83 shipped suppressing it as a trigger) — P4's weekly leg is a materially different, stricter signal (HTF-close-confirmed reclaim/failed-reclaim, not a bare touch/cross), so it is enabled alongside the daily leg without a separate gate. The daily half is parallel to the existing "failed reclaim of daily mid" item in `next-move.md` §2 (weight 2, "the strongest intraday tell"). |
@@ -134,8 +134,12 @@ contributes zero to P1/P2/P4, not a partial or default-direction score.
   score itself.
 - Within P1, P2, and P4: a qualifying **4hr** close scores strictly more than a qualifying
   **1hr** close (both are eligible per the maturity gate in §3; 4hr is simply worth more).
-- Within P2: points scale further by liquidity tier — week-tier scores more than day-tier (both
-  qualify; session-tier and below do not qualify for P2 at all — §2.1).
+- Within P1 and P2: points scale further by liquidity tier — week-tier scores more than
+  day-tier scores more than session-tier. P1 has no tier FLOOR (even session-tier sweeps
+  qualify for P1, just at the lowest multiplier — §2.1); P2's tier floor is day-or-higher
+  (session-tier does not qualify for P2 at all — §2.1). Code-derived v1 seed multipliers
+  (`validate_contracts.score_thesis_evidence`): session ×0.5, day ×0.75, week ×1.0, same
+  ladder applied to both criteria.
 - Secondary criteria (§2.2) are capped at a LOWER max than any single P1–P4 criterion. Their
   role is to accumulate when they agree with each other and/or with the P1–P4 read, nudging
   confidence — they cannot outweigh the primary four on their own.
@@ -289,6 +293,19 @@ the revision above (tally normally, cap the ceiling, raise on a clean drag) is t
 - DOL selection is unchanged from the existing S8 `_dol_menu`/validator contract: nearest
   meaningful, in-facts, unswept, undepleted, correct-side pool ≥ `DOL_MIN_DRAW_DISTANCE_PTS`
   (5.0) away — prefer the DOL menu's `D*` IDs directly.
+- **Gap:** the code-derived evidence ledger (§9; `validate_contracts.score_thesis_evidence`)
+  covers P1 and P2 only — both share the same accept/reject-of-a-sweep shape (level, tier, tf,
+  direction). P3 (equilibrium position — no sweep, no accept/reject) and P4 (reclaim/failed-
+  reclaim — a different two-step shape) are NOT yet expressible in this ledger and remain
+  reasoning-only, scored by the model's self-report the way the whole thesis was before this
+  gap was partially closed. A future ledger shape for P3/P4 is a natural follow-up, not done
+  here (deliberately scoped to the two criteria that produced the observed 2026-07-02 08:00
+  bugs — sign misclassification and bias-contradicts-net-score, both P1-driven).
+- **Gap:** §6's cross-asset contradiction detection in `score_thesis_evidence` only catches an
+  EXACT shared level name evidenced with differing `direction` on both assets (e.g. both assets
+  carry a P1 item on `prev1_day_high`). It does not yet resolve "analogous" levels with
+  different names across assets (§6's own text allows for this) — a real cross-name analog
+  contradiction would currently net-score correctly but NOT trigger the confidence-ceiling cap.
 
 ## 9. Output schema
 
@@ -301,19 +318,32 @@ thesis:
   regime: TREND | RANGE | HYBRID
   dol: {level, price}                     # only if bias != NEUTRAL; from S8 DOL menu
   falsified_if: [ <predicate> ]           # closed vocab, §6/§7; prefer menu IDs, else escape hatch
+                                           # code-rejected if already true at the current price —
+                                           # thesis.falsified_if cannot self-invalidate at issuance
+                                           # (validate_contracts XL_FALSIFIED_IF_ALREADY_TRUE)
   exhausted_if: [ <predicate> ]           # typically DOL touch + optional beyond/time terms
-  confidence: HIGH | MEDIUM | LOW          # code-derived (agent-optimizations.md §8); self-report audit-only
-                                           # net score still applies under a §6 contradiction; the
-                                           # contradiction caps the CEILING at MEDIUM (LOW if the net
-                                           # score is itself thin) until a clean aligned bar raises it
+                                           # same issuance-time check (XL_EXHAUSTED_IF_ALREADY_TRUE)
+  confidence: HIGH | MEDIUM | LOW          # code-derived from the evidence ledger below
+                                           # (validate_contracts.score_thesis_evidence); self-report
+                                           # is a starting point, silently clamped to the computed
+                                           # ceiling. Net score still applies under a §6 contradiction;
+                                           # the contradiction caps the CEILING at MEDIUM (LOW if the
+                                           # net score is itself thin) until a clean aligned bar raises
+                                           # it — that RAISE is not yet automated (§8/standing-thesis
+                                           # gap), only the cap direction is code-enforced today.
   recall: {events: [ <predicate> ], max_age_min}  # ≈30min under a §6 contradiction — the check for
                                                   # whether it has resolved (drag), not just a re-ask
+  evidence: [ <P1/P2 item> ]              # model declares criterion/asset/level/tier/tf/direction/
+                                           # mature per item (§2.1); code derives each item's UP/DOWN
+                                           # sign from the level's own high/low identity (never
+                                           # model-declared — closes the P1 sign-misclassification
+                                           # bug) plus its points (tier x tf multiplier, zeroed if
+                                           # immature), sums to a net score, and REJECTS (retry, not
+                                           # silent override — same split as daily-trend/next-move) a
+                                           # declared bias inconsistent with that net score's sign
+                                           # (validate_contracts ARI_THESIS_BIAS). P3/P4 are NOT yet
+                                           # in this ledger — reasoning-only still (§8 gap).
   reasoning: audit-only
-  # audit-only evidence table (not part of thesis.json; logged for calibration/backtest):
-  evidence:
-    P1..P4: <criterion, asset, tier/tf, direction, points, maturity-gate status>
-    secondary: <criterion, points, alignment>
-    contradiction: <none | P1 | P3 | both — §6 detection result, and the LTF tie-break used>
 ```
 
 ## 10. Failure modes this doc encodes
@@ -331,4 +361,14 @@ was DOWN/MEDIUM, raised to HIGH at the 12:30 recall on a clean aligned bar) → 
 path back to HIGH (this section's own first draft) → §6's revised Effect/Direction/Recall rules ·
 one-event-many-votes (daily-trend.md run-1 failure) → §2.2 secondary pool retains the
 correlation-audit/dedup discipline; P1↔P2 stacking is the ONE deliberate exception, called out
-explicitly in §2.1 P2 so it is never "fixed" as if it were the same bug.
+explicitly in §2.1 P2 so it is never "fixed" as if it were the same bug · P1 sign
+misclassification (2026-07-02 08:00 ET: a rejected LOW-side sweep labeled "bearish" when
+rejecting a low sweep is bullish by P1's own rule) → §9 evidence ledger, sign code-derived from
+level polarity, never model-declared · bias contradicting its own net-score tally (same
+2026-07-02 08:00 run: reasoning stated the net score leaned UP, declared bias DOWN anyway) → §9
+ARI_THESIS_BIAS retry gate (`validate_contracts.score_thesis_evidence`) · falsified_if issued
+already-true against current price (same run: falsified_if anchored 5pts from a price already on
+the wrong side of it, self-invalidated 10 minutes later regardless of what the market did) → §9
+XL_FALSIFIED_IF_ALREADY_TRUE / XL_EXHAUSTED_IF_ALREADY_TRUE issuance-time consistency gate,
+reusing the existing stop-vs-falsification `MarketView.price_only()` cross-level pattern one
+level earlier.

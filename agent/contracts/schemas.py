@@ -24,6 +24,20 @@ CONFIDENCES = {"HIGH", "MEDIUM", "LOW"}
 VERDICTS = {"SETUP", "WAIT"}
 DIRECTIONS = {"LONG", "SHORT"}
 
+# decisions/thesis.md §2.1 evidence-ledger item shape — P1 (HTF close beyond/before at
+# ANY sweep) and P2 (meaningful SMT + HTF rejection) only. Both share the same
+# accept/reject-of-a-sweep shape; P3 (equilibrium position) and P4 (reclaim/failed-reclaim)
+# do not and are NOT covered by this ledger yet (thesis.md §8 gap note) — they stay
+# reasoning-only for now. The model declares WHICH criterion/asset/level/tier/tf fired and
+# whether it is accept or reject; code (validate_contracts.score_thesis_evidence) derives
+# the UP/DOWN sign from the level's own high/low identity — never model-declared — which is
+# what makes a P1 sign misclassification structurally impossible (2026-07-02 08:00 bug).
+EVIDENCE_CRITERIA = {"P1", "P2"}
+EVIDENCE_ASSETS = {"MNQ", "MES"}
+EVIDENCE_TIERS = {"session", "day", "week"}
+EVIDENCE_TFS = {"1h", "4h"}
+EVIDENCE_DIRECTIONS = {"accept", "reject"}
+
 # spec §7 — entry mechanisms (map to existing code paths via the Phase-4 adapter).
 ENTRY_MECHANISMS = {
     "confirmation_bar",
@@ -91,6 +105,7 @@ class Thesis:
     exhausted_if: list = field(default_factory=list)  # [predicate]
     confidence: Optional[str] = None
     recall: Optional[dict] = None                    # {"events": [pred], "max_age_min": int}
+    evidence: list = field(default_factory=list)      # [P1/P2 evidence item] — §2.1
     reasoning: Optional[str] = None
 
     @classmethod
@@ -102,6 +117,7 @@ class Thesis:
             dol=d.get("dol"), falsified_if=list(d.get("falsified_if") or []),
             exhausted_if=list(d.get("exhausted_if") or []),
             confidence=d.get("confidence"), recall=d.get("recall"),
+            evidence=list(d.get("evidence") or []),
             reasoning=d.get("reasoning"))
 
     def to_dict(self) -> dict:
@@ -110,7 +126,8 @@ class Thesis:
             "facts_hash": self.facts_hash, "bias": self.bias, "regime": self.regime,
             "dol": self.dol, "falsified_if": self.falsified_if,
             "exhausted_if": self.exhausted_if, "confidence": self.confidence,
-            "recall": self.recall, "reasoning": self.reasoning,
+            "recall": self.recall, "evidence": self.evidence,
+            "reasoning": self.reasoning,
         }
 
     def is_directional(self) -> bool:
@@ -174,6 +191,7 @@ def failsafe_thesis() -> dict:
         "bias": "NEUTRAL", "regime": "RANGE", "dol": None,
         "falsified_if": [], "exhausted_if": [], "confidence": "LOW",
         "recall": {"events": [], "max_age_min": FAILSAFE_RECALL_MAX_AGE_MIN},
+        "evidence": [],
         "reasoning": "fail-safe neutral/low thesis (offline/failsafe)",
     }
 
@@ -285,6 +303,26 @@ _RECALL = {
     "additionalProperties": False,
 }
 
+# decisions/thesis.md §2.1 evidence-ledger item — P1/P2 only (see EVIDENCE_* comment above).
+# `points`/`side` are NOT in this schema: they are code-derived (validate_contracts.
+# score_thesis_evidence), never model-declared — the model selects which criterion/asset/
+# level/tier/tf/direction fired; code does the sign + arithmetic.
+_EVIDENCE_ITEM = {
+    "type": "object",
+    "properties": {
+        "criterion": {"enum": sorted(EVIDENCE_CRITERIA)},
+        "asset": {"enum": sorted(EVIDENCE_ASSETS)},
+        "level": {"type": "string"},
+        "tier": {"enum": sorted(EVIDENCE_TIERS)},
+        "tf": {"enum": sorted(EVIDENCE_TFS)},
+        "direction": {"enum": sorted(EVIDENCE_DIRECTIONS)},
+        "mature": {"type": "boolean"},
+    },
+    "required": ["criterion", "asset", "level", "tier", "tf", "direction", "mature"],
+    "additionalProperties": False,
+}
+_EVIDENCE_LIST = {"type": "array", "items": _EVIDENCE_ITEM}
+
 THESIS_SCHEMA = {
     "type": "object",
     "$defs": dict(_PRED_DEFS),
@@ -296,10 +334,11 @@ THESIS_SCHEMA = {
         "exhausted_if": _PRED_LIST,
         "confidence": {"enum": sorted(CONFIDENCES)},
         "recall": _RECALL,
+        "evidence": _EVIDENCE_LIST,
         "reasoning": {"type": "string"},
     },
     "required": ["bias", "regime", "dol", "falsified_if", "exhausted_if",
-                 "confidence", "recall", "reasoning"],
+                 "confidence", "recall", "evidence", "reasoning"],
     "additionalProperties": False,
 }
 

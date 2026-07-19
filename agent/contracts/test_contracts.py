@@ -1,7 +1,7 @@
 """Phase-1 schema + cross-level contract validation tests (plan §Phase 1)."""
 
 from schemas import Thesis, TradePlan
-from validate_contracts import validate_thesis, validate_trade_plan
+from validate_contracts import score_thesis_evidence, validate_thesis, validate_trade_plan
 
 
 # --------------------------------------------------------------------------- #
@@ -211,3 +211,126 @@ def test_dataclass_roundtrip():
     src = valid_setup()
     TradePlan.from_dict(src).to_dict()
     assert src == valid_setup()
+
+
+# --------------------------------------------------------------------------- #
+# Issuance-time consistency gate (2026-07-02 08:00 bug)                        #
+# --------------------------------------------------------------------------- #
+def test_falsified_if_already_true_rejected():
+    t = valid_thesis()
+    # now_price=19800; already above 19700 on the 'above' side -> already true.
+    t["falsified_if"] = [{"type": "n_closes_beyond", "price": 19700, "side": "above",
+                          "tf": "5m", "n": 2}]
+    assert "XL_FALSIFIED_IF_ALREADY_TRUE" in validate_thesis(t, FACTS).codes()
+
+
+def test_exhausted_if_already_true_rejected():
+    t = valid_thesis()
+    t["exhausted_if"] = [{"type": "price_beyond", "price": 19700, "side": "above"}]
+    assert "XL_EXHAUSTED_IF_ALREADY_TRUE" in validate_thesis(t, FACTS).codes()
+
+
+def test_falsified_if_not_yet_true_accepted():
+    r = validate_thesis(valid_thesis(), FACTS)   # falsifies below 19500; price is 19800
+    assert "XL_FALSIFIED_IF_ALREADY_TRUE" not in r.codes()
+    assert "XL_EXHAUSTED_IF_ALREADY_TRUE" not in r.codes()
+
+
+# --------------------------------------------------------------------------- #
+# Evidence ledger — syntactic/semantic validation                              #
+# --------------------------------------------------------------------------- #
+def _ev(criterion="P1", asset="MNQ", level="prev_day_high", tier="day", tf="1h",
+        direction="accept", mature=True):
+    return {"criterion": criterion, "asset": asset, "level": level, "tier": tier,
+            "tf": tf, "direction": direction, "mature": mature}
+
+
+def test_evidence_item_bad_enum_rejected():
+    t = valid_thesis()
+    t["evidence"] = [_ev(criterion="P9")]
+    assert "SYN_BAD_EVIDENCE_ITEM" in validate_thesis(t, FACTS).codes()
+
+
+def test_evidence_item_level_not_in_facts_rejected():
+    t = valid_thesis()
+    t["evidence"] = [_ev(level="ghost_level")]
+    assert "SEM_LEVEL_NOT_IN_FACTS" in validate_thesis(t, FACTS).codes()
+
+
+# --------------------------------------------------------------------------- #
+# score_thesis_evidence — pure arithmetic                                      #
+# --------------------------------------------------------------------------- #
+def test_score_evidence_high_accept_is_up():
+    scoring = score_thesis_evidence([_ev(level="prev_day_high", direction="accept",
+                                          tier="week", tf="4h")])
+    assert scoring["net_score"] == 3.0     # 2.0 base * 1.5 (4h) * 1.0 (week)
+    assert scoring["expected_bias"] == "UP"
+    assert scoring["scored_evidence"][0]["side"] == "UP"
+
+
+def test_score_evidence_low_reject_is_up_not_down():
+    # The exact 2026-07-02 08:00 bug shape: rejecting a LOW sweep is bullish, not bearish.
+    scoring = score_thesis_evidence([_ev(level="prev_day_low", direction="reject")])
+    assert scoring["expected_bias"] == "UP"
+    assert scoring["scored_evidence"][0]["side"] == "UP"
+
+
+def test_score_evidence_low_accept_is_down():
+    scoring = score_thesis_evidence([_ev(level="prev_day_low", direction="accept")])
+    assert scoring["expected_bias"] == "DOWN"
+
+
+def test_score_evidence_immature_scores_zero():
+    scoring = score_thesis_evidence([_ev(level="prev_day_high", direction="accept",
+                                          mature=False)])
+    assert scoring["net_score"] == 0.0
+    assert scoring["expected_bias"] == "NEUTRAL"
+    assert scoring["scored_evidence"][0]["points"] == 0.0
+
+
+def test_score_evidence_tier_ladder():
+    session = score_thesis_evidence([_ev(tier="session")])["net_score"]
+    day = score_thesis_evidence([_ev(tier="day")])["net_score"]
+    week = score_thesis_evidence([_ev(tier="week")])["net_score"]
+    assert 0 < session < day < week
+
+
+def test_score_evidence_contradiction_caps_ceiling():
+    # Same level, MNQ accepts (UP) while MES rejects (DOWN) -> a live P1 contradiction.
+    # Net score is thin (1 UP week item - 1 DOWN day item), so even a real lean tops at MEDIUM.
+    ev = [_ev(asset="MNQ", level="prev1_day_high", direction="accept", tier="week", tf="4h"),
+          _ev(asset="MES", level="prev1_day_high", direction="reject", tier="day", tf="1h")]
+    scoring = score_thesis_evidence(ev)
+    assert scoring["contradiction"] is True
+    assert scoring["confidence_ceiling"] in ("MEDIUM", "LOW")
+    assert scoring["confidence_ceiling"] != "HIGH"
+
+
+def test_score_evidence_no_contradiction_allows_high():
+    ev = [_ev(asset="MNQ", tier="week", tf="4h"),
+          _ev(asset="MES", tier="week", tf="4h")]
+    scoring = score_thesis_evidence(ev)
+    assert scoring["contradiction"] is False
+    assert scoring["confidence_ceiling"] == "HIGH"
+
+
+# --------------------------------------------------------------------------- #
+# ARI_THESIS_BIAS — declared bias vs. computed net score                       #
+# --------------------------------------------------------------------------- #
+def test_bias_inconsistent_with_evidence_rejected():
+    t = valid_thesis()   # bias UP
+    t["evidence"] = [_ev(level="prev_day_low", direction="accept")]   # nets DOWN
+    assert "ARI_THESIS_BIAS" in validate_thesis(t, FACTS).codes()
+
+
+def test_bias_consistent_with_evidence_accepted():
+    t = valid_thesis()   # bias UP
+    t["evidence"] = [_ev(level="prev_day_high", direction="accept")]  # nets UP
+    r = validate_thesis(t, FACTS)
+    assert "ARI_THESIS_BIAS" not in r.codes()
+
+
+def test_empty_evidence_exempt_from_bias_check():
+    t = valid_thesis()
+    t["evidence"] = []
+    assert "ARI_THESIS_BIAS" not in validate_thesis(t, FACTS).codes()

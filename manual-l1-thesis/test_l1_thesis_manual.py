@@ -52,6 +52,7 @@ from lifecycle import _SweepTracker  # noqa: E402  (agent/bench/lifecycle.py)
 from predicates import MarketView, eval_any  # noqa: E402  (agent/contracts/predicates.py)
 from run_agent import (  # noqa: E402  (agent/run_agent.py)
     MAX_TOKENS,
+    _derive_thesis_arithmetic,
     _facts_context,
     _run_call,
     _TASK_THESIS,
@@ -247,6 +248,11 @@ def render_explanation_md(result: dict) -> str:
         json.dumps(t.get("recall"), indent=2, default=str),
         "```",
         "",
+        "**evidence ledger (P1/P2 only; points/side are code-derived):**",
+        "```json",
+        json.dumps(t.get("evidence"), indent=2, default=str),
+        "```",
+        "",
         "## Why the model decided this (its own explanation)",
         "",
         result.get("reasoning") or "_(no reasoning returned — likely a failsafe call)_",
@@ -332,6 +338,7 @@ def main(argv=None) -> int:
         backend, system, user, THESIS_SCHEMA,
         validate_block=lambda d: validate_thesis(d, facts),
         failsafe_block=failsafe_thesis(),
+        derive_block=_derive_thesis_arithmetic,
     )
 
     recap = price_recap(source, boundary, args.lookback_hours)

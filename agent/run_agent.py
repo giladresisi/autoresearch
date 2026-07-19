@@ -576,6 +576,36 @@ def _derive_next_arithmetic(block: dict) -> tuple[dict, list]:
     return block, notes
 
 
+def _derive_thesis_arithmetic(block: dict) -> tuple[dict, list]:
+    """Compute per-item points, net score, and the confidence ceiling from the model's
+    declared P1/P2 evidence ledger (decisions/thesis.md §2.1/§4/§6). Mirrors
+    _derive_daily_arithmetic/_derive_next_arithmetic: confidence is silently corrected
+    here (pure arithmetic); bias is deliberately NOT overridden — a declared bias
+    inconsistent with the computed net score is a judgment error and stays a validator
+    retry (validate_contracts.validate_thesis's ARI_THESIS_BIAS check), quoted against
+    the CORRECT net score on retry. An empty/absent ledger (e.g. the NEUTRAL failsafe,
+    or a thin P3/P4-only call not yet covered by this ledger — thesis.md §8 gap) is a
+    no-op."""
+    from validate_contracts import score_thesis_evidence
+    notes: list = []
+    evidence = block.get("evidence") or []
+    if not evidence:
+        return block, notes
+    scoring = score_thesis_evidence(evidence)
+    # Audit-annotate each item with its computed points/side in place (mirrors
+    # _derive_next_arithmetic writing item["score"] back onto the ledger).
+    block["evidence"] = scoring["scored_evidence"]
+    ceiling = scoring["confidence_ceiling"]
+    declared_conf = block.get("confidence")
+    final = _min_conf(str(declared_conf).lower(), ceiling.lower())
+    if final.upper() != declared_conf:
+        notes.append(f"confidence {declared_conf} -> {final.upper()} "
+                     f"(ceiling {ceiling}, net_score {scoring['net_score']}, "
+                     f"contradiction {scoring['contradiction']})")
+        block["confidence"] = final.upper()
+    return block, notes
+
+
 def _derive_daily_arithmetic(block: dict) -> tuple[dict, list]:
     """Compute S and the confidence ceiling from the declared driver contributions
     (daily-trend.md §3). Contributions themselves stay model-owned — they encode the
@@ -616,12 +646,19 @@ def _retry_prompt(violations: list[str]) -> str:
         "Your previous JSON decision failed deterministic validation with these "
         "protocol violations:\n"
         f"{bullet}\n\n"
-        "Correct the violations, then RE-DERIVE every field that depends on what you "
-        "changed: direction must follow the corrected N against the +/-3 gate; "
-        "confidence must respect its ceiling; a directional call must carry a "
-        "move_target that exists in the facts, is unswept/undepleted, and sits on the "
-        "correct side of current price. Keep unrelated fields identical and return a "
-        "fresh, complete JSON decision matching the schema."
+        "Correct the violations, then RE-DERIVE every OTHER field that depends on what "
+        "you changed so the whole decision is mutually consistent — do not just relabel "
+        "one field to silence a violation while leaving the evidence/ledger that produced "
+        "it untouched. In particular: a declared direction/bias must match the "
+        "RECOMPUTED net score of your own ledger/evidence items (if a violation names an "
+        "expected value, that expected value is correct — either change the label to "
+        "match it, or if you believe your evidence was right, change your evidence items "
+        "instead and let the label follow); confidence must respect its computed "
+        "ceiling; any directional target/DOL must exist in the facts, be unswept/"
+        "undepleted, and sit on the correct side of current price; a falsified_if/"
+        "exhausted_if predicate must not already be true at the current price. Keep "
+        "unrelated fields identical and return a fresh, complete JSON decision matching "
+        "the schema."
     )
 
 
@@ -790,9 +827,20 @@ _TASK_THESIS = (
     "hatch: you MAY emit an off-menu predicate, but it must be schema-valid and every level "
     "it names must exist in the facts (unswept/undepleted where the menu requires). Prefer "
     "menu entries.\n"
-    "\nEvery level named in a predicate or the DOL must exist in the facts. confidence is "
-    "your self-report (audit-only; the executor computes the effective gate). Return JSON "
-    "matching the schema."
+    "\nEvery level named in a predicate or the DOL must exist in the facts. "
+    "\n\nEVIDENCE LEDGER (P1/P2 only — thesis.md §2.1). List every P1 (HTF close "
+    "beyond/before at a swept level) and P2 (meaningful SMT + HTF rejection) reading you "
+    "used, one item per {criterion: P1|P2, asset: MNQ|MES, level: <name in facts>, "
+    "tier: session|day|week, tf: 1h|4h (the qualifying HTF close), direction: "
+    "accept|reject, mature: bool (has the §3 maturity gate — >=1 qualifying HTF close "
+    "since the sweep — actually passed for this item?)}. Do NOT declare which way (UP/"
+    "DOWN) an item leans — code derives that mechanically from the level's own high/low "
+    "identity plus accept/reject, so leave that judgment to the validator. Your declared "
+    "bias must match the sign of the resulting net score, or the call is rejected and "
+    "retried against the correct score — so tally your own items before committing to "
+    "bias. confidence is your self-report; code clamps it to a ceiling computed from the "
+    "same ledger (net score magnitude, capped under a live cross-asset P1 contradiction "
+    "per §6) — audit-only beyond that clamp. Return JSON matching the schema."
 )
 _TASK_PLAN = (
     "TASK — L2 trade-plan decision (AI-trader v2).\n"
@@ -812,8 +860,12 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
     """The L1 thesis call in isolation (validate-and-retry, failsafe on repeat).
 
     Validation is the deterministic contract validator (schemas + predicate vocabulary +
-    semantic level checks). No code-derived arithmetic: the thesis carries no ledger; its
-    effective confidence is computed later by the calibration module (spec §8)."""
+    semantic level checks + the evidence-ledger arithmetic below). The thesis carries a
+    P1/P2 evidence ledger (decisions/thesis.md §2.1); code derives each item's points/sign
+    and the confidence ceiling (_derive_thesis_arithmetic), and validate_thesis rejects a
+    declared bias inconsistent with the computed net score (retry, not silent override —
+    same split as daily-trend/next-move). P3/P4 and the standing-thesis-recall confidence
+    escalation (spec §8) remain reasoning-only / not yet code-derived (thesis.md §8 gap)."""
     from schemas import THESIS_SCHEMA, failsafe_thesis
     from validate_contracts import validate_thesis
     system = build_system_prompt(docs_root)
@@ -822,6 +874,7 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
         backend, system, user, THESIS_SCHEMA,
         validate_block=lambda d: validate_thesis(d, facts),
         failsafe_block=failsafe_thesis(),
+        derive_block=_derive_thesis_arithmetic,
     )
 
 
