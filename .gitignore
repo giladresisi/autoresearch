@@ -82,6 +82,7 @@ calibration/cuts/
 # L1 lifecycle bench run artifacts (plan 10; per-run lifecycles/decisions/scorecards) - never tracked
 agent/bench/runs/
 
-# Manual L1 thesis test run artifacts (regenerable per-run JSON; latest_explanation.md and
-# the harness script itself ARE tracked) - never commit the JSONs
+# Manual L1 thesis test run artifacts (regenerable per-run JSON + explanation markdown; the
+# harness script itself IS tracked) - never commit these
 manual-l1-thesis/*.json
+manual-l1-thesis/latest_explanation*.md
