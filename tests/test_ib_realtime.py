@@ -697,6 +697,85 @@ def test_gap_fill_1s_ib_interleaves_instruments(tmp_path, monkeypatch):
         f"requests must alternate MNQ/MES while both instruments are filling, got {order}"
 
 
+def test_gap_fill_1s_ib_pacing_exhaustion_does_not_advance_cursor(tmp_path, monkeypatch):
+    """When every request is throttled (error 162) and the per-chunk retries run out,
+    the round must END for that instrument with the cursor unadvanced — skip-advancing
+    a throttled window creates a permanent interior hole once a later chunk succeeds
+    (root cause of the 2026-05-24 / 2026-06-29 holes)."""
+    from data import ib_realtime as _ib_mod
+    src = _make_source(tmp_path)
+    old_ts = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(hours=3)
+    src._mnq_1s_df = pd.DataFrame(
+        {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0]},
+        index=pd.DatetimeIndex([old_ts]),
+    )
+    src._mes_1s_df = src._mnq_1s_df.copy()
+    monkeypatch.setattr(_ib_mod, "_next_trading_open", lambda ts: ts)
+    monkeypatch.setattr(_ib_mod, "_IB_1S_PACING_BACKOFF_S", 0.0)
+
+    class _FakeEvent:
+        def __init__(self): self._h = []
+        def __iadd__(self, h): self._h.append(h); return self
+        def _emit(self, *a):
+            for h in self._h:
+                h(*a)
+
+    class _FakeIB:
+        def __init__(self):
+            self.errorEvent = _FakeEvent()
+            self.end_datetimes = []
+        def connect(self, *a, **k): pass
+        def disconnect(self): pass
+        def isConnected(self): return True
+        def sleep(self, s): pass
+        def reqHistoricalData(self, contract, *a, **k):
+            self.end_datetimes.append(k.get("endDateTime"))
+            self.errorEvent._emit(1, 162, "pacing violation", None)  # always throttled
+            return []
+
+    fake = _FakeIB()
+    with patch("ib_insync.IB", return_value=fake), patch("ib_insync.Contract"):
+        result = src._gap_fill_1s_ib()
+
+    assert result is False, "an all-throttled round must report incomplete"
+    # Every instrument retried only its FIRST chunk — no later window was requested.
+    assert len(set(fake.end_datetimes)) <= 2, \
+        f"cursor advanced past a throttled window: {sorted(set(fake.end_datetimes))}"
+
+
+# ── holiday-aware gap classification ─────────────────────────────────────────
+
+def test_count_expected_1m_bars_excludes_holiday_early_close():
+    """Juneteenth 2026 (Fri Jun 19) closed at 13:00 ET — minutes after that must not
+    count as expected, else coverage WARNs fire on perfectly complete fills."""
+    from data.ib_realtime import _count_expected_1m_bars
+    start = pd.Timestamp("2026-06-19 12:00", tz="America/New_York")
+    end = pd.Timestamp("2026-06-19 16:00", tz="America/New_York")
+    assert _count_expected_1m_bars(start, end) == 60  # only 12:00-13:00 traded
+
+
+def test_count_expected_1m_bars_excludes_weekend():
+    """Friday 16:00 -> Saturday 12:00 spans the weekend closure — only 16:00-17:00 trades."""
+    from data.ib_realtime import _count_expected_1m_bars
+    start = pd.Timestamp("2026-06-12 16:00", tz="America/New_York")
+    end = pd.Timestamp("2026-06-13 12:00", tz="America/New_York")
+    assert _count_expected_1m_bars(start, end) == 60
+
+
+def test_gap_is_expected_holiday_early_close_into_weekend():
+    """A gap from the Juneteenth 13:00 ET close to Sunday 18:00 reopen (~53 h) is expected."""
+    from data.ib_realtime import _gap_is_expected
+    start = pd.Timestamp("2026-06-19 12:59:59", tz="America/New_York")
+    assert _gap_is_expected(start, 3180.0)
+
+
+def test_gap_is_expected_same_gap_on_ordinary_friday_is_unexpected():
+    """The same 13:00->Sunday gap on a non-holiday Friday means missing afternoon data."""
+    from data.ib_realtime import _gap_is_expected
+    start = pd.Timestamp("2026-06-12 12:59:59", tz="America/New_York")
+    assert not _gap_is_expected(start, 3180.0)
+
+
 # ── RAM reduction tests ──────────────────────────────────────────────────────
 
 def _make_bar_df(days_ago_start: int, days_ago_end: int = 0) -> pd.DataFrame:

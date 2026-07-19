@@ -72,15 +72,23 @@ _GAP_HEADSUP_HOURS = 24    # informational: gap this large likely needs multiple
 _GAP_CAUGHT_UP_HOURS = 1   # loop's convergence target
 
 
-def gap_hours_by_file(bar_data_dir: Path) -> dict:
+def gap_hours_by_file(bar_data_dir: Path, now: "pd.Timestamp | None" = None) -> dict:
     """Hours between now and the last bar in each of the 4 main parquets.
+
+    ``now`` is clamped to the most recent trading close (data.trading_calendar) —
+    over a weekend or the daily break the newest fillable bar is the prior close, so
+    measuring against raw wall-clock time would make the retry loop unconvergeable
+    (observed 2026-07-19: weekend `trade.py gap-fill` looped no-op rounds forever).
 
     A missing, empty, or unreadable file returns float('inf') for that entry rather
     than raising — a first-ever run with no existing parquet naturally reads as
     "needs multiple rounds," consistent with how the existing fill logic already
     creates files from scratch when absent.
     """
-    now = pd.Timestamp.now(tz="UTC")
+    from data.trading_calendar import prev_trading_close
+    if now is None:
+        now = pd.Timestamp.now(tz="UTC")
+    now = prev_trading_close(now).tz_convert("UTC")
     gaps: dict = {}
     for name in _GAP_FILE_NAMES:
         path = bar_data_dir / name
@@ -98,7 +106,9 @@ def gap_hours_by_file(bar_data_dir: Path) -> dict:
         last = df.index[-1]
         if last.tzinfo is None:
             last = last.tz_localize("UTC")
-        gaps[name] = (now - last.tz_convert("UTC")).total_seconds() / 3600.0
+        # Floor at 0: stray post-close ticks (e.g. settlement prints inside the
+        # maintenance break) can put the last bar after the clamped now.
+        gaps[name] = max(0.0, (now - last.tz_convert("UTC")).total_seconds() / 3600.0)
     return gaps
 
 
@@ -466,17 +476,31 @@ class IbRealtimeSource:
                             # IB pacing violation (error 162) during this request → back off and
                             # retry the SAME chunk rather than misreading the empty result as a
                             # data boundary. Keeps the fill progressing instead of giving up.
-                            if _pacing["n"] > _pacing_before and st["pacing_retries"] < _IB_1S_MAX_PACING_RETRIES:
-                                st["pacing_retries"] += 1
+                            if _pacing["n"] > _pacing_before:
+                                if st["pacing_retries"] < _IB_1S_MAX_PACING_RETRIES:
+                                    st["pacing_retries"] += 1
+                                    print(
+                                        f"[gap_fill_1s_ib] {instrument}: IB pacing violation at "
+                                        f"{chunk_end.strftime('%m-%d %H:%M ET')} — backing off "
+                                        f"{_IB_1S_PACING_BACKOFF_S:.0f}s "
+                                        f"(retry {st['pacing_retries']}/{_IB_1S_MAX_PACING_RETRIES})",
+                                        flush=True,
+                                    )
+                                    ib.sleep(_IB_1S_PACING_BACKOFF_S)
+                                    continue  # retry the same window — do NOT advance chunk_start
+                                # Retries exhausted while still throttled: end this instrument's
+                                # round with the cursor UNADVANCED. Skip-advancing a throttled
+                                # window creates a permanent interior hole once a later chunk
+                                # succeeds — the next round resumes from the last written bar.
                                 print(
-                                    f"[gap_fill_1s_ib] {instrument}: IB pacing violation at "
-                                    f"{chunk_end.strftime('%m-%d %H:%M ET')} — backing off "
-                                    f"{_IB_1S_PACING_BACKOFF_S:.0f}s "
-                                    f"(retry {st['pacing_retries']}/{_IB_1S_MAX_PACING_RETRIES})",
+                                    f"[gap_fill_1s_ib] {instrument}: pacing retries exhausted at "
+                                    f"{chunk_end.strftime('%m-%d %H:%M ET')} — ending round, "
+                                    "cursor kept for next round",
                                     flush=True,
                                 )
-                                ib.sleep(_IB_1S_PACING_BACKOFF_S)
-                                continue  # retry the same window — do NOT advance chunk_start
+                                st["active"] = False
+                                all_filled = False
+                                break
                             lag_min = int((now - chunk_end).total_seconds() / 60)
                             if lag_min > 65:
                                 # Far from now: expected gap (maintenance window, holiday).
@@ -901,6 +925,14 @@ class IbRealtimeSource:
         residual historical 1s gap. Keeps automation.main alive exactly like the orchestrator.
         """
         self._load_parquets()
+        # 1m first: it is cheap (few requests) and is what signals depend on — it must
+        # not compete with a pacing budget the 1s fill has already exhausted.
+        gap_fill_1m_ib(self._bar_data_dir)  # calls check_parquet_gaps internally
+        print("[gap_fill_1m_ib] IB 1m gap fill complete", flush=True)
+        # Reload so the in-memory 1m state matches the gap-filled parquet files.
+        # Without this, the first live 1m bar write would overwrite any bars added by
+        # gap_fill_1m_ib with the stale df that was loaded before gap-fill ran.
+        self._load_parquets()
         if self._gap_fill_1s_ib():
             print("[gap_fill_1s_ib] complete", flush=True)
         else:
@@ -910,12 +942,6 @@ class IbRealtimeSource:
                 "parquet-check backfills the residual gap",
                 flush=True,
             )
-        gap_fill_1m_ib(self._bar_data_dir)  # calls check_parquet_gaps internally
-        print("[gap_fill_1m_ib] IB 1m gap fill complete", flush=True)
-        # Reload 1m dfs so the in-memory state matches the gap-filled parquet files.
-        # Without this, the first live 1m bar write would overwrite any bars added by
-        # gap_fill_1m_ib with the stale df that was loaded before gap-fill ran.
-        self._load_parquets()
 
     def start(self) -> None:
         import asyncio, time
@@ -1136,7 +1162,9 @@ class IbRealtimeSource:
 
 
 def _count_expected_1m_bars(start: "pd.Timestamp", end: "pd.Timestamp") -> int:
-    """Count expected 1m bars in [start, end) for CME NQ/MNQ, excluding maintenance and weekends."""
+    """Count expected 1m bars in [start, end) for CME NQ/MNQ, excluding maintenance,
+    weekends, and holiday early closes (data.trading_calendar.EARLY_CLOSES_ET)."""
+    from data.trading_calendar import EARLY_CLOSES_ET
     if end <= start:
         return 0
     idx = pd.date_range(
@@ -1147,12 +1175,15 @@ def _count_expected_1m_bars(start: "pd.Timestamp", end: "pd.Timestamp") -> int:
         return 0
     wd = idx.weekday
     h  = idx.hour
-    active = ~(
+    closed = (
         (h == 17) |
-        ((wd == 5) & (h >= 17)) |
+        ((wd == 4) & (h >= 17)) |
+        (wd == 5) |
         ((wd == 6) & (h < 18))
     )
-    return int(active.sum())
+    for holiday, close_h in EARLY_CLOSES_ET.items():
+        closed |= (idx.date == holiday) & (h >= close_h)
+    return int((~closed).sum())
 
 
 def gap_fill_1m_ib(bar_data_dir: Path) -> None:
@@ -1369,6 +1400,14 @@ def _gap_is_expected(start: "pd.Timestamp", gap_min: float) -> bool:
     # CME US bank holiday early close: market closes at noon ET, reopens at 18:00.
     # Pattern: gap starts between 12:00–13:00, lasts ≤360 min (to 18:00).
     if 12.0 <= frac_h < 13.0 and gap_min <= 360:
+        return True
+    # Known holiday early close (data.trading_calendar): gap from the early-close hour
+    # to the next open. Cap at 78 h to cover a Friday early close spilling into the
+    # Sunday 18:00 reopen (e.g. Juneteenth 13:00 -> Sunday 18:00 ≈ 53 h) while still
+    # flagging gaps that also swallow the following trading day.
+    from data.trading_calendar import EARLY_CLOSES_ET
+    close_h = EARLY_CLOSES_ET.get(et.date())
+    if close_h is not None and (close_h - 0.25) <= frac_h and gap_min <= 78 * 60:
         return True
     return False
 
