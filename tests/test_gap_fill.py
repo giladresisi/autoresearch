@@ -162,6 +162,38 @@ def test_source_gap_fill_runs_1m_then_1s(monkeypatch, tmp_path):
     assert calls == ["load", f"1m:{tmp_path}", "load", "1s"]
 
 
+def test_source_gap_fill_waits_for_queued_parquet_writes(monkeypatch, tmp_path):
+    """gap_fill() must not return until its queued async parquet writes have landed.
+
+    The retry loop's convergence check reads the parquets from disk immediately after
+    the round returns — a still-in-flight write makes the file look stale and costs a
+    wasted ~11-min extra round (observed 2026-07-20 and 2026-07-22 on MES_1s)."""
+    import threading
+    import time as _time
+
+    src = _make_source(tmp_path)
+    monkeypatch.setattr(src, "_load_parquets", lambda: None)
+    import data.ib_realtime as _ir
+    monkeypatch.setattr(_ir, "gap_fill_1m_ib", lambda d: None)
+
+    write_landed = threading.Event()
+
+    def _slow_queued_write():
+        _time.sleep(0.2)
+        write_landed.set()
+
+    def _fake_1s_fill():
+        src._parquet_executor.submit(_slow_queued_write)
+        return True
+
+    monkeypatch.setattr(src, "_gap_fill_1s_ib", _fake_1s_fill)
+
+    src.gap_fill()
+
+    assert write_landed.is_set(), \
+        "gap_fill() returned while a queued parquet write was still in flight"
+
+
 def test_source_gap_fill_degrades_when_1s_fails(monkeypatch, tmp_path):
     """An incomplete 1s fill must NOT raise — it WARNs and still runs the 1m fill.
 

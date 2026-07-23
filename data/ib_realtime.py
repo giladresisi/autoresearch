@@ -942,6 +942,12 @@ class IbRealtimeSource:
                 "parquet-check backfills the residual gap",
                 flush=True,
             )
+        # Barrier: drain the (single-worker, FIFO) write executor before returning.
+        # The retry loop's convergence check reads the parquets from disk right after
+        # this round — an in-flight write reads as a stale file and costs a wasted
+        # ~11-min extra round. shutdown() is not an option: live streaming reuses
+        # this executor after the fill.
+        self._parquet_executor.submit(lambda: None).result()
 
     def start(self) -> None:
         import asyncio, time
