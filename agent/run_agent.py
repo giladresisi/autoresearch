@@ -576,7 +576,7 @@ def _derive_next_arithmetic(block: dict) -> tuple[dict, list]:
     return block, notes
 
 
-def _derive_thesis_arithmetic(block: dict, magnitude=None) -> tuple[dict, list]:
+def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None) -> tuple[dict, list]:
     """Compute per-item points, net score, and the confidence ceiling from the model's
     declared P1/P2 evidence ledger (decisions/thesis.md §2.1/§4/§6). Mirrors
     _derive_daily_arithmetic/_derive_next_arithmetic: confidence is silently corrected
@@ -585,13 +585,18 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None) -> tuple[dict, list]:
     retry (validate_contracts.validate_thesis's ARI_THESIS_BIAS check), quoted against
     the CORRECT net score on retry. An empty/absent ledger (e.g. the NEUTRAL failsafe,
     or a thin P3/P4-only call not yet covered by this ledger — thesis.md §8 gap) is a
-    no-op."""
+    no-op.
+
+    `dol_available` ({"UP": bool, "DOWN": bool}, thesis.md §8 no-liquidity rule) folds the
+    same no-eligible-DOL-for-this-direction override into the confidence ceiling here as
+    validate_thesis applies to expected_bias — so a no-liquidity call is clamped to LOW
+    confidence even before the bias-consistency retry loop, not just at the validator."""
     from validate_contracts import score_thesis_evidence
     notes: list = []
     evidence = block.get("evidence") or []
     if not evidence:
         return block, notes
-    scoring = score_thesis_evidence(evidence, magnitude=magnitude)
+    scoring = score_thesis_evidence(evidence, magnitude=magnitude, dol_available=dol_available)
     # Audit-annotate each item with its computed points/side in place (mirrors
     # _derive_next_arithmetic writing item["score"] back onto the ledger).
     block["evidence"] = scoring["scored_evidence"]
@@ -884,7 +889,15 @@ _TASK_THESIS = (
     "thesis.md §2.1c / §2.2 veto category). "
     "\n- Sparse structure: when the nearest-level distance is large, prefer a closer existing "
     "predicate (smaller-n daily-mid close, a nearer anti-pool) over a far default (existing "
-    "predicate types only)."
+    "predicate types only). "
+    "\n- No liquidity: check the S8 DOL menu for the direction your evidence leans BEFORE "
+    "declaring bias. If that direction's menu is '(none eligible)' — every named pool on "
+    "that side is already swept, e.g. deep into a sustained trend that has taken out all "
+    "nearby lows/highs — there is nothing left to draw to, the same situation as price "
+    "beyond the all-time high with no resistance above it. Do NOT invent an off-menu DOL "
+    "or reuse an already-swept level. Declare bias NEUTRAL, confidence LOW, dol null, "
+    "falsified_if/exhausted_if empty (thesis.md §8) — code enforces this regardless of "
+    "your evidence ledger's net score, so declaring NEUTRAL here is correct, not a hedge."
 )
 _TASK_PLAN = (
     "TASK — L2 trade-plan decision (AI-trader v2).\n"
@@ -910,15 +923,23 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
     declared bias inconsistent with the computed net score (retry, not silent override —
     same split as daily-trend/next-move). P3/P4 and the standing-thesis-recall confidence
     escalation (spec §8) remain reasoning-only / not yet code-derived (thesis.md §8 gap)."""
-    from schemas import THESIS_SCHEMA, failsafe_thesis
+    from schemas import build_thesis_schema, failsafe_thesis
     from validate_contracts import validate_thesis
     system = build_system_prompt(docs_root)
     user = _facts_context(facts_text, context_text) + _TASK_THESIS
+    valid_levels = list((facts.get("levels") or {}).keys())
+    schema = build_thesis_schema(valid_levels)
+    menus = facts.get("menus")
+    dol_available = None
+    if menus is not None:
+        dol_menu = menus.get("dol") or {}
+        dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
     return _run_call(
-        backend, system, user, THESIS_SCHEMA,
+        backend, system, user, schema,
         validate_block=lambda d: validate_thesis(d, facts),
         failsafe_block=failsafe_thesis(),
-        derive_block=lambda d: _derive_thesis_arithmetic(d, magnitude=evidence_magnitude),
+        derive_block=lambda d: _derive_thesis_arithmetic(
+            d, magnitude=evidence_magnitude, dol_available=dol_available),
     )
 
 

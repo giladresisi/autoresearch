@@ -106,7 +106,16 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     # daily_trend/next_move's direction-vs-N check (agent/validator.py _check_arithmetic).
     # A thin/empty ledger (nothing declared yet, e.g. the NEUTRAL failsafe) is exempt.
     if t.evidence:
-        scoring = score_thesis_evidence(t.evidence)
+        # Only build dol_available when facts actually carry a computed S8 menu — a
+        # facts dict with no "menus" key at all (older/minimal test fixtures) means "we
+        # have no information", which must default to available=True (score_thesis_
+        # evidence's own no-`dol_available` default), NOT "both sides unavailable".
+        menus = (facts or {}).get("menus")
+        dol_available = None
+        if menus is not None:
+            dol_menu = menus.get("dol") or {}
+            dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
+        scoring = score_thesis_evidence(t.evidence, dol_available=dol_available)
         if t.bias in BIASES and t.bias != scoring["expected_bias"]:
             r.add("arithmetic", "ARI_THESIS_BIAS",
                   f"bias '{t.bias}' inconsistent with the evidence ledger's net score "
@@ -266,18 +275,26 @@ def _evidence_side(item: dict) -> Optional[str]:
     return "DOWN" if direction == "accept" else "UP"
 
 
-def score_thesis_evidence(evidence: list, magnitude=None) -> dict:
+def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None) -> dict:
     """Pure computation over the model-declared P1/P2 evidence ledger: per-item points
     (tier x tf x magnitude multiplier, zeroed if immature — enforcing the §3 maturity gate
     in code, not trust), the net score, the expected bias sign, and the §6 cross-asset
     contradiction cap on confidence. Returns {net_score, expected_bias, contradiction,
-    confidence_ceiling, scored_evidence}. `scored_evidence` echoes each item with its
-    computed `points`/`side`/`mag_ratio`/`mag_mult` attached, for the audit trail.
+    confidence_ceiling, scored_evidence, no_liquidity}. `scored_evidence` echoes each item
+    with its computed `points`/`side`/`mag_ratio`/`mag_mult` attached, for the audit trail.
 
     `magnitude` (plan 14 Task 5) is an optional {(asset, level, tf): ratio} lookup where
     ratio = |close - level| / avg_range[tf] (thesis.md §4 clearance magnitude). A None
     lookup, or a missing key, yields a x1.0 multiplier — byte-identical to the pre-plan-14
-    behavior (every existing call site passes no magnitude)."""
+    behavior (every existing call site passes no magnitude).
+
+    `dol_available` is an optional {"UP": bool, "DOWN": bool} — whether the S8 DOL menu has
+    ANY eligible pool for that direction (facts.menus.dol[direction], non-empty). When the
+    net-score-implied direction has no eligible DOL, there is no liquidity left to draw to
+    (the same situation as price beyond the all-time high, where no resistance exists above
+    to reference) — the expected bias is downgraded to NEUTRAL rather than a directional
+    read with nothing to draw to. `dol_available=None` (or a direction missing from it)
+    defaults to available=True — byte-identical to before this existed."""
     scored = []
     net = 0.0
     by_level: dict = {}   # level -> {asset: direction}, for the §6 contradiction check
@@ -313,7 +330,17 @@ def score_thesis_evidence(evidence: list, magnitude=None) -> dict:
     else:
         expected_bias = "NEUTRAL"
 
-    if contradiction:
+    # No-liquidity override: a directional read with no eligible DOL to draw to isn't a
+    # real actionable direction (mirrors the ATH case — no resistance exists above it either).
+    no_liquidity = (expected_bias in ("UP", "DOWN")
+                    and dol_available is not None
+                    and not dol_available.get(expected_bias, True))
+    if no_liquidity:
+        expected_bias = "NEUTRAL"
+
+    if no_liquidity:
+        ceiling = "LOW"          # no liquidity -> low confidence, regardless of net magnitude
+    elif contradiction:
         # §6: tally normally, cap the ceiling — never HIGH while a live contradiction stands.
         ceiling = "MEDIUM" if abs(net) >= 2.0 else "LOW"
     elif abs(net) >= 4.0:
@@ -325,6 +352,7 @@ def score_thesis_evidence(evidence: list, magnitude=None) -> dict:
 
     return {
         "net_score": net, "expected_bias": expected_bias, "contradiction": contradiction,
+        "no_liquidity": no_liquidity,
         "confidence_ceiling": ceiling, "scored_evidence": scored,
     }
 

@@ -58,7 +58,7 @@ from run_agent import (  # noqa: E402  (agent/run_agent.py)
     _TASK_THESIS,
     make_backend,
 )
-from schemas import THESIS_SCHEMA, failsafe_thesis  # noqa: E402  (agent/contracts/schemas.py)
+from schemas import build_thesis_schema, failsafe_thesis  # noqa: E402  (agent/contracts/schemas.py)
 from validate_contracts import validate_thesis  # noqa: E402  (agent/contracts/validate_contracts.py)
 
 TZ = "America/New_York"
@@ -334,13 +334,27 @@ def main(argv=None) -> int:
 
     backend = make_backend(args.backend, args.model)
 
+    # Level-name enum constraint (schemas.build_thesis_schema) — mirrors decide_thesis
+    # exactly; this harness bypasses decide_thesis and must build its own schema the same
+    # way or it silently loses the constraint (bug: it did, for every run before this).
+    valid_levels = list((facts.get("levels") or {}).keys())
+    thesis_schema = build_thesis_schema(valid_levels)
+
+    menus = facts.get("menus")
+    dol_available = None
+    if menus is not None:
+        dol_menu = menus.get("dol") or {}
+        dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
+
     outcome = _run_call(
-        backend, system, user, THESIS_SCHEMA,
+        backend, system, user, thesis_schema,
         validate_block=lambda d: validate_thesis(d, facts),
         failsafe_block=failsafe_thesis(),
         # plan 14 Task 6: mirror run_bench — code magnitude-scales the declared ledger from
         # the same facts bundle's evidence_magnitude (facts_text already carries S9 above).
-        derive_block=lambda d: _derive_thesis_arithmetic(d, magnitude=res.evidence_magnitude),
+        # dol_available mirrors decide_thesis's no-liquidity override (thesis.md §8).
+        derive_block=lambda d: _derive_thesis_arithmetic(
+            d, magnitude=res.evidence_magnitude, dol_available=dol_available),
     )
 
     recap = price_recap(source, boundary, args.lookback_hours)

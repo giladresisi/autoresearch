@@ -12,6 +12,7 @@ unknown `kind` is a validation reject, never a best-effort interpretation.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -351,6 +352,32 @@ THESIS_SCHEMA = {
                  "exhausted_if", "confidence", "recall"],
     "additionalProperties": False,
 }
+
+
+def build_thesis_schema(valid_levels=None) -> dict:
+    """THESIS_SCHEMA with the `level` fields on evidence items and DOL constrained to an
+    ENUM of the level names actually present in THIS call's facts, when `valid_levels` is
+    given. Under strict schema-constrained decoding (both backends use this), an enum
+    makes it STRUCTURALLY IMPOSSIBLE for the model to emit a plausible-but-malformed level
+    name (e.g. 'asia_cur_high' instead of the facts sheet's 'asia(cur)_high') — a
+    recurring SEM_LEVEL_NOT_IN_FACTS failure seen across repeated manual runs, previously
+    only caught after the fact by the semantic validator and sent back for a retry.
+    `valid_levels=None`/empty falls back to the original unconstrained string type —
+    byte-identical to plain THESIS_SCHEMA for any caller that has no facts (tests, the
+    static THESIS_SCHEMA export itself)."""
+    schema = copy.deepcopy(THESIS_SCHEMA)
+    if valid_levels:
+        level_enum = {"enum": sorted(set(valid_levels))}
+        schema["properties"]["evidence"]["items"]["properties"]["level"] = level_enum
+        schema["properties"]["dol"]["anyOf"][0]["properties"]["level"] = level_enum
+        # level_swept/level_depleted predicates (falsified_if/exhausted_if/recall.events)
+        # reference a level by `name`, not `level` — same malformed-name risk, same fix.
+        # These atom defs live in $defs (shared via $ref), so patch them there too.
+        for def_name in ("pred_level_swept", "pred_level_depleted"):
+            if def_name in schema["$defs"]:
+                schema["$defs"][def_name]["properties"]["name"] = level_enum
+    return schema
+
 
 _MECHANISM = {
     "type": "object",

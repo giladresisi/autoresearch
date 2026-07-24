@@ -381,6 +381,20 @@ tallied and still decides direction; only the ceiling is capped. Same code path,
 - DOL selection is unchanged from the existing S8 `_dol_menu`/validator contract: nearest
   meaningful, in-facts, unswept, undepleted, correct-side pool ≥ `DOL_MIN_DRAW_DISTANCE_PTS`
   (5.0) away — prefer the DOL menu's `D*` IDs directly.
+- **No-liquidity rule (code-enforced, not soft).** A sufficiently deep, sustained trend can sweep
+  every named pool on its own side within the tracked lookback (prevN_day/week — no deeper
+  history is tracked), leaving that direction's S8 DOL menu `(none eligible)`. This is the SAME
+  situation as price beyond the all-time high — no resistance exists above it either — not a cue
+  to look further back in history for an older (e.g. prior-month) level. `score_thesis_evidence`
+  takes an optional `dol_available: {"UP": bool, "DOWN": bool}` (from `facts.menus.dol`); when the
+  net-score-implied `expected_bias` has no eligible DOL, it is downgraded to NEUTRAL and the
+  confidence ceiling to LOW — a directional read with nothing to draw to is not a real actionable
+  direction. This changes `expected_bias` itself (the same value `ARI_THESIS_BIAS` compares the
+  declared bias against), so a model that correctly declares NEUTRAL here converges immediately,
+  it is not a retry-inducing gate. `_TASK_THESIS` tells the model this proactively (check the
+  DOL menu before declaring bias) so it converges without needing the correction spelled out on
+  a retry; §10 has the worked example that motivated this (2026-07-17 ET, deep in a multi-day
+  MNQ/MES decline).
 - **Gap:** the code-derived evidence ledger (§9; `validate_contracts.score_thesis_evidence`)
   covers P1 and P2 only — both share the same accept/reject-of-a-sweep shape (level, tier, tf,
   direction). P3 (equilibrium position — no sweep, no accept/reject) and P4 (reclaim/failed-
@@ -440,8 +454,12 @@ thesis:
                                            # immature), sums to a net score, and REJECTS (retry, not
                                            # silent override — same split as daily-trend/next-move) a
                                            # declared bias inconsistent with that net score's sign
-                                           # (validate_contracts ARI_THESIS_BIAS). P3/P4 are NOT yet
-                                           # in this ledger — reasoning-only still (§8 gap).
+                                           # (validate_contracts ARI_THESIS_BIAS) — EXCEPT when the
+                                           # net-score-implied direction has no eligible DOL (§8
+                                           # no-liquidity rule): expected_bias downgrades to NEUTRAL
+                                           # (confidence LOW) in code before this check runs, not a
+                                           # retry target. P3/P4 are NOT yet in this ledger —
+                                           # reasoning-only still (§8 gap).
   reasoning: audit-only
 ```
 
@@ -490,4 +508,14 @@ multiplier (weak ×0.75 / normal ×1.0 / strong ×1.25 on `|close − level| / a
 default recall/predicate chosen when a closer one existed, because structure was sparse (post-stretch
 or pre-formation) → §1 session-anchored recall + §2.1c nearest-distance guidance · a tracked level
 coinciding with an old, untracked historical extreme staying invisible to the model → §2.1e
-audit-only cross-family confluence annotation.
+audit-only cross-family confluence annotation · a malformed level name (e.g. `asia_cur_high` for
+the facts sheet's `asia(cur)_high`) passing the model's own free-text check and only being caught
+after the fact by `SEM_LEVEL_NOT_IN_FACTS` → `evidence[].level`/`dol.level`/`level_swept`+
+`level_depleted`'s `name` are now an ENUM of the facts' actual level names for THIS call
+(`schemas.build_thesis_schema`), structurally impossible to violate under strict schema-constrained
+decoding · a directional bias declared deep into a multi-day MNQ/MES decline (2026-07-17 ET) with
+no eligible DOL left on that side — the model reused an already-swept level as its DOL
+(`SEM_DOL_WRONG_SIDE`) or omitted one (`SYN_DIRECTIONAL_MISSING_DOL`), and the same evidence net
+score kept re-arguing for the same unsupported direction on retry → the no-liquidity rule above
+(this section's own DOL bullet), `expected_bias` downgraded to NEUTRAL in code rather than left as
+an unwinnable retry loop between "bias must match net score" and "bias must have a valid DOL".
