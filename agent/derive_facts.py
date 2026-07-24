@@ -249,6 +249,16 @@ class FactsBundle:
     swept_at: dict = field(default_factory=dict)  # swept_at[tkr][name] = ts | None
     htf_close_status: dict = field(default_factory=dict)  # [tkr][name] = {"1h":.., "4h":..}
     smt_candidates: list = field(default_factory=list)     # cross-ticker divergence candidates
+    # --- plan 14: ATR-like primitives + per-asset day extremes (Task 1) ---
+    avg_range_1h: dict = field(default_factory=dict)   # {tkr: mean last-20 completed 1h TR} v1 seed
+    avg_range_4h: dict = field(default_factory=dict)   # {tkr: mean last-10 completed 4h TR} v1 seed
+    day_hi: dict = field(default_factory=dict)         # {tkr: running day high} (thesis.md stretch)
+    day_lo: dict = field(default_factory=dict)         # {tkr: running day low}
+    # --- plan 14: session-maturity soft prior (Task 3) ---
+    session_elapsed_frac: Optional[float] = None       # fraction of current session elapsed at now
+    mature_evidence_count: int = 0                     # count of P1/P2-eligible items right now
+    # --- plan 14: cross-family confluence source rows (Task 8, audit-only) ---
+    historical_extremes: dict = field(default_factory=dict)  # {tkr:{"daily":[...],"weekly":[...]}}
     # S8 menus (plan 11): computed lazily by facts_to_validator_dict / render_menus_text.
     menus: Optional[dict] = None
 
@@ -331,6 +341,8 @@ _MENU_PREDICATE_CFG = (
      ({"tf": "1h", "n": 1}, {"tf": "4h", "n": 1}), None),
     ("evidence", "E", "meaningful_smt_pools", "n_closes_beyond",
      ({"tf": "1h", "n": 1}, {"tf": "4h", "n": 1}), None),
+    # --- plan 14: session-anchored recall (thesis.md §1 cadence) ---
+    ("recall", "R", "next_subsession", "clock_after", ({},), None),
 )
 
 
@@ -391,16 +403,36 @@ def _resolve_level_class(level_class: str, direction: str, mnq_levels: dict,
                          vlevels: dict, now_price: float, day_mid, dol_menu: dict,
                          max_levels, *, weekly_mid=None, mes_levels=None,
                          mnq_swept_at=None, mes_swept_at=None,
-                         smt_candidates=None) -> list:
+                         smt_candidates=None, now=None) -> list:
     """Resolve a level-class to a list of (price, side) the builder fills into predicates."""
     if level_class == "daily_mid":
         if not isinstance(day_mid, (int, float)):
             return []
-        return [(day_mid, _anti_side(direction))]
+        anti = _anti_side(direction)
+        # A reclaim-the-mid falsifier/recall only makes sense as a FORWARD-looking check —
+        # if price already sits beyond the mid on the anti-side, the thesis never held the
+        # mid in the first place, so "n_closes_beyond(mid, anti_side)" is already true at
+        # issuance (MarketView.price_only's flat-price view trivially satisfies it),
+        # tripping XL_FALSIFIED_IF_ALREADY_TRUE / a dead-on-arrival recall. Don't offer a
+        # degenerate candidate — bug found via repeated manual runs on 2026-07-14 01:00.
+        if isinstance(now_price, (int, float)) and _beyond_side(now_price, day_mid, anti):
+            return []
+        return [(day_mid, anti)]
+    if level_class == "next_subsession":
+        # plan 14 Task 4: session-anchored recall at the next sub-session boundary. The
+        # et_time string rides the price slot; direction-neutral (same for UP/DOWN). Inert
+        # when `now` is absent (keeps old fixtures/standalone callers unchanged).
+        if now is None:
+            return []
+        return [(_next_subsession_boundary(now), None)]
     if level_class == "weekly_mid":
         if not isinstance(weekly_mid, (int, float)):
             return []
-        return [(weekly_mid, _anti_side(direction))]
+        anti = _anti_side(direction)
+        # Same already-beyond-at-issuance guard as daily_mid above.
+        if isinstance(now_price, (int, float)) and _beyond_side(now_price, weekly_mid, anti):
+            return []
+        return [(weekly_mid, anti)]
     if level_class == "clock":
         return [(None, None)]
     if level_class == "dol_pools":
@@ -470,6 +502,18 @@ def _resolve_level_class(level_class: str, direction: str, mnq_levels: dict,
     return []
 
 
+def _next_subsession_boundary(now) -> str:
+    """Next sub-session boundary time-of-day ('HH:MM' ET) STRICTLY after `now`, drawn from
+    the session cadence {00:00, 06:00, 12:00, 18:00} (thesis.md §1 — the subsess cutoffs).
+    Wraps past midnight to 00:00. Format is what clock_after evaluates (confirmed across
+    midnight in the walk-forward evaluator)."""
+    tod = (now.hour, now.minute)
+    for b in (0, 6, 12, 18):
+        if (b, 0) > tod:
+            return f"{b:02d}:00"
+    return "00:00"
+
+
 def _build_predicate(builder: str, price, side, variant: dict) -> Optional[dict]:
     if builder == "price_beyond":
         return {"type": "price_beyond", "price": price, "side": side}
@@ -478,12 +522,15 @@ def _build_predicate(builder: str, price, side, variant: dict) -> Optional[dict]
                 "tf": variant["tf"], "n": variant["n"]}
     if builder == "time_elapsed":
         return {"type": "time_elapsed", "minutes": variant["minutes"]}
+    if builder == "clock_after":
+        return {"type": "clock_after", "et_time": price}   # price slot carries the et_time str
     return None
 
 
 def _predicate_menu(mnq_levels: dict, vlevels: dict, now_price: float, day_mid,
                     dol_menu: dict, *, weekly_mid=None, mes_levels=None,
-                    mnq_swept_at=None, mes_swept_at=None, smt_candidates=None) -> dict:
+                    mnq_swept_at=None, mes_swept_at=None, smt_candidates=None,
+                    now=None) -> dict:
     """Per-direction candidate falsification / exhaustion / recall / evidence predicates
     with unique IDs and concrete params, generated from _MENU_PREDICATE_CFG (config-driven).
     `evidence` family (thesis.md P1/P2) is informational scoring input, like the S3b
@@ -499,7 +546,7 @@ def _predicate_menu(mnq_levels: dict, vlevels: dict, now_price: float, day_mid,
                                            now_price, day_mid, dol_menu, max_levels,
                                            weekly_mid=weekly_mid, mes_levels=mes_levels,
                                            mnq_swept_at=mnq_swept_at, mes_swept_at=mes_swept_at,
-                                           smt_candidates=smt_candidates)
+                                           smt_candidates=smt_candidates, now=now)
             for price, side in targets:
                 for variant in variants:
                     pred = _build_predicate(builder, price, side, variant)
@@ -534,7 +581,7 @@ def build_menus(bundle: FactsBundle, vd: dict) -> dict:
     preds = _predicate_menu(mnq_levels, vlevels, now_price, bundle.day_mid, dol,
                            weekly_mid=bundle.weekly_mid, mes_levels=mes_levels,
                            mnq_swept_at=mnq_swept_at, mes_swept_at=mes_swept_at,
-                           smt_candidates=bundle.smt_candidates)
+                           smt_candidates=bundle.smt_candidates, now=bundle.now)
     return {"now_price": now_price, "daily_mid": bundle.day_mid,
             "weekly_mid": bundle.weekly_mid,
             "dol": dol, "predicates": preds}
@@ -584,14 +631,61 @@ def _fmt_predicate(pred: dict) -> str:
                 f"tf={pred['tf']}, n={pred['n']})")
     if t == "time_elapsed":
         return f"time_elapsed(minutes={pred['minutes']})"
+    if t == "clock_after":
+        return f"clock_after(et_time={pred['et_time']})"
     return json.dumps(pred, sort_keys=True)
 
 
-def render_evidence_text(bundle: FactsBundle) -> str:
+def _confluence_notes(price: float, hist_for_tkr: dict, tol: float) -> list:
+    """Audit-only (thesis.md §2.1e): notes when `price` sits within `tol` of an OLD,
+    UNTRACKED historical day/week extreme. Skips the tracked window — the last 2 daily rows
+    (prev1/prev2 day are tracked levels) and the last 1 weekly row (prev1 week) — so a level
+    never trivially matches its own tracked extreme. The skip-window is a v1-seed heuristic;
+    `tol` is ATR-relative (0.25 x avg_range_1h), also a v1 seed pending calibration. Pure and
+    deterministic — returns a short note per match."""
+    notes: list = []
+    daily = (hist_for_tkr.get("daily") or [])[:-2]    # drop tracked prev1/prev2 day rows
+    weekly = (hist_for_tkr.get("weekly") or [])[:-1]  # drop tracked prev1 week row
+    for label, rows in (("daily", daily), ("weekly", weekly)):
+        for row in rows:
+            when, hi, lo = row[0], row[1], row[2]
+            for kind, ext in (("high", hi), ("low", lo)):
+                if isinstance(ext, (int, float)) and abs(price - ext) <= tol:
+                    notes.append(
+                        f"coincides with untracked {label} {kind} {ext} from {when} "
+                        f"(dist {abs(price - ext):.2f} <= tol {tol:.2f} = 0.25x avg_1h)")
+    return notes
+
+
+# (ratio_upper, label) — MUST match validate_contracts._MAG_BUCKETS' own thresholds.
+# Duplicated here (not imported) because derive_facts is a pure facts module with no
+# decision-layer dependency (module docstring: "makes NO decisions"). Update both if the
+# scoring buckets ever change.
+_MAG_LABEL_BUCKETS = ((0.5, "WEAK"), (1.5, "NORMAL"), (float("inf"), "STRONG"))
+
+
+def _magnitude_label(ratio) -> Optional[str]:
+    if ratio is None:
+        return None
+    for upper, label in _MAG_LABEL_BUCKETS:
+        if ratio < upper:
+            return label
+    return None
+
+
+def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) -> str:
     """Render the S9 thesis-evidence block (decisions/thesis.md P1/P3/P4 inputs): weekly
     mid, per-level HTF close-status on BOTH tickers, and SMT candidates with tier
     eligibility. Kept SEPARATE from render_facts_text (S0-S7 stays byte-identical) and
-    from render_menus_text (S8) — additive, never hashed, never in bundle.lines."""
+    from render_menus_text (S8) — additive, never hashed, never in bundle.lines.
+
+    `magnitude` (optional, plan-14 gap fix): the SAME {(asset, level, tf): ratio} dict
+    build_evidence_magnitude(bundle) produces for score_thesis_evidence — passed in here so
+    each HTF close-status line can show a plain WEAK/NORMAL/STRONG clearance label BEFORE
+    the model declares its bias, instead of the magnitude multiplier being an invisible
+    factor it has no way to anticipate (thesis.md §9). No new computation: this renders the
+    identical ratio already used for scoring, so the label can never drift from the actual
+    multiplier applied. `None` (the default) renders exactly as before this fix."""
     out: list = []
     A = out.append
     A("## S9 THESIS EVIDENCE (decisions/thesis.md P1-P4 inputs)")
@@ -612,8 +706,11 @@ def render_evidence_text(bundle: FactsBundle) -> str:
                     A(f"  {tkr} {name} [{tf}]: immature (no qualifying close yet)")
                 else:
                     read = "ACCEPTED beyond" if info["beyond"] else "REJECTED (closed before)"
+                    ratio = (magnitude or {}).get((tkr, name, tf))
+                    label = _magnitude_label(ratio)
+                    tag = f" [clearance: {label}]" if label else ""
                     A(f"  {tkr} {name} [{tf}]: close={info['close']} @ {info['closed_at']} "
-                      f"(n={info['n_closed_since']}) -> {read}")
+                      f"(n={info['n_closed_since']}) -> {read}{tag}")
         if not rendered_any:
             A(f"  {tkr}: (none)")
     A("\nSMT candidates (meaningful = day/week tier, eligible for thesis.md P2; "
@@ -627,7 +724,108 @@ def render_evidence_text(bundle: FactsBundle) -> str:
           f"unswept_ticker={cand['unswept_ticker']} (leader) "
           f"type={cand['type']} swept_at={cand['swept_at']} "
           f"meaningful={cand['meaningful']}")
+
+    # --- plan 14 Task 2: stretch + nearest-meaningful-level distance (MNQ) ---
+    ar = (bundle.avg_range_1h or {}).get("MNQ")
+    np_ = bundle.now_price
+    A("\nSTRETCH & DISTANCE (MNQ; normalized by avg 1h range, v1-seed ATR — thesis.md §2.1c):")
+    A(f"  avg_range_1h = {ar} | avg_range_4h = {(bundle.avg_range_4h or {}).get('MNQ')}")
+    dhi, dlo = (bundle.day_hi or {}).get("MNQ"), (bundle.day_lo or {}).get("MNQ")
+    ext_dists = [abs(np_ - x) for x in (dhi, dlo)
+                 if isinstance(np_, (int, float)) and isinstance(x, (int, float))]
+    if ext_dists:
+        # Distance from the FARTHER (opposite-side) extreme, not the nearer one: this is
+        # "how far has price run from the extreme it moved away from" - large exactly when
+        # a big one-directional move has occurred and price sits at/near its fresh extreme,
+        # not the reverse. Using min() here was a spec bug (thesis.md §2.1c intent) that
+        # zeroed the stretch signal on the most-extended cases it exists to flag.
+        raw = max(ext_dists)
+        if isinstance(ar, (int, float)) and ar > 0:
+            mult = raw / ar
+            flag = " [STRETCHED > 3.0x avg 1h range]" if mult > 3.0 else ""
+            A(f"  stretch from opposite-side day extreme: raw={raw:.2f} pts | "
+              f"{mult:.2f}x avg 1h range{flag}")
+        else:
+            A(f"  stretch from opposite-side day extreme: raw={raw:.2f} pts | "
+              f"n/a (no avg_range_1h)")
+    else:
+        A("  stretch from opposite-side day extreme: n/a (missing price/day extremes)")
+    dol_menu = (bundle.menus or {}).get("dol") if bundle.menus else None
+    if dol_menu is None:
+        dol_menu = _dol_menu((bundle.levels or {}).get("MNQ", {}), {}, np_)
+    for direction in ("UP", "DOWN"):
+        rows = dol_menu.get(direction) or []
+        if not rows or not isinstance(np_, (int, float)):
+            A(f"  nearest named level [{direction}]: (none)")
+            continue
+        nearest = rows[0]
+        d = abs(nearest["price"] - np_)
+        if isinstance(ar, (int, float)) and ar > 0:
+            mult = d / ar
+            flag = " [SPARSE STRUCTURE > 3.0x avg 1h range]" if mult > 3.0 else ""
+            A(f"  nearest named level [{direction}]: {nearest['level']} @ {nearest['price']} "
+              f"raw={d:.2f} pts | {mult:.2f}x avg 1h range{flag}")
+        else:
+            A(f"  nearest named level [{direction}]: {nearest['level']} @ {nearest['price']} "
+              f"raw={d:.2f} pts | n/a (no avg_range_1h)")
+
+    # --- plan 14 Task 3: session-maturity soft prior ---
+    A("\nSESSION MATURITY (thesis.md §2.2 — soft prior, not a code gate):")
+    A(f"  session_elapsed_frac = {bundle.session_elapsed_frac} | mature P1/P2-eligible items "
+      f"now = {bundle.mature_evidence_count} — a thin ledger this early is expected "
+      f"data-scarcity (thesis.md §2.2), not market ambiguity; let it inform confidence, do "
+      f"not read it as contradiction.")
+
+    # --- plan 14 Task 8: cross-family price-cluster confluence (audit-only, not scored) ---
+    A("\nCROSS-FAMILY CONFLUENCE (audit-only, not scored — thesis.md §2.1e):")
+    he = bundle.historical_extremes or {}
+    ar_by_tkr = bundle.avg_range_1h or {}
+    any_note = False
+    for tkr in ("MNQ", "MES"):
+        hist_for = he.get(tkr)
+        ar_t = ar_by_tkr.get(tkr)
+        if not hist_for or not isinstance(ar_t, (int, float)) or ar_t <= 0:
+            continue
+        tol = 0.25 * ar_t   # v1 seed, pending calibration
+        for name, tup in (bundle.levels or {}).get(tkr, {}).items():
+            price = tup[0] if tup else None
+            if not isinstance(price, (int, float)):
+                continue
+            for note in _confluence_notes(price, hist_for, tol):
+                any_note = True
+                A(f"  {tkr} {name} @ {price}: {note}")
+    if not any_note:
+        A("  (none)")
+
     return "\n".join(out) + "\n"
+
+
+def build_evidence_magnitude(bundle: FactsBundle) -> dict:
+    """plan 14 Task 5 — {(asset, level, tf): ratio} where ratio = |close - level_price| /
+    avg_range[tf][asset], over every MATURE HTF close (thesis.md §4 clearance magnitude).
+    Covers ALL swept levels x tf so score_thesis_evidence can look up whatever level/tf the
+    model later declares; a missing key -> neutral x1.0. Skips immature/None closes and
+    None/zero avg_range. Built where the FactsBundle lives (bench.build_facts), never
+    recomputed in run_agent — the scorer receives only this flat ratio dict."""
+    out: dict = {}
+    avg = {"1h": bundle.avg_range_1h or {}, "4h": bundle.avg_range_4h or {}}
+    for tkr in ("MNQ", "MES"):
+        status = (bundle.htf_close_status or {}).get(tkr, {})
+        levels = (bundle.levels or {}).get(tkr, {})
+        for name, tf_map in status.items():
+            tup = levels.get(name)
+            if not tup or not isinstance(tup[0], (int, float)):
+                continue
+            level_price = tup[0]
+            for tf in ("1h", "4h"):
+                info = (tf_map or {}).get(tf)
+                if not info:
+                    continue
+                ar = avg[tf].get(tkr)
+                if not isinstance(ar, (int, float)) or ar <= 0:
+                    continue
+                out[(tkr, name, tf)] = round(abs(info["close"] - level_price) / ar, 4)
+    return out
 
 
 def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
@@ -683,6 +881,11 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
     bundle.td_now = td_now
     bundle.ckpt = ckpt
     bundle.now_price = float(data["MNQ"]["close"].iloc[-1])
+    # plan 14 Task 3: session-maturity soft prior — fraction of the current session elapsed
+    # at now (minutes since the session's first bar over the ~1379-min full session span:
+    # prior-day 18:00 -> 16:59 ET). Clamped to [0,1]. v1 seed span, pending calibration.
+    _elapsed_min = (now - sess_now_start).total_seconds() / 60.0
+    bundle.session_elapsed_frac = round(min(max(_elapsed_min / 1379.0, 0.0), 1.0), 3)
 
     L("## S0 META")
     L(f"now = {now}  (trade date {td_now}, {now.strftime('%A')})")
@@ -755,6 +958,20 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
               f"(at {sess_now['low'].idxmin()}) mid={(dh + dl) / 2}")
         if tkr == "MNQ" and dh is not None and dl is not None:
             bundle.day_mid = round((dh + dl) / 2.0, 2)   # S8 menu input (not rendered in S1)
+        # plan 14 Task 1: per-asset day extremes + ATR-like avg_range (completed HTF bars
+        # only, simple high-low true range; windows are v1 seeds pending calibration). No
+        # L(...) — additive FactsBundle fields, S0-S7 text unchanged.
+        if dh is not None:
+            bundle.day_hi[tkr] = float(dh)
+        if dl is not None:
+            bundle.day_lo[tkr] = float(dl)
+        for tf, win, dst in (("1h", 20, bundle.avg_range_1h), ("4h", 10, bundle.avg_range_4h)):
+            bars = ohlc(df, tf).iloc[:-1]                 # completed bars only
+            if len(bars) == 0:
+                dst[tkr] = None
+                continue
+            tr = (bars["high"] - bars["low"]).tail(win)
+            dst[tkr] = round(float(tr.mean()), 4) if len(tr) else None
         L(f"last close: {float(df['close'].iloc[-1])}")
         ath = ath_mnq if tkr == "MNQ" else ath_mes
         if ath:
@@ -874,6 +1091,21 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
                         add_card("CANDIDATE laggard-fail", lg, name, pp, side, ats, tier,
                                  f" | reach {dist:.2f} short (25%-of-thr gate {gate:.2f}: QUALIFIES)")
 
+    # plan 14 Task 3: count currently P1/P2-eligible items (mature P1 swept levels on either
+    # ticker with >=1 non-None HTF close, plus meaningful P2 SMT candidates). Computed AFTER
+    # htf_close_status and smt_candidates are populated. Additive field, no L(...).
+    _mature_p1 = 0
+    for _tkr in ("MNQ", "MES"):
+        _status = bundle.htf_close_status.get(_tkr, {})
+        _swept = bundle.swept_at.get(_tkr, {})
+        for _name, _tf_map in _status.items():
+            if _swept.get(_name) is None:
+                continue
+            if any((_tf_map or {}).get(_tf) is not None for _tf in ("1h", "4h")):
+                _mature_p1 += 1
+    _mature_p2 = sum(1 for c in bundle.smt_candidates if c.get("meaningful"))
+    bundle.mature_evidence_count = _mature_p1 + _mature_p2
+
     L("\n## S3b CANDIDATE ITEM CARDS (precomputed scoring inputs; multipliers per decisions/next-move.md §2)")
     L("score = tier_weight × session_side × alignment × freshness × whipsaw = base × session_side × alignment × whipsaw")
     L("Copy tier w and freshness from the card — do NOT recompute the exponent. session_side/")
@@ -957,6 +1189,15 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
                 low=("low", "min"), close=("close", "last"))
             L(f"\n{tkr} weekly bars (trade weeks), last {min(len(wk), 12)}:")
             L(wk.tail(12).to_string(index=False))
+            # plan 14 Task 8: capture the already-computed daily/weekly extreme rows
+            # structurally for audit-only cross-family confluence tagging (S9). No new
+            # computation and no L(...) — the S5b rendered text above is unchanged.
+            bundle.historical_extremes[tkr] = {
+                "daily": [(r.trade_date, float(r.high), float(r.low))
+                          for r in dtab.itertuples(index=False)],
+                "weekly": [(r.start, float(r.high), float(r.low))
+                           for r in wk.reset_index().itertuples(index=False)],
+            }
 
     L("\n## S6 FVGs (both tickers, completed bars only; visited = 1s tape re-entered zone after the 3rd bar's OPEN label — daily.py convention)")
     for tkr, dft in data.items():

@@ -576,7 +576,7 @@ def _derive_next_arithmetic(block: dict) -> tuple[dict, list]:
     return block, notes
 
 
-def _derive_thesis_arithmetic(block: dict) -> tuple[dict, list]:
+def _derive_thesis_arithmetic(block: dict, magnitude=None) -> tuple[dict, list]:
     """Compute per-item points, net score, and the confidence ceiling from the model's
     declared P1/P2 evidence ledger (decisions/thesis.md §2.1/§4/§6). Mirrors
     _derive_daily_arithmetic/_derive_next_arithmetic: confidence is silently corrected
@@ -591,7 +591,7 @@ def _derive_thesis_arithmetic(block: dict) -> tuple[dict, list]:
     evidence = block.get("evidence") or []
     if not evidence:
         return block, notes
-    scoring = score_thesis_evidence(evidence)
+    scoring = score_thesis_evidence(evidence, magnitude=magnitude)
     # Audit-annotate each item with its computed points/side in place (mirrors
     # _derive_next_arithmetic writing item["score"] back onto the ledger).
     block["evidence"] = scoring["scored_evidence"]
@@ -720,6 +720,20 @@ def _run_call(backend: Backend, system: str, base_user: str, schema: dict,
             "ok": result.ok,
             "violations": result.messages(),
             "arith_overrides": overrides,
+            # Full per-attempt parsed block — including FAILED attempts, which were
+            # previously discarded once the next retry started. Needed to diagnose *why*
+            # an attempt failed (bad tally vs. sound reasoning + a slip choosing bias, a
+            # bad predicate pick, etc.), not just that it failed. Post-analysis only,
+            # never validated — this dict is not read by any code path.
+            "bias": parsed.get("bias"),
+            "regime": parsed.get("regime"),
+            "dol": parsed.get("dol"),
+            "falsified_if": parsed.get("falsified_if"),
+            "exhausted_if": parsed.get("exhausted_if"),
+            "confidence": parsed.get("confidence"),
+            "recall": parsed.get("recall"),
+            "evidence": parsed.get("evidence"),
+            "reasoning": reasoning,
         })
 
         if result.ok:
@@ -810,9 +824,12 @@ def decide_next(facts_text: str, context_text: str, facts: dict, standing_daily:
 _TASK_THESIS = (
     "TASK — L1 thesis decision (AI-trader v2).\n"
     "Decide where the market is going and what would prove you wrong, as of 'now' (the "
-    "last S0 timestamp). Return a thesis JSON matching the schema: bias (UP/DOWN/NEUTRAL), "
-    "regime, a DOL (draw-on-liquidity) when directional, and structured falsified_if / "
-    "exhausted_if / recall predicates.\n"
+    "last S0 timestamp). Return a thesis JSON matching the schema. The schema requests "
+    "fields in this order: evidence, then reasoning, then bias/regime/dol/falsified_if/"
+    "exhausted_if/confidence/recall — DELIBERATELY evidence-and-reasoning-first, so you "
+    "enumerate and think through your evidence before committing to bias (UP/DOWN/"
+    "NEUTRAL), regime, a DOL (draw-on-liquidity) when directional, and structured "
+    "falsified_if/exhausted_if/recall predicates.\n"
     "\nPREDICATE VOCABULARY (closed; the schema enforces it). Each predicate is one of the "
     "six atoms — price_beyond(price, side), n_closes_beyond(price, side, tf, n), "
     "level_swept(name), level_depleted(name), time_elapsed(minutes), clock_after(et_time) "
@@ -835,12 +852,39 @@ _TASK_THESIS = (
     "accept|reject, mature: bool (has the §3 maturity gate — >=1 qualifying HTF close "
     "since the sweep — actually passed for this item?)}. Do NOT declare which way (UP/"
     "DOWN) an item leans — code derives that mechanically from the level's own high/low "
-    "identity plus accept/reject, so leave that judgment to the validator. Your declared "
+    "identity plus accept/reject, so leave that judgment to the validator. THE TWO SIDES "
+    "MIRROR, THEY DO NOT MATCH — a recurring error is treating 'accept' as always-bullish "
+    "on both sides: accepting BEYOND A HIGH is bullish continuation (price kept pushing "
+    "up through resistance) — but accepting BEYOND A LOW is BEARISH continuation (price "
+    "kept pushing down through support), not bullish, precisely because it is the same "
+    "kind of continuation in the OPPOSITE direction. Symmetrically, rejecting a low "
+    "(bouncing back above it) is bullish reversal; rejecting a high (failing above it, "
+    "closing back under) is bearish reversal. Do not reason 'accept = bullish' or 'reject "
+    "= bearish' as a blanket rule — always re-derive per item from which side (_high vs "
+    "_low) it is. Each swept "
+    "level's HTF close in the facts sheet is tagged [clearance: WEAK|NORMAL|STRONG] — code "
+    "scales that item's points by this already-visible factor (weak clearances count for "
+    "less, strong for more) before tallying the net score. Weigh this when forming your own "
+    "bias lean; do not compute the multiplier yourself, just account for which side's "
+    "evidence is visibly stronger. Your declared "
     "bias must match the sign of the resulting net score, or the call is rejected and "
     "retried against the correct score — so tally your own items before committing to "
     "bias. confidence is your self-report; code clamps it to a ceiling computed from the "
     "same ledger (net score magnitude, capped under a live cross-asset P1 contradiction "
     "per §6) — audit-only beyond that clamp. Return JSON matching the schema."
+    "\n\nS9 EVIDENCE FACTS (plan 14 — read before deciding). The facts now carry an S9 block "
+    "with stretch/distance, session-maturity, and cross-family confluence lines: "
+    "\n- Recall: when current evidence is thin/immature, prefer a clock_after at the next "
+    "sub-session boundary (menu R*) over an arbitrary minutes-elapsed count (thesis.md §1). "
+    "\n- Session maturity: a thin ledger early in the session (see S9 session_elapsed_frac / "
+    "mature-item count) is expected data-scarcity, not market ambiguity — let it inform "
+    "confidence, do not read it as contradiction (thesis.md §2.2). "
+    "\n- Stretch: before declaring regime TREND, check the S9 stretch line — an undigested "
+    "high-stretch TREND is an unverifiable load-bearing input (one confidence tier down, "
+    "thesis.md §2.1c / §2.2 veto category). "
+    "\n- Sparse structure: when the nearest-level distance is large, prefer a closer existing "
+    "predicate (smaller-n daily-mid close, a nearer anti-pool) over a far default (existing "
+    "predicate types only)."
 )
 _TASK_PLAN = (
     "TASK — L2 trade-plan decision (AI-trader v2).\n"
@@ -856,7 +900,7 @@ _TASK_PLAN = (
 
 
 def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Backend, *,
-                  docs_root: str = DOCS_ROOT) -> CallOutcome:
+                  docs_root: str = DOCS_ROOT, evidence_magnitude=None) -> CallOutcome:
     """The L1 thesis call in isolation (validate-and-retry, failsafe on repeat).
 
     Validation is the deterministic contract validator (schemas + predicate vocabulary +
@@ -874,7 +918,7 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
         backend, system, user, THESIS_SCHEMA,
         validate_block=lambda d: validate_thesis(d, facts),
         failsafe_block=failsafe_thesis(),
-        derive_block=_derive_thesis_arithmetic,
+        derive_block=lambda d: _derive_thesis_arithmetic(d, magnitude=evidence_magnitude),
     )
 
 

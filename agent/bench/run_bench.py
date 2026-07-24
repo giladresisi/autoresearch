@@ -144,9 +144,12 @@ def make_live_provider(source: ParquetFactsSource, backend, cfg: BenchConfig,
         # Spec §4 failure policy: an API/transport error degrades this call to a failsafe
         # (no thesis stands) rather than aborting the whole multi-date run.
         try:
-            # Model prompt = S0–S7 core + the S8 menu block; validator_dict carries the
-            # structured menu for the menu-membership check + escape-hatch tagging.
-            outcome = decide_thesis(fr.text + fr.menu_text, "", fr.validator_dict, backend)
+            # Model prompt = S0–S7 core + the S8 menu block + the S9 evidence block (plan
+            # 14); validator_dict carries the structured menu for the menu-membership check +
+            # escape-hatch tagging; evidence_magnitude lets code magnitude-scale the ledger.
+            outcome = decide_thesis(fr.text + fr.menu_text + fr.evidence_text, "",
+                                    fr.validator_dict, backend,
+                                    evidence_magnitude=fr.evidence_magnitude)
         except Exception as exc:  # noqa: BLE001 — any backend/transport failure → failsafe
             th = failsafe_thesis()
             th["issued_at"] = trigger_ts.isoformat()

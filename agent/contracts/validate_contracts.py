@@ -207,6 +207,35 @@ _TF_MULT = {"1h": 1.0, "4h": 1.5}          # thesis.md §4: 4hr scores more than
 _TIER_MULT = {"session": 0.5, "day": 0.75, "week": 1.0}   # §4: week > day > session
 _BASE_POINTS = 2.0                          # v1 seed, pending calibration (thesis.md §4)
 
+# thesis.md §4: clearance magnitude — |close - level| / avg_range[tf]. v1 seeds pending calibration.
+# weak (<0.5x) x0.75, normal (0.5-1.5x) x1.0, strong (>1.5x) x1.25 — a shallow poke past a level
+# scores less than a decisive clearance ("model judges which level/accept, code computes how far").
+_MAG_BUCKETS = ((0.5, 0.75), (1.5, 1.0), (float("inf"), 1.25))   # (ratio_upper, multiplier)
+
+
+def _magnitude_mult(ratio):
+    if ratio is None:
+        return 1.0            # no magnitude info (P2/immature/absent) -> neutral, unchanged
+    for upper, mult in _MAG_BUCKETS:
+        if ratio < upper:
+            return mult
+    return 1.0
+
+
+_MAG_MULT_LABELS = {0.75: "WEAK", 1.0: "NORMAL", 1.25: "STRONG"}   # keyed off _MAG_BUCKETS' own multipliers
+
+
+def magnitude_label(ratio) -> Optional[str]:
+    """WEAK/NORMAL/STRONG for the same ratio _magnitude_mult scores — derived from
+    _magnitude_mult's own multiplier (not a separate threshold copy, so it can never drift
+    from the actual scoring buckets). Rendered in S9 (derive_facts.render_evidence_text) so
+    the model can SEE which HTF closes will score more/less before declaring its own bias,
+    instead of the multiplier being an invisible factor it has no way to anticipate
+    (thesis.md §4/§9 evidence-ledger prompt note)."""
+    if ratio is None:
+        return None
+    return _MAG_MULT_LABELS.get(_magnitude_mult(ratio))
+
 
 def _level_polarity(name) -> Optional[str]:
     """'high' | 'low' | None from the level NAME's naming convention (prev1_day_high,
@@ -237,13 +266,18 @@ def _evidence_side(item: dict) -> Optional[str]:
     return "DOWN" if direction == "accept" else "UP"
 
 
-def score_thesis_evidence(evidence: list) -> dict:
+def score_thesis_evidence(evidence: list, magnitude=None) -> dict:
     """Pure computation over the model-declared P1/P2 evidence ledger: per-item points
-    (tier x tf multiplier, zeroed if immature — enforcing the §3 maturity gate in code,
-    not trust), the net score, the expected bias sign, and the §6 cross-asset
+    (tier x tf x magnitude multiplier, zeroed if immature — enforcing the §3 maturity gate
+    in code, not trust), the net score, the expected bias sign, and the §6 cross-asset
     contradiction cap on confidence. Returns {net_score, expected_bias, contradiction,
     confidence_ceiling, scored_evidence}. `scored_evidence` echoes each item with its
-    computed `points`/`side` attached, for the audit trail."""
+    computed `points`/`side`/`mag_ratio`/`mag_mult` attached, for the audit trail.
+
+    `magnitude` (plan 14 Task 5) is an optional {(asset, level, tf): ratio} lookup where
+    ratio = |close - level| / avg_range[tf] (thesis.md §4 clearance magnitude). A None
+    lookup, or a missing key, yields a x1.0 multiplier — byte-identical to the pre-plan-14
+    behavior (every existing call site passes no magnitude)."""
     scored = []
     net = 0.0
     by_level: dict = {}   # level -> {asset: direction}, for the §6 contradiction check
@@ -253,13 +287,18 @@ def score_thesis_evidence(evidence: list) -> dict:
         tf_mult = _TF_MULT.get(item.get("tf"), 0.0)
         tier_mult = _TIER_MULT.get(item.get("tier"), 0.0)
         mature = bool(item.get("mature"))
-        points = round(_BASE_POINTS * tf_mult * tier_mult, 4) if mature else 0.0
+        ratio = None
+        if magnitude:
+            ratio = magnitude.get((item.get("asset"), item.get("level"), item.get("tf")))
+        mag_mult = _magnitude_mult(ratio)
+        points = round(_BASE_POINTS * tf_mult * tier_mult * mag_mult, 4) if mature else 0.0
         side = _evidence_side(item)
         if side == "UP":
             net += points
         elif side == "DOWN":
             net -= points
-        scored.append({**item, "points": points, "side": side})
+        scored.append({**item, "points": points, "side": side,
+                       "mag_ratio": ratio, "mag_mult": mag_mult})
 
         level, asset, direction = item.get("level"), item.get("asset"), item.get("direction")
         if item.get("criterion") == "P1" and mature and level and asset:

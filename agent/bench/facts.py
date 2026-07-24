@@ -31,8 +31,9 @@ for _p in (_AGENT, os.path.join(_AGENT, "contracts"), os.path.join(_REPO, "calib
         sys.path.insert(0, _p)
 
 from derive_facts import (  # noqa: E402
-    DEPLETE, TZ, build_menus, compute_facts, facts_to_validator_dict, load,
-    render_facts_text, render_menus_text, render_evidence_text, session_frame, trade_date,
+    DEPLETE, TZ, build_evidence_magnitude, build_menus, compute_facts,
+    facts_to_validator_dict, load, render_facts_text, render_menus_text,
+    render_evidence_text, session_frame, trade_date,
 )
 
 DEFAULT_MAIN = os.path.expanduser(
@@ -49,6 +50,7 @@ class FactsResult:
     menu_text: str = ""              # S8 menu block (appended to the model prompt; NOT hashed)
     evidence_text: str = ""          # S9 evidence block (weekly_mid, HTF close-status, SMT
                                       # candidates; appended to the model prompt; NOT hashed)
+    evidence_magnitude: dict = field(default_factory=dict)  # {(asset, level, tf): ratio} (plan 14)
     validator_dict: dict = field(default_factory=dict)
     content_hash: str = ""
     max_ts: Optional[pd.Timestamp] = None
@@ -131,7 +133,10 @@ class ParquetFactsSource:
         bundle.menus = build_menus(bundle, res.validator_dict)
         res.validator_dict["menus"] = bundle.menus
         res.menu_text = render_menus_text(bundle)              # reuses cached bundle.menus
-        res.evidence_text = render_evidence_text(bundle)       # S9: additive, not hashed
+        res.evidence_magnitude = build_evidence_magnitude(bundle)  # plan 14 Task 5: code-derived
+        # magnitude threaded into the render so the model can SEE the WEAK/NORMAL/STRONG
+        # clearance label before declaring bias (gap fix: same ratio, no new computation).
+        res.evidence_text = render_evidence_text(bundle, magnitude=res.evidence_magnitude)
         res.content_hash = _sha(res.text)                      # core hash: S0–S7 only (parity)
         res.now = bundle.now
         res.max_ts = bundle.now

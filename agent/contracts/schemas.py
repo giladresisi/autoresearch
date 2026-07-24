@@ -326,7 +326,19 @@ _EVIDENCE_LIST = {"type": "array", "items": _EVIDENCE_ITEM}
 THESIS_SCHEMA = {
     "type": "object",
     "$defs": dict(_PRED_DEFS),
+    # Property order is deliberate: both backends use STRICT json-schema-constrained
+    # output (agent/run_agent.py's OpenRouterBackend/AnthropicBackend), which generates
+    # fields in this declared order. `evidence` and `reasoning` come BEFORE `bias` so the
+    # model enumerates its evidence and narrates its tally as real generated tokens it can
+    # condition on, before committing to bias — previously `bias` was first, forcing the
+    # model to commit to a bias token sequence before generating a single evidence item or
+    # word of reasoning, which is exactly backwards (no chain-of-thought was structurally
+    # possible before the answer). Code still independently re-derives sign/net-score from
+    # `evidence` and never trusts this ordering or the reasoning text itself — this is a
+    # generation-order fix for the model's own consistency, not a new validated input.
     "properties": {
+        "evidence": _EVIDENCE_LIST,
+        "reasoning": {"type": "string"},
         "bias": {"enum": sorted(BIASES)},
         "regime": {"enum": sorted(DAILY_REGIMES)},
         "dol": _DOL,
@@ -334,11 +346,9 @@ THESIS_SCHEMA = {
         "exhausted_if": _PRED_LIST,
         "confidence": {"enum": sorted(CONFIDENCES)},
         "recall": _RECALL,
-        "evidence": _EVIDENCE_LIST,
-        "reasoning": {"type": "string"},
     },
-    "required": ["bias", "regime", "dol", "falsified_if", "exhausted_if",
-                 "confidence", "recall", "evidence", "reasoning"],
+    "required": ["evidence", "reasoning", "bias", "regime", "dol", "falsified_if",
+                 "exhausted_if", "confidence", "recall"],
     "additionalProperties": False,
 }
 

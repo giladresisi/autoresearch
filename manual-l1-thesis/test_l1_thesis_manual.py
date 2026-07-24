@@ -338,7 +338,9 @@ def main(argv=None) -> int:
         backend, system, user, THESIS_SCHEMA,
         validate_block=lambda d: validate_thesis(d, facts),
         failsafe_block=failsafe_thesis(),
-        derive_block=_derive_thesis_arithmetic,
+        # plan 14 Task 6: mirror run_bench — code magnitude-scales the declared ledger from
+        # the same facts bundle's evidence_magnitude (facts_text already carries S9 above).
+        derive_block=lambda d: _derive_thesis_arithmetic(d, magnitude=res.evidence_magnitude),
     )
 
     recap = price_recap(source, boundary, args.lookback_hours)

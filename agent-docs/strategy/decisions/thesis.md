@@ -24,6 +24,14 @@ checkpoints (06:00/09:20/13:00 are retired — §11 reuse map). A flip in bias s
 hysteresis baked into whichever predicate fired (e.g. `n_closes_beyond(..., n=2)`), not a raw
 re-narration of the same evidence on every call.
 
+**Session-anchored recall.** When current evidence is thin or immature (§2.2, §3), prefer a
+`clock_after` at the NEXT sub-session boundary (00:00 / 06:00 / 12:00 ET, or the 18:00 open) as
+the recall event, rather than only an arbitrary minutes-elapsed count. A sub-session boundary is
+where new manipulation/distribution structure actually forms, so it is a more meaningful re-ask
+time than "60 minutes from now". The S8 menu now generates this as an `R*` entry
+(`next_subsession`, `derive_facts._next_subsession_boundary` → `clock_after(et_time=…)`) — copy
+that entry's `et_time` rather than inventing one.
+
 ## 2. Evidence catalog — four PRIMARY criteria (equal max weight) + secondary (lower, accumulating)
 
 Fresh tape and standing/slow context are no longer split into separate documents (that split was
@@ -95,6 +103,61 @@ own tally counted MNQ's accept on `prev2_day_high` as independent UP-supporting 
 `prev2_day_high` sat below `prev1_day_high` and should have been dropped entirely — removing one
 of the lower-tier accepts that out-voted the single meaningful week-tier reject.
 
+### 2.1c Stretch discount + regime flag
+
+**Stretch** = the distance from current price to the OPPOSITE-SIDE (farther) own-day running
+extreme (`day_high`/`day_low` — whichever price has moved AWAY from), normalized by `avg_range_1h`
+(a v1-seed ATR — mean of the last 20 completed 1h true ranges, `high − low`; `derive_facts.
+avg_range_1h`). Deliberately the farther extreme, not the nearer one: price sitting at/near a fresh
+extreme it just made is exactly the "stretched" case this exists to flag, and that is when the
+distance to the extreme it ran AWAY FROM is largest — the nearer extreme is ~0 distance at that
+same moment and would (wrongly) read as "not stretched." It answers "how many average hours of
+range has price traveled from the extreme it left behind?". A large value means price has run far
+from the day's origin/structure. The raw distance and the normalized multiple are both rendered in
+S9 (`STRETCH & DISTANCE`); the "stretched" flag trips at `> 3.0×` avg 1h range (v1 seed, pending
+calibration).
+
+Two soft effects, both SOFT (prompt-level, not new code gates — same status as §2.1a's
+unverifiable-load-bearing veto):
+
+- **P3 equilibrium discount.** A high-stretch reading DISCOUNTS the P3 equilibrium weight for this
+  call, using §6's exact "cap the ceiling, don't override the net score" mechanic with a new
+  trigger — tally P1–P4 normally, but cap the confidence ceiling. Price far from structure means
+  the equilibrium read is less load-bearing than the momentum, so a P3-heavy confidence should not
+  stand at full height.
+- **Undigested-TREND veto.** Before declaring `regime: TREND`, check the S9 stretch line. An
+  undigested high-stretch TREND declaration (price already stretched far, no pullback/digestion) is
+  an unverifiable load-bearing input — drop one confidence tier (soft, matching the §2.1a
+  precedent), NOT a hard rejection.
+
+**Nearest-meaningful-level distance** (also rendered in S9): for each direction, the distance from
+price to the nearest named DOL pool, normalized by `avg_range_1h`. When it is large (`> 3.0×`, v1
+seed → "sparse structure"), few named levels sit nearby — happens after a big stretch OR early in a
+session before structure has formed. Prefer a closer existing predicate (a smaller-`n` daily-mid
+close, a nearer anti-pool) over a far default. This is guidance, not a gate.
+
+### 2.1e Cross-family price-cluster confluence (audit-only)
+
+When a currently-tracked, NAMED level (a `prevN_day`/`prev1_week`/session-tier pool, etc.) sits
+within an ATR-relative tolerance (`0.25 × avg_range_1h`, v1 seed pending calibration) of an OLD,
+UNTRACKED historical extreme — a day-high/low or week-high/low from the long-horizon S5b history
+that is NOT among the currently-tracked prev-N levels — that is a real structural coincidence worth
+seeing. It is surfaced as a soft S9 annotation only (`CROSS-FAMILY CONFLUENCE`), in the same
+audit-only spirit as the 09:15–11:30 whipsaw boolean and the §2.2 session-maturity fact.
+
+Explicitly:
+- It is **NOT** a new scored criterion — it is not wired into `score_thesis_evidence`'s point math.
+- It is **NOT** a new tracked-level family.
+- It is **NOT** a change to §2.1b's nested/superseded-prior-liquidity pruning — that rule concerns
+  levels WITHIN one tracked family and stays exactly as-is. §2.1e is orthogonal: a coincidence
+  ACROSS families (a tracked level vs. an untracked old extreme).
+
+The "old, untracked" filter skips the most-recent tracked rows when scanning (the last 2 daily rows
+= prev1/prev2 day, the last 1 weekly row = prev1 week) so a level never trivially matches its own
+tracked extreme — a v1-seed heuristic. Motivating case (found during manual testing): a
+currently-swept session-tier level coincided almost exactly with an untracked day-high from several
+weeks back — a coincidence that was previously invisible to the model.
+
 ### 2.2 Secondary criteria (lower max weight; accumulate only if aligned)
 
 Carried over from the existing docs, capped below the P1–P4 max (§4) — confirming color, not a
@@ -113,6 +176,20 @@ primary mover:
 - Vetoes/caps (`next-move.md` §4) still apply post-scoring: fresh top-pocket counter-signal,
   unverifiable load-bearing input, low/neutral standing bias, range/hybrid regime. §6's
   contradiction cap is a NEW addition to this list, not a replacement for it.
+
+**Session-maturity soft prior.** A thin or immature evidence ledger EARLY in a session is expected
+data-scarcity, NOT market ambiguity. Manual testing during a design session found that ledger size
+and retry/failsafe rate both track how much of the trading day has elapsed: early London /
+NY-morning calls show 0-item ledgers and 1–2 retries, while NY-afternoon calls show 7–10 item
+ledgers and 0 retries. That is the natural consequence of fewer HTF bars having closed, not
+evidence that the market is contradictory. S9 renders `session_elapsed_frac`
+(`derive_facts.session_elapsed_frac`) and the mature P1/P2-eligible item count
+(`mature_evidence_count`) so this can inform confidence: a thin ledger at `session_elapsed_frac ≈
+0.1` should temper confidence via data-scarcity, and must NOT be read as a §6-style contradiction.
+This stays SOFT — a rendered fact + this guidance, NOT a new `ARI_*`/`XL_*` hard validator gate —
+deliberately matching the treatment of the 09:15–11:30 ET whipsaw-window fact (a rendered boolean
+in S0, not code-enforced). Escalating it to a hard gate is out of scope without evidence that
+justifies it.
 
 ## 3. Maturity gate (applies to P1, P2, and the HTF-close half of P4)
 
@@ -140,6 +217,14 @@ contributes zero to P1/P2/P4, not a partial or default-direction score.
   (session-tier does not qualify for P2 at all — §2.1). Code-derived v1 seed multipliers
   (`validate_contracts.score_thesis_evidence`): session ×0.5, day ×0.75, week ×1.0, same
   ladder applied to both criteria.
+- **Clearance-magnitude multiplier (P1/P2/P4).** Within these criteria, points scale further by
+  HOW FAR the qualifying HTF bar closed past the level: `ratio = |close − level| / avg_range[tf]`
+  (the same v1-seed ATR as §2.1c, per timeframe). v1-seed buckets (pending calibration): weak
+  `< 0.5×` → ×0.75, normal `0.5–1.5×` → ×1.0, strong `> 1.5×` → ×1.25. A shallow poke past a level
+  scores less than a decisive clearance. This is code-derived in `score_thesis_evidence`
+  (`_magnitude_mult`, fed by `derive_facts.build_evidence_magnitude`), NEVER model-declared — the
+  model judges which level and accept/reject; code computes how far. A missing/immature/absent
+  magnitude (e.g. P2 with no per-tf close, or no `avg_range`) is neutral ×1.0.
 - Secondary criteria (§2.2) are capped at a LOWER max than any single P1–P4 criterion. Their
   role is to accumulate when they agree with each other and/or with the P1–P4 read, nudging
   confidence — they cannot outweigh the primary four on their own.
@@ -248,6 +333,11 @@ own first draft then over-corrected into discarding the net score in favor of a 
 tie-break under any contradiction, capping confidence at LOW/MEDIUM with no path back to HIGH —
 the revision above (tally normally, cap the ceiling, raise on a clean drag) is the fix.
 
+**Reused mechanic — the §2.1c stretch cap.** The high-stretch P3 discount (§2.1c) reuses THIS
+section's "tally normally, cap the confidence ceiling" mechanic with a different trigger (price
+stretched far from structure, rather than a cross-asset P1/P3 disagreement). The net score is still
+tallied and still decides direction; only the ceiling is capped. Same code path, new trigger.
+
 ## 7. SMT lifecycle (pending → confirmed → expired)
 
 1. **Discovery** — a raw cross-ticker divergence at a level is a bias flag only, never acted on
@@ -276,13 +366,11 @@ the revision above (tally normally, cap the ceiling, raise on a clean drag) is t
 
 - P1/P4's HTF close tests map directly to `n_closes_beyond(price, side, tf, n=1)` with
   `tf="1h"` or `tf="4h"` — both already valid atoms in the closed vocabulary
-  (`agent-optimizations.md` §6). **Gap:** `derive_facts._MENU_PREDICATE_CFG` does not yet
-  generate 1h/4h variants, a `weekly_mid` level-class, or a general swept-level close-class — the
-  S8 menu currently only offers 5m daily-mid variants (falsification/recall) and `price_beyond`
-  for pools/anti-pools. Until a code change adds these menu families, the model must use the
-  documented escape hatch (any schema-valid, facts-grounded predicate) to express P1/P2/P4 reads
-  in `falsified_if`/`exhausted_if`/`recall.events` — this doc does not invent a new predicate
-  type, it composes existing atoms the generator hasn't been configured to enumerate yet.
+  (`agent-optimizations.md` §6). **Closed (plan 13 + plan 14):** `derive_facts._MENU_PREDICATE_CFG`
+  now generates 1h/4h daily-mid variants, a `weekly_mid` level-class, general swept-level and
+  meaningful-SMT close-classes (plan 13), AND a session-anchored `next_subsession` recall class
+  (plan 14, `clock_after` at the next boundary — §1). The escape hatch remains available for reads
+  the generator still does not enumerate, but the common P1/P2/P4 + recall shapes are now on-menu.
 - P3's weekly-mid leg needs the `weekly_mid` fact field added to `FactsBundle` (parallel to the
   existing `day_mid`) before it is machine-checkable. Per the sandwich principle
   (`agent-optimizations.md` §1), the model must not compute this itself; it is a facts layer
@@ -306,6 +394,17 @@ the revision above (tally normally, cap the ceiling, raise on a clean drag) is t
   carry a P1 item on `prev1_day_high`). It does not yet resolve "analogous" levels with
   different names across assets (§6's own text allows for this) — a real cross-name analog
   contradiction would currently net-score correctly but NOT trigger the confidence-ceiling cap.
+- **Closed (plan 14):** the plan-13 menu/facts additions are now joined by session-anchored recall
+  (`next_subsession` `R*` menu — §1), clearance-magnitude scaling on the P1/P2 ledger (§4,
+  `build_evidence_magnitude` → `_magnitude_mult`), and the stretch / nearest-distance / session-
+  maturity / cross-family-confluence S9 facts (§2.1c, §2.1e, §2.2).
+- **Soft-gate design rationale.** Session-maturity (§2.2), stretch (§2.1c), and cross-family
+  confluence (§2.1e) are deliberately SOFT — rendered S9 facts + this doc's guidance, NOT
+  `ARI_*`/`XL_*` hard validator gates. This matches the existing 09:15–11:30 whipsaw-window fact
+  (a rendered boolean, not code-enforced). The clearance-magnitude multiplier (§4) IS code-enforced
+  because it is a pure how-far arithmetic on an already-mature, already-scored item — it changes the
+  magnitude of a point that would score anyway, it does not gate whether an item counts. Escalating
+  any of the three soft facts to a hard gate is out of scope pending evidence that justifies it.
 
 ## 9. Output schema
 
@@ -346,6 +445,14 @@ thesis:
   reasoning: audit-only
 ```
 
+**Code-derived inputs the scoring/confidence path now consumes (plan 14).** The evidence-item
+schema is UNCHANGED — magnitude is code-derived, not a new declared field. The
+confidence/scoring path additionally consumes: (a) a clearance-magnitude multiplier on each
+mature P1/P2 item's points (`(asset, level, tf) → ratio`, §4), applied in
+`score_thesis_evidence`; and (b) the stretch, nearest-distance, and session-maturity S9 facts as
+reasoning inputs (not schema fields) that shape confidence per §2.1c / §2.2. The model still
+declares only `criterion/asset/level/tier/tf/direction/mature` per item.
+
 ## 10. Failure modes this doc encodes
 
 Acting on raw SMT at discovery (Phase-3, −$3,756/5d) → §7 confirmation gate · immature-sweep
@@ -372,3 +479,15 @@ the wrong side of it, self-invalidated 10 minutes later regardless of what the m
 XL_FALSIFIED_IF_ALREADY_TRUE / XL_EXHAUSTED_IF_ALREADY_TRUE issuance-time consistency gate,
 reusing the existing stop-vs-falsification `MarketView.price_only()` cross-level pattern one
 level earlier.
+
+Additional modes surfaced by manual point-in-time testing during a design session (`manual-l1-thesis/`):
+· thin early-session ledger misread as market ambiguity (0-item ledger at London/NY-morning read as
+contradiction) → §2.2 session-maturity soft prior (`session_elapsed_frac`/`mature_evidence_count`) ·
+high-stretch `TREND` declared without discounting distance from structure (price far from own-day
+extreme, no digestion) → §2.1c stretch discount/veto (P3 ceiling cap + one-tier undigested-TREND
+drop) · a shallow poke past a level scored equal to a decisive clearance → §4 clearance-magnitude
+multiplier (weak ×0.75 / normal ×1.0 / strong ×1.25 on `|close − level| / avg_range[tf]`) · a far
+default recall/predicate chosen when a closer one existed, because structure was sparse (post-stretch
+or pre-formation) → §1 session-anchored recall + §2.1c nearest-distance guidance · a tracked level
+coinciding with an old, untracked historical extreme staying invisible to the model → §2.1e
+audit-only cross-family confluence annotation.
