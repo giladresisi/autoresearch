@@ -400,6 +400,7 @@ class IbRealtimeSource:
             return True
 
         all_filled = True
+        self._last_1s_round_progressed = False  # did this round append any bars?
         ib = IB()
         try:
             ib.connect(self._host, self._port, clientId=self._client_id + 1)
@@ -526,6 +527,7 @@ class IbRealtimeSource:
                         st["consecutive_skips"] = 0
                         st["pacing_retries"] = 0
                         st["all_bars"].extend(bars)
+                        self._last_1s_round_progressed = True
                         st["chunk_start"] = chunk_end
                         if st["chunk_start"] >= now:
                             st["active"] = False
@@ -927,7 +929,9 @@ class IbRealtimeSource:
         self._load_parquets()
         # 1m first: it is cheap (few requests) and is what signals depend on — it must
         # not compete with a pacing budget the 1s fill has already exhausted.
-        gap_fill_1m_ib(self._bar_data_dir)  # calls check_parquet_gaps internally
+        # Its trailing gap check is scoped to the 1m files; the 1s files are checked
+        # below, after their own fill has run.
+        gap_fill_1m_ib(self._bar_data_dir, check_names=("MNQ_1m", "MES_1m"))
         print("[gap_fill_1m_ib] IB 1m gap fill complete", flush=True)
         # Reload so the in-memory 1m state matches the gap-filled parquet files.
         # Without this, the first live 1m bar write would overwrite any bars added by
@@ -935,6 +939,14 @@ class IbRealtimeSource:
         self._load_parquets()
         if self._gap_fill_1s_ib():
             print("[gap_fill_1s_ib] complete", flush=True)
+        elif getattr(self, "_last_1s_round_progressed", False):
+            # Pacing out mid-large-gap after real progress is normal multi-round
+            # behavior — not warning-worthy (warning fatigue hides real failures).
+            print(
+                "[gap_fill_1s_ib] round incomplete (IB pacing) — progress made; the next "
+                "round continues from the kept cursor",
+                flush=True,
+            )
         else:
             print(
                 "[gap_fill_1s_ib] WARN: 1s fill incomplete (IB pacing / no data) — proceeding "
@@ -948,6 +960,9 @@ class IbRealtimeSource:
         # ~11-min extra round. shutdown() is not an option: live streaming reuses
         # this executor after the fill.
         self._parquet_executor.submit(lambda: None).result()
+        # 1s gap check runs here — after the 1s fill and the write barrier — so it
+        # reports the files' real post-fill state.
+        check_parquet_gaps(self._bar_data_dir, names=("MNQ_1s", "MES_1s"))
 
     def start(self) -> None:
         import asyncio, time
@@ -1187,13 +1202,17 @@ def _count_expected_1m_bars(start: "pd.Timestamp", end: "pd.Timestamp") -> int:
         (wd == 5) |
         ((wd == 6) & (h < 18))
     )
+    frac_h = h + idx.minute / 60.0  # close hours can be fractional (e.g. 13.25 = 13:15 ET)
     for holiday, close_h in EARLY_CLOSES_ET.items():
-        closed |= (idx.date == holiday) & (h >= close_h)
+        closed |= (idx.date == holiday) & (frac_h >= close_h)
     return int((~closed).sum())
 
 
-def gap_fill_1m_ib(bar_data_dir: Path) -> None:
+def gap_fill_1m_ib(bar_data_dir: Path, check_names: "tuple | None" = None) -> None:
     """1m bar gap-fill from IB.
+
+    check_names scopes the trailing check_parquet_gaps call (None = all 4 files);
+    gap_fill() passes the 1m names so the not-yet-run 1s fill isn't warned about.
 
     Reads IB_HOST, IB_PORT, MNQ_CONID, MES_CONID from environment.
     Uses client_id=17 (distinct from all other IB clients in the system).
@@ -1384,7 +1403,7 @@ def gap_fill_1m_ib(bar_data_dir: Path) -> None:
         except Exception:
             pass
 
-    check_parquet_gaps(bar_data_dir)
+    check_parquet_gaps(bar_data_dir, names=check_names)
 
 
 def _gap_is_expected(start: "pd.Timestamp", gap_min: float) -> bool:
@@ -1418,17 +1437,19 @@ def _gap_is_expected(start: "pd.Timestamp", gap_min: float) -> bool:
     return False
 
 
-def check_parquet_gaps(bar_data_dir: "Path") -> None:
-    """Scan the 4 main parquets for unexpected gaps in the last 48 h and print findings."""
+def check_parquet_gaps(bar_data_dir: "Path", names: "tuple | None" = None) -> None:
+    """Scan main parquets for unexpected gaps in the last 48 h and print findings.
+
+    names: bare file stems to check (e.g. ("MNQ_1m", "MES_1m")); None checks all 4.
+    Scoping matters mid-gap-fill: checking the 1s files before the 1s fill has run
+    just WARNs about the staleness that round is about to fix.
+    """
     now = pd.Timestamp.now(tz="UTC")
     cutoff = now - pd.Timedelta(hours=48)
 
-    names_and_files = [
-        ("MNQ_1m", bar_data_dir / "MNQ_1m.parquet"),
-        ("MES_1m", bar_data_dir / "MES_1m.parquet"),
-        ("MNQ_1s", bar_data_dir / "MNQ_1s.parquet"),
-        ("MES_1s", bar_data_dir / "MES_1s.parquet"),
-    ]
+    if names is None:
+        names = ("MNQ_1m", "MES_1m", "MNQ_1s", "MES_1s")
+    names_and_files = [(n, bar_data_dir / f"{n}.parquet") for n in names]
 
     all_ok = True
     for name, path in names_and_files:

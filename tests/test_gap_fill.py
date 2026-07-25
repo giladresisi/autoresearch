@@ -155,7 +155,8 @@ def test_source_gap_fill_runs_1m_then_1s(monkeypatch, tmp_path):
     monkeypatch.setattr(src, "_load_parquets", lambda: calls.append("load"))
     monkeypatch.setattr(src, "_gap_fill_1s_ib", lambda: calls.append("1s") or True)
     import data.ib_realtime as _ir
-    monkeypatch.setattr(_ir, "gap_fill_1m_ib", lambda d: calls.append(f"1m:{d}"))
+    monkeypatch.setattr(_ir, "gap_fill_1m_ib",
+                        lambda d, check_names=None: calls.append(f"1m:{d}"))
 
     src.gap_fill()
 
@@ -174,7 +175,7 @@ def test_source_gap_fill_waits_for_queued_parquet_writes(monkeypatch, tmp_path):
     src = _make_source(tmp_path)
     monkeypatch.setattr(src, "_load_parquets", lambda: None)
     import data.ib_realtime as _ir
-    monkeypatch.setattr(_ir, "gap_fill_1m_ib", lambda d: None)
+    monkeypatch.setattr(_ir, "gap_fill_1m_ib", lambda d, check_names=None: None)
 
     write_landed = threading.Event()
 
@@ -504,3 +505,82 @@ def test_gap_fill_until_now_runs_interior_repair_after_retry_loop(monkeypatch, t
     gap_fill.gap_fill_until_now(tmp_path)
 
     assert order == ["retries", f"repair:{tmp_path}"]
+
+
+# ---------------------------------------------------------------------------
+# gap-check scoping (no premature 1s staleness WARNs)
+# ---------------------------------------------------------------------------
+
+def test_check_parquet_gaps_names_subset(tmp_path, capsys):
+    """check_parquet_gaps(names=...) only inspects the given files."""
+    from data.ib_realtime import check_parquet_gaps
+    check_parquet_gaps(tmp_path, names=("MNQ_1m", "MES_1m"))  # none exist -> WARNs
+    out = capsys.readouterr().out
+    assert "MNQ_1m" in out and "MES_1m" in out
+    assert "MNQ_1s" not in out and "MES_1s" not in out
+
+
+def test_source_gap_fill_checks_1s_after_1s_fill(monkeypatch, tmp_path):
+    """The 1m phase must check only the 1m files (the 1s fill has not run yet — a
+    48h-staleness WARN there is noise about the very gap this round is filling);
+    the 1s files are checked after the 1s fill."""
+    src = _make_source(tmp_path)
+    calls: list = []
+    monkeypatch.setattr(src, "_load_parquets", lambda: None)
+    monkeypatch.setattr(src, "_gap_fill_1s_ib", lambda: calls.append("1s") or True)
+    import data.ib_realtime as _ir
+    monkeypatch.setattr(_ir, "gap_fill_1m_ib",
+                        lambda d, check_names=None: calls.append(("1m", check_names)))
+    monkeypatch.setattr(_ir, "check_parquet_gaps",
+                        lambda d, names=None: calls.append(("check", names)))
+
+    src.gap_fill()
+
+    assert ("1m", ("MNQ_1m", "MES_1m")) in calls
+    assert ("check", ("MNQ_1s", "MES_1s")) in calls
+    assert calls.index(("check", ("MNQ_1s", "MES_1s"))) > calls.index("1s")
+
+
+# ---------------------------------------------------------------------------
+# 1s-incomplete WARN downgrade when the round made progress
+# ---------------------------------------------------------------------------
+
+def test_source_gap_fill_no_warn_when_1s_incomplete_but_progressed(monkeypatch, tmp_path, capsys):
+    """Pacing out mid-large-gap after real progress is NORMAL multi-round behavior —
+    it must log as info, not WARN (warning fatigue hides real failures)."""
+    src = _make_source(tmp_path)
+    monkeypatch.setattr(src, "_load_parquets", lambda: None)
+    import data.ib_realtime as _ir
+    monkeypatch.setattr(_ir, "gap_fill_1m_ib", lambda d, check_names=None: None)
+    monkeypatch.setattr(_ir, "check_parquet_gaps", lambda d, names=None: None)
+
+    def _fake_1s_fill():
+        src._last_1s_round_progressed = True
+        return False
+
+    monkeypatch.setattr(src, "_gap_fill_1s_ib", _fake_1s_fill)
+
+    src.gap_fill()
+
+    out = capsys.readouterr().out
+    assert "WARN" not in out
+    assert "incomplete" in out  # still visibly reported, just not as a warning
+
+
+def test_source_gap_fill_warns_when_1s_incomplete_without_progress(monkeypatch, tmp_path, capsys):
+    """Zero progress (IB unreachable / no data) keeps the WARN."""
+    src = _make_source(tmp_path)
+    monkeypatch.setattr(src, "_load_parquets", lambda: None)
+    import data.ib_realtime as _ir
+    monkeypatch.setattr(_ir, "gap_fill_1m_ib", lambda d, check_names=None: None)
+    monkeypatch.setattr(_ir, "check_parquet_gaps", lambda d, names=None: None)
+
+    def _fake_1s_fill():
+        src._last_1s_round_progressed = False
+        return False
+
+    monkeypatch.setattr(src, "_gap_fill_1s_ib", _fake_1s_fill)
+
+    src.gap_fill()
+
+    assert "WARN: 1s fill incomplete" in capsys.readouterr().out

@@ -1174,3 +1174,11 @@ def test_stop_flushes_pending_to_session_not_main_1s(tmp_path):
     session_files = list(tmp_path.glob("MNQ_1s_session_*.parquet"))
     assert len(session_files) == 1
     assert len(pd.read_parquet(session_files[0])) == 1
+
+
+def test_count_expected_1m_bars_fractional_early_close():
+    """Thanksgiving 2026 closes 13:15 ET — the 13:00-13:15 bars count, later ones don't."""
+    from data.ib_realtime import _count_expected_1m_bars
+    start = pd.Timestamp("2026-11-26 13:00", tz="America/New_York")
+    end = pd.Timestamp("2026-11-26 15:00", tz="America/New_York")
+    assert _count_expected_1m_bars(start, end) == 15
