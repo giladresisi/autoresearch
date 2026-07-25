@@ -132,6 +132,16 @@ class ParquetFactsSource:
         # shared facts_to_validator_dict stays byte-stable for the shadow engine's hash).
         bundle.menus = build_menus(bundle, res.validator_dict)
         res.validator_dict["menus"] = bundle.menus
+        # plan 15 Task 4: FVG-zone ids allowed as P5 evidence `level` values (additive overlay
+        # on the bench's own validator_dict copy, like menus — never in the shadow-hash dict).
+        res.validator_dict["fvg_zones"] = [z["id"] for z in bundle.fvg_zones]
+        # plan 15 Task 7: `now` for the audit-only pending_resolution.resolves_at > now check.
+        res.validator_dict["now"] = str(bundle.now) if bundle.now is not None else None
+        # thesis.md §2.1b/§2.1d: nested/duplicate-sweep levels excluded from fresh P1
+        # evidence (lists, not sets -- JSON/artifact-safe, like fvg_zones above).
+        res.validator_dict["suppressed_p1_levels"] = {
+            tkr: sorted(names) for tkr, names in (bundle.suppressed_p1_levels or {}).items()
+        }
         res.menu_text = render_menus_text(bundle)              # reuses cached bundle.menus
         res.evidence_magnitude = build_evidence_magnitude(bundle)  # plan 14 Task 5: code-derived
         # magnitude threaded into the render so the model can SEE the WEAK/NORMAL/STRONG

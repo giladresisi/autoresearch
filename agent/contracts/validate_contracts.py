@@ -48,6 +48,10 @@ class ContractViolation:
 @dataclass
 class ContractValidation:
     violations: list = field(default_factory=list)
+    # plan 15 Task 7: audit-only warnings — surfaced for the record, NEVER affect `ok`
+    # (not a retry trigger). Kept separate from violations so nothing downstream that gates
+    # on `ok`/`codes()` changes behavior.
+    warnings: list = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -59,8 +63,14 @@ class ContractValidation:
     def messages(self) -> list:
         return [str(v) for v in self.violations]
 
+    def warning_messages(self) -> list:
+        return [str(v) for v in self.warnings]
+
     def add(self, layer: str, code: str, message: str, where: str = "") -> None:
         self.violations.append(ContractViolation(layer, code, message, where))
+
+    def warn(self, code: str, message: str, where: str = "") -> None:
+        self.warnings.append(ContractViolation("audit", code, message, where))
 
 
 def _enum(value, allowed, where, code, r: ContractValidation) -> None:
@@ -98,8 +108,9 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
                                            "thesis.recall.events"):
             r.add("syntactic", "SYN_BAD_PREDICATE", msg, "thesis.recall.events")
 
+    now_ts = (facts or {}).get("now")
     for i, item in enumerate(t.evidence or []):
-        _validate_evidence_item(item, f"thesis.evidence[{i}]", r)
+        _validate_evidence_item(item, f"thesis.evidence[{i}]", r, now_ts=now_ts)
 
     # ARI_THESIS_BIAS (§4/§9): the declared bias must match the sign of the code-computed
     # net score over the evidence ledger — the SAME retry-not-override pattern as
@@ -115,7 +126,9 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
         if menus is not None:
             dol_menu = menus.get("dol") or {}
             dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
-        scoring = score_thesis_evidence(t.evidence, dol_available=dol_available)
+        suppressed_p1_levels = (facts or {}).get("suppressed_p1_levels")
+        scoring = score_thesis_evidence(t.evidence, dol_available=dol_available,
+                                        suppressed_p1_levels=suppressed_p1_levels)
         if t.bias in BIASES and t.bias != scoring["expected_bias"]:
             r.add("arithmetic", "ARI_THESIS_BIAS",
                   f"bias '{t.bias}' inconsistent with the evidence ledger's net score "
@@ -127,7 +140,7 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     return r
 
 
-def _validate_evidence_item(item, where: str, r: ContractValidation) -> None:
+def _validate_evidence_item(item, where: str, r: ContractValidation, now_ts=None) -> None:
     if not isinstance(item, dict):
         r.add("syntactic", "SYN_BAD_EVIDENCE_ITEM",
               f"evidence item must be an object, got {type(item).__name__}", where)
@@ -147,6 +160,34 @@ def _validate_evidence_item(item, where: str, r: ContractValidation) -> None:
     if not isinstance(item.get("mature"), bool):
         r.add("syntactic", "SYN_BAD_EVIDENCE_ITEM",
               "'mature' must be a boolean", where)
+    _validate_pending_resolution(item, where, r, now_ts)
+
+
+def _validate_pending_resolution(item: dict, where: str, r: ContractValidation, now_ts) -> None:
+    """plan 15 Task 7 — AUDIT-ONLY structural check on an item's optional pending_resolution.
+    A resolves_at that is not strictly after `now` is a warning (the resolution has, by its own
+    claim, already passed — the model likely copied a stale timestamp), NOT a hard rejection —
+    pending_resolution is informational and never scored. `now` absent (older fixtures) skips
+    the time check."""
+    pr = item.get("pending_resolution")
+    if pr is None:
+        return
+    if not isinstance(pr, dict):
+        r.warn("AUD_PENDING_RESOLUTION_SHAPE", "pending_resolution must be an object", where)
+        return
+    resolves_at = pr.get("resolves_at")
+    if resolves_at is None or now_ts is None:
+        return
+    try:
+        import pandas as pd
+        if pd.Timestamp(resolves_at) <= pd.Timestamp(now_ts):
+            r.warn("AUD_PENDING_RESOLUTION_STALE",
+                   f"pending_resolution.resolves_at {resolves_at!r} is not after now "
+                   f"{now_ts!r} (resolution already passed?)", where)
+    except (ValueError, TypeError):
+        r.warn("AUD_PENDING_RESOLUTION_SHAPE",
+               f"pending_resolution.resolves_at {resolves_at!r} is not a parseable timestamp",
+               where)
 
 
 def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
@@ -158,6 +199,12 @@ def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
     if isinstance(t.dol, dict) and t.dol.get("level"):
         names.add(t.dol["level"])
     for item in t.evidence or []:
+        # P3/P4/P5 reference a synthetic equilibrium mid or an FVG-zone id, not a named price
+        # level in facts.levels — their level string is validated by the criterion-specific
+        # sign derivers (_mid_side/_fvg_side), so exempt them from SEM_LEVEL_NOT_IN_FACTS
+        # (plan 15 Tasks 4/6).
+        if isinstance(item, dict) and item.get("criterion") in ("P3", "P4", "P5"):
+            continue
         if isinstance(item, dict) and isinstance(item.get("level"), str) and item["level"]:
             names.add(item["level"])
     for name in sorted(names):
@@ -275,7 +322,59 @@ def _evidence_side(item: dict) -> Optional[str]:
     return "DOWN" if direction == "accept" else "UP"
 
 
-def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None) -> dict:
+def _fvg_side(item: dict) -> Optional[str]:
+    """UP or DOWN for a P5 (FVG-fill) item — mechanically derived from the zone's bull/bear
+    kind (parsed from the copied S6 identifier in `level`) plus accept/reject, never
+    model-declared (plan 15 Task 4 / thesis.md §2.1 P5). A bull zone is polarity-'high', a
+    bear zone polarity-'low', so the SAME accept/reject rule as _evidence_side applies:
+    a bull zone that HELD (accept) is bullish continuation (UP), a violated one (reject) is
+    DOWN; a bear zone that held (accept) is DOWN, a violated one (reject) is UP."""
+    lname = (item.get("level") or "").lower()
+    if "bull" in lname:
+        polarity = "high"
+    elif "bear" in lname:
+        polarity = "low"
+    else:
+        return None
+    direction = item.get("direction")
+    if direction not in EVIDENCE_DIRECTIONS:
+        return None
+    if polarity == "high":
+        return "UP" if direction == "accept" else "DOWN"
+    return "DOWN" if direction == "accept" else "UP"
+
+
+def _mid_side(item: dict) -> Optional[str]:
+    """UP or DOWN for a P3 (equilibrium position) item — code-derived, never model-declared
+    (plan 15 Task 6 / thesis.md §2.1 P3). P3 has no accept/reject-of-a-sweep; the model
+    declares only WHERE price sits relative to the daily/weekly mid, mapped onto the
+    accept/reject field: `accept` = price accepted ABOVE the mid (bullish lean -> UP),
+    `reject` = price sits/closed BELOW the mid (bearish lean -> DOWN). Deliberately simpler
+    than P1/P4: a position read, not a two-step reclaim."""
+    direction = item.get("direction")
+    if direction == "accept":
+        return "UP"
+    if direction == "reject":
+        return "DOWN"
+    return None
+
+
+def _item_side(item: dict) -> Optional[str]:
+    """Dispatch an evidence item to its criterion-specific sign deriver — all code-derived,
+    never model-declared. P5 -> FVG bull/bear kind; P3 -> above/below equilibrium; P4 ->
+    the reclaim direction encoded in the _high/_low mid name (reclaim IS an accept-beyond-
+    then-hold pattern, so _evidence_side's polarity logic applies); P1/P2 -> level high/low
+    polarity + accept/reject."""
+    criterion = item.get("criterion")
+    if criterion == "P5":
+        return _fvg_side(item)
+    if criterion == "P3":
+        return _mid_side(item)
+    return _evidence_side(item)
+
+
+def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
+                           suppressed_p1_levels=None) -> dict:
     """Pure computation over the model-declared P1/P2 evidence ledger: per-item points
     (tier x tf x magnitude multiplier, zeroed if immature — enforcing the §3 maturity gate
     in code, not trust), the net score, the expected bias sign, and the §6 cross-asset
@@ -294,7 +393,13 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None) ->
     (the same situation as price beyond the all-time high, where no resistance exists above
     to reference) — the expected bias is downgraded to NEUTRAL rather than a directional
     read with nothing to draw to. `dol_available=None` (or a direction missing from it)
-    defaults to available=True — byte-identical to before this existed."""
+    defaults to available=True — byte-identical to before this existed.
+
+    `suppressed_p1_levels` (thesis.md §2.1b/§2.1d) is an optional {asset: set(level names)}
+    — nested prevN levels and duplicate-simultaneous-sweep restatements (derive_facts.
+    _nested_prev_levels / _duplicate_sweep_losers). A P1 item at a suppressed level scores
+    ZERO, same "zeroed, not scored" mechanic as immature/exhausted — this NEVER applies to
+    P2 items: a divergence already fired at a nested level remains valid evidence."""
     scored = []
     net = 0.0
     by_level: dict = {}   # level -> {asset: direction}, for the §6 contradiction check
@@ -308,8 +413,16 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None) ->
         if magnitude:
             ratio = magnitude.get((item.get("asset"), item.get("level"), item.get("tf")))
         mag_mult = _magnitude_mult(ratio)
-        points = round(_BASE_POINTS * tf_mult * tier_mult * mag_mult, 4) if mature else 0.0
-        side = _evidence_side(item)
+        # plan 15 Task 5: an item the model flags `exhausted: True` (a played-out stale SMT,
+        # see S9 suggested_exhausted) contributes ZERO — same "zeroed, not scored" mechanic as
+        # the immature gate, a pure code mechanic on a model judgment (no new sign logic).
+        exhausted = bool(item.get("exhausted"))
+        suppressed = bool(
+            item.get("criterion") == "P1" and suppressed_p1_levels
+            and item.get("level") in (suppressed_p1_levels.get(item.get("asset")) or ()))
+        scored_mature = mature and not exhausted and not suppressed
+        points = round(_BASE_POINTS * tf_mult * tier_mult * mag_mult, 4) if scored_mature else 0.0
+        side = _item_side(item)
         if side == "UP":
             net += points
         elif side == "DOWN":
@@ -318,7 +431,7 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None) ->
                        "mag_ratio": ratio, "mag_mult": mag_mult})
 
         level, asset, direction = item.get("level"), item.get("asset"), item.get("direction")
-        if item.get("criterion") == "P1" and mature and level and asset:
+        if item.get("criterion") == "P1" and scored_mature and level and asset:
             by_level.setdefault(level, {})[asset] = direction
 
     contradiction = any(len(set(d.values())) > 1 for d in by_level.values() if len(d) > 1)

@@ -576,7 +576,8 @@ def _derive_next_arithmetic(block: dict) -> tuple[dict, list]:
     return block, notes
 
 
-def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None) -> tuple[dict, list]:
+def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
+                              suppressed_p1_levels=None) -> tuple[dict, list]:
     """Compute per-item points, net score, and the confidence ceiling from the model's
     declared P1/P2 evidence ledger (decisions/thesis.md §2.1/§4/§6). Mirrors
     _derive_daily_arithmetic/_derive_next_arithmetic: confidence is silently corrected
@@ -596,7 +597,8 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None) -
     evidence = block.get("evidence") or []
     if not evidence:
         return block, notes
-    scoring = score_thesis_evidence(evidence, magnitude=magnitude, dol_available=dol_available)
+    scoring = score_thesis_evidence(evidence, magnitude=magnitude, dol_available=dol_available,
+                                    suppressed_p1_levels=suppressed_p1_levels)
     # Audit-annotate each item with its computed points/side in place (mirrors
     # _derive_next_arithmetic writing item["score"] back onto the ledger).
     block["evidence"] = scoring["scored_evidence"]
@@ -647,7 +649,7 @@ def _derive_daily_arithmetic(block: dict) -> tuple[dict, list]:
 # --------------------------------------------------------------------------- #
 def _retry_prompt(violations: list[str]) -> str:
     bullet = "\n".join(f"  - {m}" for m in violations)
-    return (
+    body = (
         "Your previous JSON decision failed deterministic validation with these "
         "protocol violations:\n"
         f"{bullet}\n\n"
@@ -665,6 +667,25 @@ def _retry_prompt(violations: list[str]) -> str:
         "unrelated fields identical and return a fresh, complete JSON decision matching "
         "the schema."
     )
+    # plan 15 Task 8 (cheaper lever, per the Task-1b spike): an ARI_THESIS_BIAS mismatch is
+    # the recurring "model re-tallies its own evidence and re-diverges on retry" failure — the
+    # code's net score is authoritative and the per-item points/sign are code-derived, so the
+    # fix is to relabel `bias`, NOT to re-pick or re-tally the evidence ledger. Spelling this
+    # out stops the observed churn where each retry rewrote the ledger and produced a new
+    # inconsistency (2026-07-14 01:00 → 3 attempts → failsafe).
+    if any("ARI_THESIS_BIAS" in m for m in violations):
+        body += (
+            "\n\nON THE BIAS/NET-SCORE MISMATCH SPECIFICALLY: the expected bias quoted above "
+            "is the sign of code's authoritative recomputation of YOUR OWN evidence ledger — "
+            "you do not tally the points yourself (tier x tf x clearance and the UP/DOWN sign "
+            "are all code-derived per item). Do NOT re-pick or re-tally your evidence items to "
+            "chase a different number. KEEP your evidence ledger exactly as-is and set `bias` "
+            "to the quoted expected value — UNLESS a specific evidence item is factually wrong "
+            "(wrong level, wrong accept/reject, wrong mature/tier/tf), in which case fix that "
+            "ONE item and let bias follow. Changing the whole ledger on this retry is what "
+            "causes it to fail again."
+        )
+    return body
 
 
 @dataclass
@@ -866,7 +887,17 @@ _TASK_THESIS = (
     "(bouncing back above it) is bullish reversal; rejecting a high (failing above it, "
     "closing back under) is bearish reversal. Do not reason 'accept = bullish' or 'reject "
     "= bearish' as a blanket rule — always re-derive per item from which side (_high vs "
-    "_low) it is. Each swept "
+    "_low) it is. "
+    "\nTHIS SAME POLARITY RULE GOVERNS P2. A P2 item is the LAGGER (the asset whose own HTF "
+    "close you read — §5) rejecting the liquidity it just swept, so the reversal runs in the "
+    "OPPOSITE direction of the sweep: rejecting a swept LOW (the lagger swept a _low then "
+    "closed back ABOVE it) is BULLISH; rejecting a swept HIGH (swept a _high then closed back "
+    "UNDER it) is BEARISH. It is mechanically IDENTICAL to P1's own reject polarity, just "
+    "applied to the lagger's side of an SMT pair rather than a plain single-asset sweep — a "
+    "recurring error is narrating a correctly-scored bullish P2 low-reject as 'adds weight to "
+    "the DOWN thesis' because the word 'swept a low' feels bearish. It does not: the REJECT "
+    "flips it. Code derives the P2 sign the same way (level _high/_low polarity + reject), so "
+    "describe it in prose the way code will score it, not backwards. Each swept "
     "level's HTF close in the facts sheet is tagged [clearance: WEAK|NORMAL|STRONG] — code "
     "scales that item's points by this already-visible factor (weak clearances count for "
     "less, strong for more) before tallying the net score. Weigh this when forming your own "
@@ -876,7 +907,39 @@ _TASK_THESIS = (
     "retried against the correct score — so tally your own items before committing to "
     "bias. confidence is your self-report; code clamps it to a ceiling computed from the "
     "same ledger (net score magnitude, capped under a live cross-asset P1 contradiction "
-    "per §6) — audit-only beyond that clamp. Return JSON matching the schema."
+    "per §6) — audit-only beyond that clamp. "
+    "\nP5 (FVG-FILL — thesis.md §2.1). The facts S9 'FVG-FILL CANDIDATES' block lists each "
+    "VISITED fair-value-gap zone with an id (e.g. 'MES 1hr 2026-07-14 00:00:00-04:00 bull'). "
+    "A visited zone is a fill event — usable P5 evidence. To score it, add an evidence item "
+    "{criterion: P5, asset, level: <copy the zone id VERBATIM, including the bull/bear word>, "
+    "tier: session|day|week, tf: 1h|4h, direction: accept|reject, mature}. direction=accept "
+    "means the zone HELD its own bias (a bull zone held as support / a bear zone held as "
+    "resistance); reject means it was violated (closed through). Do NOT declare UP/DOWN — code "
+    "derives the sign from the bull/bear kind in the id plus accept/reject (bull-accept and "
+    "bear-reject are bullish; bear-accept and bull-reject are bearish), the SAME mirrored "
+    "polarity as P1. Only cite a VISITED zone; an unvisited gap is a pending draw, not a fill. "
+    "\nSMT EXHAUSTION (thesis.md §2.1c). Each S9 SMT candidate may carry a code-computed "
+    "'stretch_since_fire=Nx avg_1h' and, past its tier-relative shelf life (session 2x, day "
+    "4x, week 8x), a '[SUGGESTED EXHAUSTED]' tag — the divergence has already played out (price "
+    "ran far from where it fired), so it is no longer live continuation evidence. This is a "
+    "SUGGESTION, not automatic: if you judge such a P2 item stale you may set exhausted: true on "
+    "that evidence item, which zeroes its contribution (like an immature item). You may also "
+    "DISAGREE and score it normally (omit exhausted) — the suggestion is a hint from stretch, "
+    "not a gate. Do not set exhausted on a fresh, un-flagged SMT. "
+    "\nP3/P4 (EQUILIBRIUM & RECLAIM — thesis.md §2.1, now partially code-scored). You may add "
+    "these to the SAME evidence ledger: "
+    "\n- P3 (position vs. equilibrium): {criterion: P3, asset, level: daily_mid | weekly_mid, "
+    "tier, tf, direction: accept | reject, mature} — accept = price accepted ABOVE that mid "
+    "(bullish), reject = sits/closed BELOW it (bearish). Code derives the sign; do not declare "
+    "UP/DOWN. "
+    "\n- P4 (reclaim / failed reclaim of a mid, HTF-confirmed): {criterion: P4, asset, level: "
+    "daily_mid_high | daily_mid_low | weekly_mid_high | weekly_mid_low, tier, tf, direction: "
+    "accept | reject, mature} — the _high/_low encodes the reclaim DIRECTION and accept "
+    "(reclaimed and held) / reject (failed reclaim) works exactly like P1's accept/reject on a "
+    "high/low. Use the HTF-close-confirmed reclaim, not a bare mid touch/cross (proven noise). "
+    "Both reuse the P1 tier/tf multipliers and the §3 maturity gate — code computes the sign and "
+    "points, you only tag the position/reclaim. "
+    "Return JSON matching the schema."
     "\n\nS9 EVIDENCE FACTS (plan 14 — read before deciding). The facts now carry an S9 block "
     "with stretch/distance, session-maturity, and cross-family confluence lines: "
     "\n- Recall: when current evidence is thin/immature, prefer a clock_after at the next "
@@ -884,6 +947,12 @@ _TASK_THESIS = (
     "\n- Session maturity: a thin ledger early in the session (see S9 session_elapsed_frac / "
     "mature-item count) is expected data-scarcity, not market ambiguity — let it inform "
     "confidence, do not read it as contradiction (thesis.md §2.2). "
+    "\n- Pending resolution: for any IMMATURE (mature: false) day/week evidence item you cite, "
+    "populate pending_resolution {resolves_tf: 1h|4h, resolves_at: <copy the matching 'next 1h "
+    "close'/'next 4h close' timestamp from the S9 PENDING RESOLUTION line — do NOT compute it "
+    "yourself>, implied_direction_if_confirmed: UP|DOWN (which way it leans IF that close "
+    "confirms)}. It is informational (unscored), so an execution layer can read when/how the "
+    "item will resolve. "
     "\n- Stretch: before declaring regime TREND, check the S9 stretch line — an undigested "
     "high-stretch TREND is an unverifiable load-bearing input (one confidence tier down, "
     "thesis.md §2.1c / §2.2 veto category). "
@@ -897,7 +966,17 @@ _TASK_THESIS = (
     "beyond the all-time high with no resistance above it. Do NOT invent an off-menu DOL "
     "or reuse an already-swept level. Declare bias NEUTRAL, confidence LOW, dol null, "
     "falsified_if/exhausted_if empty (thesis.md §8) — code enforces this regardless of "
-    "your evidence ledger's net score, so declaring NEUTRAL here is correct, not a hedge."
+    "your evidence ledger's net score, so declaring NEUTRAL here is correct, not a hedge. "
+    "\n- Nested / duplicate levels (thesis.md §2.1b/§2.1d): a swept level tagged "
+    "'[nested/duplicate ...]' in the S9 close-status block is EITHER an older prevN level "
+    "already superseded by a more-recent, deeper same-family level (day_low/day_high/"
+    "week_low/week_high), OR a duplicate restatement of one physical sweep that another "
+    "named level already covers at the identical timestamp. Do NOT declare a fresh P1 item "
+    "there — code zeroes it regardless. The ONE exception: if that same level is ALSO listed "
+    "under SMT candidates, its divergence is still valid P2 evidence (a cross-asset "
+    "divergence that already fired does not stop being true just because a newer level "
+    "later superseded it for plain same-asset accept/reject purposes) — score it as P2, "
+    "never as P1."
 )
 _TASK_PLAN = (
     "TASK — L2 trade-plan decision (AI-trader v2).\n"
@@ -928,18 +1007,20 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
     system = build_system_prompt(docs_root)
     user = _facts_context(facts_text, context_text) + _TASK_THESIS
     valid_levels = list((facts.get("levels") or {}).keys())
-    schema = build_thesis_schema(valid_levels)
+    schema = build_thesis_schema(valid_levels, extra_evidence_levels=facts.get("fvg_zones"))
     menus = facts.get("menus")
     dol_available = None
     if menus is not None:
         dol_menu = menus.get("dol") or {}
         dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
+    suppressed_p1_levels = facts.get("suppressed_p1_levels")
     return _run_call(
         backend, system, user, schema,
         validate_block=lambda d: validate_thesis(d, facts),
         failsafe_block=failsafe_thesis(),
         derive_block=lambda d: _derive_thesis_arithmetic(
-            d, magnitude=evidence_magnitude, dol_available=dol_available),
+            d, magnitude=evidence_magnitude, dol_available=dol_available,
+            suppressed_p1_levels=suppressed_p1_levels),
     )
 
 

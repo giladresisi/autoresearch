@@ -315,6 +315,184 @@ def test_score_evidence_no_contradiction_allows_high():
 
 
 # --------------------------------------------------------------------------- #
+# P5 (FVG-fill) — _fvg_side sign derivation (plan 15 Task 4)                    #
+# --------------------------------------------------------------------------- #
+def test_score_p5_bull_visited_accept_is_up():
+    # example #10: MES 1hr bull zone held (accept) -> bullish continuation.
+    item = _ev(criterion="P5", asset="MES",
+               level="MES 1hr 2026-07-14 00:00:00-04:00 bull", direction="accept")
+    scoring = score_thesis_evidence([item])
+    assert scoring["scored_evidence"][0]["side"] == "UP"
+    assert scoring["expected_bias"] == "UP"
+
+
+def test_score_p5_bear_visited_accept_is_down():
+    item = _ev(criterion="P5", asset="MNQ",
+               level="MNQ 4hr 2026-07-14 00:00:00-04:00 bear", direction="accept")
+    assert score_thesis_evidence([item])["expected_bias"] == "DOWN"
+
+
+def test_score_p5_bull_reject_is_down():
+    # A bull zone that was violated (closed through) reverses -> bearish.
+    item = _ev(criterion="P5", asset="MES",
+               level="MES 1hr 2026-07-14 00:00:00-04:00 bull", direction="reject")
+    assert score_thesis_evidence([item])["expected_bias"] == "DOWN"
+
+
+def test_score_p5_no_kind_scores_no_side():
+    # A level string with neither bull nor bear -> no sign, contributes nothing.
+    item = _ev(criterion="P5", level="some 1hr zone", direction="accept")
+    scoring = score_thesis_evidence([item])
+    assert scoring["scored_evidence"][0]["side"] is None
+    assert scoring["net_score"] == 0.0
+
+
+def test_p5_evidence_level_exempt_from_facts_check():
+    # A P5 item's level is an FVG-zone id, not a named price level -> not SEM_LEVEL_NOT_IN_FACTS.
+    t = valid_thesis()
+    t["evidence"] = [_ev(criterion="P5", asset="MES",
+                         level="MES 1hr 2026-07-14 00:00:00-04:00 bull", direction="accept")]
+    assert "SEM_LEVEL_NOT_IN_FACTS" not in validate_thesis(t, FACTS).codes()
+
+
+# --------------------------------------------------------------------------- #
+# P-resolution — immature pending_resolution surfacing (plan 15 Task 7)         #
+# --------------------------------------------------------------------------- #
+def test_pending_resolution_accepted_when_immature():
+    from schemas import build_thesis_schema
+    from jsonschema import validate as js_validate
+    item = _ev(criterion="P1", level="prev_day_high", direction="accept", mature=False)
+    item["pending_resolution"] = {"resolves_tf": "1h",
+                                  "resolves_at": "2026-07-14 02:00:00-04:00",
+                                  "implied_direction_if_confirmed": "UP"}
+    t = valid_thesis()
+    t["evidence"] = [item]
+    js_validate(t, build_thesis_schema())          # schema accepts the optional object
+    assert "SYN_BAD_EVIDENCE_ITEM" not in validate_thesis(t, FACTS).codes()
+
+
+def test_pending_resolution_omitted_when_mature_is_fine():
+    t = valid_thesis()
+    t["evidence"] = [_ev(level="prev_day_high", direction="accept", mature=True)]
+    assert "SYN_BAD_EVIDENCE_ITEM" not in validate_thesis(t, FACTS).codes()
+
+
+def test_pending_resolution_stale_is_warning_not_rejection():
+    item = _ev(criterion="P1", level="prev_day_high", direction="accept", mature=False)
+    item["pending_resolution"] = {"resolves_tf": "1h",
+                                  "resolves_at": "2026-07-14 00:00:00-04:00",  # BEFORE now
+                                  "implied_direction_if_confirmed": "UP"}
+    t = valid_thesis()
+    t["bias"] = "NEUTRAL"                            # immature item nets zero -> NEUTRAL
+    t["evidence"] = [item]
+    facts = {**FACTS, "now": "2026-07-14 01:00:00-04:00"}
+    r = validate_thesis(t, facts)
+    assert "AUD_PENDING_RESOLUTION_STALE" in {w.code for w in r.warnings}
+    assert "AUD_PENDING_RESOLUTION_STALE" not in r.codes()   # not a hard violation
+
+
+# --------------------------------------------------------------------------- #
+# P3/P4 — equilibrium & reclaim code-derivation (plan 15 Task 6)               #
+# --------------------------------------------------------------------------- #
+def test_score_p3_above_mid_accept_is_up():
+    item = _ev(criterion="P3", level="daily_mid", direction="accept")
+    assert score_thesis_evidence([item])["expected_bias"] == "UP"
+
+
+def test_score_p3_below_mid_reject_is_down():
+    item = _ev(criterion="P3", level="weekly_mid", direction="reject")
+    assert score_thesis_evidence([item])["expected_bias"] == "DOWN"
+
+
+def test_score_p4_reclaim_high_accept_is_up():
+    # reclaim of the mid holding above -> bullish (accept on a _high level).
+    item = _ev(criterion="P4", level="daily_mid_high", direction="accept")
+    assert score_thesis_evidence([item])["expected_bias"] == "UP"
+
+
+def test_score_p4_failed_reclaim_high_reject_is_down():
+    item = _ev(criterion="P4", level="weekly_mid_high", direction="reject")
+    assert score_thesis_evidence([item])["expected_bias"] == "DOWN"
+
+
+def test_p3_p4_levels_exempt_from_facts_check():
+    t = valid_thesis()
+    t["bias"] = "UP"
+    t["evidence"] = [_ev(criterion="P3", level="daily_mid", direction="accept"),
+                     _ev(criterion="P4", level="weekly_mid_high", direction="accept")]
+    codes = validate_thesis(t, FACTS).codes()
+    assert "SEM_LEVEL_NOT_IN_FACTS" not in codes
+
+
+# --------------------------------------------------------------------------- #
+# P2 exhausted override — zeroed like the maturity gate (plan 15 Task 5)        #
+# --------------------------------------------------------------------------- #
+def test_exhausted_item_scores_zero():
+    item = _ev(criterion="P2", level="prev1_day_low", direction="reject", tier="week", tf="4h")
+    base = score_thesis_evidence([item])["net_score"]
+    assert base != 0.0                                  # would score if not exhausted
+    item_exh = {**item, "exhausted": True}
+    scoring = score_thesis_evidence([item_exh])
+    assert scoring["net_score"] == 0.0
+    assert scoring["scored_evidence"][0]["points"] == 0.0
+    assert scoring["expected_bias"] == "NEUTRAL"
+
+
+def test_exhausted_and_immature_together_no_error_no_double_penalty():
+    item = _ev(criterion="P2", level="prev1_day_high", direction="accept",
+               mature=False, tier="day", tf="1h")
+    item["exhausted"] = True
+    scoring = score_thesis_evidence([item])            # both flags -> zero, no exception
+    assert scoring["scored_evidence"][0]["points"] == 0.0
+    assert scoring["net_score"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# suppressed_p1_levels — nested prevN / duplicate-simultaneous-sweep levels     #
+# (thesis.md §2.1b/§2.1d): excluded from fresh P1 evidence, NEVER from P2.      #
+# --------------------------------------------------------------------------- #
+def test_suppressed_p1_level_scores_zero():
+    item = _ev(criterion="P1", level="prev3_day_low", direction="reject", tier="day")
+    base = score_thesis_evidence([item])["net_score"]
+    assert base != 0.0                                  # would score if not suppressed
+    scoring = score_thesis_evidence(
+        [item], suppressed_p1_levels={"MNQ": ["prev3_day_low"]})
+    assert scoring["scored_evidence"][0]["points"] == 0.0
+    assert scoring["net_score"] == 0.0
+
+
+def test_suppressed_level_p2_item_unaffected():
+    # the SAME level, the SAME suppression set, but a P2 item — must score normally,
+    # since a divergence that already fired stays valid regardless of P1 nesting.
+    item = _ev(criterion="P2", level="prev3_day_low", direction="reject", tier="day")
+    scoring = score_thesis_evidence(
+        [item], suppressed_p1_levels={"MNQ": ["prev3_day_low"]})
+    assert scoring["scored_evidence"][0]["points"] > 0.0
+    assert scoring["net_score"] != 0.0
+
+
+def test_suppressed_p1_levels_scoped_per_asset():
+    # suppression for MNQ must not bleed onto MES's own reading of the same level name.
+    item = _ev(criterion="P1", asset="MES", level="prev3_day_low", direction="reject",
+              tier="day")
+    scoring = score_thesis_evidence(
+        [item], suppressed_p1_levels={"MNQ": ["prev3_day_low"]})
+    assert scoring["scored_evidence"][0]["points"] > 0.0
+
+
+def test_suppressed_p1_level_excluded_from_contradiction_tally():
+    # a suppressed (zeroed) P1 item must not count toward §6's cross-asset contradiction
+    # check either -- it carries no real information once suppressed.
+    items = [
+        _ev(criterion="P1", asset="MNQ", level="prev3_day_low", direction="reject", tier="day"),
+        _ev(criterion="P1", asset="MES", level="prev3_day_low", direction="accept", tier="day"),
+    ]
+    scoring = score_thesis_evidence(
+        items, suppressed_p1_levels={"MNQ": ["prev3_day_low"]})
+    assert scoring["contradiction"] is False
+
+
+# --------------------------------------------------------------------------- #
 # ARI_THESIS_BIAS — declared bias vs. computed net score                       #
 # --------------------------------------------------------------------------- #
 def test_bias_inconsistent_with_evidence_rejected():

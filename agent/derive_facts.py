@@ -35,6 +35,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
@@ -46,6 +47,19 @@ DEPLETE = {
     "MNQ": {"week": 80.0, "day": 40.0, "session": 20.0},
     "MES": {"week": 12.0, "day": 6.0, "session": 3.0},
 }
+
+# plan 15 Task 5: tier-relative SMT "shelf life" — how many avg-1h-ranges of stretch (price
+# distance from the SMT's fire price) an SMT candidate can absorb before it is CODE-SUGGESTED
+# exhausted (a played-out old divergence, no longer continuation evidence). Each tier gets
+# ~double the shelf life of the tier below (a week-tier divergence stays relevant far longer
+# than a session-tier one). v1 seeds, pending calibration — same status as every other
+# threshold in decisions/thesis.md (§2.1c stretch flag, the DEPLETE tables, etc.).
+SMT_SHELF_LIFE = {"session": 2.0, "day": 4.0, "week": 8.0}
+
+# thesis.md §2.1b/§2.1d: tier rank used to pick a single representative when two or more
+# named levels turn out to be restatements of the same physical sweep (nesting tie-break,
+# and the duplicate-simultaneous-sweep collapse) — week > day > session.
+_TIER_RANK = {"week": 3, "day": 2, "session": 1}
 
 
 def load(path):
@@ -185,6 +199,93 @@ def age_min(ts, now):
     return (now - ts).total_seconds() / 60.0
 
 
+_PREV_LEVEL_RE = re.compile(r"^prev(\d+)_(day|week)_(high|low)$")
+
+
+def _nested_prev_levels(lv: dict) -> set:
+    """thesis.md §2.1b: within a same-asset, same-side prevN family (day_low, day_high,
+    week_low, week_high), a level is NESTED (superseded) if some MORE RECENT (smaller N)
+    level in the SAME family already extends beyond it — i.e. that nearer level's own
+    static price is at least as extreme. Pure price comparison across the full tracked
+    depth, independent of which one got swept first.
+
+    Nested levels are excluded from FRESH P1 accept/reject evidence and from being a
+    legitimate target for a NEW P2/SMT search going forward (render_evidence_text /
+    score_thesis_evidence's `suppressed_p1_levels`) — but a P2/SMT divergence that
+    ALREADY fired at a nested level remains valid evidence (S3's cross-ticker matrix is
+    NOT filtered by this — see render_evidence_text's smt-candidate-site exemption)."""
+    families: dict = {}
+    for name, (price, _body, _side, _tier, _active_from) in lv.items():
+        m = _PREV_LEVEL_RE.match(name)
+        if not m:
+            continue
+        n, fam_tier, fam_side = int(m.group(1)), m.group(2), m.group(3)
+        families.setdefault((fam_tier, fam_side), {})[n] = price
+    nested = set()
+    for (fam_tier, fam_side), by_n in families.items():
+        order = sorted(by_n)                                  # 1 = most recent
+        for idx, n in enumerate(order):
+            price_n = by_n[n]
+            more_recent = [by_n[m] for m in order[:idx]]
+            if fam_side == "low":
+                if any(p <= price_n for p in more_recent):
+                    nested.add(f"prev{n}_{fam_tier}_low")
+            elif any(p >= price_n for p in more_recent):
+                nested.add(f"prev{n}_{fam_tier}_high")
+    return nested
+
+
+def _duplicate_sweep_losers(lv: dict, swept_at: dict) -> set:
+    """thesis.md §2.1d: when two or more named levels for the SAME asset share the
+    identical sweep timestamp and side, they MAY be restatements of one physical price
+    move — but a shared 1-second timestamp alone is not proof of that: a fast multi-level
+    break can cross several genuinely DISTINCT prices within the same second, which is not
+    a duplicate, just a quick market. Collapsing purely on timestamp match (any price)
+    wrongly killed `prev1_day_high` (2026-07-10 12:00 ET MES case — never nested by
+    definition, dropped only because it shared a tick with the unrelated `prev1_week_high`
+    one point away) and, separately, `prev1_day_low` (2026-07-16 09:00 ET MNQ case).
+
+    Only collapse a group when EITHER:
+    - the shared timestamp IS the session's own opening bar (`lv["TDO"]`'s active_from) —
+      the legitimate "already breached before this session's visible history began" gap-
+      cascade case, where the price spread among the crossed levels is irrelevant; or
+    - the colliding items share the EXACT same price — a true structural duplicate (e.g. a
+      prior day's own NY-evening sub-block low IS that day's day-low).
+    A same-second collision that is neither is left alone; each level is scored on its own.
+
+    Keeps only the highest-tier-weighted representative within a collapsing group (week >
+    day > session; ties broken by the more extreme price) and suppresses the rest from
+    fresh P1 evidence."""
+    session_open = (lv.get("TDO") or (None,) * 5)[4]
+    groups: dict = {}
+    for name, (price, _body, side, tier, _active_from) in lv.items():
+        t = swept_at.get(name)
+        if side is None or t is None:
+            continue
+        groups.setdefault((side, t), []).append((name, price, tier))
+    losers = set()
+
+    def _winner(items):
+        return max(
+            items,
+            key=lambda it: (_TIER_RANK.get(it[2], 0), -it[1] if side == "below" else it[1]))
+
+    for (side, t), items in groups.items():
+        if len(items) < 2:
+            continue
+        if t == session_open:
+            losers.update(it[0] for it in items if it is not _winner(items))
+            continue
+        by_price: dict = {}
+        for it in items:
+            by_price.setdefault(it[1], []).append(it)
+        for _price, same_price_items in by_price.items():
+            if len(same_price_items) < 2:
+                continue
+            losers.update(it[0] for it in same_price_items if it is not _winner(same_price_items))
+    return losers
+
+
 def fvgs(bars):
     out = []
     for i in range(1, len(bars) - 1):
@@ -195,6 +296,47 @@ def fvgs(bars):
         elif nh < pl:
             out.append((bars.index[i], "bear", float(nh), float(pl), bars.index[i + 1]))
     return out
+
+
+def _long_horizon_extremes(hist_df: pd.DataFrame, now: pd.Timestamp) -> dict:
+    """Aggregate the full-history 1s frame into per-True-Day and per-trade-week extreme
+    rows, truncated at `now` (no lookahead — identical `<= now` slice to the S5b block).
+
+    Returns {"daily": [row, ...], "weekly": [row, ...]} where each daily row is a dict
+    {trade_date, open, high, low, close, close_high, close_low} and each weekly row is
+    {week_start, open, high, low, close, close_high, close_low}. `close_high`/`close_low`
+    are the max/min CLOSE (body extreme) over the period via hl() — the S5b render table
+    itself does not need them, but the prev3-7_day / prev2-3_week named levels DO (they
+    carry the same (price, body_price, side, tier, active_from) tuple shape prev1/prev2_day
+    already use). Computed ONCE per ticker and reused for both the S5b render table and the
+    new named levels, so the long-horizon frame is scanned only once (no naive re-scan of
+    the primary frame — plan 15 Task 1 / thesis.md §2.1b)."""
+    hf = hist_df[hist_df.index <= now]
+    htd = pd.Series((hf.index + pd.Timedelta(hours=7)).date, index=hf.index)
+    counts = htd.value_counts()
+    days = sorted(d for d, n in counts.items() if d.weekday() < 5 and n >= 1000)
+    daily = []
+    for d in days[-60:]:                                   # same cap as the S5b render table
+        s = hf[htd.values == d]
+        h, l, ch, cl = hl(s)
+        daily.append({
+            "trade_date": d, "open": float(s["open"].iloc[0]),
+            "high": h, "low": l, "close": float(s["close"].iloc[-1]),
+            "close_high": ch, "close_low": cl,
+        })
+    weeks: dict = {}
+    for r in daily:
+        weeks.setdefault(r["trade_date"].isocalendar()[:2], []).append(r)
+    weekly = []
+    for _iso, rs in weeks.items():                         # dict preserves oldest-first order
+        weekly.append({
+            "week_start": rs[0]["trade_date"], "open": rs[0]["open"],
+            "high": max(r["high"] for r in rs), "low": min(r["low"] for r in rs),
+            "close": rs[-1]["close"],
+            "close_high": max(r["close_high"] for r in rs),
+            "close_low": min(r["close_low"] for r in rs),
+        })
+    return {"daily": daily, "weekly": weekly}
 
 
 def mid_cross_table(closes_1m, mid_1m, cap=24):
@@ -259,8 +401,14 @@ class FactsBundle:
     mature_evidence_count: int = 0                     # count of P1/P2-eligible items right now
     # --- plan 14: cross-family confluence source rows (Task 8, audit-only) ---
     historical_extremes: dict = field(default_factory=dict)  # {tkr:{"daily":[...],"weekly":[...]}}
+    # --- plan 15 Task 4: FVG zones as structured P5-fill evidence candidates ---
+    fvg_zones: list = field(default_factory=list)      # [{id, asset, tf, ts, kind, lo, hi, visited}]
     # S8 menus (plan 11): computed lazily by facts_to_validator_dict / render_menus_text.
     menus: Optional[dict] = None
+    # thesis.md §2.1b/§2.1d refinement: {tkr: set(level names)} excluded from FRESH P1
+    # accept/reject evidence (nested prevN levels + duplicate-simultaneous-sweep losers).
+    # Never applied to P2/SMT candidacy — see _nested_prev_levels/_duplicate_sweep_losers.
+    suppressed_p1_levels: dict = field(default_factory=dict)
 
 
 def render_facts_text(bundle: FactsBundle) -> str:
@@ -692,25 +840,35 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
     A(f"weekly_mid = {bundle.weekly_mid}")
     A("\nHTF close-status per swept level (maturity gate: 'immature' = no qualifying HTF "
       "close yet since the sweep -> NOT usable evidence, decisions/thesis.md §3):")
+    A("(a level tagged 'nested/duplicate' below is NOT usable as a fresh, standalone P1 "
+      "item — thesis.md §2.1b/§2.1d — unless it is ALSO listed under SMT candidates, in "
+      "which case it is P2 evidence only, not P1):")
+    candidate_sites = {(c["swept_ticker"], c["level"]) for c in (bundle.smt_candidates or [])}
     for tkr in ("MNQ", "MES"):
         status = (bundle.htf_close_status or {}).get(tkr, {})
         swept_map = (bundle.swept_at or {}).get(tkr, {})
+        suppressed = (bundle.suppressed_p1_levels or {}).get(tkr, set())
         rendered_any = False
         for name, tf_map in status.items():
             if swept_map.get(name) is None:      # never swept -> not evidence, skip entirely
                 continue
+            is_candidate_site = (tkr, name) in candidate_sites
+            if name in suppressed and not is_candidate_site:
+                continue          # nested / duplicate restatement, not fresh P1 evidence
             rendered_any = True
+            note = " [nested/duplicate -- P2-candidate context only, NOT a P1 item]" \
+                if name in suppressed else ""
             for tf in ("1h", "4h"):
                 info = (tf_map or {}).get(tf)
                 if info is None:
-                    A(f"  {tkr} {name} [{tf}]: immature (no qualifying close yet)")
+                    A(f"  {tkr} {name} [{tf}]: immature (no qualifying close yet){note}")
                 else:
                     read = "ACCEPTED beyond" if info["beyond"] else "REJECTED (closed before)"
                     ratio = (magnitude or {}).get((tkr, name, tf))
                     label = _magnitude_label(ratio)
                     tag = f" [clearance: {label}]" if label else ""
                     A(f"  {tkr} {name} [{tf}]: close={info['close']} @ {info['closed_at']} "
-                      f"(n={info['n_closed_since']}) -> {read}{tag}")
+                      f"(n={info['n_closed_since']}) -> {read}{tag}{note}")
         if not rendered_any:
             A(f"  {tkr}: (none)")
     A("\nSMT candidates (meaningful = day/week tier, eligible for thesis.md P2; "
@@ -719,11 +877,62 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
     if not bundle.smt_candidates:
         A("  (none)")
     for cand in bundle.smt_candidates:
+        exh = cand.get("suggested_exhausted")
+        stretch = cand.get("stretch_since_fire")
+        exh_tag = ""
+        if stretch is not None:
+            thr = SMT_SHELF_LIFE.get(cand.get("tier"))
+            exh_tag = (f" | stretch_since_fire={stretch}x avg_1h"
+                       f"{f' [SUGGESTED EXHAUSTED > {thr}x shelf-life]' if exh else ''}")
         A(f"  {cand['level']} [{cand['side']}, {cand['tier']}]: "
           f"swept_ticker={cand['swept_ticker']} (lagger) "
           f"unswept_ticker={cand['unswept_ticker']} (leader) "
           f"type={cand['type']} swept_at={cand['swept_at']} "
-          f"meaningful={cand['meaningful']}")
+          f"meaningful={cand['meaningful']}{exh_tag}")
+
+    # --- plan 15 Task 7: pending-resolution timestamps for immature day/week items ---
+    now = bundle.now
+    A("\nPENDING RESOLUTION (immature day/week items resolve at the next HTF close AFTER now — "
+      "copy the matching timestamp into pending_resolution.resolves_at, do not compute it "
+      "yourself; thesis.md §3):")
+    if now is not None:
+        next_1h = now.ceil("h")
+        if next_1h <= now:
+            next_1h = next_1h + pd.Timedelta(hours=1)
+        next_4h = now.ceil("4h")
+        if next_4h <= now:
+            next_4h = next_4h + pd.Timedelta(hours=4)
+        A(f"  next 1h close: {next_1h} | next 4h close: {next_4h}")
+        immature = []
+        for tkr in ("MNQ", "MES"):
+            status = (bundle.htf_close_status or {}).get(tkr, {})
+            swept_map = (bundle.swept_at or {}).get(tkr, {})
+            suppressed = (bundle.suppressed_p1_levels or {}).get(tkr, set())
+            for name, tf_map in status.items():
+                if swept_map.get(name) is None:
+                    continue
+                if name in suppressed and (tkr, name) not in candidate_sites:
+                    continue      # nested / duplicate restatement, not a fresh P1 item
+                tier = (bundle.levels.get(tkr, {}).get(name) or (None, None, None, None))[3]
+                if tier not in ("day", "week"):
+                    continue
+                pend = [tf for tf in ("1h", "4h") if (tf_map or {}).get(tf) is None]
+                if pend:
+                    immature.append(f"{tkr} {name} (awaiting {'/'.join(pend)})")
+        A("  immature day/week items awaiting resolution: "
+          + ("; ".join(immature) if immature else "(none)"))
+    else:
+        A("  (now unavailable)")
+
+    # --- plan 15 Task 4: FVG-fill (P5) candidates ---
+    A("\nFVG-FILL CANDIDATES (thesis.md §2.1 P5; a VISITED zone is a fill event — copy the id "
+      "verbatim as the evidence `level`; direction=accept means the zone HELD its own bias "
+      "(bull=up/bear=down), reject means it was violated; code derives the UP/DOWN sign):")
+    _visited_fvg = [z for z in (bundle.fvg_zones or []) if z.get("visited")]
+    if not _visited_fvg:
+        A("  (none visited)")
+    for z in _visited_fvg:
+        A(f"  {z['id']}: {z['kind']} zone {z['lo']}-{z['hi']} [{z['tf']}] VISITED")
 
     # --- plan 14 Task 2: stretch + nearest-meaningful-level distance (MNQ) ---
     ar = (bundle.avg_range_1h or {}).get("MNQ")
@@ -869,6 +1078,16 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
 
     wk_anchor = week_start_ts(now)
 
+    # plan 15 Task 1: long-horizon day/week extremes, computed ONCE per ticker (only when the
+    # full-history frame is supplied) and reused for both the new prev3-7_day / prev2-3_week
+    # named levels (S1 loop below) and the S5b render table + historical_extremes (further
+    # down) — no naive re-scan of the primary frame. Absent hist -> empty, byte-identical to
+    # the pre-plan-15 no-hist path (the golden fixtures supply no hist).
+    long_horizon = {}
+    for tkr in data:
+        if hist.get(tkr) is not None:
+            long_horizon[tkr] = _long_horizon_extremes(hist[tkr], now)
+
     cands = []
     for d, h, m in ((td_now, 9, 20), (td_now, 13, 0)):
         c = pd.Timestamp(d, tz=TZ) + pd.Timedelta(hours=h, minutes=m)
@@ -947,6 +1166,38 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
             L(f"prev1_week ({prev1_week_tds[0]}..{prev1_week_tds[-1]}): high={h} (body {ch}) low={l} (body {cl})")
             lv["prev1_week_high"] = (h, ch, "above", "week", sess_now.index[0])
             lv["prev1_week_low"] = (l, cl, "below", "week", sess_now.index[0])
+
+        # plan 15 Task 1: deeper prior-day/week named levels (prev3-7_day, prev2-3_week),
+        # sourced from the reused long_horizon aggregation — NOT a fresh primary-frame scan.
+        # prev1/prev2_day and prev1_week stay on the existing prim-based path above (byte-
+        # identical for any caller not supplying hist). No L(...) render here: these are
+        # additive named levels consumed by the generic S2/S3/S3b/S8 machinery (they iterate
+        # lv/levels[tkr]), never a new S0-S7 line. Graceful degradation: assign only what
+        # exists (thin history -> fewer levels, never an error). §2.1b: a nested deeper level
+        # is still independent cross-asset P2/SMT evidence even when same-asset-superseded.
+        lh = long_horizon.get(tkr)
+        if lh:
+            prior_days = [r for r in lh["daily"] if r["trade_date"] < td_now]
+            # most-recent = 1; prev1/prev2 already assigned from prim -> deeper start at 3.
+            recent_days = list(reversed(prior_days))       # newest first
+            for i in range(3, 8):
+                if len(recent_days) < i:
+                    break
+                r = recent_days[i - 1]
+                lv[f"prev{i}_day_high"] = (r["high"], r["close_high"], "above", "day",
+                                          sess_now.index[0])
+                lv[f"prev{i}_day_low"] = (r["low"], r["close_low"], "below", "day",
+                                         sess_now.index[0])
+            prior_weeks = [r for r in lh["weekly"] if r["week_start"].isocalendar()[:2] < iso_now]
+            recent_weeks = list(reversed(prior_weeks))     # newest first (prev1_week = index 0)
+            for i in (2, 3):
+                if len(recent_weeks) < i:
+                    break
+                r = recent_weeks[i - 1]
+                lv[f"prev{i}_week_high"] = (r["high"], r["close_high"], "above", "week",
+                                           sess_now.index[0])
+                lv[f"prev{i}_week_low"] = (r["low"], r["close_low"], "below", "week",
+                                          sess_now.index[0])
 
         wkf = df.loc[wk_anchor:now]
         h, l, ch, cl = hl(wkf)
@@ -1031,6 +1282,16 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
 
     bundle.levels = levels
 
+    # thesis.md §2.1b/§2.1d refinement: nested prevN levels and duplicate-simultaneous-
+    # sweep restatements are excluded from FRESH P1 evidence, never from P2/SMT candidacy
+    # (bundle.smt_candidates below is NOT filtered by this — a divergence that already
+    # fired at a nested level remains valid until exhausted/depleted/invalidated).
+    bundle.suppressed_p1_levels = {}
+    for tkr in ("MNQ", "MES"):
+        nested = _nested_prev_levels(levels[tkr])
+        dup_losers = _duplicate_sweep_losers(levels[tkr], bundle.swept_at.get(tkr, {}))
+        bundle.suppressed_p1_levels[tkr] = nested | dup_losers
+
     bundle.htf_close_status = {}
     for tkr in ("MNQ", "MES"):
         bundle.htf_close_status[tkr] = {}
@@ -1106,6 +1367,27 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
     _mature_p2 = sum(1 for c in bundle.smt_candidates if c.get("meaningful"))
     bundle.mature_evidence_count = _mature_p1 + _mature_p2
 
+    # plan 15 Task 5: code-SUGGESTED exhaustion per SMT candidate — tier-relative stretch of
+    # the swept (lagger) ticker's price since the SMT fired, normalized by its avg 1h range.
+    # Additive field on each candidate; a model-OVERRIDABLE hint, never a hard gate (the model
+    # may agree or disagree via the P2 `exhausted` override — thesis.md §2.1c). Computed here
+    # (not in the S3 loop) so avg_range_1h is already populated.
+    for c in bundle.smt_candidates:
+        c["suggested_exhausted"] = False
+        c["stretch_since_fire"] = None
+        tkr = c.get("swept_ticker")
+        ar = (bundle.avg_range_1h or {}).get(tkr)
+        fired_at = c.get("swept_at")
+        if not isinstance(ar, (int, float)) or ar <= 0 or fired_at is None:
+            continue
+        closes = data[tkr]["close"]
+        fire_px = closes.asof(fired_at)
+        if fire_px is None or pd.isna(fire_px):
+            continue
+        stretch = abs(float(closes.iloc[-1]) - float(fire_px)) / ar
+        c["stretch_since_fire"] = round(stretch, 3)
+        c["suggested_exhausted"] = stretch > SMT_SHELF_LIFE.get(c.get("tier"), float("inf"))
+
     L("\n## S3b CANDIDATE ITEM CARDS (precomputed scoring inputs; multipliers per decisions/next-move.md §2)")
     L("score = tier_weight × session_side × alignment × freshness × whipsaw = base × session_side × alignment × whipsaw")
     L("Copy tier w and freshness from the card — do NOT recompute the exponent. session_side/")
@@ -1170,16 +1452,14 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
     if hist["MNQ"] is not None and hist["MES"] is not None:
         L("\n## S5b LONG-HORIZON CONTEXT (full history truncated at now; True-Day daily bars + trade-week weekly bars)")
         for tkr in ("MNQ", "MES"):
-            hf = hist[tkr]
-            hf = hf[hf.index <= now]
-            htd = pd.Series((hf.index + pd.Timedelta(hours=7)).date, index=hf.index)
-            counts = htd.value_counts()
-            days = sorted(d for d, n in counts.items() if d.weekday() < 5 and n >= 1000)
-            rows = []
-            for d in days[-60:]:
-                s = hf[htd.values == d]
-                rows.append((d, float(s["open"].iloc[0]), float(s["high"].max()),
-                             float(s["low"].min()), float(s["close"].iloc[-1])))
+            # plan 15 Task 1: reuse the long_horizon aggregation computed once above (same
+            # `<= now` slice, same days[-60:] cap) instead of re-scanning hist here. The
+            # rendered daily/weekly tables stay byte-identical (same rows, same open/high/
+            # low/close columns, same dtab.groupby weekly agg); close_high/close_low are
+            # dropped from the render, used only by the prev3-7/prev2-3_week named levels.
+            lh = long_horizon.get(tkr) or {"daily": [], "weekly": []}
+            rows = [(r["trade_date"], r["open"], r["high"], r["low"], r["close"])
+                    for r in lh["daily"]]
             dtab = pd.DataFrame(rows, columns=["trade_date", "open", "high", "low", "close"])
             L(f"\n{tkr} daily (True-Day) bars, last {len(dtab)} sessions:")
             L(dtab.to_string(index=False))
@@ -1189,26 +1469,34 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
                 low=("low", "min"), close=("close", "last"))
             L(f"\n{tkr} weekly bars (trade weeks), last {min(len(wk), 12)}:")
             L(wk.tail(12).to_string(index=False))
-            # plan 14 Task 8: capture the already-computed daily/weekly extreme rows
-            # structurally for audit-only cross-family confluence tagging (S9). No new
-            # computation and no L(...) — the S5b rendered text above is unchanged.
+            # plan 14 Task 8: daily/weekly extreme rows for audit-only cross-family confluence
+            # tagging (S9), now read from the same long_horizon cache (no third pass).
             bundle.historical_extremes[tkr] = {
-                "daily": [(r.trade_date, float(r.high), float(r.low))
-                          for r in dtab.itertuples(index=False)],
-                "weekly": [(r.start, float(r.high), float(r.low))
-                           for r in wk.reset_index().itertuples(index=False)],
+                "daily": [(r["trade_date"], float(r["high"]), float(r["low"]))
+                          for r in lh["daily"]],
+                "weekly": [(r["week_start"], float(r["high"]), float(r["low"]))
+                           for r in lh["weekly"]],
             }
 
     L("\n## S6 FVGs (both tickers, completed bars only; visited = 1s tape re-entered zone after the 3rd bar's OPEN label — daily.py convention)")
     for tkr, dft in data.items():
         h1t = ohlc(dft, "1h")
         h4t = ohlc(dft, "4h")
-        for label, bars in ((f"{tkr} 1hr", h1t.iloc[:-1]), (f"{tkr} 4hr", h4t.iloc[:-1])):
+        for label, tf_norm, bars in ((f"{tkr} 1hr", "1h", h1t.iloc[:-1]),
+                                     (f"{tkr} 4hr", "4h", h4t.iloc[:-1])):
             recent = bars[bars.index >= now - pd.Timedelta(days=10)]
             for ts, kind, lo, hi, third_ts in fvgs(recent):
                 seg = dft[dft.index > third_ts]
                 touched = bool(((seg["low"] <= hi) & (seg["high"] >= lo)).any()) if len(seg) else False
                 L(f"{label} {ts} {kind} zone {lo}-{hi} -> {'visited' if touched else 'UNVISITED'}")
+                # plan 15 Task 4: additive P5-fill candidate — no change to the rendered S6
+                # line above. `id` is the exact S6 identifier (asset + tf label + ts + kind)
+                # so the model copies it verbatim as the evidence `level`; the bull/bear kind
+                # in it is what _fvg_side derives the sign from.
+                bundle.fvg_zones.append({
+                    "id": f"{label} {ts} {kind}", "asset": tkr, "tf": tf_norm,
+                    "ts": ts, "kind": kind, "lo": lo, "hi": hi, "visited": touched,
+                })
 
     L("\n## S7 CHECKPOINT SNAPSHOT")
     for tkr, dft in data.items():

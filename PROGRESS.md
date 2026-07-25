@@ -1,5 +1,58 @@
 ﻿# PROGRESS
 
+## Feature: L1 thesis evidence-ledger improvements — Plan 15
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/15.l1-thesis-evidence-ledger-improvements.md`
+**Execution Report**: `.agents/execution-reports/15.l1-thesis-evidence-ledger-improvements.md`
+
+All 9 tasks implemented (Task 8 resolved to the cheaper validator-message lever per the Task-1b
+spike, not the scratch-tally field). **Task 1** — depth-of-history levels (`prev3-7_day`,
+`prev2-3_week`) via a single reused `_long_horizon_extremes` scan (S5b render byte-identical);
+thesis.md §2.1b clarified so same-asset nesting pruning never suppresses cross-asset P2 candidacy;
+the concrete 2026-07-14 01:00 `prev3_day_low` SMT (MNQ swept 29395.0, MES never within 15.5 pts of
+7516.25, MNQ 1h/4h close 29425.0 REJECTED) is now an automated regression test. **Task 2** — P2
+HIGH/LOW polarity prompt reinforcement. **Task 1b** — arithmetic-bug spike →
+`.agents/plans/15-arithmetic-bug-spike-findings.md` (verdict: DEFER scratch-tally, do the cheaper
+lever). **Task 4** — FVG-fill as scored `P5` (`bundle.fvg_zones`, `_fvg_side`, S9 candidates,
+schema/enum wiring). **Task 5** — tier-relative `suggested_exhausted` on SMT candidates
+(`SMT_SHELF_LIFE` session 2×/day 4×/week 8×) + a model-overridable `exhausted` field that zeroes
+scoring. **Task 6** — partial P3 (`_mid_side`) and P4 (`_evidence_side` via `_high`/`_low` synthetic
+mids) code-derivation. **Task 7** — optional `pending_resolution` on immature items + a code-computed
+S9 next-HTF-close line + an audit-only (never-rejecting) `resolves_at > now` warning. **Task 8** —
+targeted `ARI_THESIS_BIAS` retry message telling the model to keep its ledger and relabel bias.
+Every new value follows "model judges, code computes." Scoped suite: **136 passed, 1 failed** — the
+lone failure is the PRE-EXISTING stale burned-cut `test_facts_parity_with_prepare_cuts` (its S0–S7
+hash shifts because Task 1's new levels flow through S2/S3 on the hist path, per the plan's Contract
+1; the no-hist golden stays byte-identical). +20 new tests, no NEW failures vs. the 116+1 baseline.
+All changes UNSTAGED; nothing committed/pushed.
+
+## Feature: L1 thesis — stretch / session-maturity / magnitude — Plan 14
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/14.l1-thesis-stretch-session-magnitude.md`
+**Execution Report**: `.agents/execution-reports/14.l1-thesis-stretch-session-magnitude.md`
+
+All 8 tasks implemented exactly per plan, additively on top of plan 13, closing the L1
+thesis-model gaps for young sessions and far-from-structure runs: session-anchored recall
+(`next_subsession` `clock_after` menu), session-maturity soft prior (`session_elapsed_frac` +
+`mature_evidence_count`), clearance-magnitude scaling (`_MAG_BUCKETS` on `score_thesis_evidence`,
+None → ×1.0 byte-identical), stretch discount + nearest-level distance (S9 STRETCH block on
+`avg_range_1h`/`day_hi`/`day_lo`), and audit-only cross-family confluence (`historical_extremes` +
+`_confluence_notes`). Every new value is a code-computed `FactsBundle` field / S9 render line / S8
+menu entry / scoring multiplier — never a model self-report. S0–S7 byte-identity held (golden
+passes; hash unchanged `4e78271928…`). Scoped suite IDENTICAL before/after (116 passed, 1 failed —
+the 1 failure is a PRE-EXISTING stale burned-cut fixture `test_facts_parity_with_prepare_cuts`,
+byte-stable across the change). NO new tests (explicit user override). Manual early/late smoke
+(2026-06-25 00:30 vs 15:30 ET): stretch 0.51x→2.17x, elapsed_frac 0.283 early, magnitude count
+18→56 — early-vs-late differentiation confirmed. code-review PASS + acceptance ACCEPTED, no fixes.
++383/−27 across 5 code + 1 doc file. All changes UNSTAGED; nothing committed/pushed.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/14.l1-thesis-stretch-session-magnitude.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics
+
 ## Feature: L1 mechanical fixes — default low-conf TTL + wrong-side DOL — Plan 12
 ### Status: ✅ Complete (unstaged)
 **Plan File**: `.agents/plans/12.l1-mechanical-fixes.md`

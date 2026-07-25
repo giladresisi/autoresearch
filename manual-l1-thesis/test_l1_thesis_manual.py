@@ -338,13 +338,15 @@ def main(argv=None) -> int:
     # exactly; this harness bypasses decide_thesis and must build its own schema the same
     # way or it silently loses the constraint (bug: it did, for every run before this).
     valid_levels = list((facts.get("levels") or {}).keys())
-    thesis_schema = build_thesis_schema(valid_levels)
+    thesis_schema = build_thesis_schema(valid_levels,
+                                        extra_evidence_levels=facts.get("fvg_zones"))
 
     menus = facts.get("menus")
     dol_available = None
     if menus is not None:
         dol_menu = menus.get("dol") or {}
         dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
+    suppressed_p1_levels = facts.get("suppressed_p1_levels")
 
     outcome = _run_call(
         backend, system, user, thesis_schema,
@@ -353,8 +355,11 @@ def main(argv=None) -> int:
         # plan 14 Task 6: mirror run_bench — code magnitude-scales the declared ledger from
         # the same facts bundle's evidence_magnitude (facts_text already carries S9 above).
         # dol_available mirrors decide_thesis's no-liquidity override (thesis.md §8).
+        # suppressed_p1_levels mirrors decide_thesis's nested/duplicate-sweep P1 backstop
+        # (thesis.md §2.1b/§2.1d).
         derive_block=lambda d: _derive_thesis_arithmetic(
-            d, magnitude=res.evidence_magnitude, dol_available=dol_available),
+            d, magnitude=res.evidence_magnitude, dol_available=dol_available,
+            suppressed_p1_levels=suppressed_p1_levels),
     )
 
     recap = price_recap(source, boundary, args.lookback_hours)

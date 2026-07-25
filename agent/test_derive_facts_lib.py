@@ -271,6 +271,111 @@ def test_htf_close_status_none_swept_at_is_immature():
     assert status == {"1h": None, "4h": None}
 
 
+def _lv_day_low(prices):
+    """Build a minimal lv dict of prevN_day_low entries at the given {n: price}."""
+    return {f"prev{n}_day_low": (price, price, "below", "day", pd.Timestamp("2026-01-01"))
+            for n, price in prices.items()}
+
+
+def test_nested_prev_levels_matches_2026_07_14_worked_example():
+    # thesis.md §2.1b's own worked example: MNQ day lows prev1=29386.5 prev2=29677.5
+    # prev3=29395.0 prev4=28910.25 prev5=29209.75 prev6=29683.25 prev7=29522.5 -- only
+    # prev1 (always valid) and prev4 (extends beyond every more-recent level) are NOT
+    # nested; every other level is superseded by a more-recent, deeper one.
+    lv = _lv_day_low({1: 29386.5, 2: 29677.5, 3: 29395.0, 4: 28910.25, 5: 29209.75,
+                      6: 29683.25, 7: 29522.5})
+    nested = derive_facts._nested_prev_levels(lv)
+    assert nested == {"prev2_day_low", "prev3_day_low", "prev5_day_low",
+                      "prev6_day_low", "prev7_day_low"}
+
+
+def test_nested_prev_levels_high_side_mirrors_low_side():
+    # highs mirror lows: nested if a more-recent level's price is AT OR ABOVE this one's.
+    # prev1 (110) is the deepest/most-recent high -- prev2/prev3 (lower, older) are nested.
+    lv = {"prev1_day_high": (110.0, 110.0, "above", "day", pd.Timestamp("2026-01-01")),
+         "prev2_day_high": (105.0, 105.0, "above", "day", pd.Timestamp("2026-01-01")),
+         "prev3_day_high": (100.0, 100.0, "above", "day", pd.Timestamp("2026-01-01"))}
+    nested = derive_facts._nested_prev_levels(lv)
+    assert nested == {"prev2_day_high", "prev3_day_high"}   # neither exceeds prev1's 110
+
+
+def test_nested_prev_levels_prev1_never_nested():
+    lv = _lv_day_low({1: 30000.0, 2: 1.0})     # prev1 shallower than everything -- still valid
+    assert "prev1_day_low" not in derive_facts._nested_prev_levels(lv)
+
+
+def test_nested_prev_levels_families_independent():
+    # a day_low family and a week_low family with the same N must not cross-contaminate.
+    # prev2_day_low (50) is DEEPER than prev1 (100) -> not nested; prev2_week_low (200) is
+    # SHALLOWER than prev1_week_low (150) -> nested.
+    lv = {"prev1_day_low": (100.0, 100.0, "below", "day", pd.Timestamp("2026-01-01")),
+         "prev2_day_low": (50.0, 50.0, "below", "day", pd.Timestamp("2026-01-01")),
+         "prev1_week_low": (150.0, 150.0, "below", "week", pd.Timestamp("2026-01-01")),
+         "prev2_week_low": (200.0, 200.0, "below", "week", pd.Timestamp("2026-01-01"))}
+    nested = derive_facts._nested_prev_levels(lv)
+    assert nested == {"prev2_week_low"}
+
+
+def test_duplicate_sweep_losers_keeps_highest_tier():
+    t = pd.Timestamp("2026-07-13 18:00:00", tz="America/New_York")
+    lv = {"prev1_day_low": (100.0, 100.0, "below", "day", pd.Timestamp("2026-01-01")),
+         "asia(prev1)_low": (100.0, 100.0, "below", "session", pd.Timestamp("2026-01-01"))}
+    swept_at = {"prev1_day_low": t, "asia(prev1)_low": t}
+    losers = derive_facts._duplicate_sweep_losers(lv, swept_at)
+    assert losers == {"asia(prev1)_low"}
+
+
+def test_duplicate_sweep_losers_session_open_cascade_collapses_regardless_of_price_spread():
+    # legitimate case (2026-07-13/07-16 examples): the session's OWN opening bar is when
+    # several already-stale, genuinely different-priced old lows all register as "swept"
+    # simultaneously (they were breached before this session's visible history began) --
+    # this MUST still collapse to one representative regardless of the price spread.
+    t = pd.Timestamp("2026-07-13 18:00:00", tz="America/New_York")
+    lv = {"TDO": (29500.0, None, None, "session", t),
+         "asia(prev1)_low": (100.0, 100.0, "below", "session", pd.Timestamp("2026-01-01")),
+         "london(prev1)_low": (95.0, 95.0, "below", "session", pd.Timestamp("2026-01-01")),
+         "ny_morning(prev1)_low": (90.0, 90.0, "below", "session", pd.Timestamp("2026-01-01"))}
+    swept_at = {"asia(prev1)_low": t, "london(prev1)_low": t, "ny_morning(prev1)_low": t}
+    losers = derive_facts._duplicate_sweep_losers(lv, swept_at)
+    assert losers == {"asia(prev1)_low", "london(prev1)_low"}    # 90.0 is the deepest low
+
+
+def test_duplicate_sweep_losers_non_open_different_prices_not_collapsed():
+    # regression case (2026-07-10 12:00 ET MES): prev1_day_high (7595.0) and prev1_week_high
+    # (7594.0) crossed within the SAME 1-second tick well after the session opened -- a fast
+    # multi-level break, NOT the same physical level. Must NOT collapse: prev1_day_high is
+    # index-1 and must never be suppressible.
+    t = pd.Timestamp("2026-07-10 08:13:57", tz="America/New_York")
+    lv = {"TDO": (7600.0, None, None, "session", pd.Timestamp("2026-07-09 18:00:00",
+                                                              tz="America/New_York")),
+         "prev1_day_high": (7595.0, 7595.0, "above", "day", pd.Timestamp("2026-01-01")),
+         "prev1_week_high": (7594.0, 7594.0, "above", "week", pd.Timestamp("2026-01-01"))}
+    swept_at = {"prev1_day_high": t, "prev1_week_high": t}
+    assert derive_facts._duplicate_sweep_losers(lv, swept_at) == set()
+
+
+def test_duplicate_sweep_losers_different_timestamps_not_collapsed():
+    lv = {"prev1_day_low": (100.0, 100.0, "below", "day", pd.Timestamp("2026-01-01")),
+         "prev2_day_low": (100.0, 100.0, "below", "day", pd.Timestamp("2026-01-01"))}
+    swept_at = {"prev1_day_low": pd.Timestamp("2026-07-13 18:00:00", tz="America/New_York"),
+               "prev2_day_low": pd.Timestamp("2026-07-13 19:00:00", tz="America/New_York")}
+    assert derive_facts._duplicate_sweep_losers(lv, swept_at) == set()
+
+
+def test_duplicate_sweep_losers_never_swept_ignored():
+    lv = _lv_day_low({1: 100.0, 2: 100.0})
+    losers = derive_facts._duplicate_sweep_losers(lv, {"prev1_day_low": None, "prev2_day_low": None})
+    assert losers == set()
+
+
+def test_suppressed_p1_levels_wired_into_compute_facts():
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    assert "MNQ" in bundle.suppressed_p1_levels and "MES" in bundle.suppressed_p1_levels
+    for tkr in ("MNQ", "MES"):
+        assert isinstance(bundle.suppressed_p1_levels[tkr], set)
+
+
 def test_htf_close_status_wired_into_compute_facts_both_tickers():
     mnq, mes = _load_fixture_slices()
     bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)

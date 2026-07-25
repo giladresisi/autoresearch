@@ -44,8 +44,9 @@ daily-trend vs next-move) — one evidence ledger, scored per call, gated by the
 |---|---|---|
 | P1 | **HTF close beyond/before at any liquidity sweep** | General acceptance/rejection test at ANY swept level (fixed or running, either asset) — independent of whether an SMT is present there. `n_closes_beyond(price=level, side=sweep_direction, tf, n=1)` true → **accepted beyond** (continuation-leaning); the SAME check on the opposite `side` true instead → **rejected/closed before** (reversal-leaning). Gated by the maturity rule (§3) — a sweep with no qualifying HTF close yet scores ZERO, not a default direction. 4hr close scores more than 1hr (§4). Unlike P2, P1 has NO tier floor — session-tier sweeps still qualify — but points scale by tier (session < day < week, same ladder as P2 — §4), so a pile of session-tier reads cannot numerically out-tally one week-tier read. Evaluated PER ASSET, on that asset's own copy of the level (§5) — see §6 for what it means when the two assets' P1 reads disagree. |
 | P2 | **Meaningful SMT + HTF rejection at that liquidity** | Requires ALL of: (a) an SMT divergence present at the level, (b) the level is week-or-day tier or higher (`prev1/2_day_high/low`, `prev1_week_high/low`, `TDO`/`TWO`, running `day_high/low`/`week_high/low`) — explicitly EXCLUDING session-tier (6hr sub-session extremes, `liquidities_session_prior`) and fill/FVG tier, (c) the relevant HTF bar (4hr if it exists over the window, else 1hr) on the LAGGER (see §5 leader/lagger) closed BEFORE — not beyond — the liquidity. Reversal-only by design (no symmetric "SMT + accept-beyond" bonus form — an accepted push is scored by P1 on its own). Points scale with tier (week > day). **Deliberately stacks with P1** when both independently fire on the same physical sweep — this is not double-counting-as-bug, it is P2 rewarding the specific SMT-plus-genuine-rejection combination as a stronger tell than either alone; do not dedupe P1↔P2. |
-| P3 | **Position vs. equilibrium — daily/weekly weight set by phase, not fixed** | Current price vs. daily mid AND vs. weekly mid (`equilibrium.md` §1 definitions: running-extreme midpoints), evaluated PER ASSET. The daily-vs-weekly split is NOT fixed 50/50 — see §2.1a for the phase rule that sets which one dominates a given call. See §6 for what it means when the two assets agree on one equilibrium (e.g. both above weekly mid) but disagree on the other (e.g. split daily-mid placement). |
-| P4 | **Reclaim / failed reclaim of daily or weekly mid, HTF-confirmed** | A close-beyond-then-fails-back (or fails-to-reclaim) sequence on the daily OR weekly mid, confirmed specifically by an HTF (1h/4h) close — not any close. Daily and weekly weighted equally; 4hr scores more than 1hr (same scaling as P1). Note: `equilibrium.md` §3 and `next-move.md` mark plain weekly-mid TOUCH/CROSS as proven noise (GIL-39 B, +$83 shipped suppressing it as a trigger) — P4's weekly leg is a materially different, stricter signal (HTF-close-confirmed reclaim/failed-reclaim, not a bare touch/cross), so it is enabled alongside the daily leg without a separate gate. The daily half is parallel to the existing "failed reclaim of daily mid" item in `next-move.md` §2 (weight 2, "the strongest intraday tell"). |
+| P3 | **Position vs. equilibrium — daily/weekly weight set by phase, not fixed** | Current price vs. daily mid AND vs. weekly mid (`equilibrium.md` §1 definitions: running-extreme midpoints), evaluated PER ASSET. The daily-vs-weekly split is NOT fixed 50/50 — see §2.1a for the phase rule that sets which one dominates a given call. See §6 for what it means when the two assets agree on one equilibrium (e.g. both above weekly mid) but disagree on the other (e.g. split daily-mid placement). **Partial code-derivation (plan 15 Task 6):** the model references the mid as a synthetic `daily_mid`/`weekly_mid` level and declares `direction: accept` (price accepted ABOVE the mid → bullish lean) / `reject` (sits BELOW → bearish lean); code derives the sign via `validate_contracts._mid_side` (a position read, no accept/reject-of-a-sweep). Conservatively scoped: reuses the P1 tier/tf multipliers, no new tables; the §2.1a dynamic daily/weekly weighting stays reasoning-only (its per-asset touch timestamps are not yet structured facts — §8 gap). |
+| P4 | **Reclaim / failed reclaim of daily or weekly mid, HTF-confirmed** | A close-beyond-then-fails-back (or fails-to-reclaim) sequence on the daily OR weekly mid, confirmed specifically by an HTF (1h/4h) close — not any close. Daily and weekly weighted equally; 4hr scores more than 1hr (same scaling as P1). Note: `equilibrium.md` §3 and `next-move.md` mark plain weekly-mid TOUCH/CROSS as proven noise (GIL-39 B, +$83 shipped suppressing it as a trigger) — P4's weekly leg is a materially different, stricter signal (HTF-close-confirmed reclaim/failed-reclaim, not a bare touch/cross), so it is enabled alongside the daily leg without a separate gate. The daily half is parallel to the existing "failed reclaim of daily mid" item in `next-move.md` §2 (weight 2, "the strongest intraday tell"). **Partial code-derivation (plan 15 Task 6):** the model references the mid as a `daily_mid_high`/`daily_mid_low`/`weekly_mid_high`/`weekly_mid_low` synthetic level (the `_high`/`_low` encoding the reclaim direction) with `direction: accept` (reclaim held) / `reject` (failed reclaim); code derives the UP/DOWN sign via the same `_evidence_side` polarity as P1. Conservatively scoped — reuses the P1 tier/tf multipliers and the §3 maturity gate, no new multiplier tables. |
+| P5 | **FVG fill (fair-value-gap zone visited)** | A completed-bar 1hr/4hr fair-value gap (`derive_facts.fvgs`) that the 1s tape has since re-entered ("visited" — `daily.py` convention). A visited zone is the fill event. Scored (plan 15 Task 4) via `validate_contracts._fvg_side`: the model copies the S6/S9 zone id verbatim (carrying the `bull`/`bear` kind) as the evidence `level` and declares `direction: accept` (the zone held its own bias) / `reject` (violated); code derives the sign from the bull/bear kind + accept/reject (bull↔high, bear↔low — the same mirrored polarity as P1). Reuses the P1/P2 tier/tf multipliers and the §3 maturity gate; magnitude is neutral (no per-tf clearance close for a zone fill). Motivating case (example #10): MES 1hr bull zone 7544.75–7558.0 (2026-07-14 00:00), visited — previously never appeared in the ledger at all. |
 
 ### 2.1a P3 daily/weekly weighting — set by which reference was touched most recently
 
@@ -80,7 +81,25 @@ track — a level is eligible evidence for P1/P2/P4/DOL ONLY if it sits BEYOND e
 level in that same family. Scan a family from most-recent to oldest; drop any level that does not
 exceed (is not beyond) the extreme already established by a more recent one in the same family —
 it is nested inside already-superseded liquidity, not an independent pool. Applies per asset
-(MNQ's own family, MES's own family, separately).
+(MNQ's own family, MES's own family, separately). **This is a pure, static price comparison across
+the FULL tracked depth** (prev1…prev7_day, prev1…prev3_week) — it does not depend on which level
+got swept first; a level's fixed price is known for the whole session regardless of sweep timing.
+
+**Code-enforced (`derive_facts._nested_prev_levels`, computed once per facts build into
+`bundle.suppressed_p1_levels[asset]`, applied in `score_thesis_evidence` as a hard zero, exactly
+like the §3 maturity gate), not merely a prompt instruction the model can miss.** The S9 close-status
+block skips a nested level's line entirely (not offered as fresh P1 evidence at all) UNLESS that
+level is also a live SMT candidate, in which case it renders tagged `[nested/duplicate ... P2-
+candidate context only]` — visible for P2 judgment, structurally unusable as a P1 item.
+
+**Worked example (2026-07-14 01:00 ET, MNQ day lows):** `prev1_day_low`=29386.5, `prev2`=29677.5,
+`prev3`=29395.0, `prev4`=28910.25, `prev5`=29209.75, `prev6`=29683.25, `prev7`=29522.5. Scanning
+from most-recent: `prev1` is always valid (nothing more recent to be nested under). `prev2`, `prev3`,
+`prev5`, `prev6`, `prev7` are each nested — a more-recent level (`prev1` or `prev4`) already sits at
+least as deep. `prev4` is the ONE exception among the deeper levels: no more-recent level (`prev1`,
+`prev2`, `prev3`) reaches as low as 28910.25, so it remains a valid, independent pool. The eligible
+set for fresh P1/P2 lookup at this boundary is exactly `{prev1_day_low, prev4_day_low}` — not a
+fixed "prev1/prev2 only" cutoff, but whichever subset survives the price comparison at each boundary.
 
 **Worked example:** `prev1_day_high` (yesterday's high) sits ABOVE `prev2_day_high` (the day
 before). `prev1_day_high` is the relevant, farther-out high-side pool; `prev2_day_high` does NOT
@@ -88,6 +107,40 @@ extend beyond it, so **`prev2_day_high` is IGNORED** — it must not be scored a
 accept/reject event, must not count toward P2's meaningful-tier check on its own, and must not be
 offered as a DOL. The identical rule applies to prev-day lows (the most recent low is relevant
 unless an older low sits farther below it) and prev-week highs/lows.
+
+**Same-asset scope only — a nested level still carries cross-asset (P2/SMT) evidence.** The
+exclusion above applies ONLY to a single asset's OWN P1 accept/reject tallying and its own DOL
+eligibility — it prevents one physical sweep from being double-counted across nested same-asset
+named levels. It does NOT exclude a nested level from P2 / SMT-candidate evaluation, because a
+cross-asset divergence at that level is evidence about the OTHER asset's behavior, not a second
+echo of this asset's own sweep. Concretely, at the **2026-07-14 01:00 ET** boundary MNQ swept its
+`prev3_day_low` (29395.0) while MES never came within 15.5 points of its own `prev3_day_low`
+(7516.25) all session — a genuine, uncontested SMT. That SMT must NOT be dropped just because
+MNQ's `prev3_day_low` is nested under (does not extend beyond) MNQ's own more-recent
+`prev1_day_low` (29386.5): the nesting rule silences MNQ's redundant same-asset P1 count at the
+deeper low, but the MNQ-swept / MES-unswept divergence is independent evidence and stays a live P2
+candidate. Depth-of-history levels (`prev3_day`…`prev7_day`, `prev2_week`/`prev3_week`) exist
+precisely so these deeper cross-asset divergences are visible; §2.1b prunes same-asset P1 stacking,
+it never prunes cross-asset candidacy.
+
+**Deliberate simplification — SMT-candidate scanning is NOT itself nesting-gated.** The intent is
+"do not go hunting for brand-new divergences at nested liquidities" (a nested level's own accept/
+reject reading is stale/redundant, so a fresh divergence there is low-value noise) — but implementing
+a literal "was this level still the frontier at the moment the SMT fired" check would require
+tracking, per level, WHEN it became superseded (the sweep timestamp of whatever deeper level nests
+it), which is a second, harder-to-verify temporal condition. Instead, `bundle.smt_candidates` (S3's
+cross-ticker matrix) scans the full tracked depth exactly as before — unrestricted by nesting — and
+relies on P2's OWN pre-existing requirement (the lagger's HTF close must REJECT, not accept, thesis.md
+§2.1) as the natural filter: a nested level whose divergence shows a plain ACCEPT (continuation, e.g.
+`prev7_day_low` in the worked example above — MNQ swept it while MES never confirmed, but MNQ's own
+close continued through rather than rejecting) does not qualify as meaningful P2 evidence regardless
+of nesting, so it costs nothing to leave the scan unrestricted. This is why `prev3_day_low`'s SMT
+survives (genuine reject shape) while `prev6_day_low` (a "both eventually swept, >15min apart" reading,
+not even a wick-divergence candidate) and `prev7_day_low` (a real divergence tag, but MNQ ACCEPTED, not
+rejected, so it fails P2's own gate) do not end up mattering — without a separate, explicit exclusion
+list. If a future case surfaces a nested level with a genuine reject-shape divergence that should NOT
+count (e.g. one already fully accounted for at a shallower, non-nested level), revisit this — it has
+not been needed yet.
 
 This filter is orthogonal to, not a replacement for, tier weighting (§4) — it prunes WHICH levels
 within a family are even eligible before tier weight is applied to whichever survives. It does
@@ -135,6 +188,47 @@ price to the nearest named DOL pool, normalized by `avg_range_1h`. When it is la
 seed → "sparse structure"), few named levels sit nearby — happens after a big stretch OR early in a
 session before structure has formed. Prefer a closer existing predicate (a smaller-`n` daily-mid
 close, a nearer anti-pool) over a far default. This is guidance, not a gate.
+
+**SMT exhaustion — tier-relative shelf life (plan 15 Task 5).** Stretch is not only a confidence
+discount on the current read; it also ages out a STALE SMT so it stops counting as continuation
+evidence. For each S9 SMT candidate, code computes `stretch_since_fire` = distance from the swept
+(lagger) ticker's current price to its price when the SMT fired, normalized by that ticker's
+`avg_range_1h`. Past a tier-relative shelf life — **session `> 2.0×`, day `> 4.0×`, week `> 8.0×`**
+(each tier ~double the tier below; `derive_facts.SMT_SHELF_LIFE`, all v1 seeds pending calibration,
+same status as the `> 3.0×` stretch flag above) — the candidate is tagged `suggested_exhausted` in
+S9. This is a CODE SUGGESTION, model-overridable: the model may set `exhausted: true` on a P2
+evidence item it agrees is played out, which zeroes that item's points in `score_thesis_evidence`
+(the same "zeroed, not scored" mechanic as the §3 maturity gate — a pure code mechanic on a model
+judgment, never a new sign). It stays LLM-judged, not hard-gated: the model may disagree with the
+suggestion and score the item normally. Motivating case (example #10): a stale bearish SMT kept
+counting as continuation evidence 5.6× past its origin, long after it had played out.
+
+### 2.1d Duplicate-simultaneous-sweep collapsing
+
+Distinct from §2.1b's same-family nesting: when TWO OR MORE named levels for the SAME asset — of
+ANY tier, and possibly from DIFFERENT families (a session sub-block low vs. a day-tier low) — share
+the IDENTICAL sweep timestamp and side, they are restatements of one physical price move, not
+independent structural events. Two concrete shapes seen in practice:
+
+- **Exact cross-family duplicate.** A prior day's own sub-session low (`ny_evening(prev1)_low`) can
+  be EXACTLY the same price, swept at the EXACT same timestamp, as that day's own `prev1_day_low` —
+  by construction, whichever sub-block contains the day's extreme has a sub-block low identical to
+  the day low. Both are the SAME event under two labels.
+- **Opening-gap cascade.** A session's opening bar can cross several old, already-superseded levels
+  in the same instant (e.g. `prev6_day_low`, `prev2_day_low`, `asia(prev1)_low`, `london(prev1)_low`,
+  `ny_morning(prev1)_low` all "swept 18:00:00" in the 2026-07-14 01:00 ET example) — one drop, not
+  five-to-six independent bearish signals.
+
+**Code-enforced** (`derive_facts._duplicate_sweep_losers`, folded into the same
+`bundle.suppressed_p1_levels[asset]` set §2.1b uses): among levels sharing a (side, swept_at) key,
+keep only the highest-tier-weighted representative (week > day > session; ties broken by the more
+extreme price) and suppress the rest from fresh P1 evidence — same "S9 skips it unless it's also an
+SMT-candidate site" rendering rule as §2.1b, and the same code backstop in `score_thesis_evidence`
+(never applied to P2). Note §2.1b's day/week nesting rule already resolves most day-tier duplicates
+on its own (the redundant day-tier levels are typically ALSO nested, e.g. `prev6_day_low` above is
+superseded by `prev4_day_low` regardless); this rule's main remaining bite is on session-tier
+sub-blocks and the day/session cross-family exact-duplicate case, which §2.1b's family-scoped
+comparison does not reach.
 
 ### 2.1e Cross-family price-cluster confluence (audit-only)
 
@@ -190,6 +284,17 @@ This stays SOFT — a rendered fact + this guidance, NOT a new `ARI_*`/`XL_*` ha
 deliberately matching the treatment of the 09:15–11:30 ET whipsaw-window fact (a rendered boolean
 in S0, not code-enforced). Escalating it to a hard gate is out of scope without evidence that
 justifies it.
+
+**Immature-item pending resolution (plan 15 Task 7).** An immature (`mature: False`) day/week
+evidence item is informative even though it scores zero — the model already narrates when/how it
+will resolve. That is now STRUCTURED: an evidence item may carry an optional `pending_resolution`
+`{resolves_tf: 1h|4h, resolves_at, implied_direction_if_confirmed: UP|DOWN}`. `resolves_at` is
+CODE-computed — the S9 `PENDING RESOLUTION` block renders the next 1h / 4h close timestamp after
+`now` (pure arithmetic on known bar boundaries), which the model COPIES rather than computing a
+clock time itself (consistent with the "code computes, model copies" bias). It is informational
+only: `score_thesis_evidence` never reads it (zero points either way), and the validator's single
+check is audit-only — a `resolves_at` not strictly after `now` is a warning, never a hard
+rejection (`validate_contracts._validate_pending_resolution`).
 
 ## 3. Maturity gate (applies to P1, P2, and the HTF-close half of P4)
 
@@ -518,4 +623,12 @@ no eligible DOL left on that side — the model reused an already-swept level as
 (`SEM_DOL_WRONG_SIDE`) or omitted one (`SYN_DIRECTIONAL_MISSING_DOL`), and the same evidence net
 score kept re-arguing for the same unsupported direction on retry → the no-liquidity rule above
 (this section's own DOL bullet), `expected_bias` downgraded to NEUTRAL in code rather than left as
-an unwinnable retry loop between "bias must match net score" and "bias must have a valid DOL".
+an unwinnable retry loop between "bias must match net score" and "bias must have a valid DOL" ·
+depth-of-history levels (`prev3_day`…`prev7_day`) initially scored as independent P1 evidence
+without a nesting check, so a single opening-bar cascade (2026-07-14 01:00 ET: one drop through 6+
+old day/session lows in the same instant) was tallied as 6+ independent bearish signals, and a
+session sub-block low exactly duplicating that day's own day-low (`ny_evening(prev1)_low` ≡
+`prev1_day_low`, same price AND timestamp) was double-counted under two labels → §2.1b's nesting
+rule promoted from a documented-but-unenforced principle to a code backstop
+(`suppressed_p1_levels`), plus the new §2.1d duplicate-simultaneous-sweep collapse for the
+cross-family/session-tier cases §2.1b's family-scoped comparison does not reach.

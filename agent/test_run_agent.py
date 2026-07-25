@@ -503,3 +503,19 @@ def test_derive_thesis_annotates_evidence_with_points_and_side():
     item = out["evidence"][0]
     assert item["side"] == "DOWN"
     assert item["points"] == 3.0   # 2.0 base * 1.5 (4h) * 1.0 (week)
+
+
+# --------------------------------------------------------------------------- #
+# plan 15 Task 8 — targeted ARI_THESIS_BIAS retry message (the cheaper lever)   #
+# --------------------------------------------------------------------------- #
+def test_retry_prompt_adds_ari_specific_guidance():
+    msg = run_agent._retry_prompt(
+        ["[ARI_THESIS_BIAS] (thesis.bias) bias 'UP' inconsistent with the evidence "
+         "ledger's net score -22.5 (expected 'DOWN')"])
+    assert "KEEP your evidence ledger" in msg
+    assert "set `bias` to the quoted expected value" in msg
+
+
+def test_retry_prompt_omits_ari_guidance_for_other_violations():
+    msg = run_agent._retry_prompt(["[SEM_LEVEL_NOT_IN_FACTS] (thesis) level 'ghost' ..."])
+    assert "KEEP your evidence ledger" not in msg

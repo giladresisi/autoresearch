@@ -25,15 +25,15 @@ CONFIDENCES = {"HIGH", "MEDIUM", "LOW"}
 VERDICTS = {"SETUP", "WAIT"}
 DIRECTIONS = {"LONG", "SHORT"}
 
-# decisions/thesis.md §2.1 evidence-ledger item shape — P1 (HTF close beyond/before at
-# ANY sweep) and P2 (meaningful SMT + HTF rejection) only. Both share the same
-# accept/reject-of-a-sweep shape; P3 (equilibrium position) and P4 (reclaim/failed-reclaim)
-# do not and are NOT covered by this ledger yet (thesis.md §8 gap note) — they stay
-# reasoning-only for now. The model declares WHICH criterion/asset/level/tier/tf fired and
-# whether it is accept or reject; code (validate_contracts.score_thesis_evidence) derives
-# the UP/DOWN sign from the level's own high/low identity — never model-declared — which is
-# what makes a P1 sign misclassification structurally impossible (2026-07-02 08:00 bug).
-EVIDENCE_CRITERIA = {"P1", "P2"}
+# decisions/thesis.md §2.1 evidence-ledger item shape. P1 (HTF close beyond/before at ANY
+# sweep) and P2 (meaningful SMT + HTF rejection) share the accept/reject-of-a-sweep shape;
+# P5 (plan 15 Task 4 — FVG-fill) reuses it with the sign derived from the fill zone's
+# bull/bear kind; P3 (equilibrium position) and P4 (reclaim/failed-reclaim) are the plan-15
+# Task 6 minimal code-derivation (P3 above/below mid, P4 reclaim accept/reject). The model
+# declares WHICH criterion/asset/level/tier/tf fired and whether it is accept or reject; code
+# (validate_contracts.score_thesis_evidence) derives the UP/DOWN sign — never model-declared —
+# which is what makes a P1 sign misclassification structurally impossible (2026-07-02 08:00 bug).
+EVIDENCE_CRITERIA = {"P1", "P2", "P3", "P4", "P5"}
 EVIDENCE_ASSETS = {"MNQ", "MES"}
 EVIDENCE_TIERS = {"session", "day", "week"}
 EVIDENCE_TFS = {"1h", "4h"}
@@ -318,6 +318,28 @@ _EVIDENCE_ITEM = {
         "tf": {"enum": sorted(EVIDENCE_TFS)},
         "direction": {"enum": sorted(EVIDENCE_DIRECTIONS)},
         "mature": {"type": "boolean"},
+        # plan 15 Task 5: optional model override — set True on a P2 SMT item the model judges
+        # stale (played out past its tier-relative shelf life, see S9 suggested_exhausted) to
+        # exclude it from continuation scoring. Omitted = not exhausted. LLM-judged, not
+        # hard-gated: code zeroes an exhausted item's points, it never sets this itself.
+        "exhausted": {"type": "boolean"},
+        # plan 15 Task 7: optional structured pending-resolution for an IMMATURE (mature:False)
+        # day/week item — when/how it will resolve, so an execution layer can read it. Only
+        # meaningful when mature is False; informational (zero points either way). resolves_at
+        # is the code-computed next-HTF-close timestamp the model COPIES from the S9 "PENDING
+        # RESOLUTION" line (not model-computed); it is optional (omit -> relative timing in
+        # prose). implied_direction_if_confirmed is the model's read of which way the item
+        # leans IF the pending close confirms — audit metadata, never fed to score_thesis_evidence.
+        "pending_resolution": {
+            "type": "object",
+            "properties": {
+                "resolves_tf": {"enum": sorted(EVIDENCE_TFS)},
+                "resolves_at": {"type": "string"},
+                "implied_direction_if_confirmed": {"enum": ["UP", "DOWN"]},
+            },
+            "required": ["resolves_tf", "implied_direction_if_confirmed"],
+            "additionalProperties": False,
+        },
     },
     "required": ["criterion", "asset", "level", "tier", "tf", "direction", "mature"],
     "additionalProperties": False,
@@ -354,7 +376,18 @@ THESIS_SCHEMA = {
 }
 
 
-def build_thesis_schema(valid_levels=None) -> dict:
+# plan 15 Tasks 4/6: synthetic equilibrium-mid level names a P3/P4 evidence item may
+# reference (not real named price levels — the daily/weekly mid position and its
+# HTF-confirmed reclaim). Allowed in the evidence `level` enum ONLY (never the DOL enum,
+# which must stay a real drawable pool). P3 uses the bare mid; P4 the _high/_low reclaim
+# form (the reclaim direction _evidence_side derives its sign from).
+EVIDENCE_MID_LEVELS = (
+    "daily_mid", "weekly_mid",
+    "daily_mid_high", "daily_mid_low", "weekly_mid_high", "weekly_mid_low",
+)
+
+
+def build_thesis_schema(valid_levels=None, extra_evidence_levels=None) -> dict:
     """THESIS_SCHEMA with the `level` fields on evidence items and DOL constrained to an
     ENUM of the level names actually present in THIS call's facts, when `valid_levels` is
     given. Under strict schema-constrained decoding (both backends use this), an enum
@@ -364,18 +397,27 @@ def build_thesis_schema(valid_levels=None) -> dict:
     only caught after the fact by the semantic validator and sent back for a retry.
     `valid_levels=None`/empty falls back to the original unconstrained string type —
     byte-identical to plain THESIS_SCHEMA for any caller that has no facts (tests, the
-    static THESIS_SCHEMA export itself)."""
+    static THESIS_SCHEMA export itself).
+
+    `extra_evidence_levels` (plan 15 Tasks 4/6): additional strings allowed for the
+    EVIDENCE `level` only, not the DOL — the P5 FVG-zone ids and the P3/P4 synthetic mid
+    names (EVIDENCE_MID_LEVELS). These are real facts-grounded identifiers that are not
+    named price levels, so they belong in the evidence enum but must never be offered as a
+    DOL draw. Ignored (byte-identical) when `valid_levels` is falsy."""
     schema = copy.deepcopy(THESIS_SCHEMA)
     if valid_levels:
-        level_enum = {"enum": sorted(set(valid_levels))}
+        dol_enum = {"enum": sorted(set(valid_levels))}
+        ev_names = set(valid_levels) | set(extra_evidence_levels or []) | set(EVIDENCE_MID_LEVELS)
+        level_enum = {"enum": sorted(ev_names)}
         schema["properties"]["evidence"]["items"]["properties"]["level"] = level_enum
-        schema["properties"]["dol"]["anyOf"][0]["properties"]["level"] = level_enum
+        schema["properties"]["dol"]["anyOf"][0]["properties"]["level"] = dol_enum
         # level_swept/level_depleted predicates (falsified_if/exhausted_if/recall.events)
         # reference a level by `name`, not `level` — same malformed-name risk, same fix.
-        # These atom defs live in $defs (shared via $ref), so patch them there too.
+        # These atom defs live in $defs (shared via $ref), so patch them there too. They must
+        # name a REAL price level (dol_enum), never a synthetic mid / FVG-zone id.
         for def_name in ("pred_level_swept", "pred_level_depleted"):
             if def_name in schema["$defs"]:
-                schema["$defs"][def_name]["properties"]["name"] = level_enum
+                schema["$defs"][def_name]["properties"]["name"] = dol_enum
     return schema
 
 
