@@ -429,3 +429,35 @@ def test_gap_fill_loads_dotenv_then_calls_gap_fill_until_now(monkeypatch, capsys
     mock_gap_fill.gap_fill_until_now.assert_called_once_with()
     out = capsys.readouterr().out
     assert "Gap-fill complete" in out
+
+
+# ---------------------------------------------------------------------------
+# promote command
+# ---------------------------------------------------------------------------
+
+def test_promote_calls_promote_live_to_main(monkeypatch, capsys):
+    """`trade.py promote` copies the live parquets over main (backing up the prior
+    main files) via check_session_parquets.promote_live_to_main()."""
+    mock_csp = MagicMock()
+    mock_csp.promote_live_to_main.return_value = {
+        "MNQ_1m.parquet": "ok", "MES_1m.parquet": "ok",
+        "MNQ_1s.parquet": "ok", "MES_1s.parquet": "ok",
+    }
+    monkeypatch.setitem(sys.modules, "scripts.check_session_parquets", mock_csp)
+
+    _run_trade(["promote"], monkeypatch, MagicMock(), MagicMock())
+
+    mock_csp.promote_live_to_main.assert_called_once_with()
+    out = capsys.readouterr().out
+    assert "Promoted 4 file(s)" in out
+
+
+def test_promote_warns_when_nothing_promoted(monkeypatch, capsys):
+    """No live parquets found -> say so instead of a silent no-op."""
+    mock_csp = MagicMock()
+    mock_csp.promote_live_to_main.return_value = {}
+    monkeypatch.setitem(sys.modules, "scripts.check_session_parquets", mock_csp)
+
+    _run_trade(["promote"], monkeypatch, MagicMock(), MagicMock())
+
+    assert "nothing promoted" in capsys.readouterr().out.lower()

@@ -23,6 +23,7 @@ Usage:
   python trade.py start --resume         # Start with automatic entries enabled (clears data/paused; start continues regardless)
   python trade.py terminate              # Kill orchestrator and automation.main
   python trade.py gap-fill               # IB-backfill main 1s+1m parquets up to now (orchestrator must NOT be running)
+  python trade.py promote                # Copy live parquets over main (prior main backed up to .bak) — run after gap-fill
 
 Add --force / -f to bypass position.json state checks and override broker state:
   python trade.py close --force
@@ -401,6 +402,20 @@ def main() -> None:
               "(do NOT run while the live orchestrator/session is up — IB client-id conflict)...")
         gap_fill_until_now()
         print("Gap-fill complete")
+
+    elif cmd == "promote":
+        # Same promotion parquet-check runs at session end: copy the live parquets
+        # into the current main subfolder, backing up each prior main file to .bak.
+        # Lets offline work (e.g. after `trade.py gap-fill`) extend backtest main
+        # without waiting for a session-end parquet-check.
+        from scripts.check_session_parquets import promote_live_to_main
+
+        promoted = promote_live_to_main()
+        if promoted:
+            print(f"Promoted {len(promoted)} file(s) live -> main: "
+                  + ", ".join(sorted(promoted)))
+        else:
+            print("No live parquets found — nothing promoted")
 
     elif cmd == "terminate":
         killed = _terminate_all()
