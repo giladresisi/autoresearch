@@ -977,6 +977,15 @@ _TASK_THESIS = (
     "divergence that already fired does not stop being true just because a newer level "
     "later superseded it for plain same-asset accept/reject purposes) — score it as P2, "
     "never as P1."
+    "\n- Near-maturity pre-confirmation (thesis.md §3a, a BOUNDED exception to the §3 "
+    "maturity gate): the S9 'NEAR-MATURITY PRE-CONFIRMATION CANDIDATES' block lists any day/"
+    "week-tier item due to close within a few minutes. You may declare mature=true for that "
+    "item NOW, using its implied_direction, ONLY if its preconfirm_eligible flag is True — "
+    "this already requires BOTH the current price to sit comfortably clear of the level "
+    "(distance_safe) AND a second independent agreeing source with no contradiction present "
+    "(corroborated: cross-asset, cross-tier, or a live P2 SMT). If preconfirm_eligible is "
+    "False (even if a candidate is listed), treat the item as immature as usual — do NOT "
+    "declare mature=true on it."
 )
 _TASK_PLAN = (
     "TASK — L2 trade-plan decision (AI-trader v2).\n"

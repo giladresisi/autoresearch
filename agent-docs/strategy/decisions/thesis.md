@@ -311,6 +311,61 @@ read admissible at the higher (4hr) weight tier in §4; absent a 4hr close yet, 
 it admissible at the lower tier. This is a strict gate, not a discount — an immature sweep
 contributes zero to P1/P2/P4, not a partial or default-direction score.
 
+### 3a. Near-maturity pre-confirmation (a BOUNDED exception to §3)
+
+Motivating case (2026-07-16 20:00 ET): a scheduled call fired at 19:59:59, one minute before a
+fresh, meaningful day-tier MNQ sweep's qualifying 4hr close at 20:00:00 — every OTHER item that
+session was already depleted (spent), so the call landed with zero usable evidence and went
+NEUTRAL, missing a move that followed almost immediately. §3's gate is correct in general (an
+immature sweep must not silently default toward a direction), but a razor's-edge miss like this
+is avoidable without weakening the gate everywhere.
+
+**Scope.** Applies ONLY to a day-tier-or-higher sweep (session-tier is out of scope, same
+carve-out as P2 §2.1) whose next qualifying HTF close (1h or 4h) is due within
+`NEAR_MATURITY_WINDOW_MIN` (10 min, v1 seed) of `now`. `derive_facts._near_maturity_candidates`
+computes this candidate set once per facts build (needs `htf_close_status`,
+`suppressed_p1_levels`, `smt_candidates`, and `avg_range_1h`/`avg_range_4h` already populated) and
+S9 renders it as **NEAR-MATURITY PRE-CONFIRMATION CANDIDATES**.
+
+**Two checks gate `preconfirm_eligible` (code-computed, both required):**
+- **`distance_safe`** — the CURRENT (pre-close) price already clears `NEAR_MATURITY_DISTANCE_RATIO`
+  (reuses the §4 clearance-magnitude "STRONG" bucket's own bar, 1.5× `avg_range[tf]` — an
+  ATR-normalized bar, not a flat point count, for the same reason `avg_range` normalizes
+  everything else in this doc: MNQ and MES trade at very different absolute point scales, so a
+  flat threshold means something different on each) in the level's own polarity direction. Close
+  to the level (a genuine toss-up) does NOT clear this — the close could still flip either way in
+  the remaining minutes.
+- **`corroborated`** — the implied UP/DOWN read (mechanically derived from the level's high/low
+  polarity, same as P1's own sign rule) has a second independent agreeing source, with **no**
+  other mature day/week-tier item on EITHER asset closing the opposite way (a live contradiction
+  voids corroboration outright, regardless of the other checks). One of:
+  - **cross-asset** — the OTHER asset's own copy of the SAME named level already closed the same
+    way, or
+  - **cross-tier** — a DIFFERENT tier on the SAME asset already closed the same way, or
+  - **live P2 SMT** — this exact level is itself a meaningful, not-suggested-exhausted SMT
+    candidate (P2's own cross-asset divergence requirement already supplies the second source).
+
+**Effect.** When `preconfirm_eligible: true`, the model MAY declare `mature: true` for that item
+now, using its `implied_direction`, instead of waiting for the literal close — the SAME
+model-declared `mature` field as every other item (no schema change; this is a code-suggested
+green light on a model judgment, the identical "code suggests, model may act or not" shape as
+`suggested_exhausted` §2.1c, never a hard override). When `preconfirm_eligible: false` — near
+maturity but not distance-safe, not corroborated, or contradicted — the item stays immature as
+before; §3's strict zero still applies.
+
+**The other half — don't call too early either.** The check above only governs what the MODEL may
+do once a call has already been made. The mirror case is scheduling: an executor should not fire
+a scheduled or recall call at a moment when a live, otherwise-material item is about to mature and
+is NOT yet `preconfirm_eligible` — firing one minute early (the motivating case) wastes the call.
+No live executor exists yet for this KB (thesis.md isn't wired into a production loop — §12 of
+`agent-optimizations.md`), so this is currently only exercised by the offline
+`manual-l1-thesis/test_l1_thesis_manual.py` harness: by default it retargets a requested boundary
+to the next qualifying close when a non-`preconfirm_eligible` near-maturity candidate is present
+(erring toward waiting when in doubt — bounded to at most `NEAR_MATURITY_WINDOW_MIN` minutes by
+construction), disable via `--ignore-near-maturity-wait`. Whenever an executor for this KB is
+built, §1's cadence rule (including the mandatory 18:00 call) should apply this same short,
+bounded wait rather than firing at the exact scheduled instant.
+
 ## 4. Weighting
 
 - **P1–P4 are weighted EQUALLY against each other** (same max achievable points per criterion) —
@@ -646,3 +701,13 @@ more-recent level reaches as low), still surfaced as the #1 (nearest) DOWN draw 
 the thesis's DOL, while the genuinely eligible `prev3_day_low` sat unused at the back of the same
 menu → `_dol_menu` now takes the caller's `suppressed_p1_levels["MNQ"]` and excludes those names
 from both the UP and DOWN lists, same treatment as the existing swept/depleted/proximity guards.
+
+**2026-07-16 20:00 ET — a scheduled call missed maturity by one minute.** Every item from the
+18:00 opening cascade was already depleted by 20:00 (correctly excluded — not a bug), but a fresh,
+meaningful MNQ `prev1_day_low` sweep at 19:26 (with MES missing it by 8.5pts, a live SMT) was
+immature: its qualifying 4hr close was due at 20:00:00, one minute after the 19:59:59 call. The
+call landed with zero usable evidence and went NEUTRAL, missing the move that followed → §3a's
+near-maturity pre-confirmation (act now when distance-safe + corroborated) and the harness-level
+wait simulation (retarget the call to the imminent close otherwise) — both scoped tightly (a short
+window, day+/week tier only, corroboration required) so they don't reopen the immature-sweep
+false-signal failure mode §3 exists to prevent.

@@ -19,7 +19,7 @@ for _p in (_HERE, os.path.dirname(_HERE), os.path.join(os.path.dirname(_HERE), "
         sys.path.insert(0, _p)
 
 from facts import DEFAULT_MAIN, LOOKBACK, ParquetFactsSource  # noqa: E402
-from derive_facts import compute_facts  # noqa: E402
+from derive_facts import NEAR_MATURITY_WINDOW_MIN, compute_facts  # noqa: E402
 
 TZ = "America/New_York"
 
@@ -154,6 +154,26 @@ def test_nested_day_levels_suppressed_2026_07_14(source):
     # prev2_day_low is nested and NOT an SMT-candidate site -- must not render as a fresh
     # P1 item at all.
     assert "MNQ prev2_day_low [1h]" not in text
+
+
+def test_near_maturity_candidates_wired_2026_07_16_2000(source):
+    # thesis.md §3a motivating case: at 2026-07-16 20:00 ET (now = 19:59:59, one minute
+    # before the 4h close), MNQ's prev1_day_low sweep at 19:26 is a near-maturity candidate.
+    boundary = pd.Timestamp("2026-07-16 20:00:00", tz=TZ)
+    res = source.build_facts(boundary)
+    assert not res.degraded
+    cands = res.validator_dict["near_maturity_candidates"]
+    assert isinstance(cands, list) and cands
+    for c in cands:
+        for key in ("asset", "level", "tier", "tf", "resolves_at", "minutes_remaining",
+                    "now_distance_ratio", "implied_direction", "distance_safe",
+                    "corroborated", "preconfirm_eligible"):
+            assert key in c
+        assert c["minutes_remaining"] <= NEAR_MATURITY_WINDOW_MIN
+        assert c["tier"] in ("day", "week")
+    site = next((c for c in cands if c["asset"] == "MNQ" and c["level"] == "prev1_day_low"
+                and c["tf"] == "4h"), None)
+    assert site is not None, "the motivating MNQ prev1_day_low 4h candidate must be present"
 
 
 def test_prev_day_levels_absent_without_hist(source):

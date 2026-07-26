@@ -142,6 +142,9 @@ class ParquetFactsSource:
         res.validator_dict["suppressed_p1_levels"] = {
             tkr: sorted(names) for tkr, names in (bundle.suppressed_p1_levels or {}).items()
         }
+        # thesis.md §3a: near-maturity pre-confirmation candidates (additive overlay, like
+        # suppressed_p1_levels above — never in the shadow-hash dict).
+        res.validator_dict["near_maturity_candidates"] = list(bundle.near_maturity_candidates or [])
         res.menu_text = render_menus_text(bundle)              # reuses cached bundle.menus
         res.evidence_magnitude = build_evidence_magnitude(bundle)  # plan 14 Task 5: code-derived
         # magnitude threaded into the render so the model can SEE the WEAK/NORMAL/STRONG

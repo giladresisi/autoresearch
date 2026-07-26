@@ -300,6 +300,13 @@ def main(argv=None) -> int:
     ap.add_argument("--explanation-md", default=None,
                     help="path to the (always-overwritten) explanation markdown file "
                          "(default: <out-dir>/latest_explanation.md)")
+    ap.add_argument("--ignore-near-maturity-wait", action="store_true",
+                    help="thesis.md §3a: by default, if the requested --datetime has a day/"
+                         "week-tier item near its next qualifying HTF close that is NOT "
+                         "preconfirm_eligible, this harness simulates the executor's 'wait' "
+                         "branch by retargeting the boundary to that close instead of calling "
+                         "at the literal requested instant. Pass this flag to disable that and "
+                         "always call at exactly --datetime as given.")
     args = ap.parse_args(argv)
 
     boundary = pd.Timestamp(args.datetime, tz=TZ)
@@ -326,6 +333,29 @@ def main(argv=None) -> int:
     if res.degraded:
         print(f"FACTS DEGRADED at {boundary}: {res.error}", file=sys.stderr)
         return 1
+
+    # thesis.md §3a: harness-level simulation of the executor's "wait" branch. No live
+    # executor exists yet for this KB (thesis.md isn't wired into a production loop), so this
+    # harness is the only place that can actually exercise the behavior end-to-end: if a day/
+    # week-tier item is near its next qualifying HTF close but NOT preconfirm_eligible (not
+    # distance-safe and/or not corroborated), retarget the boundary to that close rather than
+    # calling at the literal requested instant — erring toward "wait when in doubt" rather than
+    # silently guessing. A preconfirm_eligible candidate does NOT trigger a wait (the model may
+    # act on it now per the §3a prompt guidance); only a non-eligible near-maturity candidate does.
+    if not args.ignore_near_maturity_wait:
+        pending = [c for c in (res.validator_dict.get("near_maturity_candidates") or [])
+                  if not c.get("preconfirm_eligible")]
+        if pending:
+            retarget = min(pd.Timestamp(c["resolves_at"]) for c in pending)
+            print(f"NEAR-MATURITY WAIT: {len(pending)} day/week-tier item(s) near a "
+                  f"qualifying HTF close but not preconfirm_eligible at {boundary} — "
+                  f"retargeting to {retarget} (thesis.md §3a). Pass "
+                  f"--ignore-near-maturity-wait to call at the literal requested instant.")
+            boundary = retarget
+            res = source.build_facts(boundary)
+            if res.degraded:
+                print(f"FACTS DEGRADED at retargeted {boundary}: {res.error}", file=sys.stderr)
+                return 1
 
     system = build_manual_system_prompt()
     facts_text = "\n\n".join([res.text, res.menu_text, res.evidence_text])

@@ -409,6 +409,9 @@ class FactsBundle:
     # accept/reject evidence (nested prevN levels + duplicate-simultaneous-sweep losers).
     # Never applied to P2/SMT candidacy — see _nested_prev_levels/_duplicate_sweep_losers.
     suppressed_p1_levels: dict = field(default_factory=dict)
+    # thesis.md §3a: near-maturity pre-confirmation candidates (bounded exception to §3) —
+    # see _near_maturity_candidates for the shape of each entry.
+    near_maturity_candidates: list = field(default_factory=list)
 
 
 def render_facts_text(bundle: FactsBundle) -> str:
@@ -834,6 +837,143 @@ def _magnitude_label(ratio) -> Optional[str]:
     return None
 
 
+# thesis.md §3a — v1 seeds, pending calibration (same status as every other threshold in
+# this module). NEAR_MATURITY_DISTANCE_RATIO reuses the "STRONG" clearance bucket's own bar
+# (_MAG_LABEL_BUCKETS[1][0] == 1.5) rather than a new flat-point constant — MNQ/MES trade at
+# very different absolute point scales, so an ATR-normalized bar is the only one that means
+# the same thing on both assets (same reasoning as _MAG_LABEL_BUCKETS itself).
+NEAR_MATURITY_WINDOW_MIN = 10
+NEAR_MATURITY_DISTANCE_RATIO = _MAG_LABEL_BUCKETS[1][0]
+
+
+def _level_polarity_hl(name) -> Optional[str]:
+    """'high' | 'low' | None from the level NAME's naming convention — mirrors
+    validate_contracts._level_polarity. Duplicated locally, not imported: derive_facts is a
+    pure facts module with no decision-layer dependency (see _MAG_LABEL_BUCKETS above for the
+    same precedent). Update both if the naming convention ever changes."""
+    lname = (name or "").lower()
+    if "high" in lname:
+        return "high"
+    if "low" in lname:
+        return "low"
+    return None
+
+
+def _implied_side(polarity: Optional[str], accept: Optional[bool]) -> Optional[str]:
+    """UP/DOWN implied by a level's high/low polarity + accept(-beyond)/reject(-before) read
+    — the same accept<->sign mapping as validate_contracts._evidence_side, duplicated locally
+    for the reason above."""
+    if polarity is None or accept is None:
+        return None
+    if polarity == "high":
+        return "UP" if accept else "DOWN"
+    return "DOWN" if accept else "UP"
+
+
+def _near_maturity_candidates(bundle: "FactsBundle", data: dict, now) -> list:
+    """thesis.md §3a — a BOUNDED, explicitly-scoped exception to the §3 maturity gate. For
+    every swept day/week-tier level still awaiting a qualifying HTF (1h or 4h) close within
+    NEAR_MATURITY_WINDOW_MIN minutes of `now`, compute whether the CURRENT (pre-close) price
+    already clears NEAR_MATURITY_DISTANCE_RATIO in the level's own polarity direction, AND
+    whether that implied UP/DOWN read is corroborated — the other asset's own copy of the
+    SAME named level already closed the same way (cross-asset), a DIFFERENT tier on the SAME
+    asset already closed the same way (cross-tier), or this level is itself a live (not
+    suggested-exhausted) meaningful P2 SMT candidate — with NO other mature day/week-tier item
+    on EITHER asset closing the opposite way (a live contradiction voids corroboration
+    outright). Both checks feed `preconfirm_eligible`, a CODE-SUGGESTED green light the model
+    MAY act on by declaring `mature: true` for that item early — the same "code suggests, model
+    may override" shape as `suggested_exhausted` (§2.1c), never a hard schema/validator change:
+    `mature` stays a plain model-declared boolean, exactly as before this function existed."""
+    out: list = []
+    if now is None:
+        return out
+    next_1h = now.ceil("h")
+    if next_1h <= now:
+        next_1h = next_1h + pd.Timedelta(hours=1)
+    next_4h = now.ceil("4h")
+    if next_4h <= now:
+        next_4h = next_4h + pd.Timedelta(hours=4)
+    next_close = {"1h": next_1h, "4h": next_4h}
+
+    def _tier_of(tkr, name):
+        return (bundle.levels.get(tkr, {}).get(name) or (None, None, None, None))[3]
+
+    # Every currently-mature (already-closed) day/week-tier P1 read, per asset — used below
+    # for the cross-asset/cross-tier corroboration checks and the contradiction veto.
+    mature_reads = {"MNQ": {}, "MES": {}}
+    for tkr in ("MNQ", "MES"):
+        status = (bundle.htf_close_status or {}).get(tkr, {})
+        swept_map = (bundle.swept_at or {}).get(tkr, {})
+        suppressed = (bundle.suppressed_p1_levels or {}).get(tkr, set())
+        for name, tf_map in status.items():
+            if swept_map.get(name) is None or name in suppressed:
+                continue
+            if _tier_of(tkr, name) not in ("day", "week"):
+                continue
+            for tf in ("1h", "4h"):
+                info = (tf_map or {}).get(tf)
+                if info is not None:
+                    side = _implied_side(_level_polarity_hl(name), bool(info["beyond"]))
+                    if side is not None:
+                        mature_reads[tkr][name] = side
+                    break
+
+    all_mature_sides = list(mature_reads["MNQ"].values()) + list(mature_reads["MES"].values())
+    smt_by_site = {(c["swept_ticker"], c["level"]): c
+                   for c in (bundle.smt_candidates or []) if c.get("meaningful")}
+
+    for tkr in ("MNQ", "MES"):
+        other = "MES" if tkr == "MNQ" else "MNQ"
+        status = (bundle.htf_close_status or {}).get(tkr, {})
+        swept_map = (bundle.swept_at or {}).get(tkr, {})
+        suppressed = (bundle.suppressed_p1_levels or {}).get(tkr, set())
+        for name, tf_map in status.items():
+            if swept_map.get(name) is None or name in suppressed:
+                continue
+            tier = _tier_of(tkr, name)
+            if tier not in ("day", "week"):
+                continue
+            tup = bundle.levels.get(tkr, {}).get(name)
+            if not tup or not isinstance(tup[0], (int, float)):
+                continue
+            price, _body, side = tup[0], tup[1], tup[2]
+            for tf in ("1h", "4h"):
+                if (tf_map or {}).get(tf) is not None:
+                    continue      # already mature on this tf — not a candidate
+                resolves_at = next_close[tf]
+                minutes_remaining = (resolves_at - now).total_seconds() / 60.0
+                if minutes_remaining < 0 or minutes_remaining > NEAR_MATURITY_WINDOW_MIN:
+                    continue
+                now_price = float(data[tkr]["close"].iloc[-1])
+                ar = (bundle.avg_range_1h if tf == "1h" else bundle.avg_range_4h or {}).get(tkr)
+                ratio = None
+                if isinstance(ar, (int, float)) and ar > 0:
+                    ratio = round(abs(now_price - price) / ar, 4)
+                distance_safe = ratio is not None and ratio >= NEAR_MATURITY_DISTANCE_RATIO
+                implied = _implied_side(_level_polarity_hl(name), _beyond_side(now_price, price, side))
+
+                contradiction = implied is not None and any(
+                    d != implied for d in all_mature_sides)
+                cross_asset = mature_reads[other].get(name) == implied if implied else False
+                cross_tier = any(
+                    n != name and d == implied and _tier_of(tkr, n) != tier
+                    for n, d in mature_reads[tkr].items()) if implied else False
+                smt_cand = smt_by_site.get((tkr, name))
+                smt_live = smt_cand is not None and not smt_cand.get("suggested_exhausted")
+                corroborated = implied is not None and not contradiction and (
+                    cross_asset or cross_tier or smt_live)
+
+                out.append({
+                    "asset": tkr, "level": name, "tier": tier, "tf": tf,
+                    "resolves_at": str(resolves_at),
+                    "minutes_remaining": round(minutes_remaining, 1),
+                    "now_distance_ratio": ratio, "implied_direction": implied,
+                    "distance_safe": distance_safe, "corroborated": corroborated,
+                    "preconfirm_eligible": bool(distance_safe and corroborated),
+                })
+    return out
+
+
 def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) -> str:
     """Render the S9 thesis-evidence block (decisions/thesis.md P1/P3/P4 inputs): weekly
     mid, per-level HTF close-status on BOTH tickers, and SMT candidates with tier
@@ -936,6 +1076,21 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
           + ("; ".join(immature) if immature else "(none)"))
     else:
         A("  (now unavailable)")
+
+    # --- thesis.md §3a: near-maturity pre-confirmation (bounded exception to §3) ---
+    A(f"\nNEAR-MATURITY PRE-CONFIRMATION CANDIDATES (a day/week-tier item within "
+      f"{NEAR_MATURITY_WINDOW_MIN} min of its next qualifying HTF close — thesis.md §3a; "
+      f"ONLY when preconfirm_eligible=True MAY you declare mature=true for that item now, "
+      f"using implied_direction, instead of waiting for the literal close):")
+    if not bundle.near_maturity_candidates:
+        A("  (none)")
+    for cand in bundle.near_maturity_candidates:
+        A(f"  {cand['asset']} {cand['level']} [{cand['tier']}, {cand['tf']}]: "
+          f"resolves_at={cand['resolves_at']} ({cand['minutes_remaining']}m away) | "
+          f"now_distance={cand['now_distance_ratio']}x avg_range | "
+          f"implied_direction={cand['implied_direction']} | "
+          f"distance_safe={cand['distance_safe']} corroborated={cand['corroborated']} "
+          f"-> preconfirm_eligible={cand['preconfirm_eligible']}")
 
     # --- plan 15 Task 4: FVG-fill (P5) candidates ---
     A("\nFVG-FILL CANDIDATES (thesis.md §2.1 P5; a VISITED zone is a fill event — copy the id "
@@ -1401,6 +1556,11 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
         stretch = abs(float(closes.iloc[-1]) - float(fire_px)) / ar
         c["stretch_since_fire"] = round(stretch, 3)
         c["suggested_exhausted"] = stretch > SMT_SHELF_LIFE.get(c.get("tier"), float("inf"))
+
+    # thesis.md §3a: near-maturity pre-confirmation candidates. Computed here (not earlier) so
+    # htf_close_status, suppressed_p1_levels, smt_candidates (incl. suggested_exhausted), and
+    # avg_range_1h/4h are all already populated — every input the check needs.
+    bundle.near_maturity_candidates = _near_maturity_candidates(bundle, data, now)
 
     L("\n## S3b CANDIDATE ITEM CARDS (precomputed scoring inputs; multipliers per decisions/next-move.md §2)")
     L("score = tier_weight × session_side × alignment × freshness × whipsaw = base × session_side × alignment × whipsaw")

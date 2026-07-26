@@ -485,3 +485,159 @@ def test_evidence_text_never_swept_level_omitted_but_swept_immature_shown():
     assert "never_swept_pool" not in ev
     assert "swept_immature_pool" in ev
     assert "immature" in ev
+
+
+# --- thesis.md §3a: near-maturity pre-confirmation candidates -------------------------- #
+
+def _nm_data(mnq_close, mes_close):
+    return {
+        "MNQ": pd.DataFrame({"close": [mnq_close]}),
+        "MES": pd.DataFrame({"close": [mes_close]}),
+    }
+
+
+_NM_NOW = pd.Timestamp("2026-07-16 19:59:00", tz="America/New_York")
+
+
+def test_near_maturity_distance_safe_and_cross_asset_corroborated():
+    """Motivating case (thesis.md §3a, 2026-07-16 20:00 ET): a fresh MNQ prev1_day_low sweep
+    one minute from its 4h close, price already far (STRONG clearance) from the level, and
+    MES's own copy of the SAME level already closed the same way (DOWN) — should be
+    preconfirm_eligible."""
+    bundle = derive_facts.FactsBundle()
+    swept_ts = _NM_NOW - pd.Timedelta(minutes=34)
+    bundle.levels = {
+        "MNQ": {"prev1_day_low": (29079.0, 29079.0, "below", "day", None)},
+        "MES": {"prev1_day_low": (7500.0, 7500.0, "below", "day", None)},
+    }
+    bundle.swept_at = {"MNQ": {"prev1_day_low": swept_ts}, "MES": {"prev1_day_low": swept_ts}}
+    bundle.htf_close_status = {
+        "MNQ": {"prev1_day_low": {"1h": None, "4h": None}},
+        "MES": {"prev1_day_low": {"1h": {"close": 7480.0, "closed_at": str(_NM_NOW),
+                                          "n_closed_since": 1, "beyond": True}, "4h": None}},
+    }
+    bundle.suppressed_p1_levels = {"MNQ": set(), "MES": set()}
+    bundle.smt_candidates = []
+    bundle.avg_range_1h = {"MNQ": 10.0, "MES": 10.0}
+    bundle.avg_range_4h = {"MNQ": 10.0, "MES": 10.0}
+
+    cands = derive_facts._near_maturity_candidates(bundle, _nm_data(29050.0, 7495.0), _NM_NOW)
+    c4h = next(c for c in cands if c["asset"] == "MNQ" and c["tf"] == "4h")
+    assert c4h["implied_direction"] == "DOWN"
+    assert c4h["distance_safe"] is True
+    assert c4h["corroborated"] is True
+    assert c4h["preconfirm_eligible"] is True
+
+
+def test_near_maturity_contradiction_blocks_corroboration():
+    """A mature item on the SAME asset closing the opposite way (UP) must veto corroboration
+    outright, even though the cross-asset agreement alone would otherwise qualify."""
+    bundle = derive_facts.FactsBundle()
+    swept_ts = _NM_NOW - pd.Timedelta(minutes=34)
+    bundle.levels = {
+        "MNQ": {"prev1_day_low": (29079.0, 29079.0, "below", "day", None),
+                "prev2_day_high": (29500.0, 29500.0, "above", "day", None)},
+        "MES": {"prev1_day_low": (7500.0, 7500.0, "below", "day", None)},
+    }
+    bundle.swept_at = {"MNQ": {"prev1_day_low": swept_ts, "prev2_day_high": swept_ts},
+                       "MES": {"prev1_day_low": swept_ts}}
+    bundle.htf_close_status = {
+        "MNQ": {
+            "prev1_day_low": {"1h": None, "4h": None},
+            "prev2_day_high": {"1h": {"close": 29600.0, "closed_at": str(_NM_NOW),
+                                       "n_closed_since": 1, "beyond": True}, "4h": None},
+        },
+        "MES": {"prev1_day_low": {"1h": {"close": 7480.0, "closed_at": str(_NM_NOW),
+                                          "n_closed_since": 1, "beyond": True}, "4h": None}},
+    }
+    bundle.suppressed_p1_levels = {"MNQ": set(), "MES": set()}
+    bundle.smt_candidates = []
+    bundle.avg_range_1h = {"MNQ": 10.0, "MES": 10.0}
+    bundle.avg_range_4h = {"MNQ": 10.0, "MES": 10.0}
+
+    cands = derive_facts._near_maturity_candidates(bundle, _nm_data(29050.0, 7495.0), _NM_NOW)
+    c4h = next(c for c in cands if c["asset"] == "MNQ" and c["level"] == "prev1_day_low"
+              and c["tf"] == "4h")
+    assert c4h["distance_safe"] is True
+    assert c4h["corroborated"] is False
+    assert c4h["preconfirm_eligible"] is False
+
+
+def test_near_maturity_not_distance_safe():
+    """Price still close to the level (below the STRONG-clearance bar) must not pre-confirm
+    even with a clean corroborating source and no contradiction."""
+    bundle = derive_facts.FactsBundle()
+    swept_ts = _NM_NOW - pd.Timedelta(minutes=34)
+    bundle.levels = {
+        "MNQ": {"prev1_day_low": (29079.0, 29079.0, "below", "day", None)},
+        "MES": {"prev1_day_low": (7500.0, 7500.0, "below", "day", None)},
+    }
+    bundle.swept_at = {"MNQ": {"prev1_day_low": swept_ts}, "MES": {"prev1_day_low": swept_ts}}
+    bundle.htf_close_status = {
+        "MNQ": {"prev1_day_low": {"1h": None, "4h": None}},
+        "MES": {"prev1_day_low": {"1h": {"close": 7480.0, "closed_at": str(_NM_NOW),
+                                          "n_closed_since": 1, "beyond": True}, "4h": None}},
+    }
+    bundle.suppressed_p1_levels = {"MNQ": set(), "MES": set()}
+    bundle.smt_candidates = []
+    bundle.avg_range_1h = {"MNQ": 10.0, "MES": 10.0}
+    bundle.avg_range_4h = {"MNQ": 10.0, "MES": 10.0}
+
+    cands = derive_facts._near_maturity_candidates(bundle, _nm_data(29075.0, 7495.0), _NM_NOW)
+    c4h = next(c for c in cands if c["asset"] == "MNQ" and c["tf"] == "4h")
+    assert c4h["distance_safe"] is False
+    assert c4h["preconfirm_eligible"] is False
+
+
+def test_near_maturity_outside_window_and_never_swept_excluded():
+    bundle = derive_facts.FactsBundle()
+    far_now = pd.Timestamp("2026-07-16 19:00:00", tz="America/New_York")   # 60m from 20:00 close
+    swept_ts = far_now - pd.Timedelta(minutes=34)
+    bundle.levels = {
+        "MNQ": {"prev1_day_low": (29079.0, 29079.0, "below", "day", None),
+                "prev2_day_low": (29200.0, 29200.0, "below", "day", None)},
+        "MES": {},
+    }
+    bundle.swept_at = {"MNQ": {"prev1_day_low": swept_ts, "prev2_day_low": None}, "MES": {}}
+    bundle.htf_close_status = {
+        "MNQ": {"prev1_day_low": {"1h": None, "4h": None},
+                "prev2_day_low": {"1h": None, "4h": None}},
+        "MES": {},
+    }
+    bundle.suppressed_p1_levels = {"MNQ": set(), "MES": set()}
+    bundle.smt_candidates = []
+    bundle.avg_range_1h = {"MNQ": 10.0, "MES": 10.0}
+    bundle.avg_range_4h = {"MNQ": 10.0, "MES": 10.0}
+
+    cands = derive_facts._near_maturity_candidates(bundle, _nm_data(29050.0, 7495.0), far_now)
+    assert cands == [], "60 minutes from the next close, and a never-swept level, must not appear"
+
+
+def test_near_maturity_live_smt_corroborates_without_cross_asset():
+    """A level that is itself a live (not suggested-exhausted), meaningful P2 SMT candidate
+    corroborates on its own — P2's own cross-asset divergence requirement already supplies the
+    second source, so no separate cross-asset/cross-tier agreement is needed."""
+    bundle = derive_facts.FactsBundle()
+    swept_ts = _NM_NOW - pd.Timedelta(minutes=34)
+    bundle.levels = {
+        "MNQ": {"prev1_day_low": (29079.0, 29079.0, "below", "day", None)},
+        "MES": {},
+    }
+    bundle.swept_at = {"MNQ": {"prev1_day_low": swept_ts}, "MES": {}}
+    bundle.htf_close_status = {
+        "MNQ": {"prev1_day_low": {"1h": None, "4h": None}},
+        "MES": {},
+    }
+    bundle.suppressed_p1_levels = {"MNQ": set(), "MES": set()}
+    bundle.smt_candidates = [{
+        "level": "prev1_day_low", "tier": "day", "side": "below",
+        "swept_ticker": "MNQ", "unswept_ticker": "MES", "swept_at": swept_ts, "type": "wick",
+        "meaningful": True, "suggested_exhausted": False,
+    }]
+    bundle.avg_range_1h = {"MNQ": 10.0, "MES": 10.0}
+    bundle.avg_range_4h = {"MNQ": 10.0, "MES": 10.0}
+
+    cands = derive_facts._near_maturity_candidates(bundle, _nm_data(29050.0, 7495.0), _NM_NOW)
+    c4h = next(c for c in cands if c["asset"] == "MNQ" and c["tf"] == "4h")
+    assert c4h["corroborated"] is True
+    assert c4h["preconfirm_eligible"] is True
