@@ -487,6 +487,26 @@ def test_evidence_text_never_swept_level_omitted_but_swept_immature_shown():
     assert "immature" in ev
 
 
+# --- day-extreme window extension (hypothesis.py::compute_live_hl_mid parity) ---------- #
+
+def test_day_start_ts_asia_looks_back_to_prior_ny_morning():
+    now = pd.Timestamp("2026-07-16 19:30:00", tz="America/New_York")
+    assert derive_facts._day_start_ts(now) == pd.Timestamp(
+        "2026-07-16 06:00:00", tz="America/New_York")
+
+
+def test_day_start_ts_london_looks_back_to_prior_ny_evening():
+    now = pd.Timestamp("2026-07-16 02:00:00", tz="America/New_York")
+    assert derive_facts._day_start_ts(now) == pd.Timestamp(
+        "2026-07-15 12:00:00", tz="America/New_York")
+
+
+def test_day_start_ts_ny_morning_onward_is_the_current_session_open():
+    now = pd.Timestamp("2026-07-16 10:00:00", tz="America/New_York")
+    assert derive_facts._day_start_ts(now) == pd.Timestamp(
+        "2026-07-15 18:00:00", tz="America/New_York")
+
+
 # --- thesis.md §3a: near-maturity pre-confirmation candidates -------------------------- #
 
 def _nm_data(mnq_close, mes_close):

@@ -93,6 +93,28 @@ def week_start_ts(now):
     return pd.Timestamp(datetime.datetime(anchor.year, anchor.month, anchor.day, 18, 0), tz=TZ)
 
 
+def _day_start_ts(now: pd.Timestamp) -> pd.Timestamp:
+    """Engine day-extreme anchor (hypothesis.py::compute_live_hl_mid), mirroring
+    week_start_ts's own pattern: session-phase-dependent, not a fixed 18:00-today offset, so
+    the running day_hi/day_lo/day_mid window is never degenerate right at/after the
+    mandatory 18:00 ET session-open call (thesis.md §1). Asia (now.hour>=18): today at
+    06:00 ET -- reaches into the PRIOR session's NY-morning-through-close (~12h of real data
+    instead of ~0). London (now.hour<6): yesterday at 12:00 ET -- reaches into the prior
+    session's NY-evening open. NY-morning onward (6<=now.hour<18): yesterday at 18:00 ET --
+    exactly the current session's own open (no extension needed -- by then the session
+    already has ample same-session data). Deliberately does NOT port
+    compute_live_hl_mid's opening-spike outlier skip (excluding the first 90min from
+    whichever side it distorts) -- window extension only, a separate refinement."""
+    today = now.date()
+    if now.hour >= 18:
+        d, hr = today, 6
+    elif now.hour < 6:
+        d, hr = today - datetime.timedelta(days=1), 12
+    else:
+        d, hr = today - datetime.timedelta(days=1), 18
+    return pd.Timestamp(datetime.datetime(d.year, d.month, d.day, hr, 0), tz=TZ)
+
+
 def ohlc(df, rule, offset=None):
     return df.resample(rule, offset=offset).agg(
         open=("open", "first"), high=("high", "max"),
@@ -394,8 +416,11 @@ class FactsBundle:
     # --- plan 14: ATR-like primitives + per-asset day extremes (Task 1) ---
     avg_range_1h: dict = field(default_factory=dict)   # {tkr: mean last-20 completed 1h TR} v1 seed
     avg_range_4h: dict = field(default_factory=dict)   # {tkr: mean last-10 completed 4h TR} v1 seed
-    day_hi: dict = field(default_factory=dict)         # {tkr: running day high} (thesis.md stretch)
-    day_lo: dict = field(default_factory=dict)         # {tkr: running day low}
+    # {tkr: running day high/low} — EXTENDED window (_day_start_ts, hypothesis.py parity),
+    # NOT the narrow current-session window the S1 "day running" text line uses (thesis.md
+    # stretch/§2.1c, S8 daily_mid).
+    day_hi: dict = field(default_factory=dict)
+    day_lo: dict = field(default_factory=dict)
     # --- plan 14: session-maturity soft prior (Task 3) ---
     session_elapsed_frac: Optional[float] = None       # fraction of current session elapsed at now
     mature_evidence_count: int = 0                     # count of P1/P2-eligible items right now
@@ -1376,15 +1401,24 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
         dh, dl, dch, dcl = hl(sess_now)
         L(f"day running: high={dh} (at {sess_now['high'].idxmax()}) low={dl} "
               f"(at {sess_now['low'].idxmin()}) mid={(dh + dl) / 2}")
-        if tkr == "MNQ" and dh is not None and dl is not None:
-            bundle.day_mid = round((dh + dl) / 2.0, 2)   # S8 menu input (not rendered in S1)
+        # thesis.md §2.1c/P3 day extremes use an EXTENDED window (_day_start_ts, hypothesis.py
+        # ::compute_live_hl_mid parity) — NOT sess_now's own narrow current-session frame,
+        # which degenerates to ~0 bars right at/after the mandatory 18:00 ET call. The S1 "day
+        # running" line above stays on sess_now UNCHANGED (hash parity with the shared S0-S7
+        # core, read by the old daily-trend.md/next-move.md KB too) — only the structured
+        # bundle.day_hi/day_lo/day_mid fields (thesis.md-only consumers: S8 daily_mid menu,
+        # §2.1c stretch) use the extended frame computed here.
+        day_ext_frame = df.loc[_day_start_ts(now):now]
+        dh_ext, dl_ext, _dch_ext, _dcl_ext = hl(day_ext_frame)
+        if tkr == "MNQ" and dh_ext is not None and dl_ext is not None:
+            bundle.day_mid = round((dh_ext + dl_ext) / 2.0, 2)   # S8 menu input (not rendered in S1)
         # plan 14 Task 1: per-asset day extremes + ATR-like avg_range (completed HTF bars
         # only, simple high-low true range; windows are v1 seeds pending calibration). No
         # L(...) — additive FactsBundle fields, S0-S7 text unchanged.
-        if dh is not None:
-            bundle.day_hi[tkr] = float(dh)
-        if dl is not None:
-            bundle.day_lo[tkr] = float(dl)
+        if dh_ext is not None:
+            bundle.day_hi[tkr] = float(dh_ext)
+        if dl_ext is not None:
+            bundle.day_lo[tkr] = float(dl_ext)
         for tf, win, dst in (("1h", 20, bundle.avg_range_1h), ("4h", 10, bundle.avg_range_4h)):
             bars = ohlc(df, tf).iloc[:-1]                 # completed bars only
             if len(bars) == 0:

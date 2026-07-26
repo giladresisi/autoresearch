@@ -19,7 +19,9 @@ for _p in (_HERE, os.path.dirname(_HERE), os.path.join(os.path.dirname(_HERE), "
         sys.path.insert(0, _p)
 
 from facts import DEFAULT_MAIN, LOOKBACK, ParquetFactsSource  # noqa: E402
-from derive_facts import NEAR_MATURITY_WINDOW_MIN, compute_facts  # noqa: E402
+from derive_facts import (  # noqa: E402
+    NEAR_MATURITY_WINDOW_MIN, compute_facts, render_facts_text,
+)
 
 TZ = "America/New_York"
 
@@ -154,6 +156,24 @@ def test_nested_day_levels_suppressed_2026_07_14(source):
     # prev2_day_low is nested and NOT an SMT-candidate site -- must not render as a fresh
     # P1 item at all.
     assert "MNQ prev2_day_low [1h]" not in text
+
+
+def test_day_hi_lo_extended_window_not_degenerate_right_after_1800(source):
+    # Right after the mandatory 18:00 ET session-open call, the CURRENT session has ~1
+    # minute of bars — a narrow session-only window would give a near-zero day_hi-day_lo
+    # range. The extended window (_day_start_ts, Asia case: today at 06:00 ET) reaches back
+    # into the prior session's NY-morning-through-close, so the range must be real.
+    boundary = pd.Timestamp("2026-07-16 18:01:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+    dh, dl = bundle.day_hi["MNQ"], bundle.day_lo["MNQ"]
+    assert dh is not None and dl is not None
+    assert dh - dl > 10.0, "extended window must cover more than a single opening tick"
+
+    # The S1 "day running" TEXT line stays hash-sensitive (shared with the old KB docs) and
+    # unaffected by the extended structured fields — test_facts_parity_with_prepare_cuts is
+    # the authoritative proof of that; here just confirm the line still renders normally.
+    text = render_facts_text(bundle)
+    assert "day running:" in text
 
 
 def test_near_maturity_candidates_wired_2026_07_16_2000(source):

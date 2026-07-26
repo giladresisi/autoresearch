@@ -162,6 +162,22 @@ of the lower-tier accepts that out-voted the single meaningful week-tier reject.
 
 ### 2.1c Stretch discount + regime flag
 
+**Day-extreme window (`derive_facts._day_start_ts`, hypothesis.py `compute_live_hl_mid` parity).**
+`day_high`/`day_low`/`day_mid` (feeding this section, P3's daily-equilibrium read, and the S8
+`daily_mid` menu) are NOT computed from the current session's own bars alone — that window is
+degenerate (near-zero range) right at/after the mandatory 18:00 ET call, exactly the moment a
+fresh thesis is needed most. Session-phase-dependent, mirroring `week_start_ts`'s own pattern:
+Asia (now.hour≥18) looks back to 06:00 ET the same calendar day (the prior session's NY-morning-
+through-close); London (now.hour<6) looks back to 12:00 ET the prior calendar day (the prior
+session's NY-evening open); NY-morning onward (06:00-17:59 ET) is exactly the current session's
+own 18:00 open (no extension needed — by then the session already has ample same-session data).
+This is a structured-field-only change: the S1 "day running" TEXT line (part of the shared,
+hashed S0-S7 core also read by `daily-trend.md`/`next-move.md`) stays on the narrow
+current-session window, unchanged. Deliberately does NOT port `compute_live_hl_mid`'s
+opening-spike outlier skip (excluding the first 90min from whichever side it distorts, if
+disproportionate) — window extension only; the outlier skip is a separate, not-yet-ported
+refinement.
+
 **Stretch** = the distance from current price to the OPPOSITE-SIDE (farther) own-day running
 extreme (`day_high`/`day_low` — whichever price has moved AWAY from), normalized by `avg_range_1h`
 (a v1-seed ATR — mean of the last 20 completed 1h true ranges, `high − low`; `derive_facts.
@@ -711,3 +727,12 @@ near-maturity pre-confirmation (act now when distance-safe + corroborated) and t
 wait simulation (retarget the call to the imminent close otherwise) — both scoped tightly (a short
 window, day+/week tier only, corroboration required) so they don't reopen the immature-sweep
 false-signal failure mode §3 exists to prevent.
+
+**Day-extreme window was degenerate right at the mandatory 18:00 ET call.** `bundle.day_hi`/
+`day_lo`/`day_mid` were computed from the current session's own bars only (`session_frame`) —
+~0 bars right at/after 18:00, so P3's daily-equilibrium read and the §2.1c stretch flag were
+meaningless at exactly the moment they matter most. The weekly analog (`week_start_ts`) already
+carried a production-parity extension (looks back 2-3 prior trading days at week start) — the
+daily side never got the equivalent port → §2.1c's new day-extreme window
+(`derive_facts._day_start_ts`, `hypothesis.py::compute_live_hl_mid` parity) fixes this for the
+structured fields only, leaving the shared S1 text line (and its hash) untouched.
