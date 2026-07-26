@@ -502,7 +502,7 @@ def _thesis_side(direction: str) -> str:
     return "above" if direction == "UP" else "below"
 
 
-def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float) -> dict:
+def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None) -> dict:
     """Eligible target pools per direction: in-facts, unswept AND undepleted, on the
     correct side of current price, AND at least DOL_MIN_DRAW_DISTANCE_PTS away. UP draws sit
     above price (nearest first); DOWN below.
@@ -513,11 +513,23 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float) -> dict:
     can cross the level, so the exhaustion (`price_beyond(DOL)`) is already satisfied at arrival
     and the thesis "completes" in minutes on a level it never actually drew to. This was the
     07-02 th_02 bug: DOL prev1_day_low was 0.75 pts below price at facts build; price crossed it
-    during the latency window → bogus 2-minute completion."""
+    during the latency window → bogus 2-minute completion.
+
+    Nesting/duplicate guard (thesis.md §2.1b/§2.1d): `suppressed` is the caller's
+    `bundle.suppressed_p1_levels["MNQ"]` set — a level already excluded from fresh P1 scoring
+    because a more-recent same-family level supersedes it (or it's a duplicate-simultaneous-sweep
+    loser) is equally not an independent draw target, so it's excluded here too. Without this, a
+    nested level could still surface as the NEAREST (and therefore selected) DOL menu entry even
+    though it can never be cited as P1 evidence — the 2026-07-13 18:00 ET case: `prev7_day_low`
+    was nested under `prev3_day_low` (both unswept, but prev3 sits farther/deeper), yet it was the
+    #1 DOWN entry and got selected as the thesis's DOL."""
     out = {"UP": [], "DOWN": []}
     if not isinstance(now_price, (int, float)):
         return out
+    suppressed = suppressed or ()
     for name, tup in mnq_levels.items():
+        if name in suppressed:
+            continue
         price, body, side, tier, _active = tup
         if side not in ("above", "below") or not isinstance(price, (int, float)):
             continue
@@ -723,7 +735,8 @@ def build_menus(bundle: FactsBundle, vd: dict) -> dict:
     now_price = vd.get("now_price") if isinstance(vd, dict) else bundle.now_price
     if not isinstance(now_price, (int, float)):
         now_price = bundle.now_price
-    dol = _dol_menu(mnq_levels, vlevels, now_price)
+    mnq_suppressed = (bundle.suppressed_p1_levels or {}).get("MNQ", set())
+    dol = _dol_menu(mnq_levels, vlevels, now_price, suppressed=mnq_suppressed)
     mnq_swept_at = (bundle.swept_at or {}).get("MNQ", {})
     mes_swept_at = (bundle.swept_at or {}).get("MES", {})
     preds = _predicate_menu(mnq_levels, vlevels, now_price, bundle.day_mid, dol,
@@ -961,7 +974,8 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
         A("  stretch from opposite-side day extreme: n/a (missing price/day extremes)")
     dol_menu = (bundle.menus or {}).get("dol") if bundle.menus else None
     if dol_menu is None:
-        dol_menu = _dol_menu((bundle.levels or {}).get("MNQ", {}), {}, np_)
+        dol_menu = _dol_menu((bundle.levels or {}).get("MNQ", {}), {}, np_,
+                              suppressed=(bundle.suppressed_p1_levels or {}).get("MNQ", set()))
     for direction in ("UP", "DOWN"):
         rows = dol_menu.get(direction) or []
         if not rows or not isinstance(np_, (int, float)):

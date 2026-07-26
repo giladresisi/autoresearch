@@ -118,6 +118,38 @@ def test_th_02_root_cause_regression_dol_absent():
     assert "prev2_day_low" in down, "a genuine farther low draw should still be offered"
 
 
+def test_dol_menu_excludes_nested_prev_level_2026_07_13_case():
+    """thesis.md §2.1b names DOL as one of the things prev-level nesting must exclude, but
+    `_dol_menu` never received the suppression set until now. Verbatim MNQ day-low family from
+    the 2026-07-13 18:00 ET case (thesis.md §10): `prev7_day_low` (29329.0) is nested under
+    `prev3_day_low` (28910.25, deeper/farther — no more-recent level reaches as low) yet it was
+    offered as the #1 DOWN draw and picked as the thesis's DOL before this fix."""
+    now_price = 29433.75
+    logged = {
+        "prev1_day_low": (29677.5, True),
+        "prev2_day_low": (29395.0, True),
+        "prev3_day_low": (28910.25, False),
+        "prev4_day_low": (29209.75, False),
+        "prev5_day_low": (29683.25, True),
+        "prev6_day_low": (29522.5, True),
+        "prev7_day_low": (29329.0, False),
+    }
+    b = FactsBundle()
+    b.now_price = now_price
+    b.day_mid = 29714.5
+    mnq, vd_levels = {}, {}
+    for name, (price, swept) in logged.items():
+        mnq[name] = (price, price, "below", "day", None)
+        vd_levels[name] = {"price": price, "side": "low", "swept": swept, "depleted": swept}
+    b.levels = {"MNQ": mnq}
+    b.suppressed_p1_levels = {
+        "MNQ": {"prev4_day_low", "prev5_day_low", "prev6_day_low", "prev7_day_low"}}
+    m = build_menus(b, {"now_price": now_price, "levels": vd_levels})
+    down = {e["level"] for e in m["dol"]["DOWN"]}
+    assert "prev7_day_low" not in down, "nested level must not be offered as a DOL draw"
+    assert down == {"prev3_day_low"}, down
+
+
 def test_dol_menu_nearest_first_and_ids():
     m = build_menus(_bundle(), _vd())
     up = m["dol"]["UP"]

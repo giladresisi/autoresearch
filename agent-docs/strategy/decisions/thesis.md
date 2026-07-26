@@ -91,6 +91,10 @@ like the §3 maturity gate), not merely a prompt instruction the model can miss.
 block skips a nested level's line entirely (not offered as fresh P1 evidence at all) UNLESS that
 level is also a live SMT candidate, in which case it renders tagged `[nested/duplicate ... P2-
 candidate context only]` — visible for P2 judgment, structurally unusable as a P1 item.
+`derive_facts._dol_menu` also excludes `bundle.suppressed_p1_levels["MNQ"]` from both the UP and
+DOWN draw lists — a nested level cannot become the thesis's DOL either, closing the gap where a
+level unusable as P1 evidence could still be the #1 (nearest) DOL menu entry and get selected
+(the 2026-07-13 18:00 ET case in §10).
 
 **Worked example (2026-07-14 01:00 ET, MNQ day lows):** `prev1_day_low`=29386.5, `prev2`=29677.5,
 `prev3`=29395.0, `prev4`=28910.25, `prev5`=29209.75, `prev6`=29683.25, `prev7`=29522.5. Scanning
@@ -484,8 +488,9 @@ tallied and still decides direction; only the ceiling is capped. Same code path,
   daily-mid touch/cross" as structured facts (currently rendered-text-only in S1/S4) — see §2.1a's
   own gap note.
 - DOL selection is unchanged from the existing S8 `_dol_menu`/validator contract: nearest
-  meaningful, in-facts, unswept, undepleted, correct-side pool ≥ `DOL_MIN_DRAW_DISTANCE_PTS`
-  (5.0) away — prefer the DOL menu's `D*` IDs directly.
+  meaningful, in-facts, unswept, undepleted, correct-side, NOT nested/duplicate-suppressed
+  (§2.1b/§2.1d) pool ≥ `DOL_MIN_DRAW_DISTANCE_PTS` (5.0) away — prefer the DOL menu's `D*` IDs
+  directly.
 - **No-liquidity rule (code-enforced, not soft).** A sufficiently deep, sustained trend can sweep
   every named pool on its own side within the tracked lookback (prevN_day/week — no deeper
   history is tracked), leaving that direction's S8 DOL menu `(none eligible)`. This is the SAME
@@ -632,3 +637,12 @@ session sub-block low exactly duplicating that day's own day-low (`ny_evening(pr
 rule promoted from a documented-but-unenforced principle to a code backstop
 (`suppressed_p1_levels`), plus the new §2.1d duplicate-simultaneous-sweep collapse for the
 cross-family/session-tier cases §2.1b's family-scoped comparison does not reach.
+
+**2026-07-13 18:00 ET — a nested level was still offered and selected as DOL.** §2.1b's own text
+says a nested level is ineligible for "P1/P2/P4/**DOL**" alike, and `suppressed_p1_levels` was
+wired into P1 scoring and S9 rendering, but `derive_facts._dol_menu` never received or checked
+that set — `prev7_day_low` (29329.0), nested under `prev3_day_low` (28910.25, deeper, no
+more-recent level reaches as low), still surfaced as the #1 (nearest) DOWN draw and was picked as
+the thesis's DOL, while the genuinely eligible `prev3_day_low` sat unused at the back of the same
+menu → `_dol_menu` now takes the caller's `suppressed_p1_levels["MNQ"]` and excludes those names
+from both the UP and DOWN lists, same treatment as the existing swept/depleted/proximity guards.
