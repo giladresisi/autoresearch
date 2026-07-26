@@ -577,7 +577,7 @@ def _derive_next_arithmetic(block: dict) -> tuple[dict, list]:
 
 
 def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
-                              suppressed_p1_levels=None) -> tuple[dict, list]:
+                              suppressed_p1_levels=None, suppressed_p2_sites=None) -> tuple[dict, list]:
     """Compute per-item points, net score, and the confidence ceiling from the model's
     declared P1/P2 evidence ledger (decisions/thesis.md §2.1/§4/§6). Mirrors
     _derive_daily_arithmetic/_derive_next_arithmetic: confidence is silently corrected
@@ -598,7 +598,8 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
     if not evidence:
         return block, notes
     scoring = score_thesis_evidence(evidence, magnitude=magnitude, dol_available=dol_available,
-                                    suppressed_p1_levels=suppressed_p1_levels)
+                                    suppressed_p1_levels=suppressed_p1_levels,
+                                    suppressed_p2_sites=suppressed_p2_sites)
     # Audit-annotate each item with its computed points/side in place (mirrors
     # _derive_next_arithmetic writing item["score"] back onto the ledger).
     block["evidence"] = scoring["scored_evidence"]
@@ -972,11 +973,19 @@ _TASK_THESIS = (
     "already superseded by a more-recent, deeper same-family level (day_low/day_high/"
     "week_low/week_high), OR a duplicate restatement of one physical sweep that another "
     "named level already covers at the identical timestamp. Do NOT declare a fresh P1 item "
-    "there — code zeroes it regardless. The ONE exception: if that same level is ALSO listed "
-    "under SMT candidates, its divergence is still valid P2 evidence (a cross-asset "
-    "divergence that already fired does not stop being true just because a newer level "
-    "later superseded it for plain same-asset accept/reject purposes) — score it as P2, "
-    "never as P1."
+    "there — code zeroes it regardless. If that same level is ALSO listed under SMT "
+    "candidates, check its tag there: 'grandfathered' means the divergence fired BEFORE the "
+    "level became nested (a newer level superseded it only afterward) — still valid P2 "
+    "evidence, score it as P2, never as P1. 'P2-SUPPRESSED' means the level was ALREADY "
+    "nested when the divergence itself fired — no evidence at all here, not P1 and not P2; "
+    "code zeroes it regardless of what you declare."
+    "\n- Equilibrium-stale P1 items (thesis.md §2.1c): a close-status line tagged "
+    "'[SUGGESTED STALE: price has since reached equilibrium]' means price has, since this "
+    "level's own sweep, already traveled all the way to (and tested) the relevant daily or "
+    "weekly mid — more recent, more meaningful behavior than the original sweep. This is a "
+    "suggestion, not a hard rule: you may set exhausted:true on that P1 item (same field "
+    "P2 uses for a played-out SMT) if you judge the sweep no longer meaningful, or leave it "
+    "scoring normally if you judge it still relevant."
     "\n- Near-maturity pre-confirmation (thesis.md §3a, a BOUNDED exception to the §3 "
     "maturity gate): the S9 'NEAR-MATURITY PRE-CONFIRMATION CANDIDATES' block lists any day/"
     "week-tier item due to close within a few minutes. You may declare mature=true for that "
@@ -1023,13 +1032,14 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
         dol_menu = menus.get("dol") or {}
         dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
     suppressed_p1_levels = facts.get("suppressed_p1_levels")
+    suppressed_p2_sites = facts.get("suppressed_p2_sites")
     return _run_call(
         backend, system, user, schema,
         validate_block=lambda d: validate_thesis(d, facts),
         failsafe_block=failsafe_thesis(),
         derive_block=lambda d: _derive_thesis_arithmetic(
             d, magnitude=evidence_magnitude, dol_available=dol_available,
-            suppressed_p1_levels=suppressed_p1_levels),
+            suppressed_p1_levels=suppressed_p1_levels, suppressed_p2_sites=suppressed_p2_sites),
     )
 
 

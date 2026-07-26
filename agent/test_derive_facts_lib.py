@@ -507,6 +507,119 @@ def test_day_start_ts_ny_morning_onward_is_the_current_session_open():
         "2026-07-15 18:00:00", tz="America/New_York")
 
 
+# --- thesis.md §2.1b: P2/SMT nesting grandfather clause -------------------------------- #
+
+def _gf_bundle():
+    """MNQ day-low/day-high families with prev1 (born 2026-07-15) deeper than prev2 (born
+    2026-07-10) on BOTH sides -- so prev2_day_low/prev2_day_high are CURRENTLY nested. Two
+    SMT candidates test the two outcomes: prev2_day_low's divergence fired 07-12 (BEFORE
+    prev1's own day existed) -> grandfathered; prev2_day_high's fired 07-16 (AFTER prev1's
+    day already existed) -> already nested at fire time -> P2-suppressed."""
+    b = derive_facts.FactsBundle()
+    b.levels = {"MNQ": {
+        "prev1_day_low": (50.0, 50.0, "below", "day", None),
+        "prev2_day_low": (70.0, 70.0, "below", "day", None),
+        "prev1_day_high": (200.0, 200.0, "above", "day", None),
+        "prev2_day_high": (150.0, 150.0, "above", "day", None),
+    }, "MES": {}}
+    b.suppressed_p1_levels = {"MNQ": {"prev2_day_low", "prev2_day_high"}, "MES": set()}
+    b.smt_candidates = [
+        {"level": "prev2_day_low", "tier": "day", "side": "below", "swept_ticker": "MNQ",
+         "unswept_ticker": "MES", "swept_at": pd.Timestamp("2026-07-12 10:00", tz="America/New_York"),
+         "type": "wick", "meaningful": True, "suggested_exhausted": False},
+        {"level": "prev2_day_high", "tier": "day", "side": "above", "swept_ticker": "MNQ",
+         "unswept_ticker": "MES", "swept_at": pd.Timestamp("2026-07-16 10:00", tz="America/New_York"),
+         "type": "wick", "meaningful": True, "suggested_exhausted": False},
+    ]
+    return b
+
+
+_GF_KW = dict(prev1_td=pd.Timestamp("2026-07-15").date(),
+             prev2_td=pd.Timestamp("2026-07-10").date(),
+             prev1_week_tds=[], long_horizon={"MNQ": {"daily": [], "weekly": []}, "MES": {}},
+             td_now=pd.Timestamp("2026-07-16").date(),
+             iso_now=pd.Timestamp("2026-07-16").isocalendar()[:2])
+
+
+def test_p2_grandfather_keeps_divergence_fired_before_nesting():
+    b = _gf_bundle()
+    out = derive_facts._p2_nesting_grandfather(b, **_GF_KW)
+    low_cand = next(c for c in b.smt_candidates if c["level"] == "prev2_day_low")
+    assert low_cand["grandfathered"] is True
+    assert low_cand["p2_suppressed"] is False
+    assert "prev2_day_low" not in out["MNQ"]
+
+
+def test_p2_grandfather_suppresses_divergence_fired_after_nesting():
+    b = _gf_bundle()
+    out = derive_facts._p2_nesting_grandfather(b, **_GF_KW)
+    high_cand = next(c for c in b.smt_candidates if c["level"] == "prev2_day_high")
+    assert high_cand["grandfathered"] is False
+    assert high_cand["p2_suppressed"] is True
+    assert "prev2_day_high" in out["MNQ"]
+
+
+def test_p2_grandfather_site_stays_valid_if_any_instance_grandfathered():
+    """The real 2026-07-14 01:00 ET shape: prev3_day_low carries TWO candidate instances --
+    a wick divergence that fired BEFORE nesting (grandfathered) and a LATER, unrelated body-
+    close divergence that fired AFTER nesting (not grandfathered). The model's declared P2
+    evidence can't distinguish wick vs body, so the SITE must stay valid (not p2_suppressed)
+    because at least one instance is genuinely grandfathered."""
+    b = _gf_bundle()
+    b.smt_candidates.append({
+        "level": "prev2_day_low", "tier": "day", "side": "below", "swept_ticker": "MNQ",
+        "unswept_ticker": "MES",
+        "swept_at": pd.Timestamp("2026-07-15 20:00", tz="America/New_York"),  # AFTER prev1 (07-15) exists
+        "type": "body", "meaningful": True, "suggested_exhausted": False,
+    })
+    out = derive_facts._p2_nesting_grandfather(b, **_GF_KW)
+    instances = [c for c in b.smt_candidates if c["level"] == "prev2_day_low"]
+    assert any(c["grandfathered"] for c in instances)       # the original wick instance
+    assert any(not c["grandfathered"] for c in instances)   # the new, later body instance
+    assert "prev2_day_low" not in out["MNQ"]                 # site stays valid overall
+    for c in instances:
+        assert c["p2_suppressed"] is False                  # site-level flag, same on both
+
+
+def test_p2_grandfather_noop_when_not_currently_nested():
+    b = _gf_bundle()
+    b.suppressed_p1_levels = {"MNQ": set(), "MES": set()}   # nothing nested at all
+    out = derive_facts._p2_nesting_grandfather(b, **_GF_KW)
+    for cand in b.smt_candidates:
+        assert cand["grandfathered"] is False
+        assert cand["p2_suppressed"] is False
+    assert out == {"MNQ": set(), "MES": set()}
+
+
+# --- thesis.md §2.1c: P1 equilibrium-staleness decay ------------------------------------ #
+
+def test_p1_equilibrium_staleness_flags_level_price_has_since_reached_mid():
+    b = derive_facts.FactsBundle()
+    swept_ts = pd.Timestamp("2026-07-23 03:30:00", tz="America/New_York")
+    b.levels = {"MNQ": {"prev1_day_low": (100.0, 100.0, "below", "day", None)}, "MES": {}}
+    b.swept_at = {"MNQ": {"prev1_day_low": swept_ts}, "MES": {}}
+    b.day_hi = {"MNQ": 110.0}
+    b.day_lo = {"MNQ": 90.0}      # mid = 100.0
+    idx = pd.date_range(swept_ts, periods=5, freq="1h", tz="America/New_York")
+    data = {"MNQ": pd.DataFrame({"low": [95, 96, 99, 101, 102], "high": [97, 98, 100.5, 103, 104]},
+                               index=idx)}
+    out = derive_facts._p1_equilibrium_staleness(b, data)
+    assert out["MNQ"]["prev1_day_low"] is True    # bar 3 (99-100.5) straddles mid=100
+
+
+def test_p1_equilibrium_staleness_false_when_mid_never_reached():
+    b = derive_facts.FactsBundle()
+    swept_ts = pd.Timestamp("2026-07-23 03:30:00", tz="America/New_York")
+    b.levels = {"MNQ": {"prev1_day_low": (100.0, 100.0, "below", "day", None)}, "MES": {}}
+    b.swept_at = {"MNQ": {"prev1_day_low": swept_ts}, "MES": {}}
+    b.day_hi = {"MNQ": 110.0}
+    b.day_lo = {"MNQ": 90.0}      # mid = 100.0
+    idx = pd.date_range(swept_ts, periods=3, freq="1h", tz="America/New_York")
+    data = {"MNQ": pd.DataFrame({"low": [95, 96, 94], "high": [97, 98, 96]}, index=idx)}
+    out = derive_facts._p1_equilibrium_staleness(b, data)
+    assert out["MNQ"]["prev1_day_low"] is False
+
+
 # --- thesis.md §3a: near-maturity pre-confirmation candidates -------------------------- #
 
 def _nm_data(mnq_close, mes_close):

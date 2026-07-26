@@ -127,24 +127,60 @@ candidate. Depth-of-history levels (`prev3_day`…`prev7_day`, `prev2_week`/`pre
 precisely so these deeper cross-asset divergences are visible; §2.1b prunes same-asset P1 stacking,
 it never prunes cross-asset candidacy.
 
-**Deliberate simplification — SMT-candidate scanning is NOT itself nesting-gated.** The intent is
-"do not go hunting for brand-new divergences at nested liquidities" (a nested level's own accept/
-reject reading is stale/redundant, so a fresh divergence there is low-value noise) — but implementing
-a literal "was this level still the frontier at the moment the SMT fired" check would require
-tracking, per level, WHEN it became superseded (the sweep timestamp of whatever deeper level nests
-it), which is a second, harder-to-verify temporal condition. Instead, `bundle.smt_candidates` (S3's
-cross-ticker matrix) scans the full tracked depth exactly as before — unrestricted by nesting — and
-relies on P2's OWN pre-existing requirement (the lagger's HTF close must REJECT, not accept, thesis.md
-§2.1) as the natural filter: a nested level whose divergence shows a plain ACCEPT (continuation, e.g.
-`prev7_day_low` in the worked example above — MNQ swept it while MES never confirmed, but MNQ's own
-close continued through rather than rejecting) does not qualify as meaningful P2 evidence regardless
-of nesting, so it costs nothing to leave the scan unrestricted. This is why `prev3_day_low`'s SMT
-survives (genuine reject shape) while `prev6_day_low` (a "both eventually swept, >15min apart" reading,
-not even a wick-divergence candidate) and `prev7_day_low` (a real divergence tag, but MNQ ACCEPTED, not
-rejected, so it fails P2's own gate) do not end up mattering — without a separate, explicit exclusion
-list. If a future case surfaces a nested level with a genuine reject-shape divergence that should NOT
-count (e.g. one already fully accounted for at a shallower, non-nested level), revisit this — it has
-not been needed yet.
+**P2/SMT nesting suppression, WITH a grandfather clause (`derive_facts._p2_nesting_grandfather`).**
+Nesting now ALSO gates P2/SMT candidacy — not the "deliberate simplification" this doc previously
+described (unrestricted P2 scanning, relying on P2's own reject-vs-accept requirement as an informal
+filter). The 2026-07-23 07:00 ET case showed why that wasn't enough: `prev3_day_high`/`prev4_day_high`
+were genuine REJECT-shape divergences at already-nested levels, contributing real (wrong) noise to
+the ledger. But a blanket nesting-gate on P2 has its OWN failure mode — the 2026-07-14 01:00 ET case:
+`prev3_day_low`'s divergence had genuinely fired BEFORE that level became nested (a fresh, more-recent
+day only superseded it afterward) — dropping it would regress a validated clean-correct call.
+
+The fix distinguishes the two: for each currently-nested candidate, check whether some MORE RECENT
+same-family day/week was already COMPLETE (and deeper) by the candidate's OWN `swept_at` — using the
+same historical rows (`long_horizon`) already loaded for the facts build, no cross-call state needed.
+Not already-nested-at-fire → **grandfathered**, keeps scoring as P2. Already-nested-at-fire → **P2-
+suppressed**, scores zero, same "zeroed, not scored" mechanic P1 already uses. A site can carry more
+than one candidate instance (a wick AND a body-close divergence at the same level, each with its own
+`swept_at`) — the model's declared evidence can't distinguish which type it means, so a site is
+suppressed only when EVERY instance at it was already nested at its own fire time; if ANY instance
+genuinely predates the nesting, the site stays valid (this is exactly what happens for `prev3_day_low`:
+its wick divergence fired before nesting — grandfathered — while a later, unrelated body-close
+instance at the same level fired after — the site stays valid via the wick instance).
+
+**This grandfather check only works because `swept_at` itself was also fixed (`SMT_LOOKBACK_HOURS`,
+below) — without that, `prev3_day_low`'s wick divergence would be misattributed to an unrelated LATER
+re-touch that DID happen after nesting, wrongly suppressing a genuinely valid site.** The two fixes
+are a pair, not independent: nesting-aware suppression needs an accurate fire timestamp to check
+against, and the wide SMT lookback is what supplies one.
+
+**Wide SMT lookback (`SMT_LOOKBACK_HOURS = 24`, `derive_facts._wide_day_week_smt_scan`).** A day/
+week-tier level's name shifts across every session rollover (prevN renumbering as new days/weeks
+accumulate) — but the SESSION-SCOPED sweep-detection this codebase otherwise uses (`first_cross`
+searched only from the current session's own open) has no memory across that rollover: a divergence
+that fully formed in a PRIOR session, under the level's THEN name, is either invisible (if price never
+happens to re-touch that price again this session) or gets silently re-attributed to whatever
+unrelated LATER touch occurs under the new name (2026-07-14 01:00 ET: the real sweep was 15:38 ET on
+2026-07-13, ~9.4h before the call and inside the prior session; session-scoped search instead found an
+unrelated 19:00 ET re-touch and used THAT as `swept_at`). `_wide_day_week_smt_scan` re-scans day/week-
+tier shared levels over `[now - 24h, now]` (clamped to available data) instead of the current session's
+own frame, and its result REPLACES the day/week-tier entries `compute_facts`' own S3 loop would
+otherwise have produced (session-tier candidates from S3 are untouched). 24h, not unlimited: a
+divergence older than that is assumed to have already been fully digested by both graphs — more than
+a session's worth of silence on it means it stopped mattering, not that it's still live.
+
+**Deliberately does NOT touch `bundle.swept_at` (P1) or any rendered text.** S2's and S3's rendered
+lines are part of the shared, HASHED S0-S7 core also read by the live `daily-trend.md`/`next-move.md`
+KB — widening those in place would silently change what that OTHER, already-shipped system sees and
+require a full backtest before merging, a much bigger blast radius than this fix's actual goal (P2/SMT
+candidacy for the still-experimental thesis.md path). `_wide_day_week_smt_scan` is purely additive: a
+separate function, called only to replace `bundle.smt_candidates`, touching no `L(...)` line and no
+existing structured field P1 or the old KB reads. One accepted consequence: for a day/week-tier level
+whose true divergence predates the current session, the OLD S3 "CROSS-TICKER SWEEP MATRIX" text block
+may still say "not swept" (it's rendering off the untouched, session-scoped `t1`/`t2`) while the S9
+"SMT candidates" block correctly lists it with its true `swept_at` — S9 is what thesis.md tells the
+model to actually use for P1-P4, so this is a cosmetic inconsistency in a legacy/diagnostic view, not
+a live evidence-ledger bug.
 
 This filter is orthogonal to, not a replacement for, tier weighting (§4) — it prunes WHICH levels
 within a family are even eligible before tier weight is applied to whichever survives. It does
@@ -222,6 +258,22 @@ evidence item it agrees is played out, which zeroes that item's points in `score
 judgment, never a new sign). It stays LLM-judged, not hard-gated: the model may disagree with the
 suggestion and score the item normally. Motivating case (example #10): a stale bearish SMT kept
 counting as continuation evidence 5.6× past its origin, long after it had played out.
+
+**P1 equilibrium-staleness (`derive_facts._p1_equilibrium_staleness`).** The stretch-based shelf
+life above is P2/SMT-only; a plain P1 item has no analogous decay — it counts at full weight
+forever once mature, no matter how much MORE RECENT, MORE MEANINGFUL price action has happened
+since its own sweep. Motivating case (2026-07-23 07:00 ET): MNQ's `prev1_day_low` swept ~3h before
+the call; price has since fully round-tripped all the way back to (and through) the daily
+equilibrium — a materially more recent and more meaningful development than the original sweep,
+which the ledger had no way to reflect. For every mature P1 item on a day-tier level, code checks
+whether price has touched the daily mid at any point since that item's own `swept_at` (weekly mid
+for a week-tier item, using each asset's OWN mid — `bundle.day_hi`/`day_lo`/`week_hi`/`week_lo` are
+per-asset, unlike the MNQ-only `day_mid`/`weekly_mid` scalars used elsewhere). If so, S9 tags that
+close-status line `[SUGGESTED STALE: price has since reached equilibrium]`. Same "code suggests,
+model may override" mechanic as `suggested_exhausted` — the model may set the EXISTING
+`exhausted: true` field on that P1 item (no schema change; `exhausted` was already criterion-
+agnostic in `score_thesis_evidence`, so this needed no new scoring code either) or leave it scoring
+normally if it judges the sweep still relevant.
 
 ### 2.1d Duplicate-simultaneous-sweep collapsing
 
@@ -727,6 +779,22 @@ near-maturity pre-confirmation (act now when distance-safe + corroborated) and t
 wait simulation (retarget the call to the imminent close otherwise) — both scoped tightly (a short
 window, day+/week tier only, corroboration required) so they don't reopen the immature-sweep
 false-signal failure mode §3 exists to prevent.
+
+**2026-07-23 07:00 ET — a nested level's own genuine reject-shape divergence still counted as P2
+(the case that ended the §2.1b "deliberate simplification").** `prev3_day_high`/`prev4_day_high`
+were nested (superseded by a deeper prior high) but their SMT divergences still scored as P2,
+since nesting was never applied to `bundle.smt_candidates` at all → the grandfather-aware P2
+suppression above. Investigating this surfaced a SECOND, deeper bug: the level's `swept_at` itself
+was wrong (a session-scoped `first_cross` misattributed the real 2026-07-13 15:38 ET sweep of
+`prev3_day_low` — a DIFFERENT case, the 2026-07-14 01:00 ET flagship — to an unrelated 19:00 ET
+re-touch that happened to occur under the level's NEW, post-rollover name) → `SMT_LOOKBACK_HOURS`
+(24h) wide re-scan of day/week-tier levels, additive only, never touching the shared hashed S0-S7
+core or `bundle.swept_at` (P1's own sweep timestamp stays exactly as it was).
+
+**2026-07-23 07:00 ET (again) — a stale P1 sweep outweighed materially more recent equilibrium
+behavior.** `prev1_day_low` swept ~3h before the call; price had since fully round-tripped to the
+daily mid, a more meaningful, more recent development the ledger couldn't express (P1 had no
+staleness decay analogous to P2's shelf life) → §2.1c's equilibrium-staleness suggestion.
 
 **Day-extreme window was degenerate right at the mandatory 18:00 ET call.** `bundle.day_hi`/
 `day_lo`/`day_mid` were computed from the current session's own bars only (`session_frame`) —

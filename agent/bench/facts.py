@@ -142,6 +142,11 @@ class ParquetFactsSource:
         res.validator_dict["suppressed_p1_levels"] = {
             tkr: sorted(names) for tkr, names in (bundle.suppressed_p1_levels or {}).items()
         }
+        # thesis.md §2.1b: grandfather-aware P2/SMT nesting suppression (additive overlay,
+        # like suppressed_p1_levels above — never in the shadow-hash dict).
+        res.validator_dict["suppressed_p2_sites"] = {
+            tkr: sorted(names) for tkr, names in (bundle.suppressed_p2_sites or {}).items()
+        }
         # thesis.md §3a: near-maturity pre-confirmation candidates (additive overlay, like
         # suppressed_p1_levels above — never in the shadow-hash dict).
         res.validator_dict["near_maturity_candidates"] = list(bundle.near_maturity_candidates or [])

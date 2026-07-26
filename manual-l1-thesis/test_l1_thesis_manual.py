@@ -377,6 +377,7 @@ def main(argv=None) -> int:
         dol_menu = menus.get("dol") or {}
         dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
     suppressed_p1_levels = facts.get("suppressed_p1_levels")
+    suppressed_p2_sites = facts.get("suppressed_p2_sites")
 
     outcome = _run_call(
         backend, system, user, thesis_schema,
@@ -385,11 +386,11 @@ def main(argv=None) -> int:
         # plan 14 Task 6: mirror run_bench — code magnitude-scales the declared ledger from
         # the same facts bundle's evidence_magnitude (facts_text already carries S9 above).
         # dol_available mirrors decide_thesis's no-liquidity override (thesis.md §8).
-        # suppressed_p1_levels mirrors decide_thesis's nested/duplicate-sweep P1 backstop
-        # (thesis.md §2.1b/§2.1d).
+        # suppressed_p1_levels/suppressed_p2_sites mirror decide_thesis's nested/duplicate-
+        # sweep P1/P2 backstops (thesis.md §2.1b/§2.1d).
         derive_block=lambda d: _derive_thesis_arithmetic(
             d, magnitude=res.evidence_magnitude, dol_available=dol_available,
-            suppressed_p1_levels=suppressed_p1_levels),
+            suppressed_p1_levels=suppressed_p1_levels, suppressed_p2_sites=suppressed_p2_sites),
     )
 
     recap = price_recap(source, boundary, args.lookback_hours)

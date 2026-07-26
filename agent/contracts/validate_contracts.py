@@ -127,8 +127,10 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
             dol_menu = menus.get("dol") or {}
             dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
         suppressed_p1_levels = (facts or {}).get("suppressed_p1_levels")
+        suppressed_p2_sites = (facts or {}).get("suppressed_p2_sites")
         scoring = score_thesis_evidence(t.evidence, dol_available=dol_available,
-                                        suppressed_p1_levels=suppressed_p1_levels)
+                                        suppressed_p1_levels=suppressed_p1_levels,
+                                        suppressed_p2_sites=suppressed_p2_sites)
         if t.bias in BIASES and t.bias != scoring["expected_bias"]:
             r.add("arithmetic", "ARI_THESIS_BIAS",
                   f"bias '{t.bias}' inconsistent with the evidence ledger's net score "
@@ -374,7 +376,7 @@ def _item_side(item: dict) -> Optional[str]:
 
 
 def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
-                           suppressed_p1_levels=None) -> dict:
+                           suppressed_p1_levels=None, suppressed_p2_sites=None) -> dict:
     """Pure computation over the model-declared P1/P2 evidence ledger: per-item points
     (tier x tf x magnitude multiplier, zeroed if immature — enforcing the §3 maturity gate
     in code, not trust), the net score, the expected bias sign, and the §6 cross-asset
@@ -398,8 +400,11 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     `suppressed_p1_levels` (thesis.md §2.1b/§2.1d) is an optional {asset: set(level names)}
     — nested prevN levels and duplicate-simultaneous-sweep restatements (derive_facts.
     _nested_prev_levels / _duplicate_sweep_losers). A P1 item at a suppressed level scores
-    ZERO, same "zeroed, not scored" mechanic as immature/exhausted — this NEVER applies to
-    P2 items: a divergence already fired at a nested level remains valid evidence."""
+    ZERO, same "zeroed, not scored" mechanic as immature/exhausted. This ONLY gates P1 —
+    `suppressed_p2_sites` (thesis.md §2.1b, derive_facts._p2_nesting_grandfather) is the
+    separate, grandfather-aware {asset: set(level names)} that gates P2: a candidate whose
+    divergence fired BEFORE its level became nested keeps scoring (not in this set); one
+    that was ALREADY nested when it fired scores ZERO too."""
     scored = []
     net = 0.0
     by_level: dict = {}   # level -> {asset: direction}, for the §6 contradiction check
@@ -417,9 +422,17 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
         # see S9 suggested_exhausted) contributes ZERO — same "zeroed, not scored" mechanic as
         # the immature gate, a pure code mechanic on a model judgment (no new sign logic).
         exhausted = bool(item.get("exhausted"))
-        suppressed = bool(
+        p1_suppressed = bool(
             item.get("criterion") == "P1" and suppressed_p1_levels
             and item.get("level") in (suppressed_p1_levels.get(item.get("asset")) or ()))
+        # thesis.md §2.1b: a P2/SMT candidate ALREADY nested at the moment its own
+        # divergence fired (no grandfather claim — derive_facts._p2_nesting_grandfather)
+        # scores ZERO too, same mechanic. A candidate that fired BEFORE it became nested
+        # keeps scoring (not in suppressed_p2_sites) — the 2026-07-14 01:00 ET case.
+        p2_suppressed = bool(
+            item.get("criterion") == "P2" and suppressed_p2_sites
+            and item.get("level") in (suppressed_p2_sites.get(item.get("asset")) or ()))
+        suppressed = p1_suppressed or p2_suppressed
         scored_mature = mature and not exhausted and not suppressed
         points = round(_BASE_POINTS * tf_mult * tier_mult * mag_mult, 4) if scored_mature else 0.0
         side = _item_side(item)

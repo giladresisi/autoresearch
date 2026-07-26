@@ -149,7 +149,13 @@ def test_nested_day_levels_suppressed_2026_07_14(source):
         assert name not in suppressed, f"{name} should NOT be nested/suppressed"
 
     # prev3_day_low is nested (suppressed for P1) but is ALSO a live SMT candidate — its
-    # close-status must still render (P2 context), tagged, not silently dropped.
+    # close-status must still render (P2 context), tagged, not silently dropped. Its WICK
+    # divergence fired 2026-07-13 15:38 ET (BEFORE nesting) -- grandfathered, must NOT be
+    # p2_suppressed, even though a later, unrelated body-close instance at the same level
+    # fired after nesting (thesis.md §2.1b's grandfather clause + SMT_LOOKBACK_HOURS wide
+    # scan, both needed together: a session-scoped scan would misattribute the wick's
+    # swept_at to that later instance and wrongly suppress the whole site).
+    assert "prev3_day_low" not in bundle.suppressed_p2_sites["MNQ"]
     text = render_evidence_text(bundle, magnitude=build_evidence_magnitude(bundle))
     assert "MNQ prev3_day_low [1h]" in text
     assert "[nested/duplicate" in text
