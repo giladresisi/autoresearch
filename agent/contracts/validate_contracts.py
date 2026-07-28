@@ -115,7 +115,12 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     # ARI_THESIS_BIAS (§4/§9): the declared bias must match the sign of the code-computed
     # net score over the evidence ledger — the SAME retry-not-override pattern as
     # daily_trend/next_move's direction-vs-N check (agent/validator.py _check_arithmetic).
-    # A thin/empty ledger (nothing declared yet, e.g. the NEUTRAL failsafe) is exempt.
+    # A thin/empty ledger is exempt ONLY for a NEUTRAL bias (the legitimate failsafe/no-
+    # evidence-found case) — a declared UP/DOWN with an EMPTY ledger is rejected outright
+    # below, not silently waved through: a directional call resting on zero structured
+    # evidence bypasses the entire "model judges, code computes" sandwich regardless of how
+    # much free-text reasoning cites facts that were never transcribed into `evidence`
+    # (2026-07-27 09:20 ET case: rich reasoning, bias UP, evidence == []).
     if t.evidence:
         # Only build dol_available when facts actually carry a computed S8 menu — a
         # facts dict with no "menus" key at all (older/minimal test fixtures) means "we
@@ -136,6 +141,12 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
                   f"bias '{t.bias}' inconsistent with the evidence ledger's net score "
                   f"{scoring['net_score']} (expected '{scoring['expected_bias']}')",
                   "thesis.bias")
+    elif t.bias in ("UP", "DOWN"):
+        r.add("arithmetic", "ARI_THESIS_BIAS",
+              f"bias '{t.bias}' declared with an EMPTY evidence ledger — a directional call "
+              "needs at least one declared P1-P5 item backing it; declare NEUTRAL if you "
+              "truly found no evidence, do not leave the ledger empty under a directional bias",
+              "thesis.bias")
 
     if facts is not None:
         _semantic_thesis(t, facts, r)

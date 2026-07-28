@@ -26,6 +26,10 @@ def valid_thesis() -> dict:
                           "tf": "5m", "n": 2}],
         "exhausted_if": [{"type": "price_beyond", "price": 20000, "side": "above"}],
         "recall": {"events": [], "max_age_min": 60},
+        # A directional (UP/DOWN) bias with an EMPTY evidence ledger is rejected
+        # (ARI_THESIS_BIAS) — this fixture's bias is UP, so it needs a real, UP-consistent
+        # item by default; tests that care about evidence override this explicitly.
+        "evidence": [_ev()],
         "reasoning": "audit",
     }
 
@@ -151,6 +155,7 @@ def test_thesis_dol_correct_side_accepted():
         "falsified_if": [],
         "exhausted_if": [{"type": "price_beyond", "price": 19500, "side": "below"}],
         "recall": {"events": [], "max_age_min": 60}, "reasoning": "x",
+        "evidence": [_ev(level="prev_day_low", direction="accept")],   # accept-beyond a low = DOWN
     }
     r = validate_thesis(t, FACTS)
     assert "SEM_DOL_WRONG_SIDE" not in r.codes()
@@ -508,7 +513,17 @@ def test_bias_consistent_with_evidence_accepted():
     assert "ARI_THESIS_BIAS" not in r.codes()
 
 
-def test_empty_evidence_exempt_from_bias_check():
+def test_empty_evidence_neutral_bias_exempt_from_bias_check():
     t = valid_thesis()
+    t["bias"] = "NEUTRAL"
     t["evidence"] = []
     assert "ARI_THESIS_BIAS" not in validate_thesis(t, FACTS).codes()
+
+
+def test_empty_evidence_directional_bias_rejected():
+    # 2026-07-27 09:20 ET case: a directional bias with a genuinely empty ledger must not be
+    # silently waved through — it bypasses the entire evidence-scoring sandwich regardless of
+    # how much free-text reasoning cites facts that were never transcribed into `evidence`.
+    t = valid_thesis()   # bias UP
+    t["evidence"] = []
+    assert "ARI_THESIS_BIAS" in validate_thesis(t, FACTS).codes()
