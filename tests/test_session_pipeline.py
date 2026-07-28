@@ -1305,23 +1305,27 @@ def _pipeline_for_week_ts_test():
     return pipeline
 
 
-def test_week_start_ts_monday_session_uses_prev_thursday():
-    """Monday session (Sunday 21:00 ET): _week_start_ts returns prev Thursday 18:00 ET."""
+def test_week_start_ts_monday_session_uses_prev_wednesday():
+    """Monday session (Sunday 21:00 ET): _week_start_ts returns prev Wednesday 18:00 ET --
+    the start of Thursday's OWN session, so the full day is included (not just its last
+    hour)."""
     pipeline = _pipeline_for_week_ts_test()
     # Sunday 2025-11-09 21:00 ET = start of Monday's CME session
     now = pd.Timestamp("2025-11-09 21:00", tz="America/New_York")
     result = pipeline._week_start_ts(now)
-    expected = pd.Timestamp("2025-11-06 18:00", tz="America/New_York")  # prev Thursday
+    expected = pd.Timestamp("2025-11-05 18:00", tz="America/New_York")  # prev Wednesday
     assert result == expected, f"Monday session week start expected {expected}, got {result}"
 
 
-def test_week_start_ts_tuesday_session_uses_prev_friday():
-    """Tuesday session (Monday 21:00 ET): _week_start_ts returns prev Friday 18:00 ET."""
+def test_week_start_ts_tuesday_session_uses_prev_thursday():
+    """Tuesday session (Monday 21:00 ET): _week_start_ts returns prev Thursday 18:00 ET --
+    the start of Friday's OWN session, so the full day is included (not just its last
+    hour)."""
     pipeline = _pipeline_for_week_ts_test()
     # Monday 2025-11-10 21:00 ET = start of Tuesday's CME session
     now = pd.Timestamp("2025-11-10 21:00", tz="America/New_York")
     result = pipeline._week_start_ts(now)
-    expected = pd.Timestamp("2025-11-07 18:00", tz="America/New_York")  # prev Friday
+    expected = pd.Timestamp("2025-11-06 18:00", tz="America/New_York")  # prev Thursday
     assert result == expected, f"Tuesday session week start expected {expected}, got {result}"
 
 

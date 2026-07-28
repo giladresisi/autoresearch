@@ -710,15 +710,17 @@ def _make_week_bars(
     )
 
 
-def test_compute_live_hl_mid_monday_session_uses_prev_thursday():
-    """Monday session (Asia, 21:00 ET Sunday): week_high should include prev Thursday 18:00 bar."""
+def test_compute_live_hl_mid_monday_session_uses_prev_wednesday():
+    """Monday session (Asia, 21:00 ET Sunday): week_high should include prev Wednesday 18:00
+    bar -- the start of Thursday's OWN session, so the full day is captured (not just its
+    last hour, which is all "prev Thursday 18:00" would have covered)."""
     from hypothesis import compute_live_hl_mid
 
     # 2025-11-10 is a Monday. Session opens Sunday 2025-11-09 18:00 ET.
-    # prev Thursday = 2025-11-06
-    thu_high = 25000.0
+    # prev Wednesday = 2025-11-05 (Thursday's own session open)
+    wed_high = 25000.0
     bars = _make_week_bars(
-        ("2025-11-06 18:00", thu_high),     # prev Thursday 18:00 ET — should be included
+        ("2025-11-05 18:00", wed_high),      # prev Wednesday 18:00 ET — should be included
         ("2025-11-09 18:00", 21010.0),       # Sunday (session open)
         ("2025-11-09 21:00", 21005.0),       # Asia session bar
     )
@@ -726,20 +728,21 @@ def test_compute_live_hl_mid_monday_session_uses_prev_thursday():
     result = compute_live_hl_mid(bars, now)
 
     assert "week_high" in result
-    assert result["week_high"] == thu_high, (
-        f"Monday session week_high should include prev Thu bar (25000), got {result['week_high']}"
+    assert result["week_high"] == wed_high, (
+        f"Monday session week_high should include prev Wed bar (25000), got {result['week_high']}"
     )
 
 
-def test_compute_live_hl_mid_tuesday_session_uses_prev_friday():
-    """Tuesday session (Asia, 21:00 ET Monday): week_high should include prev Friday 18:00 bar."""
+def test_compute_live_hl_mid_tuesday_session_uses_prev_thursday():
+    """Tuesday session (Asia, 21:00 ET Monday): week_high should include prev Thursday 18:00
+    bar -- the start of Friday's OWN session, so the full day is captured."""
     from hypothesis import compute_live_hl_mid
 
     # 2025-11-11 is a Tuesday. Session opens Monday 2025-11-10 18:00 ET.
-    # prev Friday = 2025-11-07
-    fri_high = 25000.0
+    # prev Thursday = 2025-11-06 (Friday's own session open)
+    thu_high = 25000.0
     bars = _make_week_bars(
-        ("2025-11-07 18:00", fri_high),      # prev Friday 18:00 ET — should be included
+        ("2025-11-06 18:00", thu_high),       # prev Thursday 18:00 ET — should be included
         ("2025-11-09 18:00", 21010.0),        # Sunday
         ("2025-11-10 18:00", 21005.0),        # Monday (session open for Tuesday)
         ("2025-11-10 21:00", 21003.0),        # Monday Asia
@@ -748,8 +751,8 @@ def test_compute_live_hl_mid_tuesday_session_uses_prev_friday():
     result = compute_live_hl_mid(bars, now)
 
     assert "week_high" in result
-    assert result["week_high"] == fri_high, (
-        f"Tuesday session week_high should include prev Fri bar (25000), got {result['week_high']}"
+    assert result["week_high"] == thu_high, (
+        f"Tuesday session week_high should include prev Thu bar (25000), got {result['week_high']}"
     )
 
 

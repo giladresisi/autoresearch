@@ -2035,14 +2035,22 @@ def compute_live_hl_mid(
 
     # Week H/L start — extended lookback on Mon/Tue sessions, standard from Wed+.
     # Session-open day (ET) drives the choice: Sunday = Monday session, Monday = Tuesday, etc.
-    # Monday session  → prev Thursday 18:00 ET (capture Sun/Mon pre-week range)
-    # Tuesday session → prev Friday  18:00 ET  (capture Mon Asia range)
+    # Monday session  → prev Wednesday 18:00 ET (Thursday's OWN session open)
+    # Tuesday session → prev Thursday  18:00 ET (Friday's OWN session open)
     # Wednesday+      → Sunday 18:00 ET (standard CME week open)
+    #
+    # A trading day's own session runs 18:00 the evening before -> ~17:00 that day (+7h
+    # trade-date convention) -- anchoring AT "Thursday 18:00" only captures the last hour of
+    # Thursday's session (everything back to Wednesday 18:00 is already trade-date Thursday)
+    # and silently drops the rest of it. Confirmed materially wrong on a real case (2026-07-27
+    # 09:20 ET, Sunday-open Monday session): the old 3-day anchor put MNQ price ABOVE the
+    # weekly mid; the correct 4-day anchor (one day earlier) puts the SAME price BELOW it --
+    # a full sign flip of the equilibrium read, not a rounding difference.
     _session_open_wd = _day_open_cal.weekday()  # Mon=0, Tue=1, ..., Sun=6
     if _session_open_wd == 6:  # Sunday → Monday session
-        _week_anchor = _day_open_cal - timedelta(days=3)   # prev Thursday
+        _week_anchor = _day_open_cal - timedelta(days=4)   # prev Wednesday
     elif _session_open_wd == 0:  # Monday → Tuesday session
-        _week_anchor = _day_open_cal - timedelta(days=3)   # prev Friday
+        _week_anchor = _day_open_cal - timedelta(days=4)   # prev Thursday
     else:
         _days_to_sunday = (_session_open_wd + 1) % 7
         _week_anchor = _day_open_cal - timedelta(days=_days_to_sunday)

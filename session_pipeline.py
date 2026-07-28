@@ -2919,18 +2919,27 @@ class SessionPipeline:
     def _week_start_ts(self, now: pd.Timestamp) -> pd.Timestamp:
         """Return the extended week-H/L start for the CME session containing `now`.
 
-        Monday session  (session-open = Sunday) → prev Thursday 18:00 ET
-        Tuesday session (session-open = Monday) → prev Friday   18:00 ET
+        Monday session  (session-open = Sunday) → prev Wednesday 18:00 ET (Thursday's OWN open)
+        Tuesday session (session-open = Monday) → prev Thursday  18:00 ET (Friday's OWN open)
         Wednesday+      → standard Sunday 18:00 ET (CME week open)
+
+        A trading day's own session runs from 18:00 the evening BEFORE it to ~17:00 that day
+        (the +7h trade-date convention) — anchoring AT "Thursday 18:00" only captures the last
+        hour of Thursday's session (everything before that, back to Wednesday 18:00, is already
+        trade-date Thursday but wall-clock Wednesday evening) and silently drops the rest of it.
+        Confirmed materially wrong on a real case (2026-07-27 09:20 ET, Sunday-open Monday
+        session): the old 3-day anchor gave a weekly mid with MNQ price reading ABOVE it; the
+        correct 4-day anchor (one day earlier) puts the SAME price BELOW it — a full sign flip
+        of the equilibrium read, not a rounding difference.
         """
         today = now.date()
         _session_open = today if now.hour >= 18 else today - datetime.timedelta(days=1)
         _wd = _session_open.weekday()  # Mon=0, Tue=1, ..., Sun=6
 
         if _wd == 6:  # Sunday → Monday session
-            _anchor = _session_open - datetime.timedelta(days=3)   # prev Thursday
+            _anchor = _session_open - datetime.timedelta(days=4)   # prev Wednesday
         elif _wd == 0:  # Monday → Tuesday session
-            _anchor = _session_open - datetime.timedelta(days=3)   # prev Friday
+            _anchor = _session_open - datetime.timedelta(days=4)   # prev Thursday
         else:
             _days_to_sunday = (_wd + 1) % 7
             _anchor = _session_open - datetime.timedelta(days=_days_to_sunday)
