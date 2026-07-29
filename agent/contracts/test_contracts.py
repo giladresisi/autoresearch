@@ -21,9 +21,12 @@ FACTS = {
 def valid_thesis() -> dict:
     return {
         "bias": "UP", "regime": "TREND", "confidence": "HIGH",
+        "dol_rationale": "nearest eligible UP pool, prev_day_high",
         "dol": {"level": "prev_day_high", "price": 20000.0},
+        "falsified_if_rationale": "close back below prev_day_low invalidates the UP read",
         "falsified_if": [{"type": "n_closes_beyond", "price": 19500, "side": "below",
                           "tf": "5m", "n": 2}],
+        "exhausted_if_rationale": "the DOL itself is the exhaustion price",
         "exhausted_if": [{"type": "price_beyond", "price": 20000, "side": "above"}],
         "recall": {"events": [], "max_age_min": 60},
         # A directional (UP/DOWN) bias with an EMPTY evidence ledger is rejected

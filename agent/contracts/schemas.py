@@ -101,8 +101,11 @@ class Thesis:
     facts_hash: Optional[str] = None
     bias: Optional[str] = None
     regime: Optional[str] = None
+    dol_rationale: Optional[str] = None
     dol: Optional[dict] = None                       # {"level": str, "price": float}
+    falsified_if_rationale: Optional[str] = None
     falsified_if: list = field(default_factory=list)  # [predicate]
+    exhausted_if_rationale: Optional[str] = None
     exhausted_if: list = field(default_factory=list)  # [predicate]
     confidence: Optional[str] = None
     recall: Optional[dict] = None                    # {"events": [pred], "max_age_min": int}
@@ -115,7 +118,10 @@ class Thesis:
         return cls(
             thesis_id=d.get("thesis_id"), issued_at=d.get("issued_at"),
             facts_hash=d.get("facts_hash"), bias=d.get("bias"), regime=d.get("regime"),
-            dol=d.get("dol"), falsified_if=list(d.get("falsified_if") or []),
+            dol_rationale=d.get("dol_rationale"), dol=d.get("dol"),
+            falsified_if_rationale=d.get("falsified_if_rationale"),
+            falsified_if=list(d.get("falsified_if") or []),
+            exhausted_if_rationale=d.get("exhausted_if_rationale"),
             exhausted_if=list(d.get("exhausted_if") or []),
             confidence=d.get("confidence"), recall=d.get("recall"),
             evidence=list(d.get("evidence") or []),
@@ -125,7 +131,10 @@ class Thesis:
         return {
             "thesis_id": self.thesis_id, "issued_at": self.issued_at,
             "facts_hash": self.facts_hash, "bias": self.bias, "regime": self.regime,
-            "dol": self.dol, "falsified_if": self.falsified_if,
+            "dol_rationale": self.dol_rationale, "dol": self.dol,
+            "falsified_if_rationale": self.falsified_if_rationale,
+            "falsified_if": self.falsified_if,
+            "exhausted_if_rationale": self.exhausted_if_rationale,
             "exhausted_if": self.exhausted_if, "confidence": self.confidence,
             "recall": self.recall, "evidence": self.evidence,
             "reasoning": self.reasoning,
@@ -189,8 +198,12 @@ def failsafe_thesis() -> dict:
     """The L1 fail-safe: a NEUTRAL / LOW standing thesis (no directional commitment, no
     entries follow). Itself a valid thesis (validate_thesis(failsafe_thesis()).ok)."""
     return {
-        "bias": "NEUTRAL", "regime": "RANGE", "dol": None,
-        "falsified_if": [], "exhausted_if": [], "confidence": "LOW",
+        "bias": "NEUTRAL", "regime": "RANGE",
+        "dol_rationale": "none — failsafe thesis, no directional call", "dol": None,
+        "falsified_if_rationale": "none — failsafe thesis, no predicates armed",
+        "falsified_if": [],
+        "exhausted_if_rationale": "none — failsafe thesis, no predicates armed",
+        "exhausted_if": [], "confidence": "LOW",
         "recall": {"events": [], "max_age_min": FAILSAFE_RECALL_MAX_AGE_MIN},
         "evidence": [],
         "reasoning": "fail-safe neutral/low thesis (offline/failsafe)",
@@ -364,13 +377,27 @@ THESIS_SCHEMA = {
         "reasoning": {"type": "string"},
         "bias": {"enum": sorted(BIASES)},
         "regime": {"enum": sorted(DAILY_REGIMES)},
+        # dol_rationale/falsified_if_rationale/exhausted_if_rationale (prototype, 2026-07-28
+        # audit): each sits IMMEDIATELY BEFORE the field it justifies in generation order, so
+        # under strict schema-constrained decoding the model must emit real derivation tokens
+        # right before committing to the value — the same "reasoning before commitment" trick
+        # `evidence`/`reasoning` already use ahead of `bias`, applied one level further down.
+        # A 5-sample audit of past runs found `dol` and `falsified_if`/`exhausted_if` (which sit
+        # AFTER the free-text `reasoning` field closes) routinely carry a level/threshold with
+        # zero supporting derivation anywhere in the prose, while `regime` (which sits right
+        # after `reasoning`) never showed this gap — the leak tracks how far downstream of
+        # `reasoning` a field sits, not which field it is.
+        "dol_rationale": {"type": "string"},
         "dol": _DOL,
+        "falsified_if_rationale": {"type": "string"},
         "falsified_if": _PRED_LIST,
+        "exhausted_if_rationale": {"type": "string"},
         "exhausted_if": _PRED_LIST,
         "confidence": {"enum": sorted(CONFIDENCES)},
         "recall": _RECALL,
     },
-    "required": ["evidence", "reasoning", "bias", "regime", "dol", "falsified_if",
+    "required": ["evidence", "reasoning", "bias", "regime", "dol_rationale", "dol",
+                 "falsified_if_rationale", "falsified_if", "exhausted_if_rationale",
                  "exhausted_if", "confidence", "recall"],
     "additionalProperties": False,
 }

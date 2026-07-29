@@ -754,8 +754,11 @@ def _run_call(backend: Backend, system: str, base_user: str, schema: dict,
             # never validated — this dict is not read by any code path.
             "bias": parsed.get("bias"),
             "regime": parsed.get("regime"),
+            "dol_rationale": parsed.get("dol_rationale"),
             "dol": parsed.get("dol"),
+            "falsified_if_rationale": parsed.get("falsified_if_rationale"),
             "falsified_if": parsed.get("falsified_if"),
+            "exhausted_if_rationale": parsed.get("exhausted_if_rationale"),
             "exhausted_if": parsed.get("exhausted_if"),
             "confidence": parsed.get("confidence"),
             "recall": parsed.get("recall"),
@@ -852,11 +855,26 @@ _TASK_THESIS = (
     "TASK — L1 thesis decision (AI-trader v2).\n"
     "Decide where the market is going and what would prove you wrong, as of 'now' (the "
     "last S0 timestamp). Return a thesis JSON matching the schema. The schema requests "
-    "fields in this order: evidence, then reasoning, then bias/regime/dol/falsified_if/"
-    "exhausted_if/confidence/recall — DELIBERATELY evidence-and-reasoning-first, so you "
-    "enumerate and think through your evidence before committing to bias (UP/DOWN/"
-    "NEUTRAL), regime, a DOL (draw-on-liquidity) when directional, and structured "
-    "falsified_if/exhausted_if/recall predicates.\n"
+    "fields in this order: evidence, then reasoning, then bias/regime/dol_rationale/dol/"
+    "falsified_if_rationale/falsified_if/exhausted_if_rationale/exhausted_if/confidence/"
+    "recall — DELIBERATELY evidence-and-reasoning-first, so you enumerate and think "
+    "through your evidence before committing to bias (UP/DOWN/NEUTRAL), regime, a DOL "
+    "(draw-on-liquidity) when directional, and structured falsified_if/exhausted_if/"
+    "recall predicates.\n"
+    "\nRATIONALE FIELDS (dol_rationale, falsified_if_rationale, exhausted_if_rationale). "
+    "Your main `reasoning` field closes BEFORE these three values are generated, so nothing "
+    "in `reasoning` can justify them after the fact — each rationale is your ONLY chance to "
+    "derive the field it immediately precedes, in 1-2 sentences, citing the specific facts "
+    "that support it. dol_rationale: name the alternative pools you considered from the S8 "
+    "DOL menu for your bias and why this one wins (nearest eligible, cleanest structure, "
+    "etc.) — not a restatement of the DOL menu, an actual comparison. falsified_if_rationale: "
+    "state why THIS threshold/level, not a different one — if you copied it from the S8 "
+    "predicate menu, say which menu entry and why that one over the others offered. "
+    "exhausted_if_rationale: same, for the exhaustion condition. If a rationale would just "
+    "restate the value with no real derivation, that is a sign you have not actually decided "
+    "why — reconsider the pick, do not paper over it with filler text. When bias is NEUTRAL "
+    "and dol/falsified_if/exhausted_if are all null/empty (no-liquidity case below), each "
+    "rationale should say so briefly (e.g. 'none — NEUTRAL, no DOL menu eligible').\n"
     "\nPREDICATE VOCABULARY (closed; the schema enforces it). Each predicate is one of the "
     "six atoms — price_beyond(price, side), n_closes_beyond(price, side, tf, n), "
     "level_swept(name), level_depleted(name), time_elapsed(minutes), clock_after(et_time) "
