@@ -451,8 +451,11 @@ class SessionPipeline:
                 .dropna(subset=["Open"])
             )
             self._hist_1hr = _1hr_full[_1hr_full.index >= _14d_ago]
+            # 4h bars anchor to the 18:00 ET session open (CME/TradingView convention:
+            # 18:00/22:00/02:00/06:00/10:00/14:00 ET), not pandas' default midnight grid --
+            # offset=18h is a no-op on the 1h resample above (exact multiple of 1h).
             _4hr_full = (
-                self._hist_mnq_1m.resample("4h", label="left")
+                self._hist_mnq_1m.resample("4h", label="left", offset=pd.Timedelta(hours=18))
                 .agg(_agg)
                 .dropna(subset=["Open"])
             )
@@ -479,11 +482,16 @@ class SessionPipeline:
             self._fvg_1hr = _fvg_1hr_full[
                 (_fvg_1hr_full.index >= _14d_ago) & (_fvg_1hr_full.index < now.floor("1h"))
             ]
+            # 18:00-ET-session anchor (CME/TradingView convention) -- floor(now) must use the
+            # same anchor via the shift/floor/unshift trick, or the cutoff misaligns with the
+            # bar grid above and can include/exclude the still-forming trailing bar incorrectly.
             _fvg_4hr_full = (
-                _combined.resample("4h", label="left").agg(_agg).dropna(subset=["Open"])
+                _combined.resample("4h", label="left", offset=pd.Timedelta(hours=18))
+                .agg(_agg).dropna(subset=["Open"])
             )
+            _now_4hr_floor = (now - pd.Timedelta(hours=18)).floor("4h") + pd.Timedelta(hours=18)
             self._fvg_4hr = _fvg_4hr_full[
-                (_fvg_4hr_full.index >= _14d_ago) & (_fvg_4hr_full.index < now.floor("4h"))
+                (_fvg_4hr_full.index >= _14d_ago) & (_fvg_4hr_full.index < _now_4hr_floor)
             ]
         else:
             self._fvg_1hr = pd.DataFrame(columns=list(_agg))

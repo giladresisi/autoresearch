@@ -1051,7 +1051,8 @@ def hypothesis() -> list:
     )
     hist_4hr = (
         hist_mnq_1m
-        .resample("4h", label="left").agg(_agg).dropna(subset=["Open"])
+        # 18:00-ET-session anchor (CME/TradingView convention), matching session_pipeline.py.
+        .resample("4h", label="left", offset=pd.Timedelta(hours=18)).agg(_agg).dropna(subset=["Open"])
     )
 
     signals = _hyp_mod.run_hypothesis(

@@ -1907,14 +1907,17 @@ def _determine_direction(
         _sess_1hr = mnq_1m.resample("1h").agg(_agg).dropna(subset=["Open"])
         mnq_1hr = pd.concat([hist_1hr, _sess_1hr])
         mnq_1hr = mnq_1hr[~mnq_1hr.index.duplicated(keep="last")].sort_index()
-        _sess_4hr = mnq_1m.resample("4h").agg(_agg).dropna(subset=["Open"])
+        # 4h bars anchor to the 18:00 ET session open (CME/TradingView convention), not
+        # pandas' default midnight grid -- must match session_pipeline.py's hist_4hr anchor
+        # or concatenating the two produces a misaligned, mixed-anchor bar series.
+        _sess_4hr = mnq_1m.resample("4h", offset=pd.Timedelta(hours=18)).agg(_agg).dropna(subset=["Open"])
         mnq_4hr = pd.concat([hist_4hr, _sess_4hr])
         mnq_4hr = mnq_4hr[~mnq_4hr.index.duplicated(keep="last")].sort_index()
     else:
         combined_bars = pd.concat([hist_mnq_1m, mnq_1m])
         combined_bars = combined_bars[~combined_bars.index.duplicated(keep="last")].sort_index()
         mnq_1hr = combined_bars.resample("1h").agg(_agg).dropna(subset=["Open"])
-        mnq_4hr = combined_bars.resample("4h").agg(_agg).dropna(subset=["Open"])
+        mnq_4hr = combined_bars.resample("4h", offset=pd.Timedelta(hours=18)).agg(_agg).dropna(subset=["Open"])
     b1hr = _compute_bos_choch_score(mnq_1hr, BOS_SWING_N, BOS_LOOKBACK_1HR)
     b4hr = _compute_bos_choch_score(mnq_4hr, BOS_SWING_N, BOS_LOOKBACK_4HR)
     bos_sc   = 0.35 * b1hr + 0.65 * b4hr
