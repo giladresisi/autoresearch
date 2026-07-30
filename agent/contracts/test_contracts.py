@@ -501,6 +501,76 @@ def test_suppressed_p1_level_excluded_from_contradiction_tally():
 
 
 # --------------------------------------------------------------------------- #
+# P4-dominates-P3 (thesis.md §6 extension)                                     #
+# --------------------------------------------------------------------------- #
+def test_p4_reclaim_dominates_contradicting_p3_on_other_asset():
+    # MNQ: HTF-confirmed failed reclaim ABOVE the weekly mid (bearish, DOWN).
+    p4 = _ev(criterion="P4", asset="MNQ", level="weekly_mid_high", tier="week", tf="1h",
+             direction="reject", mature=True)
+    # MES: merely sits above its OWN weekly mid (bullish position, UP) -- contradicts MNQ's
+    # dynamic P4 read at the same (weekly) mid.
+    p3 = _ev(criterion="P3", asset="MES", level="weekly_mid", tier="week", tf="1h",
+             direction="accept", mature=True)
+    scoring = score_thesis_evidence([p4, p3])
+    p3_scored = next(e for e in scoring["scored_evidence"] if e["criterion"] == "P3")
+    assert p3_scored["points"] == 0.0
+    assert scoring["expected_bias"] == "DOWN"   # only the P4 item's points count
+
+
+def test_p4_reclaim_does_not_dominate_agreeing_p3():
+    p4 = _ev(criterion="P4", asset="MNQ", level="weekly_mid_high", tier="week", tf="1h",
+             direction="reject", mature=True)   # DOWN
+    p3 = _ev(criterion="P3", asset="MES", level="weekly_mid", tier="week", tf="1h",
+             direction="reject", mature=True)    # also DOWN -- agrees, not dominated
+    scoring = score_thesis_evidence([p4, p3])
+    p3_scored = next(e for e in scoring["scored_evidence"] if e["criterion"] == "P3")
+    assert p3_scored["points"] > 0.0
+
+
+def test_immature_p4_does_not_dominate_p3():
+    p4 = _ev(criterion="P4", asset="MNQ", level="weekly_mid_high", tier="week", tf="1h",
+             direction="reject", mature=False)   # immature -- can't dominate anything
+    p3 = _ev(criterion="P3", asset="MES", level="weekly_mid", tier="week", tf="1h",
+             direction="accept", mature=True)
+    scoring = score_thesis_evidence([p4, p3])
+    p3_scored = next(e for e in scoring["scored_evidence"] if e["criterion"] == "P3")
+    assert p3_scored["points"] > 0.0
+
+
+def test_exhausted_p4_does_not_dominate_p3():
+    p4 = {**_ev(criterion="P4", asset="MNQ", level="weekly_mid_high", tier="week", tf="1h",
+                direction="reject", mature=True), "exhausted": True}
+    p3 = _ev(criterion="P3", asset="MES", level="weekly_mid", tier="week", tf="1h",
+             direction="accept", mature=True)
+    scoring = score_thesis_evidence([p4, p3])
+    p3_scored = next(e for e in scoring["scored_evidence"] if e["criterion"] == "P3")
+    assert p3_scored["points"] > 0.0
+
+
+def test_p4_daily_mid_does_not_dominate_p3_weekly_mid():
+    # Different mid TYPE -- daily P4 must not dominate a weekly P3, even with opposite sides.
+    p4 = _ev(criterion="P4", asset="MNQ", level="daily_mid_high", tier="day", tf="1h",
+             direction="reject", mature=True)    # DOWN, daily
+    p3 = _ev(criterion="P3", asset="MES", level="weekly_mid", tier="week", tf="1h",
+             direction="accept", mature=True)     # UP, weekly
+    scoring = score_thesis_evidence([p4, p3])
+    p3_scored = next(e for e in scoring["scored_evidence"] if e["criterion"] == "P3")
+    assert p3_scored["points"] > 0.0
+
+
+def test_p4_does_not_dominate_p3_on_the_same_asset():
+    # The rule is specifically OTHER-asset domination -- a same-asset P4/P3 split (an
+    # internal inconsistency, not a cross-asset staleness case) is untouched by this gate.
+    p4 = _ev(criterion="P4", asset="MNQ", level="weekly_mid_high", tier="week", tf="1h",
+             direction="reject", mature=True)    # DOWN
+    p3 = _ev(criterion="P3", asset="MNQ", level="weekly_mid", tier="week", tf="1h",
+             direction="accept", mature=True)     # UP, SAME asset as the P4 item
+    scoring = score_thesis_evidence([p4, p3])
+    p3_scored = next(e for e in scoring["scored_evidence"] if e["criterion"] == "P3")
+    assert p3_scored["points"] > 0.0
+
+
+# --------------------------------------------------------------------------- #
 # ARI_THESIS_BIAS — declared bias vs. computed net score                       #
 # --------------------------------------------------------------------------- #
 def test_bias_inconsistent_with_evidence_rejected():

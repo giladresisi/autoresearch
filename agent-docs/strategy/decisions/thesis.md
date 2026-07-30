@@ -570,6 +570,26 @@ section's "tally normally, cap the confidence ceiling" mechanic with a different
 stretched far from structure, rather than a cross-asset P1/P3 disagreement). The net score is still
 tallied and still decides direction; only the ceiling is capped. Same code path, new trigger.
 
+**P4-dominates-P3 (a DIFFERENT mechanic from the cap above — zeroes points, doesn't just cap
+confidence).** A cross-asset P1/P3 split isn't always two equally-weighted, genuinely opposing
+reads. P4 (§2.1 — reclaim/failed-reclaim of a daily/weekly mid, HTF-confirmed) is a DYNAMIC signal;
+P3 (§2.1) is a plain static position snapshot. When one asset carries a mature, non-exhausted P4
+item at a given mid and the OTHER asset's P3 item at that SAME mid contradicts it, the P3 item
+scores ZERO (`validate_contracts.score_thesis_evidence`, a pre-pass over the declared evidence,
+independent of item order) — the dynamic reclaim/failed-reclaim read is treated as more
+informative than the other asset's snapshot, not netted against it as an equal, offsetting vote.
+Scoped narrowly: same mid TYPE (daily vs. weekly) only, OTHER asset only (a same-asset P4/P3 split
+is a different kind of inconsistency, untouched here), P4 must be mature and not
+model-flagged-exhausted.
+
+Motivating case (2026-07-27 09:20 ET): MNQ repeatedly failed to reclaim above its (corrected —
+see §10) weekly mid over almost an hour (04:57-05:59 ET, several distinct wick-and-reject
+attempts), while MES sat comfortably above its own weekly mid the entire session and didn't even
+test it until 09:58 ET, nearly 5 hours later. A plain P3 snapshot at 09:20 would have read MNQ
+below / MES above — two equally-weighted, opposing votes. But MNQ's read is backed by a
+repeated, already-resolved P4 failed-reclaim; MES's is an untested, stale-by-comparison position.
+This mechanic lets the former dominate the latter rather than washing out to a neutral-ish split.
+
 ## 7. SMT lifecycle (pending → confirmed → expired)
 
 1. **Discovery** — a raw cross-ticker divergence at a level is a bias flag only, never acted on
@@ -692,7 +712,14 @@ thesis:
                                            # no-liquidity rule): expected_bias downgrades to NEUTRAL
                                            # (confidence LOW) in code before this check runs, not a
                                            # retry target. P3/P4 are NOT yet in this ledger —
-                                           # reasoning-only still (§8 gap).
+                                           # reasoning-only still (§8 gap). An EMPTY evidence
+                                           # list is exempt from the net-score check ONLY when
+                                           # bias is NEUTRAL (the legitimate no-evidence-found
+                                           # case) — a declared UP/DOWN with an empty ledger is
+                                           # REJECTED outright (retry), not silently exempt: a
+                                           # directional call needs at least one declared item,
+                                           # regardless of how much free-text `reasoning` cites
+                                           # facts that were never transcribed into `evidence`.
   reasoning: audit-only
 ```
 
@@ -804,3 +831,31 @@ carried a production-parity extension (looks back 2-3 prior trading days at week
 daily side never got the equivalent port → §2.1c's new day-extreme window
 (`derive_facts._day_start_ts`, `hypothesis.py::compute_live_hl_mid` parity) fixes this for the
 structured fields only, leaving the shared S1 text line (and its hash) untouched.
+
+**Weekly anchor was one day short on early-week sessions, silently flipping the equilibrium
+read.** `week_start_ts`'s Sun-open/Mon-open special cases anchored at "prev Thursday 18:00" /
+"prev Friday 18:00" — but a trading day's OWN session runs from 18:00 the evening BEFORE it to
+~17:00 that day, so anchoring AT Thursday 18:00 only captures the last hour of Thursday's session
+(everything before that is already trade-date Thursday but wall-clock Wednesday evening, and gets
+excluded) — missing the entire rest of it. Confirmed on 2026-07-27 09:20 ET (Sunday-open Monday
+session): the 3-day anchor gave weekly_mid=28488.12 with MNQ price (28640.25) reading ABOVE it
+(bullish P3 lean); the correct 4-day anchor (start of Thursday's own session, one day earlier)
+recomputes the SAME window to weekly_mid=28747.75 — MNQ price now reads BELOW it (bearish lean) —
+a full flip of the P3 equilibrium signal, not a rounding difference. MES's own weekly mid stayed
+above (mid=7480.88 vs price 7509.0), meaning the corrected calc also surfaces a genuine cross-
+asset weekly-placement split (§6) that the miscalculated version hid entirely. Fixed in
+`derive_facts.week_start_ts` (`timedelta(days=3)` → `days=4)` on both special cases), and the
+SAME fix ported to the live production originals it mirrors (`session_pipeline._week_start_ts`,
+`hypothesis.py::compute_live_hl_mid`'s week anchor), in the separate `auto-co-trader-main` repo
+(a different worktree from this one), commit `335836f` — unlike `_day_start_ts` above (a
+deliberate L1-only extension the production code never had), this one really is a bug in the
+shared reference implementation itself, not a new divergence from it.
+
+**Empty evidence ledger silently exempted a directional bias from the net-score check.** The
+same 2026-07-27 09:20 ET call declared `bias: UP` backed by extensive free-text `reasoning`
+citing real facts (a P1 split, equilibrium reads, an FVG fill) — but the structured `evidence`
+array was empty (0 items), and `ARI_THESIS_BIAS`'s exemption for a thin/empty ledger was
+unconditional, so the directional call passed validation clean, on the first attempt, entirely
+ungrounded in the code-scored ledger. Fixed: the exemption now applies ONLY when `bias ==
+NEUTRAL`; a declared UP/DOWN with an empty ledger is rejected outright (retry), forcing the
+model to either transcribe real evidence or downgrade to NEUTRAL.

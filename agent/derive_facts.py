@@ -89,15 +89,23 @@ def trade_date(ts):
 
 
 def week_start_ts(now):
-    """Engine week anchor (session_pipeline._week_start_ts): Sun 18:00 ET, extended
-    for early-week sessions (Mon session -> prev Thu 18:00; Tue session -> prev Fri)."""
+    """Engine week anchor: Sun 18:00 ET, extended for early-week sessions so the window
+    covers the FULL prior trading day's own session, not just part of it (Mon session ->
+    prev Wed 18:00, the start of Thursday's OWN session; Tue session -> prev Thu 18:00, the
+    start of Friday's OWN session). A trading day's session runs from 18:00 the evening
+    before to ~17:00 that day (trade_date's +7h convention) -- anchoring at "Thursday 18:00"
+    would only capture the LAST hour of Thursday's session (18:00-17:00 the next day is
+    already trade-date Friday), missing the entire rest of it. This is a DELIBERATE
+    divergence from session_pipeline._week_start_ts / hypothesis.py::compute_live_hl_mid
+    (both still anchor one day later, e.g. prev Thursday for a Monday session) -- those are
+    live production code, not touched here; this fixes the L1-thesis-only copy."""
     today = now.date()
     session_open = today if now.hour >= 18 else today - datetime.timedelta(days=1)
     wd = session_open.weekday()  # Mon=0 .. Sun=6
     if wd == 6:      # Sunday open -> Monday session
-        anchor = session_open - datetime.timedelta(days=3)  # prev Thursday
+        anchor = session_open - datetime.timedelta(days=4)  # prev Wednesday (Thursday's own open)
     elif wd == 0:    # Monday open -> Tuesday session
-        anchor = session_open - datetime.timedelta(days=3)  # prev Friday
+        anchor = session_open - datetime.timedelta(days=4)  # prev Thursday (Friday's own open)
     else:
         anchor = session_open - datetime.timedelta(days=(wd + 1) % 7)
     return pd.Timestamp(datetime.datetime(anchor.year, anchor.month, anchor.day, 18, 0), tz=TZ)

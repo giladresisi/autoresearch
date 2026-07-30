@@ -415,7 +415,36 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     `suppressed_p2_sites` (thesis.md §2.1b, derive_facts._p2_nesting_grandfather) is the
     separate, grandfather-aware {asset: set(level names)} that gates P2: a candidate whose
     divergence fired BEFORE its level became nested keeps scoring (not in this set); one
-    that was ALREADY nested when it fired scores ZERO too."""
+    that was ALREADY nested when it fired scores ZERO too.
+
+    P4-dominates-P3 (thesis.md §6 extension): needs no caller input — computed internally
+    from the SAME declared `evidence` list. When one asset carries an HTF-confirmed (mature,
+    not exhausted) P4 reclaim/failed-reclaim at a given mid (daily or weekly), the OTHER
+    asset's P3 (static position) item at that SAME mid scores ZERO if its direction
+    contradicts the P4 read — a dynamic, HTF-confirmed reclaim signal should not be netted
+    against a mere position snapshot as an equal, offsetting data point. Motivating case
+    (2026-07-27 09:20 ET): MNQ repeatedly failed to reclaim its weekly mid over almost an
+    hour (04:57-05:59 ET) while MES sat comfortably above its own weekly mid the whole
+    session, not testing it until 09:58 — MES's P3 "above" reading was stale relative to
+    MNQ's already-confirmed rejection, not a genuinely offsetting bullish signal."""
+    # thesis.md §6 extension: an HTF-confirmed P4 reclaim/failed-reclaim on ONE asset should
+    # outweigh a contradicting P3 (static position) read on the OTHER asset at the SAME mid,
+    # not be netted against it as an equal, offsetting data point — P4 is a dynamic,
+    # HTF-confirmed event, P3 is a plain snapshot. Pre-pass so a P4 item can dominate a P3
+    # item regardless of which one appears first in the declared list.
+    _P4_MID_LEVELS = {"daily_mid_high": "daily", "daily_mid_low": "daily",
+                      "weekly_mid_high": "weekly", "weekly_mid_low": "weekly"}
+    p4_mid_dominance: dict = {}   # (asset, "daily"|"weekly") -> "UP"|"DOWN"
+    for item in evidence or []:
+        if not isinstance(item, dict) or item.get("criterion") != "P4":
+            continue
+        mid_type = _P4_MID_LEVELS.get(item.get("level"))
+        if mid_type is None or not bool(item.get("mature")) or bool(item.get("exhausted")):
+            continue
+        side = _item_side(item)
+        if side is not None:
+            p4_mid_dominance[(item.get("asset"), mid_type)] = side
+
     scored = []
     net = 0.0
     by_level: dict = {}   # level -> {asset: direction}, for the §6 contradiction check
@@ -443,7 +472,18 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
         p2_suppressed = bool(
             item.get("criterion") == "P2" and suppressed_p2_sites
             and item.get("level") in (suppressed_p2_sites.get(item.get("asset")) or ()))
-        suppressed = p1_suppressed or p2_suppressed
+        # thesis.md §6 extension (see pre-pass above): a P3 item whose OTHER asset carries an
+        # HTF-confirmed P4 reclaim/failed-reclaim at the SAME mid, in the OPPOSITE direction,
+        # is dominated by that dynamic signal and scores ZERO — same mechanic as the other
+        # suppression gates, never applied to P1/P2/P4/P5.
+        p3_dominated = False
+        if item.get("criterion") == "P3" and item.get("level") in ("daily_mid", "weekly_mid"):
+            mid_type = "daily" if item.get("level") == "daily_mid" else "weekly"
+            other_asset = "MES" if item.get("asset") == "MNQ" else "MNQ"
+            dom_side = p4_mid_dominance.get((other_asset, mid_type))
+            this_side = _mid_side(item)
+            p3_dominated = dom_side is not None and this_side is not None and dom_side != this_side
+        suppressed = p1_suppressed or p2_suppressed or p3_dominated
         scored_mature = mature and not exhausted and not suppressed
         points = round(_BASE_POINTS * tf_mult * tier_mult * mag_mult, 4) if scored_mature else 0.0
         side = _item_side(item)

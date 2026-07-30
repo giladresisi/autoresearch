@@ -5,13 +5,13 @@ daily-trend checkpoint (most recent at/before now): 2026-05-19 09:20:00-04:00
 current session first bar: 2026-05-18 18:00:00-04:00
 prev1 trade date: 2026-05-18 | prev2: None
 current-week trade dates: [datetime.date(2026, 5, 18), datetime.date(2026, 5, 19)] | prev1-week: []
-ENGINE week anchor (session_pipeline._week_start_ts): 2026-05-15 18:00:00-04:00
+ENGINE week anchor (session_pipeline._week_start_ts): 2026-05-14 18:00:00-04:00
 
 ## S1 LEVELS MNQ (price = wick extreme; body = close extreme)
 TDO (session open 2026-05-18 18:00:00-04:00): 29393.25
 TWO (bar 2026-05-18 18:00:00-04:00): 29393.25
 prev1_day (2026-05-18): high=29713.0 (body 29711.75) low=29107.5 (body 29109.25) close=29373.75 (range pos 0.44)
-week running [ENGINE anchor 2026-05-15 18:00:00-04:00]: high=29713.0 low=29095.5 mid=29404.250
+week running [ENGINE anchor 2026-05-14 18:00:00-04:00]: high=29713.0 low=29095.5 mid=29404.250
 day running: high=29483.25 (at 2026-05-18 20:21:38-04:00) low=29095.5 (at 2026-05-19 09:27:58-04:00) mid=29289.375
 last close: 29099.75
 ATH 30077.0: last close is 3.25% below
@@ -46,7 +46,7 @@ ny_evening(prev1)_low 29107.5 [below]: swept 2026-05-19 09:20:53-04:00 (age 7m) 
 TDO (session open 2026-05-18 18:00:00-04:00): 7485.5
 TWO (bar 2026-05-18 18:00:00-04:00): 7485.5
 prev1_day (2026-05-18): high=7516.75 (body 7516.75) low=7435.25 (body 7436.5) close=7483.75 (range pos 0.60)
-week running [ENGINE anchor 2026-05-15 18:00:00-04:00]: high=7516.75 low=7435.25 mid=7476.000
+week running [ENGINE anchor 2026-05-14 18:00:00-04:00]: high=7516.75 low=7435.25 mid=7476.000
 day running: high=7503.25 (at 2026-05-18 20:21:39-04:00) low=7442.75 (at 2026-05-19 09:21:31-04:00) mid=7473.0
 last close: 7444.75
 ATH 7602.5: last close is 2.07% below
