@@ -20,7 +20,8 @@ for _p in (_HERE, os.path.dirname(_HERE), os.path.join(os.path.dirname(_HERE), "
 
 from facts import DEFAULT_MAIN, LOOKBACK, ParquetFactsSource  # noqa: E402
 from derive_facts import (  # noqa: E402
-    NEAR_MATURITY_WINDOW_MIN, compute_facts, render_facts_text,
+    FVG_LOOKBACK_DAYS, NEAR_MATURITY_WINDOW_MIN, compute_facts,
+    render_evidence_text, render_facts_text,
 )
 
 TZ = "America/New_York"
@@ -228,3 +229,175 @@ def test_evidence_text_populated_and_not_in_content_hash(source):
     assert res.evidence_text.startswith("## S9 THESIS EVIDENCE")
     # the core content_hash (S0-S7 only) must not change when evidence_text exists.
     assert res.content_hash == hashlib.sha256(res.text.encode("utf-8")).hexdigest()
+
+
+# --- Fix 1: (prev1) sub-session levels time-gated by ET clock ---
+
+def test_prev1_subsession_levels_gated_london_onward_2026_07_15(source):
+    # 2026-07-15 09:20 ET (now.hour = 9, the 00:00-17:59 "London onward" branch): NO
+    # (prev1) sub-session level of any sub-session may be offered — their (cur) copies are
+    # the only valid reference this late. This is the exact case that motivated the fix
+    # (ny_evening(prev1)_high fed 4 evidence citations to a wrong UP call this date).
+    boundary = pd.Timestamp("2026-07-15 09:20:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+    for tkr in ("MNQ", "MES"):
+        for sess in ("asia", "london", "ny_morning", "ny_evening"):
+            for edge in ("high", "low"):
+                assert f"{sess}(prev1)_{edge}" not in bundle.levels[tkr], \
+                    f"{sess}(prev1)_{edge} should be gated out at 09:20 ET on {tkr}"
+
+
+def test_prev1_subsession_levels_gated_during_asia_2026_07_15_2000(source):
+    # 2026-07-15 20:00 ET (now = 19:59:59, now.hour = 19, today's Asia session forming):
+    # ONLY ny_morning/ny_evening prev1 copies stay in scope; asia/london prev1 are dropped.
+    boundary = pd.Timestamp("2026-07-15 20:00:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+    for tkr in ("MNQ", "MES"):
+        lv = bundle.levels[tkr]
+        assert "ny_morning(prev1)_high" in lv or "ny_morning(prev1)_low" in lv, \
+            f"ny_morning(prev1) should be present during Asia on {tkr}"
+        assert "ny_evening(prev1)_high" in lv or "ny_evening(prev1)_low" in lv, \
+            f"ny_evening(prev1) should be present during Asia on {tkr}"
+        for sess in ("asia", "london"):
+            for edge in ("high", "low"):
+                assert f"{sess}(prev1)_{edge}" not in lv, \
+                    f"{sess}(prev1)_{edge} should be gated out during Asia on {tkr}"
+
+
+def test_cur_subsession_levels_unaffected_by_prev1_gate(source):
+    # Happy path: the (cur) sub-session emission is gated only by its own closes_at rule
+    # and is completely unaffected by the (prev1) time-gate. At 09:20 ET the asia(cur) and
+    # london(cur) sub-sessions have already closed, so they must still be present.
+    boundary = pd.Timestamp("2026-07-15 09:20:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+    for tkr in ("MNQ", "MES"):
+        cur_names = [k for k in bundle.levels[tkr] if "(cur)" in k]
+        assert cur_names, f"expected (cur) sub-session levels on {tkr}"
+        assert any(k.startswith("asia(cur)") for k in cur_names), \
+            f"asia(cur) should be present at 09:20 ET on {tkr}"
+        assert any(k.startswith("london(cur)") for k in cur_names), \
+            f"london(cur) should be present at 09:20 ET on {tkr}"
+
+
+# --- Fix 2: curated + verdicted S9 FVG-fill (P5) candidates ---
+
+def _s9_fvg_line(bundle, zone_id):
+    """The single S9 FVG-FILL line for zone_id, or None if not curated into S9."""
+    text = render_evidence_text(bundle)
+    lines = text.splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.startswith("FVG-FILL CANDIDATES"))
+    except StopIteration:
+        return None
+    for ln in lines[start + 1:]:
+        if ln and not ln.startswith("  "):        # left column -> next S9 subsection
+            break
+        if zone_id in ln:
+            return ln.strip()
+    return None
+
+
+def test_fvg_s9_curated_and_verdicted_2026_07_20(source):
+    # 2026-07-20 09:20 ET: the S9 FVG list is curated to zones formed within
+    # FVG_LOOKBACK_DAYS (=3) days and each carries a HELD/VIOLATED verdict. Two real
+    # surviving zones: a bear zone that was violated and a bull zone that held.
+    boundary = pd.Timestamp("2026-07-20 09:20:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+
+    violated = _s9_fvg_line(bundle, "MNQ 1hr 2026-07-17 14:00:00-04:00 bear")
+    assert violated is not None, "expected the 07-17 14:00 bear zone in the curated S9 list"
+    assert "VIOLATED (reject)" in violated
+
+    held = _s9_fvg_line(bundle, "MNQ 1hr 2026-07-19 18:00:00-04:00 bull")
+    assert held is not None, "expected the 07-19 18:00 bull zone in the curated S9 list"
+    assert "HELD (accept)" in held
+
+    # Curation is doing something: a genuinely visited zone > 3 days old (07-10 12:00,
+    # inside the S6 10-day scan but outside the S9 3-day window) is EXCLUDED from S9.
+    old_id = "MNQ 1hr 2026-07-10 12:00:00-04:00 bull"
+    old_zone = next((z for z in bundle.fvg_zones if z["id"] == old_id), None)
+    assert old_zone is not None and old_zone["visited"], "the 07-10 zone should be a real visited zone"
+    assert (bundle.now - old_zone["ts"]) > pd.Timedelta(days=FVG_LOOKBACK_DAYS)
+    assert _s9_fvg_line(bundle, old_id) is None, "the >3-day zone must be curated out of S9"
+
+
+def test_fvg_s9_too_recent_to_verdict_2026_07_23_1830(source):
+    # 2026-07-23 18:30 ET: the MES 1hr 15:00 bull zone was visited at 18:13, after the last
+    # qualifying 1h/4h close, so it has NO mature verdict yet — it must render as
+    # '(fill too recent to verdict)', never a fabricated HELD.
+    boundary = pd.Timestamp("2026-07-23 18:30:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+    zid = "MES 1hr 2026-07-23 15:00:00-04:00 bull"
+    zone = next((z for z in bundle.fvg_zones if z["id"] == zid), None)
+    assert zone is not None and zone["visited"], "expected the 15:00 bull zone visited"
+    assert zone["fill_verdict"] is None, "verdict should be immature at this boundary"
+    line = _s9_fvg_line(bundle, zid)
+    assert line is not None, "the fresh zone is within the 3-day window -> should be in S9"
+    assert "(fill too recent to verdict)" in line
+    assert "HELD" not in line and "VIOLATED" not in line
+
+
+def test_fvg_s6_raw_list_unchanged_by_s9_curation_2026_07_20(source):
+    # S6 stays the full historical list (10-day scan) regardless of the S9-only curation:
+    # the 07-10 zone excluded from S9 above is still present in the S6 render.
+    boundary = pd.Timestamp("2026-07-20 09:20:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+    s6 = render_facts_text(bundle)
+    assert "## S6 FVGs" in s6
+    assert "MNQ 1hr 2026-07-10 12:00:00-04:00 bull zone" in s6, \
+        "S6 must keep the full historical FVG list, uncurated"
+    # and the S6 line still uses the original visited/UNVISITED wording, no verdict appended.
+    assert "-> VIOLATED" not in s6 and "-> HELD" not in s6
+
+
+# --- Fix 3: HTF-close verdict for daily_mid / weekly_mid ---
+
+def _mid_render_lines(bundle):
+    return [ln.strip() for ln in render_evidence_text(bundle).splitlines()
+            if "weekly_mid [" in ln or "daily_mid [" in ln]
+
+
+def test_weekly_mid_htf_verdict_rejected_2026_07_27(source):
+    # Plan Fix 3 test 1 (the motivating wrong-call case): at 2026-07-27 09:20 ET MNQ's 1h
+    # closes sat BELOW its weekly mid (28747.75) for consecutive bars despite wicking above
+    # intrabar, so the mid must carry a mature REJECTED (failed-reclaim) verdict — not a
+    # bare number. side is the fixed "above" mid convention: beyond=False == closed below.
+    boundary = pd.Timestamp("2026-07-27 09:20:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+    st = bundle.htf_close_status["MNQ"]["weekly_mid"]["1h"]
+    assert st is not None, "MNQ weekly_mid 1h must be mature at this boundary"
+    assert st["beyond"] is False, "1h closed below the weekly mid -> REJECTED"
+    assert bundle.swept_at["MNQ"]["weekly_mid"] is not None
+    # renders as a real REJECTED verdict line, the P4 anchor that was previously missing.
+    assert any("weekly_mid [1h]" in ln and "REJECTED" in ln for ln in _mid_render_lines(bundle))
+    # bare daily_mid scalar line added symmetrically alongside weekly_mid.
+    assert "daily_mid = " in render_evidence_text(bundle)
+
+
+def test_weekly_mid_htf_verdict_accepted_reclaim_2026_07_22(source):
+    # Plan Fix 3 test 2 (HTF reclaim-from-below): at 2026-07-22 09:20 ET MES's most recent
+    # completed 1h bar closed ABOVE its weekly mid -> ACCEPTED (held reclaim, beyond=True).
+    # NOTE (reported divergence from the plan's literal expectation): MNQ's weekly_mid is
+    # NOT a mature ACCEPTED here — MNQ price is straddling its own weekly mid at the call
+    # (last crossing 09:02:47, no qualifying completed 1h close since), so a faithful
+    # implementation must leave it immature rather than fabricate an ACCEPTED verdict.
+    boundary = pd.Timestamp("2026-07-22 09:20:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+    mes = bundle.htf_close_status["MES"]["weekly_mid"]["1h"]
+    assert mes is not None and mes["beyond"] is True, "MES 1h closed above weekly mid -> ACCEPTED"
+    # MNQ straddles its mid at this instant -> honestly immature, not a fabricated verdict.
+    assert bundle.htf_close_status["MNQ"]["weekly_mid"]["1h"] is None
+
+
+def test_mid_no_recent_crossing_is_none_2026_07_27(source):
+    # Plan Fix 3 test 3: when price stayed on one side of the mid across the whole lookback
+    # (never crossed), the synthetic level is left unswept -> status None on both TFs and it
+    # produces NO evidence line, exactly as an unswept named level does. MES's weekly mid at
+    # 2026-07-27 09:20 ET is such a case (price held one side of it for the full 24h window).
+    boundary = pd.Timestamp("2026-07-27 09:20:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+    assert bundle.swept_at["MES"]["weekly_mid"] is None, "no crossing -> unswept"
+    st = bundle.htf_close_status["MES"]["weekly_mid"]
+    assert st["1h"] is None and st["4h"] is None
+    # an unswept mid is skipped by the render loop (never-swept -> not evidence).
+    assert not any(ln.startswith("MES weekly_mid [") for ln in _mid_render_lines(bundle))

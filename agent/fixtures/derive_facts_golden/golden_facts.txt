@@ -15,32 +15,20 @@ week running [ENGINE anchor 2026-05-14 18:00:00-04:00]: high=29713.0 low=29095.5
 day running: high=29483.25 (at 2026-05-18 20:21:38-04:00) low=29095.5 (at 2026-05-19 09:27:58-04:00) mid=29289.375
 last close: 29099.75
 ATH 30077.0: last close is 3.25% below
-asia(prev1): high=29577.0 (body 29576.5) low=29217.25 (body 29220.25)
-london(prev1): high=29542.25 (body 29542.0) low=29283.25 (body 29284.75)
-ny_morning(prev1): high=29713.0 (body 29711.75) low=29234.75 (body 29235.5)
-ny_evening(prev1): high=29406.75 (body 29405.5) low=29107.5 (body 29109.25)
 asia(cur, closed): high=29483.25 (body 29481.0) low=29223.25 (body 29225.5)
 london(cur, closed): high=29418.5 (body 29417.75) low=29131.0 (body 29132.5)
 
 ## S2 SWEEPS MNQ (current True Day; inclusive wick cross; body = first 15m close beyond; ages vs now)
 prev1_day_high 29713.0 [above]: NOT swept (closest approach 229.75 short @ 2026-05-18 20:21:38-04:00, age 786m)
-ny_morning(prev1)_high 29713.0 [above]: NOT swept (closest approach 229.75 short @ 2026-05-18 20:21:38-04:00, age 786m)
-asia(prev1)_high 29577.0 [above]: NOT swept (closest approach 93.75 short @ 2026-05-18 20:21:38-04:00, age 786m)
-london(prev1)_high 29542.25 [above]: NOT swept (closest approach 59.00 short @ 2026-05-18 20:21:38-04:00, age 786m)
 asia(cur)_high 29483.25 [above]: NOT swept (closest approach 64.75 short @ 2026-05-19 03:48:36-04:00, age 339m)
 london(cur)_high 29418.5 [above]: NOT swept (closest approach 174.25 short @ 2026-05-19 07:03:10-04:00, age 145m)
-ny_evening(prev1)_high 29406.75 [above]: swept 2026-05-18 18:00:10-04:00 (age 928m) | max excursion beyond 76.50 (DEPLETED, thr 20.0) | body15m: 2026-05-18 18:00:00-04:00 (age 928m)
 TDO 29393.25: first above-cross 2026-05-18 18:00:00-04:00 (age 928m)
 TDO 29393.25: first below-cross 2026-05-18 18:00:00-04:00 (age 928m)
 TWO 29393.25: first above-cross 2026-05-18 18:00:00-04:00 (age 928m)
 TWO 29393.25: first below-cross 2026-05-18 18:00:00-04:00 (age 928m)
-london(prev1)_low 29283.25 [below]: swept 2026-05-18 21:26:12-04:00 (age 722m) | max excursion beyond 187.75 (DEPLETED, thr 20.0) | body15m: 2026-05-18 22:00:00-04:00 (age 688m)
-ny_morning(prev1)_low 29234.75 [below]: swept 2026-05-18 22:09:54-04:00 (age 678m) | max excursion beyond 139.25 (DEPLETED, thr 20.0) | body15m: 2026-05-19 00:15:00-04:00 (age 553m)
 asia(cur)_low 29223.25 [below]: swept 2026-05-19 00:19:02-04:00 (age 549m) | max excursion beyond 127.75 (DEPLETED, thr 20.0) | body15m: 2026-05-19 00:15:00-04:00 (age 553m)
-asia(prev1)_low 29217.25 [below]: swept 2026-05-19 00:19:06-04:00 (age 549m) | max excursion beyond 121.75 (DEPLETED, thr 20.0) | body15m: 2026-05-19 05:15:00-04:00 (age 253m)
 london(cur)_low 29131.0 [below]: swept 2026-05-19 08:01:02-04:00 (age 87m) | max excursion beyond 35.50 (DEPLETED, thr 20.0) | body15m: 2026-05-19 09:15:00-04:00 (age 13m)
 prev1_day_low 29107.5 [below]: swept 2026-05-19 09:20:53-04:00 (age 7m) | max excursion beyond 12.00 (not depleted, thr 40.0) | body15m: 2026-05-19 09:15:00-04:00 (age 13m)
-ny_evening(prev1)_low 29107.5 [below]: swept 2026-05-19 09:20:53-04:00 (age 7m) | max excursion beyond 12.00 (not depleted, thr 20.0) | body15m: 2026-05-19 09:15:00-04:00 (age 13m)
 
 ## S1 LEVELS MES (price = wick extreme; body = close extreme)
 TDO (session open 2026-05-18 18:00:00-04:00): 7485.5
@@ -50,32 +38,20 @@ week running [ENGINE anchor 2026-05-14 18:00:00-04:00]: high=7516.75 low=7435.25
 day running: high=7503.25 (at 2026-05-18 20:21:39-04:00) low=7442.75 (at 2026-05-19 09:21:31-04:00) mid=7473.0
 last close: 7444.75
 ATH 7602.5: last close is 2.07% below
-asia(prev1): high=7497.75 (body 7497.5) low=7437.5 (body 7437.5)
-london(prev1): high=7480.25 (body 7480.25) low=7438.75 (body 7438.75)
-ny_morning(prev1): high=7516.75 (body 7516.75) low=7448.75 (body 7449.75)
-ny_evening(prev1): high=7491.0 (body 7490.25) low=7435.25 (body 7436.5)
 asia(cur, closed): high=7503.25 (body 7502.75) low=7465.25 (body 7465.5)
 london(cur, closed): high=7495.5 (body 7495.5) low=7446.5 (body 7446.75)
 
 ## S2 SWEEPS MES (current True Day; inclusive wick cross; body = first 15m close beyond; ages vs now)
 prev1_day_high 7516.75 [above]: NOT swept (closest approach 13.50 short @ 2026-05-18 20:21:39-04:00, age 786m)
-ny_morning(prev1)_high 7516.75 [above]: NOT swept (closest approach 13.50 short @ 2026-05-18 20:21:39-04:00, age 786m)
 asia(cur)_high 7503.25 [above]: NOT swept (closest approach 7.75 short @ 2026-05-19 03:48:32-04:00, age 339m)
-asia(prev1)_high 7497.75 [above]: swept 2026-05-18 18:20:40-04:00 (age 907m) | max excursion beyond 5.50 (DEPLETED, thr 3.0) | body15m: 2026-05-18 18:15:00-04:00 (age 913m)
 london(cur)_high 7495.5 [above]: NOT swept (closest approach 27.75 short @ 2026-05-19 07:03:09-04:00, age 145m)
-ny_evening(prev1)_high 7491.0 [above]: swept 2026-05-18 18:00:26-04:00 (age 928m) | max excursion beyond 12.25 (DEPLETED, thr 3.0) | body15m: 2026-05-18 18:15:00-04:00 (age 913m)
 TDO 7485.5: first above-cross 2026-05-18 18:00:00-04:00 (age 928m)
 TDO 7485.5: first below-cross 2026-05-18 18:00:00-04:00 (age 928m)
 TWO 7485.5: first above-cross 2026-05-18 18:00:00-04:00 (age 928m)
 TWO 7485.5: first below-cross 2026-05-18 18:00:00-04:00 (age 928m)
-london(prev1)_high 7480.25 [above]: swept 2026-05-18 18:00:00-04:00 (age 928m) | max excursion beyond 23.00 (DEPLETED, thr 3.0) | body15m: 2026-05-18 18:00:00-04:00 (age 928m)
 asia(cur)_low 7465.25 [below]: swept 2026-05-19 00:18:31-04:00 (age 549m) | max excursion beyond 22.50 (DEPLETED, thr 3.0) | body15m: 2026-05-19 00:15:00-04:00 (age 553m)
-ny_morning(prev1)_low 7448.75 [below]: swept 2026-05-19 05:40:26-04:00 (age 228m) | max excursion beyond 6.00 (DEPLETED, thr 3.0) | body15m: 2026-05-19 05:30:00-04:00 (age 238m)
 london(cur)_low 7446.5 [below]: swept 2026-05-19 09:20:52-04:00 (age 7m) | max excursion beyond 3.75 (DEPLETED, thr 3.0) | body15m: 2026-05-19 09:15:00-04:00 (age 13m)
-london(prev1)_low 7438.75 [below]: NOT swept (closest approach 4.00 short @ 2026-05-19 09:21:31-04:00, age 6m)
-asia(prev1)_low 7437.5 [below]: NOT swept (closest approach 5.25 short @ 2026-05-19 09:21:31-04:00, age 6m)
 prev1_day_low 7435.25 [below]: NOT swept (closest approach 7.50 short @ 2026-05-19 09:21:31-04:00, age 6m)
-ny_evening(prev1)_low 7435.25 [below]: NOT swept (closest approach 7.50 short @ 2026-05-19 09:21:31-04:00, age 6m)
 
 ## S3 CROSS-TICKER SWEEP MATRIX (same level name; one swept + other not = divergence candidate)
 asia(cur)_high [above, session]: wick MNQ not swept | MES not swept
@@ -84,35 +60,12 @@ asia(cur)_high [above, session]: wick MNQ not swept | MES not swept
                  laggard MES max reach: 7.75 short of 7503.25 @ 2026-05-19 03:48:32-04:00 (age 339m)
 asia(cur)_low [below, session]: wick MNQ 2026-05-19 00:19:02-04:00 | MES 2026-05-19 00:18:31-04:00
                 body MNQ 2026-05-19 00:15:00-04:00 | MES 2026-05-19 00:15:00-04:00
-asia(prev1)_high [above, session]: wick MNQ not swept | MES 2026-05-18 18:20:40-04:00  <-- WICK DIVERGENCE CANDIDATE (lead MES)
-                   body MNQ — | MES 2026-05-18 18:15:00-04:00  <-- BODY(15m) DIVERGENCE CANDIDATE (lead MES)
-                   laggard MNQ max reach: 93.75 short of 29577.0 @ 2026-05-18 20:21:38-04:00 (age 786m)
-asia(prev1)_low [below, session]: wick MNQ 2026-05-19 00:19:06-04:00 | MES not swept  <-- WICK DIVERGENCE CANDIDATE (lead MNQ)
-                  body MNQ 2026-05-19 05:15:00-04:00 | MES —  <-- BODY(15m) DIVERGENCE CANDIDATE (lead MNQ)
-                  laggard MES max reach: 5.25 short of 7437.5 @ 2026-05-19 09:21:31-04:00 (age 6m)
 london(cur)_high [above, session]: wick MNQ not swept | MES not swept
                    body MNQ — | MES —
                    laggard MNQ max reach: 174.25 short of 29418.5 @ 2026-05-19 07:03:10-04:00 (age 145m)
                    laggard MES max reach: 27.75 short of 7495.5 @ 2026-05-19 07:03:09-04:00 (age 145m)
 london(cur)_low [below, session]: wick MNQ 2026-05-19 08:01:02-04:00 | MES 2026-05-19 09:20:52-04:00  <-- both swept, >15min apart (transient divergence window)
                   body MNQ 2026-05-19 09:15:00-04:00 | MES 2026-05-19 09:15:00-04:00
-london(prev1)_high [above, session]: wick MNQ not swept | MES 2026-05-18 18:00:00-04:00  <-- WICK DIVERGENCE CANDIDATE (lead MES)
-                     body MNQ — | MES 2026-05-18 18:00:00-04:00  <-- BODY(15m) DIVERGENCE CANDIDATE (lead MES)
-                     laggard MNQ max reach: 59.00 short of 29542.25 @ 2026-05-18 20:21:38-04:00 (age 786m)
-london(prev1)_low [below, session]: wick MNQ 2026-05-18 21:26:12-04:00 | MES not swept  <-- WICK DIVERGENCE CANDIDATE (lead MNQ)
-                    body MNQ 2026-05-18 22:00:00-04:00 | MES —  <-- BODY(15m) DIVERGENCE CANDIDATE (lead MNQ)
-                    laggard MES max reach: 4.00 short of 7438.75 @ 2026-05-19 09:21:31-04:00 (age 6m)
-ny_evening(prev1)_high [above, session]: wick MNQ 2026-05-18 18:00:10-04:00 | MES 2026-05-18 18:00:26-04:00
-                         body MNQ 2026-05-18 18:00:00-04:00 | MES 2026-05-18 18:15:00-04:00
-ny_evening(prev1)_low [below, session]: wick MNQ 2026-05-19 09:20:53-04:00 | MES not swept  <-- WICK DIVERGENCE CANDIDATE (lead MNQ)
-                        body MNQ 2026-05-19 09:15:00-04:00 | MES —  <-- BODY(15m) DIVERGENCE CANDIDATE (lead MNQ)
-                        laggard MES max reach: 7.50 short of 7435.25 @ 2026-05-19 09:21:31-04:00 (age 6m)
-ny_morning(prev1)_high [above, session]: wick MNQ not swept | MES not swept
-                         body MNQ — | MES —
-                         laggard MNQ max reach: 229.75 short of 29713.0 @ 2026-05-18 20:21:38-04:00 (age 786m)
-                         laggard MES max reach: 13.50 short of 7516.75 @ 2026-05-18 20:21:39-04:00 (age 786m)
-ny_morning(prev1)_low [below, session]: wick MNQ 2026-05-18 22:09:54-04:00 | MES 2026-05-19 05:40:26-04:00  <-- both swept, >15min apart (transient divergence window)
-                        body MNQ 2026-05-19 00:15:00-04:00 | MES 2026-05-19 05:30:00-04:00
 prev1_day_high [above, day]: wick MNQ not swept | MES not swept
                  body MNQ — | MES —
                  laggard MNQ max reach: 229.75 short of 29713.0 @ 2026-05-18 20:21:38-04:00 (age 786m)
@@ -132,8 +85,6 @@ candidates (freshness = failure time); items >6h old omitted (spent). Dynamic-ex
 events and continuation items are not carded — compute their freshness from S4/S5 times.
 MNQ london(cur)_low 29131.0 [below] sweep: window=ny_morning @ 2026-05-19 08:01:02-04:00 | age 87m | tier=session w=1.0 | freshness=0.715 | base(w×freshness)=0.72 | DEPLETED
 MNQ prev1_day_low 29107.5 [below] sweep: window=ny_morning @ 2026-05-19 09:20:53-04:00 | age 7m | tier=day w=2.0 | freshness=0.973 | base(w×freshness)=1.95
-MNQ ny_evening(prev1)_low 29107.5 [below] sweep: window=ny_morning @ 2026-05-19 09:20:53-04:00 | age 7m | tier=session w=1.0 | freshness=0.973 | base(w×freshness)=0.97
-MES ny_morning(prev1)_low 7448.75 [below] sweep: window=london @ 2026-05-19 05:40:26-04:00 | age 228m | tier=session w=1.0 | freshness=0.416 | base(w×freshness)=0.42 | DEPLETED
 MES london(cur)_low 7446.5 [below] sweep: window=ny_morning @ 2026-05-19 09:20:52-04:00 | age 7m | tier=session w=1.0 | freshness=0.973 | base(w×freshness)=0.97 | DEPLETED
 
 ## S4 EQUILIBRIUM (1m closes vs RUNNING mids, current session; weekly mid = ENGINE anchor)

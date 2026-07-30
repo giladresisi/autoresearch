@@ -72,6 +72,11 @@ _TIER_RANK = {"week": 3, "day": 2, "session": 1}
 # 18:55:51 re-touch instead). Session-tier sub-blocks are NOT widened — single-session
 # concepts by design (thesis.md §2.1b).
 SMT_LOOKBACK_HOURS = 24
+# S9-only recency window for the P5 FVG-fill candidate list (thesis.md §2.1 P5). The raw
+# S6 FVG list stays the full historical scan; S9 curates it to VISITED zones formed within
+# this many days of now, mirroring how S9's SMT-candidate list is a curated subset of the
+# raw S3 sweep matrix.
+FVG_LOOKBACK_DAYS = 3
 
 
 def load(path):
@@ -243,6 +248,25 @@ def _htf_close_status(df: pd.DataFrame, swept_at: Optional[pd.Timestamp], *,
             "n_closed_since": int(len(eligible)),
         }
     return out
+
+
+def _last_mid_crossing(close: pd.Series, mid: float) -> Optional[pd.Timestamp]:
+    """Timestamp of the LAST genuine crossing of `mid` in a close series, else None.
+
+    A crossing is a bar whose side of the mid differs from the prior bar's; a close exactly
+    at the mid continues the previous side (equality is not its own crossing). None means
+    price stayed on one side across the whole window (never swept) — giving the mid the same
+    "not evidence" treatment the rendering loop already applies to unswept named levels."""
+    if len(close) == 0:
+        return None
+    sign = pd.Series(float("nan"), index=close.index)
+    sign[close > mid] = 1.0
+    sign[close < mid] = -1.0
+    sign = sign.ffill()                            # equality carries the previous side
+    prev = sign.shift(1)
+    mask = (sign.notna() & prev.notna() & (sign != prev)).to_numpy()
+    crossings = sign.index[mask]
+    return crossings[-1] if len(crossings) else None
 
 
 def age_min(ts, now):
@@ -668,7 +692,7 @@ class FactsBundle:
     # --- plan 14: cross-family confluence source rows (Task 8, audit-only) ---
     historical_extremes: dict = field(default_factory=dict)  # {tkr:{"daily":[...],"weekly":[...]}}
     # --- plan 15 Task 4: FVG zones as structured P5-fill evidence candidates ---
-    fvg_zones: list = field(default_factory=list)      # [{id, asset, tf, ts, kind, lo, hi, visited}]
+    fvg_zones: list = field(default_factory=list)      # [{id, asset, tf, ts, kind, lo, hi, visited, visited_at, fill_verdict}]
     # S8 menus (plan 11): computed lazily by facts_to_validator_dict / render_menus_text.
     menus: Optional[dict] = None
     # thesis.md §2.1b/§2.1d refinement: {tkr: set(level names)} excluded from FRESH P1
@@ -1268,6 +1292,7 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
     A = out.append
     A("## S9 THESIS EVIDENCE (decisions/thesis.md P1-P4 inputs)")
     A(f"weekly_mid = {bundle.weekly_mid}")
+    A(f"daily_mid = {bundle.day_mid}")
     A("\nHTF close-status per swept level (maturity gate: 'immature' = no qualifying HTF "
       "close yet since the sweep -> NOT usable evidence, decisions/thesis.md §3):")
     A("(a level tagged 'nested/duplicate' below is NOT usable as a fresh, standalone P1 "
@@ -1381,15 +1406,24 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
           f"distance_safe={cand['distance_safe']} corroborated={cand['corroborated']} "
           f"-> preconfirm_eligible={cand['preconfirm_eligible']}")
 
-    # --- plan 15 Task 4: FVG-fill (P5) candidates ---
-    A("\nFVG-FILL CANDIDATES (thesis.md §2.1 P5; a VISITED zone is a fill event — copy the id "
-      "verbatim as the evidence `level`; direction=accept means the zone HELD its own bias "
-      "(bull=up/bear=down), reject means it was violated; code derives the UP/DOWN sign):")
-    _visited_fvg = [z for z in (bundle.fvg_zones or []) if z.get("visited")]
-    if not _visited_fvg:
-        A("  (none visited)")
-    for z in _visited_fvg:
-        A(f"  {z['id']}: {z['kind']} zone {z['lo']}-{z['hi']} [{z['tf']}] VISITED")
+    # --- plan 15 Task 4 / plan 17 Fix 2: curated + verdicted FVG-fill (P5) candidates ---
+    A(f"\nFVG-FILL CANDIDATES (thesis.md §2.1 P5; curated to VISITED zones formed within "
+      f"{FVG_LOOKBACK_DAYS} days of now — copy the id verbatim as the evidence `level`. The "
+      f"HELD/VIOLATED verdict is code-derived from the same HTF-close maturity gate the named "
+      f"levels use: HELD -> direction=accept (the zone held its bull=up/bear=down bias), "
+      f"VIOLATED -> direction=reject (price closed decisively through it); "
+      f"'too recent to verdict' = no qualifying HTF close since the fill yet, NOT usable):")
+    _cutoff = (bundle.now - pd.Timedelta(days=FVG_LOOKBACK_DAYS)) if bundle.now is not None else None
+    _curated_fvg = [z for z in (bundle.fvg_zones or [])
+                    if z.get("visited") and (_cutoff is None or z["ts"] >= _cutoff)]
+    if not _curated_fvg:
+        A("  (none visited within lookback)")
+    for z in _curated_fvg:
+        v = z.get("fill_verdict")
+        vtag = (" -> HELD (accept)" if v == "held"
+                else " -> VIOLATED (reject)" if v == "violated"
+                else " -> (fill too recent to verdict)")
+        A(f"  {z['id']}: {z['kind']} zone {z['lo']}-{z['hi']} [{z['tf']}] VISITED{vtag}")
 
     # --- plan 14 Task 2: stretch + nearest-meaningful-level distance (MNQ) ---
     ar = (bundle.avg_range_1h or {}).get("MNQ")
@@ -1710,8 +1744,20 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
             L(f"ATH {ath}: last close is {(ath - float(df['close'].iloc[-1])) / ath * 100:.2f}% below")
 
         if prev1_td is not None:
+            # Time-gate (prev1) sub-session levels by the current ET clock, mirroring
+            # production smt_detect.py::eligible_levels for THIS file's (cur)/(prev1)
+            # model: during today's own forming Asia session (>=18:00 ET) only the two NY
+            # sub-sessions' prev1 copies are still in scope; from London onward
+            # (00:00-17:59 ET) every prev1 sub-session copy is stale/superseded by its
+            # (cur) copy and none are eligible.
+            if now.hour >= 18:
+                prev1_eligible = {"ny_morning", "ny_evening"}
+            else:
+                prev1_eligible = set()
             pblocks = sub_blocks(session_frame(df, prev1_td))
             for name, frame in pblocks.items():
+                if name not in prev1_eligible:
+                    continue
                 h, l, ch, cl = hl(frame)
                 if h is None:
                     continue
@@ -1782,6 +1828,33 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
             bundle.htf_close_status[tkr][name] = _htf_close_status(
                 data[tkr], bundle.swept_at[tkr].get(name), price=price, side=side, now=now)
 
+    # plan 17 Fix 3: daily_mid / weekly_mid as synthetic per-asset "levels" fed through the
+    # SAME _htf_close_status() machinery, so render_evidence_text's per-level loop renders a
+    # [1h]/[4h] ACCEPTED/REJECTED verdict for the mid — the P4 (HTF-confirmed reclaim /
+    # failed-reclaim) anchor that was missing (thesis.md §3), previously only a bare number.
+    # swept_at = the LAST crossing of the mid within SMT_LOOKBACK_HOURS (no crossing ->
+    # None -> the render loop skips it, same as an unswept level; a mid price straddles at
+    # the call is correctly left immature). side is FIXED "above" (a mid has no inherent
+    # side the way a named high/low does): beyond=True means the most-recent qualifying HTF
+    # bar CLOSED ABOVE the mid -> reclaim HELD (ACCEPTED, bullish); below -> failed reclaim
+    # (REJECTED, bearish). This direction-consistent convention makes the ACCEPTED/REJECTED
+    # label meaningful without a per-name side and yields the correct failed-reclaim read on
+    # the 2026-07-27 motivating case (1h closes sat below the weekly mid -> REJECTED).
+    for tkr in ("MNQ", "MES"):
+        dh, dl = bundle.day_hi.get(tkr), bundle.day_lo.get(tkr)
+        wh, wl = bundle.week_hi.get(tkr), bundle.week_lo.get(tkr)
+        mids = {}
+        if dh is not None and dl is not None:
+            mids["daily_mid"] = round((dh + dl) / 2.0, 2)
+        if wh is not None and wl is not None:
+            mids["weekly_mid"] = round((wh + wl) / 2.0, 2)
+        wide = data[tkr]["close"].loc[now - pd.Timedelta(hours=SMT_LOOKBACK_HOURS):now]
+        for mname, mid in mids.items():
+            swept_at = _last_mid_crossing(wide, mid)
+            bundle.swept_at[tkr][mname] = swept_at
+            bundle.htf_close_status[tkr][mname] = _htf_close_status(
+                data[tkr], swept_at, price=mid, side="above", now=now)
+
     L("\n## S3 CROSS-TICKER SWEEP MATRIX (same level name; one swept + other not = divergence candidate)")
     shared = sorted(set(levels["MNQ"]) & set(levels["MES"]))
     for name in shared:
@@ -1849,6 +1922,8 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
         _status = bundle.htf_close_status.get(_tkr, {})
         _swept = bundle.swept_at.get(_tkr, {})
         for _name, _tf_map in _status.items():
+            if _name not in levels.get(_tkr, {}):
+                continue          # synthetic daily_mid/weekly_mid (Fix 3) are P4 pivots, not P1 levels
             if _swept.get(_name) is None:
                 continue
             if any((_tf_map or {}).get(_tf) is not None for _tf in ("1h", "4h")):
@@ -1990,8 +2065,22 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
             recent = bars[bars.index >= now - pd.Timedelta(days=10)]
             for ts, kind, lo, hi, third_ts in fvgs(recent):
                 seg = dft[dft.index > third_ts]
-                touched = bool(((seg["low"] <= hi) & (seg["high"] >= lo)).any()) if len(seg) else False
+                hits = seg[(seg["low"] <= hi) & (seg["high"] >= lo)] if len(seg) else seg
+                visited_at = hits.index[0] if len(hits) else None
+                touched = visited_at is not None
                 L(f"{label} {ts} {kind} zone {lo}-{hi} -> {'visited' if touched else 'UNVISITED'}")
+                # plan 17 Fix 2: held/violated verdict for a VISITED zone, reusing the same
+                # _htf_close_status() the named levels use — a bull zone is VIOLATED when a
+                # qualifying HTF bar CLOSED below its LOW edge since the visit (side="below"
+                # -> beyond=True), else HELD; a bear zone symmetrically on its HIGH edge. 1h
+                # verdict preferred, 4h fallback; both immature -> None (too recent).
+                fill_verdict = None
+                if visited_at is not None:
+                    edge, vside = (lo, "below") if kind == "bull" else (hi, "above")
+                    st = _htf_close_status(dft, visited_at, price=edge, side=vside, now=now)
+                    r = st["1h"] if st.get("1h") is not None else st.get("4h")
+                    if r is not None:
+                        fill_verdict = "violated" if r["beyond"] else "held"
                 # plan 15 Task 4: additive P5-fill candidate — no change to the rendered S6
                 # line above. `id` is the exact S6 identifier (asset + tf label + ts + kind)
                 # so the model copies it verbatim as the evidence `level`; the bull/bear kind
@@ -1999,6 +2088,7 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
                 bundle.fvg_zones.append({
                     "id": f"{label} {ts} {kind}", "asset": tkr, "tf": tf_norm,
                     "ts": ts, "kind": kind, "lo": lo, "hi": hi, "visited": touched,
+                    "visited_at": visited_at, "fill_verdict": fill_verdict,
                 })
 
     L("\n## S7 CHECKPOINT SNAPSHOT")

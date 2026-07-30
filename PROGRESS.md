@@ -1,5 +1,27 @@
 ﻿# PROGRESS
 
+## Feature: L1 Facts-Completeness Fixes — Plan 17
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/17.l1-facts-completeness-fixes.md`
+
+Three additive S8/S9-scoped fixes to `agent/derive_facts.py`: (1) time-gate `(prev1)`
+sub-session liquidity levels by the ET clock, (2) curate the S9 FVG-fill (P5) block to a
+`FVG_LOOKBACK_DAYS=3` window with held/violated/too-recent verdicts (S6 raw list unchanged),
+(3) HTF-close verdict for `daily_mid`/`weekly_mid` as synthetic per-asset levels fed through
+`_htf_close_status` (plus a bare `daily_mid =` line). Hashed S0–S7 core untouched; golden fixture
+regenerated with only the 49 prev1 line deletions. 9 new tests over real boundaries; full plan
+suite 224 passed. code-review (1 MEDIUM + 1 LOW fixed) and acceptance-criteria-validate (17/17)
+both passed. `FVG_LOOKBACK_DAYS=3` confirmed adequate (7 curated zones at 07-20, 13 at 07-27).
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/17.l1-facts-completeness-fixes.md`
+- Detailed implementation summary (3 fixes)
+- Divergences and resolutions (Fix 3 side rule; 07-22 MNQ immature)
+- Test results and metrics
+
+---
+
 ## Feature: L1 thesis evidence-ledger improvements — Plan 15
 ### Status: ✅ Complete (unstaged)
 **Plan File**: `.agents/plans/15.l1-thesis-evidence-ledger-improvements.md`
