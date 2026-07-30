@@ -76,7 +76,16 @@ SMT_LOOKBACK_HOURS = 24
 # S6 FVG list stays the full historical scan; S9 curates it to VISITED zones formed within
 # this many days of now, mirroring how S9's SMT-candidate list is a curated subset of the
 # raw S3 sweep matrix.
-FVG_LOOKBACK_DAYS = 3
+#
+# Was 3 -- found (2026-07-30 root-cause audit) to silently exclude the exact zones that
+# motivated this fix in the first place: evaluating 2026-07-27 09:20 ET, the 2026-07-23
+# 07:00/08:00 ET bearish zones sit 4+ days back (a `now - 3 days` cutoff of ~07-24 09:20
+# lands hours AFTER those same-morning zones formed), so a 3-day window drops them from
+# the facts entirely -- not merely undeclared, structurally absent. 5 days reliably
+# includes same-time-of-day zones a full 4 calendar days back while keeping the curated
+# list well short of the original ~70-line/10-day dump (32-37 zones across several dates
+# checked, vs. 3 days' 13-21).
+FVG_LOOKBACK_DAYS = 5
 
 
 def load(path):

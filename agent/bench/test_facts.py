@@ -299,7 +299,7 @@ def _s9_fvg_line(bundle, zone_id):
 
 def test_fvg_s9_curated_and_verdicted_2026_07_20(source):
     # 2026-07-20 09:20 ET: the S9 FVG list is curated to zones formed within
-    # FVG_LOOKBACK_DAYS (=3) days and each carries a HELD/VIOLATED verdict. Two real
+    # FVG_LOOKBACK_DAYS days and each carries a HELD/VIOLATED verdict. Two real
     # surviving zones: a bear zone that was violated and a bull zone that held.
     boundary = pd.Timestamp("2026-07-20 09:20:00", tz=TZ)
     bundle = _bundle_at(source, boundary)
@@ -312,13 +312,14 @@ def test_fvg_s9_curated_and_verdicted_2026_07_20(source):
     assert held is not None, "expected the 07-19 18:00 bull zone in the curated S9 list"
     assert "HELD (accept)" in held
 
-    # Curation is doing something: a genuinely visited zone > 3 days old (07-10 12:00,
-    # inside the S6 10-day scan but outside the S9 3-day window) is EXCLUDED from S9.
+    # Curation is doing something: a genuinely visited zone older than FVG_LOOKBACK_DAYS
+    # (07-10 12:00, inside the S6 10-day scan but outside the S9 lookback window) is
+    # EXCLUDED from S9.
     old_id = "MNQ 1hr 2026-07-10 12:00:00-04:00 bull"
     old_zone = next((z for z in bundle.fvg_zones if z["id"] == old_id), None)
     assert old_zone is not None and old_zone["visited"], "the 07-10 zone should be a real visited zone"
     assert (bundle.now - old_zone["ts"]) > pd.Timedelta(days=FVG_LOOKBACK_DAYS)
-    assert _s9_fvg_line(bundle, old_id) is None, "the >3-day zone must be curated out of S9"
+    assert _s9_fvg_line(bundle, old_id) is None, "the too-old zone must be curated out of S9"
 
 
 def test_fvg_s9_too_recent_to_verdict_2026_07_23_1830(source):
@@ -332,9 +333,23 @@ def test_fvg_s9_too_recent_to_verdict_2026_07_23_1830(source):
     assert zone is not None and zone["visited"], "expected the 15:00 bull zone visited"
     assert zone["fill_verdict"] is None, "verdict should be immature at this boundary"
     line = _s9_fvg_line(bundle, zid)
-    assert line is not None, "the fresh zone is within the 3-day window -> should be in S9"
+    assert line is not None, "the fresh zone is within the lookback window -> should be in S9"
     assert "(fill too recent to verdict)" in line
     assert "HELD" not in line and "VIOLATED" not in line
+
+
+def test_fvg_s9_lookback_covers_same_time_of_day_4_days_back_2026_07_27(source):
+    # Regression for the FVG_LOOKBACK_DAYS=3 -> 5 bug: evaluated at 2026-07-27 09:20 ET, the
+    # 2026-07-23 07:00/08:00 ET bearish zones (formed 4 days earlier, same time of day) were
+    # silently excluded at 3 days -- `now - 3 days` lands at ~07-24 09:20, AFTER those same-
+    # morning zones formed on 07-23. 5 days must include them.
+    boundary = pd.Timestamp("2026-07-27 09:20:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+    for zid in ("MNQ 1hr 2026-07-23 07:00:00-04:00 bear",
+                "MNQ 1hr 2026-07-23 08:00:00-04:00 bear",
+                "MNQ 4hr 2026-07-23 06:00:00-04:00 bear"):
+        line = _s9_fvg_line(bundle, zid)
+        assert line is not None, f"{zid} must survive S9 curation at FVG_LOOKBACK_DAYS={FVG_LOOKBACK_DAYS}"
 
 
 def test_fvg_s6_raw_list_unchanged_by_s9_curation_2026_07_20(source):
