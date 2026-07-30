@@ -87,7 +87,10 @@ def test_prev3_day_low_smt_2026_07_14(source):
     # plan 15 Task 1 concrete acceptance case: at the 2026-07-14 01:00 ET boundary MNQ swept
     # its prev3_day_low (29395.0) while MES never reached its own prev3_day_low (7516.25) —
     # a genuine, uncontested cross-asset SMT that the pre-plan-15 2-day/1-week depth could not
-    # see. MNQ's own HTF close (29425.0) REJECTED the swept low on both 1h and 4h.
+    # see. MNQ's own HTF close REJECTED the swept low on both 1h and 4h (1h close unaffected
+    # by the 18:00-ET-session 4h-bar anchor fix, since 1h bins are anchor-invariant; the 4h
+    # close value shifted because the 4h bar boundary moved from the old midnight anchor to
+    # the correct 18:00 ET session anchor).
     boundary = pd.Timestamp("2026-07-14 01:00:00", tz=TZ)
     bundle = _bundle_at(source, boundary)
 
@@ -105,9 +108,9 @@ def test_prev3_day_low_smt_2026_07_14(source):
         assert c["meaningful"] is True
 
     status = bundle.htf_close_status["MNQ"]["prev3_day_low"]
-    for tf in ("1h", "4h"):
+    for tf, expected_close in (("1h", 29425.0), ("4h", 29448.25)):
         assert status[tf] is not None, f"prev3_day_low immature on {tf}"
-        assert status[tf]["close"] == 29425.0
+        assert status[tf]["close"] == expected_close
         assert status[tf]["beyond"] is False       # closed ABOVE the swept low -> REJECTED
 
 

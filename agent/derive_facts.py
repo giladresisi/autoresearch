@@ -18,15 +18,17 @@ Engine-grounded conventions (v2 — aligned to the live engine after POC run 3):
   weekend/stub trade dates (Sat/Sun or < 1000 bars) are excluded from the date universe.
 - True Day = 18:00 ET -> 16:55 ET next day; trade date = close date.
 - Week extremes/mid use the ENGINE anchor (session_pipeline._week_start_ts):
-  Sunday 18:00 ET, EXTENDED for early-week sessions — Monday session -> prev Thursday
-  18:00 ET, Tuesday session -> prev Friday 18:00 ET.
+  Sunday 18:00 ET, EXTENDED for early-week sessions — Monday session -> prev Wednesday
+  18:00 ET, Tuesday session -> prev Thursday 18:00 ET (the start of that prior day's OWN
+  full session, not just its last hour).
 - Sweeps are INCLUSIVE (low <= level / high >= level), matching the engine.
 - Depletion thresholds: MNQ week 80 / day 40 / session 20; MES week 12 / day 6 /
   session 3 (exact engine tables, not a ratio); DEPLETED at excursion >= threshold.
 - Levels carry BODY (close) extremes too; body sweeps are reported on 15min closes
   (hidden-SMT convention, smt_detect HIDDEN_TFS).
-- 4hr/1hr bars are MIDNIGHT-anchored resamples (engine convention, hypothesis.py);
-  an 18:00-anchored 4hr table is printed as auxiliary only.
+- 4hr/1hr bars are 18:00-ET-SESSION-anchored resamples (CME/TradingView convention:
+  18:00/22:00/02:00/06:00/10:00/14:00 ET, final bar ~3h before the maintenance gap) --
+  NOT the midnight/epoch grid pandas defaults to.
 - FVGs on COMPLETED 1hr and 4hr bars, BOTH tickers; "visited" counts any 1s re-entry
   strictly after the third bar's OPEN label (daily.py convention).
 """
@@ -133,7 +135,15 @@ def _day_start_ts(now: pd.Timestamp) -> pd.Timestamp:
     return pd.Timestamp(datetime.datetime(d.year, d.month, d.day, hr, 0), tz=TZ)
 
 
-def ohlc(df, rule, offset=None):
+def ohlc(df, rule, offset=pd.Timedelta(hours=18)):
+    """Resample to `rule`-length bars anchored to the 18:00 ET session open (CME/
+    TradingView convention), not the midnight/epoch grid pandas defaults to. For a "4h"
+    rule this gives 18:00/22:00/02:00/06:00/10:00/14:00 ET boundaries, with the final
+    bar of the day naturally running only ~3h (14:00 -> the last bar before the 16:55-
+    18:00 maintenance gap in the data) since there is no data to fill the rest of that
+    bin -- no special-casing needed. The 18h offset is an exact multiple of every OTHER
+    rule this helper is called with (1h/30min/15min/5min), so it is a no-op for those
+    and safe to apply unconditionally."""
     return df.resample(rule, offset=offset).agg(
         open=("open", "first"), high=("high", "max"),
         low=("low", "min"), close=("close", "last"),
@@ -202,7 +212,7 @@ def _beyond_side(value: float, price: float, side: str) -> bool:
 def _htf_close_status(df: pd.DataFrame, swept_at: Optional[pd.Timestamp], *,
                        price: float, side: str, now: pd.Timestamp) -> dict:
     """For a level swept at `swept_at`, classify the most recent COMPLETED 1h/4h bar
-    (midnight-anchored, engine convention) that CLOSED strictly after the sweep and at/
+    (18:00-ET-session-anchored, CME/TradingView convention) that CLOSED strictly after the sweep and at/
     before `now`. Returns {"1h": None, "4h": None} when `swept_at` is None (never swept)
     or when no qualifying bar has closed yet since the sweep — the maturity gate
     (decisions/thesis.md §3): an immature sweep is not usable evidence in either
@@ -1917,7 +1927,7 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
                 if len(seg):
                     L(f"  acceptance {lbl}: {seg['above'].mean() * 100:.0f}% of closes above (n={len(seg)})")
 
-    L("\n## S5 STRUCTURE BARS (MNQ; 4hr/1hr are MIDNIGHT-anchored = engine convention)")
+    L("\n## S5 STRUCTURE BARS (MNQ; 4hr/1hr are 18:00-ET-SESSION-anchored = CME/TradingView convention)")
     df = data["MNQ"]
     L("\nTrue-Day bars (rows = session open time):")
     tds_series = pd.Series((df.index + pd.Timedelta(hours=7)).date, index=df.index)
@@ -1930,7 +1940,7 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
                      float(s['low'].min()), float(s['close'].iloc[-1])))
     L(pd.DataFrame(rows, columns=["open_ts", "open", "high", "low", "close"]).to_string(index=False))
     h4 = ohlc(df, "4h")
-    L("\n4hr bars (midnight-anchored, ENGINE), last 24:")
+    L("\n4hr bars (18:00-ET-session-anchored), last 24:")
     L(h4.tail(24).to_string())
     h1 = ohlc(df, "1h")
     L("\n1hr bars, last 24:")
