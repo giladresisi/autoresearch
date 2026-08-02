@@ -150,16 +150,23 @@ class ParquetFactsSource:
         # thesis.md §3a: near-maturity pre-confirmation candidates (additive overlay, like
         # suppressed_p1_levels above — never in the shadow-hash dict).
         res.validator_dict["near_maturity_candidates"] = list(bundle.near_maturity_candidates or [])
-        # 2026-08-01 mid-completeness check: daily_mid/weekly_mid HTF-close maturity per
-        # asset (additive overlay, like suppressed_p1_levels above — never in the shadow-
-        # hash dict). Lets the validator require a P3/P4 declaration when a mid's verdict
-        # is genuinely mature and confirmed — the model can't silently ignore it. JSON/
-        # artifact-safe (booleans only, like fvg_zones/suppressed_p1_levels above) — the
-        # raw per-tf dict carries pd.Timestamp objects the validator doesn't need.
-        res.validator_dict["mid_htf_close_status"] = {
-            tkr: {name: {tf: bool((bundle.htf_close_status.get(tkr, {}).get(name) or {}).get(tf))
+        # 2026-08-02 evidence-direction ground truth: the SAME per-level HTF-close verdict
+        # already computed for every named level (bundle.htf_close_status, incl. the
+        # daily_mid/weekly_mid synthetic "levels" plan 17 Fix 3 added) exposed as a flat
+        # None|bool per (asset, level, tf) -- None = never swept / no qualifying close yet
+        # (immature), True = closed BEYOND (accept), False = closed back before (reject).
+        # Additive overlay, like suppressed_p1_levels above — never in the shadow-hash
+        # dict. Two consumers: (1) SEM_EVIDENCE_DIRECTION_MISMATCH cross-checks every
+        # declared P1/P2 item's mature/direction claim against this instead of trusting it
+        # (closes the 2026-07-15 prev1_week_high fabrication class — a level that was NEVER
+        # swept has every tf entry None, directly contradicting a declared mature=True); (2)
+        # score_thesis_evidence's P3 auto-derivation reads the two mid names straight out of
+        # this same dict rather than needing its own separate overlay.
+        res.validator_dict["level_htf_close_status"] = {
+            tkr: {name: {tf: (None if (status or {}).get(tf) is None
+                              else bool(status[tf]["beyond"]))
                         for tf in ("1h", "4h")}
-                  for name in ("daily_mid", "weekly_mid")}
+                  for name, status in (bundle.htf_close_status.get(tkr) or {}).items()}
             for tkr in ("MNQ", "MES")
         }
         res.menu_text = render_menus_text(bundle)              # reuses cached bundle.menus

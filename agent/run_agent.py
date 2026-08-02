@@ -577,7 +577,8 @@ def _derive_next_arithmetic(block: dict) -> tuple[dict, list]:
 
 
 def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
-                              suppressed_p1_levels=None, suppressed_p2_sites=None) -> tuple[dict, list]:
+                              suppressed_p1_levels=None, suppressed_p2_sites=None,
+                              level_htf_close_status=None) -> tuple[dict, list]:
     """Compute per-item points, net score, and the confidence ceiling from the model's
     declared P1/P2 evidence ledger (decisions/thesis.md §2.1/§4/§6). Mirrors
     _derive_daily_arithmetic/_derive_next_arithmetic: confidence is silently corrected
@@ -591,15 +592,21 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
     `dol_available` ({"UP": bool, "DOWN": bool}, thesis.md §8 no-liquidity rule) folds the
     same no-eligible-DOL-for-this-direction override into the confidence ceiling here as
     validate_thesis applies to expected_bias — so a no-liquidity call is clamped to LOW
-    confidence even before the bias-consistency retry loop, not just at the validator."""
+    confidence even before the bias-consistency retry loop, not just at the validator.
+
+    `level_htf_close_status` (2026-08-02) is threaded straight through to
+    score_thesis_evidence's P3 auto-derivation — daily_mid/weekly_mid evidence is
+    code-injected here too, so the ceiling/net-score computed BEFORE the validator retry
+    loop already reflects it, not just validate_thesis's own re-scoring."""
     from validate_contracts import score_thesis_evidence
     notes: list = []
     evidence = block.get("evidence") or []
-    if not evidence:
+    if not evidence and not level_htf_close_status:
         return block, notes
     scoring = score_thesis_evidence(evidence, magnitude=magnitude, dol_available=dol_available,
                                     suppressed_p1_levels=suppressed_p1_levels,
-                                    suppressed_p2_sites=suppressed_p2_sites)
+                                    suppressed_p2_sites=suppressed_p2_sites,
+                                    level_htf_close_status=level_htf_close_status)
     # Audit-annotate each item with its computed points/side in place (mirrors
     # _derive_next_arithmetic writing item["score"] back onto the ledger).
     block["evidence"] = scoring["scored_evidence"]
@@ -952,19 +959,21 @@ _TASK_THESIS = (
     "that evidence item, which zeroes its contribution (like an immature item). You may also "
     "DISAGREE and score it normally (omit exhausted) — the suggestion is a hint from stretch, "
     "not a gate. Do not set exhausted on a fresh, un-flagged SMT. "
-    "\nP3/P4 (EQUILIBRIUM & RECLAIM — thesis.md §2.1, now partially code-scored). You may add "
-    "these to the SAME evidence ledger: "
-    "\n- P3 (position vs. equilibrium): {criterion: P3, asset, level: daily_mid | weekly_mid, "
-    "tier, tf, direction: accept | reject, mature} — accept = price accepted ABOVE that mid "
-    "(bullish), reject = sits/closed BELOW it (bearish). Code derives the sign; do not declare "
-    "UP/DOWN. "
-    "\n- P4 (reclaim / failed reclaim of a mid, HTF-confirmed): {criterion: P4, asset, level: "
+    "\nP3/P4 (EQUILIBRIUM & RECLAIM — thesis.md §2.1). "
+    "\n- P3 (position vs. equilibrium) is FULLY AUTOMATIC as of 2026-08-02 — do NOT declare "
+    "P3 items yourself. Code reads daily_mid/weekly_mid's own HTF-close verdict directly from "
+    "the facts and injects the correct evidence item (asset, tier, tf, accept/reject) for you, "
+    "for both assets, whenever a mature reading exists — this is a plain fact lookup, not a "
+    "judgment call, so your input adds nothing and any P3 item you declare is discarded and "
+    "replaced. Spend your judgment on P1/P2/P4/P5 instead. "
+    "\n- P4 (reclaim / failed reclaim of a mid, HTF-confirmed) is still yours to declare — "
+    "{criterion: P4, asset, level: "
     "daily_mid_high | daily_mid_low | weekly_mid_high | weekly_mid_low, tier, tf, direction: "
     "accept | reject, mature} — the _high/_low encodes the reclaim DIRECTION and accept "
     "(reclaimed and held) / reject (failed reclaim) works exactly like P1's accept/reject on a "
     "high/low. Use the HTF-close-confirmed reclaim, not a bare mid touch/cross (proven noise). "
-    "Both reuse the P1 tier/tf multipliers and the §3 maturity gate — code computes the sign and "
-    "points, you only tag the position/reclaim. "
+    "P4 reuses the P1 tier/tf multipliers and the §3 maturity gate — code computes the sign and "
+    "points, you only tag the reclaim. "
     "Return JSON matching the schema."
     "\n\nS9 EVIDENCE FACTS (plan 14 — read before deciding). The facts now carry an S9 block "
     "with stretch/distance, session-maturity, and cross-family confluence lines: "
@@ -1043,8 +1052,10 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
     P1/P2 evidence ledger (decisions/thesis.md §2.1); code derives each item's points/sign
     and the confidence ceiling (_derive_thesis_arithmetic), and validate_thesis rejects a
     declared bias inconsistent with the computed net score (retry, not silent override —
-    same split as daily-trend/next-move). P3/P4 and the standing-thesis-recall confidence
-    escalation (spec §8) remain reasoning-only / not yet code-derived (thesis.md §8 gap)."""
+    same split as daily-trend/next-move). P3 (daily_mid/weekly_mid position) is fully
+    code-derived from the facts, not model-declared (2026-08-02). P4 and the standing-
+    thesis-recall confidence escalation (spec §8) remain reasoning-only / not yet
+    code-derived (thesis.md §8 gap)."""
     from schemas import build_thesis_schema, failsafe_thesis
     from validate_contracts import validate_thesis
     system = build_system_prompt(docs_root)
@@ -1058,13 +1069,15 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
         dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
     suppressed_p1_levels = facts.get("suppressed_p1_levels")
     suppressed_p2_sites = facts.get("suppressed_p2_sites")
+    level_htf_close_status = facts.get("level_htf_close_status")
     return _run_call(
         backend, system, user, schema,
         validate_block=lambda d: validate_thesis(d, facts),
         failsafe_block=failsafe_thesis(),
         derive_block=lambda d: _derive_thesis_arithmetic(
             d, magnitude=evidence_magnitude, dol_available=dol_available,
-            suppressed_p1_levels=suppressed_p1_levels, suppressed_p2_sites=suppressed_p2_sites),
+            suppressed_p1_levels=suppressed_p1_levels, suppressed_p2_sites=suppressed_p2_sites,
+            level_htf_close_status=level_htf_close_status),
     )
 
 

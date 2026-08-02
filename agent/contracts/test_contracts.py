@@ -432,6 +432,32 @@ def test_p3_p4_levels_exempt_from_facts_check():
     assert "SEM_LEVEL_NOT_IN_FACTS" not in codes
 
 
+def test_mid_tier_is_code_derived_not_model_declared():
+    # 2026-07-20 root-cause: the model declared all 3 mid items at tier="session"
+    # (0.5x), under-weighting real evidence that should score at its true day/week
+    # tier -- code now ignores the declared tier for daily_mid/weekly_mid and uses
+    # the level's own identity instead.
+    daily = _ev(criterion="P3", level="daily_mid", tier="session", tf="1h", direction="accept")
+    weekly = _ev(criterion="P3", level="weekly_mid", tier="session", tf="1h", direction="reject")
+    scored = score_thesis_evidence([daily, weekly])["scored_evidence"]
+    assert scored[0]["points"] == 1.5    # day tier (0.75) x 1h (1.0) x 2.0 base, not session (0.5) -> 1.0
+    assert scored[1]["points"] == 2.0    # week tier (1.0) x 1h (1.0) x 2.0 base, not session (0.5) -> 1.0
+
+
+def test_p4_mid_tier_also_code_derived():
+    item = _ev(criterion="P4", level="weekly_mid_high", tier="session", tf="1h", direction="accept")
+    scored = score_thesis_evidence([item])["scored_evidence"]
+    assert scored[0]["points"] == 2.0    # week tier, not the declared session tier
+
+
+def test_mid_tier_override_does_not_touch_p1_or_p2():
+    # the override is scoped to P3/P4 only -- a P1/P2 item literally named "daily_mid"
+    # (not a realistic level, but guards the scoping) keeps its declared tier as-is.
+    item = _ev(criterion="P1", level="daily_mid", tier="session", tf="1h", direction="accept")
+    scored = score_thesis_evidence([item])["scored_evidence"]
+    assert scored[0]["points"] == 1.0    # session tier honored, no override applied
+
+
 # --------------------------------------------------------------------------- #
 # P2 exhausted override — zeroed like the maturity gate (plan 15 Task 5)        #
 # --------------------------------------------------------------------------- #
@@ -653,54 +679,114 @@ def test_empty_evidence_directional_bias_rejected():
 
 
 # --------------------------------------------------------------------------- #
-# SEM_MID_EVIDENCE_MISSING — daily_mid/weekly_mid completeness                 #
+# level_htf_close_status: SEM_EVIDENCE_DIRECTION_MISMATCH + P3 auto-derivation #
 # --------------------------------------------------------------------------- #
-_MID_FACTS_MATURE = {
+_LEVEL_STATUS_FACTS = {
     **FACTS,
-    "mid_htf_close_status": {
-        "MNQ": {"daily_mid": {"1h": True, "4h": False},
-                "weekly_mid": {"1h": False, "4h": False}},
-        "MES": {"daily_mid": {"1h": False, "4h": False},
-                "weekly_mid": {"1h": False, "4h": False}},
+    "level_htf_close_status": {
+        "MNQ": {
+            "prev_day_high": {"1h": True, "4h": None},     # accept on 1h, 4h not closed yet
+            "daily_mid": {"1h": True, "4h": False},        # 1h accept, 4h reject (prefer 4h)
+            "weekly_mid": {"1h": None, "4h": None},        # immature both tf
+        },
+        "MES": {
+            "prev_day_high": {"1h": None, "4h": None},     # never swept
+            "daily_mid": {"1h": None, "4h": None},
+            "weekly_mid": {"1h": None, "4h": None},
+        },
     },
 }
 
 
-def test_mature_undeclared_mid_rejected():
-    # 2026-07-20 09:20 ET case: MNQ's daily_mid was mature/confirmed and rendered in S9,
-    # but the model declared nothing for it at all -- must be forced to declare it.
+def test_direction_mismatch_flags_fabricated_maturity():
+    # 2026-07-15 09:20 ET root cause: a level NEVER swept (every tf entry None) declared
+    # mature=True -- the exact fabrication class this check exists to catch.
     t = valid_thesis()
-    assert "SEM_MID_EVIDENCE_MISSING" in validate_thesis(t, _MID_FACTS_MATURE).codes()
+    t["evidence"] = [_ev(asset="MES", level="prev_day_high", direction="accept", mature=True)]
+    assert "SEM_EVIDENCE_DIRECTION_MISMATCH" in validate_thesis(t, _LEVEL_STATUS_FACTS).codes()
 
 
-def test_mature_mid_declared_as_p3_satisfies_check():
+def test_direction_mismatch_flags_wrong_direction():
+    # MNQ prev_day_high 1h actually ACCEPTED per the facts -- declaring reject is wrong.
     t = valid_thesis()
-    t["evidence"] = [_ev(), _ev(criterion="P3", asset="MNQ", level="daily_mid",
-                         tier="day", tf="1h", direction="accept")]
-    assert "SEM_MID_EVIDENCE_MISSING" not in validate_thesis(t, _MID_FACTS_MATURE).codes()
+    t["evidence"] = [_ev(asset="MNQ", level="prev_day_high", tf="1h", direction="reject",
+                         mature=True)]
+    assert "SEM_EVIDENCE_DIRECTION_MISMATCH" in validate_thesis(t, _LEVEL_STATUS_FACTS).codes()
 
 
-def test_mature_mid_declared_as_p4_satisfies_check():
-    # P4 uses the _high/_low reclaim-direction level name, not the bare P3 name --
-    # the check must recognize both as "this mid was addressed".
+def test_direction_matching_facts_not_flagged():
     t = valid_thesis()
-    t["evidence"] = [_ev(), _ev(criterion="P4", asset="MNQ", level="daily_mid_high",
-                         tier="day", tf="1h", direction="accept")]
-    assert "SEM_MID_EVIDENCE_MISSING" not in validate_thesis(t, _MID_FACTS_MATURE).codes()
+    t["evidence"] = [_ev(asset="MNQ", level="prev_day_high", tf="1h", direction="accept",
+                         mature=True)]
+    assert "SEM_EVIDENCE_DIRECTION_MISMATCH" not in validate_thesis(t, _LEVEL_STATUS_FACTS).codes()
 
 
-def test_immature_mid_not_required():
-    # Neither MNQ's weekly_mid nor MES's daily/weekly_mid is mature in the fixture above --
-    # nothing should be required for those, only MNQ's daily_mid.
+def test_immature_declaration_not_checked_against_direction():
+    # mature=False items are never scored regardless of direction, so a mismatch there
+    # isn't fabrication -- only a declared mature=True claim is cross-checked.
     t = valid_thesis()
-    codes = validate_thesis(t, _MID_FACTS_MATURE).messages()
-    assert not any("MES daily_mid" in m for m in codes)
-    assert not any("MES weekly_mid" in m for m in codes)
-    assert not any("MNQ weekly_mid" in m for m in codes)
+    t["evidence"] = [_ev(asset="MNQ", level="prev_day_high", tf="4h", direction="reject",
+                         mature=False)]
+    assert "SEM_EVIDENCE_DIRECTION_MISMATCH" not in validate_thesis(t, _LEVEL_STATUS_FACTS).codes()
 
 
-def test_no_mid_status_in_facts_is_a_noop():
-    # Older/minimal facts dicts with no "mid_htf_close_status" key at all (e.g. FACTS
-    # itself) must not trip this check -- byte-identical to before this existed.
+def test_no_level_status_in_facts_is_a_noop():
+    # Older/minimal facts dicts with no "level_htf_close_status" key at all (e.g. FACTS
+    # itself) must not trip this check.
     t = valid_thesis()
-    assert "SEM_MID_EVIDENCE_MISSING" not in validate_thesis(t, FACTS).codes()
+    assert "SEM_EVIDENCE_DIRECTION_MISMATCH" not in validate_thesis(t, FACTS).codes()
+
+
+def test_p3_auto_injected_when_undeclared():
+    # 2026-07-20/07-22 09:20 ET root cause: the model declares nothing for P3 at all --
+    # code now injects it directly from the facts, no declaration required.
+    scoring = score_thesis_evidence(
+        [], level_htf_close_status=_LEVEL_STATUS_FACTS["level_htf_close_status"])
+    p3 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"]
+    assert len(p3) == 1   # only MNQ daily_mid is mature; MNQ weekly_mid + both MES mids are not
+    assert p3[0]["asset"] == "MNQ" and p3[0]["level"] == "daily_mid"
+    assert p3[0]["tf"] == "4h" and p3[0]["direction"] == "reject"   # prefers 4h: reject there
+    assert p3[0]["tier"] == "day"
+
+
+def test_p3_declared_item_discarded_and_replaced():
+    # A model-declared P3 item for the same mid is dropped, not netted alongside the
+    # auto-derived one -- 2026-07-20's tier-mislabeling bug (declared tier="session")
+    # cannot recur because the declaration is never trusted in the first place.
+    bad = _ev(criterion="P3", asset="MNQ", level="daily_mid", tier="session", tf="1h",
+              direction="accept")
+    scoring = score_thesis_evidence(
+        [bad], level_htf_close_status=_LEVEL_STATUS_FACTS["level_htf_close_status"])
+    p3 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"]
+    assert len(p3) == 1
+    assert p3[0]["tier"] == "day" and p3[0]["direction"] == "reject"   # code's read, not the model's
+
+
+def test_p3_not_injected_when_immature():
+    status = {"MNQ": {"weekly_mid": {"1h": None, "4h": None}}, "MES": {}}
+    scoring = score_thesis_evidence([], level_htf_close_status=status)
+    assert not [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"]
+
+
+def test_level_htf_close_status_none_leaves_p3_untouched():
+    # Default (no facts wired) -- byte-identical to pre-2026-08-02 behavior: a declared
+    # P3 item is neither dropped nor duplicated by an auto-injected replacement.
+    item = _ev(criterion="P3", asset="MNQ", level="daily_mid", tier="session", tf="1h",
+              direction="accept")
+    scoring = score_thesis_evidence([item])
+    p3 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"]
+    assert len(p3) == 1
+    assert p3[0]["direction"] == "accept"   # the model's own declared direction, unreplaced
+
+
+def test_directional_bias_backed_only_by_auto_injected_p3_is_valid():
+    # The empty-ledger-directional-bias rejection must not fire when auto-injected P3
+    # evidence alone backs the call -- the 2026-07-20/22 empty-ledger bug's fix.
+    t = valid_thesis()   # bias UP
+    t["evidence"] = []
+    facts = {**FACTS, "level_htf_close_status": {
+        "MNQ": {"daily_mid": {"1h": True, "4h": None}},   # accept -> UP, matches bias
+        "MES": {},
+    }}
+    codes = validate_thesis(t, facts).codes()
+    assert "ARI_THESIS_BIAS" not in codes

@@ -112,30 +112,64 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     for i, item in enumerate(t.evidence or []):
         _validate_evidence_item(item, f"thesis.evidence[{i}]", r, now_ts=now_ts)
 
+    # SEM_EVIDENCE_DIRECTION_MISMATCH (2026-08-02 root-cause audit): a P1/P2 item's
+    # mature/direction claim is not taken on faith — it is cross-checked against the SAME
+    # code-computed HTF-close verdict already used to render S9's per-level ACCEPTED/
+    # REJECTED text, exposed here via facts["level_htf_close_status"] as {asset: {level:
+    # {tf: Optional[bool]}}} (None = never swept / no qualifying close yet, True = accept,
+    # False = reject). Closes the 2026-07-15 prev1_week_high fabrication class: a level
+    # NEVER swept by either asset has every tf entry None, directly contradicting a
+    # declared mature=True — previously this passed validation clean as long as the
+    # (fabricated) net score happened to match the declared bias.
+    level_htf_close_status = (facts or {}).get("level_htf_close_status")
+    if level_htf_close_status:
+        for i, item in enumerate(t.evidence or []):
+            if not isinstance(item, dict) or item.get("criterion") not in ("P1", "P2"):
+                continue
+            if not bool(item.get("mature")):
+                continue
+            asset, level, tf = item.get("asset"), item.get("level"), item.get("tf")
+            actual = ((level_htf_close_status.get(asset) or {}).get(level) or {}).get(tf)
+            if actual is None:
+                r.add("semantic", "SEM_EVIDENCE_DIRECTION_MISMATCH",
+                      f"{asset} {level} [{tf}] declared mature=True but the facts show no "
+                      "qualifying HTF close since a sweep (never swept, or no close yet) "
+                      "— this item cannot be mature", f"thesis.evidence[{i}]")
+                continue
+            actual_direction = "accept" if actual else "reject"
+            if item.get("direction") != actual_direction:
+                r.add("semantic", "SEM_EVIDENCE_DIRECTION_MISMATCH",
+                      f"{asset} {level} [{tf}] declared direction={item.get('direction')!r} "
+                      f"but the facts show it was actually {actual_direction!r}ed",
+                      f"thesis.evidence[{i}]")
+
     # ARI_THESIS_BIAS (§4/§9): the declared bias must match the sign of the code-computed
-    # net score over the evidence ledger — the SAME retry-not-override pattern as
-    # daily_trend/next_move's direction-vs-N check (agent/validator.py _check_arithmetic).
-    # A thin/empty ledger is exempt ONLY for a NEUTRAL bias (the legitimate failsafe/no-
-    # evidence-found case) — a declared UP/DOWN with an EMPTY ledger is rejected outright
-    # below, not silently waved through: a directional call resting on zero structured
-    # evidence bypasses the entire "model judges, code computes" sandwich regardless of how
-    # much free-text reasoning cites facts that were never transcribed into `evidence`
-    # (2026-07-27 09:20 ET case: rich reasoning, bias UP, evidence == []).
-    if t.evidence:
-        # Only build dol_available when facts actually carry a computed S8 menu — a
-        # facts dict with no "menus" key at all (older/minimal test fixtures) means "we
-        # have no information", which must default to available=True (score_thesis_
-        # evidence's own no-`dol_available` default), NOT "both sides unavailable".
-        menus = (facts or {}).get("menus")
-        dol_available = None
-        if menus is not None:
-            dol_menu = menus.get("dol") or {}
-            dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
-        suppressed_p1_levels = (facts or {}).get("suppressed_p1_levels")
-        suppressed_p2_sites = (facts or {}).get("suppressed_p2_sites")
-        scoring = score_thesis_evidence(t.evidence, dol_available=dol_available,
-                                        suppressed_p1_levels=suppressed_p1_levels,
-                                        suppressed_p2_sites=suppressed_p2_sites)
+    # net score over the EFFECTIVE evidence ledger (declared + code-injected P3 mid
+    # reads — see score_thesis_evidence's P3 auto-derivation) — the SAME retry-not-
+    # override pattern as daily_trend/next_move's direction-vs-N check (agent/validator.py
+    # _check_arithmetic). A thin/empty effective ledger is exempt ONLY for a NEUTRAL bias
+    # (the legitimate failsafe/no-evidence-found case) — a declared UP/DOWN backed by
+    # nothing, not even an auto-derived mid read, is rejected outright below, not silently
+    # waved through: a directional call resting on zero structured evidence bypasses the
+    # entire "model judges, code computes" sandwich regardless of how much free-text
+    # reasoning cites facts that were never transcribed into `evidence` (2026-07-27 09:20
+    # ET case: rich reasoning, bias UP, evidence == []).
+    # Only build dol_available when facts actually carry a computed S8 menu — a facts
+    # dict with no "menus" key at all (older/minimal test fixtures) means "we have no
+    # information", which must default to available=True (score_thesis_evidence's own
+    # no-`dol_available` default), NOT "both sides unavailable".
+    menus = (facts or {}).get("menus")
+    dol_available = None
+    if menus is not None:
+        dol_menu = menus.get("dol") or {}
+        dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
+    suppressed_p1_levels = (facts or {}).get("suppressed_p1_levels")
+    suppressed_p2_sites = (facts or {}).get("suppressed_p2_sites")
+    scoring = score_thesis_evidence(t.evidence, dol_available=dol_available,
+                                    suppressed_p1_levels=suppressed_p1_levels,
+                                    suppressed_p2_sites=suppressed_p2_sites,
+                                    level_htf_close_status=level_htf_close_status)
+    if scoring["scored_evidence"]:
         if t.bias in BIASES and t.bias != scoring["expected_bias"]:
             r.add("arithmetic", "ARI_THESIS_BIAS",
                   f"bias '{t.bias}' inconsistent with the evidence ledger's net score "
@@ -144,40 +178,10 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     elif t.bias in ("UP", "DOWN"):
         r.add("arithmetic", "ARI_THESIS_BIAS",
               f"bias '{t.bias}' declared with an EMPTY evidence ledger — a directional call "
-              "needs at least one declared P1-P5 item backing it; declare NEUTRAL if you "
-              "truly found no evidence, do not leave the ledger empty under a directional bias",
+              "needs at least one declared P1-P5 item (or an auto-derived P3 mid read) "
+              "backing it; declare NEUTRAL if you truly found no evidence, do not leave "
+              "the ledger empty under a directional bias",
               "thesis.bias")
-
-    # Mid-completeness (2026-08-01 root-cause audit): daily_mid/weekly_mid get an HTF-close
-    # verdict computed the same way any named level's is (derive_facts._htf_close_status),
-    # exposed here via facts["mid_htf_close_status"] as {asset: {mid_name: {tf: bool
-    # mature}}}. Unlike a named swept level, the model has repeatedly shown it simply never
-    # engages with these two -- not in prose, not in the ledger -- even when the fact is
-    # genuinely available and rendered in S9 (confirmed on multiple real 2026-07 dates).
-    # Require a P3 or P4 item for any asset+mid whose verdict is mature on either
-    # timeframe, regardless of declared bias — a mature, confirmed fact must be in the
-    # ledger even if the model judges it outweighed by something else.
-    mid_status = (facts or {}).get("mid_htf_close_status")
-    if mid_status:
-        declared_mids = set()
-        for item in (t.evidence or []):
-            if item.get("criterion") not in ("P3", "P4"):
-                continue
-            level = item.get("level") or ""
-            if level.startswith("daily_mid"):
-                declared_mids.add((item.get("asset"), "daily_mid"))
-            elif level.startswith("weekly_mid"):
-                declared_mids.add((item.get("asset"), "weekly_mid"))
-        for asset, mids in mid_status.items():
-            for mid_name, tf_map in (mids or {}).items():
-                if not any((tf_map or {}).values()):
-                    continue    # neither 1h nor 4h mature -- nothing to require yet
-                if (asset, mid_name) not in declared_mids:
-                    r.add("semantic", "SEM_MID_EVIDENCE_MISSING",
-                          f"{asset} {mid_name} has a mature, confirmed HTF-close verdict in "
-                          "the facts (S9) but no P3/P4 evidence item was declared for it -- "
-                          "declare it, even if you judge it outweighed by other evidence",
-                          f"thesis.evidence[{asset}.{mid_name}]")
 
     if facts is not None:
         _semantic_thesis(t, facts, r)
@@ -418,7 +422,8 @@ def _item_side(item: dict) -> Optional[str]:
 
 
 def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
-                           suppressed_p1_levels=None, suppressed_p2_sites=None) -> dict:
+                           suppressed_p1_levels=None, suppressed_p2_sites=None,
+                           level_htf_close_status=None) -> dict:
     """Pure computation over the model-declared P1/P2 evidence ledger: per-item points
     (tier x tf x magnitude multiplier, zeroed if immature — enforcing the §3 maturity gate
     in code, not trust), the net score, the expected bias sign, and the §6 cross-asset
@@ -464,7 +469,41 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     (2026-07-27 09:20 ET): MNQ repeatedly failed to reclaim its weekly mid over almost an
     hour (04:57-05:59 ET) while MES sat comfortably above its own weekly mid the whole
     session, not testing it until 09:58 — MES's P3 "above" reading was stale relative to
-    MNQ's already-confirmed rejection, not a genuinely offsetting bullish signal."""
+    MNQ's already-confirmed rejection, not a genuinely offsetting bullish signal.
+
+    P3 auto-derivation (2026-08-02): `level_htf_close_status` ({asset: {level: {tf:
+    Optional[bool]}}}, None = immature, True = accept, False = reject — bench/facts.py's
+    flat view of derive_facts.compute_facts's own per-level HTF-close verdict, which
+    already covers the daily_mid/weekly_mid synthetic "levels" plan 17 Fix 3 added)
+    replaces trust in the model's declared P3 items entirely: any P3 item referencing
+    daily_mid/weekly_mid is dropped and replaced with a code-synthesized item per
+    asset+mid (direction/tier taken straight from the facts, 4h preferred over 1h when
+    both are mature). P3's position read is not a judgment call — it is a direct fact
+    lookup — so this closes both the omission failure (model never declares it) and the
+    misdeclaration failure (2026-07-20: all 3 mid items declared at the wrong tier)
+    in one mechanism. `level_htf_close_status=None` (every pre-2026-08-02 call site)
+    leaves P3 scoring exactly as declared, unchanged."""
+    if level_htf_close_status is not None:
+        evidence = [
+            it for it in (evidence or [])
+            if not (isinstance(it, dict) and it.get("criterion") == "P3"
+                    and (it.get("level") or "").startswith(("daily_mid", "weekly_mid")))
+        ]
+        for _asset in ("MNQ", "MES"):
+            for _mid_name, _tier in (("daily_mid", "day"), ("weekly_mid", "week")):
+                _tf_map = (level_htf_close_status.get(_asset) or {}).get(_mid_name) or {}
+                _val, _tf = None, None
+                if _tf_map.get("4h") is not None:
+                    _val, _tf = _tf_map["4h"], "4h"
+                elif _tf_map.get("1h") is not None:
+                    _val, _tf = _tf_map["1h"], "1h"
+                if _val is not None:
+                    evidence.append({
+                        "criterion": "P3", "asset": _asset, "level": _mid_name,
+                        "tier": _tier, "tf": _tf,
+                        "direction": "accept" if _val else "reject",
+                        "mature": True, "exhausted": False,
+                    })
     # thesis.md §6 extension: an HTF-confirmed P4 reclaim/failed-reclaim on ONE asset should
     # outweigh a contradicting P3 (static position) read on the OTHER asset at the SAME mid,
     # not be netted against it as an equal, offsetting data point — P4 is a dynamic,
@@ -516,6 +555,20 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
             continue
         tf_mult = _TF_MULT.get(item.get("tf"), 0.0)
         tier_mult = _TIER_MULT.get(item.get("tier"), 0.0)
+        # thesis.md §2.1a: a daily_mid/weekly_mid item's tier is fully determined by its
+        # own identity (daily -> "day", weekly -> "week"), never a judgment call -- so it
+        # is code-derived here, the same "model judges, code computes" split already
+        # applied to sign (_item_side). Without this override the model can under-weight
+        # real evidence by mislabeling it, e.g. tier="session" (0.5x) instead of the
+        # correct "week" (1.0x) -- confirmed real on 2026-07-20 (all 3 mid items declared
+        # at tier="session"). Covers both P3's plain "daily_mid"/"weekly_mid" level names
+        # and P4's "daily_mid_high"/"daily_mid_low"/"weekly_mid_high"/"weekly_mid_low".
+        if item.get("criterion") in ("P3", "P4"):
+            _lvl = item.get("level") or ""
+            if _lvl.startswith("daily_mid"):
+                tier_mult = _TIER_MULT["day"]
+            elif _lvl.startswith("weekly_mid"):
+                tier_mult = _TIER_MULT["week"]
         mature = bool(item.get("mature"))
         ratio = None
         if magnitude:
