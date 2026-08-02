@@ -571,6 +571,56 @@ def test_p4_does_not_dominate_p3_on_the_same_asset():
 
 
 # --------------------------------------------------------------------------- #
+# tf-dedup (same level/direction cited at both 1h and 4h)                      #
+# --------------------------------------------------------------------------- #
+def test_tf_dedup_keeps_4h_zeroes_1h_when_both_mature():
+    h1 = _ev(level="prev_day_high", tier="day", tf="1h", direction="accept", mature=True)
+    h4 = _ev(level="prev_day_high", tier="day", tf="4h", direction="accept", mature=True)
+    scoring = score_thesis_evidence([h1, h4])
+    by_tf = {e["tf"]: e for e in scoring["scored_evidence"]}
+    assert by_tf["1h"]["points"] == 0.0
+    assert by_tf["4h"]["points"] > 0.0
+    assert scoring["net_score"] == by_tf["4h"]["points"]   # only the 4h counted
+
+
+def test_tf_dedup_leaves_1h_alone_when_4h_immature():
+    h1 = _ev(level="prev_day_high", tier="day", tf="1h", direction="accept", mature=True)
+    h4 = _ev(level="prev_day_high", tier="day", tf="4h", direction="accept", mature=False)
+    scoring = score_thesis_evidence([h1, h4])
+    by_tf = {e["tf"]: e for e in scoring["scored_evidence"]}
+    assert by_tf["1h"]["points"] > 0.0      # rule 2: only 1h closed -> take it
+    assert by_tf["4h"]["points"] == 0.0     # immature anyway, zeroed by the maturity gate
+
+
+def test_tf_dedup_scoped_to_same_level_direction_only():
+    # Different LEVEL -- not the same physical event, both should score independently.
+    h1 = _ev(level="prev_day_high", tier="day", tf="1h", direction="accept", mature=True)
+    h4 = _ev(level="prev2_day_high", tier="day", tf="4h", direction="accept", mature=True)
+    scoring = score_thesis_evidence([h1, h4])
+    assert all(e["points"] > 0.0 for e in scoring["scored_evidence"])
+
+    # Same level, OPPOSITE direction (a genuine same-level cross-timeframe contradiction,
+    # e.g. the 2026-07-27 MNQ prev1_day_high case) -- not a duplicate, both score.
+    reject_1h = _ev(level="prev_day_high", tier="day", tf="1h", direction="reject", mature=True)
+    accept_4h = _ev(level="prev_day_high", tier="day", tf="4h", direction="accept", mature=True)
+    scoring2 = score_thesis_evidence([reject_1h, accept_4h])
+    assert all(e["points"] > 0.0 for e in scoring2["scored_evidence"])
+
+
+def test_tf_dedup_does_not_double_zero_an_already_exhausted_4h():
+    # A 4h item that's mature but flagged exhausted doesn't count as "has_mature_4h" for
+    # dedup purposes (it contributes zero itself already) -- the 1h should NOT also be
+    # zeroed out from under a case where the 4h isn't actually usable.
+    h1 = _ev(level="prev_day_high", tier="day", tf="1h", direction="accept", mature=True)
+    h4 = {**_ev(level="prev_day_high", tier="day", tf="4h", direction="accept", mature=True),
+          "exhausted": True}
+    scoring = score_thesis_evidence([h1, h4])
+    by_tf = {e["tf"]: e for e in scoring["scored_evidence"]}
+    assert by_tf["1h"]["points"] > 0.0
+    assert by_tf["4h"]["points"] == 0.0     # zeroed by its OWN exhausted flag, not dedup
+
+
+# --------------------------------------------------------------------------- #
 # ARI_THESIS_BIAS — declared bias vs. computed net score                       #
 # --------------------------------------------------------------------------- #
 def test_bias_inconsistent_with_evidence_rejected():
@@ -600,3 +650,57 @@ def test_empty_evidence_directional_bias_rejected():
     t = valid_thesis()   # bias UP
     t["evidence"] = []
     assert "ARI_THESIS_BIAS" in validate_thesis(t, FACTS).codes()
+
+
+# --------------------------------------------------------------------------- #
+# SEM_MID_EVIDENCE_MISSING — daily_mid/weekly_mid completeness                 #
+# --------------------------------------------------------------------------- #
+_MID_FACTS_MATURE = {
+    **FACTS,
+    "mid_htf_close_status": {
+        "MNQ": {"daily_mid": {"1h": True, "4h": False},
+                "weekly_mid": {"1h": False, "4h": False}},
+        "MES": {"daily_mid": {"1h": False, "4h": False},
+                "weekly_mid": {"1h": False, "4h": False}},
+    },
+}
+
+
+def test_mature_undeclared_mid_rejected():
+    # 2026-07-20 09:20 ET case: MNQ's daily_mid was mature/confirmed and rendered in S9,
+    # but the model declared nothing for it at all -- must be forced to declare it.
+    t = valid_thesis()
+    assert "SEM_MID_EVIDENCE_MISSING" in validate_thesis(t, _MID_FACTS_MATURE).codes()
+
+
+def test_mature_mid_declared_as_p3_satisfies_check():
+    t = valid_thesis()
+    t["evidence"] = [_ev(), _ev(criterion="P3", asset="MNQ", level="daily_mid",
+                         tier="day", tf="1h", direction="accept")]
+    assert "SEM_MID_EVIDENCE_MISSING" not in validate_thesis(t, _MID_FACTS_MATURE).codes()
+
+
+def test_mature_mid_declared_as_p4_satisfies_check():
+    # P4 uses the _high/_low reclaim-direction level name, not the bare P3 name --
+    # the check must recognize both as "this mid was addressed".
+    t = valid_thesis()
+    t["evidence"] = [_ev(), _ev(criterion="P4", asset="MNQ", level="daily_mid_high",
+                         tier="day", tf="1h", direction="accept")]
+    assert "SEM_MID_EVIDENCE_MISSING" not in validate_thesis(t, _MID_FACTS_MATURE).codes()
+
+
+def test_immature_mid_not_required():
+    # Neither MNQ's weekly_mid nor MES's daily/weekly_mid is mature in the fixture above --
+    # nothing should be required for those, only MNQ's daily_mid.
+    t = valid_thesis()
+    codes = validate_thesis(t, _MID_FACTS_MATURE).messages()
+    assert not any("MES daily_mid" in m for m in codes)
+    assert not any("MES weekly_mid" in m for m in codes)
+    assert not any("MNQ weekly_mid" in m for m in codes)
+
+
+def test_no_mid_status_in_facts_is_a_noop():
+    # Older/minimal facts dicts with no "mid_htf_close_status" key at all (e.g. FACTS
+    # itself) must not trip this check -- byte-identical to before this existed.
+    t = valid_thesis()
+    assert "SEM_MID_EVIDENCE_MISSING" not in validate_thesis(t, FACTS).codes()

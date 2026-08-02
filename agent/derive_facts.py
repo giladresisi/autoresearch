@@ -318,6 +318,63 @@ def _nested_prev_levels(lv: dict) -> set:
     return nested
 
 
+_SESSION_LEVEL_RE = re.compile(
+    r"^(asia|london|ny_morning|ny_evening)\((cur|prev1)\)_(high|low)$")
+
+# Fixed chronological order of 6hr-session blocks: a trading day always runs
+# asia -> london -> ny_morning -> ny_evening, and EVERY (prev1) session (yesterday's)
+# precedes EVERY (cur) session (today's) -- position in this tuple IS recency (later =
+# more recent). Session-tier levels carry no per-block timestamp usable for recency
+# (unlike prevN_day/week's numeric N) -- (prev1)'s stored `_active_from` is the same
+# constant for all four sub-blocks (see the `sess_now.index[0]` assignment above), so
+# this fixed sequence is the only reliable ordering source.
+_SESSION_RECENCY_ORDER = (
+    ("asia", "prev1"), ("london", "prev1"), ("ny_morning", "prev1"), ("ny_evening", "prev1"),
+    ("asia", "cur"), ("london", "cur"), ("ny_morning", "cur"), ("ny_evening", "cur"),
+)
+_SESSION_RECENCY_INDEX = {key: i for i, key in enumerate(_SESSION_RECENCY_ORDER)}
+
+
+def _nested_session_levels(lv: dict) -> set:
+    """thesis.md §2.1b extension (2026-08-01 root-cause audit): the SAME nesting/
+    supersession concept as `_nested_prev_levels`, but for 6hr-SESSION-tier levels
+    (asia/london/ny_morning/ny_evening, `(cur)`/`(prev1)` tags) instead of
+    `prevN_day/week` families. These were previously invisible to nesting suppression
+    entirely (`_nested_prev_levels`'s regex only matches `prevN_day/week` names) —
+    confirmed via two real historical cases: 2026-07-15's `ny_evening(prev1)_high`
+    nested under `asia(cur)_high`/`london(cur)_high`, and 2026-07-27's `asia(cur)_high`
+    nested under `london(cur)_high` (which was also that day's running high). A level
+    is nested if some level LATER in `_SESSION_RECENCY_ORDER` (same side) reaches at
+    least as far — same "more-recent, at-least-as-deep supersedes" rule as the prevN
+    version, just keyed on fixed session sequence instead of numeric N."""
+    families: dict = {}   # "high"|"low" -> {(session, tag): price}
+    for name, (price, _body, _side, tier, _active_from) in lv.items():
+        if tier != "session":
+            continue
+        m = _SESSION_LEVEL_RE.match(name)
+        if not m:
+            continue
+        sess, tag, sub = m.group(1), m.group(2), m.group(3)
+        key = (sess, tag)
+        if key not in _SESSION_RECENCY_INDEX:
+            continue
+        families.setdefault(sub, {})[key] = price
+    nested = set()
+    for sub, by_key in families.items():
+        for key, price in by_key.items():
+            idx = _SESSION_RECENCY_INDEX[key]
+            more_recent = [p for k, p in by_key.items() if _SESSION_RECENCY_INDEX[k] > idx]
+            if not more_recent:
+                continue
+            sess, tag = key
+            if sub == "low":
+                if any(p <= price for p in more_recent):
+                    nested.add(f"{sess}({tag})_low")
+            elif any(p >= price for p in more_recent):
+                nested.add(f"{sess}({tag})_high")
+    return nested
+
+
 def _level_born_date(name: str, prev1_td, prev2_td, prev1_week_tds, long_horizon_tkr,
                      td_now, iso_now):
     """The calendar date (day-tier) or week-start date (week-tier) this SPECIFIC prevN_day/
@@ -1825,8 +1882,9 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
     bundle.suppressed_p1_levels = {}
     for tkr in ("MNQ", "MES"):
         nested = _nested_prev_levels(levels[tkr])
+        nested_session = _nested_session_levels(levels[tkr])
         dup_losers = _duplicate_sweep_losers(levels[tkr], bundle.swept_at.get(tkr, {}))
-        bundle.suppressed_p1_levels[tkr] = nested | dup_losers
+        bundle.suppressed_p1_levels[tkr] = nested | nested_session | dup_losers
 
     bundle.htf_close_status = {}
     for tkr in ("MNQ", "MES"):

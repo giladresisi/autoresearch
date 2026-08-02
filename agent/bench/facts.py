@@ -150,6 +150,18 @@ class ParquetFactsSource:
         # thesis.md §3a: near-maturity pre-confirmation candidates (additive overlay, like
         # suppressed_p1_levels above — never in the shadow-hash dict).
         res.validator_dict["near_maturity_candidates"] = list(bundle.near_maturity_candidates or [])
+        # 2026-08-01 mid-completeness check: daily_mid/weekly_mid HTF-close maturity per
+        # asset (additive overlay, like suppressed_p1_levels above — never in the shadow-
+        # hash dict). Lets the validator require a P3/P4 declaration when a mid's verdict
+        # is genuinely mature and confirmed — the model can't silently ignore it. JSON/
+        # artifact-safe (booleans only, like fvg_zones/suppressed_p1_levels above) — the
+        # raw per-tf dict carries pd.Timestamp objects the validator doesn't need.
+        res.validator_dict["mid_htf_close_status"] = {
+            tkr: {name: {tf: bool((bundle.htf_close_status.get(tkr, {}).get(name) or {}).get(tf))
+                        for tf in ("1h", "4h")}
+                  for name in ("daily_mid", "weekly_mid")}
+            for tkr in ("MNQ", "MES")
+        }
         res.menu_text = render_menus_text(bundle)              # reuses cached bundle.menus
         res.evidence_magnitude = build_evidence_magnitude(bundle)  # plan 14 Task 5: code-derived
         # magnitude threaded into the render so the model can SEE the WEAK/NORMAL/STRONG

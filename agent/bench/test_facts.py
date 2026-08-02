@@ -168,6 +168,45 @@ def test_nested_day_levels_suppressed_2026_07_14(source):
     assert "MNQ prev2_day_low [1h]" not in text
 
 
+def test_nested_session_levels_suppressed_2026_07_15(source):
+    # thesis.md §2.1b extension (2026-08-01): confirmed real case -- at 2026-07-15 09:20 ET,
+    # MES's asia(cur)_high (7608.5) is nested under its later, deeper london(cur)_high
+    # (7613.5). Root-cause audit found this level still surfacing as fresh P1 evidence
+    # before this fix (it was invisible to the prevN-only nesting regex).
+    boundary = pd.Timestamp("2026-07-15 09:20:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+    assert "asia(cur)_high" in bundle.suppressed_p1_levels["MES"]
+    # And Fix 1's time-of-day gate independently removes ny_evening(prev1)_high from the
+    # facts entirely at this boundary (00:00-17:59 ET branch) -- confirm it's not even a
+    # candidate for nesting to act on (both fixes compose without conflict).
+    assert "ny_evening(prev1)_high" not in bundle.levels["MNQ"]
+
+
+def test_nested_session_levels_suppressed_2026_07_27(source):
+    # Second confirmed real case: at 2026-07-27 09:20 ET, MNQ's asia(cur)_high (28733.5) is
+    # nested under its later london(cur)_high (28763.75), which is ALSO that day's running
+    # high (set 05:51 ET).
+    boundary = pd.Timestamp("2026-07-27 09:20:00", tz=TZ)
+    bundle = _bundle_at(source, boundary)
+    assert "asia(cur)_high" in bundle.suppressed_p1_levels["MNQ"]
+
+
+def test_nested_session_levels_prev1_still_nests_under_prev1(source):
+    # Sanity: two (prev1) levels of the same side should still nest against each other
+    # (not just against (cur)) when the fixed sequence orders one after the other, at a
+    # boundary where (prev1) levels ARE actually offered (Asia-forming window, hour>=18).
+    from derive_facts import _nested_session_levels
+    lv = {
+        "asia(prev1)_high": (100.0, 100.0, "above", "session", None),
+        "london(prev1)_high": (105.0, 105.0, "above", "session", None),   # later, deeper
+        "ny_morning(prev1)_high": (102.0, 102.0, "above", "session", None),  # later, shallower
+    }
+    nested = _nested_session_levels(lv)
+    assert "asia(prev1)_high" in nested        # superseded by london(prev1) (deeper) and ny_morning(prev1)
+    assert "london(prev1)_high" not in nested  # nothing later reaches as far
+    assert "ny_morning(prev1)_high" not in nested  # nothing LATER than it reaches as far (london is earlier)
+
+
 def test_day_hi_lo_extended_window_not_degenerate_right_after_1800(source):
     # Right after the mandatory 18:00 ET session-open call, the CURRENT session has ~1
     # minute of bars — a narrow session-only window would give a near-zero day_hi-day_lo

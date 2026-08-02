@@ -148,6 +148,37 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
               "truly found no evidence, do not leave the ledger empty under a directional bias",
               "thesis.bias")
 
+    # Mid-completeness (2026-08-01 root-cause audit): daily_mid/weekly_mid get an HTF-close
+    # verdict computed the same way any named level's is (derive_facts._htf_close_status),
+    # exposed here via facts["mid_htf_close_status"] as {asset: {mid_name: {tf: bool
+    # mature}}}. Unlike a named swept level, the model has repeatedly shown it simply never
+    # engages with these two -- not in prose, not in the ledger -- even when the fact is
+    # genuinely available and rendered in S9 (confirmed on multiple real 2026-07 dates).
+    # Require a P3 or P4 item for any asset+mid whose verdict is mature on either
+    # timeframe, regardless of declared bias — a mature, confirmed fact must be in the
+    # ledger even if the model judges it outweighed by something else.
+    mid_status = (facts or {}).get("mid_htf_close_status")
+    if mid_status:
+        declared_mids = set()
+        for item in (t.evidence or []):
+            if item.get("criterion") not in ("P3", "P4"):
+                continue
+            level = item.get("level") or ""
+            if level.startswith("daily_mid"):
+                declared_mids.add((item.get("asset"), "daily_mid"))
+            elif level.startswith("weekly_mid"):
+                declared_mids.add((item.get("asset"), "weekly_mid"))
+        for asset, mids in mid_status.items():
+            for mid_name, tf_map in (mids or {}).items():
+                if not any((tf_map or {}).values()):
+                    continue    # neither 1h nor 4h mature -- nothing to require yet
+                if (asset, mid_name) not in declared_mids:
+                    r.add("semantic", "SEM_MID_EVIDENCE_MISSING",
+                          f"{asset} {mid_name} has a mature, confirmed HTF-close verdict in "
+                          "the facts (S9) but no P3/P4 evidence item was declared for it -- "
+                          "declare it, even if you judge it outweighed by other evidence",
+                          f"thesis.evidence[{asset}.{mid_name}]")
+
     if facts is not None:
         _semantic_thesis(t, facts, r)
     return r
@@ -395,6 +426,13 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     confidence_ceiling, scored_evidence, no_liquidity}. `scored_evidence` echoes each item
     with its computed `points`/`side`/`mag_ratio`/`mag_mult` attached, for the audit trail.
 
+    tf-dedup (2026-08-01): when the SAME (criterion, asset, level, tier, direction) is
+    declared at both `tf: "1h"` and `tf: "4h"` and BOTH are mature/non-exhausted, only the
+    4h item scores — the 1h is zeroed, same "zeroed, not scored" mechanic as the other
+    suppression gates below. Needs no caller input; computed internally from the declared
+    list, like P4-dominates-P3. An item with only a mature 1h (4h still immature) is
+    unaffected.
+
     `magnitude` (plan 14 Task 5) is an optional {(asset, level, tf): ratio} lookup where
     ratio = |close - level| / avg_range[tf] (thesis.md §4 clearance magnitude). A None
     lookup, or a missing key, yields a x1.0 multiplier — byte-identical to the pre-plan-14
@@ -445,6 +483,31 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
         if side is not None:
             p4_mid_dominance[(item.get("asset"), mid_type)] = side
 
+    # tf-dedup pre-pass (2026-08-01 root-cause audit): when a 1h AND a 4h item both exist
+    # for the same (criterion, asset, level, tier, direction) -- the same physical event
+    # cited at both qualifying timeframes -- and BOTH are mature/non-exhausted, keep only
+    # the 4h (the stronger, higher tier_mult confirmed read) and zero the 1h. Citing both
+    # double-counts one underlying continuation as two pieces of evidence; confirmed
+    # contributing material padding to multiple wrong 2026-07 calls this session (e.g. one
+    # event alone carried 4 of 5 UP-side points on 2026-07-15). An item with only a mature
+    # 1h and an immature 4h is untouched -- we don't yet know how the 4h will resolve.
+    _tf_dedup_zero: set = set()
+    _tf_groups: dict = {}
+    for item in evidence or []:
+        if not isinstance(item, dict):
+            continue
+        key = (item.get("criterion"), item.get("asset"), item.get("level"),
+               item.get("tier"), item.get("direction"))
+        _tf_groups.setdefault(key, []).append(item)
+    for _key, _items in _tf_groups.items():
+        _has_mature_4h = any(
+            _it.get("tf") == "4h" and bool(_it.get("mature")) and not bool(_it.get("exhausted"))
+            for _it in _items)
+        if _has_mature_4h:
+            for _it in _items:
+                if _it.get("tf") == "1h":
+                    _tf_dedup_zero.add(id(_it))
+
     scored = []
     net = 0.0
     by_level: dict = {}   # level -> {asset: direction}, for the §6 contradiction check
@@ -483,7 +546,8 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
             dom_side = p4_mid_dominance.get((other_asset, mid_type))
             this_side = _mid_side(item)
             p3_dominated = dom_side is not None and this_side is not None and dom_side != this_side
-        suppressed = p1_suppressed or p2_suppressed or p3_dominated
+        tf_deduped = id(item) in _tf_dedup_zero
+        suppressed = p1_suppressed or p2_suppressed or p3_dominated or tf_deduped
         scored_mature = mature and not exhausted and not suppressed
         points = round(_BASE_POINTS * tf_mult * tier_mult * mag_mult, 4) if scored_mature else 0.0
         side = _item_side(item)
