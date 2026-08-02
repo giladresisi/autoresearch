@@ -739,27 +739,32 @@ def test_no_level_status_in_facts_is_a_noop():
 
 def test_p3_auto_injected_when_undeclared():
     # 2026-07-20/07-22 09:20 ET root cause: the model declares nothing for P3 at all --
-    # code now injects it directly from the facts, no declaration required.
+    # code now injects it directly from the facts, no declaration required. MNQ daily_mid
+    # is mature on BOTH tf and they DISAGREE (1h accept, 4h reject) -- both are injected as
+    # distinct items (a real contradiction, not a duplicate); MNQ weekly_mid + both MES
+    # mids are immature and stay uninjected.
     scoring = score_thesis_evidence(
         [], level_htf_close_status=_LEVEL_STATUS_FACTS["level_htf_close_status"])
     p3 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"]
-    assert len(p3) == 1   # only MNQ daily_mid is mature; MNQ weekly_mid + both MES mids are not
-    assert p3[0]["asset"] == "MNQ" and p3[0]["level"] == "daily_mid"
-    assert p3[0]["tf"] == "4h" and p3[0]["direction"] == "reject"   # prefers 4h: reject there
-    assert p3[0]["tier"] == "day"
+    assert len(p3) == 2
+    assert all(it["asset"] == "MNQ" and it["level"] == "daily_mid" and it["tier"] == "day"
+               for it in p3)
+    by_tf = {it["tf"]: it["direction"] for it in p3}
+    assert by_tf == {"1h": "accept", "4h": "reject"}
 
 
 def test_p3_declared_item_discarded_and_replaced():
     # A model-declared P3 item for the same mid is dropped, not netted alongside the
-    # auto-derived one -- 2026-07-20's tier-mislabeling bug (declared tier="session")
+    # auto-derived one(s) -- 2026-07-20's tier-mislabeling bug (declared tier="session")
     # cannot recur because the declaration is never trusted in the first place.
     bad = _ev(criterion="P3", asset="MNQ", level="daily_mid", tier="session", tf="1h",
               direction="accept")
     scoring = score_thesis_evidence(
         [bad], level_htf_close_status=_LEVEL_STATUS_FACTS["level_htf_close_status"])
     p3 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"]
-    assert len(p3) == 1
-    assert p3[0]["tier"] == "day" and p3[0]["direction"] == "reject"   # code's read, not the model's
+    assert len(p3) == 2   # code's read (both disagreeing tf), not the model's single guess
+    assert all(it["tier"] == "day" for it in p3)
+    assert {it["direction"] for it in p3} == {"accept", "reject"}
 
 
 def test_p3_not_injected_when_immature():
@@ -876,14 +881,39 @@ def test_p2_falls_through_to_p1_when_lagger_actually_accepted():
     assert scored[0]["criterion"] == "P1" and scored[0]["direction"] == "accept"
 
 
-def test_p2_suppressed_site_falls_through_to_p1():
+def test_p2_suppressed_site_excludes_both_p1_and_p2():
+    # thesis.md: a P2-suppressed level was "already nested when the divergence itself
+    # fired -- no evidence at all here, not P1 and not P2". It must NOT fall through to
+    # an ordinary P1 reading.
     status = {"MNQ": {"prev_day_high": {"1h": False, "4h": None}}, "MES": {}}
     scoring = score_thesis_evidence(
         [], level_tiers=_LEVEL_TIERS, level_htf_close_status=status,
         smt_candidates=_SMT_CANDIDATES, suppressed_p2_sites={"MNQ": ["prev_day_high"]})
-    scored = scoring["scored_evidence"]
-    assert len(scored) == 1
-    assert scored[0]["criterion"] == "P1"   # P2 path skipped -- falls through, not suppressed twice
+    assert not [it for it in scoring["scored_evidence"] if it["level"] == "prev_day_high"]
+
+
+def test_disagreeing_1h_4h_scores_both_not_just_4h():
+    # 2026-07-27 root-cause regression: MNQ prev1_day_high's 1h (fresh reject) and 4h
+    # (stale accept) genuinely disagreed. An earlier version of this auto-derivation
+    # unconditionally preferred 4h, silently discarding the fresh 1h contradiction --
+    # both must score independently, mirroring tf-dedup's own "keep genuine
+    # disagreements" scoping.
+    status = {"MNQ": {"prev_day_high": {"1h": False, "4h": True}}, "MES": {}}
+    scoring = score_thesis_evidence([], level_tiers=_LEVEL_TIERS, level_htf_close_status=status)
+    items = [it for it in scoring["scored_evidence"] if it["level"] == "prev_day_high"]
+    assert len(items) == 2
+    tfs = {it["tf"]: it["direction"] for it in items}
+    assert tfs == {"1h": "reject", "4h": "accept"}
+
+
+def test_agreeing_1h_4h_collapses_via_tf_dedup():
+    status = {"MNQ": {"prev_day_high": {"1h": True, "4h": True}}, "MES": {}}
+    scoring = score_thesis_evidence([], level_tiers=_LEVEL_TIERS, level_htf_close_status=status)
+    items = [it for it in scoring["scored_evidence"] if it["level"] == "prev_day_high"]
+    assert len(items) == 2   # both injected...
+    scored_pts = {it["tf"]: it["points"] for it in items}
+    assert scored_pts["1h"] == 0.0    # ...but the 1h is zeroed by tf-dedup, matching direction
+    assert scored_pts["4h"] > 0.0
 
 
 def test_p1_p2_never_double_counted_for_same_level():

@@ -482,22 +482,27 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     flat view of derive_facts.compute_facts's own per-level HTF-close verdict, which
     already covers the daily_mid/weekly_mid synthetic "levels" plan 17 Fix 3 added)
     replaces trust in the model's declared P3 items entirely: any P3 item referencing
-    daily_mid/weekly_mid is dropped and replaced with a code-synthesized item per
-    asset+mid (direction/tier taken straight from the facts, 4h preferred over 1h when
-    both are mature). P3's position read is not a judgment call — it is a direct fact
-    lookup — so this closes both the omission failure (model never declares it) and the
-    misdeclaration failure (2026-07-20: all 3 mid items declared at the wrong tier)
-    in one mechanism. `level_htf_close_status=None` (every pre-2026-08-02 call site)
-    leaves P3 scoring exactly as declared, unchanged.
+    daily_mid/weekly_mid is dropped and replaced with code-synthesized item(s) per
+    asset+mid — one per (tf) with a mature reading, so a genuine 1h-vs-4h disagreement
+    scores as two distinct items rather than silently picking one (2026-08-02 fix: an
+    earlier version of this preferred 4h unconditionally, which discarded a real fresh-
+    vs-stale contradiction the same way the P1 bug below did). P3's position read is not
+    a judgment call — it is a direct fact lookup — so this closes the omission failure
+    (model never declares it) and the misdeclaration failure (2026-07-20: all 3 mid items
+    declared at the wrong tier). `level_htf_close_status=None` (every pre-2026-08-02 call
+    site) leaves P3 scoring exactly as declared, unchanged.
 
     P1/P2 auto-derivation (2026-08-02): `level_tiers` ({asset: {level: {"tier", "price"}}})
     and `smt_candidates` ([{level, tier, swept_ticker, unswept_ticker, meaningful}]) extend
     the SAME auto-derivation pattern to named levels — every real, non-suppressed level
-    with a mature `level_htf_close_status` reading is auto-injected (P2 when it is a
-    meaningful, unsuppressed SMT divergence AND the lagger's own close is a genuine reject;
-    ordinary P1 otherwise), any model-declared P1/P2 item for that (asset, level) is
-    dropped first, and the model's only remaining lever is declaring the SAME item with
-    `exhausted: true` to veto it. Gated on BOTH `level_tiers` and `level_htf_close_status`
+    gets one auto-injected item PER mature tf reading (P2 when a tf's reading is a
+    meaningful, unsuppressed SMT divergence's genuine reject; ordinary P1 otherwise — a
+    level can resolve as P2 on one tf and P1 on the other if they disagree), any
+    model-declared P1/P2 item for that (asset, level) is dropped first, and the model's
+    only remaining lever is declaring the SAME item with `exhausted: true` to veto it. A
+    level flagged in `suppressed_p2_sites` gets NO evidence at all (neither P1 nor P2 —
+    thesis.md: "already nested when the divergence itself fired... no evidence at all
+    here"), not a fallback to P1. Gated on BOTH `level_tiers` and `level_htf_close_status`
     being provided (either `None` — every pre-2026-08-02 call site passes neither — leaves
     P1/P2 scoring exactly as declared, unchanged); the §2.1e tier promotion below only
     needs `level_tiers`, independent of this gate.
@@ -521,18 +526,18 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
         for _asset in ("MNQ", "MES"):
             for _mid_name, _tier in (("daily_mid", "day"), ("weekly_mid", "week")):
                 _tf_map = (level_htf_close_status.get(_asset) or {}).get(_mid_name) or {}
-                _val, _tf = None, None
-                if _tf_map.get("4h") is not None:
-                    _val, _tf = _tf_map["4h"], "4h"
-                elif _tf_map.get("1h") is not None:
-                    _val, _tf = _tf_map["1h"], "1h"
-                if _val is not None:
-                    evidence.append({
-                        "criterion": "P3", "asset": _asset, "level": _mid_name,
-                        "tier": _tier, "tf": _tf,
-                        "direction": "accept" if _val else "reject",
-                        "mature": True, "exhausted": False,
-                    })
+                # per-tf, not "prefer 4h": if 1h/4h genuinely disagree, inject BOTH (the
+                # existing tf-dedup pre-pass below collapses them back to one when they
+                # AGREE on direction -- same reasoning as the P1/P2 auto-derivation below).
+                for _tf in ("1h", "4h"):
+                    _val = _tf_map.get(_tf)
+                    if _val is not None:
+                        evidence.append({
+                            "criterion": "P3", "asset": _asset, "level": _mid_name,
+                            "tier": _tier, "tf": _tf,
+                            "direction": "accept" if _val else "reject",
+                            "mature": True, "exhausted": False,
+                        })
 
     # P1/P2 auto-derivation (2026-08-02): every real named level's tier/direction/tf is
     # ALSO a plain fact lookup (bundle.levels + level_htf_close_status), not a judgment
@@ -545,13 +550,16 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     # — same veto mechanic P2 staleness already uses — which zeroes the auto-injected
     # item instead of overriding it silently.
     #
-    # P2-vs-P1 dedup: a level can be BOTH a real named level AND a meaningful SMT/P2
-    # candidate — scoring it as both would double-count one physical event. P2 is tried
-    # FIRST and, when it fires, claims the (asset, level) pair so the P1 pass below skips
-    # it. A "meaningful" SMT candidate whose lagger's close actually shows accept (held
-    # the sweep, no reversal) is not a genuine P2 divergence signal — thesis.md/the
-    # prompt's own text defines a real P2 item as the lagger REJECTING what it swept — so
-    # it falls through and scores as ordinary P1 instead, never as both.
+    # P2-vs-P1 resolution is PER-TF, not per-level: a level can be BOTH a real named
+    # level AND a meaningful SMT/P2 candidate, but scoring the SAME tf's reading as both
+    # would double-count one physical event -- so for each tf independently, a genuine
+    # reject on a meaningful, unsuppressed candidate scores as P2; anything else
+    # (accept, or reject on a non-candidate level) scores as ordinary P1. A level whose
+    # 1h and 4h readings disagree can therefore resolve as P2 on one tf and P1 on the
+    # other -- a real, distinct pair of facts, not a duplicate (mirrors the P3 fix above
+    # and the tf-dedup pre-pass's own "keep genuine disagreements" scoping). A
+    # `suppressed_p2_sites` level is excluded entirely (see docstring), never falls
+    # through to P1.
     if level_tiers is not None and level_htf_close_status is not None:
         _declared_exhausted = {
             (it.get("asset"), it.get("level")) for it in (evidence or [])
@@ -564,51 +572,49 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
             if not (isinstance(it, dict) and it.get("criterion") in ("P1", "P2")
                     and (it.get("asset"), it.get("level")) in _auto_pairs)
         ]
-        _p2_claimed: set = set()
+        # meaningful, unsuppressed SMT candidates, keyed by (swept_ticker, level) -> tier.
+        # A P2-suppressed level is EXCLUDED entirely below (not P1, not P2 -- thesis.md:
+        # "already nested when the divergence itself fired... no evidence at all here"),
+        # so it is never added to this lookup in the first place.
+        _p2_lookup: dict = {}
         for _cand in (smt_candidates or []):
             _lvl, _tier2 = _cand.get("level"), _cand.get("tier")
-            _swept, _unswept = _cand.get("swept_ticker"), _cand.get("unswept_ticker")
-            if not _cand.get("meaningful") or _swept is None or _lvl is None:
-                continue
-            if _lvl in ((suppressed_p2_sites or {}).get(_swept) or ()):
-                continue
-            if (_swept, _lvl) in _declared_exhausted:
-                continue
-            _tf_map = (level_htf_close_status.get(_swept) or {}).get(_lvl) or {}
-            _val2, _tf2 = None, None
-            if _tf_map.get("4h") is not None:
-                _val2, _tf2 = _tf_map["4h"], "4h"
-            elif _tf_map.get("1h") is not None:
-                _val2, _tf2 = _tf_map["1h"], "1h"
-            if _val2 is not False:   # only a genuine reject is a P2 divergence signal
-                continue
-            evidence.append({
-                "criterion": "P2", "asset": _swept, "level": _lvl, "tier": _tier2,
-                "tf": _tf2, "direction": "reject", "mature": True, "exhausted": False,
-            })
-            _p2_claimed.add((_swept, _lvl))
+            _swept = _cand.get("swept_ticker")
+            if _cand.get("meaningful") and _swept is not None and _lvl is not None \
+                    and _lvl not in ((suppressed_p2_sites or {}).get(_swept) or ()):
+                _p2_lookup[(_swept, _lvl)] = _tier2
         for _asset2, _levels2 in (level_tiers or {}).items():
+            _p2_excluded = set((suppressed_p2_sites or {}).get(_asset2) or ())
             for _name2, _meta2 in (_levels2 or {}).items():
-                if (_asset2, _name2) in _p2_claimed:
+                if (_asset2, _name2) in _declared_exhausted or _name2 in _p2_excluded:
                     continue
-                if _name2 in ((suppressed_p1_levels or {}).get(_asset2) or ()):
-                    continue
-                if (_asset2, _name2) in _declared_exhausted:
-                    continue
+                _p1_suppressed_here = _name2 in ((suppressed_p1_levels or {}).get(_asset2) or ())
                 _tf_map2 = (level_htf_close_status.get(_asset2) or {}).get(_name2) or {}
-                _val3, _tf3 = None, None
-                if _tf_map2.get("4h") is not None:
-                    _val3, _tf3 = _tf_map2["4h"], "4h"
-                elif _tf_map2.get("1h") is not None:
-                    _val3, _tf3 = _tf_map2["1h"], "1h"
-                if _val3 is None:
-                    continue
-                evidence.append({
-                    "criterion": "P1", "asset": _asset2, "level": _name2,
-                    "tier": _meta2.get("tier"), "tf": _tf3,
-                    "direction": "accept" if _val3 else "reject",
-                    "mature": True, "exhausted": False,
-                })
+                # per-tf, not per-level: if 1h and 4h GENUINELY DISAGREE (a real
+                # contradiction, not a duplicate -- 2026-07-27's MNQ prev1_day_high case,
+                # 1h fresh reject vs 4h stale accept), injecting only one and discarding
+                # the other would silently erase a real signal. Inject one item per
+                # (asset, level, tf) that has a mature reading; the EXISTING tf-dedup
+                # pre-pass below already collapses the 1h when both AGREE (same
+                # criterion/direction), so no separate "prefer 4h" logic is needed here.
+                for _tf3 in ("1h", "4h"):
+                    _val3 = _tf_map2.get(_tf3)
+                    if _val3 is None:
+                        continue
+                    _p2_tier = _p2_lookup.get((_asset2, _name2))
+                    if _p2_tier is not None and _val3 is False:
+                        evidence.append({
+                            "criterion": "P2", "asset": _asset2, "level": _name2,
+                            "tier": _p2_tier, "tf": _tf3, "direction": "reject",
+                            "mature": True, "exhausted": False,
+                        })
+                    elif not _p1_suppressed_here:
+                        evidence.append({
+                            "criterion": "P1", "asset": _asset2, "level": _name2,
+                            "tier": _meta2.get("tier"), "tf": _tf3,
+                            "direction": "accept" if _val3 else "reject",
+                            "mature": True, "exhausted": False,
+                        })
     # thesis.md §6 extension: an HTF-confirmed P4 reclaim/failed-reclaim on ONE asset should
     # outweigh a contradicting P3 (static position) read on the OTHER asset at the SAME mid,
     # not be netted against it as an equal, offsetting data point — P4 is a dynamic,
