@@ -460,7 +460,7 @@ def _wide_day_week_smt_scan(levels: dict, wide_cache: dict) -> list:
 
 
 def _p2_nesting_grandfather(bundle: "FactsBundle", *, prev1_td, prev2_td, prev1_week_tds,
-                            long_horizon: dict, td_now, iso_now) -> dict:
+                            long_horizon: dict, td_now, iso_now, data: dict = None) -> dict:
     """thesis.md §2.1b: extends nesting exclusion to P2/SMT candidates too (previously a
     deliberate simplification left them unrestricted), WITH a grandfather exception for a
     candidate whose divergence fired BEFORE its level became nested. Two motivating real
@@ -487,6 +487,20 @@ def _p2_nesting_grandfather(bundle: "FactsBundle", *, prev1_td, prev2_td, prev1_
     01:00 ET case: prev3_day_low's wick divergence fired at 15:38 ET on 2026-07-13, before
     nesting -- grandfathered -- while a LATER, unrelated body-close divergence at the same
     level, at 19:00 ET, fired after nesting; the site must still count via the wick instance).
+
+    2026-08-02 fix (2026-07-16 09:30/10:00 ET case): the `rows` comparison above only sees
+    COMPLETED prior days/weeks (`long_horizon`, prev1_td/prev2_td) -- it is blind to a
+    supersession made WITHIN the candidate's own fire_td session, since that session's own
+    extreme isn't "born" as prev1_day_X until the NEXT rollover. MES's prev3_day_high carried
+    two instances at the SAME site: a wick fire at 09:30:02 and a body fire at 10:00:00 on
+    2026-07-16 -- that session's own high was actually made at 09:37:08, seven minutes AFTER
+    the wick (genuinely grandfathered) but 22 minutes BEFORE the body (should NOT be). Both
+    were incorrectly flagged `grandfathered: True` before this fix, since day-granularity
+    `fire_td` comparison can't distinguish them. Now also checks, day-tier only (`data`, the
+    raw per-ticker bars, threaded in for this), the RUNNING high/low of fire_td's own session
+    strictly before each instance's own `swept_at` -- catching an intra-session supersession
+    `rows` cannot see. Week-tier keeps the coarser rows-only approximation (both motivating
+    cases were day-tier; a week-tier equivalent is unbuilt).
 
     Annotates each bundle.smt_candidates entry in place with `grandfathered` (per-instance:
     was THIS specific divergence already nested when it fired) and `p2_suppressed` (site-
@@ -542,6 +556,20 @@ def _p2_nesting_grandfather(bundle: "FactsBundle", *, prev1_td, prev2_td, prev1_
                 level_born is not None and fire_td is not None and level_price is not None
                 and any(level_born < d < fire_td and beyond(p, level_price)
                        for d, p in rows.get((tier, fam_side), [])))
+            # 2026-08-02 fix: `rows` can't see a same-fire_td-session supersession (that
+            # session isn't "born" as prev1_day_X until the next rollover) -- check the
+            # RUNNING extreme of fire_td's own session strictly before THIS instance's own
+            # swept_at directly against the raw bars. Day-tier only (see docstring).
+            if not already_nested_at_fire and (data or {}).get(tkr) is not None and tier == "day" \
+                    and fire_td is not None and level_price is not None \
+                    and cand.get("swept_at") is not None:
+                sess = session_frame(data[tkr], fire_td)
+                prior_in_session = sess[sess.index < cand["swept_at"]]
+                if len(prior_in_session):
+                    running = (prior_in_session["low"].min() if fam_side == "low"
+                              else prior_in_session["high"].max())
+                    if pd.notna(running) and beyond(running, level_price):
+                        already_nested_at_fire = True
             cand["grandfathered"] = not already_nested_at_fire
             site_checked.setdefault(name, []).append(already_nested_at_fire)
 
@@ -2040,7 +2068,7 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
     # _p2_nesting_grandfather's own docstring for the two motivating real cases).
     bundle.suppressed_p2_sites = _p2_nesting_grandfather(
         bundle, prev1_td=prev1_td, prev2_td=prev2_td, prev1_week_tds=prev1_week_tds,
-        long_horizon=long_horizon, td_now=td_now, iso_now=iso_now)
+        long_horizon=long_horizon, td_now=td_now, iso_now=iso_now, data=data)
 
     # thesis.md §2.1c: per-item equilibrium-staleness suggestion for mature P1 items.
     bundle.p1_equilibrium_stale = _p1_equilibrium_staleness(bundle, data)
