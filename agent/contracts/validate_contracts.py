@@ -316,6 +316,35 @@ _TF_MULT = {"1h": 1.0, "4h": 1.5}          # thesis.md §4: 4hr scores more than
 _TIER_MULT = {"session": 0.5, "day": 0.75, "week": 1.0}   # §4: week > day > session
 _BASE_POINTS = 2.0                          # v1 seed, pending calibration (thesis.md §4)
 
+# thesis.md §2.1a (2026-08-02): P3 (daily_mid/weekly_mid position) is a static snapshot,
+# not a confirmation event whose strength should scale with how long a bar took to close
+# — so it gets its OWN fixed point value per tier instead of the shared tf_mult x
+# tier_mult formula every other criterion uses (a 4h reading isn't "worth more" than a 1h
+# one here, just possibly more current). v1 seed, pending calibration, same status as
+# every other constant in this module.
+_P3_MID_POINTS = {"day": 1.0, "week": 1.5}
+
+
+def _is_week_confluent(item: dict, level_tiers, week_extremes) -> bool:
+    """thesis.md §2.1e promotion (2026-08-02, scoped narrowly): True when a day-tier P1/P2
+    item's OWN price sits within 5% of the week's range of THIS ASSET's current week high/
+    low — a day-tier level that is ALSO the week's own extreme, not merely a day-scale
+    event. Confirmed real on 2026-07-15 (MNQ prev2_day_high sat ~20pts from the week's own
+    high, a tight cluster; prev1_day_high, ~150pts away, did NOT cluster). Shared by the
+    scoring loop's tier_mult override AND the dominance pre-passes below, so both agree on
+    which items are "effectively week-tier" — deliberately narrower than derive_facts.
+    _confluence_notes (audit-only, matches against OLD untracked extremes only)."""
+    if item.get("tier") != "day" or not level_tiers:
+        return False
+    price = ((level_tiers.get(item.get("asset")) or {}).get(item.get("level")) or {}).get("price")
+    wk = (week_extremes or {}).get(item.get("asset")) or {}
+    whi, wlo = wk.get("hi"), wk.get("lo")
+    if not (isinstance(price, (int, float)) and isinstance(whi, (int, float))
+            and isinstance(wlo, (int, float)) and whi > wlo):
+        return False
+    tol = 0.05 * (whi - wlo)
+    return abs(price - whi) <= tol or abs(price - wlo) <= tol
+
 # thesis.md §4: clearance magnitude — |close - level| / avg_range[tf]. v1 seeds pending calibration.
 # weak (<0.5x) x0.75, normal (0.5-1.5x) x1.0, strong (>1.5x) x1.25 — a shallow poke past a level
 # scores less than a decisive clearance ("model judges which level/accept, code computes how far").
@@ -490,7 +519,10 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     a judgment call — it is a direct fact lookup — so this closes the omission failure
     (model never declares it) and the misdeclaration failure (2026-07-20: all 3 mid items
     declared at the wrong tier). `level_htf_close_status=None` (every pre-2026-08-02 call
-    site) leaves P3 scoring exactly as declared, unchanged.
+    site) leaves P3 scoring exactly as declared, unchanged. Points use `_P3_MID_POINTS`
+    (fixed 1.0 day / 1.5 week, 2026-08-02) instead of the shared tf_mult x tier_mult
+    formula — a position snapshot's magnitude shouldn't scale with which timeframe's bar
+    happened to close, unlike a confirmation event.
 
     P1/P2 auto-derivation (2026-08-02): `level_tiers` ({asset: {level: {"tier", "price"}}})
     and `smt_candidates` ([{level, tier, swept_ticker, unswept_ticker, meaningful}]) extend
@@ -509,8 +541,14 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
 
     P1/P2-dominates-P3 (2026-08-02 extension of P4-dominates-P3 above): a mature,
     non-exhausted P1/P2 item ALSO dominates the OTHER asset's contradicting P3 mid — a
-    day-tier item claims that asset's daily mid, a week-tier item the weekly mid (P4
-    claims win ties). No caller input needed; computed from the SAME evidence list.
+    day-tier item claims that asset's daily mid, a week-tier item the weekly mid, and a
+    day-tier item that is ALSO week-confluent (see _is_week_confluent) claims both (P4
+    claims win ties). No caller input needed; computed from the SAME evidence list. A
+    mature P2 (not P1) ALSO dominates a contradicting P3 on the SAME asset — a bearish
+    SMT divergence is a distinct reversal signal, not a description of current position,
+    so it can genuinely disagree with that asset's own P3 (P1 cannot: a fresh sweep-
+    accept all but guarantees agreement with the same asset's own mid position, so
+    same-asset P1-vs-P3 domination stays unbuilt).
 
     thesis.md §2.1e promotion (2026-08-02, scoped): `week_extremes` ({asset: {"hi", "lo"}})
     lets a day-tier P1/P2 item score at week-tier weight when its OWN price sits within
@@ -638,26 +676,62 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     # dominate the OTHER asset's contradicting P3 mid — a day-tier item dominates that
     # asset's DAILY mid, a week-tier item the WEEKLY mid (mirroring P4's own tier split,
     # since P1/P2 have no inherent mid_type the way P4's _high/_low levels do; session-
-    # tier items dominate neither). `setdefault` so an existing P4 claim always wins ties
-    # — a two-step, HTF-confirmed reclaim is a stronger signal than a single sweep read or
-    # SMT divergence. Volume-checked across the 10 sample dates first (nonzero on 8/10,
-    # often double digits) — this is a common contradiction pattern, not an edge case.
-    # NOTE: same-asset P1/P2-vs-P3 "domination" is deliberately NOT built — now that P3 is
+    # tier items dominate neither). A day-tier item that is ALSO week-confluent (see
+    # _is_week_confluent) claims BOTH mid_types, not just one — it is genuinely dual-
+    # natured: still a day-family level by name, but also the week's own extreme by price.
+    # `setdefault` so an existing P4 claim always wins ties — a two-step, HTF-confirmed
+    # reclaim is a stronger signal than a single sweep read or SMT divergence. Volume-
+    # checked across the 10 sample dates first (nonzero on 8/10, often double digits) —
+    # this is a common contradiction pattern, not an edge case.
+    # NOTE: same-asset P1-vs-P3 "domination" is deliberately NOT built — now that P3 is
     # fully auto-derived from the SAME asset's own latest close (2026-08-02), a same-asset
-    # P1/P2 read and its own P3 position essentially never disagree (a fresh sweep beyond
-    # a high all but guarantees that asset already sits above its own mid) — there is
-    # nothing meaningful to dominate there.
+    # P1 read and its own P3 position essentially never disagree (a fresh sweep beyond a
+    # high all but guarantees that asset already sits above its own mid) — there is
+    # nothing meaningful to dominate there. P2 is different (see p2_same_asset_dominance
+    # below): a bearish SMT divergence is a distinct reversal signal, not a description of
+    # current position, so it CAN meaningfully disagree with the same asset's own P3.
     for item in evidence or []:
         if not isinstance(item, dict) or item.get("criterion") not in ("P1", "P2"):
             continue
         if not bool(item.get("mature")) or bool(item.get("exhausted")):
             continue
-        mid_type = {"day": "daily", "week": "weekly"}.get(item.get("tier"))
-        if mid_type is None:
-            continue
+        mid_types = set()
+        if item.get("tier") == "day":
+            mid_types.add("daily")
+        elif item.get("tier") == "week":
+            mid_types.add("weekly")
+        if _is_week_confluent(item, level_tiers, week_extremes):
+            mid_types.add("weekly")
         side = _item_side(item)
         if side is not None:
-            p4_mid_dominance.setdefault((item.get("asset"), mid_type), side)
+            for mid_type in mid_types:
+                p4_mid_dominance.setdefault((item.get("asset"), mid_type), side)
+
+    # P2-same-asset-dominates-P3 (2026-08-02, thesis.md §6 further extension): a mature,
+    # non-exhausted P2 divergence dominates a CONTRADICTING P3 reading on the SAME asset
+    # too (P1 does not — see NOTE above). Motivating case (2026-07-15 09:20 ET): MNQ's own
+    # P2 divergence at prev2_day_high (a genuine bearish reversal warning, week-confluent)
+    # coexisted with MNQ's own P3 daily/weekly mid still reading "above" (a static fact
+    # about where the last close sat) — two different questions, legitimately allowed to
+    # disagree, unlike P1's "did I close beyond this level" which all but guarantees
+    # agreement with the same asset's own mid position.
+    p2_same_asset_dominance: dict = {}   # (asset, "daily"|"weekly") -> "UP"|"DOWN"
+    for item in evidence or []:
+        if not isinstance(item, dict) or item.get("criterion") != "P2":
+            continue
+        if not bool(item.get("mature")) or bool(item.get("exhausted")):
+            continue
+        mid_types = set()
+        if item.get("tier") == "day":
+            mid_types.add("daily")
+        elif item.get("tier") == "week":
+            mid_types.add("weekly")
+        if _is_week_confluent(item, level_tiers, week_extremes):
+            mid_types.add("weekly")
+        side = _item_side(item)
+        if side is not None:
+            for mid_type in mid_types:
+                p2_same_asset_dominance.setdefault((item.get("asset"), mid_type), side)
 
     # tf-dedup pre-pass (2026-08-01 root-cause audit): when a 1h AND a 4h item both exist
     # for the same (criterion, asset, level, tier, direction) -- the same physical event
@@ -692,40 +766,20 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
             continue
         tf_mult = _TF_MULT.get(item.get("tf"), 0.0)
         tier_mult = _TIER_MULT.get(item.get("tier"), 0.0)
-        # thesis.md §2.1a: a daily_mid/weekly_mid item's tier is fully determined by its
-        # own identity (daily -> "day", weekly -> "week"), never a judgment call -- so it
-        # is code-derived here, the same "model judges, code computes" split already
-        # applied to sign (_item_side). Without this override the model can under-weight
-        # real evidence by mislabeling it, e.g. tier="session" (0.5x) instead of the
-        # correct "week" (1.0x) -- confirmed real on 2026-07-20 (all 3 mid items declared
-        # at tier="session"). Covers both P3's plain "daily_mid"/"weekly_mid" level names
-        # and P4's "daily_mid_high"/"daily_mid_low"/"weekly_mid_high"/"weekly_mid_low".
-        if item.get("criterion") in ("P3", "P4"):
+        # thesis.md §2.1a: a daily_mid_high/daily_mid_low/weekly_mid_high/weekly_mid_low
+        # (P4) item's tier is fully determined by its own identity, never a judgment call
+        # -- so it is code-derived here, the same "model judges, code computes" split
+        # already applied to sign (_item_side). P3's daily_mid/weekly_mid gets its own
+        # FIXED point value instead (see _P3_MID_POINTS below), not a tier_mult override.
+        if item.get("criterion") == "P4":
             _lvl = item.get("level") or ""
             if _lvl.startswith("daily_mid"):
                 tier_mult = _TIER_MULT["day"]
             elif _lvl.startswith("weekly_mid"):
                 tier_mult = _TIER_MULT["week"]
-        # thesis.md §2.1e promotion (2026-08-02, scoped narrowly): a day-tier P1/P2 item
-        # whose OWN price sits within a tight cluster of THIS ASSET's current week high/
-        # low gets week-tier weight instead of day-tier -- it isn't merely a day-scale
-        # event, it is ALSO the week's own extreme. Confirmed real on 2026-07-15 (MNQ
-        # prev2_day_high sat ~20pts from the week's own high, a tight cluster;
-        # prev1_day_high, ~150pts away, did NOT cluster and correctly stays day-tier).
-        # Deliberately narrower than derive_facts._confluence_notes (audit-only, matches
-        # against OLD untracked extremes only) -- this compares against the CURRENT,
-        # actively-tracked week extreme, a different case. Tolerance is 5% of the week's
-        # own range (self-scaling per asset/week, no new ATR plumbing) -- a v1 seed
-        # pending calibration, same status as every other constant in this module.
-        if item.get("criterion") in ("P1", "P2") and item.get("tier") == "day" and level_tiers:
-            _price = ((level_tiers.get(item.get("asset")) or {}).get(item.get("level")) or {}).get("price")
-            _wk = (week_extremes or {}).get(item.get("asset")) or {}
-            _whi, _wlo = _wk.get("hi"), _wk.get("lo")
-            if (isinstance(_price, (int, float)) and isinstance(_whi, (int, float))
-                    and isinstance(_wlo, (int, float)) and _whi > _wlo):
-                _tol = 0.05 * (_whi - _wlo)
-                if abs(_price - _whi) <= _tol or abs(_price - _wlo) <= _tol:
-                    tier_mult = _TIER_MULT["week"]
+        # thesis.md §2.1e promotion (2026-08-02, scoped narrowly) -- see _is_week_confluent.
+        if item.get("criterion") in ("P1", "P2") and _is_week_confluent(item, level_tiers, week_extremes):
+            tier_mult = _TIER_MULT["week"]
         mature = bool(item.get("mature"))
         ratio = None
         if magnitude:
@@ -746,20 +800,31 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
             item.get("criterion") == "P2" and suppressed_p2_sites
             and item.get("level") in (suppressed_p2_sites.get(item.get("asset")) or ()))
         # thesis.md §6 extension (see pre-pass above): a P3 item whose OTHER asset carries an
-        # HTF-confirmed P4 reclaim/failed-reclaim at the SAME mid, in the OPPOSITE direction,
-        # is dominated by that dynamic signal and scores ZERO — same mechanic as the other
-        # suppression gates, never applied to P1/P2/P4/P5.
+        # HTF-confirmed P4/P1/P2 signal at the SAME mid, in the OPPOSITE direction, is
+        # dominated by that dynamic signal and scores ZERO — same mechanic as the other
+        # suppression gates, never applied to P1/P2/P4/P5. 2026-08-02: a mature P2
+        # divergence ALSO dominates a contradicting P3 on the SAME asset (p2_same_asset_
+        # dominance, pre-pass below) — a bearish SMT and "still above own mid" answer
+        # different questions and can genuinely disagree even for one asset, unlike P1
+        # (a fresh sweep-accept all but guarantees that asset is already above its own
+        # mid, so same-asset P1-vs-P3 domination stays unbuilt as near-vacuous).
         p3_dominated = False
         if item.get("criterion") == "P3" and item.get("level") in ("daily_mid", "weekly_mid"):
             mid_type = "daily" if item.get("level") == "daily_mid" else "weekly"
             other_asset = "MES" if item.get("asset") == "MNQ" else "MNQ"
-            dom_side = p4_mid_dominance.get((other_asset, mid_type))
+            this_asset = item.get("asset")
+            dom_side = (p4_mid_dominance.get((other_asset, mid_type))
+                        or p2_same_asset_dominance.get((this_asset, mid_type)))
             this_side = _mid_side(item)
             p3_dominated = dom_side is not None and this_side is not None and dom_side != this_side
         tf_deduped = id(item) in _tf_dedup_zero
         suppressed = p1_suppressed or p2_suppressed or p3_dominated or tf_deduped
         scored_mature = mature and not exhausted and not suppressed
-        points = round(_BASE_POINTS * tf_mult * tier_mult * mag_mult, 4) if scored_mature else 0.0
+        if item.get("criterion") == "P3" and item.get("level") in ("daily_mid", "weekly_mid"):
+            _p3_base = _P3_MID_POINTS["day" if item.get("level") == "daily_mid" else "week"]
+            points = round(_p3_base * mag_mult, 4) if scored_mature else 0.0
+        else:
+            points = round(_BASE_POINTS * tf_mult * tier_mult * mag_mult, 4) if scored_mature else 0.0
         side = _item_side(item)
         if side == "UP":
             net += points

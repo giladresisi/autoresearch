@@ -433,15 +433,15 @@ def test_p3_p4_levels_exempt_from_facts_check():
 
 
 def test_mid_tier_is_code_derived_not_model_declared():
-    # 2026-07-20 root-cause: the model declared all 3 mid items at tier="session"
-    # (0.5x), under-weighting real evidence that should score at its true day/week
-    # tier -- code now ignores the declared tier for daily_mid/weekly_mid and uses
-    # the level's own identity instead.
+    # 2026-07-20 root-cause: the model declared all 3 mid items at tier="session",
+    # under-weighting real evidence -- P3 now uses a fixed point value per its own
+    # identity (_P3_MID_POINTS), ignoring the declared tier entirely (2026-08-02:
+    # no longer even a tf_mult x tier_mult computation, a flat 1.0/1.5).
     daily = _ev(criterion="P3", level="daily_mid", tier="session", tf="1h", direction="accept")
     weekly = _ev(criterion="P3", level="weekly_mid", tier="session", tf="1h", direction="reject")
     scored = score_thesis_evidence([daily, weekly])["scored_evidence"]
-    assert scored[0]["points"] == 1.5    # day tier (0.75) x 1h (1.0) x 2.0 base, not session (0.5) -> 1.0
-    assert scored[1]["points"] == 2.0    # week tier (1.0) x 1h (1.0) x 2.0 base, not session (0.5) -> 1.0
+    assert scored[0]["points"] == 1.0    # fixed P3 daily_mid value, not session (0.5x) or day (0.75x)
+    assert scored[1]["points"] == 1.5    # fixed P3 weekly_mid value, not session (0.5x) or week (1.0x)
 
 
 def test_p4_mid_tier_also_code_derived():
@@ -985,3 +985,56 @@ def test_confluence_promotion_noop_without_week_extremes():
     item = _ev(asset="MNQ", level="prev_day_high", tier="day", direction="accept")
     scoring = score_thesis_evidence([item], level_tiers=_LEVEL_TIERS)
     assert scoring["scored_evidence"][0]["points"] == 1.5   # unpromoted -- no week_extremes passed
+
+
+# --------------------------------------------------------------------------- #
+# P3 fixed point value + P2-same-asset-dominates-P3 (2026-08-02)               #
+# --------------------------------------------------------------------------- #
+def test_p3_fixed_points_independent_of_tf():
+    daily_1h = _ev(criterion="P3", level="daily_mid", tf="1h", direction="accept")
+    daily_4h = _ev(criterion="P3", asset="MES", level="daily_mid", tf="4h", direction="accept")
+    weekly_1h = _ev(criterion="P3", level="weekly_mid", tier="week", tf="1h", direction="reject")
+    weekly_4h = _ev(criterion="P3", asset="MES", level="weekly_mid", tier="week", tf="4h", direction="reject")
+    scored = score_thesis_evidence([daily_1h, daily_4h, weekly_1h, weekly_4h])["scored_evidence"]
+    assert [it["points"] for it in scored] == [1.0, 1.0, 1.5, 1.5]   # tf never changes a P3 point value
+
+
+def test_p2_dominates_contradicting_p3_on_same_asset():
+    # 2026-07-15 09:20 ET motivating case: MNQ's own bearish P2 divergence at
+    # prev2_day_high coexisted with MNQ's own P3 daily_mid still reading "above" --
+    # the P2 divergence must dominate (zero) the contradicting same-asset P3.
+    p2 = _ev(criterion="P2", asset="MNQ", level="prev_day_high", tier="day", direction="reject")  # DOWN
+    p3 = _ev(criterion="P3", asset="MNQ", level="daily_mid", direction="accept")   # UP -- contradicts
+    scoring = score_thesis_evidence([p2, p3])
+    p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
+    assert p3_scored["points"] == 0.0
+
+
+def test_p1_does_not_dominate_same_asset_p3():
+    p1 = _ev(criterion="P1", asset="MNQ", level="prev_day_high", tier="day", direction="reject")  # DOWN
+    p3 = _ev(criterion="P3", asset="MNQ", level="daily_mid", direction="accept")   # UP -- contradicts
+    scoring = score_thesis_evidence([p1, p3])
+    p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
+    assert p3_scored["points"] > 0.0   # P1 same-asset domination stays unbuilt
+
+
+def test_p2_same_asset_dominance_agreeing_not_zeroed():
+    p2 = _ev(criterion="P2", asset="MNQ", level="prev_day_high", tier="day", direction="accept")  # UP
+    p3 = _ev(criterion="P3", asset="MNQ", level="daily_mid", direction="accept")   # UP -- agrees
+    scoring = score_thesis_evidence([p2, p3])
+    p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
+    assert p3_scored["points"] > 0.0
+
+
+def test_week_confluent_day_tier_item_dominates_both_mids_cross_asset():
+    # A day-tier item that is ALSO week-confluent (prev_day_high, per _WEEK_EXTREMES) is
+    # dual-natured: it should claim BOTH the other asset's daily AND weekly mid, not just
+    # the daily one a plain day-tier item would.
+    p1 = _ev(criterion="P1", asset="MNQ", level="prev_day_high", tier="day", direction="reject")  # DOWN
+    p3_daily = _ev(criterion="P3", asset="MES", level="daily_mid", direction="accept")    # UP -- contradicts
+    p3_weekly = _ev(criterion="P3", asset="MES", level="weekly_mid", tier="week", direction="accept")  # UP -- contradicts
+    scoring = score_thesis_evidence([p1, p3_daily, p3_weekly],
+                                    level_tiers=_LEVEL_TIERS, week_extremes=_WEEK_EXTREMES)
+    p3_scored = {it["level"]: it["points"] for it in scoring["scored_evidence"] if it["criterion"] == "P3"}
+    assert p3_scored["daily_mid"] == 0.0
+    assert p3_scored["weekly_mid"] == 0.0
