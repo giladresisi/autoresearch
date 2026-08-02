@@ -790,3 +790,168 @@ def test_directional_bias_backed_only_by_auto_injected_p3_is_valid():
     }}
     codes = validate_thesis(t, facts).codes()
     assert "ARI_THESIS_BIAS" not in codes
+
+
+# --------------------------------------------------------------------------- #
+# P1/P2 auto-derivation + P1/P2-dominates-P3 + §2.1e tier promotion (2026-08-02) #
+# --------------------------------------------------------------------------- #
+_LEVEL_TIERS = {
+    "MNQ": {
+        "prev_day_high": {"tier": "day", "price": 20000.0},
+        "prev_day_low": {"tier": "day", "price": 19500.0},
+    },
+    "MES": {},
+}
+_LEVEL_STATUS = {
+    "MNQ": {
+        "prev_day_high": {"1h": True, "4h": None},    # accept
+        "prev_day_low": {"1h": None, "4h": None},      # immature -- not injected
+    },
+    "MES": {},
+}
+_SMT_CANDIDATES = [
+    {"level": "prev_day_high", "tier": "day", "swept_ticker": "MNQ",
+     "unswept_ticker": "MES", "meaningful": True},
+]
+
+
+def test_p1_auto_injected_when_undeclared():
+    scoring = score_thesis_evidence([], level_tiers=_LEVEL_TIERS,
+                                    level_htf_close_status=_LEVEL_STATUS)
+    p1 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P1"]
+    assert len(p1) == 1
+    assert p1[0]["asset"] == "MNQ" and p1[0]["level"] == "prev_day_high"
+    assert p1[0]["direction"] == "accept" and p1[0]["tier"] == "day"
+
+
+def test_p1_not_injected_when_immature():
+    scoring = score_thesis_evidence([], level_tiers=_LEVEL_TIERS,
+                                    level_htf_close_status=_LEVEL_STATUS)
+    assert not any(it["level"] == "prev_day_low" for it in scoring["scored_evidence"])
+
+
+def test_p1_not_injected_when_suppressed():
+    scoring = score_thesis_evidence(
+        [], level_tiers=_LEVEL_TIERS, level_htf_close_status=_LEVEL_STATUS,
+        suppressed_p1_levels={"MNQ": ["prev_day_high"]})
+    assert not [it for it in scoring["scored_evidence"] if it["criterion"] == "P1"]
+
+
+def test_declared_p1_item_discarded_and_replaced():
+    bad = _ev(asset="MNQ", level="prev_day_high", tier="week", direction="reject")
+    scoring = score_thesis_evidence([bad], level_tiers=_LEVEL_TIERS,
+                                    level_htf_close_status=_LEVEL_STATUS)
+    p1 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P1"]
+    assert len(p1) == 1
+    assert p1[0]["tier"] == "day" and p1[0]["direction"] == "accept"   # code's read, not the model's
+
+
+def test_exhausted_veto_zeroes_auto_injected_p1():
+    veto = _ev(asset="MNQ", level="prev_day_high", direction="accept", mature=True)
+    veto["exhausted"] = True
+    scoring = score_thesis_evidence([veto], level_tiers=_LEVEL_TIERS,
+                                    level_htf_close_status=_LEVEL_STATUS)
+    assert scoring["net_score"] == 0.0
+
+
+def test_p2_injected_for_meaningful_unsuppressed_reject_divergence():
+    status = {"MNQ": {"prev_day_high": {"1h": False, "4h": None}}, "MES": {}}   # reject
+    scoring = score_thesis_evidence([], level_tiers=_LEVEL_TIERS,
+                                    level_htf_close_status=status,
+                                    smt_candidates=_SMT_CANDIDATES)
+    scored = scoring["scored_evidence"]
+    assert len(scored) == 1
+    assert scored[0]["criterion"] == "P2" and scored[0]["direction"] == "reject"
+    assert scored[0]["asset"] == "MNQ" and scored[0]["level"] == "prev_day_high"
+
+
+def test_p2_falls_through_to_p1_when_lagger_actually_accepted():
+    # meaningful=True but the lagger's own close shows accept, not reject -- not a genuine
+    # P2 divergence signal, so it scores as ordinary P1 instead, never as both.
+    scoring = score_thesis_evidence([], level_tiers=_LEVEL_TIERS,
+                                    level_htf_close_status=_LEVEL_STATUS,   # accept
+                                    smt_candidates=_SMT_CANDIDATES)
+    scored = scoring["scored_evidence"]
+    assert len(scored) == 1
+    assert scored[0]["criterion"] == "P1" and scored[0]["direction"] == "accept"
+
+
+def test_p2_suppressed_site_falls_through_to_p1():
+    status = {"MNQ": {"prev_day_high": {"1h": False, "4h": None}}, "MES": {}}
+    scoring = score_thesis_evidence(
+        [], level_tiers=_LEVEL_TIERS, level_htf_close_status=status,
+        smt_candidates=_SMT_CANDIDATES, suppressed_p2_sites={"MNQ": ["prev_day_high"]})
+    scored = scoring["scored_evidence"]
+    assert len(scored) == 1
+    assert scored[0]["criterion"] == "P1"   # P2 path skipped -- falls through, not suppressed twice
+
+
+def test_p1_p2_never_double_counted_for_same_level():
+    status = {"MNQ": {"prev_day_high": {"1h": False, "4h": None}}, "MES": {}}
+    scoring = score_thesis_evidence([], level_tiers=_LEVEL_TIERS,
+                                    level_htf_close_status=status,
+                                    smt_candidates=_SMT_CANDIDATES)
+    assert len(scoring["scored_evidence"]) == 1   # never both P1 and P2 for the same level
+
+
+def test_level_tiers_none_leaves_p1_p2_untouched():
+    item = _ev(asset="MNQ", level="prev_day_high", direction="accept")
+    scoring = score_thesis_evidence([item])
+    assert len(scoring["scored_evidence"]) == 1
+    assert scoring["scored_evidence"][0]["direction"] == "accept"
+
+
+def test_day_tier_p1_dominates_other_assets_daily_p3():
+    p1 = _ev(asset="MNQ", level="prev_day_high", tier="day", direction="accept")   # UP
+    p3 = _ev(criterion="P3", asset="MES", level="daily_mid", tier="day", direction="reject")  # DOWN
+    scoring = score_thesis_evidence([p1, p3])
+    p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
+    assert p3_scored["points"] == 0.0
+
+
+def test_week_tier_p2_dominates_other_assets_weekly_p3():
+    p2 = _ev(criterion="P2", asset="MNQ", level="prev1_week_low", tier="week", direction="reject")  # UP (reject a low is bullish)
+    p3 = _ev(criterion="P3", asset="MES", level="weekly_mid", tier="week", direction="reject")  # DOWN
+    scoring = score_thesis_evidence([p2, p3])
+    p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
+    assert p3_scored["points"] == 0.0
+
+
+def test_session_tier_p1_does_not_dominate_p3():
+    p1 = _ev(asset="MNQ", level="prev_day_high", tier="session", direction="accept")
+    p3 = _ev(criterion="P3", asset="MES", level="daily_mid", tier="day", direction="reject")
+    scoring = score_thesis_evidence([p1, p3])
+    p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
+    assert p3_scored["points"] > 0.0
+
+
+def test_p4_dominance_wins_over_p1_p2_on_tie():
+    p1 = _ev(asset="MNQ", level="prev_day_low", tier="day", direction="accept")   # DOWN (low accept)
+    p4 = _ev(criterion="P4", asset="MNQ", level="daily_mid_high", tier="day", direction="accept")  # UP
+    p3 = _ev(criterion="P3", asset="MES", level="daily_mid", tier="day", direction="accept")   # UP -- agrees with P4
+    scoring = score_thesis_evidence([p1, p4, p3])
+    p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
+    assert p3_scored["points"] > 0.0   # P4 (UP) does not contradict P3 (UP) -- not zeroed
+
+
+_WEEK_EXTREMES = {"MNQ": {"hi": 20010.0, "lo": 19000.0}}   # range 1010, 5% tol = 50.5
+
+
+def test_day_tier_confluent_with_week_high_scores_week_tier():
+    # prev_day_high (20000.0) sits 10pts from the week high (20010.0), well within 5% tol.
+    item = _ev(asset="MNQ", level="prev_day_high", tier="day", direction="accept")
+    scoring = score_thesis_evidence([item], level_tiers=_LEVEL_TIERS, week_extremes=_WEEK_EXTREMES)
+    assert scoring["scored_evidence"][0]["points"] == 2.0   # week tier (1.0) x 1h (1.0) x 2.0 base
+
+
+def test_day_tier_not_confluent_scores_day_tier():
+    # prev_day_low (19500.0) sits 500pts from either week extreme -- not confluent.
+    item = _ev(asset="MNQ", level="prev_day_low", tier="day", direction="reject")
+    scoring = score_thesis_evidence([item], level_tiers=_LEVEL_TIERS, week_extremes=_WEEK_EXTREMES)
+    assert scoring["scored_evidence"][0]["points"] == 1.5   # day tier (0.75) x 1h (1.0) x 2.0 base
+
+
+def test_confluence_promotion_noop_without_week_extremes():
+    item = _ev(asset="MNQ", level="prev_day_high", tier="day", direction="accept")
+    scoring = score_thesis_evidence([item], level_tiers=_LEVEL_TIERS)
+    assert scoring["scored_evidence"][0]["points"] == 1.5   # unpromoted -- no week_extremes passed

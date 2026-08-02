@@ -165,10 +165,15 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
         dol_available = {"UP": bool(dol_menu.get("UP")), "DOWN": bool(dol_menu.get("DOWN"))}
     suppressed_p1_levels = (facts or {}).get("suppressed_p1_levels")
     suppressed_p2_sites = (facts or {}).get("suppressed_p2_sites")
+    level_tiers = (facts or {}).get("level_tiers")
+    smt_candidates = (facts or {}).get("smt_candidates")
+    week_extremes = (facts or {}).get("week_extremes")
     scoring = score_thesis_evidence(t.evidence, dol_available=dol_available,
                                     suppressed_p1_levels=suppressed_p1_levels,
                                     suppressed_p2_sites=suppressed_p2_sites,
-                                    level_htf_close_status=level_htf_close_status)
+                                    level_htf_close_status=level_htf_close_status,
+                                    level_tiers=level_tiers, smt_candidates=smt_candidates,
+                                    week_extremes=week_extremes)
     if scoring["scored_evidence"]:
         if t.bias in BIASES and t.bias != scoring["expected_bias"]:
             r.add("arithmetic", "ARI_THESIS_BIAS",
@@ -423,7 +428,8 @@ def _item_side(item: dict) -> Optional[str]:
 
 def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                            suppressed_p1_levels=None, suppressed_p2_sites=None,
-                           level_htf_close_status=None) -> dict:
+                           level_htf_close_status=None, level_tiers=None,
+                           smt_candidates=None, week_extremes=None) -> dict:
     """Pure computation over the model-declared P1/P2 evidence ledger: per-item points
     (tier x tf x magnitude multiplier, zeroed if immature — enforcing the §3 maturity gate
     in code, not trust), the net score, the expected bias sign, and the §6 cross-asset
@@ -482,7 +488,30 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     lookup — so this closes both the omission failure (model never declares it) and the
     misdeclaration failure (2026-07-20: all 3 mid items declared at the wrong tier)
     in one mechanism. `level_htf_close_status=None` (every pre-2026-08-02 call site)
-    leaves P3 scoring exactly as declared, unchanged."""
+    leaves P3 scoring exactly as declared, unchanged.
+
+    P1/P2 auto-derivation (2026-08-02): `level_tiers` ({asset: {level: {"tier", "price"}}})
+    and `smt_candidates` ([{level, tier, swept_ticker, unswept_ticker, meaningful}]) extend
+    the SAME auto-derivation pattern to named levels — every real, non-suppressed level
+    with a mature `level_htf_close_status` reading is auto-injected (P2 when it is a
+    meaningful, unsuppressed SMT divergence AND the lagger's own close is a genuine reject;
+    ordinary P1 otherwise), any model-declared P1/P2 item for that (asset, level) is
+    dropped first, and the model's only remaining lever is declaring the SAME item with
+    `exhausted: true` to veto it. Gated on BOTH `level_tiers` and `level_htf_close_status`
+    being provided (either `None` — every pre-2026-08-02 call site passes neither — leaves
+    P1/P2 scoring exactly as declared, unchanged); the §2.1e tier promotion below only
+    needs `level_tiers`, independent of this gate.
+
+    P1/P2-dominates-P3 (2026-08-02 extension of P4-dominates-P3 above): a mature,
+    non-exhausted P1/P2 item ALSO dominates the OTHER asset's contradicting P3 mid — a
+    day-tier item claims that asset's daily mid, a week-tier item the weekly mid (P4
+    claims win ties). No caller input needed; computed from the SAME evidence list.
+
+    thesis.md §2.1e promotion (2026-08-02, scoped): `week_extremes` ({asset: {"hi", "lo"}})
+    lets a day-tier P1/P2 item score at week-tier weight when its OWN price sits within
+    5% of the week's range of THAT ASSET's current week high/low — a day-tier level that
+    is ALSO the week's own extreme isn't merely a day-scale signal. `level_tiers=None` or
+    `week_extremes=None` leaves this off."""
     if level_htf_close_status is not None:
         evidence = [
             it for it in (evidence or [])
@@ -504,6 +533,82 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                         "direction": "accept" if _val else "reject",
                         "mature": True, "exhausted": False,
                     })
+
+    # P1/P2 auto-derivation (2026-08-02): every real named level's tier/direction/tf is
+    # ALSO a plain fact lookup (bundle.levels + level_htf_close_status), not a judgment
+    # call — the only genuine judgment left is relevance (which candidates are worth
+    # citing), and volume-checking across the 10 sample dates found that pool stays small
+    # (2-7/day for P1, 0-9/day for P2) after existing suppression, unlike P5's 30-53/day
+    # (rejected for exactly this reason). `level_tiers` gates this block; `None` (every
+    # pre-2026-08-02 call site) leaves P1/P2 scoring exactly as declared, unchanged. The
+    # model's only remaining lever is `exhausted: true` on a matching (asset, level) item
+    # — same veto mechanic P2 staleness already uses — which zeroes the auto-injected
+    # item instead of overriding it silently.
+    #
+    # P2-vs-P1 dedup: a level can be BOTH a real named level AND a meaningful SMT/P2
+    # candidate — scoring it as both would double-count one physical event. P2 is tried
+    # FIRST and, when it fires, claims the (asset, level) pair so the P1 pass below skips
+    # it. A "meaningful" SMT candidate whose lagger's close actually shows accept (held
+    # the sweep, no reversal) is not a genuine P2 divergence signal — thesis.md/the
+    # prompt's own text defines a real P2 item as the lagger REJECTING what it swept — so
+    # it falls through and scores as ordinary P1 instead, never as both.
+    if level_tiers is not None and level_htf_close_status is not None:
+        _declared_exhausted = {
+            (it.get("asset"), it.get("level")) for it in (evidence or [])
+            if isinstance(it, dict) and it.get("criterion") in ("P1", "P2")
+            and bool(it.get("exhausted"))
+        }
+        _auto_pairs = {(_tkr, _name) for _tkr, _m in (level_tiers or {}).items() for _name in _m}
+        evidence = [
+            it for it in evidence
+            if not (isinstance(it, dict) and it.get("criterion") in ("P1", "P2")
+                    and (it.get("asset"), it.get("level")) in _auto_pairs)
+        ]
+        _p2_claimed: set = set()
+        for _cand in (smt_candidates or []):
+            _lvl, _tier2 = _cand.get("level"), _cand.get("tier")
+            _swept, _unswept = _cand.get("swept_ticker"), _cand.get("unswept_ticker")
+            if not _cand.get("meaningful") or _swept is None or _lvl is None:
+                continue
+            if _lvl in ((suppressed_p2_sites or {}).get(_swept) or ()):
+                continue
+            if (_swept, _lvl) in _declared_exhausted:
+                continue
+            _tf_map = (level_htf_close_status.get(_swept) or {}).get(_lvl) or {}
+            _val2, _tf2 = None, None
+            if _tf_map.get("4h") is not None:
+                _val2, _tf2 = _tf_map["4h"], "4h"
+            elif _tf_map.get("1h") is not None:
+                _val2, _tf2 = _tf_map["1h"], "1h"
+            if _val2 is not False:   # only a genuine reject is a P2 divergence signal
+                continue
+            evidence.append({
+                "criterion": "P2", "asset": _swept, "level": _lvl, "tier": _tier2,
+                "tf": _tf2, "direction": "reject", "mature": True, "exhausted": False,
+            })
+            _p2_claimed.add((_swept, _lvl))
+        for _asset2, _levels2 in (level_tiers or {}).items():
+            for _name2, _meta2 in (_levels2 or {}).items():
+                if (_asset2, _name2) in _p2_claimed:
+                    continue
+                if _name2 in ((suppressed_p1_levels or {}).get(_asset2) or ()):
+                    continue
+                if (_asset2, _name2) in _declared_exhausted:
+                    continue
+                _tf_map2 = (level_htf_close_status.get(_asset2) or {}).get(_name2) or {}
+                _val3, _tf3 = None, None
+                if _tf_map2.get("4h") is not None:
+                    _val3, _tf3 = _tf_map2["4h"], "4h"
+                elif _tf_map2.get("1h") is not None:
+                    _val3, _tf3 = _tf_map2["1h"], "1h"
+                if _val3 is None:
+                    continue
+                evidence.append({
+                    "criterion": "P1", "asset": _asset2, "level": _name2,
+                    "tier": _meta2.get("tier"), "tf": _tf3,
+                    "direction": "accept" if _val3 else "reject",
+                    "mature": True, "exhausted": False,
+                })
     # thesis.md §6 extension: an HTF-confirmed P4 reclaim/failed-reclaim on ONE asset should
     # outweigh a contradicting P3 (static position) read on the OTHER asset at the SAME mid,
     # not be netted against it as an equal, offsetting data point — P4 is a dynamic,
@@ -521,6 +626,32 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
         side = _item_side(item)
         if side is not None:
             p4_mid_dominance[(item.get("asset"), mid_type)] = side
+
+    # P1/P2-dominates-P3 (2026-08-02 extension, thesis.md §6): the SAME cross-asset
+    # domination shape as P4 above, just letting a mature, non-exhausted P1/P2 item ALSO
+    # dominate the OTHER asset's contradicting P3 mid — a day-tier item dominates that
+    # asset's DAILY mid, a week-tier item the WEEKLY mid (mirroring P4's own tier split,
+    # since P1/P2 have no inherent mid_type the way P4's _high/_low levels do; session-
+    # tier items dominate neither). `setdefault` so an existing P4 claim always wins ties
+    # — a two-step, HTF-confirmed reclaim is a stronger signal than a single sweep read or
+    # SMT divergence. Volume-checked across the 10 sample dates first (nonzero on 8/10,
+    # often double digits) — this is a common contradiction pattern, not an edge case.
+    # NOTE: same-asset P1/P2-vs-P3 "domination" is deliberately NOT built — now that P3 is
+    # fully auto-derived from the SAME asset's own latest close (2026-08-02), a same-asset
+    # P1/P2 read and its own P3 position essentially never disagree (a fresh sweep beyond
+    # a high all but guarantees that asset already sits above its own mid) — there is
+    # nothing meaningful to dominate there.
+    for item in evidence or []:
+        if not isinstance(item, dict) or item.get("criterion") not in ("P1", "P2"):
+            continue
+        if not bool(item.get("mature")) or bool(item.get("exhausted")):
+            continue
+        mid_type = {"day": "daily", "week": "weekly"}.get(item.get("tier"))
+        if mid_type is None:
+            continue
+        side = _item_side(item)
+        if side is not None:
+            p4_mid_dominance.setdefault((item.get("asset"), mid_type), side)
 
     # tf-dedup pre-pass (2026-08-01 root-cause audit): when a 1h AND a 4h item both exist
     # for the same (criterion, asset, level, tier, direction) -- the same physical event
@@ -569,6 +700,26 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                 tier_mult = _TIER_MULT["day"]
             elif _lvl.startswith("weekly_mid"):
                 tier_mult = _TIER_MULT["week"]
+        # thesis.md §2.1e promotion (2026-08-02, scoped narrowly): a day-tier P1/P2 item
+        # whose OWN price sits within a tight cluster of THIS ASSET's current week high/
+        # low gets week-tier weight instead of day-tier -- it isn't merely a day-scale
+        # event, it is ALSO the week's own extreme. Confirmed real on 2026-07-15 (MNQ
+        # prev2_day_high sat ~20pts from the week's own high, a tight cluster;
+        # prev1_day_high, ~150pts away, did NOT cluster and correctly stays day-tier).
+        # Deliberately narrower than derive_facts._confluence_notes (audit-only, matches
+        # against OLD untracked extremes only) -- this compares against the CURRENT,
+        # actively-tracked week extreme, a different case. Tolerance is 5% of the week's
+        # own range (self-scaling per asset/week, no new ATR plumbing) -- a v1 seed
+        # pending calibration, same status as every other constant in this module.
+        if item.get("criterion") in ("P1", "P2") and item.get("tier") == "day" and level_tiers:
+            _price = ((level_tiers.get(item.get("asset")) or {}).get(item.get("level")) or {}).get("price")
+            _wk = (week_extremes or {}).get(item.get("asset")) or {}
+            _whi, _wlo = _wk.get("hi"), _wk.get("lo")
+            if (isinstance(_price, (int, float)) and isinstance(_whi, (int, float))
+                    and isinstance(_wlo, (int, float)) and _whi > _wlo):
+                _tol = 0.05 * (_whi - _wlo)
+                if abs(_price - _whi) <= _tol or abs(_price - _wlo) <= _tol:
+                    tier_mult = _TIER_MULT["week"]
         mature = bool(item.get("mature"))
         ratio = None
         if magnitude:

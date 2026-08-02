@@ -578,7 +578,8 @@ def _derive_next_arithmetic(block: dict) -> tuple[dict, list]:
 
 def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
                               suppressed_p1_levels=None, suppressed_p2_sites=None,
-                              level_htf_close_status=None) -> tuple[dict, list]:
+                              level_htf_close_status=None, level_tiers=None,
+                              smt_candidates=None, week_extremes=None) -> tuple[dict, list]:
     """Compute per-item points, net score, and the confidence ceiling from the model's
     declared P1/P2 evidence ledger (decisions/thesis.md §2.1/§4/§6). Mirrors
     _derive_daily_arithmetic/_derive_next_arithmetic: confidence is silently corrected
@@ -594,19 +595,22 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
     validate_thesis applies to expected_bias — so a no-liquidity call is clamped to LOW
     confidence even before the bias-consistency retry loop, not just at the validator.
 
-    `level_htf_close_status` (2026-08-02) is threaded straight through to
-    score_thesis_evidence's P3 auto-derivation — daily_mid/weekly_mid evidence is
-    code-injected here too, so the ceiling/net-score computed BEFORE the validator retry
-    loop already reflects it, not just validate_thesis's own re-scoring."""
+    `level_htf_close_status`/`level_tiers`/`smt_candidates`/`week_extremes` (2026-08-02)
+    are threaded straight through to score_thesis_evidence's P1/P2/P3 auto-derivation and
+    §2.1e tier promotion — code-injected evidence is reflected here too, so the ceiling/
+    net-score computed BEFORE the validator retry loop already accounts for it, not just
+    validate_thesis's own re-scoring."""
     from validate_contracts import score_thesis_evidence
     notes: list = []
     evidence = block.get("evidence") or []
-    if not evidence and not level_htf_close_status:
+    if not evidence and not level_htf_close_status and not level_tiers:
         return block, notes
     scoring = score_thesis_evidence(evidence, magnitude=magnitude, dol_available=dol_available,
                                     suppressed_p1_levels=suppressed_p1_levels,
                                     suppressed_p2_sites=suppressed_p2_sites,
-                                    level_htf_close_status=level_htf_close_status)
+                                    level_htf_close_status=level_htf_close_status,
+                                    level_tiers=level_tiers, smt_candidates=smt_candidates,
+                                    week_extremes=week_extremes)
     # Audit-annotate each item with its computed points/side in place (mirrors
     # _derive_next_arithmetic writing item["score"] back onto the ledger).
     block["evidence"] = scoring["scored_evidence"]
@@ -897,9 +901,14 @@ _TASK_THESIS = (
     "it names must exist in the facts (unswept/undepleted where the menu requires). Prefer "
     "menu entries.\n"
     "\nEvery level named in a predicate or the DOL must exist in the facts. "
-    "\n\nEVIDENCE LEDGER (P1/P2 only — thesis.md §2.1). List every P1 (HTF close "
-    "beyond/before at a swept level) and P2 (meaningful SMT + HTF rejection) reading you "
-    "used, one item per {criterion: P1|P2, asset: MNQ|MES, level: <name in facts>, "
+    "\n\nEVIDENCE LEDGER (P1/P2 only — thesis.md §2.1). As of 2026-08-02, every real, "
+    "non-suppressed P1/P2 reading that already has a qualifying HTF close is injected by "
+    "code directly — you do NOT need to declare it for it to score. Your remaining job "
+    "here is narrower: (1) if you judge an auto-scored item stale/played-out, veto it by "
+    "declaring that SAME {criterion, asset, level} with exhausted: true; (2) declare any "
+    "IMMATURE (mature: false) item yourself if you want its pending_resolution logged — "
+    "code never auto-injects an immature reading. For any item you DO declare, one per "
+    "{criterion: P1|P2, asset: MNQ|MES, level: <name in facts>, "
     "tier: session|day|week, tf: 1h|4h (the qualifying HTF close), direction: "
     "accept|reject, mature: bool (has the §3 maturity gate — >=1 qualifying HTF close "
     "since the sweep — actually passed for this item?)}. Do NOT declare which way (UP/"
@@ -1052,8 +1061,11 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
     P1/P2 evidence ledger (decisions/thesis.md §2.1); code derives each item's points/sign
     and the confidence ceiling (_derive_thesis_arithmetic), and validate_thesis rejects a
     declared bias inconsistent with the computed net score (retry, not silent override —
-    same split as daily-trend/next-move). P3 (daily_mid/weekly_mid position) is fully
-    code-derived from the facts, not model-declared (2026-08-02). P4 and the standing-
+    same split as daily-trend/next-move). P3 (daily_mid/weekly_mid position) and every
+    real, non-suppressed named-level P1/P2 reading are fully code-derived from the facts,
+    not model-declared (2026-08-02) — the model's remaining evidence-ledger role is
+    relevance judgment on the small residual (which candidates are worth citing beyond
+    what code already injects) plus an `exhausted: true` veto. P4 and the standing-
     thesis-recall confidence escalation (spec §8) remain reasoning-only / not yet
     code-derived (thesis.md §8 gap)."""
     from schemas import build_thesis_schema, failsafe_thesis
@@ -1070,6 +1082,9 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
     suppressed_p1_levels = facts.get("suppressed_p1_levels")
     suppressed_p2_sites = facts.get("suppressed_p2_sites")
     level_htf_close_status = facts.get("level_htf_close_status")
+    level_tiers = facts.get("level_tiers")
+    smt_candidates = facts.get("smt_candidates")
+    week_extremes = facts.get("week_extremes")
     return _run_call(
         backend, system, user, schema,
         validate_block=lambda d: validate_thesis(d, facts),
@@ -1077,7 +1092,8 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
         derive_block=lambda d: _derive_thesis_arithmetic(
             d, magnitude=evidence_magnitude, dol_available=dol_available,
             suppressed_p1_levels=suppressed_p1_levels, suppressed_p2_sites=suppressed_p2_sites,
-            level_htf_close_status=level_htf_close_status),
+            level_htf_close_status=level_htf_close_status, level_tiers=level_tiers,
+            smt_candidates=smt_candidates, week_extremes=week_extremes),
     )
 
 

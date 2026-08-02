@@ -169,6 +169,39 @@ class ParquetFactsSource:
                   for name, status in (bundle.htf_close_status.get(tkr) or {}).items()}
             for tkr in ("MNQ", "MES")
         }
+        # 2026-08-02 P1/P2 auto-derivation: level_htf_close_status has no tier or price
+        # (facts_to_validator_dict's own "levels" view deliberately omits tier -- see its
+        # docstring -- and score_thesis_evidence only receives narrow sub-dicts, not the
+        # full facts blob), so this carries both straight from bundle.levels for the day-
+        # tier-confluent-with-week-tier tier bump (thesis.md §2.1e promotion) as well as
+        # auto-injecting P1 items. Additive overlay, like suppressed_p1_levels above.
+        res.validator_dict["level_tiers"] = {
+            tkr: {name: {"tier": tier, "price": price}
+                  for name, (price, _body, side, tier, _active) in
+                  (bundle.levels.get(tkr) or {}).items() if side is not None}
+            for tkr in ("MNQ", "MES")
+        }
+        # 2026-08-02 P2 auto-derivation: JSON-safe view of bundle.smt_candidates (drops
+        # swept_at/type -- not needed for scoring) so score_thesis_evidence can auto-inject
+        # a P2 item for every meaningful, unsuppressed divergence directly, the same way
+        # P3 is auto-derived from level_htf_close_status.
+        res.validator_dict["smt_candidates"] = [
+            {"level": c.get("level"), "tier": c.get("tier"),
+             "swept_ticker": c.get("swept_ticker"), "unswept_ticker": c.get("unswept_ticker"),
+             "meaningful": bool(c.get("meaningful"))}
+            for c in (bundle.smt_candidates or [])
+        ]
+        # 2026-08-02 thesis.md §2.1e promotion: the CURRENT week's own high/low, for the
+        # narrow day-tier-confluent-with-week-tier tier bump in score_thesis_evidence
+        # (2026-07-15 root-cause: prev2_day_high sat within a tight cluster of the week's
+        # own high on both assets -- a day-tier SMT that is ALSO the week's extreme deserves
+        # week-tier weight, not day-tier). Deliberately NOT the same mechanism as the
+        # existing _confluence_notes (audit-only, OLD untracked extremes only) -- this
+        # compares against the CURRENT, actively-tracked week extreme.
+        res.validator_dict["week_extremes"] = {
+            tkr: {"hi": bundle.week_hi.get(tkr), "lo": bundle.week_lo.get(tkr)}
+            for tkr in ("MNQ", "MES")
+        }
         res.menu_text = render_menus_text(bundle)              # reuses cached bundle.menus
         res.evidence_magnitude = build_evidence_magnitude(bundle)  # plan 14 Task 5: code-derived
         # magnitude threaded into the render so the model can SEE the WEAK/NORMAL/STRONG
