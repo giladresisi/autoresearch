@@ -1101,3 +1101,66 @@ def test_p2_same_asset_extremity_resolution():
     scoring = score_thesis_evidence([p2_near, p2_far, p3], level_tiers=_LEVEL_TIERS, now_price=_NOW_PRICE)
     p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
     assert p3_scored["points"] == 0.0   # dominated by the more extreme same-asset P2 (prev_day_low)
+
+
+# --------------------------------------------------------------------------- #
+# P5 same-move dedup (2026-08-02)                                              #
+# --------------------------------------------------------------------------- #
+_FVG_ZONE_META = {
+    "MNQ 1hr 2026-07-22 01:00:00-04:00 bear": {"asset": "MNQ", "tf": "1h", "kind": "bear",
+                                               "ts": "2026-07-22 01:00:00-04:00"},
+    "MNQ 1hr 2026-07-22 02:00:00-04:00 bear": {"asset": "MNQ", "tf": "1h", "kind": "bear",
+                                               "ts": "2026-07-22 02:00:00-04:00"},
+    "MNQ 1hr 2026-07-22 07:00:00-04:00 bear": {"asset": "MNQ", "tf": "1h", "kind": "bear",
+                                               "ts": "2026-07-22 07:00:00-04:00"},
+    "MES 1hr 2026-07-22 02:00:00-04:00 bear": {"asset": "MES", "tf": "1h", "kind": "bear",
+                                               "ts": "2026-07-22 02:00:00-04:00"},
+    "MNQ 1hr 2026-07-22 01:00:00-04:00 bull": {"asset": "MNQ", "tf": "1h", "kind": "bull",
+                                               "ts": "2026-07-22 01:00:00-04:00"},
+}
+
+
+def _p5(level, asset="MNQ", direction="accept"):
+    return _ev(criterion="P5", asset=asset, level=level, tier="day", direction=direction)
+
+
+def test_adjacent_p5_zones_collapse_to_freshest():
+    z1 = _p5("MNQ 1hr 2026-07-22 01:00:00-04:00 bear")
+    z2 = _p5("MNQ 1hr 2026-07-22 02:00:00-04:00 bear")
+    scoring = score_thesis_evidence([z1, z2], fvg_zone_meta=_FVG_ZONE_META)
+    scored = {it["level"]: it["points"] for it in scoring["scored_evidence"]}
+    assert scored["MNQ 1hr 2026-07-22 01:00:00-04:00 bear"] == 0.0    # older -- zeroed
+    assert scored["MNQ 1hr 2026-07-22 02:00:00-04:00 bear"] > 0.0     # freshest -- survives
+
+
+def test_non_adjacent_p5_zone_not_deduped():
+    # 07:00 is 5 hours after 02:00 -- not a consecutive 1h bar, a genuinely separate move.
+    z2 = _p5("MNQ 1hr 2026-07-22 02:00:00-04:00 bear")
+    z3 = _p5("MNQ 1hr 2026-07-22 07:00:00-04:00 bear")
+    scoring = score_thesis_evidence([z2, z3], fvg_zone_meta=_FVG_ZONE_META)
+    scored = {it["level"]: it["points"] for it in scoring["scored_evidence"]}
+    assert scored["MNQ 1hr 2026-07-22 02:00:00-04:00 bear"] > 0.0
+    assert scored["MNQ 1hr 2026-07-22 07:00:00-04:00 bear"] > 0.0
+
+
+def test_p5_dedup_scoped_to_same_asset():
+    z1 = _p5("MNQ 1hr 2026-07-22 01:00:00-04:00 bear")
+    z_mes = _p5("MES 1hr 2026-07-22 02:00:00-04:00 bear", asset="MES")
+    scoring = score_thesis_evidence([z1, z_mes], fvg_zone_meta=_FVG_ZONE_META)
+    scored = {it["level"]: it["points"] for it in scoring["scored_evidence"]}
+    assert scored["MNQ 1hr 2026-07-22 01:00:00-04:00 bear"] > 0.0   # lone in its own asset group
+    assert scored["MES 1hr 2026-07-22 02:00:00-04:00 bear"] > 0.0
+
+
+def test_p5_dedup_scoped_to_same_kind():
+    bear = _p5("MNQ 1hr 2026-07-22 01:00:00-04:00 bear")
+    bull = _p5("MNQ 1hr 2026-07-22 01:00:00-04:00 bull", direction="reject")   # same asset/tf/ts, different kind
+    scoring = score_thesis_evidence([bear, bull], fvg_zone_meta=_FVG_ZONE_META)
+    assert all(it["points"] > 0.0 for it in scoring["scored_evidence"])   # never grouped together
+
+
+def test_fvg_zone_meta_none_leaves_p5_untouched():
+    z1 = _p5("MNQ 1hr 2026-07-22 01:00:00-04:00 bear")
+    z2 = _p5("MNQ 1hr 2026-07-22 02:00:00-04:00 bear")
+    scoring = score_thesis_evidence([z1, z2])   # no fvg_zone_meta
+    assert all(it["points"] > 0.0 for it in scoring["scored_evidence"])   # dedup never runs

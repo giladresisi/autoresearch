@@ -58,6 +58,12 @@ DEPLETE = {
 # threshold in decisions/thesis.md (§2.1c stretch flag, the DEPLETE tables, etc.).
 SMT_SHELF_LIFE = {"session": 2.0, "day": 4.0, "week": 8.0}
 
+# 2026-08-02: P5 (FVG-fill) has no tier concept (session/day/week), so a single shelf life
+# applies -- matching SMT_SHELF_LIFE's "day" value, a reasonable default since a filled
+# 3-bar gap is a day-scale event, not week-scale. v1 seed, pending calibration, same status
+# as SMT_SHELF_LIFE above.
+FVG_SHELF_LIFE = 4.0
+
 # thesis.md §2.1b/§2.1d: tier rank used to pick a single representative when two or more
 # named levels turn out to be restatements of the same physical sweep (nesting tie-break,
 # and the duplicate-simultaneous-sweep collapse) — week > day > session.
@@ -1478,7 +1484,14 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
       f"HELD/VIOLATED verdict is code-derived from the same HTF-close maturity gate the named "
       f"levels use: HELD -> direction=accept (the zone held its bull=up/bear=down bias), "
       f"VIOLATED -> direction=reject (price closed decisively through it); "
-      f"'too recent to verdict' = no qualifying HTF close since the fill yet, NOT usable):")
+      f"'too recent to verdict' = no qualifying HTF close since the fill yet, NOT usable. "
+      f"'stretch_since_fill=Nx avg_1h' past shelf life ({FVG_SHELF_LIFE}x) carries a "
+      f"'[SUGGESTED EXHAUSTED]' tag, same meaning/override as the SMT candidates' own tag "
+      f"below — set exhausted: true on the P5 item if you judge it stale, or disagree and "
+      f"score it normally. ADJACENT same-asset/same-kind/same-tf zones (consecutive bars, "
+      f"one continuous move) are auto-collapsed by code to the freshest one when declared — "
+      f"citing several from one continuous move does not add weight, so prefer the single "
+      f"freshest zone from a run):")
     _cutoff = (bundle.now - pd.Timedelta(days=FVG_LOOKBACK_DAYS)) if bundle.now is not None else None
     _curated_fvg = [z for z in (bundle.fvg_zones or [])
                     if z.get("visited") and (_cutoff is None or z["ts"] >= _cutoff)]
@@ -1489,7 +1502,11 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
         vtag = (" -> HELD (accept)" if v == "held"
                 else " -> VIOLATED (reject)" if v == "violated"
                 else " -> (fill too recent to verdict)")
-        A(f"  {z['id']}: {z['kind']} zone {z['lo']}-{z['hi']} [{z['tf']}] VISITED{vtag}")
+        stretch = z.get("stretch_since_visit")
+        exh_tag = (f" | stretch_since_fill={stretch}x avg_1h"
+                   + (" [SUGGESTED EXHAUSTED]" if z.get("suggested_exhausted") else "")
+                   if stretch is not None else "")
+        A(f"  {z['id']}: {z['kind']} zone {z['lo']}-{z['hi']} [{z['tf']}] VISITED{vtag}{exh_tag}")
 
     # --- plan 14 Task 2: stretch + nearest-meaningful-level distance (MNQ) ---
     ar = (bundle.avg_range_1h or {}).get("MNQ")
@@ -2148,6 +2165,22 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
                     r = st["1h"] if st.get("1h") is not None else st.get("4h")
                     if r is not None:
                         fill_verdict = "violated" if r["beyond"] else "held"
+                # 2026-08-02: code-SUGGESTED exhaustion for a filled FVG, same shape as the
+                # SMT candidates' stretch_since_fire/suggested_exhausted above -- stretch of
+                # price since the FILL (visited_at), not the zone's own formation, normalized
+                # by avg_range_1h (P5 has no tier, so a single FVG_SHELF_LIFE applies). A
+                # model-OVERRIDABLE hint via the existing P5 `exhausted` field, never a hard
+                # gate.
+                stretch_since_visit = None
+                suggested_exhausted = False
+                if visited_at is not None:
+                    ar = (bundle.avg_range_1h or {}).get(tkr)
+                    if isinstance(ar, (int, float)) and ar > 0:
+                        visit_px = dft["close"].asof(visited_at)
+                        if visit_px is not None and not pd.isna(visit_px):
+                            stretch_since_visit = round(
+                                abs(float(dft["close"].iloc[-1]) - float(visit_px)) / ar, 3)
+                            suggested_exhausted = stretch_since_visit > FVG_SHELF_LIFE
                 # plan 15 Task 4: additive P5-fill candidate — no change to the rendered S6
                 # line above. `id` is the exact S6 identifier (asset + tf label + ts + kind)
                 # so the model copies it verbatim as the evidence `level`; the bull/bear kind
@@ -2156,6 +2189,8 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
                     "id": f"{label} {ts} {kind}", "asset": tkr, "tf": tf_norm,
                     "ts": ts, "kind": kind, "lo": lo, "hi": hi, "visited": touched,
                     "visited_at": visited_at, "fill_verdict": fill_verdict,
+                    "stretch_since_visit": stretch_since_visit,
+                    "suggested_exhausted": suggested_exhausted,
                 })
 
     L("\n## S7 CHECKPOINT SNAPSHOT")

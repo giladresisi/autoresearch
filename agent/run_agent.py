@@ -580,7 +580,7 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
                               suppressed_p1_levels=None, suppressed_p2_sites=None,
                               level_htf_close_status=None, level_tiers=None,
                               smt_candidates=None, week_extremes=None,
-                              now_price=None) -> tuple[dict, list]:
+                              now_price=None, fvg_zone_meta=None) -> tuple[dict, list]:
     """Compute per-item points, net score, and the confidence ceiling from the model's
     declared P1/P2 evidence ledger (decisions/thesis.md §2.1/§4/§6). Mirrors
     _derive_daily_arithmetic/_derive_next_arithmetic: confidence is silently corrected
@@ -596,12 +596,12 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
     validate_thesis applies to expected_bias — so a no-liquidity call is clamped to LOW
     confidence even before the bias-consistency retry loop, not just at the validator.
 
-    `level_htf_close_status`/`level_tiers`/`smt_candidates`/`week_extremes`/`now_price`
-    (2026-08-02) are threaded straight through to score_thesis_evidence's P1/P2/P3
-    auto-derivation, §2.1e tier promotion, and extremity-based dominance resolution —
-    code-injected evidence is reflected here too, so the ceiling/net-score computed
-    BEFORE the validator retry loop already accounts for it, not just validate_thesis's
-    own re-scoring."""
+    `level_htf_close_status`/`level_tiers`/`smt_candidates`/`week_extremes`/`now_price`/
+    `fvg_zone_meta` (2026-08-02) are threaded straight through to score_thesis_evidence's
+    P1/P2/P3 auto-derivation, §2.1e tier promotion, extremity-based dominance resolution,
+    and P5 same-move dedup — code-injected evidence is reflected here too, so the
+    ceiling/net-score computed BEFORE the validator retry loop already accounts for it,
+    not just validate_thesis's own re-scoring."""
     from validate_contracts import score_thesis_evidence
     notes: list = []
     evidence = block.get("evidence") or []
@@ -612,7 +612,8 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
                                     suppressed_p2_sites=suppressed_p2_sites,
                                     level_htf_close_status=level_htf_close_status,
                                     level_tiers=level_tiers, smt_candidates=smt_candidates,
-                                    week_extremes=week_extremes, now_price=now_price)
+                                    week_extremes=week_extremes, now_price=now_price,
+                                    fvg_zone_meta=fvg_zone_meta)
     # Audit-annotate each item with its computed points/side in place (mirrors
     # _derive_next_arithmetic writing item["score"] back onto the ledger).
     block["evidence"] = scoring["scored_evidence"]
@@ -962,6 +963,13 @@ _TASK_THESIS = (
     "derives the sign from the bull/bear kind in the id plus accept/reject (bull-accept and "
     "bear-reject are bullish; bear-accept and bull-reject are bearish), the SAME mirrored "
     "polarity as P1. Only cite a VISITED zone; an unvisited gap is a pending draw, not a fill. "
+    "Each candidate may also carry a code-computed 'stretch_since_fill=Nx avg_1h' and, past "
+    "shelf life, a '[SUGGESTED EXHAUSTED]' tag (same meaning/override as the SMT one below — "
+    "set exhausted: true on the item if you judge it stale, or disagree and score it "
+    "normally). ADJACENT same-asset/same-kind/same-tf zones (consecutive bars — one "
+    "continuous move that kept creating new gaps as it went) are auto-collapsed by code to "
+    "the freshest one — citing several from one continuous move does not add weight, so "
+    "prefer the single freshest zone from a run rather than listing every one. "
     "\nSMT EXHAUSTION (thesis.md §2.1c). Each S9 SMT candidate may carry a code-computed "
     "'stretch_since_fire=Nx avg_1h' and, past its tier-relative shelf life (session 2x, day "
     "4x, week 8x), a '[SUGGESTED EXHAUSTED]' tag — the divergence has already played out (price "
@@ -1088,6 +1096,7 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
     smt_candidates = facts.get("smt_candidates")
     week_extremes = facts.get("week_extremes")
     now_price = facts.get("now_price")
+    fvg_zone_meta = facts.get("fvg_zone_meta")
     return _run_call(
         backend, system, user, schema,
         validate_block=lambda d: validate_thesis(d, facts),
@@ -1096,7 +1105,8 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
             d, magnitude=evidence_magnitude, dol_available=dol_available,
             suppressed_p1_levels=suppressed_p1_levels, suppressed_p2_sites=suppressed_p2_sites,
             level_htf_close_status=level_htf_close_status, level_tiers=level_tiers,
-            smt_candidates=smt_candidates, week_extremes=week_extremes, now_price=now_price),
+            smt_candidates=smt_candidates, week_extremes=week_extremes, now_price=now_price,
+            fvg_zone_meta=fvg_zone_meta),
     )
 
 

@@ -169,12 +169,14 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     smt_candidates = (facts or {}).get("smt_candidates")
     week_extremes = (facts or {}).get("week_extremes")
     now_price = (facts or {}).get("now_price")
+    fvg_zone_meta = (facts or {}).get("fvg_zone_meta")
     scoring = score_thesis_evidence(t.evidence, dol_available=dol_available,
                                     suppressed_p1_levels=suppressed_p1_levels,
                                     suppressed_p2_sites=suppressed_p2_sites,
                                     level_htf_close_status=level_htf_close_status,
                                     level_tiers=level_tiers, smt_candidates=smt_candidates,
-                                    week_extremes=week_extremes, now_price=now_price)
+                                    week_extremes=week_extremes, now_price=now_price,
+                                    fvg_zone_meta=fvg_zone_meta)
     if scoring["scored_evidence"]:
         if t.bias in BIASES and t.bias != scoring["expected_bias"]:
             r.add("arithmetic", "ARI_THESIS_BIAS",
@@ -479,7 +481,7 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                            suppressed_p1_levels=None, suppressed_p2_sites=None,
                            level_htf_close_status=None, level_tiers=None,
                            smt_candidates=None, week_extremes=None,
-                           now_price=None) -> dict:
+                           now_price=None, fvg_zone_meta=None) -> dict:
     """Pure computation over the model-declared P1/P2 evidence ledger: per-item points
     (tier x tf x magnitude multiplier, zeroed if immature — enforcing the §3 maturity gate
     in code, not trust), the net score, the expected bias sign, and the §6 cross-asset
@@ -584,7 +586,17 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     lets a day-tier P1/P2 item score at week-tier weight when its OWN price sits within
     5% of the week's range of THAT ASSET's current week high/low — a day-tier level that
     is ALSO the week's own extreme isn't merely a day-scale signal. `level_tiers=None` or
-    `week_extremes=None` leaves this off."""
+    `week_extremes=None` leaves this off.
+
+    P5 same-move dedup (2026-08-02): `fvg_zone_meta` ({id: {asset, tf, kind, ts}},
+    bench/facts.py) lets score_thesis_evidence detect FVG-fill zones formed on CONSECUTIVE
+    bars of the same asset/kind/tf — typically one continuous move that kept creating new
+    gaps as it went, not independent confirmations. Every member of such a run except the
+    freshest (most recent) scores ZERO, same "zeroed, not scored" mechanic as tf-dedup
+    above (which this mirrors for P5's own duplication shape). A lone zone, or one
+    separated from its neighbors by a gap (a genuinely distinct move), is untouched.
+    `fvg_zone_meta=None` (every pre-2026-08-02 call site) leaves P5 scoring exactly as
+    declared, unchanged."""
     if level_htf_close_status is not None:
         evidence = [
             it for it in (evidence or [])
@@ -817,6 +829,49 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                 if _it.get("tf") == "1h":
                     _tf_dedup_zero.add(id(_it))
 
+    # P5 same-move dedup (2026-08-02): several FVG-fill zones formed on CONSECUTIVE bars of
+    # the same asset/kind(bull|bear)/tf are typically one continuous price move that kept
+    # creating new gaps as it went -- citing each separately double(triple/...)-counts that
+    # one move, the same "one physical event, don't score it twice" issue tf-dedup already
+    # solves for P1/P2. Zero every member of a run of 2+ consecutive-bar zones EXCEPT the
+    # freshest (most recent) one; a lone zone, or one separated from its neighbors by a gap
+    # (a genuinely distinct move), is untouched. `fvg_zone_meta` ({id: {asset, tf, kind,
+    # ts}}, bench/facts.py) is needed to resolve each declared P5 item's own asset/tf/kind/ts
+    # without re-parsing the level-id string; `fvg_zone_meta=None` (every pre-2026-08-02
+    # call site) leaves P5 scoring exactly as declared, unchanged.
+    _p5_dedup_zero: set = set()
+    if fvg_zone_meta is not None:
+        import pandas as pd
+        _bar_period = {"1h": pd.Timedelta(hours=1), "4h": pd.Timedelta(hours=4)}
+        _p5_groups: dict = {}   # (asset, kind, tf) -> [(item, ts), ...]
+        for item in evidence or []:
+            if not isinstance(item, dict) or item.get("criterion") != "P5":
+                continue
+            meta = fvg_zone_meta.get(item.get("level"))
+            if not meta:
+                continue
+            try:
+                ts = pd.Timestamp(meta.get("ts"))
+            except (ValueError, TypeError):
+                continue
+            key = (meta.get("asset"), meta.get("kind"), meta.get("tf"))
+            _p5_groups.setdefault(key, []).append((item, ts))
+        for (_asset3, _kind3, _tf4), _members in _p5_groups.items():
+            _period = _bar_period.get(_tf4)
+            if _period is None or len(_members) < 2:
+                continue
+            _members.sort(key=lambda m: m[1])
+            _i = 0
+            _n = len(_members)
+            while _i < _n:
+                _j = _i
+                while _j + 1 < _n and _members[_j + 1][1] - _members[_j][1] == _period:
+                    _j += 1
+                if _j > _i:   # a run of 2+ consecutive-bar zones -- keep only the freshest
+                    for _k in range(_i, _j):
+                        _p5_dedup_zero.add(id(_members[_k][0]))
+                _i = _j + 1
+
     scored = []
     net = 0.0
     by_level: dict = {}   # level -> {asset: direction}, for the §6 contradiction check
@@ -877,7 +932,8 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
             this_side = _mid_side(item)
             p3_dominated = dom_side is not None and this_side is not None and dom_side != this_side
         tf_deduped = id(item) in _tf_dedup_zero
-        suppressed = p1_suppressed or p2_suppressed or p3_dominated or tf_deduped
+        p5_deduped = id(item) in _p5_dedup_zero
+        suppressed = p1_suppressed or p2_suppressed or p3_dominated or tf_deduped or p5_deduped
         scored_mature = mature and not exhausted and not suppressed
         if item.get("criterion") == "P3" and item.get("level") in ("daily_mid", "weekly_mid"):
             _p3_base = _P3_MID_POINTS["day" if item.get("level") == "daily_mid" else "week"]

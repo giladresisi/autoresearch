@@ -135,6 +135,16 @@ class ParquetFactsSource:
         # plan 15 Task 4: FVG-zone ids allowed as P5 evidence `level` values (additive overlay
         # on the bench's own validator_dict copy, like menus — never in the shadow-hash dict).
         res.validator_dict["fvg_zones"] = [z["id"] for z in bundle.fvg_zones]
+        # 2026-08-02: structured FVG-zone metadata (keyed by id) for score_thesis_evidence's
+        # same-move dedup -- the plain id list above is schema-facing only (level-name
+        # validation), this carries what the dedup pre-pass needs to detect "adjacent bars,
+        # one continuous move" (asset/tf/kind/ts) without re-parsing the id string. `ts` is
+        # stringified (JSON/artifact-safe, like fvg_zones above) and re-parsed with
+        # pd.Timestamp on the scoring side.
+        res.validator_dict["fvg_zone_meta"] = {
+            z["id"]: {"asset": z["asset"], "tf": z["tf"], "kind": z["kind"], "ts": str(z["ts"])}
+            for z in (bundle.fvg_zones or [])
+        }
         # plan 15 Task 7: `now` for the audit-only pending_resolution.resolves_at > now check.
         res.validator_dict["now"] = str(bundle.now) if bundle.now is not None else None
         # thesis.md §2.1b/§2.1d: nested/duplicate-sweep levels excluded from fresh P1
