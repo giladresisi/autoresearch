@@ -1038,3 +1038,66 @@ def test_week_confluent_day_tier_item_dominates_both_mids_cross_asset():
     p3_scored = {it["level"]: it["points"] for it in scoring["scored_evidence"] if it["criterion"] == "P3"}
     assert p3_scored["daily_mid"] == 0.0
     assert p3_scored["weekly_mid"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Extremity-based dominance resolution (2026-08-02)                            #
+# --------------------------------------------------------------------------- #
+_NOW_PRICE = 19800.0   # prev_day_high (20000, dist 200) vs prev_day_low (19500, dist 300)
+
+
+def test_more_extreme_item_wins_same_asset_dominance_conflict():
+    # 2026-07-15 09:20 ET motivating case: MNQ's own prev1_day_high (dist 33.5, UP) and
+    # prev2_day_high (dist 87.0, DOWN, the more extreme level) disagreed on which should
+    # dominate MES's contradicting P3 -- the more extreme one must win regardless of
+    # declaration order.
+    high = _ev(criterion="P1", asset="MNQ", level="prev_day_high", tier="day", direction="accept")  # UP, dist 200
+    low = _ev(criterion="P1", asset="MNQ", level="prev_day_low", tier="day", direction="accept")     # DOWN, dist 300 (more extreme)
+    p3 = _ev(criterion="P3", asset="MES", level="daily_mid", direction="accept")   # UP -- contradicts the more extreme DOWN
+    scoring = score_thesis_evidence([high, low, p3], level_tiers=_LEVEL_TIERS, now_price=_NOW_PRICE)
+    p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
+    assert p3_scored["points"] == 0.0   # dominated by the more extreme (prev_day_low) item, not prev_day_high
+
+
+def test_more_extreme_item_wins_regardless_of_declared_order():
+    # Same conflict, items declared in the OPPOSITE order -- the winner must not depend
+    # on iteration/declaration order once now_price is supplied.
+    high = _ev(criterion="P1", asset="MNQ", level="prev_day_high", tier="day", direction="accept")  # UP, dist 200
+    low = _ev(criterion="P1", asset="MNQ", level="prev_day_low", tier="day", direction="accept")     # DOWN, dist 300
+    p3 = _ev(criterion="P3", asset="MES", level="daily_mid", direction="accept")   # UP
+    scoring = score_thesis_evidence([p3, low, high], level_tiers=_LEVEL_TIERS, now_price=_NOW_PRICE)
+    p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
+    assert p3_scored["points"] == 0.0
+
+
+def test_p4_outranks_p1_p2_regardless_of_distance():
+    # P4 must win the dominance slot even when the competing P1/P2 item is FURTHER away
+    # (would otherwise win on pure extremity) -- a two-step HTF-confirmed reclaim beats a
+    # single sweep/divergence read.
+    far_p1 = _ev(criterion="P1", asset="MNQ", level="prev_day_low", tier="day", direction="accept")  # DOWN, dist 300
+    p4 = _ev(criterion="P4", asset="MNQ", level="daily_mid_high", tier="day", direction="accept")     # UP, dist 0 (no level_tiers entry)
+    p3 = _ev(criterion="P3", asset="MES", level="daily_mid", direction="accept")   # UP -- agrees with P4, not far_p1
+    scoring = score_thesis_evidence([far_p1, p4, p3], level_tiers=_LEVEL_TIERS, now_price=_NOW_PRICE)
+    p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
+    assert p3_scored["points"] > 0.0   # P4 (UP) wins over the more-distant P1 (DOWN) -- not zeroed
+
+
+def test_now_price_none_falls_back_to_declaration_order():
+    # Byte-identical to pre-2026-08-02 behavior when now_price isn't supplied: every
+    # distance is 0.0, so the first-declared candidate wins (matching the old setdefault
+    # first-come semantics).
+    high = _ev(criterion="P1", asset="MNQ", level="prev_day_high", tier="day", direction="accept")  # UP, declared first
+    low = _ev(criterion="P1", asset="MNQ", level="prev_day_low", tier="day", direction="accept")     # DOWN, declared second
+    p3 = _ev(criterion="P3", asset="MES", level="daily_mid", direction="accept")   # UP -- agrees with the FIRST-declared item
+    scoring = score_thesis_evidence([high, low, p3], level_tiers=_LEVEL_TIERS)   # no now_price
+    p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
+    assert p3_scored["points"] > 0.0   # first-declared (high, UP) wins the tie -- not zeroed
+
+
+def test_p2_same_asset_extremity_resolution():
+    p2_near = _ev(criterion="P2", asset="MNQ", level="prev_day_high", tier="day", direction="reject")  # DOWN, dist 200
+    p2_far = _ev(criterion="P2", asset="MNQ", level="prev_day_low", tier="day", direction="reject")     # UP, dist 300 (more extreme)
+    p3 = _ev(criterion="P3", asset="MNQ", level="daily_mid", direction="reject")   # DOWN -- contradicts the more extreme UP
+    scoring = score_thesis_evidence([p2_near, p2_far, p3], level_tiers=_LEVEL_TIERS, now_price=_NOW_PRICE)
+    p3_scored = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"][0]
+    assert p3_scored["points"] == 0.0   # dominated by the more extreme same-asset P2 (prev_day_low)

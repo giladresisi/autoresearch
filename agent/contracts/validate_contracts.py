@@ -168,12 +168,13 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     level_tiers = (facts or {}).get("level_tiers")
     smt_candidates = (facts or {}).get("smt_candidates")
     week_extremes = (facts or {}).get("week_extremes")
+    now_price = (facts or {}).get("now_price")
     scoring = score_thesis_evidence(t.evidence, dol_available=dol_available,
                                     suppressed_p1_levels=suppressed_p1_levels,
                                     suppressed_p2_sites=suppressed_p2_sites,
                                     level_htf_close_status=level_htf_close_status,
                                     level_tiers=level_tiers, smt_candidates=smt_candidates,
-                                    week_extremes=week_extremes)
+                                    week_extremes=week_extremes, now_price=now_price)
     if scoring["scored_evidence"]:
         if t.bias in BIASES and t.bias != scoring["expected_bias"]:
             r.add("arithmetic", "ARI_THESIS_BIAS",
@@ -345,6 +346,25 @@ def _is_week_confluent(item: dict, level_tiers, week_extremes) -> bool:
     tol = 0.05 * (whi - wlo)
     return abs(price - whi) <= tol or abs(price - wlo) <= tol
 
+
+def _dominance_distance(item: dict, level_tiers, now_price) -> float:
+    """2026-08-02: how far this item's OWN level sits from `now_price` — the general,
+    comparable "how extreme/significant is this level" metric used to resolve same-asset
+    dominance conflicts (thesis.md §6 extension). Distance-from-price generalizes across
+    high/low families (unlike comparing raw price directly, which only makes sense within
+    one family) and across level types. Returns 0.0 (never wins a tie) when now_price or
+    the level's own price aren't available. Motivating case (2026-07-15 09:20 ET): MNQ's
+    own prev1_day_high (accept, UP) and prev2_day_high (P2 reject, DOWN) disagreed on
+    which side should dominate MES's contradicting P3 — prev2_day_high is genuinely the
+    more extreme (further) level and should win, not whichever happened to be iterated
+    first."""
+    if not isinstance(now_price, (int, float)) or not level_tiers:
+        return 0.0
+    price = ((level_tiers.get(item.get("asset")) or {}).get(item.get("level")) or {}).get("price")
+    if not isinstance(price, (int, float)):
+        return 0.0
+    return abs(price - now_price)
+
 # thesis.md §4: clearance magnitude — |close - level| / avg_range[tf]. v1 seeds pending calibration.
 # weak (<0.5x) x0.75, normal (0.5-1.5x) x1.0, strong (>1.5x) x1.25 — a shallow poke past a level
 # scores less than a decisive clearance ("model judges which level/accept, code computes how far").
@@ -458,7 +478,8 @@ def _item_side(item: dict) -> Optional[str]:
 def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                            suppressed_p1_levels=None, suppressed_p2_sites=None,
                            level_htf_close_status=None, level_tiers=None,
-                           smt_candidates=None, week_extremes=None) -> dict:
+                           smt_candidates=None, week_extremes=None,
+                           now_price=None) -> dict:
     """Pure computation over the model-declared P1/P2 evidence ledger: per-item points
     (tier x tf x magnitude multiplier, zeroed if immature — enforcing the §3 maturity gate
     in code, not trust), the net score, the expected bias sign, and the §6 cross-asset
@@ -542,13 +563,22 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     P1/P2-dominates-P3 (2026-08-02 extension of P4-dominates-P3 above): a mature,
     non-exhausted P1/P2 item ALSO dominates the OTHER asset's contradicting P3 mid — a
     day-tier item claims that asset's daily mid, a week-tier item the weekly mid, and a
-    day-tier item that is ALSO week-confluent (see _is_week_confluent) claims both (P4
-    claims win ties). No caller input needed; computed from the SAME evidence list. A
-    mature P2 (not P1) ALSO dominates a contradicting P3 on the SAME asset — a bearish
+    day-tier item that is ALSO week-confluent (see _is_week_confluent) claims both. No
+    caller input needed beyond `now_price` (below); computed from the SAME evidence list.
+    A mature P2 (not P1) ALSO dominates a contradicting P3 on the SAME asset — a bearish
     SMT divergence is a distinct reversal signal, not a description of current position,
     so it can genuinely disagree with that asset's own P3 (P1 cannot: a fresh sweep-
     accept all but guarantees agreement with the same asset's own mid position, so
     same-asset P1-vs-P3 domination stays unbuilt).
+
+    Extremity-based dominance resolution (2026-08-02): `now_price` (float) resolves ties
+    when MULTIPLE items compete for the same (asset, mid_type) dominance slot — the one
+    whose OWN level is furthest from now_price wins (see _dominance_distance), not
+    whichever happened to be iterated first. P4 always outranks P1/P2 regardless of
+    distance (a two-step, HTF-confirmed reclaim beats a single sweep/divergence read);
+    among same-priority candidates, extremity breaks the tie. `now_price=None` (every
+    pre-2026-08-02 call site) makes every distance 0.0, falling back to Python dict/list
+    iteration order — the exact prior behavior.
 
     thesis.md §2.1e promotion (2026-08-02, scoped): `week_extremes` ({asset: {"hi", "lo"}})
     lets a day-tier P1/P2 item score at week-tier weight when its OWN price sits within
@@ -658,9 +688,27 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     # not be netted against it as an equal, offsetting data point — P4 is a dynamic,
     # HTF-confirmed event, P3 is a plain snapshot. Pre-pass so a P4 item can dominate a P3
     # item regardless of which one appears first in the declared list.
+    #
+    # Extremity-based resolution (2026-08-02): when MULTIPLE items compete for the SAME
+    # (asset, mid_type) dominance slot, the one whose OWN level is furthest from now_price
+    # wins — not whichever happened to be iterated first (the previous `setdefault`
+    # first-come behavior). P4 still always outranks P1/P2 (a two-step, HTF-confirmed
+    # reclaim is a stronger signal than a single sweep read or SMT divergence); among
+    # same-priority candidates, extremity breaks the tie. Motivating case (2026-07-15
+    # 09:20 ET): MNQ's own prev1_day_high (P1 accept, UP, dist 33.5) and prev2_day_high
+    # (P2 reject, DOWN, dist 87.0 — the more extreme, week-confluent level) disagreed on
+    # which should dominate MES's contradicting P3 — prev2_day_high should win, and now
+    # does, regardless of declaration order. Verified across the 10 sample dates first:
+    # 2 genuine cross-level conflicts (07-15, 07-21), both resolved correctly by this rule
+    # without flip risk elsewhere; same-level cross-tf disagreements (07-23, 07-27) have
+    # identical distance by construction and are unaffected (tf-dedup handles those).
     _P4_MID_LEVELS = {"daily_mid_high": "daily", "daily_mid_low": "daily",
                       "weekly_mid_high": "weekly", "weekly_mid_low": "weekly"}
-    p4_mid_dominance: dict = {}   # (asset, "daily"|"weekly") -> "UP"|"DOWN"
+    _dominance_candidates: dict = {}   # (asset, "daily"|"weekly") -> [(priority, distance, side), ...]
+
+    def _add_dominance_candidate(asset, mid_type, priority, dist, side):
+        _dominance_candidates.setdefault((asset, mid_type), []).append((priority, dist, side))
+
     for item in evidence or []:
         if not isinstance(item, dict) or item.get("criterion") != "P4":
             continue
@@ -669,7 +717,8 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
             continue
         side = _item_side(item)
         if side is not None:
-            p4_mid_dominance[(item.get("asset"), mid_type)] = side
+            _add_dominance_candidate(item.get("asset"), mid_type, 2,
+                                     _dominance_distance(item, level_tiers, now_price), side)
 
     # P1/P2-dominates-P3 (2026-08-02 extension, thesis.md §6): the SAME cross-asset
     # domination shape as P4 above, just letting a mature, non-exhausted P1/P2 item ALSO
@@ -679,10 +728,8 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     # tier items dominate neither). A day-tier item that is ALSO week-confluent (see
     # _is_week_confluent) claims BOTH mid_types, not just one — it is genuinely dual-
     # natured: still a day-family level by name, but also the week's own extreme by price.
-    # `setdefault` so an existing P4 claim always wins ties — a two-step, HTF-confirmed
-    # reclaim is a stronger signal than a single sweep read or SMT divergence. Volume-
-    # checked across the 10 sample dates first (nonzero on 8/10, often double digits) —
-    # this is a common contradiction pattern, not an edge case.
+    # Volume-checked across the 10 sample dates first (nonzero on 8/10, often double
+    # digits) — this is a common contradiction pattern, not an edge case.
     # NOTE: same-asset P1-vs-P3 "domination" is deliberately NOT built — now that P3 is
     # fully auto-derived from the SAME asset's own latest close (2026-08-02), a same-asset
     # P1 read and its own P3 position essentially never disagree (a fresh sweep beyond a
@@ -704,8 +751,14 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
             mid_types.add("weekly")
         side = _item_side(item)
         if side is not None:
+            dist = _dominance_distance(item, level_tiers, now_price)
             for mid_type in mid_types:
-                p4_mid_dominance.setdefault((item.get("asset"), mid_type), side)
+                _add_dominance_candidate(item.get("asset"), mid_type, 1, dist, side)
+
+    p4_mid_dominance: dict = {   # (asset, "daily"|"weekly") -> "UP"|"DOWN"
+        key: max(cands, key=lambda c: (c[0], c[1]))[2]
+        for key, cands in _dominance_candidates.items()
+    }
 
     # P2-same-asset-dominates-P3 (2026-08-02, thesis.md §6 further extension): a mature,
     # non-exhausted P2 divergence dominates a CONTRADICTING P3 reading on the SAME asset
@@ -714,8 +767,9 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     # coexisted with MNQ's own P3 daily/weekly mid still reading "above" (a static fact
     # about where the last close sat) — two different questions, legitimately allowed to
     # disagree, unlike P1's "did I close beyond this level" which all but guarantees
-    # agreement with the same asset's own mid position.
-    p2_same_asset_dominance: dict = {}   # (asset, "daily"|"weekly") -> "UP"|"DOWN"
+    # agreement with the same asset's own mid position. Same extremity resolution as
+    # above when multiple same-asset P2 candidates disagree.
+    _p2_same_asset_candidates: dict = {}   # (asset, "daily"|"weekly") -> [(distance, side), ...]
     for item in evidence or []:
         if not isinstance(item, dict) or item.get("criterion") != "P2":
             continue
@@ -730,8 +784,13 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
             mid_types.add("weekly")
         side = _item_side(item)
         if side is not None:
+            dist = _dominance_distance(item, level_tiers, now_price)
             for mid_type in mid_types:
-                p2_same_asset_dominance.setdefault((item.get("asset"), mid_type), side)
+                _p2_same_asset_candidates.setdefault((item.get("asset"), mid_type), []).append((dist, side))
+    p2_same_asset_dominance: dict = {   # (asset, "daily"|"weekly") -> "UP"|"DOWN"
+        key: max(cands, key=lambda c: c[0])[1]
+        for key, cands in _p2_same_asset_candidates.items()
+    }
 
     # tf-dedup pre-pass (2026-08-01 root-cause audit): when a 1h AND a 4h item both exist
     # for the same (criterion, asset, level, tier, direction) -- the same physical event
