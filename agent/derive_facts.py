@@ -381,37 +381,6 @@ def _nested_session_levels(lv: dict) -> set:
     return nested
 
 
-def _level_born_date(name: str, prev1_td, prev2_td, prev1_week_tds, long_horizon_tkr,
-                     td_now, iso_now):
-    """The calendar date (day-tier) or week-start date (week-tier) this SPECIFIC prevN_day/
-    week level refers to — re-derives the same index->date mapping the S1 loop used to
-    assign it, so `_p2_nesting_grandfather` (below) can ask 'was this physical day/week
-    already superseded as of some EARLIER moment' without needing to know what the level
-    would have been NAMED at that earlier moment. None for a non-prevN name or a depth not
-    present in the tracked history."""
-    m = _PREV_LEVEL_RE.match(name or "")
-    if not m:
-        return None
-    n, fam_tier, _fam_side = int(m.group(1)), m.group(2), m.group(3)
-    lh = long_horizon_tkr or {"daily": [], "weekly": []}
-    if fam_tier == "day":
-        if n == 1:
-            return prev1_td
-        if n == 2:
-            return prev2_td
-        prior_days = [r for r in lh.get("daily", []) if r["trade_date"] < td_now]
-        recent_days = list(reversed(prior_days))
-        return recent_days[n - 1]["trade_date"] if len(recent_days) >= n else None
-    if fam_tier == "week":
-        if n == 1:
-            return min(prev1_week_tds) if prev1_week_tds else None
-        prior_weeks = [r for r in lh.get("weekly", [])
-                      if iso_now and r["week_start"].isocalendar()[:2] < iso_now]
-        recent_weeks = list(reversed(prior_weeks))
-        return recent_weeks[n - 1]["week_start"] if len(recent_weeks) >= n else None
-    return None
-
-
 def _wide_day_week_smt_scan(levels: dict, wide_cache: dict) -> list:
     """thesis.md §2.1b/§7: re-scan day/week-tier shared levels for wick/body divergences over
     the WIDE (SMT_LOOKBACK_HOURS, cross-session) frame — the exact same detection shape as
@@ -459,129 +428,37 @@ def _wide_day_week_smt_scan(levels: dict, wide_cache: dict) -> list:
     return out
 
 
-def _p2_nesting_grandfather(bundle: "FactsBundle", *, prev1_td, prev2_td, prev1_week_tds,
-                            long_horizon: dict, td_now, iso_now, data: dict = None) -> dict:
-    """thesis.md §2.1b: extends nesting exclusion to P2/SMT candidates too (previously a
-    deliberate simplification left them unrestricted), WITH a grandfather exception for a
-    candidate whose divergence fired BEFORE its level became nested. Two motivating real
-    cases:
-    - 2026-07-14 01:00 ET (keep counting): MNQ's prev3_day_low SMT fired while that level
-      was still the frontier of its family; a FRESH prev1_day_low nested it only afterward.
-      The SMT must keep scoring as P2 -- dropping it would regress a validated clean-correct
-      call.
-    - 2026-07-23 07:00 ET (suppress): prev3_day_high/prev4_day_high were ALREADY nested
-      (superseded by a deeper prior high) at the moment their own divergence fired -- no
-      grandfather claim, must be suppressed for P2 exactly like a plain nested P1 level.
+def _p2_nesting_suppression(bundle: "FactsBundle") -> dict:
+    """thesis.md §2.1b (2026-08-03: grandfather exception dropped). A P2/SMT candidate at a
+    nested prevN_day/week level is suppressed exactly like a plain nested P1 level, with no
+    exception for a divergence that fired before its level became nested. Nesting is a
+    STATIC, price-only fact about the CURRENT level table (`_nested_prev_levels`) -- it does
+    not depend on when the candidate's own divergence happened to fire.
 
-    Distinguishing the two needs, per candidate, whether some MORE RECENT same-family day/
-    week was already complete (and deeper) by the candidate's OWN `swept_at` -- computed
-    here from the SAME historical rows (`long_horizon`) already loaded for this facts build;
-    no cross-call state needed (a week-tier boundary is a coarser, accepted approximation --
-    both motivating cases are day-tier).
+    Rationale (2026-07-13/14 case): dropping a name's grandfather status does not drop the
+    underlying signal -- the more extreme, un-nested member of the same family (e.g.
+    prev1_day_low) is BY CONSTRUCTION never nested (nothing more recent exists to nest it),
+    so once price actually sweeps that frontier level, it fires its OWN, independent,
+    un-suppressed candidate. A touch that only reaches a nested (shallower) level without
+    also reaching the frontier is deliberately treated as not-yet-meaningful, same as any
+    other nested P1 read.
 
-    A site (asset, level) can carry MORE THAN ONE candidate instance (a "wick" and a "body"
-    divergence, each with its OWN swept_at) -- the model's declared evidence has no way to
-    distinguish which type it means, so the site is suppressed for P2 ONLY if EVERY instance
-    at it was already nested at its own fire time; if ANY instance genuinely predates the
-    nesting, the whole site stays valid (this is what actually happened in the 2026-07-14
-    01:00 ET case: prev3_day_low's wick divergence fired at 15:38 ET on 2026-07-13, before
-    nesting -- grandfathered -- while a LATER, unrelated body-close divergence at the same
-    level, at 19:00 ET, fired after nesting; the site must still count via the wick instance).
-
-    2026-08-02 fix (2026-07-16 09:30/10:00 ET case): the `rows` comparison above only sees
-    COMPLETED prior days/weeks (`long_horizon`, prev1_td/prev2_td) -- it is blind to a
-    supersession made WITHIN the candidate's own fire_td session, since that session's own
-    extreme isn't "born" as prev1_day_X until the NEXT rollover. MES's prev3_day_high carried
-    two instances at the SAME site: a wick fire at 09:30:02 and a body fire at 10:00:00 on
-    2026-07-16 -- that session's own high was actually made at 09:37:08, seven minutes AFTER
-    the wick (genuinely grandfathered) but 22 minutes BEFORE the body (should NOT be). Both
-    were incorrectly flagged `grandfathered: True` before this fix, since day-granularity
-    `fire_td` comparison can't distinguish them. Now also checks, day-tier only (`data`, the
-    raw per-ticker bars, threaded in for this), the RUNNING high/low of fire_td's own session
-    strictly before each instance's own `swept_at` -- catching an intra-session supersession
-    `rows` cannot see. Week-tier keeps the coarser rows-only approximation (both motivating
-    cases were day-tier; a week-tier equivalent is unbuilt).
-
-    Annotates each bundle.smt_candidates entry in place with `grandfathered` (per-instance:
-    was THIS specific divergence already nested when it fired) and `p2_suppressed` (site-
-    level: only true when NO instance at this site is grandfathered). Returns {tkr: set(level
-    names)} of the P2-suppressed sites, meant to be threaded into score_thesis_evidence
-    alongside suppressed_p1_levels."""
+    Annotates each bundle.smt_candidates entry in place with `p2_suppressed`. Returns
+    {tkr: set(level names)} of the P2-suppressed sites, meant to be threaded into
+    score_thesis_evidence alongside suppressed_p1_levels."""
     out = {"MNQ": set(), "MES": set()}
     for tkr in ("MNQ", "MES"):
-        site_checked = {}       # name -> list[bool] (already_nested_at_fire per instance)
-        lv = bundle.levels.get(tkr, {})
         suppressed = (bundle.suppressed_p1_levels or {}).get(tkr, set())
-        lh = long_horizon.get(tkr)
-        # Full-depth (date, extreme) rows per (tier, side-word) family -- a day counted once
-        # via prev1/prev2 and again via long_horizon is harmless for a max/min-style compare.
-        rows = {("day", "low"): [], ("day", "high"): [], ("week", "low"): [], ("week", "high"): []}
-        if "prev1_day_low" in lv:
-            rows[("day", "low")].append((prev1_td, lv["prev1_day_low"][0]))
-        if "prev2_day_low" in lv:
-            rows[("day", "low")].append((prev2_td, lv["prev2_day_low"][0]))
-        if "prev1_day_high" in lv:
-            rows[("day", "high")].append((prev1_td, lv["prev1_day_high"][0]))
-        if "prev2_day_high" in lv:
-            rows[("day", "high")].append((prev2_td, lv["prev2_day_high"][0]))
-        if prev1_week_tds:
-            wk1 = min(prev1_week_tds)
-            if "prev1_week_low" in lv:
-                rows[("week", "low")].append((wk1, lv["prev1_week_low"][0]))
-            if "prev1_week_high" in lv:
-                rows[("week", "high")].append((wk1, lv["prev1_week_high"][0]))
-        if lh:
-            rows[("day", "low")] += [(r["trade_date"], r["low"]) for r in lh.get("daily", [])]
-            rows[("day", "high")] += [(r["trade_date"], r["high"]) for r in lh.get("daily", [])]
-            rows[("week", "low")] += [(r["week_start"], r["low"]) for r in lh.get("weekly", [])]
-            rows[("week", "high")] += [(r["week_start"], r["high"]) for r in lh.get("weekly", [])]
-
         for cand in bundle.smt_candidates:
             if cand.get("swept_ticker") != tkr:
                 continue
             name, tier = cand.get("level"), cand.get("tier")
-            m = _PREV_LEVEL_RE.match(name or "")
-            if not cand.get("meaningful") or tier not in ("day", "week") or not m \
-                    or name not in suppressed:
-                cand.setdefault("grandfathered", False)
-                cand.setdefault("p2_suppressed", False)
-                continue          # not currently nested (or not a prevN name) -> nothing to check
-            fam_side = m.group(3)                       # "low" | "high"
-            level_born = _level_born_date(name, prev1_td, prev2_td, prev1_week_tds, lh,
-                                          td_now, iso_now)
-            fire_td = trade_date(cand["swept_at"]) if cand.get("swept_at") is not None else None
-            level_price = lv.get(name, (None,))[0]
-            beyond = (lambda a, b: a < b) if fam_side == "low" else (lambda a, b: a > b)
-            already_nested_at_fire = bool(
-                level_born is not None and fire_td is not None and level_price is not None
-                and any(level_born < d < fire_td and beyond(p, level_price)
-                       for d, p in rows.get((tier, fam_side), [])))
-            # 2026-08-02 fix: `rows` can't see a same-fire_td-session supersession (that
-            # session isn't "born" as prev1_day_X until the next rollover) -- check the
-            # RUNNING extreme of fire_td's own session strictly before THIS instance's own
-            # swept_at directly against the raw bars. Day-tier only (see docstring).
-            if not already_nested_at_fire and (data or {}).get(tkr) is not None and tier == "day" \
-                    and fire_td is not None and level_price is not None \
-                    and cand.get("swept_at") is not None:
-                sess = session_frame(data[tkr], fire_td)
-                prior_in_session = sess[sess.index < cand["swept_at"]]
-                if len(prior_in_session):
-                    running = (prior_in_session["low"].min() if fam_side == "low"
-                              else prior_in_session["high"].max())
-                    if pd.notna(running) and beyond(running, level_price):
-                        already_nested_at_fire = True
-            cand["grandfathered"] = not already_nested_at_fire
-            site_checked.setdefault(name, []).append(already_nested_at_fire)
-
-        # Site-level suppression: only when EVERY checked instance at this site was already
-        # nested at its own fire time (see docstring — a grandfathered wick must keep a site
-        # valid even if a later, unrelated body-close instance at the same site was not).
-        for name, results in site_checked.items():
-            if results and all(results):
+            is_suppressed = bool(
+                cand.get("meaningful") and tier in ("day", "week")
+                and _PREV_LEVEL_RE.match(name or "") and name in suppressed)
+            cand["p2_suppressed"] = is_suppressed
+            if is_suppressed:
                 out[tkr].add(name)
-        for cand in bundle.smt_candidates:
-            if cand.get("swept_ticker") == tkr and cand.get("level") in site_checked:
-                cand["p2_suppressed"] = cand.get("level") in out[tkr]
     return out
 
 
@@ -799,9 +676,8 @@ class FactsBundle:
     # accept/reject evidence (nested prevN levels + duplicate-simultaneous-sweep losers).
     # Never applied to P2/SMT candidacy — see _nested_prev_levels/_duplicate_sweep_losers.
     suppressed_p1_levels: dict = field(default_factory=dict)
-    # thesis.md §2.1b: {tkr: set(level names)} of SMT/P2 candidates that were ALREADY
-    # nested at the moment their own divergence fired (no grandfather claim) — see
-    # _p2_nesting_grandfather. Threaded into score_thesis_evidence alongside
+    # thesis.md §2.1b: {tkr: set(level names)} of SMT/P2 candidates whose level is nested —
+    # see _p2_nesting_suppression. Threaded into score_thesis_evidence alongside
     # suppressed_p1_levels, but ONLY zeroes P2 items (never P1, which suppressed_p1_levels
     # already covers).
     suppressed_p2_sites: dict = field(default_factory=dict)
@@ -1446,11 +1322,7 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
             thr = SMT_SHELF_LIFE.get(cand.get("tier"))
             exh_tag = (f" | stretch_since_fire={stretch}x avg_1h"
                        f"{f' [SUGGESTED EXHAUSTED > {thr}x shelf-life]' if exh else ''}")
-        nest_tag = ""
-        if cand.get("p2_suppressed"):
-            nest_tag = " | P2-SUPPRESSED (already nested when this divergence fired)"
-        elif cand.get("grandfathered"):
-            nest_tag = " | grandfathered (valid when it fired, nested by a later level since)"
+        nest_tag = " | P2-SUPPRESSED (level is nested)" if cand.get("p2_suppressed") else ""
         A(f"  {cand['level']} [{cand['side']}, {cand['tier']}]: "
           f"swept_ticker={cand['swept_ticker']} (lagger) "
           f"unswept_ticker={cand['unswept_ticker']} (leader) "
@@ -1922,7 +1794,7 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
 
     # thesis.md §2.1b/§2.1d refinement: nested prevN levels and duplicate-simultaneous-
     # sweep restatements are excluded from FRESH P1 evidence. P2/SMT candidacy gets its own,
-    # separate grandfather-aware suppression below (_p2_nesting_grandfather, computed once
+    # separate suppression below (_p2_nesting_suppression, computed once
     # bundle.smt_candidates exists) — no longer unconditionally exempt.
     bundle.suppressed_p1_levels = {}
     for tkr in ("MNQ", "MES"):
@@ -2064,11 +1936,9 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
         c["stretch_since_fire"] = round(stretch, 3)
         c["suggested_exhausted"] = stretch > SMT_SHELF_LIFE.get(c.get("tier"), float("inf"))
 
-    # thesis.md §2.1b: P2/SMT nesting suppression with the grandfather exception (see
-    # _p2_nesting_grandfather's own docstring for the two motivating real cases).
-    bundle.suppressed_p2_sites = _p2_nesting_grandfather(
-        bundle, prev1_td=prev1_td, prev2_td=prev2_td, prev1_week_tds=prev1_week_tds,
-        long_horizon=long_horizon, td_now=td_now, iso_now=iso_now, data=data)
+    # thesis.md §2.1b: P2/SMT nesting suppression, no grandfather exception (see
+    # _p2_nesting_suppression's own docstring).
+    bundle.suppressed_p2_sites = _p2_nesting_suppression(bundle)
 
     # thesis.md §2.1c: per-item equilibrium-staleness suggestion for mature P1 items.
     bundle.p1_equilibrium_stale = _p1_equilibrium_staleness(bundle, data)

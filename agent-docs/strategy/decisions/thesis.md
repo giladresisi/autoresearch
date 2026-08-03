@@ -127,32 +127,39 @@ candidate. Depth-of-history levels (`prev3_day`…`prev7_day`, `prev2_week`/`pre
 precisely so these deeper cross-asset divergences are visible; §2.1b prunes same-asset P1 stacking,
 it never prunes cross-asset candidacy.
 
-**P2/SMT nesting suppression, WITH a grandfather clause (`derive_facts._p2_nesting_grandfather`).**
-Nesting now ALSO gates P2/SMT candidacy — not the "deliberate simplification" this doc previously
+**P2/SMT nesting suppression — same rule as P1, no exception (`derive_facts._p2_nesting_suppression`).**
+Nesting ALSO gates P2/SMT candidacy — not the "deliberate simplification" this doc previously
 described (unrestricted P2 scanning, relying on P2's own reject-vs-accept requirement as an informal
 filter). The 2026-07-23 07:00 ET case showed why that wasn't enough: `prev3_day_high`/`prev4_day_high`
 were genuine REJECT-shape divergences at already-nested levels, contributing real (wrong) noise to
-the ledger. But a blanket nesting-gate on P2 has its OWN failure mode — the 2026-07-14 01:00 ET case:
-`prev3_day_low`'s divergence had genuinely fired BEFORE that level became nested (a fresh, more-recent
-day only superseded it afterward) — dropping it would regress a validated clean-correct call.
+the ledger.
 
-The fix distinguishes the two: for each currently-nested candidate, check whether some MORE RECENT
-same-family day/week was already COMPLETE (and deeper) by the candidate's OWN `swept_at` — using the
-same historical rows (`long_horizon`) already loaded for the facts build, no cross-call state needed.
-Not already-nested-at-fire → **grandfathered**, keeps scoring as P2. Already-nested-at-fire → **P2-
-suppressed**, scores zero, same "zeroed, not scored" mechanic P1 already uses. A site can carry more
-than one candidate instance (a wick AND a body-close divergence at the same level, each with its own
-`swept_at`) — the model's declared evidence can't distinguish which type it means, so a site is
-suppressed only when EVERY instance at it was already nested at its own fire time; if ANY instance
-genuinely predates the nesting, the site stays valid (this is exactly what happens for `prev3_day_low`:
-its wick divergence fired before nesting — grandfathered — while a later, unrelated body-close
-instance at the same level fired after — the site stays valid via the wick instance).
+An earlier version of this rule carried a **grandfather exception** — a candidate whose divergence
+fired BEFORE its level became nested kept scoring as P2. **That exception was dropped (2026-08-03).**
+Nesting is a STATIC, price-only fact about the CURRENT level table (§2.1b above, `_nested_prev_levels`)
+— it does not matter when the divergence happened to fire, only whether the level it names is
+currently the frontier of its family. A nested level (e.g. `prev3_day_low`, superseded by a more-
+recent, deeper `prev1_day_low`) is now fully suppressed for BOTH P1 and P2, no exception — exactly
+the same treatment as a plain nested P1 level with no SMT at all.
 
-**This grandfather check only works because `swept_at` itself was also fixed (`SMT_LOOKBACK_HOURS`,
-below) — without that, `prev3_day_low`'s wick divergence would be misattributed to an unrelated LATER
-re-touch that DID happen after nesting, wrongly suppressing a genuinely valid site.** The two fixes
-are a pair, not independent: nesting-aware suppression needs an accurate fire timestamp to check
-against, and the wide SMT lookback is what supplies one.
+This does not drop the underlying signal. The frontier member of a prevN family (`prev1_day_low`/
+`prev1_day_high`) is BY CONSTRUCTION never nested — nothing more recent exists in the family to nest
+it — so once price actually sweeps THAT level, it fires its own, independent, un-suppressed P2
+candidate. Concretely, the 2026-07-13/14 case is now read differently than the flagship case this
+section originally documented: MNQ's `prev3_day_low` (29395.0, touched ~19:00 ET on 2026-07-13) is
+nested under its own more-recent `prev1_day_low` (29386.5) and produces NO evidence at all, P1 or P2.
+The meaningful event is `prev1_day_low` itself getting swept (~19:04 ET, four minutes later) — a
+separate, un-nested candidate that scores as ordinary P2 once its own HTF close resolves accept/
+reject. A touch that only reaches a nested (shallower) level without also reaching the frontier is
+treated as not-yet-meaningful, same as any other nested P1 read — the same "only the most extreme
+swept level should be treated" principle §6 uses to resolve same-asset P3 dominance conflicts.
+
+**Accurate `swept_at` attribution still matters (`SMT_LOOKBACK_HOURS`, below), independently of
+nesting.** Without the wide scan, a level's divergence can be misattributed to an unrelated LATER
+re-touch under the same name — which would then also wrongly determine which close resolves accept/
+reject. The two mechanisms are independent: nesting suppression decides WHICH named levels carry
+evidence at all; the wide SMT lookback decides WHEN (and whether) a given un-suppressed level's
+divergence actually fired.
 
 **Wide SMT lookback (`SMT_LOOKBACK_HOURS = 24`, `derive_facts._wide_day_week_smt_scan`).** A day/
 week-tier level's name shifts across every session rollover (prevN renumbering as new days/weeks
@@ -810,13 +817,25 @@ false-signal failure mode §3 exists to prevent.
 **2026-07-23 07:00 ET — a nested level's own genuine reject-shape divergence still counted as P2
 (the case that ended the §2.1b "deliberate simplification").** `prev3_day_high`/`prev4_day_high`
 were nested (superseded by a deeper prior high) but their SMT divergences still scored as P2,
-since nesting was never applied to `bundle.smt_candidates` at all → the grandfather-aware P2
-suppression above. Investigating this surfaced a SECOND, deeper bug: the level's `swept_at` itself
+since nesting was never applied to `bundle.smt_candidates` at all → P2/SMT nesting suppression
+above. Investigating this surfaced a SECOND, deeper bug: the level's `swept_at` itself
 was wrong (a session-scoped `first_cross` misattributed the real 2026-07-13 15:38 ET sweep of
 `prev3_day_low` — a DIFFERENT case, the 2026-07-14 01:00 ET flagship — to an unrelated 19:00 ET
 re-touch that happened to occur under the level's NEW, post-rollover name) → `SMT_LOOKBACK_HOURS`
 (24h) wide re-scan of day/week-tier levels, additive only, never touching the shared hashed S0-S7
 core or `bundle.swept_at` (P1's own sweep timestamp stays exactly as it was).
+
+**2026-08-03 — the grandfather exception itself was dropped.** The initial P2 nesting-suppression
+fix above kept a "grandfathered" carve-out for a candidate whose divergence fired before its level
+became nested, motivated by the 2026-07-14 01:00 ET case (`prev3_day_low`'s wick divergence at
+15:38 ET on 2026-07-13). Re-examining that case: `prev3_day_low` (29395.0) IS nested under MNQ's
+own `prev1_day_low` (29386.5) at the moment of the 19:00 ET call, full stop — nesting is a static
+price fact, not a claim about firing order, so the grandfather exception was re-litigating a
+question §2.1b/§2.1d had already answered for P1. Dropping it revealed the real July 13-14 story
+had been mis-told: the level actually tested and rejected around 19:00-19:04 ET was `prev1_day_low`
+itself (swept 19:04 ET, 4 minutes after the nested `prev3_day_low` touch at 19:00 ET), not
+`prev3_day_low` — the frontier level, once it fires its own candidate, was the real signal all
+along, no exception mechanism needed to preserve it.
 
 **2026-07-23 07:00 ET (again) — a stale P1 sweep outweighed materially more recent equilibrium
 behavior.** `prev1_day_low` swept ~3h before the call; price had since fully round-tripped to the

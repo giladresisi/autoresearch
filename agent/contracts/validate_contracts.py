@@ -513,10 +513,9 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     — nested prevN levels and duplicate-simultaneous-sweep restatements (derive_facts.
     _nested_prev_levels / _duplicate_sweep_losers). A P1 item at a suppressed level scores
     ZERO, same "zeroed, not scored" mechanic as immature/exhausted. This ONLY gates P1 —
-    `suppressed_p2_sites` (thesis.md §2.1b, derive_facts._p2_nesting_grandfather) is the
-    separate, grandfather-aware {asset: set(level names)} that gates P2: a candidate whose
-    divergence fired BEFORE its level became nested keeps scoring (not in this set); one
-    that was ALREADY nested when it fired scores ZERO too.
+    `suppressed_p2_sites` (thesis.md §2.1b, derive_facts._p2_nesting_suppression) is the
+    separate {asset: set(level names)} that gates P2: a candidate whose level is nested
+    scores ZERO too, no exception for when the divergence itself happened to fire.
 
     P4-dominates-P3 (thesis.md §6 extension): needs no caller input — computed internally
     from the SAME declared `evidence` list. When one asset carries an HTF-confirmed (mature,
@@ -906,10 +905,9 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
         p1_suppressed = bool(
             item.get("criterion") == "P1" and suppressed_p1_levels
             and item.get("level") in (suppressed_p1_levels.get(item.get("asset")) or ()))
-        # thesis.md §2.1b: a P2/SMT candidate ALREADY nested at the moment its own
-        # divergence fired (no grandfather claim — derive_facts._p2_nesting_grandfather)
-        # scores ZERO too, same mechanic. A candidate that fired BEFORE it became nested
-        # keeps scoring (not in suppressed_p2_sites) — the 2026-07-14 01:00 ET case.
+        # thesis.md §2.1b: a P2/SMT candidate at a nested level scores ZERO too, same
+        # mechanic as P1 — derive_facts._p2_nesting_suppression, no exception for when the
+        # divergence itself happened to fire.
         p2_suppressed = bool(
             item.get("criterion") == "P2" and suppressed_p2_sites
             and item.get("level") in (suppressed_p2_sites.get(item.get("asset")) or ()))

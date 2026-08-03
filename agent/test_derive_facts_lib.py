@@ -507,14 +507,12 @@ def test_day_start_ts_ny_morning_onward_is_the_current_session_open():
         "2026-07-15 18:00:00", tz="America/New_York")
 
 
-# --- thesis.md §2.1b: P2/SMT nesting grandfather clause -------------------------------- #
+# --- thesis.md §2.1b: P2/SMT nesting suppression (2026-08-03: no grandfather exception) - #
 
 def _gf_bundle():
-    """MNQ day-low/day-high families with prev1 (born 2026-07-15) deeper than prev2 (born
-    2026-07-10) on BOTH sides -- so prev2_day_low/prev2_day_high are CURRENTLY nested. Two
-    SMT candidates test the two outcomes: prev2_day_low's divergence fired 07-12 (BEFORE
-    prev1's own day existed) -> grandfathered; prev2_day_high's fired 07-16 (AFTER prev1's
-    day already existed) -> already nested at fire time -> P2-suppressed."""
+    """MNQ day-low/day-high families with prev1 deeper than prev2 on BOTH sides -- so
+    prev2_day_low/prev2_day_high are CURRENTLY nested. Two SMT candidates, one per side,
+    to exercise the suppress/no-op split."""
     b = derive_facts.FactsBundle()
     b.levels = {"MNQ": {
         "prev1_day_low": (50.0, 50.0, "below", "day", None),
@@ -530,126 +528,42 @@ def _gf_bundle():
         {"level": "prev2_day_high", "tier": "day", "side": "above", "swept_ticker": "MNQ",
          "unswept_ticker": "MES", "swept_at": pd.Timestamp("2026-07-16 10:00", tz="America/New_York"),
          "type": "wick", "meaningful": True, "suggested_exhausted": False},
+        {"level": "prev1_day_low", "tier": "day", "side": "below", "swept_ticker": "MNQ",
+         "unswept_ticker": "MES", "swept_at": pd.Timestamp("2026-07-16 11:00", tz="America/New_York"),
+         "type": "wick", "meaningful": True, "suggested_exhausted": False},
     ]
     return b
 
 
-_GF_KW = dict(prev1_td=pd.Timestamp("2026-07-15").date(),
-             prev2_td=pd.Timestamp("2026-07-10").date(),
-             prev1_week_tds=[], long_horizon={"MNQ": {"daily": [], "weekly": []}, "MES": {}},
-             td_now=pd.Timestamp("2026-07-16").date(),
-             iso_now=pd.Timestamp("2026-07-16").isocalendar()[:2])
-
-
-def test_p2_grandfather_keeps_divergence_fired_before_nesting():
+def test_p2_nested_level_suppressed_regardless_of_when_it_fired():
+    # 2026-08-03: the grandfather exception is gone -- prev2_day_low's divergence fired
+    # 2026-07-12, well before prev1_day_low ever existed as a name, but nesting is a STATIC
+    # price fact about the CURRENT level table, not a claim about firing order. It is
+    # suppressed exactly like prev2_day_high (which fired AFTER nesting).
     b = _gf_bundle()
-    out = derive_facts._p2_nesting_grandfather(b, **_GF_KW)
+    out = derive_facts._p2_nesting_suppression(b)
     low_cand = next(c for c in b.smt_candidates if c["level"] == "prev2_day_low")
-    assert low_cand["grandfathered"] is True
-    assert low_cand["p2_suppressed"] is False
-    assert "prev2_day_low" not in out["MNQ"]
-
-
-def test_p2_grandfather_suppresses_divergence_fired_after_nesting():
-    b = _gf_bundle()
-    out = derive_facts._p2_nesting_grandfather(b, **_GF_KW)
     high_cand = next(c for c in b.smt_candidates if c["level"] == "prev2_day_high")
-    assert high_cand["grandfathered"] is False
+    assert low_cand["p2_suppressed"] is True
     assert high_cand["p2_suppressed"] is True
-    assert "prev2_day_high" in out["MNQ"]
+    assert out["MNQ"] == {"prev2_day_low", "prev2_day_high"}
 
 
-def test_p2_grandfather_site_stays_valid_if_any_instance_grandfathered():
-    """The real 2026-07-14 01:00 ET shape: prev3_day_low carries TWO candidate instances --
-    a wick divergence that fired BEFORE nesting (grandfathered) and a LATER, unrelated body-
-    close divergence that fired AFTER nesting (not grandfathered). The model's declared P2
-    evidence can't distinguish wick vs body, so the SITE must stay valid (not p2_suppressed)
-    because at least one instance is genuinely grandfathered."""
+def test_p2_un_nested_frontier_level_not_suppressed():
+    # prev1_day_low is never nested (nothing more recent exists in its family) -- its own
+    # candidate, once it fires, stays valid P2 evidence.
     b = _gf_bundle()
-    b.smt_candidates.append({
-        "level": "prev2_day_low", "tier": "day", "side": "below", "swept_ticker": "MNQ",
-        "unswept_ticker": "MES",
-        "swept_at": pd.Timestamp("2026-07-15 20:00", tz="America/New_York"),  # AFTER prev1 (07-15) exists
-        "type": "body", "meaningful": True, "suggested_exhausted": False,
-    })
-    out = derive_facts._p2_nesting_grandfather(b, **_GF_KW)
-    instances = [c for c in b.smt_candidates if c["level"] == "prev2_day_low"]
-    assert any(c["grandfathered"] for c in instances)       # the original wick instance
-    assert any(not c["grandfathered"] for c in instances)   # the new, later body instance
-    assert "prev2_day_low" not in out["MNQ"]                 # site stays valid overall
-    for c in instances:
-        assert c["p2_suppressed"] is False                  # site-level flag, same on both
+    out = derive_facts._p2_nesting_suppression(b)
+    frontier_cand = next(c for c in b.smt_candidates if c["level"] == "prev1_day_low")
+    assert frontier_cand["p2_suppressed"] is False
+    assert "prev1_day_low" not in out["MNQ"]
 
 
-def _p2_grandfather_intra_session_data():
-    """Minimal synthetic MNQ bars spanning trade_date 2026-07-15's own session (18:00 ET
-    2026-07-14 through the afternoon of 2026-07-15), with the running high crossing above
-    150 (prev2_day_high's own price in _gf_bundle) at 11:00 -- the exact shape of the real
-    2026-07-16 09:30/10:00 ET wick/body bug: a candidate firing at 09:00 (before the
-    crossing) is genuinely fresh; one firing at 14:00 (after) is already-superseded, even
-    though BOTH share fire_td=2026-07-15 (the day that becomes prev1_day_high) and so are
-    invisible to the day-granularity `rows` check alone."""
-    idx = pd.DatetimeIndex([
-        pd.Timestamp("2026-07-14 18:00", tz="America/New_York"),
-        pd.Timestamp("2026-07-15 09:00", tz="America/New_York"),
-        pd.Timestamp("2026-07-15 11:00", tz="America/New_York"),
-        pd.Timestamp("2026-07-15 14:00", tz="America/New_York"),
-        pd.Timestamp("2026-07-15 16:00", tz="America/New_York"),
-    ])
-    return pd.DataFrame({
-        "high": [130.0, 140.0, 180.0, 195.0, 200.0],
-        "low": [120.0, 130.0, 140.0, 180.0, 190.0],
-    }, index=idx)
-
-
-def test_p2_grandfather_distinguishes_intra_session_supersession():
-    # 2026-08-02 fix, real 2026-07-16 09:30/10:00 ET case: two instances at the SAME site,
-    # SAME fire_td (the day that becomes prev1_day_high, not yet named that at fire time) --
-    # only the one firing AFTER the same-session crossing should lose grandfather status.
-    b = _gf_bundle()
-    b.smt_candidates += [
-        {"level": "prev2_day_high", "tier": "day", "side": "above", "swept_ticker": "MNQ",
-         "unswept_ticker": "MES",
-         "swept_at": pd.Timestamp("2026-07-15 09:00", tz="America/New_York"),
-         "type": "wick", "meaningful": True, "suggested_exhausted": False},
-        {"level": "prev2_day_high", "tier": "day", "side": "above", "swept_ticker": "MNQ",
-         "unswept_ticker": "MES",
-         "swept_at": pd.Timestamp("2026-07-15 14:00", tz="America/New_York"),
-         "type": "body", "meaningful": True, "suggested_exhausted": False},
-    ]
-    data = {"MNQ": _p2_grandfather_intra_session_data(),
-           "MES": pd.DataFrame({"high": [], "low": []})}
-    derive_facts._p2_nesting_grandfather(b, data=data, **_GF_KW)
-    early = next(c for c in b.smt_candidates
-                if c["level"] == "prev2_day_high" and c["swept_at"].hour == 9)
-    late = next(c for c in b.smt_candidates
-               if c["level"] == "prev2_day_high" and c["swept_at"].hour == 14)
-    assert early["grandfathered"] is True     # fired before the same-session crossing
-    assert late["grandfathered"] is False     # fired after -- already superseded intra-session
-
-
-def test_p2_grandfather_data_none_skips_intra_session_check():
-    # Backward compat: callers not yet passing `data` (data=None, the default) get the
-    # exact pre-2026-08-02 behavior -- the intra-session check never runs, never crashes.
-    b = _gf_bundle()
-    b.smt_candidates.append({
-        "level": "prev2_day_high", "tier": "day", "side": "above", "swept_ticker": "MNQ",
-        "unswept_ticker": "MES",
-        "swept_at": pd.Timestamp("2026-07-15 14:00", tz="America/New_York"),
-        "type": "body", "meaningful": True, "suggested_exhausted": False,
-    })
-    derive_facts._p2_nesting_grandfather(b, **_GF_KW)   # no data kwarg
-    late = next(c for c in b.smt_candidates
-               if c["level"] == "prev2_day_high" and c["swept_at"].hour == 14)
-    assert late["grandfathered"] is True   # day-level rows check alone doesn't catch this
-
-
-def test_p2_grandfather_noop_when_not_currently_nested():
+def test_p2_nesting_suppression_noop_when_not_currently_nested():
     b = _gf_bundle()
     b.suppressed_p1_levels = {"MNQ": set(), "MES": set()}   # nothing nested at all
-    out = derive_facts._p2_nesting_grandfather(b, **_GF_KW)
+    out = derive_facts._p2_nesting_suppression(b)
     for cand in b.smt_candidates:
-        assert cand["grandfathered"] is False
         assert cand["p2_suppressed"] is False
     assert out == {"MNQ": set(), "MES": set()}
 
