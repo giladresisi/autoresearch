@@ -212,6 +212,19 @@ class ParquetFactsSource:
             tkr: {"hi": bundle.week_hi.get(tkr), "lo": bundle.week_lo.get(tkr)}
             for tkr in ("MNQ", "MES")
         }
+        # thesis.md §10 (2026-08-05): P3-vs-P4 mid promotion, PER TF — whether each mid's
+        # crossing on that tf is still the live, un-superseded story (derive_facts.
+        # _mid_tf_state). JSON-safe as-is ({tf: {"fresh": bool, "cross_dir": str}}, no
+        # timestamps).
+        res.validator_dict["mid_reclaim"] = {
+            tkr: dict(bundle.mid_reclaim.get(tkr) or {}) for tkr in ("MNQ", "MES")
+        }
+        # thesis.md §10 (2026-08-05): partial-bar reversal — does the currently-forming
+        # next-tf bar already undermine a level/mid's just-completed bar verdict
+        # (derive_facts._htf_reversal_tier). JSON-safe as-is ({level: {tf: str}}).
+        res.validator_dict["htf_reversal"] = {
+            tkr: dict(bundle.htf_reversal.get(tkr) or {}) for tkr in ("MNQ", "MES")
+        }
         res.menu_text = render_menus_text(bundle)              # reuses cached bundle.menus
         res.evidence_magnitude = build_evidence_magnitude(bundle)  # plan 14 Task 5: code-derived
         # magnitude threaded into the render so the model can SEE the WEAK/NORMAL/STRONG

@@ -580,7 +580,8 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
                               suppressed_p1_levels=None, suppressed_p2_sites=None,
                               level_htf_close_status=None, level_tiers=None,
                               smt_candidates=None, week_extremes=None,
-                              now_price=None, fvg_zone_meta=None) -> tuple[dict, list]:
+                              now_price=None, fvg_zone_meta=None,
+                              mid_reclaim=None, htf_reversal=None) -> tuple[dict, list]:
     """Compute per-item points, net score, and the confidence ceiling from the model's
     declared P1/P2 evidence ledger (decisions/thesis.md §2.1/§4/§6). Mirrors
     _derive_daily_arithmetic/_derive_next_arithmetic: confidence is silently corrected
@@ -601,7 +602,11 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
     P1/P2/P3 auto-derivation, §2.1e tier promotion, extremity-based dominance resolution,
     and P5 same-move dedup — code-injected evidence is reflected here too, so the
     ceiling/net-score computed BEFORE the validator retry loop already accounts for it,
-    not just validate_thesis's own re-scoring."""
+    not just validate_thesis's own re-scoring. `mid_reclaim` (2026-08-05) extends the same
+    auto-derivation to promote a mid's item from P3 to P4 when its crossing on that tf is
+    still live. `htf_reversal` (2026-08-05) discounts/omits/reverses a P1/P3/P4 item whose
+    completed-bar verdict has already been undermined by the currently-forming next bar
+    (thesis.md §10, 2026-08-05)."""
     from validate_contracts import score_thesis_evidence
     notes: list = []
     evidence = block.get("evidence") or []
@@ -613,7 +618,8 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
                                     level_htf_close_status=level_htf_close_status,
                                     level_tiers=level_tiers, smt_candidates=smt_candidates,
                                     week_extremes=week_extremes, now_price=now_price,
-                                    fvg_zone_meta=fvg_zone_meta)
+                                    fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim,
+                                    htf_reversal=htf_reversal)
     # Audit-annotate each item with its computed points/side in place (mirrors
     # _derive_next_arithmetic writing item["score"] back onto the ledger).
     block["evidence"] = scoring["scored_evidence"]
@@ -978,21 +984,27 @@ _TASK_THESIS = (
     "that evidence item, which zeroes its contribution (like an immature item). You may also "
     "DISAGREE and score it normally (omit exhausted) — the suggestion is a hint from stretch, "
     "not a gate. Do not set exhausted on a fresh, un-flagged SMT. "
-    "\nP3/P4 (EQUILIBRIUM & RECLAIM — thesis.md §2.1). "
-    "\n- P3 (position vs. equilibrium) is FULLY AUTOMATIC as of 2026-08-02 — do NOT declare "
-    "P3 items yourself. Code reads daily_mid/weekly_mid's own HTF-close verdict directly from "
-    "the facts and injects the correct evidence item (asset, tier, tf, accept/reject) for you, "
-    "for both assets, whenever a mature reading exists — this is a plain fact lookup, not a "
-    "judgment call, so your input adds nothing and any P3 item you declare is discarded and "
-    "replaced. Spend your judgment on P1/P2/P4/P5 instead. "
-    "\n- P4 (reclaim / failed reclaim of a mid, HTF-confirmed) is still yours to declare — "
-    "{criterion: P4, asset, level: "
-    "daily_mid_high | daily_mid_low | weekly_mid_high | weekly_mid_low, tier, tf, direction: "
-    "accept | reject, mature} — the _high/_low encodes the reclaim DIRECTION and accept "
-    "(reclaimed and held) / reject (failed reclaim) works exactly like P1's accept/reject on a "
-    "high/low. Use the HTF-close-confirmed reclaim, not a bare mid touch/cross (proven noise). "
-    "P4 reuses the P1 tier/tf multipliers and the §3 maturity gate — code computes the sign and "
-    "points, you only tag the reclaim. "
+    "\nP3/P4 (EQUILIBRIUM & RECLAIM — thesis.md §2.1/§10). "
+    "\n- BOTH P3 (position vs. equilibrium) and P4 (reclaim / failed reclaim of a mid) are "
+    "FULLY AUTOMATIC as of 2026-08-05 — do NOT declare P3 or P4 items yourself. Code reads "
+    "each mid's own HTF-close verdict and decides WHICH of the two applies: if the mid's last "
+    "crossing is still the live, un-superseded story (nothing more extreme has happened on the "
+    "tested side since), it is a genuine reclaim/failed-reclaim EVENT and is injected as P4 "
+    "(daily_mid_high/daily_mid_low/weekly_mid_high/weekly_mid_low, accept=held/reject=failed); "
+    "if a later, more extreme move has since superseded that crossing, the crossing is old news "
+    "and it is injected as plain P3 position instead (daily_mid/weekly_mid, accept=above/"
+    "reject=below). Either way this is a plain fact lookup, not a judgment call — any P3/P4 "
+    "item you declare is discarded and replaced, and there is no exhausted override (a mid "
+    "auto-derived as P4 is HTF-confirmed by construction, not a staleness candidate). Spend "
+    "your judgment on P1/P2/P5 instead. "
+    "\n- Partial-bar reversal (thesis.md §10, 2026-08-05): a completed bar's own accept/"
+    "reject verdict (P1 or P3/P4) is code-adjusted, automatically, whenever the CURRENTLY-"
+    "FORMING next bar has already retraced back through the level by call time — halved "
+    "points for a partial recross, dropped entirely once it fully engulfs the completed "
+    "bar's own body, or flipped (accept<->reject) once it also breaks that bar's wick — a "
+    "clear MSS. This is fully automatic, no declaration or override needed; a close-status "
+    "line tagged '[PARTIAL-BAR ...]' in S9 is informational only, reflecting what the "
+    "ledger already did. "
     "Return JSON matching the schema."
     "\n\nS9 EVIDENCE FACTS (plan 14 — read before deciding). The facts now carry an S9 block "
     "with stretch/distance, session-maturity, and cross-family confluence lines: "
@@ -1097,6 +1109,8 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
     week_extremes = facts.get("week_extremes")
     now_price = facts.get("now_price")
     fvg_zone_meta = facts.get("fvg_zone_meta")
+    mid_reclaim = facts.get("mid_reclaim")
+    htf_reversal = facts.get("htf_reversal")
     return _run_call(
         backend, system, user, schema,
         validate_block=lambda d: validate_thesis(d, facts),
@@ -1106,7 +1120,7 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
             suppressed_p1_levels=suppressed_p1_levels, suppressed_p2_sites=suppressed_p2_sites,
             level_htf_close_status=level_htf_close_status, level_tiers=level_tiers,
             smt_candidates=smt_candidates, week_extremes=week_extremes, now_price=now_price,
-            fvg_zone_meta=fvg_zone_meta),
+            fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim, htf_reversal=htf_reversal),
     )
 
 

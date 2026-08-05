@@ -721,6 +721,36 @@ def test_direction_matching_facts_not_flagged():
     assert "SEM_EVIDENCE_DIRECTION_MISMATCH" not in validate_thesis(t, _LEVEL_STATUS_FACTS).codes()
 
 
+def test_direction_mismatch_accounts_for_reversal_2026_07_22_regression():
+    # Real bug found 2026-07-22 09:20 ET, same day htf_reversal shipped: MNQ prev_day_high
+    # is raw-'accept' per the facts, but a partial-bar 'reverse' means the CORRECT declared
+    # direction is 'reject' -- without folding in htf_reversal here, a correctly-declared
+    # 'reject' was rejected every retry against the STALE raw fact (an infinite loop to
+    # failsafe -- verified live against the real harness).
+    facts = {**_LEVEL_STATUS_FACTS,
+            "htf_reversal": {"MNQ": {"prev_day_high": {"1h": "reverse"}}, "MES": {}}}
+    t = valid_thesis()
+    t["evidence"] = [_ev(asset="MNQ", level="prev_day_high", tf="1h", direction="reject",
+                         mature=True)]
+    assert "SEM_EVIDENCE_DIRECTION_MISMATCH" not in validate_thesis(t, facts).codes()
+    # and the RAW (un-reversed) direction is now the one that's wrong.
+    t2 = valid_thesis()
+    t2["evidence"] = [_ev(asset="MNQ", level="prev_day_high", tf="1h", direction="accept",
+                          mature=True)]
+    assert "SEM_EVIDENCE_DIRECTION_MISMATCH" in validate_thesis(t2, facts).codes()
+
+
+def test_direction_mismatch_skipped_for_omitted_item():
+    # An 'omit' tier item scores nothing either way -- direction correctness is moot, must
+    # not block validation regardless of what was declared.
+    facts = {**_LEVEL_STATUS_FACTS,
+            "htf_reversal": {"MNQ": {"prev_day_high": {"1h": "omit"}}, "MES": {}}}
+    t = valid_thesis()
+    t["evidence"] = [_ev(asset="MNQ", level="prev_day_high", tf="1h", direction="reject",
+                         mature=True)]
+    assert "SEM_EVIDENCE_DIRECTION_MISMATCH" not in validate_thesis(t, facts).codes()
+
+
 def test_immature_declaration_not_checked_against_direction():
     # mature=False items are never scored regardless of direction, so a mismatch there
     # isn't fabrication -- only a declared mature=True claim is cross-checked.
@@ -795,6 +825,132 @@ def test_directional_bias_backed_only_by_auto_injected_p3_is_valid():
     }}
     codes = validate_thesis(t, facts).codes()
     assert "ARI_THESIS_BIAS" not in codes
+
+
+# --------------------------------------------------------------------------- #
+# P3-vs-P4 mid promotion via mid_reclaim (2026-08-05, thesis.md §10)          #
+# --------------------------------------------------------------------------- #
+
+def test_fresh_up_cross_promotes_to_p4_daily_mid_high():
+    # 2026-07-22 09:20 ET (weekly_mid case): a fresh up-cross with a mature close beyond
+    # is a live reclaim EVENT -- P4, not P3.
+    status = {"MNQ": {"daily_mid": {"1h": True, "4h": None}}, "MES": {}}
+    reclaim = {"MNQ": {"daily_mid": {"1h": {"fresh": True, "cross_dir": "up"}}}, "MES": {}}
+    scoring = score_thesis_evidence([], level_htf_close_status=status, mid_reclaim=reclaim)
+    ev = scoring["scored_evidence"]
+    assert not [it for it in ev if it["criterion"] == "P3"]
+    p4 = [it for it in ev if it["criterion"] == "P4"]
+    assert len(p4) == 1
+    assert p4[0]["level"] == "daily_mid_high"
+    assert p4[0]["direction"] == "accept"   # up-cross + beyond=True -> held -> accept
+
+
+def test_fresh_down_cross_accept_reject_is_inverted():
+    # A down-cross tests the mid as support-turned-resistance (daily_mid_low): "accept"
+    # means the breakdown HELD (closed below, beyond=False) -- the inverse of P3's own
+    # beyond-based mapping, not a straight passthrough.
+    status = {"MNQ": {"weekly_mid": {"1h": False, "4h": None}}, "MES": {}}
+    reclaim = {"MNQ": {"weekly_mid": {"1h": {"fresh": True, "cross_dir": "down"}}}, "MES": {}}
+    scoring = score_thesis_evidence([], level_htf_close_status=status, mid_reclaim=reclaim)
+    p4 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P4"]
+    assert len(p4) == 1
+    assert p4[0]["level"] == "weekly_mid_low"
+    assert p4[0]["direction"] == "accept"   # down-cross + beyond=False -> held -> accept
+
+    status_reject = {"MNQ": {"weekly_mid": {"1h": True, "4h": None}}, "MES": {}}
+    scoring2 = score_thesis_evidence([], level_htf_close_status=status_reject, mid_reclaim=reclaim)
+    p4_2 = [it for it in scoring2["scored_evidence"] if it["criterion"] == "P4"]
+    assert p4_2[0]["direction"] == "reject"   # down-cross + beyond=True -> snapped back -> reject
+
+
+def test_stale_crossing_stays_p3_not_p4():
+    # 2026-07-22 09:20 ET (daily_mid case): the crossing predates a later, deeper daily
+    # low -- old news, plain P3 position only, exactly as before mid_reclaim existed.
+    status = {"MNQ": {"daily_mid": {"1h": False, "4h": None}}, "MES": {}}
+    reclaim = {"MNQ": {"daily_mid": {"1h": {"fresh": False, "cross_dir": "down"}}}, "MES": {}}
+    scoring = score_thesis_evidence([], level_htf_close_status=status, mid_reclaim=reclaim)
+    ev = scoring["scored_evidence"]
+    assert not [it for it in ev if it["criterion"] == "P4"]
+    p3 = [it for it in ev if it["criterion"] == "P3"]
+    assert len(p3) == 1 and p3[0]["level"] == "daily_mid" and p3[0]["direction"] == "reject"
+
+
+def test_mid_reclaim_none_leaves_p3_only_unchanged():
+    # Default (mid_reclaim not wired) -- byte-identical to pre-2026-08-05 behavior.
+    status = {"MNQ": {"daily_mid": {"1h": True, "4h": None}}, "MES": {}}
+    scoring = score_thesis_evidence([], level_htf_close_status=status)
+    ev = scoring["scored_evidence"]
+    assert not [it for it in ev if it["criterion"] == "P4"]
+    assert len([it for it in ev if it["criterion"] == "P3"]) == 1
+
+
+def test_declared_p4_mid_item_discarded_and_replaced_by_auto_derivation():
+    bad = _ev(criterion="P4", asset="MNQ", level="daily_mid_high", tier="day", tf="1h",
+              direction="reject")
+    status = {"MNQ": {"daily_mid": {"1h": True, "4h": None}}, "MES": {}}
+    reclaim = {"MNQ": {"daily_mid": {"1h": {"fresh": True, "cross_dir": "up"}}}, "MES": {}}
+    scoring = score_thesis_evidence([bad], level_htf_close_status=status, mid_reclaim=reclaim)
+    p4 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P4"]
+    assert len(p4) == 1
+    assert p4[0]["direction"] == "accept"   # code's read, not the model's discarded "reject"
+
+
+# --------------------------------------------------------------------------- #
+# Partial-bar reversal via htf_reversal (2026-08-05, thesis.md §10)            #
+# --------------------------------------------------------------------------- #
+
+def test_htf_reversal_none_leaves_item_unaffected():
+    item = _ev(criterion="P1", asset="MNQ", level="prev_day_low", direction="accept")
+    reversal = {"MNQ": {"prev_day_low": {"1h": "none"}}}
+    scoring = score_thesis_evidence([item], htf_reversal=reversal)
+    assert scoring["scored_evidence"][0]["points"] == 1.5   # day/1h base, unaffected
+
+
+def test_htf_reversal_discount_halves_points():
+    item = _ev(criterion="P1", asset="MNQ", level="prev_day_low", direction="accept")
+    reversal = {"MNQ": {"prev_day_low": {"1h": "discount"}}}
+    scoring = score_thesis_evidence([item], htf_reversal=reversal)
+    assert scoring["scored_evidence"][0]["points"] == 0.75   # 1.5 * 0.5
+    assert scoring["scored_evidence"][0]["direction"] == "accept"   # direction untouched
+
+
+def test_htf_reversal_omit_zeroes_the_item():
+    item = _ev(criterion="P1", asset="MNQ", level="prev_day_low", direction="accept")
+    reversal = {"MNQ": {"prev_day_low": {"1h": "omit"}}}
+    scoring = score_thesis_evidence([item], htf_reversal=reversal)
+    assert scoring["scored_evidence"] == []   # dropped before scoring, not merely zero-pointed
+
+
+def test_htf_reversal_reverse_flips_direction_and_side():
+    # 2026-07-22 09:20 ET: MNQ london(cur)_low declared accept (DOWN); the forming 09:00
+    # bar broke past the completed bar's own wick -- reverse to reject (UP).
+    item = _ev(criterion="P1", asset="MNQ", level="london_low", tier="session",
+              direction="accept")
+    reversal = {"MNQ": {"london_low": {"1h": "reverse"}}}
+    scoring = score_thesis_evidence([item], htf_reversal=reversal)
+    scored = scoring["scored_evidence"][0]
+    assert scored["direction"] == "reject"
+    assert scored["side"] == "UP"          # accept on a "low" level is DOWN; reject is UP
+    assert scored["htf_reversal"] == "reverse"
+
+
+def test_htf_reversal_applies_to_auto_injected_p4_mid_item():
+    # The exact 2026-07-22 MNQ weekly_mid shape: fresh up-cross promotes to P4 (accept),
+    # but the partial 09:00 bar's own MSS reverses it to reject regardless.
+    status = {"MNQ": {"weekly_mid": {"1h": False, "4h": None}}, "MES": {}}
+    reclaim = {"MNQ": {"weekly_mid": {"1h": {"fresh": True, "cross_dir": "down"}}}, "MES": {}}
+    reversal = {"MNQ": {"weekly_mid_low": {"1h": "reverse"}}}
+    scoring = score_thesis_evidence([], level_htf_close_status=status, mid_reclaim=reclaim,
+                                    htf_reversal=reversal)
+    p4 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P4"]
+    assert len(p4) == 1
+    assert p4[0]["direction"] == "reject"   # accept (down-cross held) reversed -> reject
+
+
+def test_htf_reversal_none_param_leaves_scoring_unchanged():
+    item = _ev(criterion="P1", asset="MNQ", level="prev_day_low", direction="accept")
+    scoring = score_thesis_evidence([item])   # no htf_reversal kwarg at all
+    assert scoring["scored_evidence"][0]["points"] == 1.5
 
 
 # --------------------------------------------------------------------------- #
@@ -997,6 +1153,21 @@ def test_p3_fixed_points_independent_of_tf():
     weekly_4h = _ev(criterion="P3", asset="MES", level="weekly_mid", tier="week", tf="4h", direction="reject")
     scored = score_thesis_evidence([daily_1h, daily_4h, weekly_1h, weekly_4h])["scored_evidence"]
     assert [it["points"] for it in scored] == [1.0, 1.0, 1.5, 1.5]   # tf never changes a P3 point value
+
+
+def test_p3_clearance_magnitude_discounts_thin_close():
+    # 2026-08-05: a razor-thin HTF close (e.g. MES weekly_mid, 2026-07-22 09:20 ET -- wicked
+    # 10.75pts below the mid, closed only 1.0pt beyond) previously scored at an unweighted
+    # x1.0 (build_evidence_magnitude had no entry for a synthetic mid) -- same as a
+    # decisive, confidently-held close. A weak-clearance ratio (<0.5x avg range) must now
+    # discount it exactly like a P1 item already does.
+    item = _ev(criterion="P3", level="daily_mid", tf="1h", direction="accept")
+    weak = score_thesis_evidence([item], magnitude={("MNQ", "daily_mid", "1h"): 0.1})
+    strong = score_thesis_evidence([item], magnitude={("MNQ", "daily_mid", "1h"): 2.0})
+    neutral = score_thesis_evidence([item])
+    assert weak["scored_evidence"][0]["points"] == 0.75      # _P3_MID_POINTS["day"]=1.0 * 0.75
+    assert strong["scored_evidence"][0]["points"] == 1.25    # 1.0 * 1.25
+    assert neutral["scored_evidence"][0]["points"] == 1.0    # no magnitude -> x1.0, unchanged
 
 
 def test_p2_dominates_contradicting_p3_on_same_asset():

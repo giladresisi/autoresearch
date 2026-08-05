@@ -122,6 +122,16 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     # declared mature=True — previously this passed validation clean as long as the
     # (fabricated) net score happened to match the declared bias.
     level_htf_close_status = (facts or {}).get("level_htf_close_status")
+    # thesis.md §10 (2026-08-05): a partial-bar reversal (htf_reversal) changes what the
+    # "correct" declared direction actually is for a P1 item — a 'reverse' tier means the
+    # auto-injected (or a correctly-declared) item's direction is the OPPOSITE of the
+    # completed bar's own raw close, and an 'omit' tier means the item scores nothing
+    # regardless of direction. Without this, a model (or the auto-injection itself)
+    # correctly reflecting the reversal was flagged as a "mismatch" against the stale,
+    # pre-reversal fact — a real bug found the same day this mechanism shipped (2026-07-22
+    # 09:20 ET: MNQ london(cur)_low correctly declared 'reject' post-reversal, rejected on
+    # every retry against the raw 'accept').
+    htf_reversal = (facts or {}).get("htf_reversal")
     if level_htf_close_status:
         for i, item in enumerate(t.evidence or []):
             if not isinstance(item, dict) or item.get("criterion") not in ("P1", "P2"):
@@ -129,6 +139,9 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
             if not bool(item.get("mature")):
                 continue
             asset, level, tf = item.get("asset"), item.get("level"), item.get("tf")
+            rev_tier = ((htf_reversal or {}).get(asset) or {}).get(level, {}).get(tf, "none")
+            if rev_tier == "omit":
+                continue          # scores nothing either way -- direction is moot
             actual = ((level_htf_close_status.get(asset) or {}).get(level) or {}).get(tf)
             if actual is None:
                 r.add("semantic", "SEM_EVIDENCE_DIRECTION_MISMATCH",
@@ -137,10 +150,13 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
                       "— this item cannot be mature", f"thesis.evidence[{i}]")
                 continue
             actual_direction = "accept" if actual else "reject"
+            if rev_tier == "reverse":
+                actual_direction = "reject" if actual_direction == "accept" else "accept"
             if item.get("direction") != actual_direction:
                 r.add("semantic", "SEM_EVIDENCE_DIRECTION_MISMATCH",
                       f"{asset} {level} [{tf}] declared direction={item.get('direction')!r} "
-                      f"but the facts show it was actually {actual_direction!r}ed",
+                      f"but the facts show it was actually {actual_direction!r}ed"
+                      f"{' (post partial-bar reversal)' if rev_tier == 'reverse' else ''}",
                       f"thesis.evidence[{i}]")
 
     # ARI_THESIS_BIAS (§4/§9): the declared bias must match the sign of the code-computed
@@ -170,13 +186,16 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     week_extremes = (facts or {}).get("week_extremes")
     now_price = (facts or {}).get("now_price")
     fvg_zone_meta = (facts or {}).get("fvg_zone_meta")
+    mid_reclaim = (facts or {}).get("mid_reclaim")
+    htf_reversal = (facts or {}).get("htf_reversal")
     scoring = score_thesis_evidence(t.evidence, dol_available=dol_available,
                                     suppressed_p1_levels=suppressed_p1_levels,
                                     suppressed_p2_sites=suppressed_p2_sites,
                                     level_htf_close_status=level_htf_close_status,
                                     level_tiers=level_tiers, smt_candidates=smt_candidates,
                                     week_extremes=week_extremes, now_price=now_price,
-                                    fvg_zone_meta=fvg_zone_meta)
+                                    fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim,
+                                    htf_reversal=htf_reversal)
     if scoring["scored_evidence"]:
         if t.bias in BIASES and t.bias != scoring["expected_bias"]:
             r.add("arithmetic", "ARI_THESIS_BIAS",
@@ -481,7 +500,8 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                            suppressed_p1_levels=None, suppressed_p2_sites=None,
                            level_htf_close_status=None, level_tiers=None,
                            smt_candidates=None, week_extremes=None,
-                           now_price=None, fvg_zone_meta=None) -> dict:
+                           now_price=None, fvg_zone_meta=None,
+                           mid_reclaim=None, htf_reversal=None) -> dict:
     """Pure computation over the model-declared P1/P2 evidence ledger: per-item points
     (tier x tf x magnitude multiplier, zeroed if immature — enforcing the §3 maturity gate
     in code, not trust), the net score, the expected bias sign, and the §6 cross-asset
@@ -595,22 +615,76 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     above (which this mirrors for P5's own duplication shape). A lone zone, or one
     separated from its neighbors by a gap (a genuinely distinct move), is untouched.
     `fvg_zone_meta=None` (every pre-2026-08-02 call site) leaves P5 scoring exactly as
-    declared, unchanged."""
+    declared, unchanged.
+
+    P3-vs-P4 mid promotion (2026-08-05, PER TF as of the same-day rewrite): `mid_reclaim`
+    ({asset: {"daily_mid"|"weekly_mid": {"1h"|"4h": {"fresh": bool, "cross_dir":
+    "up"|"down"}}}}, derive_facts._mid_tf_state) decides WHICH criterion a mid's auto-
+    derived item takes, per (asset, mid, tf) — a mid's 1h and 4h crossings can genuinely
+    differ. A "fresh" crossing (the mid's crossing on THIS tf postdates, or ties, the
+    tier's own most-recent extreme on the tested side — nothing more extreme has happened
+    since) is a live, still-relevant reclaim/failed-reclaim EVENT and is promoted to P4
+    (`{mid}_high` for an up-cross, `{mid}_low` for a down-cross), NOT declared as P3 — the
+    same "P4-overrules-P3" logic already governs the dominance pre-pass above, just
+    applied at declaration time instead of via a later zeroing pass, so the ledger doesn't
+    carry a redundant P3 restatement of an event already covered by a P4 item. A "stale"
+    crossing (superseded by a later, more extreme move) or no `mid_reclaim` entry at all
+    (never crossed, or `mid_reclaim=None` — every pre-2026-08-05 call site) stays plain
+    P3, exactly as before. Motivating case (2026-07-22 09:20 ET): MNQ/MES's daily_mid was
+    crossed ~07:00-07:40 ET but BOTH assets then set a fresh, deeper daily low in the
+    08:55 ET bar — stale, P3 only. Their weekly_mid was crossed ~09:00 ET with no later,
+    deeper weekly low since, and a qualifying close already available — fresh, P4. Any
+    model-declared P3/P4 item for a mid this auto-derivation covers is dropped and
+    replaced — like P3 alone before it, this is now a plain fact lookup end to end
+    (position AND reclaim verdict), not a judgment call, so unlike P1/P2's own auto-
+    derivation there is no `exhausted: true` override lever here: a mid auto-derived as
+    P4 is HTF-confirmed by construction, not a staleness candidate.
+
+    Partial-bar reversal (2026-08-05): `htf_reversal` ({asset: {level_or_mid_name:
+    {"1h"|"4h": "none"|"discount"|"omit"|"reverse"}}}, derive_facts._htf_reversal_tier)
+    applies to EVERY P1/P3/P4 item (declared or auto-derived) whose (asset, level, tf) has
+    an entry — a completed bar's own accept/reject verdict is a settled fact, but if the
+    CURRENTLY-FORMING next bar has, by call time, already retraced back through the level
+    it is no longer safe to treat that verdict as if nothing has happened since. 'none' (or
+    no entry) leaves the item exactly as declared/auto-derived. 'discount' halves the
+    item's points (a partial recross, not yet a full retracement of the completed bar's
+    own body). 'omit' zeroes the item — same "zeroed, not scored" mechanic as the other
+    suppression gates — once the partial bar has fully engulfed the completed bar's body
+    but not yet its wick, neither the original nor a flipped read is safe to assert.
+    'reverse' flips the item's `direction` (accept<->reject) before computing side/points —
+    the partial bar has broken the completed bar's ENTIRE range (a clear MSS), the same
+    "model judges, code computes" mechanical certainty as everything else in this ledger.
+    `htf_reversal=None` (every pre-2026-08-05 call site) leaves every item exactly as
+    declared/auto-derived, unaffected."""
     if level_htf_close_status is not None:
         evidence = [
             it for it in (evidence or [])
-            if not (isinstance(it, dict) and it.get("criterion") == "P3"
+            if not (isinstance(it, dict) and it.get("criterion") in ("P3", "P4")
                     and (it.get("level") or "").startswith(("daily_mid", "weekly_mid")))
         ]
         for _asset in ("MNQ", "MES"):
             for _mid_name, _tier in (("daily_mid", "day"), ("weekly_mid", "week")):
                 _tf_map = (level_htf_close_status.get(_asset) or {}).get(_mid_name) or {}
+                _reclaim_by_tf = (mid_reclaim or {}).get(_asset, {}).get(_mid_name) or {}
                 # per-tf, not "prefer 4h": if 1h/4h genuinely disagree, inject BOTH (the
                 # existing tf-dedup pre-pass below collapses them back to one when they
                 # AGREE on direction -- same reasoning as the P1/P2 auto-derivation below).
                 for _tf in ("1h", "4h"):
                     _val = _tf_map.get(_tf)
-                    if _val is not None:
+                    if _val is None:
+                        continue
+                    _reclaim = _reclaim_by_tf.get(_tf)
+                    if _reclaim and _reclaim.get("fresh"):
+                        _up = _reclaim.get("cross_dir") == "up"
+                        _held = _val if _up else not _val
+                        evidence.append({
+                            "criterion": "P4", "asset": _asset,
+                            "level": f"{_mid_name}_{'high' if _up else 'low'}",
+                            "tier": _tier, "tf": _tf,
+                            "direction": "accept" if _held else "reject",
+                            "mature": True, "exhausted": False,
+                        })
+                    else:
                         evidence.append({
                             "criterion": "P3", "asset": _asset, "level": _mid_name,
                             "tier": _tier, "tf": _tf,
@@ -694,6 +768,31 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                             "direction": "accept" if _val3 else "reject",
                             "mature": True, "exhausted": False,
                         })
+
+    # Partial-bar reversal (2026-08-05, see docstring): applied BEFORE the dominance/
+    # dedup pre-passes below so they see the corrected picture too -- an 'omit'ted item
+    # must not participate in a cross-asset contradiction or dominance vote either, and a
+    # 'reverse'd item's flipped direction is what actually happened, not a footnote applied
+    # only at final scoring. 'discount' needs no pre-processing here (direction is
+    # unchanged, only its weight); tagged for the final points formula below instead.
+    if htf_reversal is not None:
+        _reversed_evidence = []
+        for _it in (evidence or []):
+            if not isinstance(_it, dict) or _it.get("criterion") not in ("P1", "P3", "P4"):
+                _reversed_evidence.append(_it)
+                continue
+            _tier = ((htf_reversal.get(_it.get("asset")) or {}).get(_it.get("level")) or {}
+                    ).get(_it.get("tf"), "none")
+            if _tier == "omit":
+                continue
+            if _tier == "reverse" and _it.get("direction") in ("accept", "reject"):
+                _it = {**_it, "direction": "reject" if _it["direction"] == "accept" else "accept",
+                      "htf_reversal": "reverse"}
+            elif _tier == "discount":
+                _it = {**_it, "htf_reversal": "discount"}
+            _reversed_evidence.append(_it)
+        evidence = _reversed_evidence
+
     # thesis.md §6 extension: an HTF-confirmed P4 reclaim/failed-reclaim on ONE asset should
     # outweigh a contradicting P3 (static position) read on the OTHER asset at the SAME mid,
     # not be netted against it as an equal, offsetting data point — P4 is a dynamic,
@@ -933,11 +1032,16 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
         p5_deduped = id(item) in _p5_dedup_zero
         suppressed = p1_suppressed or p2_suppressed or p3_dominated or tf_deduped or p5_deduped
         scored_mature = mature and not exhausted and not suppressed
+        # thesis.md §10 (2026-08-05): a 'discount' partial-bar reversal (see the pre-pass
+        # above) halves the item's points -- a partial recross of the level, not yet a
+        # full retracement of the completed bar's own body.
+        reversal_mult = 0.5 if item.get("htf_reversal") == "discount" else 1.0
         if item.get("criterion") == "P3" and item.get("level") in ("daily_mid", "weekly_mid"):
             _p3_base = _P3_MID_POINTS["day" if item.get("level") == "daily_mid" else "week"]
-            points = round(_p3_base * mag_mult, 4) if scored_mature else 0.0
+            points = round(_p3_base * mag_mult * reversal_mult, 4) if scored_mature else 0.0
         else:
-            points = round(_BASE_POINTS * tf_mult * tier_mult * mag_mult, 4) if scored_mature else 0.0
+            points = (round(_BASE_POINTS * tf_mult * tier_mult * mag_mult * reversal_mult, 4)
+                     if scored_mature else 0.0)
         side = _item_side(item)
         if side == "UP":
             net += points

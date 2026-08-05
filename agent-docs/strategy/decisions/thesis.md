@@ -655,14 +655,17 @@ This mechanic lets the former dominate the latter rather than washing out to a n
   DOL menu before declaring bias) so it converges without needing the correction spelled out on
   a retry; §10 has the worked example that motivated this (2026-07-17 ET, deep in a multi-day
   MNQ/MES decline).
-- **Gap:** the code-derived evidence ledger (§9; `validate_contracts.score_thesis_evidence`)
-  covers P1 and P2 only — both share the same accept/reject-of-a-sweep shape (level, tier, tf,
-  direction). P3 (equilibrium position — no sweep, no accept/reject) and P4 (reclaim/failed-
-  reclaim — a different two-step shape) are NOT yet expressible in this ledger and remain
-  reasoning-only, scored by the model's self-report the way the whole thesis was before this
-  gap was partially closed. A future ledger shape for P3/P4 is a natural follow-up, not done
-  here (deliberately scoped to the two criteria that produced the observed 2026-07-02 08:00
-  bugs — sign misclassification and bias-contradicts-net-score, both P1-driven).
+- **Closed (2026-08-02/2026-08-05):** the code-derived evidence ledger (§9;
+  `validate_contracts.score_thesis_evidence`) originally covered P1 and P2 only — both share
+  the same accept/reject-of-a-sweep shape (level, tier, tf, direction); P3 (equilibrium
+  position — no sweep, no accept/reject) and P4 (reclaim/failed-reclaim — a different two-step
+  shape) were not yet expressible and stayed reasoning-only, scored by the model's self-report.
+  Both are now FULLY AUTOMATIC: P3 was closed first (2026-08-02, `level_htf_close_status`
+  auto-injection); P4 followed (2026-08-05, `mid_reclaim` — see §10) once it became clear a
+  live reclaim/failed-reclaim event was, in practice, never actually being declared by the
+  model, leaving it permanently under-evidenced as a mere P3 snapshot. The model no longer
+  declares P3 or P4 at all — code decides which of the two applies per mid, per tf, and injects
+  it directly.
 - **Gap:** §6's cross-asset contradiction detection in `score_thesis_evidence` only catches an
   EXACT shared level name evidenced with differing `direction` on both assets (e.g. both assets
   carry a P1 item on `prev1_day_high`). It does not yet resolve "analogous" levels with
@@ -836,6 +839,83 @@ had been mis-told: the level actually tested and rejected around 19:00-19:04 ET 
 itself (swept 19:04 ET, 4 minutes after the nested `prev3_day_low` touch at 19:00 ET), not
 `prev3_day_low` — the frontier level, once it fires its own candidate, was the real signal all
 along, no exception mechanism needed to preserve it.
+
+**2026-08-05 09:20 ET — P3's clearance was unweighted, and a stale mid-crossing scored as if it
+were a live reclaim.** Two related gaps found together on the same MNQ/MES 2026-07-22 09:20 ET
+call:
+
+- **P3 had no clearance-magnitude discount.** `build_evidence_magnitude` had no entry in
+  `bundle.levels` for the synthetic `daily_mid`/`weekly_mid` "levels" (they live only in
+  `bundle.htf_close_status`), so every P3 mid item's `mag_ratio` was always `None` → an
+  unweighted x1.0 multiplier regardless of how thin the clearance was. Concretely: MES's
+  weekly_mid (7513.75) wicked to 7503.25 (10.75pts below) before closing the 1h bar at just
+  7514.75 — a 1.0pt scrape-by — scored identically to a decisive, confidently-held close. Fixed
+  by threading the mid's own price through `bundle.mid_price` so `build_evidence_magnitude` can
+  compute a ratio for it exactly like a named level (`derive_facts.build_evidence_magnitude`).
+- **A stale mid-crossing was declared as if it were the live story.** MNQ/MES's `daily_mid` was
+  last crossed ~07:00-07:40 ET, but BOTH assets then set a fresh, DEEPER daily low in the 08:55
+  ET bar — the crossing was already old news by call time, yet the ledger (both the P3 auto-
+  injection and, if declared, a P4 reclaim item) had no way to tell "the last crossing" from "the
+  last crossing that still matters." Meanwhile the SAME assets' `weekly_mid` crossings (~09:00 ET)
+  postdated the week's own extremes with no later, deeper move since — a genuinely live reclaim
+  test with a qualifying close already available. `derive_facts._mid_tf_state` (originally
+  shipped this same day as `_mid_reclaim_state` — see the immediate follow-up entry below for
+  why it was rewritten) classifies each mid's crossing, per tf, as "fresh" (still the frontier
+  of its tier on the tested side — promote to P4, a genuine reclaim/failed-reclaim EVENT) or
+  "stale" (superseded by a later, more extreme move — stays plain P3 position). `score_thesis_
+  evidence`'s P3 auto-injection checks this (`mid_reclaim`, threaded the same way
+  `level_htf_close_status` already is) and promotes fresh crossings to P4 instead of declaring
+  them P3 — closing the gap where P4 was model-declared-only and the model, in practice, never
+  declared it, leaving a genuine live reclaim test permanently under-evidenced as a mere static
+  snapshot. Like P3 alone before it, this whole surface (position AND reclaim verdict) is now a
+  plain fact lookup end to end — no model judgment, no `exhausted: true` override; a mid
+  auto-derived as P4 is HTF-confirmed by construction, not a staleness candidate.
+
+**2026-08-05 09:20 ET (same day, immediate follow-up) — the crossing anchor itself was still
+wrong, and a stale completed-bar verdict was scored as if the currently-forming bar hadn't
+already reversed it.** Two more gaps, found while checking WHY MNQ's own `weekly_mid` (the
+asset the user was most directly asking about) never showed up in the ledger at all, despite
+its 08:00-09:00 1h bar visibly sweeping the mid from above and closing below it:
+
+- **The single, 1s-level `swept_at` anchor could hide an already-COMPLETED bar's own settled
+  test.** The first `_mid_reclaim_state` design (above) still anchored to `_last_mid_crossing`'s
+  single most-recent 1s-level crossing — fine for a named P1 level (swept once, permanently
+  "active" thereafter) but wrong for a mid, which is retested constantly (normal/expected for an
+  equilibrium). MNQ's weekly_mid 08:00-09:00 1h bar closed decisively below the mid, but a 1s-
+  level re-touch at 09:02:47 ET — INSIDE the still-forming 09:00-10:00 bar — reset the anchor
+  past that close entirely; `_htf_close_status`'s `closed_at > swept_at` filter then excluded
+  the 08:00-09:00 bar's own close, since it closed BEFORE the new (immature) anchor. The whole
+  test became invisible — immature — even though a fully decisive, completed bar existed.
+  Fixed by decoupling two questions in the rewritten `_mid_tf_state`: the VERDICT always reads
+  the MOST RECENTLY COMPLETED `<tf>` bar's own close (mature whenever the mid has been crossed
+  at least once among completed `<tf>` bars, against the mid's CURRENT value — the same
+  approximation the rest of this module already makes for a moving mid); FRESHNESS is anchored
+  separately, to the last bar-to-bar side change among COMPLETED `<tf>` bars specifically (not
+  1s data), compared against the tier's own extreme timestamp exactly as before. `mid_reclaim`
+  became per-tf (`{asset: {mid: {"1h"|"4h": {...}}}}`) as part of this — a mid's 1h and 4h
+  crossings can genuinely disagree on freshness (confirmed on this exact call: MNQ's weekly_mid
+  was fresh on 1h but stale on 4h).
+- **A completed bar's verdict doesn't account for what the market has ALREADY done since.** Even
+  once MNQ's weekly_mid 08:00-09:00 bar was correctly recognized (closed below, bearish), the
+  09:00-09:20 ET partial bar had already rallied from 29017 to 29079.25 — past not just the
+  level, but past the completed bar's own OPEN (29055.00) AND its own HIGH (29072.00): a clear
+  MSS. Declaring that bar's bearish verdict at full weight, unqualified, would have been
+  actively misleading — the reversal was already visibly underway by call time. New
+  `derive_facts._htf_reversal_tier` (`bundle.htf_reversal`, `{asset: {level_or_mid: {tf:
+  "none"|"discount"|"omit"|"reverse"}}}`, applied to P1 AND P3/P4 alike) classifies how far the
+  currently-forming next-`<tf>` bar has already retraced through the level by call time: merely
+  recrossed it → 'discount' (half points); also past the completed bar's own OPEN (a full body
+  engulf) → 'omit' (drop the item, neither read is safe); ALSO past the completed bar's own WICK
+  extreme → 'reverse' (flip accept↔reject — a clear break of that bar's entire range). On this
+  call: MNQ's weekly_mid (now correctly promoted to P4) and MNQ's `london(cur)_low` (P1,
+  previously declared accept/DOWN) BOTH reverse — net score flips from a thin DOWN lean to a
+  clear UP lean (+4.25), correctly tracking the actual rally rather than a stale bearish read.
+  Deliberately a HARD, automatic rule (no `exhausted: true` override, unlike P2's stretch
+  suggestion) — the comparison is entirely mechanical (bar OHLC vs. current price), the same
+  "model judges, code computes" mechanical certainty as the rest of this ledger, not a judgment
+  call the model could reasonably disagree with. Applied BEFORE the existing dominance/dedup
+  pre-passes so they see the corrected picture too — an omitted item must not win a cross-asset
+  contradiction vote either, and a reversed item's flipped direction is what actually happened.
 
 **2026-07-23 07:00 ET (again) — a stale P1 sweep outweighed materially more recent equilibrium
 behavior.** `prev1_day_low` swept ~3h before the call; price had since fully round-tripped to the

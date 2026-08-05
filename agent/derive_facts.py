@@ -284,6 +284,137 @@ def _last_mid_crossing(close: pd.Series, mid: float) -> Optional[pd.Timestamp]:
     return crossings[-1] if len(crossings) else None
 
 
+_TF_FREQ = {"1h": pd.Timedelta(hours=1), "4h": pd.Timedelta(hours=4)}
+
+
+def _last_completed_bar(df: pd.DataFrame, tf: str, now: pd.Timestamp) -> Optional[dict]:
+    """The most recently COMPLETED <tf> bar strictly at/before `now` -- {open, high, low,
+    close, closed_at}, or None if no completed bar exists yet. Used by _mid_tf_state and
+    the §10 (2026-08-05) partial-bar reversal check, which need the completed bar's FULL
+    range (not just its close, which _htf_close_status already exposes) to tell how far
+    the currently-forming NEXT bar has already retraced back through it."""
+    freq = _TF_FREQ[tf]
+    bars = ohlc(df, tf).iloc[:-1]                   # drop the still-forming trailing bar
+    if len(bars) == 0:
+        return None
+    closed_at = bars.index + freq
+    eligible = bars[closed_at <= now]
+    if len(eligible) == 0:
+        return None
+    row = eligible.iloc[-1]
+    return {"open": float(row["open"]), "high": float(row["high"]), "low": float(row["low"]),
+           "close": float(row["close"]), "closed_at": (eligible.index + freq)[-1]}
+
+
+def _mid_tf_state(df: pd.DataFrame, mid: float, tf: str, now: pd.Timestamp,
+                  hi_ts, lo_ts) -> tuple:
+    """thesis.md §10 (2026-08-05 rewrite): per-tf mid status + P3-vs-P4 freshness, anchored
+    to COMPLETED <tf>-bar closes rather than the single most recent 1s-level crossing.
+
+    A mid, unlike a named P1 level (swept once, permanently 'active' thereafter), has no
+    fixed side and is retested constantly -- normal, expected for an equilibrium. Anchoring
+    maturity to "time since the single most recent crossing" (a plain swept level's own
+    convention) means ANY re-touch, even one still inside the currently-FORMING bar, can
+    hide an already-COMPLETED, decisive bar's own settled test. Motivating case (2026-07-22
+    09:00-09:20 ET): MNQ's weekly_mid 08:00-09:00 1h bar closed decisively below the mid
+    (swept from above), but a 1s-level re-touch at 09:02:47 ET -- INSIDE the still-forming
+    09:00-10:00 bar -- reset the old single, 1s-anchored `swept_at` past that close
+    entirely, making the whole test invisible (immature) to _htf_close_status.
+
+    Fixed by decoupling two questions: (1) the VERDICT always reads the MOST RECENTLY
+    COMPLETED <tf> bar's own close, mature whenever the mid has been crossed at least once
+    among completed <tf> bars (against the mid's CURRENT value -- the same approximation
+    the rest of this module already makes for a moving mid); (2) FRESHNESS (for the P3-vs-
+    P4 promotion) is anchored to that SAME bar-to-bar crossing -- the last COMPLETED <tf>
+    bar whose close changed sides relative to the PRECEDING completed <tf> bar's close --
+    compared against the tier's own most-recent extreme timestamp on the tested side
+    (`hi_ts` for an up-cross, `lo_ts` for a down-cross; at/before the crossing -> fresh).
+
+    Returns (status, reclaim): `status` is _htf_close_status's per-tf shape ({"close",
+    "beyond", "closed_at", "n_closed_since"}) or None (immature -- never crossed within
+    `SMT_LOOKBACK_HOURS` (24h) at 1s granularity, or no completed bar exists yet); `reclaim`
+    is {"fresh": bool, "cross_dir": "up"|"down"} or None (mirrors status's maturity).
+
+    Two DIFFERENT bounds, for two different questions -- collapsing them into one caused a
+    same-day regression (2026-07-27 09:20 ET, MNQ weekly_mid REJECTED): (1) "is this mid
+    relevant AT ALL right now" is bounded to the recent 24h window (`SMT_LOOKBACK_HOURS`,
+    1s-granularity `_last_mid_crossing` -- reused unchanged from the ORIGINAL, already-
+    correct design) -- without this bound, a mid that has simply sat on ONE side for its
+    entire visible history (2026-07-27 09:20 ET, MES weekly_mid) would spuriously "cross"
+    days earlier purely because the mid's CURRENT value differs from where price was that
+    far back. (2) "which bar's close is the verdict, and when was the crossing that
+    produced it" is UNBOUNDED (searches the full available `df`) once (1) has confirmed
+    relevance -- restricting bar-to-bar crossing search to the SAME 24h window as (1) can
+    cut off the "before" bar needed to detect a crossing sitting near the window's edge,
+    wrongly hiding an otherwise-valid, older verdict (the regression this fixes)."""
+    freq = _TF_FREQ[tf]
+    wide = df["close"].loc[now - pd.Timedelta(hours=SMT_LOOKBACK_HOURS):now]
+    if _last_mid_crossing(wide, mid) is None:
+        return None, None                          # not relevant right now -- never crossed recently
+    bars = ohlc(df, tf).iloc[:-1]                   # unbounded: which bar/crossing, once relevant
+    if len(bars) == 0:
+        return None, None
+    crossed_at_open = _last_mid_crossing(bars["close"], mid)
+    if crossed_at_open is None:
+        return None, None
+    swept_at = crossed_at_open + freq
+    cross_dir = "up" if float(bars["close"].loc[crossed_at_open]) > mid else "down"
+    closed_at = bars.index[-1] + freq
+    if closed_at > now:
+        return None, None
+    close = float(bars["close"].iloc[-1])
+    status = {
+        "close": close, "beyond": close > mid, "closed_at": closed_at,
+        "n_closed_since": int(((bars.index + freq) > swept_at).sum()),
+    }
+    extreme_ts = hi_ts if cross_dir == "up" else lo_ts
+    reclaim = {"fresh": extreme_ts is None or extreme_ts <= swept_at, "cross_dir": cross_dir}
+    return status, reclaim
+
+
+def _htf_reversal_tier(bar: dict, level_price: float, now_price: float) -> str:
+    """thesis.md §10 (2026-08-05): does the CURRENTLY-FORMING next-tf bar, as of the call,
+    already undermine `bar`'s (the just-completed bar) own accept/reject verdict at
+    `level_price`? A partial bar is never its own evidence (still immature by construction,
+    §3) -- but ignoring how far it has ALREADY reversed by call time treats a stale,
+    already-invalidated verdict as if nothing has happened since.
+
+    Three severities, gated on `now_price` having already recrossed `level_price` back to
+    the OPPOSITE side from where `bar` closed (the necessary precondition for all three):
+    - 'discount': recrossed the level, but `now_price` has not yet reached `bar`'s own OPEN
+      (has not fully retraced/engulfed that bar's own body) -- lower the item's points.
+    - 'omit': also past `bar`'s OPEN (a full body engulf of the completed bar) but not yet
+      past its WICK extreme (high, reversing up; low, reversing down) -- drop the item from
+      the ledger entirely; neither the original nor a flipped read is safe to assert.
+    - 'reverse': also past `bar`'s own WICK extreme -- a clear break of that bar's ENTIRE
+      range, an MSS by construction -- flip the verdict (accept<->reject) rather than merely
+      discount or omit it.
+    'none' if the level has not been recrossed at all -- `bar`'s verdict stands, unaffected,
+    at full weight.
+
+    Motivating case (2026-07-22 09:00-09:20 ET): MNQ's 08:00-09:00 1h bar (O29055.00
+    H29072.00 L28961.25 C29016.75) closed BELOW both its own weekly_mid (29031.75) and
+    london(cur)_low (29026.0) -- a bearish verdict on each. By 09:20 ET (now_price
+    29079.25), the forming 09:00-10:00 bar has already traded not just back above both
+    levels, but above the 08:00-09:00 bar's own OPEN (29055.00) AND its own HIGH
+    (29072.00) -- 'reverse' on both: a clear MSS, not just a marginal poke back across."""
+    closed_above = bar["close"] > level_price
+    now_above = now_price > level_price
+    if now_above == closed_above:
+        return "none"
+    if closed_above:            # bar closed ABOVE -> reversal tested DOWNWARD
+        if now_price >= bar["open"]:
+            return "discount"
+        if now_price >= bar["low"]:
+            return "omit"
+        return "reverse"
+    if now_price <= bar["open"]:    # bar closed BELOW -> reversal tested UPWARD
+        return "discount"
+    if now_price <= bar["high"]:
+        return "omit"
+    return "reverse"
+
+
 def age_min(ts, now):
     return (now - ts).total_seconds() / 60.0
 
@@ -689,6 +820,33 @@ class FactsBundle:
     # thesis.md §3a: near-maturity pre-confirmation candidates (bounded exception to §3) —
     # see _near_maturity_candidates for the shape of each entry.
     near_maturity_candidates: list = field(default_factory=list)
+    # thesis.md §10 (2026-08-05): {tkr: timestamp} of the SAME extended-window frames
+    # day_hi/day_lo/week_hi/week_lo are computed from — needed by the P3-vs-P4 mid
+    # auto-derivation (_mid_tf_state) to tell whether a mid's crossing predates or
+    # postdates the tier's own most-recent extreme.
+    day_hi_ts: dict = field(default_factory=dict)
+    day_lo_ts: dict = field(default_factory=dict)
+    week_hi_ts: dict = field(default_factory=dict)
+    week_lo_ts: dict = field(default_factory=dict)
+    # thesis.md §10 (2026-08-05): {tkr: {"daily_mid"|"weekly_mid": price}} — the synthetic
+    # mid's own price, needed to compute its clearance magnitude (build_evidence_magnitude)
+    # the same way a named level's price already is.
+    mid_price: dict = field(default_factory=dict)
+    # thesis.md §10 (2026-08-05): {tkr: {"daily_mid"|"weekly_mid": {"1h"|"4h": {"fresh":
+    # bool, "cross_dir": "up"|"down"}}}} — see _mid_tf_state. PER TF (a mid's 1h and 4h
+    # crossings can differ). "fresh" = the mid's crossing on THIS tf postdates (or ties)
+    # the tier's own most-recent extreme on the tested side, i.e. nothing MORE extreme has
+    # happened since — a live, still-relevant reclaim test, P4-eligible. "stale" (fresh=
+    # False) = a later, more extreme move has already superseded the crossing — old news,
+    # plain P3 position only.
+    mid_reclaim: dict = field(default_factory=dict)
+    # thesis.md §10 (2026-08-05): {tkr: {level_or_mid_name: {"1h"|"4h": "none"|"discount"|
+    # "omit"|"reverse"}}} — see _htf_reversal_tier. Whether the CURRENTLY-FORMING next-tf
+    # bar, as of the call, has already undermined the just-completed bar's own accept/
+    # reject verdict at this level. Applies to P1 (named levels) and P3/P4 (mids) alike —
+    # mid entries are additionally registered under both P4-promoted names (`{mid}_high`/
+    # `{mid}_low`), same pattern as mid_price/build_evidence_magnitude.
+    htf_reversal: dict = field(default_factory=dict)
 
 
 def render_facts_text(bundle: FactsBundle) -> str:
@@ -1284,6 +1442,7 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
         swept_map = (bundle.swept_at or {}).get(tkr, {})
         suppressed = (bundle.suppressed_p1_levels or {}).get(tkr, set())
         stale = (bundle.p1_equilibrium_stale or {}).get(tkr, {})
+        reversal = (bundle.htf_reversal or {}).get(tkr, {})
         rendered_any = False
         for name, tf_map in status.items():
             if swept_map.get(name) is None:      # never swept -> not evidence, skip entirely
@@ -1305,8 +1464,10 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
                     ratio = (magnitude or {}).get((tkr, name, tf))
                     label = _magnitude_label(ratio)
                     tag = f" [clearance: {label}]" if label else ""
+                    rev = (reversal.get(name) or {}).get(tf, "none")
+                    rev_tag = f" [PARTIAL-BAR {rev.upper()}]" if rev != "none" else ""
                     A(f"  {tkr} {name} [{tf}]: close={info['close']} @ {info['closed_at']} "
-                      f"(n={info['n_closed_since']}) -> {read}{tag}{stale_tag}{note}")
+                      f"(n={info['n_closed_since']}) -> {read}{tag}{stale_tag}{note}{rev_tag}")
         if not rendered_any:
             A(f"  {tkr}: (none)")
     A("\nSMT candidates (meaningful = day/week tier, eligible for thesis.md P2; "
@@ -1490,17 +1651,31 @@ def build_evidence_magnitude(bundle: FactsBundle) -> dict:
     Covers ALL swept levels x tf so score_thesis_evidence can look up whatever level/tf the
     model later declares; a missing key -> neutral x1.0. Skips immature/None closes and
     None/zero avg_range. Built where the FactsBundle lives (bench.build_facts), never
-    recomputed in run_agent — the scorer receives only this flat ratio dict."""
+    recomputed in run_agent — the scorer receives only this flat ratio dict.
+
+    2026-08-05: daily_mid/weekly_mid get a ratio too, sourced from `bundle.mid_price`
+    (they carry no entry in `bundle.levels` — synthetic, not a named level) — previously
+    silently skipped here, so every P3 mid item scored at an unweighted x1.0 regardless of
+    how thin its clearance was (thesis.md §10, 2026-08-05). The SAME ratio is also registered under
+    the level's two possible P4-promoted names (`{mid}_high`/`{mid}_low`, see _mid_tf_state)
+    since the underlying close/level_price/avg_range distance is identical regardless of
+    which criterion the auto-derivation ultimately picks."""
     out: dict = {}
     avg = {"1h": bundle.avg_range_1h or {}, "4h": bundle.avg_range_4h or {}}
     for tkr in ("MNQ", "MES"):
         status = (bundle.htf_close_status or {}).get(tkr, {})
         levels = (bundle.levels or {}).get(tkr, {})
+        mid_prices = (bundle.mid_price or {}).get(tkr, {})
         for name, tf_map in status.items():
             tup = levels.get(name)
-            if not tup or not isinstance(tup[0], (int, float)):
+            if tup and isinstance(tup[0], (int, float)):
+                level_price = tup[0]
+                names = (name,)
+            elif name in mid_prices and isinstance(mid_prices[name], (int, float)):
+                level_price = mid_prices[name]
+                names = (name, f"{name}_high", f"{name}_low")
+            else:
                 continue
-            level_price = tup[0]
             for tf in ("1h", "4h"):
                 info = (tf_map or {}).get(tf)
                 if not info:
@@ -1508,7 +1683,9 @@ def build_evidence_magnitude(bundle: FactsBundle) -> dict:
                 ar = avg[tf].get(tkr)
                 if not isinstance(ar, (int, float)) or ar <= 0:
                     continue
-                out[(tkr, name, tf)] = round(abs(info["close"] - level_price) / ar, 4)
+                ratio = round(abs(info["close"] - level_price) / ar, 4)
+                for nm in names:
+                    out[(tkr, nm, tf)] = ratio
     return out
 
 
@@ -1693,6 +1870,9 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
             bundle.week_hi[tkr] = float(h)
         if l is not None:
             bundle.week_lo[tkr] = float(l)
+        if len(wkf):
+            bundle.week_hi_ts[tkr] = wkf["high"].idxmax()
+            bundle.week_lo_ts[tkr] = wkf["low"].idxmin()
         dh, dl, dch, dcl = hl(sess_now)
         L(f"day running: high={dh} (at {sess_now['high'].idxmax()}) low={dl} "
               f"(at {sess_now['low'].idxmin()}) mid={(dh + dl) / 2}")
@@ -1714,6 +1894,9 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
             bundle.day_hi[tkr] = float(dh_ext)
         if dl_ext is not None:
             bundle.day_lo[tkr] = float(dl_ext)
+        if len(day_ext_frame):
+            bundle.day_hi_ts[tkr] = day_ext_frame["high"].idxmax()
+            bundle.day_lo_ts[tkr] = day_ext_frame["low"].idxmin()
         for tf, win, dst in (("1h", 20, bundle.avg_range_1h), ("4h", 10, bundle.avg_range_4h)):
             bars = ohlc(df, tf).iloc[:-1]                 # completed bars only
             if len(bars) == 0:
@@ -1806,24 +1989,38 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
     bundle.htf_close_status = {}
     for tkr in ("MNQ", "MES"):
         bundle.htf_close_status[tkr] = {}
+        bundle.htf_reversal[tkr] = {}
+        now_price_tkr = float(data[tkr]["close"].iloc[-1])
         for name, (price, body, side, tier, active_from) in levels[tkr].items():
             if side is None:
                 continue
-            bundle.htf_close_status[tkr][name] = _htf_close_status(
+            status = _htf_close_status(
                 data[tkr], bundle.swept_at[tkr].get(name), price=price, side=side, now=now)
+            bundle.htf_close_status[tkr][name] = status
+            # thesis.md §10 (2026-08-05): does the currently-forming next-tf bar already
+            # undermine this (mature) verdict? See _htf_reversal_tier.
+            rev_by_tf = {}
+            for tf in ("1h", "4h"):
+                if status.get(tf) is None:
+                    continue
+                bar = _last_completed_bar(data[tkr], tf, now)
+                if bar is None:
+                    continue
+                rev_by_tf[tf] = _htf_reversal_tier(bar, price, now_price_tkr)
+            if rev_by_tf:
+                bundle.htf_reversal[tkr][name] = rev_by_tf
 
-    # plan 17 Fix 3: daily_mid / weekly_mid as synthetic per-asset "levels" fed through the
-    # SAME _htf_close_status() machinery, so render_evidence_text's per-level loop renders a
-    # [1h]/[4h] ACCEPTED/REJECTED verdict for the mid — the P4 (HTF-confirmed reclaim /
-    # failed-reclaim) anchor that was missing (thesis.md §3), previously only a bare number.
-    # swept_at = the LAST crossing of the mid within SMT_LOOKBACK_HOURS (no crossing ->
-    # None -> the render loop skips it, same as an unswept level; a mid price straddles at
-    # the call is correctly left immature). side is FIXED "above" (a mid has no inherent
-    # side the way a named high/low does): beyond=True means the most-recent qualifying HTF
-    # bar CLOSED ABOVE the mid -> reclaim HELD (ACCEPTED, bullish); below -> failed reclaim
-    # (REJECTED, bearish). This direction-consistent convention makes the ACCEPTED/REJECTED
-    # label meaningful without a per-name side and yields the correct failed-reclaim read on
-    # the 2026-07-27 motivating case (1h closes sat below the weekly mid -> REJECTED).
+    # plan 17 Fix 3 / §10 (2026-08-05 rewrite): daily_mid / weekly_mid as synthetic per-
+    # asset "levels" fed through the SAME _htf_close_status()-shaped machinery, so
+    # render_evidence_text's per-level loop renders a [1h]/[4h] ACCEPTED/REJECTED verdict
+    # for the mid -- the P4 (HTF-confirmed reclaim / failed-reclaim) anchor that was
+    # missing (thesis.md §3), previously only a bare number. beyond=True means the
+    # relevant COMPLETED <tf> bar CLOSED ABOVE the mid -> reclaim HELD (ACCEPTED,
+    # bullish); below -> failed reclaim (REJECTED, bearish). Per-tf via _mid_tf_state
+    # (2026-08-05): a mid is retested constantly (normal for an equilibrium, unlike a
+    # one-time-swept named level), so the verdict/freshness are anchored to COMPLETED
+    # <tf>-bar crossings, immune to a sub-bar re-touch inside a still-forming bar hiding
+    # an already-settled test (the 2026-07-22 09:00-09:20 ET MNQ weekly_mid case).
     for tkr in ("MNQ", "MES"):
         dh, dl = bundle.day_hi.get(tkr), bundle.day_lo.get(tkr)
         wh, wl = bundle.week_hi.get(tkr), bundle.week_lo.get(tkr)
@@ -1832,12 +2029,38 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
             mids["daily_mid"] = round((dh + dl) / 2.0, 2)
         if wh is not None and wl is not None:
             mids["weekly_mid"] = round((wh + wl) / 2.0, 2)
-        wide = data[tkr]["close"].loc[now - pd.Timedelta(hours=SMT_LOOKBACK_HOURS):now]
+        now_price_tkr = float(data[tkr]["close"].iloc[-1])
+        bundle.mid_price[tkr] = {}
+        bundle.mid_reclaim[tkr] = {}
         for mname, mid in mids.items():
-            swept_at = _last_mid_crossing(wide, mid)
-            bundle.swept_at[tkr][mname] = swept_at
-            bundle.htf_close_status[tkr][mname] = _htf_close_status(
-                data[tkr], swept_at, price=mid, side="above", now=now)
+            bundle.mid_price[tkr][mname] = mid
+            hi_ts, lo_ts = ((bundle.day_hi_ts.get(tkr), bundle.day_lo_ts.get(tkr))
+                           if mname == "daily_mid"
+                           else (bundle.week_hi_ts.get(tkr), bundle.week_lo_ts.get(tkr)))
+            status_by_tf, reclaim_by_tf, rev_by_tf = {}, {}, {}
+            for tf in ("1h", "4h"):
+                status, reclaim = _mid_tf_state(data[tkr], mid, tf, now, hi_ts, lo_ts)
+                status_by_tf[tf] = status
+                if reclaim is not None:
+                    reclaim_by_tf[tf] = reclaim
+                if status is not None:
+                    bar = _last_completed_bar(data[tkr], tf, now)
+                    if bar is not None:
+                        rev_by_tf[tf] = _htf_reversal_tier(bar, mid, now_price_tkr)
+            bundle.htf_close_status[tkr][mname] = status_by_tf
+            # rendering/legacy scalar ("was this mid ever swept at all" gate for the S9
+            # close-status loop, which is shared with P1) -- prefer 1h, fall back to 4h so
+            # a mature 4h-only reading (1h still immature) is not skipped entirely.
+            bundle.swept_at[tkr][mname] = next(
+                (status_by_tf[tf]["closed_at"] for tf in ("1h", "4h") if status_by_tf.get(tf)),
+                None)
+            if reclaim_by_tf:
+                bundle.mid_reclaim[tkr][mname] = reclaim_by_tf
+            if rev_by_tf:
+                # register under all names a later criterion promotion could use (mirrors
+                # build_evidence_magnitude's own {mid}/{mid}_high/{mid}_low pattern).
+                for nm in (mname, f"{mname}_high", f"{mname}_low"):
+                    bundle.htf_reversal[tkr][nm] = rev_by_tf
 
     L("\n## S3 CROSS-TICKER SWEEP MATRIX (same level name; one swept + other not = divergence candidate)")
     shared = sorted(set(levels["MNQ"]) & set(levels["MES"]))

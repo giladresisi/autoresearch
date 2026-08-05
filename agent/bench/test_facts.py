@@ -427,16 +427,25 @@ def test_weekly_mid_htf_verdict_rejected_2026_07_27(source):
 def test_weekly_mid_htf_verdict_accepted_reclaim_2026_07_22(source):
     # Plan Fix 3 test 2 (HTF reclaim-from-below): at 2026-07-22 09:20 ET MES's most recent
     # completed 1h bar closed ABOVE its weekly mid -> ACCEPTED (held reclaim, beyond=True).
-    # NOTE (reported divergence from the plan's literal expectation): MNQ's weekly_mid is
-    # NOT a mature ACCEPTED here — MNQ price is straddling its own weekly mid at the call
-    # (last crossing 09:02:47, no qualifying completed 1h close since), so a faithful
-    # implementation must leave it immature rather than fabricate an ACCEPTED verdict.
+    #
+    # 2026-08-05 correction: an EARLIER version of this test asserted MNQ's weekly_mid
+    # stayed immature here, on the theory that "MNQ straddles its mid at this instant" was
+    # the honest read. That was itself a bug, not honesty — MNQ's 08:00-09:00 1h bar
+    # genuinely swept the mid from above and closed decisively below it (a real, mature,
+    # HTF-confirmed test); it only LOOKED immature because the single-crossing anchor
+    # (`_last_mid_crossing` on raw 1s data) kept resetting to a 09:02:47 ET re-touch INSIDE
+    # the still-forming NEXT bar, hiding the already-completed bar's own settled close from
+    # `_htf_close_status`'s "closed_at > swept_at" filter. `_mid_tf_state`'s rewrite
+    # (per-tf, anchored to completed <tf>-bar crossings) now correctly surfaces it.
     boundary = pd.Timestamp("2026-07-22 09:20:00", tz=TZ)
     bundle = _bundle_at(source, boundary)
     mes = bundle.htf_close_status["MES"]["weekly_mid"]["1h"]
     assert mes is not None and mes["beyond"] is True, "MES 1h closed above weekly mid -> ACCEPTED"
-    # MNQ straddles its mid at this instant -> honestly immature, not a fabricated verdict.
-    assert bundle.htf_close_status["MNQ"]["weekly_mid"]["1h"] is None
+    mnq = bundle.htf_close_status["MNQ"]["weekly_mid"]["1h"]
+    assert mnq is not None, "MNQ's 08:00-09:00 1h bar's own settled close must not be hidden"
+    assert mnq["close"] == 29016.75
+    assert mnq["beyond"] is False, "1h closed below the weekly mid -> REJECTED (swept from above)"
+    assert mnq["closed_at"] == pd.Timestamp("2026-07-22 09:00:00", tz=TZ)
 
 
 def test_mid_no_recent_crossing_is_none_2026_07_27(source):

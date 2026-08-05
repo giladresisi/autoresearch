@@ -568,6 +568,161 @@ def test_p2_nesting_suppression_noop_when_not_currently_nested():
     assert out == {"MNQ": set(), "MES": set()}
 
 
+# --- thesis.md §10 (2026-08-05): _last_completed_bar / _mid_tf_state / _htf_reversal_tier #
+
+def _minute_df(opens, highs, lows, closes, start="2026-07-22 08:00", freq="1min"):
+    idx = pd.date_range(start, periods=len(opens), freq=freq, tz="America/New_York")
+    return pd.DataFrame({"open": opens, "high": highs, "low": lows, "close": closes}, index=idx)
+
+
+def _flat_hour(price, start, n=60):
+    idx = pd.date_range(start, periods=n, freq="1min", tz="America/New_York")
+    return pd.DataFrame({"open": [price] * n, "high": [price + 0.25] * n,
+                        "low": [price - 0.25] * n, "close": [price] * n}, index=idx)
+
+
+def test_last_completed_bar_reads_most_recent_completed_hour():
+    # Two full completed hours (08:00-09:00, 09:00-10:00) + a partial 10:00-10:05 bar --
+    # must read the 09:00-10:00 bar, not the still-forming 10:00 one.
+    df = pd.concat([
+        _flat_hour(100.0, "2026-07-22 08:00"),
+        _flat_hour(110.0, "2026-07-22 09:00"),
+        _flat_hour(999.0, "2026-07-22 10:00", n=5),
+    ])
+    now = pd.Timestamp("2026-07-22 10:05", tz="America/New_York")
+    bar = derive_facts._last_completed_bar(df, "1h", now)
+    assert bar["close"] == 110.0
+    assert bar["closed_at"] == pd.Timestamp("2026-07-22 10:00", tz="America/New_York")
+
+
+def test_last_completed_bar_none_before_any_bar_closes():
+    df = _flat_hour(100.0, "2026-07-22 08:00", n=10)
+    now = pd.Timestamp("2026-07-22 08:10", tz="America/New_York")
+    assert derive_facts._last_completed_bar(df, "1h", now) is None
+
+
+# --- _htf_reversal_tier: none / discount / omit / reverse ------------------------------ #
+
+_REV_BAR = {"open": 29055.00, "high": 29072.00, "low": 28961.25, "close": 29016.75}   # bearish
+
+
+def test_reversal_none_when_level_not_recrossed():
+    # now_price still below the level -- agrees with the bar's own bearish close.
+    assert derive_facts._htf_reversal_tier(_REV_BAR, 29031.75, 29020.0) == "none"
+
+
+def test_reversal_discount_when_recrossed_but_not_past_bar_open():
+    assert derive_facts._htf_reversal_tier(_REV_BAR, 29031.75, 29040.0) == "discount"
+
+
+def test_reversal_omit_when_past_bar_open_but_not_wick():
+    assert derive_facts._htf_reversal_tier(_REV_BAR, 29031.75, 29060.0) == "omit"
+
+
+def test_reversal_reverse_when_past_bar_wick_2026_07_22_case():
+    # the real MNQ 08:00-09:00 1h bar + weekly_mid (29031.75) / london(cur)_low (29026.0) +
+    # now_price 29079.25 (09:20 ET) -- clear MSS on both levels.
+    assert derive_facts._htf_reversal_tier(_REV_BAR, 29031.75, 29079.25) == "reverse"
+    assert derive_facts._htf_reversal_tier(_REV_BAR, 29026.00, 29079.25) == "reverse"
+
+
+def test_reversal_tiers_symmetric_for_a_bullish_completed_bar():
+    bar = {"open": 100.0, "high": 106.0, "low": 99.0, "close": 104.0}   # bullish close
+    assert derive_facts._htf_reversal_tier(bar, 102.0, 105.0) == "none"          # still above
+    assert derive_facts._htf_reversal_tier(bar, 102.0, 101.0) == "discount"      # below level, above open
+    assert derive_facts._htf_reversal_tier(bar, 102.0, 99.5) == "omit"           # below open, above low
+    assert derive_facts._htf_reversal_tier(bar, 102.0, 98.0) == "reverse"        # below the wick too
+
+
+# --- _mid_tf_state: per-tf status + freshness, anchored to COMPLETED bar crossings ----- #
+
+def test_mid_tf_state_none_when_mid_never_crossed_among_completed_bars():
+    df = pd.concat([_flat_hour(110.0, "2026-07-22 08:00"), _flat_hour(111.0, "2026-07-22 09:00")])
+    now = pd.Timestamp("2026-07-22 09:30", tz="America/New_York")
+    status, reclaim = derive_facts._mid_tf_state(df, 100.0, "1h", now, None, None)
+    assert status is None and reclaim is None
+
+
+def test_mid_tf_state_verdict_reads_latest_completed_bar_not_hidden_by_forming_bar_touch():
+    # The exact 2026-07-22 09:00-09:20 ET MNQ weekly_mid shape: the 08:00-09:00 bar swept
+    # the mid from above and closed below it; a re-touch happens INSIDE the still-forming
+    # 09:00-10:00 bar (price back above by 09:02). The verdict must still read the
+    # COMPLETED 08:00-09:00 bar's own close as "below" (reject-of-above / accept-of-below),
+    # not be hidden by the later, immature re-touch.
+    df = pd.concat([
+        _flat_hour(29055.0, "2026-07-22 07:00"),                          # above mid all hour
+        _minute_df(                                                        # 08:00-09:00: sweeps below, closes below
+            [29055.0] + [29020.0] * 59,
+            [29072.0] + [29030.0] * 59,
+            [29028.5] + [28961.25] + [29010.0] * 58,
+            [29038.0] * 2 + [29016.75] * 58,
+            start="2026-07-22 08:00"),
+        _minute_df(                                                        # 09:00-09:20: re-touches above at minute 2
+            [29017.0, 29020.0, 29040.0] + [29079.25] * 17,
+            [29020.0, 29040.0, 29079.25] + [29079.25] * 17,
+            [29017.0, 29017.0, 29020.0] + [29079.25] * 17,
+            [29017.0, 29040.0, 29079.25] + [29079.25] * 17,
+            start="2026-07-22 09:00"),
+    ])
+    now = pd.Timestamp("2026-07-22 09:20", tz="America/New_York")
+    status, reclaim = derive_facts._mid_tf_state(df, 29031.75, "1h", now, None, None)
+    assert status is not None
+    assert status["close"] == 29016.75
+    assert status["beyond"] is False                        # closed below the mid
+    assert status["closed_at"] == pd.Timestamp("2026-07-22 09:00", tz="America/New_York")
+    assert reclaim["cross_dir"] == "down"
+
+
+def test_mid_tf_state_freshness_stale_when_tier_extreme_postdates_crossing():
+    # daily_mid crossed within the 07:00-08:00 bar (crosses to CLOSE below 100), but the
+    # day's own low (lo_ts) was set later, inside the FOLLOWING 08:00-09:00 bar -- a later,
+    # deeper move has superseded the crossing -- stale (matches the real MNQ daily_mid
+    # case: crossed ~07:04 ET, but the day's own low was set at 08:55 ET, a later hour).
+    df = pd.concat([
+        _flat_hour(105.0, "2026-07-22 06:00"),
+        _flat_hour(95.0, "2026-07-22 07:00"),       # crossing bar: closes below 100
+        _flat_hour(90.0, "2026-07-22 08:00"),       # deeper low set THIS hour
+        _flat_hour(90.0, "2026-07-22 09:00", n=5),
+    ])
+    now = pd.Timestamp("2026-07-22 09:05", tz="America/New_York")
+    lo_ts = pd.Timestamp("2026-07-22 08:30", tz="America/New_York")   # day's own low, later hour
+    status, reclaim = derive_facts._mid_tf_state(df, 100.0, "1h", now, None, lo_ts)
+    assert status["beyond"] is False
+    assert reclaim == {"fresh": False, "cross_dir": "down"}
+
+
+def test_mid_tf_state_freshness_fresh_when_no_later_extreme():
+    df = pd.concat([
+        _flat_hour(105.0, "2026-07-22 07:00"),
+        _flat_hour(95.0, "2026-07-22 08:00"),
+        _flat_hour(95.0, "2026-07-22 09:00", n=5),
+    ])
+    now = pd.Timestamp("2026-07-22 09:05", tz="America/New_York")
+    lo_ts = pd.Timestamp("2026-07-22 06:00", tz="America/New_York")   # week's low, days earlier
+    status, reclaim = derive_facts._mid_tf_state(df, 100.0, "1h", now, None, lo_ts)
+    assert reclaim == {"fresh": True, "cross_dir": "down"}
+
+
+def test_build_evidence_magnitude_covers_synthetic_mid_and_p4_variants():
+    # 2026-08-05: daily_mid/weekly_mid previously had no entry in bundle.levels, so
+    # build_evidence_magnitude silently skipped them -- every P3 mid item scored at an
+    # unweighted x1.0 regardless of how thin its clearance was. bundle.mid_price now
+    # supplies the price; the SAME ratio is also registered under both P4-promoted names.
+    b = derive_facts.FactsBundle()
+    b.avg_range_1h = {"MNQ": 10.0}
+    b.htf_close_status = {"MNQ": {"daily_mid": {
+        "1h": {"close": 101.0, "beyond": True, "closed_at": None, "n_closed_since": 1},
+        "4h": None,
+    }}, "MES": {}}
+    b.levels = {"MNQ": {}, "MES": {}}
+    b.mid_price = {"MNQ": {"daily_mid": 100.0}, "MES": {}}
+    out = derive_facts.build_evidence_magnitude(b)
+    assert out[("MNQ", "daily_mid", "1h")] == 0.1
+    assert out[("MNQ", "daily_mid_high", "1h")] == 0.1
+    assert out[("MNQ", "daily_mid_low", "1h")] == 0.1
+    assert ("MNQ", "daily_mid", "4h") not in out
+
+
 # --- thesis.md §2.1c: P1 equilibrium-staleness decay ------------------------------------ #
 
 def test_p1_equilibrium_staleness_flags_level_price_has_since_reached_mid():
