@@ -188,7 +188,25 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     fvg_zone_meta = (facts or {}).get("fvg_zone_meta")
     mid_reclaim = (facts or {}).get("mid_reclaim")
     htf_reversal = (facts or {}).get("htf_reversal")
-    scoring = score_thesis_evidence(t.evidence, dol_available=dol_available,
+    # 2026-08-05 fix: this re-check MUST use the SAME clearance-magnitude weighting the
+    # real scoring path (_derive_thesis_arithmetic) applies -- an unweighted x1.0 re-check
+    # can disagree with the true, magnitude-weighted net score closely enough to flip which
+    # side of a tie the declared bias falls on (2026-07-20 09:20 ET: true net score was an
+    # exact 0.0 tie -- NEUTRAL -- but an unweighted re-check computed +0.5 UP and waved a
+    # declared UP bias through clean). `evidence_magnitude` ({asset: {level: {tf: ratio}}},
+    # bench/facts.py) is the JSON-safe nested-dict form of build_evidence_magnitude's own
+    # tuple-keyed dict; reconstructed here to the (asset, level, tf) key shape
+    # score_thesis_evidence expects.
+    _mag_nested = (facts or {}).get("evidence_magnitude")
+    magnitude = None
+    if _mag_nested:
+        magnitude = {
+            (_asset, _level, _tf): _ratio
+            for _asset, _levels in _mag_nested.items()
+            for _level, _tfs in (_levels or {}).items()
+            for _tf, _ratio in (_tfs or {}).items()
+        }
+    scoring = score_thesis_evidence(t.evidence, magnitude=magnitude, dol_available=dol_available,
                                     suppressed_p1_levels=suppressed_p1_levels,
                                     suppressed_p2_sites=suppressed_p2_sites,
                                     level_htf_close_status=level_htf_close_status,

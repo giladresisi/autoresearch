@@ -678,6 +678,38 @@ def test_empty_evidence_directional_bias_rejected():
     assert "ARI_THESIS_BIAS" in validate_thesis(t, FACTS).codes()
 
 
+def test_bias_check_no_magnitude_key_is_a_noop():
+    # Byte-identical to every pre-2026-08-05 call site: no "evidence_magnitude" in facts ->
+    # magnitude=None -> unweighted x1.0, exactly as before this fix.
+    t = valid_thesis()   # bias UP
+    t["evidence"] = [
+        _ev(asset="MNQ", level="prev_day_high", tf="4h", direction="accept"),   # UP, day/4h: 2.25
+        _ev(asset="MNQ", level="prev_day_low", tf="1h", direction="accept"),    # DOWN, day/1h: 1.5
+    ]
+    assert "ARI_THESIS_BIAS" not in validate_thesis(t, FACTS).codes()   # unweighted net = +0.75, UP
+
+
+def test_bias_check_uses_evidence_magnitude_2026_07_20_regression():
+    # 2026-08-05 fix, real 2026-07-20 09:20 ET regression: the unweighted net for this
+    # ledger shape is +0.75 (UP, matches the declared bias, passes clean -- see the no-op
+    # test above). But a WEAK clearance on the UP item (x0.75 -> 1.6875) and a STRONG
+    # clearance on the DOWN item (x1.25 -> 1.875) flips the REAL, magnitude-weighted net to
+    # -0.1875 (DOWN) -- the declared UP bias must now be rejected. Previously
+    # validate_thesis's own re-check never applied magnitude at all, so this exact class of
+    # discrepancy slipped through clean (the real 07-20 case was a razor-thin 0.0 tie, not a
+    # full sign flip like this test, but the root cause -- an unweighted re-check -- is the
+    # same; a full flip makes the assertion unambiguous).
+    t = valid_thesis()   # bias UP
+    t["evidence"] = [
+        _ev(asset="MNQ", level="prev_day_high", tf="4h", direction="accept"),   # UP, day/4h
+        _ev(asset="MNQ", level="prev_day_low", tf="1h", direction="accept"),    # DOWN, day/1h
+    ]
+    facts = {**FACTS, "evidence_magnitude": {
+        "MNQ": {"prev_day_high": {"4h": 0.1}, "prev_day_low": {"1h": 2.0}},
+    }}
+    assert "ARI_THESIS_BIAS" in validate_thesis(t, facts).codes()
+
+
 # --------------------------------------------------------------------------- #
 # level_htf_close_status: SEM_EVIDENCE_DIRECTION_MISMATCH + P3 auto-derivation #
 # --------------------------------------------------------------------------- #

@@ -230,6 +230,19 @@ class ParquetFactsSource:
         # magnitude threaded into the render so the model can SEE the WEAK/NORMAL/STRONG
         # clearance label before declaring bias (gap fix: same ratio, no new computation).
         res.evidence_text = render_evidence_text(bundle, magnitude=res.evidence_magnitude)
+        # 2026-08-05: same ratios, JSON-safe nested-dict shape ({asset: {level: {tf:
+        # ratio}}}, tuple keys -> nested dicts) so validate_thesis's own ARI_THESIS_BIAS
+        # re-check can apply the SAME clearance-magnitude weighting the real scoring path
+        # (_derive_thesis_arithmetic) already does -- previously validate_thesis re-scored
+        # with an unweighted x1.0 on every item, which could disagree with the REAL,
+        # magnitude-weighted net score closely enough to flip which side of a tie the
+        # declared bias fell on (2026-07-20 09:20 ET: true net score was an exact 0.0 tie
+        # -- NEUTRAL -- but the unweighted re-check computed +0.5 UP and waved a declared
+        # UP bias through clean).
+        res.validator_dict["evidence_magnitude"] = {}
+        for (_asset, _level, _tf), _ratio in res.evidence_magnitude.items():
+            res.validator_dict["evidence_magnitude"].setdefault(_asset, {}).setdefault(
+                _level, {})[_tf] = _ratio
         res.content_hash = _sha(res.text)                      # core hash: S0–S7 only (parity)
         res.now = bundle.now
         res.max_ts = bundle.now

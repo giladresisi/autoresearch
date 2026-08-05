@@ -917,6 +917,26 @@ its 08:00-09:00 1h bar visibly sweeping the mid from above and closing below it:
   pre-passes so they see the corrected picture too — an omitted item must not win a cross-asset
   contradiction vote either, and a reversed item's flipped direction is what actually happened.
 
+**2026-07-20 09:20 ET — `validate_thesis`'s own bias-consistency re-check never applied
+clearance magnitude, letting a tied ledger through as directional.** Re-running the full 10-
+example set after the above fixes, MNQ/MES's ledger for this call was 3 UP items (0.75 each,
+2.25 total) against 2 DOWN items (1.5 + 0.75, 2.25 total) — an EXACT 0.0 tie once real
+clearance-magnitude weighting is applied, which should read NEUTRAL. The model declared UP and
+`validate_thesis` accepted it clean. Root cause: `validate_thesis`'s own `ARI_THESIS_BIAS`
+re-check calls `score_thesis_evidence` WITHOUT `magnitude` (unlike the real scoring path,
+`_derive_thesis_arithmetic`, which always has it) — so the re-check's own net score used an
+unweighted x1.0 on every item, computing +0.5 (UP) instead of the true, magnitude-weighted 0.0
+(NEUTRAL), and waved the declared UP bias through against the WRONG number. This gap predates
+this session's other work — `evidence_magnitude` was always threaded to the real scoring path
+as a separate function parameter, never through the shared `facts` dict `validate_thesis` reads,
+so `validate_thesis` had no way to see it at all. Fixed by adding `evidence_magnitude`
+(`{asset: {level: {tf: ratio}}}`, the JSON-safe nested form of `build_evidence_magnitude`'s own
+tuple-keyed dict) to `bench/facts.py`'s `validator_dict` — the same place every other scoring
+input (`mid_reclaim`, `htf_reversal`, `level_tiers`, ...) already lives — so `validate_thesis`
+picks it up automatically with no signature change needed anywhere else in the call chain.
+`evidence_magnitude` absent (every pre-2026-08-05 facts dict) leaves the re-check exactly as
+unweighted as before — a no-op, not a behavior change for any existing caller.
+
 **2026-07-23 07:00 ET (again) — a stale P1 sweep outweighed materially more recent equilibrium
 behavior.** `prev1_day_low` swept ~3h before the call; price had since fully round-tripped to the
 daily mid, a more meaningful, more recent development the ledger couldn't express (P1 had no
