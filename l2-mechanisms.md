@@ -235,6 +235,15 @@ resting order beyond them.
     against its open (red), the exit tick fires; if it closed with-trend-colored beyond the
     gap on the adverse side, defer to the current bar's close (enter there if it closed
     beyond the exit side — accepting the worse price as the cost of the missing conviction).
+  - *A skip voids the cycle (strict reading, explicit):* entries fire only on an actual exit
+    TICK (or close verdict) of a live cycle — never on already-crossed state carried over
+    from a skipped one. When an entering bar's close verdict is a skip (wrong color), that
+    cycle is consumed even if price now sits beyond the gap on the exit side; no market
+    entry fires at the next bar's open, and the crossed-trigger rule (§2) does NOT apply
+    within this mechanism. A fresh re-entry into the gap must occur and complete a new
+    cycle. (This is how 07-21 traded — the 09:36 green skip required the 09:38→09:39
+    re-entry before the winning exit-tick entry — and how 08-10 traded, where the 09:50 red
+    skip was followed by the 09:51 re-entry cycle rather than an 09:51:00 market fill.)
 - **Stop-loss:** the episode's excursion extreme **+ 2 pts**, capped at **30 pts** from the
   entry price (for market entries, entry price = mid of the current 1s bar at placement).
   Risk is proportionate to rejection depth, and the cap bounds deep-excursion episodes —
@@ -248,7 +257,10 @@ resting order beyond them.
   distance-invalidated by the 09:30 judas): gap B early-runaway −30, gap A exit-tick entry
   29199 at 09:39:11 → TDO +126.50, day +96.50 vs −92.25 for the 5m-only alternative. 08-03
   +123.25, 08-05 +237.50, 08-06 +145.75 — each a single clean entry after the close-color
-  gates skipped the noise cycles that a raw exit-tick rule would have taken.
+  gates skipped the noise cycles that a raw exit-tick rule would have taken. First
+  out-of-sample forward test 08-10 (thesis up, DOL = TDO): −15.75, −15.75, then early-runaway
+  long → TDO TP +65.75, day +34.25 — every rule (settle window, color gates, skip-voids-cycle,
+  early-runaway, SL cap, DOL TP) exercised as designed.
 
 ## 7. L3 binding & order lifecycle
 
