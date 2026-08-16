@@ -8,10 +8,16 @@ market execution added same day after the 07-15 09:30-open study; `fvg_1m_post_e
 mechanism and stop-out cooldown added 2026-08-08 after the 07-20/21/22 open studies; cooldown
 made state-based, not fresh-precondition, after the 07-23/24 studies; pre-open entry
 suspension, 5m distance invalidation, and the §6 episode/close-color entry logic with
-early-runaway entry and SL cap added 2026-08-09 after the 08-03..08-06 studies. NOTE: the
+early-runaway entry and SL cap added 2026-08-09 after the 08-03..08-06 studies; DOL-floor
+entry veto (§2), §4 1m-fallback widening to 5m-unusable states, and the §7
+`extreme_reject_close` mechanism added 2026-08-15 after the 08-07/08-10 studies and a
+bar-level re-check of 07-16..08-10 (1m-resolution simulation — several fills are same-bar
+fill/stop ambiguous; 1s replay required before trusting the package numbers); deeper-gap
+takeover on re-entry (§8) and the 08-11..08-14 oracle-L1 forward test (§10) added same day
+after the 08-14 study and the 07-17/07-21/07-23 backcheck. NOTE: the
 rules were tuned on the 07-14..08-06 sample — every trading day in that sample nets positive,
 several by sub-7-pt stop clearances; forward-test on unseen dates before trusting). Extends
-`agent-optimizations.md` §7 (mechanism enums). Defines two new entry mechanisms the L2 trade
+`agent-optimizations.md` §7 (mechanism enums). Defines four entry mechanisms the L2 trade
 plan may arm and the L3 executor exercises. Numeric values are starting points for regression
 tuning; the rules are fixed.
 
@@ -37,11 +43,12 @@ tuning; the rules are fixed.
   the relevant artifacts in the bars and acting on the most relevant one at any given moment.
 - Per-mechanism invalidation criteria supplied by L2 — deferred to a later stage.
 
-## 2. Common rules (both mechanisms)
+## 2. Common rules (all mechanisms)
 
 - MNQ FVGs only; no MES/SMT counterpart required. 5m is the primary timeframe; the reversal
-  mechanism has a 1m fallback (§4) for fast spike legs that print no 5m gap, and §6 defines a
-  1m-based mechanism for when the 5m structure is unusable outright.
+  mechanism has a 1m fallback (§4) for any 5m-unusable state, §6 defines a
+  1m-based mechanism for when the 5m structure is unusable outright, and §7 is a bar-pattern
+  mechanism (no FVG) for the first rejecting bar at a swept day extreme.
 - Entry is always a **resting stop-entry order** placed **beyond the FVG's far end with a fixed
   buffer** in the trade direction. The buffer is the wick-deception guard; tightening/removing
   it is a later optimization. The order is placed only when the mechanism's precondition is
@@ -101,7 +108,8 @@ tuning; the rules are fixed.
   collapse flat). Verified no-change on every other studied stop-out (07-17, 07-21, 07-23:
   cooldown-end price uncrossed → resting order, identical fills). The churn guard against
   re-entering noise cycles is the mechanism's own entry definition (e.g. §6 strictly-inside),
-  not the cooldown.
+  not the cooldown. Post-stop binding preference is subject to the deeper-gap takeover and
+  blacklist (§8).
 - **Crossed-trigger ⇒ market execution:** whenever L3 acts (settle-window end, ladder move,
   re-bind, initial placement) and the computed trigger price is already crossed in the trade
   direction, the entry executes as a market order with the same FVG-derived stop-loss — the
@@ -109,6 +117,20 @@ tuning; the rules are fixed.
   No separate "market entry" mechanism exists.
 - **Max-distance guard:** the trigger price must sit within a capped distance of current price
   (analogous to the S8 DOL proximity guard).
+- **DOL-floor veto (all mechanisms, every entry decision):** an entry is vetoed unless at
+  least ~60 pts remain between the entry/trigger price and the plan's DOL (the nearest un-hit
+  DOL when the thesis names several; all mechanisms assume a DOL-bearing plan). Applies to
+  resting-order placement, crossed-trigger market execution, episode fires, and post-stop
+  re-entries; re-evaluated on every re-bind (new trigger price), never between re-binds
+  (trigger and DOL are both fixed). This is an ABSOLUTE floor, deliberately not an RR ratio —
+  the 08-10 09:51/09:59 chase entries carried tight stops (RR ≈ 2.9) yet only ~45 pts of
+  target: the target sat within one opening-noise whipsaw of the fill. It is measured from
+  the TARGET, not from the adverse extreme: a distance-from-extreme veto implicitly assumes
+  a fixed move size and forfeits the big-reversal days (08-03's winner entered 189 pts past
+  the extreme with 123 pts still to go; 08-06 similar). Separation on 07-16..08-10: every
+  winning entry had ≥ 65.75 pts remaining, every losing chase ≤ 45.5 — a thin band from few
+  dates, so 60 is a starter knob (§9). Also suppresses the §4-1m 09:36 whipsaw on 08-10
+  (40.5 pts remaining).
 - **Single stop-entry policy:** when multiple mechanisms are armed, only one resting stop-entry
   exists at a time — the one whose trigger price is closest to current price. Other armed
   mechanisms may only fire via market/limit entries while it rests. First trigger wins.
@@ -147,12 +169,27 @@ algorithm stopped respecting its own inefficiency.
   trend.
 - **Binding (L3):** the most recently created eligible 5m FVG belonging to the trend leg being
   reversed (e.g. a bullish FVG from the uptrend when expecting down).
-- **1m fallback:** when the leg being reversed printed no eligible 5m FVG (fast spike/judas
-  legs often complete inside one or two 5m bars), L3 binds the most recently created eligible
-  1m FVG belonging to that leg instead — same buffers, height filters, guards, and lifecycle.
-  Close-through disqualification runs on 1m closes for a 1m-bound gap. (Validated on the 07-16
-  09:30 judas spike: no 5m gap existed; the leg's 1m gap gave short 29464.5 / SL 29481.5 →
-  +159 to DOL.)
+- **1m fallback (widened 2026-08-15):** applies whenever no USABLE 5m FVG exists for the
+  reversal — either the leg printed none (fast spike/judas legs often complete inside one or
+  two 5m bars), or every 5m candidate is distance-invalidated / beyond the max-distance guard
+  (the same 5m-unusable state that arms §6). L3 binds the most recently created eligible
+  counter-thesis 1m FVG instead, requiring only that the gap's creating (third) bar is at or
+  after 09:30 ET — the pattern's earlier bars may be pre-open (load-bearing on 08-03, whose
+  rescue gap builds on the 09:29 bar). Same buffers, height filters, guards, and lifecycle;
+  close-through disqualification runs on 1m closes; the §2 5m distance invalidation does NOT
+  extend to 1m-bound gaps (close-through eligibility only, for now). A resting 1m negation
+  stop MAY coexist with an armed §6 — single-stop-entry policy and first-trigger-wins govern,
+  and the 3-attempt counter is SHARED per plan across all mechanisms. (Original case
+  validated on the 07-16 09:30 judas spike: no 5m gap existed; the leg's 1m gap gave short
+  29464.5 / SL 29481.5 → +159 to DOL. Widening 1s-verified 2026-08-16: 08-06 — negation
+  long fills 29309.5 at 09:34:40, SL never touched → DOL +266.5 clean on one attempt,
+  preempting §6's later +145.75; 08-03 — fill 09:34:39, stopped −22 at 09:34:49, resting
+  refill 09:35:08 → TP 09:59:56 +222 → **+200 on 2 attempts** (vs +123.25 §6-only); 08-05 —
+  fill 09:50:11, stopped −20 at 09:50:24, and the same-gap refill is BARRED because the
+  09:50 1m close (30013) closed through the gap bottom (§2 eligibility) — one attempt only,
+  leaving the budget for §6's +237.5 winner (a naive same-gap refill burns the third attempt
+  −20 and locks the day out at −55); inert on 07-21, where §6's 09:39:11 entry precedes the
+  09:40 trigger cross; its one bad 08-10 fill is killed by the §2 DOL-floor veto.)
 - **Order:** stop-entry in the reversal direction, `entry buffer` beyond the FVG's far end
   (e.g. short 7 pts below a bullish FVG's lower bound). Full traversal of the gap = the
   expected move has started.
@@ -191,6 +228,15 @@ limit fade inside it) converts the textbook anticipation entry into a confirmati
 - **Self-falsification:** price closing through the FVG in the anti-trend direction (inversion)
   kills the setup; the order is pulled and never fires. (Consistent with the close-based
   eligibility rule in §2 — wicks through the gap do not pull the order, closes do.)
+- Forward-tested on the 08-07 judas-against-thesis open (outside the tuning sample, no rule
+  change needed): the 09:33 wick into the 09:00 bearish gap [29805, 29831.75] placed the stop
+  at 29798 (laddered up from the 09:10 gap per §2), filled 09:34; the gap-anchored stop
+  29834.75 survived the 09:45 poke to 29821.75 by 13 pts and the trade ran ~230 pts of
+  favorable excursion. The 09:30 5m bar closed 29805.75 — INSIDE the gap, 26 pts short of
+  inversion; a marginally stronger judas closing through would have killed the setup
+  permanently (accepted §2 behavior, revisit only on a studied counter-example). The
+  counterpart idea of also trading 1m continuation gaps while usable 5m structure exists was
+  considered and DECLINED (churn risk, no motivating miss — 08-07 is fully handled by 5m).
 
 ## 6. Mechanism: `fvg_1m_post_extreme`
 
@@ -204,7 +250,9 @@ resting order beyond them.
   - No usable 5m FVG: every eligible 5m gap is beyond the max-distance guard or offers bad
     risk:reward to the DOL at its fixed entry price. Bad RR disqualifies that 5m gap from
     binding entirely — so this mechanism never coexists with a resting 5m stop-entry, and no
-    cross-mechanism cancel is ever needed. If a usable 5m binding appears before this
+    cross-mechanism cancel is ever needed. (A resting 1m negation stop from §4's widened
+    fallback MAY coexist — the same 5m-unusable state arms both; single-stop-entry policy and
+    first-trigger-wins apply.) If a usable 5m binding appears before this
     mechanism's trade triggers, this mechanism stands down.
   - A new day extreme printed against the thesis direction after the last 5m FVG's creation
     (the 5m structure is stale relative to where price now is).
@@ -260,9 +308,57 @@ resting order beyond them.
   gates skipped the noise cycles that a raw exit-tick rule would have taken. First
   out-of-sample forward test 08-10 (thesis up, DOL = TDO): −15.75, −15.75, then early-runaway
   long → TDO TP +65.75, day +34.25 — every rule (settle window, color gates, skip-voids-cycle,
-  early-runaway, SL cap, DOL TP) exercised as designed.
+  early-runaway, SL cap, DOL TP) exercised as designed. (Under the 2026-08-15 additions the
+  08-10 09:51/09:59 chase entries are suppressed by the §2 DOL-floor veto — 45.5 pts
+  remaining — and the day is owned by §7's 09:42 entry, +96.25; the §6 rules themselves stand
+  unchanged, the veto and §7 simply sit in front of them. On 07-21/08-03/08-05 §6's validated
+  entries all pass the veto.)
 
-## 7. L3 binding & order lifecycle
+## 7. Mechanism: `extreme_reject_close`
+
+ICT basis: liquidity sweep / turtle soup — a stop-run through a fresh day extreme that
+immediately rejects (the extreme-making 1m bar closes back in the thesis direction) marks the
+manipulation completing. This mechanism trades the FIRST reversing 1m bar in that specific
+signature — an entry the FVG mechanisms often catch only later (or, as on 08-10, only via
+chase entries the §2 DOL-floor veto now suppresses).
+
+- **State machine (L2 arms the class; all state is L3, 1m bars, TICK-based extreme tracking;
+  "day" = the 24h session opening at the prior 18:00 ET — an RTH-only reading would wrongly
+  arm 08-07 off the 09:33 high while the 08:50 high 29867.25 stood above it):**
+  - After 09:30 ET price moves against the thesis and prints a new day extreme. From the next
+    1m bar, count consecutive 1m closes with no tick beyond the standing extreme; any
+    new-extreme TICK restarts the count, even if that bar closes in the thesis direction
+    (08-10: the 09:35 bar crossed the 09:34 low seconds in and restarted the count despite
+    closing green).
+  - Three consecutive quiet closes ⇒ **armed**.
+  - While armed, the next 1m bar that ticks a new day extreme AND closes in the thesis
+    direction fires a **market entry at that bar's close**. A new-extreme bar closing in the
+    adverse direction does not fire and does not disarm — the graph may still want to extend;
+    stay armed for the next new-extreme bar.
+- **Stop-loss:** the entry bar's opposite-wick edge, CAPPED at 15 pts from the entry price
+  (wick edge if nearer). The cap places the stop inside the swept zone — a plain retest of
+  the sweep kills the trade (08-10's stop survived by 13.5 pts); a §6-style wick+3-capped-30
+  alternative performed identically on the studied dates and is the A/B counterpart (§9).
+- **Scope:** lives and dies with the plan's `valid_while`/thesis — unscoped it fires two
+  losing shorts into the 07-21 11:14/11:28 new-day-high rally, hours after the plan
+  completed. Shared per-plan 3-attempt counter, stop-out cooldown (§2), DOL-floor veto (§2)
+  all apply; the settle window (§2) is moot in practice — the earliest possible fire is ≥4
+  bars after the first post-open extreme. An SMT in the thesis direction is corroborating
+  context, never a requirement (08-10 had an active bullish SMT from ~08:35).
+- **Accepted misses (by design — the other mechanisms own them):** the reversal may come
+  before three quiet closes (08-06: consecutive new lows 09:30–09:33, never armed before the
+  bottom), without a further new extreme (08-03), or with the final extreme-making bar
+  closing adverse. On 07-16/07-23/07-24/08-03/08-06/08-07 the mechanism correctly never
+  fires in plan scope.
+- Validation (1m simulation, 09:30–12:00): 08-10 (thesis up, DOL = TDO 29851.5): first
+  post-open new day low 09:34 (29736.75, under the overnight 29771), tick-restart 09:35
+  (29726.75), quiet 09:36–09:38 ⇒ armed 09:39; the 09:41 bar prints 29719 and closes green →
+  market 29755.25 at 09:42:00 (1s-verified), SL 29740.25 (wick capped at 15), closest
+  approach 9.75 pts → DOL TP 10:06:21 +96.25, vs +34.25 for the §6-only day. 08-05 (thesis down): fires 09:41:00
+  short 30002.5 off the 09:40 red new-high bar; the 09:45 push to 30073.25 stops it −15;
+  §6's +237.5 winner follows — accepted cost, bounded by the SL cap.
+
+## 8. L3 binding & order lifecycle
 
 - **Binding preference:** the most recently created eligible FVG. When a newer eligible FVG
   appears closer to price while a stop-entry rests, L3 re-binds: cancel the resting order,
@@ -279,10 +375,52 @@ resting order beyond them.
 - **Attempt counter:** after a stop-out with the setup still valid, L3 re-arms the same plan
   and re-binds to whatever FVG is *now* eligible (not necessarily the one that just failed).
   The 3-attempt counter remains per `plan_id` regardless of which FVG each attempt bound.
+- **Deeper-gap takeover on re-entry (2026-08-15, from the 08-14 study; backchecked
+  07-17/07-21/07-23):** when a **5m-bound** attempt (§4/§5) stops out and, between the
+  stop-out and the next attempt (the stop-out bar itself included), price ticks into a
+  deeper eligible thesis-appropriate FVG farther along the adverse path — any timeframe, 1m
+  included — the re-entry binds that deeper gap and the failed gap is **blacklisted for the
+  plan** (ignored even if price later returns to it; a stop-run through its edge is a
+  falsified edge). The blacklist is strictly CONDITIONAL on the deeper-gap penetration: with
+  no deeper gap penetrated, the same failed gap may re-bind as before — an unconditional
+  blacklist would break 07-23's validated same-gap re-entry. Neither the min-height filter
+  nor §4's creating-bar ≥ 09:30 filter applies to the takeover gap (deepest-penetration
+  binding role, same §2 exemption precedent as ladder targets — 08-14's takeover gap is
+  3.0 pts tall, created 09:11).
+  - **Re-entry mode on the takeover gap:** §6's episode machinery, not a resting stop-entry
+    — strictly-inside cycles, color gates, exit-tick with the previous-bar gate,
+    skip-voids-cycle, excursion-anchored SL (+2, capped 30) — with ONE modification: a
+    close-verdict (defer) entry whose excursion-anchored SL distance exceeds the 30-pt cap
+    is SKIPPED (cycle consumed; wait for a closer cycle). This parameter-free gate replaces
+    an earlier fixed 15-pt entry-bar-length idea: on 08-14 it skips the long noise bars
+    (24.5/31.5 pts from open) exactly as the length gate would, but on 07-17 the 51-pt
+    breakdown bar enters via exit-tick — a fixed length gate forfeits that day's entire
+    winner. Exit-tick/intra-bar entries are never length-gated (their SL distance is
+    inherently small at the zone edge).
+  - **Cooldown boundary (1s-verified):** the stop-out bar's OWN close verdict fires at
+    cooldown end — state-based, same principle as the 07-24 cooldown precedent. (08-14: the
+    09:31 stop-out bar closes red below the takeover gap → attempt 2 fires at 09:32:00.)
+  - Validation (1s replay, 2026-08-16). 08-14: attempt-1 fill 30252.25 at 09:30:33 (the
+    09:30:10 in-window penetration correctly voided; fresh retrace tick 09:30:30); the
+    09:31 squeeze to 30268.75 takes the SL (30268) at 09:31:05 and the SAME tick is the
+    takeover penetration of the deeper 09:11 1m gap [30266.5, 30269.5]; the stop-out bar's
+    red close fires attempt 2 at 09:32:00 short 30245 (SL 30270.75), stopped 09:45:21
+    −25.75; then 09:46 red close skipped by the SL-cap gate (extreme 30275.5, dist 36),
+    09:48 wrong-color skip, 09:49 SL-cap skip (dist 43.5), 10:05/10:06 wrong-color skips,
+    10:07 close-entry 30262 (SL 30282.75, dist 20.75) → DOL 30124.25 at 10:59:52 +137.75 —
+    **day +96.25 on exactly 3 attempts** (without the rule, same-gap re-binds lock the plan
+    out around −60 and miss the move). 07-17: attempt-1 replays exactly as validated (fill
+    28644.75 at 09:30:35, SL 28662.5 at 09:31:03, −17.75); takeover penetration 09:31:14;
+    the 09:31 entering bar closes inside → cycle live → exit-tick entry 09:32:05 ≈28663.75,
+    and the 09:32 push to 28685.5 prints in the first seconds BEFORE the entry, so the SL
+    (28687.5) sits above the already-made extreme — never threatened → DOL (overnight low
+    28554.75) at 09:34:29 +109 — **day +91.25 on 2 attempts**, entry 19 pts better than the
+    validated same-gap re-entry. 07-21 unaffected (no 5m-bound attempts); 07-23 unaffected
+    (no deeper-gap penetration in the stop window).
 - **Audit:** every bind / re-bind / disarm decision is logged (JSONL, extends the existing
   audit conventions) for post-session analysis.
 
-## 8. Starting values (regression tuning knobs)
+## 9. Starting values (regression tuning knobs)
 
 | Parameter | Starter | Rationale |
 |---|---|---|
@@ -293,23 +431,108 @@ resting order beyond them.
 | 5m distance invalidation | 60 pts anti-trade beyond the gap | §2; permanent, unlike the momentary max-distance guard |
 | Max FVG height | 35 pts | Caps worst-case risk at ~45 pts/attempt (×3 attempts ≈ 135 pts plan exposure) |
 | Max distance, current price → trigger | 60 pts | Beyond that we donate too much of the multi-hour L1 move |
-| No-move zone around resting trigger | 15 pts | See §7 |
+| No-move zone around resting trigger | 15 pts | See §8 |
 | `fvg_1m_post_extreme` SL buffer beyond excursion extreme | 2 pts | §6; excursion-anchored, not gap-edge-anchored |
 | `fvg_1m_post_extreme` SL cap | 30 pts from entry | §6; bounds deep-excursion episodes |
 | `fvg_1m_post_extreme` early-runaway trigger | 25 pts beyond the exit edge | §6; plus beyond-bar-open condition |
 | Stop-out cooldown | until the stop-out 1m bar closes | §2; acts on current state at the close (crossed trigger ⇒ market) |
+| DOL-floor veto | 60 pts remaining, entry → DOL | §2; ABSOLUTE floor, not an RR ratio; winners ≥65.75 / losing chases ≤45.5 on studied dates — thin band, tune early |
+| `extreme_reject_close` quiet count | 3 consecutive 1m closes | §7; tick-based restarts |
+| `extreme_reject_close` SL | opposite-wick edge, capped 15 pts from entry | §7; A/B alternative: wick+3 capped 30 (identical on studied dates) |
+| Takeover defer-entry gate | skip if excursion-SL distance > the 30-pt cap | §8; parameter-free (reuses the `fvg_1m_post_extreme` SL cap) |
 | Leg reversal threshold | max(30 pts, 25% of leg range) | §3 |
 | Min qualifying leg range | 50 pts | §3 ("significant") |
 | Leg recency | 60 min | §3 |
 | Leg segmentation lookback | ~4 hours | §3 |
 
-## 9. Implementation gaps (design-complete, work remaining)
+## 10. Forward test — 08-11..08-14 (oracle L1)
+
+Run 2026-08-15 at 1m resolution against the full updated rule set. Oracle inputs: L1 assumed
+to deliver, at 09:20, the day's actual post-09:30 direction and the liquidity level the move
+in fact reached (settle window applied through 09:30:30). Net **+232.25 over 4 days**
+(2 wins, 1 accepted skip, 1 win-via-takeover; 08-14 figure is 1s-verified).
+
+- **08-11 (down, DOL 29666 = overnight low): no entry — accepted skip.** Open drive with no
+  retrace: no adverse day extreme ever printed (§6/§7 cannot arm), §5's correct binding
+  [29835, 29855.25] was only ever entered at/before the L1 arm (settle window voids it) and
+  price never retraced into it post-window; the one fresh 5m gap (09:40, 73 pts) fails the
+  35-pt max height. The ~170-pt move is out of scope BY DECISION (2026-08-15): every
+  mechanism is retrace/confirmation-based, and a no-retrace runaway stays untraded (a
+  displacement-entry mechanism was considered and shelved).
+- **08-12 (down, DOL 29842.75 = prev RTH high): +46.75.** §4 negation short 29933 (fill
+  09:31) stopped −31 on the 09:48 squeeze; the bound gap was then close-through dead → the
+  widened §4-1m fallback armed; its first candidate was vetoed by the DOL floor (57.25
+  remaining), its second allowed (77.75) → short 29920.5 at 09:51, survived by 3 pts (max
+  high 29955 vs SL 29958), DOL TP 10:31 +77.75. First forward instance of the veto
+  discriminating between candidate bindings.
+- **08-13 (up, DOL 30001.5 = prev RTH high): +89.25.** Textbook §5: fresh 09:31 retrace into
+  the 09:10 bull gap [29881.5, 29905.25] (wicked below, never a 5m close through), buy stop
+  29912.25 filled 09:33, DOL TP during 09:36.
+- **08-14 (down, DOL 30124.25 = overnight low): +96.25** under the §8 deeper-gap takeover
+  (1s-verified sequence in §8 — attempt-1's real stop was the 09:31 squeeze, not 09:45 as
+  the 1m read suggested); roughly −60 with lockout without it. No new day extreme printed
+  (09:48 high 30280.75 vs overnight 30287.25) — §6/§7 correctly silent.
+
+1s-verified 2026-08-16: 08-11's no-entry is solid (price sat 35 pts below the binding gap
+at 09:30:30 and never returned); 08-12 exact (fill 09:31:18, stop 09:48:54 −31, re-bind fill
+09:51:35 → TP 10:31:14 +77.75, max adverse excursion 3.00 pts from the SL); 08-13 clean
+(fresh re-entry 09:32:35, fill 09:33:32, TP 09:36:43). Remaining caveats: oracle L1
+(direction and DOL assumed correct) and the DOL choice materially shapes the captured size
+(08-13's real move ran ~265 pts past its mapped DOL).
+
+### 10.1 Real-L1 replay (recorded 07-14..07-27 theses, 2026-08-16)
+
+Recorded L1 outputs (manual-l1-thesis/rerun_finalfinal) compared against the oracle
+assumptions on the studied dates:
+
+- **Match (validated numbers carry over):** 07-15 (DOWN, DOL asia_low 29745.75 — the +205
+  ride's exact target), 07-16 (DOWN, prev2_day_low 29303.25 — matches the +159 arithmetic),
+  07-17 (DOWN, london_low 28554.75 — EXACTLY the §8 takeover replay's TP; the +91.25 result
+  is therefore real-input-validated end to end), 07-24 (DOWN, london_low ≈ the +146.5
+  target).
+- **07-21 diverges: recorded bias UP** (the studied §6 +96.5 used DOWN). Under the recorded
+  thesis the DOL (prev2_day_high 29220, 50.75 pts away) is swept by the 09:30 judas before
+  the settle window ends → plan fulfilled flat. The studied gain would not have occurred
+  live, but neither would any loss — a real wrong-direction day cost 0.
+- **07-23 diverges on DOL:** direction matches (DOWN) but the recorded DOL (prev2_day_low
+  28700) sat 15.75 pts away at arm and was swept in the opening minute → plan complete,
+  flat; the studied +304 is forfeited. SYSTEMIC FINDING: a DOL within ~60–80 pts at arm
+  time interacts with the settle window (sweep completes before entries are allowed) and
+  with the DOL-floor veto (nearly every entry fails the 60-pt floor) to produce flat days.
+  This is an L1/L2 DOL-selection issue, not a mechanism defect — candidate L2 rule: when
+  the nearest DOL is within ~80 pts at arm, target the next-deeper pool instead.
+
+### 10.2 Wrong-thesis stress (inverted oracle, 2026-08-16)
+
+Each forward-test day rerun with the thesis inverted and a symmetric opposite-side DOL, to
+bound the bleed when L1 is wrong (the live edge depends on it):
+
+- 08-11 inv (UP, DOL overnight high 29887): near-gap triggers veto-blocked (27.5–36.5 pts
+  remaining); one deeper §5 binding fills 29779.25 at 09:30:56 (1s) and stops −17; later
+  §6-long episodes in the 10:45–11:30 decline are mostly color-gated → ≈ **−17..−50**.
+- 08-12 inv (UP, DOL overnight high 29992.25): DOL swept by the 09:30 push pre-settle-end →
+  **flat 0**.
+- 08-13 inv (DOWN into the monster rally): §4 negation −33.75; then §7 fires twice — 10:14
+  short 30206.25 (stopped −10.25) and **10:36 short 30262.25, five pts off the 30267 session
+  top**, riding the real afternoon decline ≈ **breakeven to positive**.
+- 08-14 inv (UP, DOL overnight high 30287.25, 45.75 away): every early entry fails the
+  60-pt floor; no new day low until 10:59 keeps §6/§7 silent through the morning → ≈
+  **0..−45**.
+- Plus the one REAL wrong-direction instance (07-21 recorded UP, §10.1): flat 0.
+
+Conclusion: wrong-thesis bleed is bounded at roughly 0..−80/day — far under the naive
+3-attempt worst case — because (1) the DOL-floor veto blocks near-DOL chases outright,
+(2) wrong-direction DOLs tend to be swept early, completing the plan flat, and (3) the
+color/cycle gates starve counter-trend episode entries. Sample: five days; extend before
+treating as a distribution.
+
+## 11. Implementation gaps (design-complete, work remaining)
 
 - 5m FVG detection + leg segmentation as L3 facts/data products (existing detection is 1hr/4hr
   in `daily.py` and 1m-based `detect_fvg` in `strategy_smt.py`; 5m does not exist yet).
 - 5m bar construction/alignment for FVG detection.
 - New §7 mechanism enum entries (`fvg_negation_reversal`, `fvg_return_continuation`,
-  `fvg_1m_post_extreme`) +
+  `fvg_1m_post_extreme`, `extreme_reject_close`) +
   validator support.
 - Ladder re-bind + close-based eligibility tracking in the L3 binding engine (per-FVG
   close-through state on the gap's own timeframe, adverse-path next-FVG detection,
@@ -320,4 +543,28 @@ resting order beyond them.
   machine (entering-bar close verdicts, close-color gates, early-runaway trigger,
   excursion-extreme tracking with SL cap), exit-tick market execution.
 - 5m distance-invalidation tracking (per-gap max anti-trade excursion, permanent kill flag).
+- DOL-floor veto at every entry decision point (placement, re-bind, crossed-trigger
+  execution, episode fire, post-stop re-entry); nearest-un-hit-DOL selection for
+  multi-target theses.
+- §4 widened 1m fallback: 5m-unusable state detection shared with §6, creating-bar ≥ 09:30
+  filter, coexistence with §6 under the shared attempt counter.
+- `extreme_reject_close` support: day-extreme tracking against the prior-18:00 session,
+  tick-based quiet counter and armed-state machine, close-direction fire at 1m close,
+  wick-capped SL, plan-scoped disarm.
+- Deeper-gap takeover support (§8): post-stop deeper-penetration detection (stop-out bar
+  included), per-plan gap blacklist, §6 episode machinery reused in re-entry mode, the
+  defer-entry SL-cap gate.
+- 07-23 5m bar-construction discrepancy: a 1m-resampled 5m series shows the 09:40–09:44 bar
+  closing 28856, above the bound gap top 28827.5, BEFORE the validated fill — which §2
+  close-through eligibility should have killed. Likely a 5m bar-alignment difference vs the
+  original study; reconcile during implementation (the §8 backcheck verdict is unaffected —
+  no deeper gap was penetrated either way).
+- 1s-replay verification: DONE 2026-08-16 for all package simulations (08-03 +200,
+  08-05 −20-one-attempt with §6's budget preserved, 08-06 +266.5 clean, 08-10 §7 +96.25,
+  08-11 no-entry, 08-12 +46.75 exact, 08-13 +89.25 clean) and the §8 takeover sequences
+  (07-17 +91.25, 08-14 +96.25); §4/§7/§8/§10 validation texts updated to 1s numbers.
+- L2 DOL-proximity rule (from §10.1): when the nearest DOL is within ~80 pts at arm time,
+  the settle window + DOL-floor veto make the plan structurally untradeable (07-21/07-23
+  recorded-L1 replays went flat; 07-23 forfeits a studied +304) — consider requiring the
+  next-deeper pool. Design not yet written.
 - Per-mechanism L2-supplied invalidation criteria — deferred.
