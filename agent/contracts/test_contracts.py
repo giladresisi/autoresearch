@@ -928,6 +928,189 @@ def test_declared_p4_mid_item_discarded_and_replaced_by_auto_derivation():
 
 
 # --------------------------------------------------------------------------- #
+# P4-supersedes-P3 per (asset, mid) + position-only P3 + P1 stale gate         #
+# (2026-08-15, from the 2026-08-10 09:20 ET audit)                             #
+# --------------------------------------------------------------------------- #
+
+def test_fresh_p4_on_one_tf_supersedes_stale_tf_p3_same_mid():
+    # 2026-08-10 09:20 ET: MES's daily_mid had a fresh 1h crossing (P4) AND a stale 4h
+    # crossing that previously injected a redundant P3 restatement of the same mid.
+    status = {"MNQ": {"daily_mid": {"1h": False, "4h": False}}, "MES": {}}
+    reclaim = {"MNQ": {"daily_mid": {"1h": {"fresh": True, "cross_dir": "down"},
+                                     "4h": {"fresh": False, "cross_dir": "down"}}}, "MES": {}}
+    scoring = score_thesis_evidence([], level_htf_close_status=status, mid_reclaim=reclaim)
+    ev = scoring["scored_evidence"]
+    p4 = [it for it in ev if it["criterion"] == "P4"]
+    assert len(p4) == 1 and p4[0]["tf"] == "1h" and p4[0]["level"] == "daily_mid_low"
+    assert not [it for it in ev if it["criterion"] == "P3"]   # stale 4h P3 superseded
+
+
+def test_stale_only_tfs_still_inject_p3_when_no_fresh_p4():
+    # No fresh crossing on ANY tf -> the old per-tf P3 behavior is unchanged.
+    status = {"MNQ": {"daily_mid": {"1h": False, "4h": False}}, "MES": {}}
+    reclaim = {"MNQ": {"daily_mid": {"1h": {"fresh": False, "cross_dir": "down"},
+                                     "4h": {"fresh": False, "cross_dir": "down"}}}, "MES": {}}
+    scoring = score_thesis_evidence([], level_htf_close_status=status, mid_reclaim=reclaim)
+    ev = scoring["scored_evidence"]
+    assert not [it for it in ev if it["criterion"] == "P4"]
+    assert len([it for it in ev if it["criterion"] == "P3"]) == 2   # 1h + 4h
+
+
+def test_position_only_p3_injected_when_mid_never_crossed():
+    # 2026-08-10 09:20 ET: both assets sat ~200pts ABOVE their weekly mids with no
+    # crossing in the lookback -- previously zero P3 items existed for the strongest
+    # position case of all.
+    status = {"MNQ": {}, "MES": {}}
+    mid_position = {"MNQ": {"weekly_mid": {"price": 29613.0, "side": "above",
+                                           "dist_pts": 202.5, "dist_ratio": 2.71}},
+                    "MES": {}}
+    scoring = score_thesis_evidence([], level_htf_close_status=status,
+                                    mid_position=mid_position)
+    ev = scoring["scored_evidence"]
+    assert len(ev) == 1
+    assert ev[0]["criterion"] == "P3" and ev[0]["level"] == "weekly_mid"
+    assert ev[0]["direction"] == "accept" and ev[0]["side"] == "UP"
+    assert ev[0]["points"] == 1.5   # _P3_MID_POINTS["week"], magnitude-neutral
+
+
+def test_position_only_p3_not_injected_when_crossing_evidence_exists():
+    # A mature crossing status for the SAME mid must win over the position fallback --
+    # exactly one item, from the crossing, not two.
+    status = {"MNQ": {"daily_mid": {"1h": True, "4h": None}}, "MES": {}}
+    mid_position = {"MNQ": {"daily_mid": {"price": 100.0, "side": "above",
+                                          "dist_pts": 5.0, "dist_ratio": 0.2}}, "MES": {}}
+    scoring = score_thesis_evidence([], level_htf_close_status=status,
+                                    mid_position=mid_position)
+    p3 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P3"]
+    assert len(p3) == 1 and p3[0]["tf"] == "1h"
+
+
+def test_no_mid_position_leaves_never_crossed_mid_unevidenced():
+    # Backward compat: mid_position absent (older facts dicts) -> exactly the old gap.
+    scoring = score_thesis_evidence([], level_htf_close_status={"MNQ": {}, "MES": {}})
+    assert scoring["scored_evidence"] == []
+
+
+def test_p1_stale_level_zeroes_declared_item():
+    item = _ev(asset="MNQ", level="prev_day_high", direction="accept")
+    base = score_thesis_evidence([item])["net_score"]
+    assert base != 0.0
+    scoring = score_thesis_evidence([_ev(asset="MNQ", level="prev_day_high",
+                                         direction="accept")],
+                                    p1_stale_levels={"MNQ": ["prev_day_high"]})
+    assert scoring["net_score"] == 0.0
+    assert scoring["scored_evidence"][0]["points"] == 0.0
+
+
+def test_p1_stale_level_skipped_by_auto_injection():
+    scoring = score_thesis_evidence(
+        [], level_tiers={"MNQ": {"prev_day_high": {"tier": "day", "price": 20000.0}},
+                         "MES": {}},
+        level_htf_close_status={"MNQ": {"prev_day_high": {"1h": True, "4h": None}},
+                                "MES": {}},
+        p1_stale_levels={"MNQ": ["prev_day_high"]})
+    assert not [it for it in scoring["scored_evidence"] if it["criterion"] == "P1"]
+
+
+def test_p2_effective_verdict_reverse_on_accept_fires_p2():
+    # Stage 1: a fully-MSS'd ('reverse') acceptance at a meaningful divergence site fires
+    # P2 (effective reject) instead of a flipped P1.
+    tiers = {"MNQ": {"prev_day_high": {"tier": "day", "price": 20000.0}}, "MES": {}}
+    status = {"MNQ": {"prev_day_high": {"1h": True, "4h": None}}, "MES": {}}   # raw accept
+    reversal = {"MNQ": {"prev_day_high": {"1h": "reverse"}}}
+    cands = [{"level": "prev_day_high", "tier": "day", "swept_ticker": "MNQ",
+              "unswept_ticker": "MES", "meaningful": True}]
+    scoring = score_thesis_evidence([], level_tiers=tiers, level_htf_close_status=status,
+                                    smt_candidates=cands, htf_reversal=reversal)
+    ev = scoring["scored_evidence"]
+    assert len(ev) == 1
+    assert ev[0]["criterion"] == "P2" and ev[0]["direction"] == "reject"
+    assert ev[0]["points"] == 1.5   # day-tier P2, FULL weight at 'reverse'
+
+
+def test_p2_effective_verdict_reverse_on_reject_falls_back_to_flipped_p1():
+    # Stage 1: a fully-MSS'd REJECTION stops firing P2 (effective accept); it falls to P1
+    # and the reversal pre-pass flips it — previously the stale P2 escaped the machinery.
+    tiers = {"MNQ": {"prev_day_high": {"tier": "day", "price": 20000.0}}, "MES": {}}
+    status = {"MNQ": {"prev_day_high": {"1h": False, "4h": None}}, "MES": {}}   # raw reject
+    reversal = {"MNQ": {"prev_day_high": {"1h": "reverse"}}}
+    cands = [{"level": "prev_day_high", "tier": "day", "swept_ticker": "MNQ",
+              "unswept_ticker": "MES", "meaningful": True}]
+    scoring = score_thesis_evidence([], level_tiers=tiers, level_htf_close_status=status,
+                                    smt_candidates=cands, htf_reversal=reversal)
+    ev = scoring["scored_evidence"]
+    assert len(ev) == 1
+    assert ev[0]["criterion"] == "P1" and ev[0]["direction"] == "accept"   # flipped
+    assert ev[0]["side"] == "UP"
+
+
+def test_p2_discount_stage_reject_scores_half():
+    # Stage 1: a P2 fired on a 'discount'-stage rejection inherits the same x0.5 the
+    # pre-pass gives P1 — previously P2 escaped the discount entirely.
+    tiers = {"MNQ": {"prev_day_high": {"tier": "day", "price": 20000.0}}, "MES": {}}
+    status = {"MNQ": {"prev_day_high": {"1h": False, "4h": None}}, "MES": {}}
+    reversal = {"MNQ": {"prev_day_high": {"1h": "discount"}}}
+    cands = [{"level": "prev_day_high", "tier": "day", "swept_ticker": "MNQ",
+              "unswept_ticker": "MES", "meaningful": True}]
+    scoring = score_thesis_evidence([], level_tiers=tiers, level_htf_close_status=status,
+                                    smt_candidates=cands, htf_reversal=reversal)
+    p2 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P2"]
+    assert len(p2) == 1 and p2[0]["points"] == 0.75   # 1.5 x 0.5
+
+
+def test_p2_omit_blocks_both_p1_and_p2():
+    tiers = {"MNQ": {"prev_day_high": {"tier": "day", "price": 20000.0}}, "MES": {}}
+    status = {"MNQ": {"prev_day_high": {"1h": False, "4h": None}}, "MES": {}}
+    reversal = {"MNQ": {"prev_day_high": {"1h": "omit"}}}
+    cands = [{"level": "prev_day_high", "tier": "day", "swept_ticker": "MNQ",
+              "unswept_ticker": "MES", "meaningful": True}]
+    scoring = score_thesis_evidence([], level_tiers=tiers, level_htf_close_status=status,
+                                    smt_candidates=cands, htf_reversal=reversal)
+    assert scoring["scored_evidence"] == []
+
+
+def test_p2_discount_fire_knob_distance_gated():
+    # Stage 2 (experimental knob): a distance-safe 'discount' recross of an ACCEPT at a
+    # divergence site fires P2 at x0.5; below the threshold it stays a discounted P1.
+    tiers = {"MNQ": {"prev_day_high": {"tier": "day", "price": 20000.0}}, "MES": {}}
+    status = {"MNQ": {"prev_day_high": {"1h": True, "4h": None}}, "MES": {}}   # raw accept
+    reversal = {"MNQ": {"prev_day_high": {"1h": "discount"}}}
+    cands = [{"level": "prev_day_high", "tier": "day", "swept_ticker": "MNQ",
+              "unswept_ticker": "MES", "meaningful": True}]
+    dist = {"MNQ": {"prev_day_high": 0.4}}
+    fired = score_thesis_evidence([], level_tiers=tiers, level_htf_close_status=status,
+                                  smt_candidates=cands, htf_reversal=reversal,
+                                  recross_distance=dist, p2_discount_fire_ratio=0.25)
+    ev = fired["scored_evidence"]
+    assert len(ev) == 1 and ev[0]["criterion"] == "P2" and ev[0]["points"] == 0.75
+    held = score_thesis_evidence([], level_tiers=tiers, level_htf_close_status=status,
+                                 smt_candidates=cands, htf_reversal=reversal,
+                                 recross_distance=dist, p2_discount_fire_ratio=0.5)
+    ev2 = held["scored_evidence"]
+    assert len(ev2) == 1 and ev2[0]["criterion"] == "P1" and ev2[0]["direction"] == "accept"
+    assert ev2[0]["points"] == 0.75   # day P1 discounted x0.5 (1.5 x 0.5), unflipped
+    off = score_thesis_evidence([], level_tiers=tiers, level_htf_close_status=status,
+                                smt_candidates=cands, htf_reversal=reversal,
+                                recross_distance=dist)   # knob unset -> Stage 1 only
+    assert [it["criterion"] for it in off["scored_evidence"]] == ["P1"]
+
+
+def test_p1_stale_gate_does_not_touch_p2():
+    # P2 keeps its own tier-relative shelf-life mechanism -- a stale P1 level with a
+    # genuine meaningful reject divergence still scores as P2.
+    scoring = score_thesis_evidence(
+        [], level_tiers={"MNQ": {"prev_day_high": {"tier": "day", "price": 20000.0}},
+                         "MES": {}},
+        level_htf_close_status={"MNQ": {"prev_day_high": {"1h": False, "4h": None}},
+                                "MES": {}},
+        smt_candidates=[{"level": "prev_day_high", "tier": "day", "swept_ticker": "MNQ",
+                         "unswept_ticker": "MES", "meaningful": True}],
+        p1_stale_levels={"MNQ": ["prev_day_high"]})
+    p2 = [it for it in scoring["scored_evidence"] if it["criterion"] == "P2"]
+    assert len(p2) == 1 and p2[0]["points"] > 0.0
+
+
+# --------------------------------------------------------------------------- #
 # Partial-bar reversal via htf_reversal (2026-08-05, thesis.md §10)            #
 # --------------------------------------------------------------------------- #
 

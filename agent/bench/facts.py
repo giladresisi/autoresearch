@@ -191,6 +191,16 @@ class ParquetFactsSource:
                   (bundle.levels.get(tkr) or {}).items() if side is not None}
             for tkr in ("MNQ", "MES")
         }
+        # thesis.md §2.1 (2026-08-15): running-extreme tier promotion — a session-tier
+        # level that IS the running day/week extreme scores at that tier (P1 weight; the
+        # matching P2 promotion lives on bundle.smt_candidates itself). Overrides the
+        # tier straight in level_tiers so the P1 auto-injection and §2.1e machinery see
+        # the promoted tier with no scorer change.
+        for _tkr, _promos in (bundle.promoted_session_levels or {}).items():
+            for _name, _ptier in (_promos or {}).items():
+                _entry = (res.validator_dict["level_tiers"].get(_tkr) or {}).get(_name)
+                if _entry is not None:
+                    _entry["tier"] = _ptier
         # 2026-08-02 P2 auto-derivation: JSON-safe view of bundle.smt_candidates (drops
         # swept_at/type -- not needed for scoring) so score_thesis_evidence can auto-inject
         # a P2 item for every meaningful, unsuppressed divergence directly, the same way
@@ -224,6 +234,25 @@ class ParquetFactsSource:
         # (derive_facts._htf_reversal_tier). JSON-safe as-is ({level: {tf: str}}).
         res.validator_dict["htf_reversal"] = {
             tkr: dict(bundle.htf_reversal.get(tkr) or {}) for tkr in ("MNQ", "MES")
+        }
+        # thesis.md §2.1 P3 (2026-08-15, #3): unconditional per-asset position vs each
+        # mid — feeds the position-only P3 injection for mids with no HTF crossing at all.
+        # JSON-safe as-is (floats/strings only).
+        res.validator_dict["mid_position"] = {
+            tkr: dict(bundle.mid_position.get(tkr) or {}) for tkr in ("MNQ", "MES")
+        }
+        # thesis.md §2.1 P2 Stage 2 input (2026-08-15): recross distance in avg-1h-range
+        # units per level/mid with a reversal entry — read only by the EXPERIMENTAL
+        # discount-fire A/B (production leaves the knob off). JSON-safe as-is.
+        res.validator_dict["recross_distance"] = {
+            tkr: dict(bundle.recross_distance.get(tkr) or {}) for tkr in ("MNQ", "MES")
+        }
+        # thesis.md §2.1c (2026-08-15, #6): equilibrium-reversion staleness as a HARD P1
+        # gate — the flagged names only (lists, JSON-safe, like suppressed_p1_levels).
+        res.validator_dict["p1_stale_levels"] = {
+            tkr: sorted(name for name, flag in
+                        (bundle.p1_equilibrium_stale.get(tkr) or {}).items() if flag)
+            for tkr in ("MNQ", "MES")
         }
         res.menu_text = render_menus_text(bundle)              # reuses cached bundle.menus
         res.evidence_magnitude = build_evidence_magnitude(bundle)  # plan 14 Task 5: code-derived

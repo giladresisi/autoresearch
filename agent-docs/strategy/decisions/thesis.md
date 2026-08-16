@@ -43,8 +43,8 @@ daily-trend vs next-move) — one evidence ledger, scored per call, gated by the
 | # | Criterion | Definition |
 |---|---|---|
 | P1 | **HTF close beyond/before at any liquidity sweep** | General acceptance/rejection test at ANY swept level (fixed or running, either asset) — independent of whether an SMT is present there. `n_closes_beyond(price=level, side=sweep_direction, tf, n=1)` true → **accepted beyond** (continuation-leaning); the SAME check on the opposite `side` true instead → **rejected/closed before** (reversal-leaning). Gated by the maturity rule (§3) — a sweep with no qualifying HTF close yet scores ZERO, not a default direction. 4hr close scores more than 1hr (§4). Unlike P2, P1 has NO tier floor — session-tier sweeps still qualify — but points scale by tier (session < day < week, same ladder as P2 — §4), so a pile of session-tier reads cannot numerically out-tally one week-tier read. Evaluated PER ASSET, on that asset's own copy of the level (§5) — see §6 for what it means when the two assets' P1 reads disagree. |
-| P2 | **Meaningful SMT + HTF rejection at that liquidity** | Requires ALL of: (a) an SMT divergence present at the level, (b) the level is week-or-day tier or higher (`prev1/2_day_high/low`, `prev1_week_high/low`, `TDO`/`TWO`, running `day_high/low`/`week_high/low`) — explicitly EXCLUDING session-tier (6hr sub-session extremes, `liquidities_session_prior`) and fill/FVG tier, (c) the relevant HTF bar (4hr if it exists over the window, else 1hr) on the LAGGER (see §5 leader/lagger) closed BEFORE — not beyond — the liquidity. Reversal-only by design (no symmetric "SMT + accept-beyond" bonus form — an accepted push is scored by P1 on its own). Points scale with tier (week > day). **Deliberately stacks with P1** when both independently fire on the same physical sweep — this is not double-counting-as-bug, it is P2 rewarding the specific SMT-plus-genuine-rejection combination as a stronger tell than either alone; do not dedupe P1↔P2. |
-| P3 | **Position vs. equilibrium — daily/weekly weight set by phase, not fixed** | Current price vs. daily mid AND vs. weekly mid (`equilibrium.md` §1 definitions: running-extreme midpoints), evaluated PER ASSET. The daily-vs-weekly split is NOT fixed 50/50 — see §2.1a for the phase rule that sets which one dominates a given call. See §6 for what it means when the two assets agree on one equilibrium (e.g. both above weekly mid) but disagree on the other (e.g. split daily-mid placement). **Partial code-derivation (plan 15 Task 6):** the model references the mid as a synthetic `daily_mid`/`weekly_mid` level and declares `direction: accept` (price accepted ABOVE the mid → bullish lean) / `reject` (sits BELOW → bearish lean); code derives the sign via `validate_contracts._mid_side` (a position read, no accept/reject-of-a-sweep). Conservatively scoped: reuses the P1 tier/tf multipliers, no new tables; the §2.1a dynamic daily/weekly weighting stays reasoning-only (its per-asset touch timestamps are not yet structured facts — §8 gap). |
+| P2 | **Meaningful SMT + HTF rejection at that liquidity** | Requires ALL of: (a) an SMT divergence present at the level, (b) the level is week-or-day tier or higher (`prev1/2_day_high/low`, `prev1_week_high/low`, `TDO`/`TWO`, running `day_high/low`/`week_high/low`) — explicitly EXCLUDING session-tier (6hr sub-session extremes, `liquidities_session_prior`) and fill/FVG tier, (c) the relevant HTF bar (4hr if it exists over the window, else 1hr) on the LAGGER (see §5 leader/lagger) closed BEFORE — not beyond — the liquidity. **Condition (c) reads the EFFECTIVE verdict (2026-08-15 "Stage 1"), not the raw completed-bar close:** the §10 partial-bar ladder applies to the dispatch — a completed acceptance that the currently-forming bar has fully MSS'd ('reverse') counts as a rejection and fires P2; a completed rejection that has been fully MSS'd back stops firing P2 (falls to P1, flipped); an 'omit' state fires neither; a P2 fired on a 'discount'-stage read carries the same ×0.5 the ladder gives P1. (An experimental "Stage 2" rung — firing P2 on a distance-safe 'discount' recross of an acceptance, at ×0.5 — exists behind a default-off knob pending its historical A/B.) Reversal-only by design (no symmetric "SMT + accept-beyond" bonus form — an accepted push is scored by P1 on its own). Points scale with tier (week > day). **Deliberately stacks with P1** when both independently fire on the same physical sweep — this is not double-counting-as-bug, it is P2 rewarding the specific SMT-plus-genuine-rejection combination as a stronger tell than either alone; do not dedupe P1↔P2. |
+| P3 | **Position vs. equilibrium — daily/weekly weight set by phase, not fixed** | Current price vs. daily mid AND vs. weekly mid (`equilibrium.md` §1 definitions: running-extreme midpoints), evaluated PER ASSET. The daily-vs-weekly split is NOT fixed 50/50 — see §2.1a for the phase rule that sets which one dominates a given call. See §6 for what it means when the two assets agree on one equilibrium (e.g. both above weekly mid) but disagree on the other (e.g. split daily-mid placement). **Partial code-derivation (plan 15 Task 6):** the model references the mid as a synthetic `daily_mid`/`weekly_mid` level and declares `direction: accept` (price accepted ABOVE the mid → bullish lean) / `reject` (sits BELOW → bearish lean); code derives the sign via `validate_contracts._mid_side` (a position read, no accept/reject-of-a-sweep). Conservatively scoped: reuses the P1 tier/tf multipliers, no new tables; the §2.1a dynamic daily/weekly weighting stays reasoning-only (its per-asset touch timestamps are not yet structured facts — §8 gap). **Unconditional (2026-08-15):** P3 is a position snapshot, so it exists for BOTH mids on BOTH assets regardless of whether the mid was ever crossed — S9 renders a dedicated `MID POSITION` block, and a mid with NO qualifying HTF crossing at all (price parked on one side for the whole lookback — the strongest position case) gets a position-only P3 auto-injected from `mid_position` instead of silently vanishing (2026-08-10 09:20 ET: both assets ~200pts above their weekly mids, zero UP-side mid evidence on the sheet). |
 | P4 | **Reclaim / failed reclaim of daily or weekly mid, HTF-confirmed** | A close-beyond-then-fails-back (or fails-to-reclaim) sequence on the daily OR weekly mid, confirmed specifically by an HTF (1h/4h) close — not any close. Daily and weekly weighted equally; 4hr scores more than 1hr (same scaling as P1). Note: `equilibrium.md` §3 and `next-move.md` mark plain weekly-mid TOUCH/CROSS as proven noise (GIL-39 B, +$83 shipped suppressing it as a trigger) — P4's weekly leg is a materially different, stricter signal (HTF-close-confirmed reclaim/failed-reclaim, not a bare touch/cross), so it is enabled alongside the daily leg without a separate gate. The daily half is parallel to the existing "failed reclaim of daily mid" item in `next-move.md` §2 (weight 2, "the strongest intraday tell"). **Partial code-derivation (plan 15 Task 6):** the model references the mid as a `daily_mid_high`/`daily_mid_low`/`weekly_mid_high`/`weekly_mid_low` synthetic level (the `_high`/`_low` encoding the reclaim direction) with `direction: accept` (reclaim held) / `reject` (failed reclaim); code derives the UP/DOWN sign via the same `_evidence_side` polarity as P1. Conservatively scoped — reuses the P1 tier/tf multipliers and the §3 maturity gate, no new multiplier tables. |
 | P5 | **FVG fill (fair-value-gap zone visited)** | A completed-bar 1hr/4hr fair-value gap (`derive_facts.fvgs`) that the 1s tape has since re-entered ("visited" — `daily.py` convention). A visited zone is the fill event. Scored (plan 15 Task 4) via `validate_contracts._fvg_side`: the model copies the S6/S9 zone id verbatim (carrying the `bull`/`bear` kind) as the evidence `level` and declares `direction: accept` (the zone held its own bias) / `reject` (violated); code derives the sign from the bull/bear kind + accept/reject (bull↔high, bear↔low — the same mirrored polarity as P1). Reuses the P1/P2 tier/tf multipliers and the §3 maturity gate; magnitude is neutral (no per-tf clearance close for a zone fill). Motivating case (example #10): MES 1hr bull zone 7544.75–7558.0 (2026-07-14 00:00), visited — previously never appeared in the ledger at all. |
 
@@ -190,11 +190,31 @@ model to actually use for P1-P4, so this is a cosmetic inconsistency in a legacy
 a live evidence-ledger bug.
 
 This filter is orthogonal to, not a replacement for, tier weighting (§4) — it prunes WHICH levels
-within a family are even eligible before tier weight is applied to whichever survives. It does
-NOT extend to session-tier sub-blocks (`asia`/`london`/`ny_morning`/`ny_evening` `(cur)`/`(prev1)`
-highs/lows) — those are a different, non-chronological-family naming scheme and P2 already
-excludes session-tier outright (§2.1); this filter is specifically about prev-day/prev-week
-nesting.
+within a family are even eligible before tier weight is applied to whichever survives.
+
+**Session-tier nesting (`derive_facts._nested_session_levels`, 2026-08-01).** The same
+supersession concept extends to the 6hr-session sub-blocks (`asia`/`london`/`ny_morning`/
+`ny_evening`, `(cur)`/`(prev1)`), keyed on the fixed chronological session sequence instead of a
+numeric prev-N: a session level is nested if a MORE RECENT session's same-side level reaches at
+least as far. (An earlier revision of this doc said the filter deliberately did not extend to
+session tier — that was superseded by the 2026-08-01 root-cause audit: 2026-07-15's
+`ny_evening(prev1)_high` nested under `asia(cur)_high`, 2026-07-27's `asia(cur)_high` under
+`london(cur)_high`.)
+
+**Most-extreme-swept-only (`derive_facts._extremity_shadowed_levels`, 2026-08-15).** Nesting and
+duplicate-collapsing above are family-scoped or timestamp-scoped; a third, general rule closes
+what they miss: among ONE asset's currently-SWEPT same-side levels — ANY tier, ANY family — only
+the MOST EXTREME one is fresh P1 evidence. A deeper sweep necessarily passed through every
+shallower same-side level on the way, so their accept/reject reads are echoes of the same
+displacement, not independent events (2026-08-10 09:20 ET: MNQ's `london(cur)_low` P1 read
+stacked on top of the deeper `asia(cur)_low` swept in the same decline — one displacement, two
+scores). This is §6's own "only the most extreme swept level should be treated" principle applied
+to P1 tallying. STRICT by design: it applies even while the deeper level's own HTF read is still
+immature (the framework prefers waiting over scoring a shadowed shallower read). Swept levels
+only — an unswept deeper level shadows nothing. Ties (identical price under two names, the §2.1d
+shape) keep the higher-tier representative. Folded into the same `suppressed_p1_levels` set, so
+the S9 rendering rule, the P1 auto-injection skip, and the scoring backstop all inherit it;
+P2/SMT candidacy is untouched, exactly as with nesting.
 
 **Why this matters:** without it, a pile of nested, lower-significance echoes of the SAME
 underlying extreme can numerically out-tally one genuinely meaningful (often week-tier) signal.
@@ -276,11 +296,20 @@ which the ledger had no way to reflect. For every mature P1 item on a day-tier l
 whether price has touched the daily mid at any point since that item's own `swept_at` (weekly mid
 for a week-tier item, using each asset's OWN mid — `bundle.day_hi`/`day_lo`/`week_hi`/`week_lo` are
 per-asset, unlike the MNQ-only `day_mid`/`weekly_mid` scalars used elsewhere). If so, S9 tags that
-close-status line `[SUGGESTED STALE: price has since reached equilibrium]`. Same "code suggests,
-model may override" mechanic as `suggested_exhausted` — the model may set the EXISTING
-`exhausted: true` field on that P1 item (no schema change; `exhausted` was already criterion-
-agnostic in `score_thesis_evidence`, so this needed no new scoring code either) or leave it scoring
-normally if it judges the sweep still relevant.
+close-status line `[STALE: price has since reached equilibrium — NOT usable P1 evidence]`.
+
+**HARD gate as of 2026-08-15 (the 2026-08-10 09:20 ET audit), no longer a suggestion.** The
+original "code suggests, model may override" shape (the model setting `exhausted: true`) failed in
+practice: MES's `prev1_day_high` — accepted many hours before the call, both tf rows tagged
+suggested-stale, and the daily mid re-swept since — was silently scored anyway and became the
+tally's LARGEST item (1.6875 of a 7.06 DOWN total, on a day the market went up). The flag is now
+exported as `p1_stale_levels` (bench/facts.py) and enforced in `score_thesis_evidence` exactly
+like `suppressed_p1_levels`: a stale level is skipped by the P1 auto-injection and zeroed if
+declared. Deliberately structure-based, not a raw age cutoff — the trigger is price having since
+interacted with the tier's own equilibrium (the market re-based; the old acceptance/rejection
+belongs to a previous swing), so a genuinely old-but-untested read is NOT gated. P2 is untouched
+(divergences keep their own tier-relative shelf life above); a fresh crossing back through the
+level later fires its own new sweep/read as usual.
 
 ### 2.1d Duplicate-simultaneous-sweep collapsing
 
@@ -330,6 +359,30 @@ The "old, untracked" filter skips the most-recent tracked rows when scanning (th
 tracked extreme — a v1-seed heuristic. Motivating case (found during manual testing): a
 currently-swept session-tier level coincided almost exactly with an untracked day-high from several
 weeks back — a coincidence that was previously invisible to the model.
+
+### 2.1f Running-extreme promotion of session-tier levels (2026-08-15)
+
+A running day/week extreme that happened to form inside a 6hr sub-session is only ever NAMED as
+that session's extreme (`asia(cur)_low`, ...) — which made it invisible to every day/week-tier
+check even though §2.1 P2's own tier list explicitly includes running `day_high/low` /
+`week_high/low`. Motivating case (2026-08-10 09:20 ET): MNQ's `asia(cur)_low` WAS the running day
+low when swept at 08:36 ET, and the bullish wick-SMT there (MES 8pts short — its own running day
+low untouched) was tagged `meaningful=False` as mere session tier; the single most relevant
+structural event of the morning never reached the ledger as P2-eligible.
+
+**Rule (`derive_facts._promoted_session_extremes`):** a session-tier level is TIER-PROMOTED to
+day/week when it was the running day/week extreme at its reference time — sweep time for a swept
+level (nothing more extreme existed before the sweep), the call time for an unswept one. Week is
+checked before day (a running week extreme is by construction also the running day extreme).
+Promotion applies to BOTH halves of the evidence machinery (user decision 2026-08-15): the P1
+tier weight (via the `level_tiers` override in bench/facts.py) AND P2 meaningful-tier eligibility
+— a session-tier SMT candidate is promoted (tier + `meaningful=True`) when the level qualifies
+for BOTH assets, each at its own reference time; one-asset-only qualification leaves it a session
+pool. The level's NAME and the hashed S0-S7 text are untouched — promotion is carried as a
+structured map plus explicit S9 tags (`[PROMOTED: running day extreme — scores day-tier]` on the
+close-status row, `PROMOTED from session tier` on the candidate line). Scoped gaps, accepted for
+now: the §2.1c equilibrium-staleness check and §3a near-maturity candidacy still key off the
+stored (session) tier, so a promoted level participates in neither.
 
 ### 2.2 Secondary criteria (lower max weight; accumulate only if aligned)
 
@@ -969,6 +1022,46 @@ SAME fix ported to the live production originals it mirrors (`session_pipeline._
 (a different worktree from this one), commit `335836f` — unlike `_day_start_ts` above (a
 deliberate L1-only extension the production code never had), this one really is a bug in the
 shared reference implementation itself, not a new divergence from it.
+
+**2026-08-10 09:20 ET — six evidence anomalies on one call (bias DOWN/RANGE toward a 360pt-away
+day-tier DOL; the market went up).** The declared ledger tallied 7.06 DOWN across 9 items; a
+manual audit found most of that weight structurally unsound, and the suppressed evidence leaned
+UP. Five fixes shipped 2026-08-15 (the sixth — SMT-at-acceptance handling — is a deferred design
+question, see below):
+
+- **A running day extreme named as a session level was invisible to every day/week check.**
+  MNQ's `asia(cur)_low` WAS the running day low when swept; the bullish SMT there scored
+  `meaningful=False` (session tier) while P1 scored the same event 0.375 DOWN → §2.1f
+  running-extreme promotion (tier + P2 eligibility, both assets required for the candidate).
+- **Same-displacement P1 stacking.** `london(cur)_low` reads (MNQ) stacked on the deeper
+  `asia(cur)_low` swept in the same decline — 2.375 of the 7.06 came from one displacement →
+  §2.1b most-extreme-swept-only rule (`_extremity_shadowed_levels`).
+- **A many-hours-stale acceptance was the tally's largest item.** MES `prev1_day_high` (4h
+  ACCEPTED at 06:00, flipped to reject via `[PARTIAL-BAR REVERSE]`, 1.6875 pts) carried
+  `[SUGGESTED STALE]` on both rows — price had since re-based at the daily mid — and was scored
+  anyway → §2.1c staleness promoted to a HARD gate (`p1_stale_levels`).
+- **No weekly-mid evidence despite both assets sitting ~200pts above their weekly mids.** S9
+  only rendered close-status rows for interacted mids; a never-crossed mid produced nothing →
+  §2.1 P3 unconditional `MID POSITION` block + position-only P3 auto-injection (`mid_position`).
+- **P4 and P3 stacked on the same physical mid.** MES carried `daily_mid_low` P4 [1h, fresh]
+  AND `daily_mid` P3 [4h, stale] — 2.25 one-way for one equilibrium → the P3/P4 auto-injection
+  now lets a fresh P4 on ANY tf supersede the other tf's stale P3 for the same asset+mid; and
+  the mid-freshness check itself now compares against the tier's latest extreme on EITHER side
+  (a new running extreme after the last mid interaction voids P4 until a newer completed-bar
+  crossing re-arms it — previously only the tested side's extreme counted, so a wick-only
+  opposite-side extreme left a dead reclaim "fresh").
+- **Divergent acceptance (the lagger accepts a level the leader never swept) — PARTIALLY
+  addressed, remainder pending A/B.** With promotion in place this call still reads DOWN from
+  MNQ's weak acceptance at the day low while MES's failure to confirm is captured nowhere: P2
+  does not fire (it requires the lagger's rejection), and P1 scores the acceptance as
+  continuation. Resolution chosen (2026-08-15): rather than a raw "divergence attenuates P1"
+  signal (weak per the SMT-predictiveness study), the divergence opens the P2 channel exactly
+  when live tape reverses through the level — "Stage 1" (shipped): P2's condition (c) reads the
+  effective post-partial-bar verdict, so a full intra-bar MSS of the acceptance fires P2;
+  "Stage 2" (EXPERIMENTAL, default off, `p2_discount_fire_ratio`): fire P2 already at a
+  distance-safe 'discount'-stage recross at ×0.5 — on this call that flips the 09:20 read to UP
+  (+1.25), but it acts on a 7-minute-old partial recross, so it ships only if the historical
+  boundary A/B shows it flips more calls right than wrong.
 
 **Empty evidence ledger silently exempted a directional bias from the net-score check.** The
 same 2026-07-27 09:20 ET call declared `bias: UP` backed by extensive free-text `reasoning`

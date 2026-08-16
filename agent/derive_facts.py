@@ -327,8 +327,8 @@ def _mid_tf_state(df: pd.DataFrame, mid: float, tf: str, now: pd.Timestamp,
     the rest of this module already makes for a moving mid); (2) FRESHNESS (for the P3-vs-
     P4 promotion) is anchored to that SAME bar-to-bar crossing -- the last COMPLETED <tf>
     bar whose close changed sides relative to the PRECEDING completed <tf> bar's close --
-    compared against the tier's own most-recent extreme timestamp on the tested side
-    (`hi_ts` for an up-cross, `lo_ts` for a down-cross; at/before the crossing -> fresh).
+    compared against the tier's own most-recent extreme timestamp on EITHER side (max of
+    `hi_ts`/`lo_ts`; at/before the crossing -> fresh — 2026-08-15, see the inline comment).
 
     Returns (status, reclaim): `status` is _htf_close_status's per-tf shape ({"close",
     "beyond", "closed_at", "n_closed_since"}) or None (immature -- never crossed within
@@ -367,8 +367,17 @@ def _mid_tf_state(df: pd.DataFrame, mid: float, tf: str, now: pd.Timestamp,
         "close": close, "beyond": close > mid, "closed_at": closed_at,
         "n_closed_since": int(((bars.index + freq) > swept_at).sum()),
     }
-    extreme_ts = hi_ts if cross_dir == "up" else lo_ts
-    reclaim = {"fresh": extreme_ts is None or extreme_ts <= swept_at, "cross_dir": cross_dir}
+    # 2026-08-15 (#2, from the 2026-08-10 09:20 ET audit): freshness compares against the
+    # tier's LATEST extreme on EITHER side, not just the tested side — a new running
+    # extreme printed AFTER the crossing means price has since moved decisively away from
+    # the mid and the reclaim story is over (P3 position only) until a NEWER completed-bar
+    # crossing re-arms it. The either-side extension specifically covers a wick-only new
+    # extreme that never produced a completed-bar crossing back through the mid, which the
+    # old tested-side-only check missed.
+    _ext_ts = [t for t in (hi_ts, lo_ts) if t is not None]
+    latest_extreme = max(_ext_ts) if _ext_ts else None
+    reclaim = {"fresh": latest_extreme is None or latest_extreme <= swept_at,
+               "cross_dir": cross_dir}
     return status, reclaim
 
 
@@ -599,10 +608,15 @@ def _p1_equilibrium_staleness(bundle: "FactsBundle", data: dict) -> dict:
     mid for a day-tier item, weekly mid for a week-tier item. That MORE RECENT behavior
     around equilibrium is more meaningful than the original sweep from hours earlier
     (motivating case: 2026-07-23 07:00 ET, MNQ prev1_day_low swept ~3h before the call;
-    price fully round-tripped back to the daily mid since). Code-SUGGESTED only, the exact
-    same pattern as suggested_exhausted (§2.1c) -- the model may set the EXISTING
-    `exhausted: true` override on such a P1 item; no schema change, this only adds the S9
-    signal the model reasons from. Returns {tkr: {name: bool}}."""
+    price fully round-tripped back to the daily mid since). 2026-08-15 (#6, from the
+    2026-08-10 09:20 ET audit — MES prev1_day_high, accepted many hours earlier, tagged
+    stale on both tf rows yet still the tally's largest item): promoted from a code
+    SUGGESTION to a HARD P1 gate — bench/facts.py exports the true names as
+    `p1_stale_levels` and score_thesis_evidence skips them in the P1 auto-injection and
+    zeroes any declared P1 at them, same "zeroed, not scored" mechanic as the other
+    suppression gates. Structure-based on purpose (not a raw age cutoff): the market
+    re-based at equilibrium, so the old acceptance/rejection belongs to a previous swing.
+    Returns {tkr: {name: bool}}."""
     out = {"MNQ": {}, "MES": {}}
     for tkr in ("MNQ", "MES"):
         swept_map = (bundle.swept_at or {}).get(tkr, {})
@@ -674,6 +688,96 @@ def _duplicate_sweep_losers(lv: dict, swept_at: dict) -> set:
                 continue
             losers.update(it[0] for it in same_price_items if it is not _winner(same_price_items))
     return losers
+
+
+def _extremity_shadowed_levels(lv: dict, swept_at: dict) -> set:
+    """thesis.md §2.1b extension (2026-08-15, from the 2026-08-10 09:20 ET audit): among
+    ONE asset's SWEPT same-side levels — ANY tier, ANY family — only the MOST EXTREME one
+    is fresh P1 evidence; every shallower swept same-side level is suppressed. This is §6's
+    own "only the most extreme swept level should be treated" principle applied to P1
+    tallying: a deeper sweep necessarily passed through every shallower same-side level on
+    the way, so their accept/reject reads are echoes of the same displacement, not
+    independent events (2026-08-10: MNQ's london(cur)_low read stacked 1.0 pt on top of the
+    deeper asia(cur)_low swept in the same decline). STRICT by user decision: applies even
+    while the deeper level's own HTF read is still immature — the framework prefers waiting
+    over scoring a shadowed shallower read. Winner ties (identical price under two names —
+    the §2.1d exact-duplicate shape) keep the higher-tier representative, mirroring
+    `_duplicate_sweep_losers._winner`."""
+    groups: dict = {}   # "above"|"below" -> [(name, price, tier)]
+    for name, (price, _body, side, tier, _af) in lv.items():
+        if side not in ("above", "below") or swept_at.get(name) is None:
+            continue
+        groups.setdefault(side, []).append((name, price, tier))
+    out = set()
+    for side, items in groups.items():
+        if len(items) < 2:
+            continue
+        winner = max(items, key=lambda it: (
+            -it[1] if side == "below" else it[1], _TIER_RANK.get(it[2], 0)))
+        out.update(it[0] for it in items if it is not winner)
+    return out
+
+
+def _promoted_session_extremes(data: dict, levels: dict, swept_at: dict,
+                               now, wk_anchor) -> dict:
+    """thesis.md §2.1 P2's meaningful-tier list includes RUNNING day/week extremes — but a
+    running extreme that formed inside a 6hr sub-session is only ever named as that
+    session's own extreme (asia(cur)_low, ...), so it was invisible to the day/week tier
+    checks (2026-08-10 09:20 ET: MNQ's asia(cur)_low WAS the running day low when swept at
+    08:36 ET, and the bullish SMT there was tagged meaningful=False as mere session tier).
+
+    A session-tier level qualifies for promotion when it was the running day/week extreme
+    at its REFERENCE TIME — sweep time for a swept level (nothing more extreme existed
+    before the sweep), `now` for an unswept one (nothing more extreme exists yet). Week is
+    checked before day (a running week extreme is by construction also the running day
+    extreme). Returns {tkr: {name: "day"|"week"}}.
+
+    By user decision (2026-08-15) promotion applies to BOTH P1 tier weight (via the
+    bench/facts.py level_tiers override) and P2 meaningful-tier eligibility (via the SMT-
+    candidate promotion in compute_facts). The level's NAME and the hashed S0-S7 text are
+    untouched — promotion is an additive map plus an S9 tag."""
+    out = {"MNQ": {}, "MES": {}}
+    day_start = _day_start_ts(now)
+    # Early-week guard: when the week window does not reach back before the day window
+    # (Monday's own session — the engine week anchor IS the session open), every running
+    # day extreme is trivially also the "week" extreme; promoting those to week tier would
+    # overweight what is really a day-scale event. Week promotion requires the week window
+    # to genuinely predate the day window; otherwise day is the ceiling.
+    week_eligible = wk_anchor is not None and wk_anchor < day_start
+
+    def _running_extreme_before(cm: pd.Series, t) -> Optional[float]:
+        """Value of a cummin/cummax series just BEFORE `t` (the sweep bar itself is
+        excluded), or its final value when t is None (unswept -> judged at now)."""
+        if len(cm) == 0:
+            return None
+        if t is None:
+            return float(cm.iloc[-1])
+        i = cm.index.searchsorted(t)          # first position at/after t
+        return float(cm.iloc[i - 1]) if i > 0 else None
+
+    for tkr, df in data.items():
+        cm_cache: dict = {}                    # anchor -> (cummin(low), cummax(high))
+        for name, (price, _body, side, tier, _af) in levels.get(tkr, {}).items():
+            if tier != "session" or side not in ("above", "below"):
+                continue
+            t = swept_at.get(tkr, {}).get(name)
+            for anchor, ptier in ((wk_anchor, "week"), (day_start, "day")):
+                if anchor is None or (ptier == "week" and not week_eligible):
+                    continue
+                if anchor not in cm_cache:
+                    frame = df.loc[anchor:now]
+                    cm_cache[anchor] = (frame["low"].cummin(), frame["high"].cummax())
+                lo_cm, hi_cm = cm_cache[anchor]
+                if side == "below":
+                    ext = _running_extreme_before(lo_cm, t)
+                    is_extreme = ext is not None and ext >= price - 1e-9
+                else:
+                    ext = _running_extreme_before(hi_cm, t)
+                    is_extreme = ext is not None and ext <= price + 1e-9
+                if is_extreme:
+                    out[tkr][name] = ptier
+                    break
+    return out
 
 
 def fvgs(bars):
@@ -813,10 +917,26 @@ class FactsBundle:
     # already covers).
     suppressed_p2_sites: dict = field(default_factory=dict)
     # thesis.md §2.1c: {tkr: {name: bool}} — a mature P1 item whose sweep has since been
-    # followed by price reaching the relevant (day/week) equilibrium. Code-SUGGESTED only
-    # (see _p1_equilibrium_staleness) — the model may act on it via the EXISTING
-    # `exhausted: true` override, no scoring code depends on this field directly.
+    # followed by price reaching the relevant (day/week) equilibrium. 2026-08-15 (#6, from
+    # the 2026-08-10 09:20 ET audit): promoted from a code-SUGGESTED tag to a HARD gate —
+    # bench/facts.py exports it as `p1_stale_levels` and score_thesis_evidence zeroes/skips
+    # stale P1 items outright (the model override no longer applies to P1 staleness).
     p1_equilibrium_stale: dict = field(default_factory=dict)
+    # thesis.md §2.1 (2026-08-15): {tkr: {name: "day"|"week"}} — session-tier levels that
+    # ARE the running day/week extreme, tier-promoted for P1 weight + P2 eligibility.
+    # See _promoted_session_extremes.
+    promoted_session_levels: dict = field(default_factory=dict)
+    # thesis.md §2.1 P3 (2026-08-15, #3): {tkr: {"daily_mid"|"weekly_mid": {"price",
+    # "side" ("above"|"below"), "dist_pts", "dist_ratio"}}} — UNCONDITIONAL per-asset
+    # position vs each mid, computed even when the mid has never been crossed (the case
+    # the close-status machinery skips entirely). Rendered in S9 and used by
+    # score_thesis_evidence to inject a position-only P3 when no HTF crossing exists.
+    mid_position: dict = field(default_factory=dict)
+    # thesis.md §2.1 P2 Stage 2 input (2026-08-15): {tkr: {level_or_mid_name: ratio}} —
+    # |now_price − level| / avg_range_1h for every level/mid that has an htf_reversal
+    # entry. Used by score_thesis_evidence's EXPERIMENTAL distance-safe discount-fire
+    # rung (p2_discount_fire_ratio); inert in production (the knob defaults to None).
+    recross_distance: dict = field(default_factory=dict)
     # thesis.md §3a: near-maturity pre-confirmation candidates (bounded exception to §3) —
     # see _near_maturity_candidates for the shape of each entry.
     near_maturity_candidates: list = field(default_factory=list)
@@ -1443,6 +1563,8 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
         suppressed = (bundle.suppressed_p1_levels or {}).get(tkr, set())
         stale = (bundle.p1_equilibrium_stale or {}).get(tkr, {})
         reversal = (bundle.htf_reversal or {}).get(tkr, {})
+        promo_map = (bundle.promoted_session_levels or {}).get(tkr, {})
+        reclaim_map = (bundle.mid_reclaim or {}).get(tkr, {})
         rendered_any = False
         for name, tf_map in status.items():
             if swept_map.get(name) is None:      # never swept -> not evidence, skip entirely
@@ -1453,8 +1575,14 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
             rendered_any = True
             note = " [nested/duplicate -- P2-candidate context only, NOT a P1 item]" \
                 if name in suppressed else ""
-            stale_tag = " [SUGGESTED STALE: price has since reached equilibrium]" \
-                if stale.get(name) else ""
+            # thesis.md §2.1c (2026-08-15, #6): equilibrium-reversion staleness is now a
+            # HARD gate (score_thesis_evidence zeroes/skips it), not a suggestion.
+            stale_tag = " [STALE: price has since reached equilibrium -- NOT usable P1 " \
+                        "evidence]" if stale.get(name) else ""
+            # thesis.md §2.1 (2026-08-15): running-extreme tier promotion tag.
+            promo = promo_map.get(name)
+            promo_tag = (f" [PROMOTED: running {promo} extreme -- scores {promo}-tier]"
+                         if promo else "")
             for tf in ("1h", "4h"):
                 info = (tf_map or {}).get(tf)
                 if info is None:
@@ -1466,10 +1594,41 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
                     tag = f" [clearance: {label}]" if label else ""
                     rev = (reversal.get(name) or {}).get(tf, "none")
                     rev_tag = f" [PARTIAL-BAR {rev.upper()}]" if rev != "none" else ""
+                    # thesis.md §10 (2026-08-15, #2/#4): per-tf P4 eligibility for the
+                    # synthetic mids — fresh reclaim = P4; superseded by a newer tier
+                    # extreme = P3 position only (and a fresh P4 on ANY tf supersedes the
+                    # stale tf's P3 for the same asset+mid).
+                    p4_tag = ""
+                    if name in ("daily_mid", "weekly_mid"):
+                        rec = (reclaim_map.get(name) or {}).get(tf)
+                        if rec is not None:
+                            p4_tag = (" [P4-ELIGIBLE: fresh reclaim test]" if rec.get("fresh")
+                                      else " [P4-INELIGIBLE: a newer running extreme "
+                                           "postdates this crossing -- P3 position only]")
                     A(f"  {tkr} {name} [{tf}]: close={info['close']} @ {info['closed_at']} "
-                      f"(n={info['n_closed_since']}) -> {read}{tag}{stale_tag}{note}{rev_tag}")
+                      f"(n={info['n_closed_since']}) -> {read}{tag}{stale_tag}{note}"
+                      f"{rev_tag}{promo_tag}{p4_tag}")
         if not rendered_any:
             A(f"  {tkr}: (none)")
+
+    # thesis.md §2.1 P3 (2026-08-15, #3): unconditional position vs BOTH mids for BOTH
+    # assets — P3 is a position snapshot, it needs no crossing/sweep. When a mid has no
+    # qualifying HTF crossing at all (no close-status row above), this block is the P3
+    # input and code auto-scores it as a position-only P3 item.
+    A("\nMID POSITION (P3 inputs; unconditional, each asset vs its OWN mids):")
+    for tkr in ("MNQ", "MES"):
+        pos_map = (bundle.mid_position or {}).get(tkr, {})
+        if not pos_map:
+            A(f"  {tkr}: (n/a)")
+            continue
+        for mname in ("daily_mid", "weekly_mid"):
+            p = pos_map.get(mname)
+            if not p:
+                continue
+            ratio_s = (f", {p['dist_ratio']}x avg_1h" if p.get("dist_ratio") is not None
+                       else "")
+            A(f"  {tkr} vs {mname} {p['price']}: last close {p['side'].upper()} "
+              f"({p['dist_pts']} pts{ratio_s})")
     A("\nSMT candidates (meaningful = day/week tier, eligible for thesis.md P2; "
       "swept_ticker = confirmed/pushed through (lagger); unswept_ticker = failed to "
       "confirm (leader)):")
@@ -1484,6 +1643,9 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
             exh_tag = (f" | stretch_since_fire={stretch}x avg_1h"
                        f"{f' [SUGGESTED EXHAUSTED > {thr}x shelf-life]' if exh else ''}")
         nest_tag = " | P2-SUPPRESSED (level is nested)" if cand.get("p2_suppressed") else ""
+        if cand.get("promoted_from"):
+            nest_tag += (f" | PROMOTED from session tier (level is the running "
+                         f"{cand['tier']} extreme on both assets)")
         A(f"  {cand['level']} [{cand['side']}, {cand['tier']}]: "
           f"swept_ticker={cand['swept_ticker']} (lagger) "
           f"unswept_ticker={cand['unswept_ticker']} (leader) "
@@ -1984,13 +2146,24 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
         nested = _nested_prev_levels(levels[tkr])
         nested_session = _nested_session_levels(levels[tkr])
         dup_losers = _duplicate_sweep_losers(levels[tkr], bundle.swept_at.get(tkr, {}))
-        bundle.suppressed_p1_levels[tkr] = nested | nested_session | dup_losers
+        # thesis.md §2.1b (2026-08-15): most-extreme-swept-only — see
+        # _extremity_shadowed_levels.
+        extremity = _extremity_shadowed_levels(levels[tkr], bundle.swept_at.get(tkr, {}))
+        bundle.suppressed_p1_levels[tkr] = nested | nested_session | dup_losers | extremity
+
+    # thesis.md §2.1 (2026-08-15): session-tier levels that ARE the running day/week
+    # extreme — tier promotion map (P1 weight via bench/facts.py's level_tiers override,
+    # P2 eligibility via the SMT-candidate promotion below).
+    bundle.promoted_session_levels = _promoted_session_extremes(
+        data, levels, bundle.swept_at, now, wk_anchor)
 
     bundle.htf_close_status = {}
     for tkr in ("MNQ", "MES"):
         bundle.htf_close_status[tkr] = {}
         bundle.htf_reversal[tkr] = {}
+        bundle.recross_distance[tkr] = {}
         now_price_tkr = float(data[tkr]["close"].iloc[-1])
+        _ar1h = (bundle.avg_range_1h or {}).get(tkr)
         for name, (price, body, side, tier, active_from) in levels[tkr].items():
             if side is None:
                 continue
@@ -2009,6 +2182,12 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
                 rev_by_tf[tf] = _htf_reversal_tier(bar, price, now_price_tkr)
             if rev_by_tf:
                 bundle.htf_reversal[tkr][name] = rev_by_tf
+                # Stage 2 input (2026-08-15): how far the current price sits from the
+                # level, in avg-1h-range units — the distance-safe check for the
+                # experimental P2 discount-fire rung.
+                if isinstance(_ar1h, (int, float)) and _ar1h > 0:
+                    bundle.recross_distance[tkr][name] = round(
+                        abs(now_price_tkr - price) / _ar1h, 4)
 
     # plan 17 Fix 3 / §10 (2026-08-05 rewrite): daily_mid / weekly_mid as synthetic per-
     # asset "levels" fed through the SAME _htf_close_status()-shaped machinery, so
@@ -2032,8 +2211,21 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
         now_price_tkr = float(data[tkr]["close"].iloc[-1])
         bundle.mid_price[tkr] = {}
         bundle.mid_reclaim[tkr] = {}
+        bundle.mid_position[tkr] = {}
         for mname, mid in mids.items():
             bundle.mid_price[tkr][mname] = mid
+            # thesis.md §2.1 P3 (2026-08-15, #3): unconditional position read — P3 is a
+            # position snapshot and needs no crossing, so it must exist even when the
+            # close-status machinery below yields nothing (never crossed within lookback).
+            _ar1h = (bundle.avg_range_1h or {}).get(tkr)
+            _dist = abs(now_price_tkr - mid)
+            bundle.mid_position[tkr][mname] = {
+                "price": mid,
+                "side": "above" if now_price_tkr > mid else "below",
+                "dist_pts": round(_dist, 2),
+                "dist_ratio": (round(_dist / _ar1h, 4)
+                               if isinstance(_ar1h, (int, float)) and _ar1h > 0 else None),
+            }
             hi_ts, lo_ts = ((bundle.day_hi_ts.get(tkr), bundle.day_lo_ts.get(tkr))
                            if mname == "daily_mid"
                            else (bundle.week_hi_ts.get(tkr), bundle.week_lo_ts.get(tkr)))
@@ -2059,8 +2251,12 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
             if rev_by_tf:
                 # register under all names a later criterion promotion could use (mirrors
                 # build_evidence_magnitude's own {mid}/{mid}_high/{mid}_low pattern).
+                _ar1h_mid = (bundle.avg_range_1h or {}).get(tkr)
                 for nm in (mname, f"{mname}_high", f"{mname}_low"):
                     bundle.htf_reversal[tkr][nm] = rev_by_tf
+                    if isinstance(_ar1h_mid, (int, float)) and _ar1h_mid > 0:
+                        bundle.recross_distance[tkr][nm] = round(
+                            abs(now_price_tkr - mid) / _ar1h_mid, 4)
 
     L("\n## S3 CROSS-TICKER SWEEP MATRIX (same level name; one swept + other not = divergence candidate)")
     shared = sorted(set(levels["MNQ"]) & set(levels["MES"]))
@@ -2120,6 +2316,21 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
     bundle.smt_candidates = (
         [c for c in bundle.smt_candidates if c.get("tier") not in ("day", "week")]
         + _wide_day_week_smt_scan(levels, wide_cache))
+
+    # thesis.md §2.1 (2026-08-15): running-extreme tier promotion for session-tier SMT
+    # candidates — promoted (meaningful, P2-eligible) only when the level qualifies as the
+    # running day/week extreme for BOTH assets (each at its own reference time); a level
+    # that is only one asset's running extreme stays a session-tier pool for the pair.
+    # Mixed day/week qualification resolves conservatively to day.
+    for c in bundle.smt_candidates:
+        if c.get("tier") != "session":
+            continue
+        _pm = (bundle.promoted_session_levels.get("MNQ") or {}).get(c.get("level"))
+        _pe = (bundle.promoted_session_levels.get("MES") or {}).get(c.get("level"))
+        if _pm and _pe:
+            c["tier"] = _pm if _pm == _pe else "day"
+            c["meaningful"] = True
+            c["promoted_from"] = "session"
 
     # plan 14 Task 3: count currently P1/P2-eligible items (mature P1 swept levels on either
     # ticker with >=1 non-None HTF close, plus meaningful P2 SMT candidates). Computed AFTER

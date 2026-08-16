@@ -581,7 +581,8 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
                               level_htf_close_status=None, level_tiers=None,
                               smt_candidates=None, week_extremes=None,
                               now_price=None, fvg_zone_meta=None,
-                              mid_reclaim=None, htf_reversal=None) -> tuple[dict, list]:
+                              mid_reclaim=None, htf_reversal=None,
+                              mid_position=None, p1_stale_levels=None) -> tuple[dict, list]:
     """Compute per-item points, net score, and the confidence ceiling from the model's
     declared P1/P2 evidence ledger (decisions/thesis.md §2.1/§4/§6). Mirrors
     _derive_daily_arithmetic/_derive_next_arithmetic: confidence is silently corrected
@@ -606,7 +607,9 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
     auto-derivation to promote a mid's item from P3 to P4 when its crossing on that tf is
     still live. `htf_reversal` (2026-08-05) discounts/omits/reverses a P1/P3/P4 item whose
     completed-bar verdict has already been undermined by the currently-forming next bar
-    (thesis.md §10, 2026-08-05)."""
+    (thesis.md §10, 2026-08-05). `mid_position`/`p1_stale_levels` (2026-08-15) thread the
+    unconditional-position P3 injection and the P1 equilibrium-staleness hard gate
+    (thesis.md §2.1 P3 / §2.1c)."""
     from validate_contracts import score_thesis_evidence
     notes: list = []
     evidence = block.get("evidence") or []
@@ -619,7 +622,8 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
                                     level_tiers=level_tiers, smt_candidates=smt_candidates,
                                     week_extremes=week_extremes, now_price=now_price,
                                     fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim,
-                                    htf_reversal=htf_reversal)
+                                    htf_reversal=htf_reversal, mid_position=mid_position,
+                                    p1_stale_levels=p1_stale_levels)
     # Audit-annotate each item with its computed points/side in place (mirrors
     # _derive_next_arithmetic writing item["score"] back onto the ledger).
     block["evidence"] = scoring["scored_evidence"]
@@ -1111,6 +1115,8 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
     fvg_zone_meta = facts.get("fvg_zone_meta")
     mid_reclaim = facts.get("mid_reclaim")
     htf_reversal = facts.get("htf_reversal")
+    mid_position = facts.get("mid_position")
+    p1_stale_levels = facts.get("p1_stale_levels")
     return _run_call(
         backend, system, user, schema,
         validate_block=lambda d: validate_thesis(d, facts),
@@ -1120,7 +1126,8 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
             suppressed_p1_levels=suppressed_p1_levels, suppressed_p2_sites=suppressed_p2_sites,
             level_htf_close_status=level_htf_close_status, level_tiers=level_tiers,
             smt_candidates=smt_candidates, week_extremes=week_extremes, now_price=now_price,
-            fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim, htf_reversal=htf_reversal),
+            fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim, htf_reversal=htf_reversal,
+            mid_position=mid_position, p1_stale_levels=p1_stale_levels),
     )
 
 

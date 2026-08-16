@@ -188,6 +188,10 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     fvg_zone_meta = (facts or {}).get("fvg_zone_meta")
     mid_reclaim = (facts or {}).get("mid_reclaim")
     htf_reversal = (facts or {}).get("htf_reversal")
+    # 2026-08-15 (2026-08-10 09:20 ET audit): unconditional-position P3 + P1 equilibrium-
+    # staleness hard gate — absent keys (older facts dicts) leave scoring unchanged.
+    mid_position = (facts or {}).get("mid_position")
+    p1_stale_levels = (facts or {}).get("p1_stale_levels")
     # 2026-08-05 fix: this re-check MUST use the SAME clearance-magnitude weighting the
     # real scoring path (_derive_thesis_arithmetic) applies -- an unweighted x1.0 re-check
     # can disagree with the true, magnitude-weighted net score closely enough to flip which
@@ -213,7 +217,8 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
                                     level_tiers=level_tiers, smt_candidates=smt_candidates,
                                     week_extremes=week_extremes, now_price=now_price,
                                     fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim,
-                                    htf_reversal=htf_reversal)
+                                    htf_reversal=htf_reversal, mid_position=mid_position,
+                                    p1_stale_levels=p1_stale_levels)
     if scoring["scored_evidence"]:
         if t.bias in BIASES and t.bias != scoring["expected_bias"]:
             r.add("arithmetic", "ARI_THESIS_BIAS",
@@ -519,7 +524,9 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                            level_htf_close_status=None, level_tiers=None,
                            smt_candidates=None, week_extremes=None,
                            now_price=None, fvg_zone_meta=None,
-                           mid_reclaim=None, htf_reversal=None) -> dict:
+                           mid_reclaim=None, htf_reversal=None,
+                           mid_position=None, p1_stale_levels=None,
+                           recross_distance=None, p2_discount_fire_ratio=None) -> dict:
     """Pure computation over the model-declared P1/P2 evidence ledger: per-item points
     (tier x tf x magnitude multiplier, zeroed if immature — enforcing the §3 maturity gate
     in code, not trust), the net score, the expected bias sign, and the §6 cross-asset
@@ -673,7 +680,42 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     the partial bar has broken the completed bar's ENTIRE range (a clear MSS), the same
     "model judges, code computes" mechanical certainty as everything else in this ledger.
     `htf_reversal=None` (every pre-2026-08-05 call site) leaves every item exactly as
-    declared/auto-derived, unaffected."""
+    declared/auto-derived, unaffected.
+
+    P4-supersedes-P3 per (asset, mid) + position-only P3 (2026-08-15, from the 2026-08-10
+    09:20 ET audit): within the P3/P4 auto-injection above, a fresh P4 on ANY tf now
+    suppresses the other tf's stale P3 for the SAME asset+mid (one physical mid, one item —
+    the per-tf split was stacking a P4 and a P3 restatement of the same equilibrium), and a
+    mid with NO qualifying HTF crossing at all gets a position-only P3 injected from
+    `mid_position` ({asset: {mid: {"side": "above"|"below", ...}}}, derive_facts.
+    FactsBundle.mid_position) — P3 is a position snapshot, so "never crossed, price parked
+    ~200pts one side" is the STRONGEST read, not a missing one. `mid_position=None` (every
+    pre-2026-08-15 call site) skips the injection, exactly as before.
+
+    P1 equilibrium-staleness hard gate (2026-08-15, #6): `p1_stale_levels` ({asset:
+    set/list of level names}, derive_facts._p1_equilibrium_staleness truths) — a mature P1
+    item at a stale level (price has since round-tripped to the tier's own equilibrium) is
+    skipped by the P1 auto-injection and zeroed if declared, same "zeroed, not scored"
+    mechanic as suppressed_p1_levels. Previously a model-overridable S9 suggestion the
+    model ignored in practice (2026-08-10: MES prev1_day_high, tagged stale on both rows,
+    was the tally's largest item). `p1_stale_levels=None` leaves scoring unchanged.
+
+    P2 effective-verdict dispatch — "Stage 1" (2026-08-15): thesis.md §2.1 P2's condition
+    (c) is now evaluated on the EFFECTIVE (post-partial-bar-reversal) verdict inside the
+    P1/P2 auto-injection, not the raw completed-bar close: 'omit' blocks both P1 and P2;
+    'reverse' flips the verdict (a fully-MSS'd acceptance at a meaningful divergence fires
+    P2; a fully-MSS'd rejection falls back to P1 and gets flipped by the pre-pass instead
+    of standing as a stale P2 — P2 previously escaped the §10 reversal machinery
+    entirely); a P2 fired on a 'discount'-stage read carries the same x0.5 the pre-pass
+    applies to P1. `htf_reversal=None` disables all of it, as before.
+
+    P2 discount-fire — "Stage 2" (2026-08-15, EXPERIMENTAL, default OFF): with
+    `p2_discount_fire_ratio` set (an avg_range_1h multiple), a 'discount'-stage recross of
+    an ACCEPTED read at a meaningful, unsuppressed divergence site fires P2 early at x0.5
+    when the recross is distance-safe: `recross_distance` ({asset: {level: ratio}},
+    derive_facts.FactsBundle.recross_distance — |now_price − level| / avg_range_1h) must
+    be >= the threshold. No production call site sets the ratio; it exists for the offline
+    A/B that decides whether (and at what threshold) this rung ships."""
     if level_htf_close_status is not None:
         evidence = [
             it for it in (evidence or [])
@@ -687,6 +729,16 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                 # per-tf, not "prefer 4h": if 1h/4h genuinely disagree, inject BOTH (the
                 # existing tf-dedup pre-pass below collapses them back to one when they
                 # AGREE on direction -- same reasoning as the P1/P2 auto-derivation below).
+                # 2026-08-15 (#4, from the 2026-08-10 09:20 ET audit): EXCEPT that a fresh
+                # P4 on ANY tf supersedes the other tf's stale P3 for the SAME asset+mid —
+                # a live, HTF-confirmed reclaim event and a position snapshot of the same
+                # physical mid are not two independent data points (2026-08-10: MES carried
+                # daily_mid_low P4 [1h] AND daily_mid P3 [4h], stacking 2.25 one-way).
+                _has_fresh_p4 = any(
+                    _tf_map.get(_tf) is not None
+                    and (_reclaim_by_tf.get(_tf) or {}).get("fresh")
+                    for _tf in ("1h", "4h"))
+                _injected_any = False
                 for _tf in ("1h", "4h"):
                     _val = _tf_map.get(_tf)
                     if _val is None:
@@ -702,11 +754,32 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                             "direction": "accept" if _held else "reject",
                             "mature": True, "exhausted": False,
                         })
-                    else:
+                        _injected_any = True
+                    elif not _has_fresh_p4:
                         evidence.append({
                             "criterion": "P3", "asset": _asset, "level": _mid_name,
                             "tier": _tier, "tf": _tf,
                             "direction": "accept" if _val else "reject",
+                            "mature": True, "exhausted": False,
+                        })
+                        _injected_any = True
+                    else:
+                        _injected_any = True     # stale tf superseded by the fresh P4
+                # 2026-08-15 (#3): a mid with NO qualifying HTF crossing at all (price
+                # parked on one side for the whole lookback — exactly the strongest
+                # position case) previously produced NO P3 item anywhere, silently losing
+                # the read (2026-08-10: both assets ~200pts above their weekly mids, zero
+                # UP-side mid evidence). P3 is a position snapshot, not a crossing event —
+                # inject a position-only P3 from `mid_position` (derive_facts, per-asset
+                # last close vs its own mid). tf is nominally "1h" (schema requires one;
+                # P3 points are tier-fixed, so tf carries no weight here).
+                if not _injected_any:
+                    _pos = ((mid_position or {}).get(_asset) or {}).get(_mid_name)
+                    if _pos and _pos.get("side") in ("above", "below"):
+                        evidence.append({
+                            "criterion": "P3", "asset": _asset, "level": _mid_name,
+                            "tier": _tier, "tf": "1h",
+                            "direction": "accept" if _pos["side"] == "above" else "reject",
                             "mature": True, "exhausted": False,
                         })
 
@@ -760,6 +833,10 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                 if (_asset2, _name2) in _declared_exhausted or _name2 in _p2_excluded:
                     continue
                 _p1_suppressed_here = _name2 in ((suppressed_p1_levels or {}).get(_asset2) or ())
+                # 2026-08-15 (#6): equilibrium-stale levels are hard-excluded from fresh
+                # P1 injection (see docstring). P2 is deliberately untouched — divergences
+                # have their own tier-relative shelf-life mechanism.
+                _p1_stale_here = _name2 in ((p1_stale_levels or {}).get(_asset2) or ())
                 _tf_map2 = (level_htf_close_status.get(_asset2) or {}).get(_name2) or {}
                 # per-tf, not per-level: if 1h and 4h GENUINELY DISAGREE (a real
                 # contradiction, not a duplicate -- 2026-07-27's MNQ prev1_day_high case,
@@ -772,14 +849,44 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                     _val3 = _tf_map2.get(_tf3)
                     if _val3 is None:
                         continue
+                    # Stage 1 (2026-08-15): the P1<->P2 dispatch reads the EFFECTIVE
+                    # (post-partial-bar-reversal) verdict, not the raw completed-bar close
+                    # -- thesis.md §2.1 P2 condition (c). 'omit' blocks BOTH (neither the
+                    # original nor a flipped read is safe -- same semantics the pre-pass
+                    # below already applies to P1); 'reverse' flips the verdict, so a
+                    # fully-MSS'd acceptance at a live divergence site fires P2 instead of
+                    # a flipped P1, and a fully-MSS'd REJECTION stops firing P2 (it falls
+                    # to P1, which the pre-pass then flips -- previously that stale P2
+                    # escaped the reversal machinery entirely); 'discount' does not flip,
+                    # but a P2 fired on a discount-stage read inherits the same x0.5 the
+                    # pre-pass gives P1 (via the htf_reversal tag on the injected item).
+                    _rev3 = (((htf_reversal or {}).get(_asset2) or {}).get(_name2)
+                             or {}).get(_tf3, "none")
+                    if _rev3 == "omit":
+                        continue
+                    _eff3 = (not _val3) if _rev3 == "reverse" else _val3
                     _p2_tier = _p2_lookup.get((_asset2, _name2))
-                    if _p2_tier is not None and _val3 is False:
-                        evidence.append({
+                    # Stage 2 (2026-08-15, EXPERIMENTAL -- default off): optionally let a
+                    # distance-safe 'discount'-stage recross of an ACCEPTED read at a live
+                    # divergence site fire P2 early (at the x0.5 discount weight), without
+                    # waiting for the full 'reverse' MSS. `p2_discount_fire_ratio` is the
+                    # avg_range_1h multiple the recross must clear (`recross_distance`,
+                    # derive_facts); None (every production call site) disables it.
+                    _discount_fire = bool(
+                        p2_discount_fire_ratio is not None
+                        and _p2_tier is not None and _rev3 == "discount" and _eff3 is True
+                        and (((recross_distance or {}).get(_asset2) or {}).get(_name2)
+                             or 0.0) >= p2_discount_fire_ratio)
+                    if _p2_tier is not None and (_eff3 is False or _discount_fire):
+                        _p2_item = {
                             "criterion": "P2", "asset": _asset2, "level": _name2,
                             "tier": _p2_tier, "tf": _tf3, "direction": "reject",
                             "mature": True, "exhausted": False,
-                        })
-                    elif not _p1_suppressed_here:
+                        }
+                        if _rev3 != "none":
+                            _p2_item["htf_reversal"] = _rev3   # 'discount' -> x0.5 below
+                        evidence.append(_p2_item)
+                    elif not _p1_suppressed_here and not _p1_stale_here:
                         evidence.append({
                             "criterion": "P1", "asset": _asset2, "level": _name2,
                             "tier": _meta2.get("tier"), "tf": _tf3,
@@ -1022,6 +1129,10 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
         p1_suppressed = bool(
             item.get("criterion") == "P1" and suppressed_p1_levels
             and item.get("level") in (suppressed_p1_levels.get(item.get("asset")) or ()))
+        # 2026-08-15 (#6): equilibrium-staleness hard gate — see docstring.
+        p1_stale = bool(
+            item.get("criterion") == "P1" and p1_stale_levels
+            and item.get("level") in (p1_stale_levels.get(item.get("asset")) or ()))
         # thesis.md §2.1b: a P2/SMT candidate at a nested level scores ZERO too, same
         # mechanic as P1 — derive_facts._p2_nesting_suppression, no exception for when the
         # divergence itself happened to fire.
@@ -1048,7 +1159,8 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
             p3_dominated = dom_side is not None and this_side is not None and dom_side != this_side
         tf_deduped = id(item) in _tf_dedup_zero
         p5_deduped = id(item) in _p5_dedup_zero
-        suppressed = p1_suppressed or p2_suppressed or p3_dominated or tf_deduped or p5_deduped
+        suppressed = (p1_suppressed or p1_stale or p2_suppressed or p3_dominated
+                      or tf_deduped or p5_deduped)
         scored_mature = mature and not exhausted and not suppressed
         # thesis.md §10 (2026-08-05): a 'discount' partial-bar reversal (see the pre-pass
         # above) halves the item's points -- a partial recross of the level, not yet a

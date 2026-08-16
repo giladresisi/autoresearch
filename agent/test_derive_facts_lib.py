@@ -906,3 +906,135 @@ def test_near_maturity_live_smt_corroborates_without_cross_asset():
     c4h = next(c for c in cands if c["asset"] == "MNQ" and c["tf"] == "4h")
     assert c4h["corroborated"] is True
     assert c4h["preconfirm_eligible"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Most-extreme-swept-only P1 + running-extreme promotion + either-side mid     #
+# freshness (2026-08-15, from the 2026-08-10 09:20 ET audit)                   #
+# --------------------------------------------------------------------------- #
+_TZ_NY = "America/New_York"
+
+
+def test_extremity_shadowed_deeper_swept_low_suppresses_shallower():
+    # 2026-08-10: MNQ's london(cur)_low (29799.5) and the deeper asia(cur)_low (29788.0)
+    # both swept in the same decline -- only the deepest survives as fresh P1.
+    t = pd.Timestamp("2026-08-10 07:12:00", tz=_TZ_NY)
+    lv = {"asia(cur)_low": (29788.0, 29790.0, "below", "session", None),
+          "london(cur)_low": (29799.5, 29801.0, "below", "session", None)}
+    swept = {"asia(cur)_low": pd.Timestamp("2026-08-10 08:36:00", tz=_TZ_NY),
+             "london(cur)_low": t}
+    assert derive_facts._extremity_shadowed_levels(lv, swept) == {"london(cur)_low"}
+
+
+def test_extremity_shadowed_unswept_deeper_level_suppresses_nothing():
+    # STRICT rule applies among SWEPT levels only -- an unswept deeper level never shadows.
+    t = pd.Timestamp("2026-08-10 07:12:00", tz=_TZ_NY)
+    lv = {"prev1_day_low": (29455.0, 29460.0, "below", "day", None),
+          "london(cur)_low": (29799.5, 29801.0, "below", "session", None)}
+    swept = {"prev1_day_low": None, "london(cur)_low": t}
+    assert derive_facts._extremity_shadowed_levels(lv, swept) == set()
+
+
+def test_extremity_shadowed_sides_independent_and_cross_tier():
+    # High side keeps the HIGHEST swept high regardless of tier; low side independent.
+    t = pd.Timestamp("2026-08-10 07:12:00", tz=_TZ_NY)
+    lv = {"prev1_day_high": (30000.0, 29990.0, "above", "day", None),
+          "asia(cur)_high": (30010.0, 30005.0, "above", "session", None),
+          "asia(cur)_low": (29788.0, 29790.0, "below", "session", None)}
+    swept = {"prev1_day_high": t, "asia(cur)_high": t, "asia(cur)_low": t}
+    assert derive_facts._extremity_shadowed_levels(lv, swept) == {"prev1_day_high"}
+
+
+def test_extremity_shadowed_equal_price_tie_keeps_higher_tier():
+    # Exact duplicate (the §2.1d shape): identical price under two names -- the higher-tier
+    # representative survives.
+    t = pd.Timestamp("2026-08-10 07:12:00", tz=_TZ_NY)
+    lv = {"prev1_day_low": (29455.0, 29460.0, "below", "day", None),
+          "ny_evening(prev1)_low": (29455.0, 29460.0, "below", "session", None)}
+    swept = {"prev1_day_low": t, "ny_evening(prev1)_low": t}
+    assert derive_facts._extremity_shadowed_levels(lv, swept) == {"ny_evening(prev1)_low"}
+
+
+def _promo_frame(rows):
+    # rows: [(ts_str, low, high)] -> minimal 1-row-per-bar OHLC frame
+    idx = pd.DatetimeIndex([pd.Timestamp(ts, tz=_TZ_NY) for ts, _lo, _hi in rows])
+    lows = [lo for _ts, lo, _hi in rows]
+    highs = [hi for _ts, _lo, hi in rows]
+    return pd.DataFrame({"open": highs, "high": highs, "low": lows, "close": highs}, index=idx)
+
+
+def test_promoted_session_extreme_day_tier_when_running_day_low():
+    # asia(cur)_low was the running day low when swept (nothing lower before the sweep) ->
+    # promoted to day tier; NOT week (an earlier week-window bar sits lower).
+    now = pd.Timestamp("2026-08-10 09:20:00", tz=_TZ_NY)
+    wk_anchor = pd.Timestamp("2026-08-06 18:00:00", tz=_TZ_NY)
+    swept_t = pd.Timestamp("2026-08-10 08:36:00", tz=_TZ_NY)
+    df = _promo_frame([
+        ("2026-08-07 10:00:00", 29700.0, 29900.0),   # week window only: deeper low exists
+        ("2026-08-09 20:00:00", 29788.0, 29900.0),   # asia: the day's low so far
+        ("2026-08-10 07:00:00", 29800.0, 29850.0),
+        ("2026-08-10 08:36:00", 29770.0, 29800.0),   # the sweep bar itself (excluded)
+    ])
+    levels = {"MNQ": {"asia(cur)_low": (29788.0, 29790.0, "below", "session", None)},
+              "MES": {"asia(cur)_low": (29788.0, 29790.0, "below", "session", None)}}
+    swept = {"MNQ": {"asia(cur)_low": swept_t}, "MES": {"asia(cur)_low": None}}
+    out = derive_facts._promoted_session_extremes(
+        {"MNQ": df, "MES": df.iloc[:-1]}, levels, swept, now, wk_anchor)
+    assert out["MNQ"].get("asia(cur)_low") == "day"
+    assert out["MES"].get("asia(cur)_low") == "day"   # unswept: judged at `now`
+
+
+def test_promoted_session_extreme_not_promoted_when_deeper_low_precedes():
+    # A pre-existing deeper low inside the day window means the session low was never the
+    # running day extreme -- no promotion.
+    now = pd.Timestamp("2026-08-10 09:20:00", tz=_TZ_NY)
+    wk_anchor = pd.Timestamp("2026-08-06 18:00:00", tz=_TZ_NY)
+    df = _promo_frame([
+        ("2026-08-09 19:00:00", 29700.0, 29900.0),   # deeper low INSIDE the day window
+        ("2026-08-09 21:00:00", 29788.0, 29880.0),
+    ])
+    levels = {"MNQ": {"asia(cur)_low": (29788.0, 29790.0, "below", "session", None)},
+              "MES": {}}
+    swept = {"MNQ": {"asia(cur)_low": None}, "MES": {}}
+    out = derive_facts._promoted_session_extremes(
+        {"MNQ": df, "MES": df}, levels, swept, now, wk_anchor)
+    assert out["MNQ"] == {}
+
+
+def test_promoted_session_extreme_week_tier_wins_over_day():
+    # A session extreme that is ALSO the running week extreme promotes straight to week.
+    now = pd.Timestamp("2026-08-10 09:20:00", tz=_TZ_NY)
+    wk_anchor = pd.Timestamp("2026-08-06 18:00:00", tz=_TZ_NY)
+    df = _promo_frame([
+        ("2026-08-07 10:00:00", 29900.0, 30000.0),
+        ("2026-08-09 20:00:00", 29788.0, 29950.0),   # the week's own low
+    ])
+    levels = {"MNQ": {"asia(cur)_low": (29788.0, 29790.0, "below", "session", None)},
+              "MES": {}}
+    swept = {"MNQ": {"asia(cur)_low": None}, "MES": {}}
+    out = derive_facts._promoted_session_extremes(
+        {"MNQ": df, "MES": df}, levels, swept, now, wk_anchor)
+    assert out["MNQ"].get("asia(cur)_low") == "week"
+
+
+def test_mid_tf_state_opposite_side_extreme_after_crossing_unfreshens():
+    # 2026-08-15 (#2): a new running extreme on EITHER side after the crossing voids P4
+    # freshness -- previously only the tested side's extreme was compared, so a wick-only
+    # opposite-side extreme (no completed-bar re-crossing) left a dead reclaim "fresh".
+    tz = _TZ_NY
+    idx = pd.DatetimeIndex([pd.Timestamp(f"2026-08-10 {h:02d}:00:30", tz=tz)
+                            for h in (0, 1, 2, 3, 4)])
+    closes = [105.0, 106.0, 95.0, 94.0, 93.0]        # down-cross of mid=100 in the 02:00 bar
+    df = pd.DataFrame({"open": closes, "high": closes, "low": closes, "close": closes},
+                      index=idx)
+    now = pd.Timestamp("2026-08-10 04:30:00", tz=tz)
+    mid = 100.0
+    crossing_close = pd.Timestamp("2026-08-10 03:00:00", tz=tz)   # 02:00 bar's close time
+    lo_before = pd.Timestamp("2026-08-10 01:30:00", tz=tz)
+    hi_after = pd.Timestamp("2026-08-10 03:45:00", tz=tz)         # wick high AFTER crossing
+    _status, reclaim = derive_facts._mid_tf_state(df, mid, "1h", now, hi_after, lo_before)
+    assert reclaim is not None and reclaim["cross_dir"] == "down"
+    assert reclaim["fresh"] is False   # either-side rule: hi_after postdates the crossing
+
+    _status2, reclaim2 = derive_facts._mid_tf_state(df, mid, "1h", now, lo_before, lo_before)
+    assert reclaim2["fresh"] is True   # both extremes predate the crossing -> still fresh

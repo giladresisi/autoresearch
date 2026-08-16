@@ -391,6 +391,8 @@ def main(argv=None) -> int:
     fvg_zone_meta = facts.get("fvg_zone_meta")
     mid_reclaim = facts.get("mid_reclaim")
     htf_reversal = facts.get("htf_reversal")
+    mid_position = facts.get("mid_position")
+    p1_stale_levels = facts.get("p1_stale_levels")
 
     outcome = _run_call(
         backend, system, user, thesis_schema,
@@ -410,12 +412,15 @@ def main(argv=None) -> int:
         # array + confidence-ceiling clamp computed here would not). 2026-08-05: mid_reclaim/
         # htf_reversal mirror decide_thesis's P3-vs-P4 mid promotion + partial-bar reversal
         # (thesis.md §10).
+        # 2026-08-15: mid_position/p1_stale_levels mirror decide_thesis's unconditional-
+        # position P3 injection + P1 equilibrium-staleness hard gate.
         derive_block=lambda d: _derive_thesis_arithmetic(
             d, magnitude=res.evidence_magnitude, dol_available=dol_available,
             suppressed_p1_levels=suppressed_p1_levels, suppressed_p2_sites=suppressed_p2_sites,
             level_htf_close_status=level_htf_close_status, level_tiers=level_tiers,
             smt_candidates=smt_candidates, week_extremes=week_extremes, now_price=now_price,
-            fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim, htf_reversal=htf_reversal),
+            fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim, htf_reversal=htf_reversal,
+            mid_position=mid_position, p1_stale_levels=p1_stale_levels),
     )
 
     recap = price_recap(source, boundary, args.lookback_hours)
