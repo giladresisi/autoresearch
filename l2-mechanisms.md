@@ -582,6 +582,22 @@ pts away). §7 fired 31 times, up to 3/arm:
   the flat/forfeit failure mode (07-21/07-23) is specifically the sweep completing inside
   the settle window, which is what the 75–83% pre-09:35 numbers measure.
 
+  **v2 extension + unreached-D2 counterfactual (2026-08-16, 73 days 05-04..08-14, 132
+  named-pool arms; pre-rollover May/early-June segment flagged — back-month data):**
+  P(swept pre-09:35) by ratio, full sample: `0.5–0.7x: n=5, 0.60 · 0.7–1.0x: n=13, 0.15 ·
+  1.0–1.5x: n=29, 0.07`; post-rollover only: `0.75 / 0.40 / 0.11`; pre-rollover:
+  `0.00 in 0.7–1.5x` (calmer regime and/or thin back-month tape — the segments disagree
+  exactly in the 0.7–1.0x band). Both segments agree 0.5–0.7x is unusable and ≥1.0x is
+  safe; the floor decision is therefore **≥0.7x minimum, 1.0x if the post-rollover regime
+  is weighted** (recommended — it is the live regime). Counterfactual on the 26 swept
+  arms with ratio < 1.5: **policy B (hold for D2) reaches D2 by 16:00 in 73% of cases and
+  beats TP-at-near-D1 by median +72.6 / mean +69.4 pts** (12:00 horizon: 62%, median
+  +69.2); B ends worse than A in 19% of arms with fat tails (−393.8 worst) — but the tail
+  is an artifact of no-stop scoring: those are arms where price died just past D1 and
+  reversed hundreds of points, i.e. cases the mechanism SL and thesis `falsified_if` cut
+  at −15..−30 long before the horizon exit. Conclusion: re-anchor to D2 and manage by the
+  existing stop/invalidation machinery — no special near-pool TP policy is needed.
+
 ## 11. Implementation gaps (design-complete, work remaining)
 
 - 5m FVG detection + leg segmentation as L3 facts/data products (existing detection is 1hr/4hr
@@ -619,12 +635,12 @@ pts away). §7 fired 31 times, up to 3/arm:
   08-05 −20-one-attempt with §6's budget preserved, 08-06 +266.5 clean, 08-10 §7 +96.25,
   08-11 no-entry, 08-12 +46.75 exact, 08-13 +89.25 clean) and the §8 takeover sequences
   (07-17 +91.25, 08-14 +96.25); §4/§7/§8/§10 validation texts updated to 1s numbers.
-- L2 DOL-proximity rule (from §10.1, data in §10.3 incl. the real-S8-menu rerun): a D1
-  nearer than ~1.0x avg_1h (≈80+ pts) is swept pre-09:35 with 40–83% probability (75–83%
-  under 0.7x) and price continues to D2 in 67–100% of cases — the flat/forfeit failure
-  mode of 07-21/07-23. Data-backed change: raise the DOL draw floor from 0.5x to ~1.0x
-  avg_1h (or have L2's selection guidance prefer the next-deeper pool below 1.0x).
-  Remaining before encoding: decide management for a next-deeper DOL that goes unreached
-  same-day, and note the 07-17 nuance (an entry that beats the sweep uses the sweep as its
-  TP — the floor must not veto plans whose entries precede the sweep).
+- L2 DOL-proximity rule — DECISION-READY (data in §10.3 v2): raise the DOL draw floor
+  from 0.5x to ≥0.7x avg_1h minimum, 1.0x recommended on post-rollover weighting; the
+  re-anchored plan holds for D2 under the existing stop/invalidation machinery (D2 reached
+  73% by 16:00, median +72.6 vs TP-at-near; the counterfactual's fat negative tail is a
+  no-stop scoring artifact). The change lands in derive_facts.py `DOL_MIN_DRAW_RATIO` —
+  shared with the L1/thesis pipeline (2026-08-16 refit); propose to its owner rather than
+  edit unilaterally. Note the 07-17 nuance: an entry that beats the sweep uses the sweep
+  as its TP — the floor shapes DOL SELECTION, it must not veto already-armed plans.
 - Per-mechanism L2-supplied invalidation criteria — deferred.
