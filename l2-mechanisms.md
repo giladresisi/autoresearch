@@ -14,7 +14,10 @@ entry veto (§2), §4 1m-fallback widening to 5m-unusable states, and the §7
 bar-level re-check of 07-16..08-10 (1m-resolution simulation — several fills are same-bar
 fill/stop ambiguous; 1s replay required before trusting the package numbers); deeper-gap
 takeover on re-entry (§8) and the 08-11..08-14 oracle-L1 forward test (§10) added same day
-after the 08-14 study and the 07-17/07-21/07-23 backcheck. NOTE: the
+after the 08-14 study and the 07-17/07-21/07-23 backcheck; §10.3 unseen-date sweep
+(`extreme_reject_close` base rates, SL-cap knob finding) and the DOL-proximity study on
+the real S8 menu (0.5x draw floor insufficient; data-backed floor ~1.0x avg_1h) added
+2026-08-16. NOTE: the
 rules were tuned on the 07-14..08-06 sample — every trading day in that sample nets positive,
 several by sub-7-pt stop clearances; forward-test on unseen dates before trusting). Extends
 `agent-optimizations.md` §7 (mechanism enums). Defines four entry mechanisms the L2 trade
@@ -337,8 +340,10 @@ chase entries the §2 DOL-floor veto now suppresses).
     stay armed for the next new-extreme bar.
 - **Stop-loss:** the entry bar's opposite-wick edge, CAPPED at 15 pts from the entry price
   (wick edge if nearer). The cap places the stop inside the swept zone — a plain retest of
-  the sweep kills the trade (08-10's stop survived by 13.5 pts); a §6-style wick+3-capped-30
-  alternative performed identically on the studied dates and is the A/B counterpart (§9).
+  the sweep kills the trade (08-10's stop survived by 9.75 pts at 1s); a §6-style
+  wick+3-capped-30 alternative was identical on the studied dates but WON the §10.3
+  unseen sweep by ~+91 (it kept a deep-wick +316.5 winner the 15-cap stopped at −15) —
+  the highest-priority §9 A/B, single-flip sensitive.
 - **Scope:** lives and dies with the plan's `valid_while`/thesis — unscoped it fires two
   losing shorts into the 07-21 11:14/11:28 new-day-high rally, hours after the plan
   completed. Shared per-plan 3-attempt counter, stop-out cooldown (§2), DOL-floor veto (§2)
@@ -438,7 +443,7 @@ chase entries the §2 DOL-floor veto now suppresses).
 | Stop-out cooldown | until the stop-out 1m bar closes | §2; acts on current state at the close (crossed trigger ⇒ market) |
 | DOL-floor veto | 60 pts remaining, entry → DOL | §2; ABSOLUTE floor, not an RR ratio; winners ≥65.75 / losing chases ≤45.5 on studied dates — thin band, tune early |
 | `extreme_reject_close` quiet count | 3 consecutive 1m closes | §7; tick-based restarts |
-| `extreme_reject_close` SL | opposite-wick edge, capped 15 pts from entry | §7; A/B alternative: wick+3 capped 30 (identical on studied dates) |
+| `extreme_reject_close` SL | opposite-wick edge, capped 15 pts from entry | §7; A/B alternative wick+3 capped 30 — identical on studied dates but +91 better on the §10.3 sweep (deep-wick winners); top-priority A/B |
 | Takeover defer-entry gate | skip if excursion-SL distance > the 30-pt cap | §8; parameter-free (reuses the `fvg_1m_post_extreme` SL cap) |
 | Leg reversal threshold | max(30 pts, 25% of leg range) | §3 |
 | Min qualifying leg range | 50 pts | §3 ("significant") |
@@ -526,6 +531,57 @@ Conclusion: wrong-thesis bleed is bounded at roughly 0..−80/day — far under 
 color/cycle gates starve counter-trend episode entries. Sample: five days; extend before
 treating as a distribution.
 
+### 10.3 Unseen-date sweep — `extreme_reject_close` base rates (2026-08-16)
+
+24 unseen post-rollover sessions (06-15..08-04 minus the studied set), BOTH thesis
+directions run blind per day (48 arms; DOL = nearest of overnight/prev-RTH/TDO pools ≥60
+pts away). §7 fired 31 times, up to 3/arm:
+
+- **Blind base rate: 2/31 TP wins** — yet positive expectancy in both SL variants (total
+  +287.8 at cap15, +378.8 at wick+3-cap-30), carried entirely by two textbook
+  sweep-rejection reversals: 06-29 (short 29807.75 at 09:53 into a −533 collapse, +527)
+  and 07-07 (long 29239 fired on the bar that printed the exact session low, +169.5). The
+  distribution is ~93% small losses (−9..−15) + rare huge wins. The studied-days win rate
+  (3/5) does NOT generalize blind — §7's live value depends on L1 direction quality; with
+  both arms run blind, half the arms are wrong-thesis by construction.
+- **Knob finding (SL cap):** the 15-pt cap killed a deep-wick winner that the
+  wick+3-capped-30 alternative kept — 06-22 third fire: −15 vs **+316.5**. Sweep total
+  prefers w3c30 by ~+91 despite its larger per-loss cost (~−8/loss × 29). Single-flip
+  sensitive; the §9 A/B just became the highest-priority knob experiment.
+- The DOL-floor veto was untestable here (the sweep's own DOL selection enforced ≥60 pts —
+  every fire had ≥167 remaining); its evidence base remains §10/§10.2.
+- **DOL-proximity data (for the §11 L2 rule):** nearest thesis-direction pool distance at
+  09:20, bucketed, over all 48 arms — P(swept by 09:35) / P(swept by 12:00) / P(price then
+  reaches the next-deeper pool by 16:00):
+  `<40 pts: n=10, 0.90 / 0.90 / 1.00 · 40–80: n=8, 0.75 / 0.88 / 0.75 ·
+  80–150: n=9, 0.44 / 0.67 / 0.80 · >150: n=21, 0.00 / 0.33 / 0.86`.
+  Pools inside ~80 pts are consumed by the opening rotation itself with 75–90% probability
+  and the move then usually extends to the next pool — both halves of the case for
+  re-anchoring the DOL deeper, with the probability cliff sitting between the 40–80 and
+  80–150 buckets (i.e. the data puts the threshold at ~80). Caveats: 3-level pool
+  approximation (not the real S8 menu), 8–21 samples per bucket, and the next-deeper DOL
+  is often NOT reached same-day (86%/80% reach rates are conditional on the sweep) — the
+  rule needs a management answer for unreached deeper DOLs.
+
+  **Real-S8-menu rerun (2026-08-16, full facts pipeline per 09:20 boundary, 43 days
+  06-15..08-14, 89 arms, 84 named-pool D1s + 5 projections):** the cliff is SHARPER on the
+  real menu. D1 distance vs P(swept by 09:35) / P(by 12:00) / P(reach D2 after sweep):
+  `40–80 pts: n=6, 0.83 / 0.83 / 0.75 · 80–150: n=27, 0.15 / 0.52 / 0.79 ·
+  >150: n=51, 0.02 / 0.31 / 0.53`; in ATR units:
+  `0.5–0.7x: n=4, 0.75 / 0.75 / 1.00 · 0.7–1.0x: n=5, 0.40 / 0.60 / 0.67 ·
+  1.0–1.5x: n=18, 0.11 / 0.50 / 0.78 · ≥2.5x: n=24, 0.00 / 0.17 / 0.25`.
+  Implications: (1) the 2026-08-16 DOL-menu refit's 0.5x-ATR draw floor is NOT sufficient —
+  pools it still offers at 0.5–0.7x are swept pre-09:35 75% of the time with 100% D2
+  continuation (07-17's recorded D1, london_low at 0.512x, is exactly this case);
+  (2) early-sweep probability only drops to ~10% at ≥1.0x ATR / ≥80–150 pts, so the
+  data-backed floor for a D1 the plan can actually trade toward is **~1.0x avg_1h (≈80+
+  pts)**, with 0.7–1.0x a 40%-sweep grey zone; (3) decisive-bucket samples are small
+  (n=4–6) but the cliff replicates across both bucketing schemes and the independent
+  §10.3 approximation. Nuance from 07-17: a near D1 is not always a flat day — if the
+  mechanisms enter BEFORE the sweep completes, the sweep IS the take-profit (+91.25 there);
+  the flat/forfeit failure mode (07-21/07-23) is specifically the sweep completing inside
+  the settle window, which is what the 75–83% pre-09:35 numbers measure.
+
 ## 11. Implementation gaps (design-complete, work remaining)
 
 - 5m FVG detection + leg segmentation as L3 facts/data products (existing detection is 1hr/4hr
@@ -563,8 +619,12 @@ treating as a distribution.
   08-05 −20-one-attempt with §6's budget preserved, 08-06 +266.5 clean, 08-10 §7 +96.25,
   08-11 no-entry, 08-12 +46.75 exact, 08-13 +89.25 clean) and the §8 takeover sequences
   (07-17 +91.25, 08-14 +96.25); §4/§7/§8/§10 validation texts updated to 1s numbers.
-- L2 DOL-proximity rule (from §10.1): when the nearest DOL is within ~80 pts at arm time,
-  the settle window + DOL-floor veto make the plan structurally untradeable (07-21/07-23
-  recorded-L1 replays went flat; 07-23 forfeits a studied +304) — consider requiring the
-  next-deeper pool. Design not yet written.
+- L2 DOL-proximity rule (from §10.1, data in §10.3 incl. the real-S8-menu rerun): a D1
+  nearer than ~1.0x avg_1h (≈80+ pts) is swept pre-09:35 with 40–83% probability (75–83%
+  under 0.7x) and price continues to D2 in 67–100% of cases — the flat/forfeit failure
+  mode of 07-21/07-23. Data-backed change: raise the DOL draw floor from 0.5x to ~1.0x
+  avg_1h (or have L2's selection guidance prefer the next-deeper pool below 1.0x).
+  Remaining before encoding: decide management for a next-deeper DOL that goes unreached
+  same-day, and note the 07-17 nuance (an entry that beats the sweep uses the sweep as its
+  TP — the floor must not veto plans whose entries precede the sweep).
 - Per-mechanism L2-supplied invalidation criteria — deferred.
