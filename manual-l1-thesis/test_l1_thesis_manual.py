@@ -373,8 +373,14 @@ def main(argv=None) -> int:
     # exactly; this harness bypasses decide_thesis and must build its own schema the same
     # way or it silently loses the constraint (bug: it did, for every run before this).
     valid_levels = list((facts.get("levels") or {}).keys())
+    # 2026-08-16: extra_dol_levels mirrors decide_thesis — the S8 menu's synthetic
+    # projection draws are DOL-slot-legal.
+    _dol_rows = ((facts.get("menus") or {}).get("dol") or {})
+    _extra_dol = sorted({e.get("level") for rows in _dol_rows.values() for e in (rows or [])
+                         if e.get("tier") == "projection"})
     thesis_schema = build_thesis_schema(valid_levels,
-                                        extra_evidence_levels=facts.get("fvg_zones"))
+                                        extra_evidence_levels=facts.get("fvg_zones"),
+                                        extra_dol_levels=_extra_dol)
 
     menus = facts.get("menus")
     dol_available = None

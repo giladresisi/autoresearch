@@ -690,13 +690,36 @@ This mechanic lets the former dominate the latter rather than washing out to a n
 - §2.1a's daily/weekly phase weighting needs per-asset "latest daily-extreme touch" and "latest
   daily-mid touch/cross" as structured facts (currently rendered-text-only in S1/S4) — see §2.1a's
   own gap note.
-- DOL selection is unchanged from the existing S8 `_dol_menu`/validator contract: nearest
-  meaningful, in-facts, unswept, undepleted, correct-side, NOT nested/duplicate-suppressed
-  (§2.1b/§2.1d) pool ≥ `DOL_MIN_DRAW_DISTANCE_PTS` (5.0) away — prefer the DOL menu's `D*` IDs
-  directly.
+- DOL selection follows the S8 `_dol_menu`/validator contract: nearest meaningful, in-facts,
+  unswept, undepleted, correct-side, NOT nested/duplicate-suppressed (§2.1b/§2.1d) pool —
+  prefer the DOL menu's `D*` IDs directly. **2026-08-16 refit (from the 08-10..08-14 09:20
+  forward tests):**
+  - **ATR-scaled draw floor.** Eligibility now requires `≥ max(5pts, 0.5 × avg_range_1h)` away
+    (`DOL_MIN_DRAW_RATIO`) — a nearer pool completes on hourly noise (08-12: a 15-pt draw
+    "completed" in 7 minutes; 08-13: a 10-pt draw "exhausted" a correct UP call that then ran
+    +350). The flat 5-pt guard remains as the latency-race backstop and the no-ATR fallback.
+  - **Distance bands.** Every entry renders `dist=Nx avg_1h` with a `BAND` (≤ 3.0×) or `FAR`
+    tag. Take the best BAND pool by tier; FAR is legitimate ONLY for a TREND-regime call with
+    HTF confirmation behind it — a RANGE call drawing to a FAR pool draws an audit warning
+    (`AUD_DOL_FAR_FOR_REGIME`; 08-10's RANGE call drew to a 4.8×-away day low and lost while
+    the near-band counterfactual won). FAR pools are tagged, never excluded.
+  - **Projection draws (price discovery).** When a direction has NO named pool inside the band,
+    the menu offers a synthetic `projection_up`/`projection_down` at the running day extreme
+    ± 1.0 × avg_1h — deterministic, unswept by construction, a real L2 take-profit — so a
+    correct trend call into new highs/lows is no longer forced to exhaust on a 10-pt pool or
+    stand NEUTRAL (08-13). DOUBLY STRETCH-GATED: no projection once price is already
+    stretched > 3.0× from the opposite-side day extreme (§2.1c), AND — direction-aware —
+    no projection toward a side price already sits ≥ 4.0× avg_1h beyond the WEEKLY mid on
+    (the day-window gate alone missed 08-14: Thursday's rip was invisible to Friday's day
+    window, day-stretch 1.8×, while MNQ sat 6.63× above its weekly mid — the weekly gate
+    preserves that correct NEUTRAL, and its direction-awareness keeps 08-10's useful
+    counter-extension `projection_down` alive at +2.7× above the mid). Projections are DOL-slot
+    legal only (never `level_swept`/`level_depleted` names, never evidence levels) and count
+    as available liquidity for the no-liquidity rule below.
 - **No-liquidity rule (code-enforced, not soft).** A sufficiently deep, sustained trend can sweep
   every named pool on its own side within the tracked lookback (prevN_day/week — no deeper
-  history is tracked), leaving that direction's S8 DOL menu `(none eligible)`. This is the SAME
+  history is tracked), leaving that direction's S8 DOL menu `(none eligible)` — with the 2026-08-16
+  refit this now happens only when the projection draw is ALSO stretch-gated out. This is the SAME
   situation as price beyond the all-time high — no resistance exists above it either — not a cue
   to look further back in history for an older (e.g. prior-month) level. `score_thesis_evidence`
   takes an optional `dol_available: {"UP": bool, "DOWN": bool}` (from `facts.menus.dol`); when the

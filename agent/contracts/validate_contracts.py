@@ -23,8 +23,9 @@ from typing import Optional
 
 from schemas import (
     BIASES, CONFIDENCES, DAILY_REGIMES, DIRECTIONS, DOL_FALSIFIED_ACTIONS,
-    ENTRY_MECHANISMS, EVIDENCE_ASSETS, EVIDENCE_CRITERIA, EVIDENCE_DIRECTIONS,
-    EVIDENCE_TFS, EVIDENCE_TIERS, MGMT_MECHANISMS, VERDICTS, Thesis, TradePlan,
+    DOL_PROJECTION_LEVELS, ENTRY_MECHANISMS, EVIDENCE_ASSETS, EVIDENCE_CRITERIA,
+    EVIDENCE_DIRECTIONS, EVIDENCE_TFS, EVIDENCE_TIERS, MGMT_MECHANISMS, VERDICTS,
+    Thesis, TradePlan,
 )
 from predicates import (
     MarketView, eval_any, referenced_levels, validate_predicate_list,
@@ -295,7 +296,10 @@ def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
     if t.recall:
         names |= set(_iter_predicate_levels((t.recall or {}).get("events") or []))
     if isinstance(t.dol, dict) and t.dol.get("level"):
-        names.add(t.dol["level"])
+        # 2026-08-16 DOL-menu refit: the synthetic projection draws are menu-offered but
+        # (deliberately) not facts.levels entries — exempt them here, DOL slot only.
+        if t.dol["level"] not in DOL_PROJECTION_LEVELS:
+            names.add(t.dol["level"])
     for item in t.evidence or []:
         # P3/P4/P5 reference a synthetic equilibrium mid or an FVG-zone id, not a named price
         # level in facts.levels — their level string is validated by the criterion-specific
@@ -349,6 +353,23 @@ def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
             r.add("semantic", "SEM_DOL_WRONG_SIDE",
                   f"DOWN thesis but DOL {dol_price} is above current price {now_price} "
                   "(a draw must sit below price)", "thesis.dol")
+
+    # AUD_DOL_FAR_FOR_REGIME (2026-08-16 DOL-menu refit): a RANGE-regime call drawing to a
+    # FAR pool (beyond DOL_BAND_MAX_RATIO x avg_1h — the menu's own band tag) is a
+    # tier/regime mismatch — a range read has no business targeting a multi-day moonshot
+    # (2026-08-10 09:20 ET: RANGE call, DOL 4.8x away, L2 lost -59.5 while the near-band
+    # counterfactual won). Audit-only warning, same non-gating status as the other AUD_
+    # codes — FAR stays legitimate for a TREND call with HTF confirmation.
+    if t.is_directional() and isinstance(t.dol, dict) and t.regime == "RANGE":
+        _menu_rows = (((facts.get("menus") or {}).get("dol") or {}).get(t.bias)) or []
+        for _e in _menu_rows:
+            if _e.get("level") == t.dol.get("level"):
+                if _e.get("band") == "FAR":
+                    r.warn("AUD_DOL_FAR_FOR_REGIME",
+                           f"RANGE regime drawing to a FAR pool "
+                           f"({_e.get('level')} at {_e.get('dist_ratio')}x avg_1h) — "
+                           "prefer a BAND draw or reconsider the regime", "thesis.dol")
+                break
 
 
 # --------------------------------------------------------------------------- #

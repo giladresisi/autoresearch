@@ -1025,6 +1025,34 @@ _EPS = 1e-6
 # belt-and-suspenders for the residual latency race.
 DOL_MIN_DRAW_DISTANCE_PTS = 5.0
 
+# 2026-08-16 DOL-menu refit (from the 08-10..08-14 09:20 forward tests). All ratios are
+# multiples of MNQ's avg_range_1h (the same v1-seed ATR everything else uses):
+# - DOL_MIN_DRAW_RATIO: the REAL draw floor — a pool nearer than this completes on noise
+#   (08-12: 15pts/0.19x touched in 7min; 08-13: 10pts/0.13x "exhausted" a call that then
+#   ran +350). DOL_MIN_DRAW_DISTANCE_PTS above stays as the absolute latency-race guard
+#   (plan 12 Fix 2) AND as the fallback floor when avg_range_1h is unavailable (fixtures/
+#   standalone callers) — the two constants protect different things; don't merge them.
+# - DOL_BAND_MAX_RATIO: entries beyond this are tagged FAR (rendered + audit-warned for a
+#   RANGE regime — 08-10's 4.8x-away day-low draw), NOT excluded: a far pool is sometimes
+#   the honest answer, and hard exclusion would silently rewrite no-liquidity semantics.
+# - DOL_PROJECTION_RATIO: price-discovery synthetic draw — when a direction has NO named
+#   pool inside the band, offer `projection_up`/`projection_down` at the running day
+#   extreme +/- this multiple (unswept by construction; gives L2 a real TP). Gated on the
+#   §2.1c stretch flag: no fresh trend-extension target once price is already stretched
+#   > DOL_BAND_MAX_RATIO from the opposite-side day extreme (the 08-13-right/08-14-wrong
+#   separator). Canonical names mirrored in schemas.DOL_PROJECTION_LEVELS.
+DOL_MIN_DRAW_RATIO = 0.5
+DOL_BAND_MAX_RATIO = 3.0
+DOL_PROJECTION_RATIO = 1.0
+# Direction-aware weekly-extension gate on projections: no projection in direction X when
+# price already sits >= this many avg_1h beyond the WEEKLY mid TOWARD X — the day-window
+# stretch gate alone misses a multi-day extension (08-14: Thursday's +350 rip was invisible
+# to Friday's day window, day-stretch read 1.8x, and a projection_up re-armed a wrong UP
+# against a correct no-liquidity NEUTRAL; MNQ sat 6.63x above its weekly mid). Benign
+# projections observed at <= 3.35x (08-10 projection_down fired AGAINST the weekly
+# extension at +2.7x above the mid — allowed by direction-awareness). v1 seed 4.0.
+DOL_PROJECTION_WEEKLY_STRETCH_MAX = 4.0
+
 # Predicate-menu generation config: families × level-classes × param variants. Adding a
 # family / level-class / variant here changes the menu WITHOUT touching the generator, and
 # nothing here names a specific level — level names are resolved from the facts at build
@@ -1060,7 +1088,9 @@ def _thesis_side(direction: str) -> str:
     return "above" if direction == "UP" else "below"
 
 
-def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None) -> dict:
+def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None, *,
+              avg_range_1h=None, day_hi=None, day_lo=None, stretch_mult=None,
+              weekly_mid=None) -> dict:
     """Eligible target pools per direction: in-facts, unswept AND undepleted, on the
     correct side of current price, AND at least DOL_MIN_DRAW_DISTANCE_PTS away. UP draws sit
     above price (nearest first); DOWN below.
@@ -1080,10 +1110,20 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None
     nested level could still surface as the NEAREST (and therefore selected) DOL menu entry even
     though it can never be cited as P1 evidence — the 2026-07-13 18:00 ET case: `prev7_day_low`
     was nested under `prev3_day_low` (both unswept, but prev3 sits farther/deeper), yet it was the
-    #1 DOWN entry and got selected as the thesis's DOL."""
+    #1 DOWN entry and got selected as the thesis's DOL.
+
+    2026-08-16 DOL-menu refit (see the constants' own comment block): `avg_range_1h`/
+    `day_hi`/`day_lo`/`stretch_mult` (all MNQ, all optional — absent leaves this function
+    byte-identical to before) enable (1) an ATR-scaled draw floor max(5pts, 0.5x avg_1h),
+    (2) per-entry `dist_ratio` + BAND/FAR tags, and (3) the stretch-gated
+    `projection_up`/`projection_down` synthetic price-discovery draw appended when a
+    direction has no named pool inside the band."""
     out = {"UP": [], "DOWN": []}
     if not isinstance(now_price, (int, float)):
         return out
+    ar = avg_range_1h if isinstance(avg_range_1h, (int, float)) and avg_range_1h > 0 else None
+    floor = (DOL_MIN_DRAW_DISTANCE_PTS if ar is None
+             else max(DOL_MIN_DRAW_DISTANCE_PTS, DOL_MIN_DRAW_RATIO * ar))
     suppressed = suppressed or ()
     for name, tup in mnq_levels.items():
         if name in suppressed:
@@ -1094,8 +1134,9 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None
         v = vlevels.get(name, {})
         if v.get("swept") or v.get("depleted"):
             continue
-        # Too close to be a draw (price is already sitting on the pool) → race-prone, spent.
-        if abs(price - now_price) < DOL_MIN_DRAW_DISTANCE_PTS:
+        # Too close to be a draw (price is already sitting on the pool, or the draw would
+        # complete on ordinary hourly noise) → race-prone / instantly-spent.
+        if abs(price - now_price) < floor:
             continue
         # A draw is a resistance ABOVE price (up) or a support BELOW price (down); a
         # level whose price sits on the wrong side of its own tag (a resistance now below
@@ -1104,16 +1145,56 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None
             out["UP"].append((name, price, body, tier, side))
         elif side == "below" and price < now_price - _EPS:
             out["DOWN"].append((name, price, body, tier, side))
+    # 2026-08-16: stretch-gated synthetic price-discovery draw. When a direction has NO
+    # named pool inside the band (everything unswept is FAR, or nothing is left at all —
+    # price above/below every named pool, the 08-13 +350-run / 08-14 no-liquidity pair),
+    # offer a projection at the running day extreme +/- DOL_PROJECTION_RATIO x avg_1h —
+    # deterministic, unswept by construction, a real L2 take-profit. Gated on stretch: a
+    # market already > DOL_BAND_MAX_RATIO from its opposite-side day extreme gets no fresh
+    # trend-extension target (08-14: stood NEUTRAL correctly and must keep doing so).
+    if ar is not None and not (isinstance(stretch_mult, (int, float))
+                               and stretch_mult > DOL_BAND_MAX_RATIO):
+        # Direction-aware weekly-extension gate (see DOL_PROJECTION_WEEKLY_STRETCH_MAX):
+        # signed distance of price from the weekly mid in avg-1h units — positive = above.
+        wk_ext = (round((now_price - weekly_mid) / ar, 4)
+                  if isinstance(weekly_mid, (int, float)) else None)
+        for direction, extreme, pside, pname in (
+                ("UP", day_hi, "above", "projection_up"),
+                ("DOWN", day_lo, "below", "projection_down")):
+            if not isinstance(extreme, (int, float)):
+                continue
+            if wk_ext is not None and (
+                    (direction == "UP" and wk_ext >= DOL_PROJECTION_WEEKLY_STRETCH_MAX)
+                    or (direction == "DOWN" and wk_ext <= -DOL_PROJECTION_WEEKLY_STRETCH_MAX)):
+                continue          # already multi-day-extended toward this direction
+            has_band_pool = any(
+                abs(price - now_price) / ar <= DOL_BAND_MAX_RATIO
+                for (_n, price, _b, _t, _s) in out[direction])
+            if has_band_pool:
+                continue
+            proj = (extreme + DOL_PROJECTION_RATIO * ar if direction == "UP"
+                    else extreme - DOL_PROJECTION_RATIO * ar)
+            proj = round(proj * 4) / 4.0            # snap to the 0.25 tick grid
+            out[direction].append((pname, proj, None, "projection", pside))
+
     # Nearest draw first (UP ascending, DOWN descending), then assign stable IDs.
     out["UP"].sort(key=lambda e: e[1])
     out["DOWN"].sort(key=lambda e: -e[1])
     menu = {}
     for direction, entries in out.items():
-        menu[direction] = [
-            {"id": f"D{i + 1}", "level": name, "price": price,
-             "body": body, "tier": tier, "side": side}
-            for i, (name, price, body, tier, side) in enumerate(entries)
-        ]
+        rows = []
+        for i, (name, price, body, tier, side) in enumerate(entries):
+            ratio = round(abs(price - now_price) / ar, 4) if ar is not None else None
+            if tier == "projection":
+                band = "PROJECTION"
+            elif ratio is None:
+                band = None
+            else:
+                band = "BAND" if ratio <= DOL_BAND_MAX_RATIO else "FAR"
+            rows.append({"id": f"D{i + 1}", "level": name, "price": price,
+                         "body": body, "tier": tier, "side": side,
+                         "dist_ratio": ratio, "band": band})
+        menu[direction] = rows
     return menu
 
 
@@ -1294,7 +1375,18 @@ def build_menus(bundle: FactsBundle, vd: dict) -> dict:
     if not isinstance(now_price, (int, float)):
         now_price = bundle.now_price
     mnq_suppressed = (bundle.suppressed_p1_levels or {}).get("MNQ", set())
-    dol = _dol_menu(mnq_levels, vlevels, now_price, suppressed=mnq_suppressed)
+    # 2026-08-16 DOL-menu refit inputs (all MNQ): ATR floor + band tags + the stretch-gated
+    # projection draw. stretch_mult is the SAME §2.1c definition S9 renders — distance from
+    # the opposite-side (farther) running day extreme in avg-1h-range units.
+    _ar = (bundle.avg_range_1h or {}).get("MNQ")
+    _dhi, _dlo = (bundle.day_hi or {}).get("MNQ"), (bundle.day_lo or {}).get("MNQ")
+    _stretch = None
+    if (isinstance(now_price, (int, float)) and isinstance(_ar, (int, float)) and _ar > 0
+            and isinstance(_dhi, (int, float)) and isinstance(_dlo, (int, float))):
+        _stretch = round(max(abs(now_price - _dhi), abs(now_price - _dlo)) / _ar, 4)
+    dol = _dol_menu(mnq_levels, vlevels, now_price, suppressed=mnq_suppressed,
+                    avg_range_1h=_ar, day_hi=_dhi, day_lo=_dlo, stretch_mult=_stretch,
+                    weekly_mid=bundle.weekly_mid)
     mnq_swept_at = (bundle.swept_at or {}).get("MNQ", {})
     mes_swept_at = (bundle.swept_at or {}).get("MES", {})
     preds = _predicate_menu(mnq_levels, vlevels, now_price, bundle.day_mid, dol,
@@ -1321,14 +1413,21 @@ def render_menus_text(bundle: FactsBundle) -> str:
     dol = m.get("dol") or {}
     for direction in ("UP", "DOWN"):
         A(f"\nDOL menu [{direction}] (eligible draws: in-facts, unswept, undepleted, "
-          f"correct side):")
+          f"correct side, >= max(5pts, {DOL_MIN_DRAW_RATIO}x avg_1h) away; prefer a BAND "
+          f"entry (<= {DOL_BAND_MAX_RATIO}x avg_1h) — FAR is legitimate only for a TREND "
+          f"call with HTF confirmation; 'projection' = synthetic price-discovery draw at "
+          f"the running day extreme +/- {DOL_PROJECTION_RATIO}x avg_1h, offered only when "
+          f"no named pool sits in the band):")
         rows = dol.get(direction) or []
         if not rows:
             A("  (none eligible)")
         for e in rows:
             body = "" if e.get("body") is None else f" body={e['body']}"
+            dist_tag = ""
+            if e.get("dist_ratio") is not None:
+                dist_tag = f" dist={e['dist_ratio']}x avg_1h ({e.get('band')})"
             A(f"  {e['id']}: {e['level']} price={e['price']}{body} "
-              f"[{e['side']}, {e['tier']}]")
+              f"[{e['side']}, {e['tier']}]{dist_tag}")
     preds = m.get("predicates") or {}
     for direction in ("UP", "DOWN"):
         A(f"\nPredicate menu [{direction}] (falsification F / exhaustion X / recall R):")

@@ -1099,7 +1099,13 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
     system = build_system_prompt(docs_root)
     user = _facts_context(facts_text, context_text) + _TASK_THESIS
     valid_levels = list((facts.get("levels") or {}).keys())
-    schema = build_thesis_schema(valid_levels, extra_evidence_levels=facts.get("fvg_zones"))
+    # 2026-08-16 DOL-menu refit: synthetic projection draws offered by the S8 menu are
+    # DOL-slot-legal (and only there) — collect whichever the menu actually offers.
+    _dol_rows = ((facts.get("menus") or {}).get("dol") or {})
+    extra_dol = sorted({e.get("level") for rows in _dol_rows.values() for e in (rows or [])
+                        if e.get("tier") == "projection"})
+    schema = build_thesis_schema(valid_levels, extra_evidence_levels=facts.get("fvg_zones"),
+                                 extra_dol_levels=extra_dol)
     menus = facts.get("menus")
     dol_available = None
     if menus is not None:

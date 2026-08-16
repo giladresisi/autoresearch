@@ -1550,3 +1550,51 @@ def test_fvg_zone_meta_none_leaves_p5_untouched():
     z2 = _p5("MNQ 1hr 2026-07-22 02:00:00-04:00 bear")
     scoring = score_thesis_evidence([z1, z2])   # no fvg_zone_meta
     assert all(it["points"] > 0.0 for it in scoring["scored_evidence"])   # dedup never runs
+
+
+# --------------------------------------------------------------------------- #
+# DOL-menu refit (2026-08-16): projection draws + band tags + RANGE/FAR audit  #
+# --------------------------------------------------------------------------- #
+
+def test_projection_dol_exempt_from_level_not_in_facts():
+    from schemas import DOL_PROJECTION_LEVELS
+    t = valid_thesis()
+    t["dol"] = {"level": "projection_up", "price": 19910.0}
+    t["exhausted_if"] = [{"type": "price_beyond", "price": 19910.0, "side": "above"}]
+    assert "projection_up" in DOL_PROJECTION_LEVELS
+    codes = validate_thesis(t, FACTS).codes()
+    assert "SEM_LEVEL_NOT_IN_FACTS" not in codes
+
+
+def test_build_thesis_schema_extra_dol_levels_dol_slot_only():
+    from schemas import build_thesis_schema
+    schema = build_thesis_schema(["prev_day_high"], extra_dol_levels=["projection_up"])
+    dol_enum = schema["properties"]["dol"]["anyOf"][0]["properties"]["level"]["enum"]
+    assert set(dol_enum) == {"prev_day_high", "projection_up"}
+    # never a sweepable-level name, never an evidence level
+    swept_enum = schema["$defs"]["pred_level_swept"]["properties"]["name"]["enum"]
+    assert "projection_up" not in swept_enum
+    ev_enum = schema["properties"]["evidence"]["items"]["properties"]["level"]["enum"]
+    assert "projection_up" not in ev_enum
+
+
+def test_aud_dol_far_for_regime_warns_on_range_only():
+    menus = {"dol": {"UP": [{"id": "D1", "level": "prev_day_high", "price": 20000.0,
+                             "tier": "day", "side": "above",
+                             "dist_ratio": 4.8, "band": "FAR"}], "DOWN": []}}
+    t = valid_thesis()
+    t["regime"] = "RANGE"
+    r = validate_thesis(t, {**FACTS, "menus": menus})
+    assert "AUD_DOL_FAR_FOR_REGIME" in {w.code for w in r.warnings}
+
+    t2 = valid_thesis()            # TREND regime -> FAR is legitimate, no warning
+    r2 = validate_thesis(t2, {**FACTS, "menus": menus})
+    assert "AUD_DOL_FAR_FOR_REGIME" not in {w.code for w in r2.warnings}
+
+    band_menus = {"dol": {"UP": [{"id": "D1", "level": "prev_day_high", "price": 20000.0,
+                                  "tier": "day", "side": "above",
+                                  "dist_ratio": 2.6, "band": "BAND"}], "DOWN": []}}
+    t3 = valid_thesis()
+    t3["regime"] = "RANGE"
+    r3 = validate_thesis(t3, {**FACTS, "menus": band_menus})
+    assert "AUD_DOL_FAR_FOR_REGIME" not in {w.code for w in r3.warnings}

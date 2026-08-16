@@ -281,3 +281,106 @@ def test_existing_menu_tests_still_pass_with_new_config():
     # family/id assertions this file already made (F1/X1/R1 exact-id checks).
     txt = render_menus_text(_bundle_with_menus())
     assert "D1:" in txt and "X1" in txt and "F1" in txt and "R1" in txt
+
+
+# --------------------------------------------------------------------------- #
+# DOL-menu refit (2026-08-16): ATR floor + band tags + stretch-gated projection #
+# --------------------------------------------------------------------------- #
+
+def _refit_bundle(ar=20.0, day_hi=104.0, day_lo=60.0, levels=None):
+    b = FactsBundle()
+    b.now_price = 100.0
+    b.day_mid = 99.0
+    b.avg_range_1h = {"MNQ": ar}
+    b.day_hi = {"MNQ": day_hi}
+    b.day_lo = {"MNQ": day_lo}
+    b.levels = {"MNQ": levels or {}}
+    return b
+
+
+def _refit_vd(levels):
+    return {"now_price": 100.0, "levels": {
+        n: {"price": p, "side": "high" if s == "above" else "low",
+            "swept": False, "depleted": False}
+        for n, (p, _b, s, _t, _a) in levels.items()}}
+
+
+def test_dol_floor_scales_with_avg_range():
+    # ar=20 -> floor = max(5, 0.5*20) = 10: a 7-pt pool is excluded, a 15-pt pool stays.
+    levels = {"up_near": (107.0, 106.5, "above", "day", None),
+              "up_ok":   (115.0, 114.5, "above", "day", None)}
+    b = _refit_bundle(levels=levels)
+    m = build_menus(b, _refit_vd(levels))
+    up = {e["level"] for e in m["dol"]["UP"] if e["tier"] != "projection"}
+    assert up == {"up_ok"}
+
+
+def test_dol_floor_falls_back_to_flat_guard_without_avg_range():
+    levels = {"up_near": (107.0, 106.5, "above", "day", None)}
+    b = _refit_bundle(levels=levels)
+    b.avg_range_1h = {}                       # no ATR -> flat 5-pt guard, 7-pt pool stays
+    m = build_menus(b, _refit_vd(levels))
+    assert {e["level"] for e in m["dol"]["UP"]} == {"up_near"}
+
+
+def test_dol_band_tags_and_ratio():
+    # ar=20: 15pts -> 0.75x BAND; 90pts -> 4.5x FAR.
+    levels = {"up_band": (115.0, 114.5, "above", "day", None),
+              "up_far":  (190.0, 189.0, "above", "week", None)}
+    b = _refit_bundle(levels=levels)
+    m = build_menus(b, _refit_vd(levels))
+    by_name = {e["level"]: e for e in m["dol"]["UP"]}
+    assert by_name["up_band"]["band"] == "BAND" and by_name["up_band"]["dist_ratio"] == 0.75
+    assert by_name["up_far"]["band"] == "FAR" and by_name["up_far"]["dist_ratio"] == 4.5
+
+
+def test_dol_projection_offered_when_band_empty():
+    # UP has only a FAR pool -> projection_up at day_hi + 1.0*ar (104 + 20 = 124),
+    # tick-snapped, tagged PROJECTION. DOWN has a BAND pool -> no projection_down.
+    levels = {"up_far":    (190.0, 189.0, "above", "week", None),
+              "down_band": (85.0, 85.5, "below", "day", None)}
+    b = _refit_bundle(levels=levels)
+    m = build_menus(b, _refit_vd(levels))
+    up_proj = [e for e in m["dol"]["UP"] if e["tier"] == "projection"]
+    assert len(up_proj) == 1
+    assert up_proj[0]["level"] == "projection_up" and up_proj[0]["price"] == 124.0
+    assert up_proj[0]["band"] == "PROJECTION" and up_proj[0]["body"] is None
+    assert not [e for e in m["dol"]["DOWN"] if e["tier"] == "projection"]
+
+
+def test_dol_projection_stretch_gated():
+    # Same geometry as above but price stretched > 3.0x from the opposite-side day
+    # extreme (day_lo=20 -> 80pts/20 = 4.0x) -> NO projection anywhere; UP menu keeps
+    # only its FAR pool (no-liquidity semantics preserved when that's all there is).
+    levels = {"up_far": (190.0, 189.0, "above", "week", None)}
+    b = _refit_bundle(day_lo=20.0, levels=levels)
+    m = build_menus(b, _refit_vd(levels))
+    assert not [e for e in m["dol"]["UP"] if e["tier"] == "projection"]
+    assert not [e for e in m["dol"]["DOWN"] if e["tier"] == "projection"]
+
+
+def test_dol_projection_counts_toward_exhaustion_predicates():
+    levels = {"up_far": (190.0, 189.0, "above", "week", None)}
+    b = _refit_bundle(levels=levels)
+    m = build_menus(b, _refit_vd(levels))
+    x_prices = {e["predicate"]["price"] for e in m["predicates"]["UP"]
+                if e["family"] == "exhaustion"}
+    assert 124.0 in x_prices                   # the projection is a real drawable target
+
+
+def test_dol_projection_weekly_extension_gate_direction_aware():
+    # Price 5x ABOVE the weekly mid (ar=20, mid=0? use mid such that (100-mid)/20 >= 4):
+    # projection_up blocked; projection_down (against the extension) still allowed.
+    levels = {"up_far":   (190.0, 189.0, "above", "week", None),
+              "down_far": (10.0, 10.5, "below", "week", None)}
+    b = _refit_bundle(levels=levels)
+    b.weekly_mid = 15.0                        # (100-15)/20 = 4.25x above -> UP gated
+    m = build_menus(b, _refit_vd(levels))
+    assert not [e for e in m["dol"]["UP"] if e["tier"] == "projection"]
+    assert [e for e in m["dol"]["DOWN"] if e["tier"] == "projection"]
+
+    b2 = _refit_bundle(levels=levels)
+    b2.weekly_mid = 60.0                       # 2.0x above -> both projections allowed
+    m2 = build_menus(b2, _refit_vd(levels))
+    assert [e for e in m2["dol"]["UP"] if e["tier"] == "projection"]
+    assert [e for e in m2["dol"]["DOWN"] if e["tier"] == "projection"]

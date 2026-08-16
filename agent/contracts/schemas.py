@@ -413,8 +413,17 @@ EVIDENCE_MID_LEVELS = (
     "daily_mid_high", "daily_mid_low", "weekly_mid_high", "weekly_mid_low",
 )
 
+# 2026-08-16 DOL-menu refit: synthetic price-discovery draws the S8 DOL menu may offer
+# (derive_facts._dol_menu's stretch-gated projection entries — running day extreme +/-
+# 1x avg_1h). Canonical names; the DOL enum may include them (via extra_dol_levels) but
+# they are NEVER valid `level_swept`/`level_depleted` names (not sweepable named levels)
+# and never evidence levels. validate_contracts._semantic_thesis exempts them from
+# SEM_LEVEL_NOT_IN_FACTS for the dol.level slot only.
+DOL_PROJECTION_LEVELS = ("projection_up", "projection_down")
 
-def build_thesis_schema(valid_levels=None, extra_evidence_levels=None) -> dict:
+
+def build_thesis_schema(valid_levels=None, extra_evidence_levels=None,
+                        extra_dol_levels=None) -> dict:
     """THESIS_SCHEMA with the `level` fields on evidence items and DOL constrained to an
     ENUM of the level names actually present in THIS call's facts, when `valid_levels` is
     given. Under strict schema-constrained decoding (both backends use this), an enum
@@ -430,10 +439,16 @@ def build_thesis_schema(valid_levels=None, extra_evidence_levels=None) -> dict:
     EVIDENCE `level` only, not the DOL — the P5 FVG-zone ids and the P3/P4 synthetic mid
     names (EVIDENCE_MID_LEVELS). These are real facts-grounded identifiers that are not
     named price levels, so they belong in the evidence enum but must never be offered as a
-    DOL draw. Ignored (byte-identical) when `valid_levels` is falsy."""
+    DOL draw. Ignored (byte-identical) when `valid_levels` is falsy.
+
+    `extra_dol_levels` (2026-08-16 DOL-menu refit): additional strings allowed for the
+    DOL slot ONLY — the synthetic projection draws (DOL_PROJECTION_LEVELS) the S8 menu may
+    offer. Deliberately NOT added to the `level_swept`/`level_depleted` name enum (a
+    projection is not a sweepable named level) nor to the evidence enum."""
     schema = copy.deepcopy(THESIS_SCHEMA)
     if valid_levels:
-        dol_enum = {"enum": sorted(set(valid_levels))}
+        real_enum = {"enum": sorted(set(valid_levels))}
+        dol_enum = {"enum": sorted(set(valid_levels) | set(extra_dol_levels or []))}
         ev_names = set(valid_levels) | set(extra_evidence_levels or []) | set(EVIDENCE_MID_LEVELS)
         level_enum = {"enum": sorted(ev_names)}
         schema["properties"]["evidence"]["items"]["properties"]["level"] = level_enum
@@ -441,10 +456,11 @@ def build_thesis_schema(valid_levels=None, extra_evidence_levels=None) -> dict:
         # level_swept/level_depleted predicates (falsified_if/exhausted_if/recall.events)
         # reference a level by `name`, not `level` — same malformed-name risk, same fix.
         # These atom defs live in $defs (shared via $ref), so patch them there too. They must
-        # name a REAL price level (dol_enum), never a synthetic mid / FVG-zone id.
+        # name a REAL price level (real_enum), never a synthetic mid / FVG-zone id / DOL
+        # projection.
         for def_name in ("pred_level_swept", "pred_level_depleted"):
             if def_name in schema["$defs"]:
-                schema["$defs"][def_name]["properties"]["name"] = dol_enum
+                schema["$defs"][def_name]["properties"]["name"] = real_enum
     return schema
 
 
