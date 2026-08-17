@@ -189,6 +189,33 @@ def test_predicate_menu_families_present():
     assert 90.0 in f_prices
 
 
+def test_falsifier_ranking_recommended_default():
+    # 2026-08-17 (07-15 sampling-stability): exactly one falsification entry per
+    # direction carries recommended=True — the FIRST one, so the tight 2x5m daily-mid
+    # close form when available, else the nearest anti-pool via the degenerate-mid
+    # fallback in _resolve_level_class.
+    m = build_menus(_bundle(), _vd())
+    for direction in ("UP", "DOWN"):
+        falsifiers = [e for e in m["predicates"][direction] if e["family"] == "falsification"]
+        rec = [e for e in m["predicates"][direction] if e.get("recommended")]
+        assert rec == [falsifiers[0]]
+    # UP (now 100 above mid 99): mid form is forward-looking -> it is F1.
+    up_rec = next(e for e in m["predicates"]["UP"] if e.get("recommended"))
+    assert up_rec["predicate"]["type"] == "n_closes_beyond"
+    assert up_rec["predicate"]["price"] == 99.0
+    assert up_rec["predicate"]["tf"] == "5m" and up_rec["predicate"]["n"] == 2
+    # DOWN: anti side is "above" and price already sits beyond the mid -> degenerate
+    # guard drops the mid form; the recommendation falls to the nearest anti-pool.
+    dn_rec = next(e for e in m["predicates"]["DOWN"] if e.get("recommended"))
+    assert dn_rec["predicate"]["type"] == "price_beyond"
+
+
+def test_menu_text_tags_recommended_falsifier():
+    txt = render_menus_text(_bundle_with_menus())
+    assert txt.count("<-- RECOMMENDED default falsifier") == 2   # once per direction
+    assert "RANKED" in txt
+
+
 def test_config_drives_generation_no_hardcoded_level_names():
     # The config names families/level-classes/builders — never a concrete facts level
     # name (level CLASSES like "daily_mid"/"anti_pools" are fine; the names below are

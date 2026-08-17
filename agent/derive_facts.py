@@ -1366,6 +1366,19 @@ def _predicate_menu(mnq_levels: dict, vlevels: dict, now_price: float, day_mid,
                     counters[prefix] = counters.get(prefix, 0) + 1
                     entries.append({"id": f"{prefix}{counters[prefix]}",
                                     "family": family, "predicate": pred})
+        # Falsifier ranking (2026-08-17, from the 07-15 sampling-stability check): four
+        # identical calls chose four falsifier designs whose exits spread 75 minutes /
+        # ~150pts on the same losing day — the menu offered candidates unranked, so the
+        # model re-decided each run. Mark the FIRST falsification entry as the
+        # recommended default (mirrors the DOL menu's D1-nearest convention, which
+        # models follow 12/13 times). Config order makes that the tight 2x5m daily-mid
+        # close form when available (bench 07-02: tighter close-based falsifiers beat
+        # distant structural ones by ~85pts), else the nearest anti-pool — the
+        # degenerate-mid guard in _resolve_level_class supplies that fallback naturally.
+        for e in entries:
+            if e["family"] == "falsification":
+                e["recommended"] = True
+                break
         out[direction] = entries
     return out
 
@@ -1438,12 +1451,15 @@ def render_menus_text(bundle: FactsBundle) -> str:
               f"[{e['side']}, {e['tier']}]{dist_tag}")
     preds = m.get("predicates") or {}
     for direction in ("UP", "DOWN"):
-        A(f"\nPredicate menu [{direction}] (falsification F / exhaustion X / recall R):")
+        A(f"\nPredicate menu [{direction}] (falsification F / exhaustion X / recall R; "
+          f"falsification entries are RANKED — take the one tagged RECOMMENDED unless "
+          f"falsified_if_rationale states a concrete reason to prefer another):")
         rows = preds.get(direction) or []
         if not rows:
             A("  (none)")
         for e in rows:
-            A(f"  {e['id']} [{e['family']}]: {_fmt_predicate(e['predicate'])}")
+            rec = "  <-- RECOMMENDED default falsifier" if e.get("recommended") else ""
+            A(f"  {e['id']} [{e['family']}]: {_fmt_predicate(e['predicate'])}{rec}")
     return "\n".join(out) + "\n"
 
 

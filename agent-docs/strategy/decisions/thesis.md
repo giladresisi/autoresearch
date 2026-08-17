@@ -720,7 +720,16 @@ This mechanic lets the former dominate the latter rather than washing out to a n
     counter-extension `projection_down` alive at +2.7× above the mid). Projections are DOL-slot
     legal only (never `level_swept`/`level_depleted` names, never evidence levels) and count
     as available liquidity for the no-liquidity rule below.
-- **No-liquidity rule (code-enforced, not soft).** A sufficiently deep, sustained trend can sweep
+- **Falsifier selection is RANKED (2026-08-17).** The S8 predicate menu's falsification entries
+  carry an explicit `RECOMMENDED default` tag on the top entry — the tight `2×5m` close-beyond
+  daily-mid form when available (bench 2026-07-02: tighter close-based falsifiers beat distant
+  structural ones by ~85 pts of late-exit slippage), else the nearest anti-side pool
+  (`price_beyond`). Take the RECOMMENDED entry unless `falsified_if_rationale` states a concrete
+  structural reason to prefer another (e.g. the thesis is anchored on an HTF accept/reject where
+  only a 1h close-beyond is a true invalidation). Motivation: the 2026-07-15 09:20 sampling-
+  stability check — four identical calls chose four falsifier designs spanning ~227 pts of
+  placement, spreading the loss-cut exit across 75 minutes on the same losing day; unranked
+  menus make the model re-decide per run. This mirrors the DOL menu's D1-nearest convention. A sufficiently deep, sustained trend can sweep
   every named pool on its own side within the tracked lookback (prevN_day/week — no deeper
   history is tracked), leaving that direction's S8 DOL menu `(none eligible)` — with the 2026-08-16
   refit this now happens only when the projection draw is ALSO stretch-gated out. This is the SAME
