@@ -1598,3 +1598,78 @@ def test_aud_dol_far_for_regime_warns_on_range_only():
     t3["regime"] = "RANGE"
     r3 = validate_thesis(t3, {**FACTS, "menus": band_menus})
     assert "AUD_DOL_FAR_FOR_REGIME" not in {w.code for w in r3.warnings}
+
+
+# --------------------------------------------------------------------------- #
+# SEM_FALSIFIER_WRONG_SIDE + ARI near-tie NEUTRAL dead-band (2026-08-17)       #
+# --------------------------------------------------------------------------- #
+
+def test_falsifier_on_thesis_side_rejected():
+    # 2026-08-05 09:20 ET: UP thesis with price_beyond(..., above) as its falsifier —
+    # fires on the thesis SUCCEEDING.
+    t = valid_thesis()   # bias UP
+    t["falsified_if"] = [{"type": "price_beyond", "price": 20000.0, "side": "above"}]
+    assert "SEM_FALSIFIER_WRONG_SIDE" in validate_thesis(t, FACTS).codes()
+
+
+def test_falsifier_anti_side_ok_and_down_mirrored():
+    t = valid_thesis()   # UP + below falsifier (the fixture default) -> clean
+    assert "SEM_FALSIFIER_WRONG_SIDE" not in validate_thesis(t, FACTS).codes()
+    t2 = valid_thesis()
+    t2["bias"] = "DOWN"
+    t2["dol"] = {"level": "prev_day_low", "price": 19500.0}
+    t2["exhausted_if"] = [{"type": "price_beyond", "price": 19500.0, "side": "below"}]
+    t2["falsified_if"] = [{"type": "n_closes_beyond", "price": 19950.0, "side": "above",
+                           "tf": "5m", "n": 2}]
+    t2["evidence"] = [_ev(level="prev_day_low", direction="accept")]   # DOWN-consistent
+    assert "SEM_FALSIFIER_WRONG_SIDE" not in validate_thesis(t2, FACTS).codes()
+    t2["falsified_if"] = [{"type": "n_closes_beyond", "price": 19400.0, "side": "below",
+                           "tf": "5m", "n": 2}]
+    assert "SEM_FALSIFIER_WRONG_SIDE" in validate_thesis(t2, FACTS).codes()
+
+
+def test_falsifier_side_checked_inside_composites():
+    t = valid_thesis()   # UP
+    t["falsified_if"] = [{"type": "any_of", "of": [
+        {"type": "level_swept", "name": "prev_day_low"},
+        {"type": "price_beyond", "price": 20000.0, "side": "above"},   # thesis-side, nested
+    ]}]
+    assert "SEM_FALSIFIER_WRONG_SIDE" in validate_thesis(t, FACTS).codes()
+
+
+def test_falsifier_check_skips_neutral_and_exhausted_if():
+    t = valid_thesis()
+    t["bias"] = "NEUTRAL"
+    t["dol"] = None
+    t["evidence"] = []
+    t["falsified_if"] = [{"type": "price_beyond", "price": 20000.0, "side": "above"}]
+    assert "SEM_FALSIFIER_WRONG_SIDE" not in validate_thesis(t, FACTS).codes()
+    t2 = valid_thesis()   # UP; exhausted_if is thesis-side BY DESIGN (DOL touch)
+    assert "SEM_FALSIFIER_WRONG_SIDE" not in validate_thesis(t2, FACTS).codes()
+
+
+def test_ari_neutral_deadband_accepts_neutral_on_thin_net():
+    # 07-15 case shape: one WEAK session read -> net +0.75; declared NEUTRAL must pass.
+    t = valid_thesis()
+    t["bias"] = "NEUTRAL"
+    t["dol"] = None
+    t["evidence"] = [_ev(tier="session", level="prev_day_high", direction="accept")]
+    facts = {**FACTS, "evidence_magnitude": {"MNQ": {"prev_day_high": {"1h": 0.1}}}}
+    assert "ARI_THESIS_BIAS" not in validate_thesis(t, facts).codes()
+
+
+def test_ari_neutral_deadband_still_rejects_strong_net_and_opposite_direction():
+    t = valid_thesis()
+    t["bias"] = "NEUTRAL"
+    t["dol"] = None
+    t["evidence"] = [_ev()]    # day-tier accept -> net +1.5, outside the band
+    assert "ARI_THESIS_BIAS" in validate_thesis(t, FACTS).codes()
+    t2 = valid_thesis()
+    t2["bias"] = "DOWN"        # opposite of a thin +0.75 net -> still rejected
+    t2["dol"] = {"level": "prev_day_low", "price": 19500.0}
+    t2["exhausted_if"] = [{"type": "price_beyond", "price": 19500.0, "side": "below"}]
+    t2["falsified_if"] = [{"type": "n_closes_beyond", "price": 19950.0, "side": "above",
+                           "tf": "5m", "n": 2}]
+    t2["evidence"] = [_ev(tier="session", level="prev_day_high", direction="accept")]
+    facts = {**FACTS, "evidence_magnitude": {"MNQ": {"prev_day_high": {"1h": 0.1}}}}
+    assert "ARI_THESIS_BIAS" in validate_thesis(t2, facts).codes()

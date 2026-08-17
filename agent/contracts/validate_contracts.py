@@ -222,10 +222,21 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
                                     p1_stale_levels=p1_stale_levels)
     if scoring["scored_evidence"]:
         if t.bias in BIASES and t.bias != scoring["expected_bias"]:
-            r.add("arithmetic", "ARI_THESIS_BIAS",
-                  f"bias '{t.bias}' inconsistent with the evidence ledger's net score "
-                  f"{scoring['net_score']} (expected '{scoring['expected_bias']}')",
-                  "thesis.bias")
+            # Near-tie NEUTRAL dead-band (2026-08-17, plan-18 mini-diff finding): a
+            # razor-thin net (2026-07-15 09:20 ET: +0.75 from a single mid row) must not
+            # FORCE a directional call — the model answered NEUTRAL / DOWN / DOWN across
+            # three attempts against a demanded 'UP' and died to the failsafe, on a day
+            # that fell 374 pts. Declared NEUTRAL is accepted whenever |net| sits inside
+            # ARI_NEUTRAL_BAND; a declared OPPOSITE direction is still rejected, and a
+            # thin net still never rejects the sign-matching direction (expected_bias is
+            # unchanged — this only widens what counts as consistent).
+            if not (t.bias == "NEUTRAL"
+                    and abs(scoring["net_score"]) < ARI_NEUTRAL_BAND):
+                r.add("arithmetic", "ARI_THESIS_BIAS",
+                      f"bias '{t.bias}' inconsistent with the evidence ledger's net score "
+                      f"{scoring['net_score']} (expected '{scoring['expected_bias']}'"
+                      f"; NEUTRAL is acceptable when |net| < {ARI_NEUTRAL_BAND})",
+                      "thesis.bias")
     elif t.bias in ("UP", "DOWN"):
         r.add("arithmetic", "ARI_THESIS_BIAS",
               f"bias '{t.bias}' declared with an EMPTY evidence ledger — a directional call "
@@ -354,6 +365,35 @@ def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
                   f"DOWN thesis but DOL {dol_price} is above current price {now_price} "
                   "(a draw must sit below price)", "thesis.dol")
 
+    # SEM_FALSIFIER_WRONG_SIDE (2026-08-17, plan-18 mini-diff finding): a directional
+    # thesis's falsified_if must describe ANTI-thesis price action — an UP thesis is
+    # falsified by price/closes going BELOW something, never ABOVE (mirrored for DOWN).
+    # A thesis-side falsifier fires on the thesis SUCCEEDING (2026-08-05 09:20 ET: an UP
+    # thesis carried `price_beyond(29990.75, above)` — an old near pool recycled as a
+    # "falsifier" — so the walk-forward "falsified" it 12 minutes before its genuine DOL
+    # touch). Mirrors SEM_DOL_WRONG_SIDE. exhausted_if is deliberately NOT checked — its
+    # DOL-touch term is thesis-side by design.
+    if t.is_directional():
+        _own_side = "above" if t.bias == "UP" else "below"
+
+        def _walk_preds(preds):
+            for _p in preds or []:
+                if not isinstance(_p, dict):
+                    continue
+                if _p.get("type") in ("all_of", "any_of"):
+                    yield from _walk_preds(_p.get("of"))
+                else:
+                    yield _p
+
+        for _p in _walk_preds(t.falsified_if):
+            if _p.get("type") in ("price_beyond", "n_closes_beyond") \
+                    and _p.get("side") == _own_side:
+                r.add("semantic", "SEM_FALSIFIER_WRONG_SIDE",
+                      f"{t.bias} thesis with a falsifier on its OWN side "
+                      f"({_p.get('type')} side={_p.get('side')} price={_p.get('price')}) "
+                      "— a falsifier must describe anti-thesis price action",
+                      "thesis.falsified_if")
+
     # AUD_DOL_FAR_FOR_REGIME (2026-08-16 DOL-menu refit): a RANGE-regime call drawing to a
     # FAR pool (beyond DOL_BAND_MAX_RATIO x avg_1h — the menu's own band tag) is a
     # tier/regime mismatch — a range read has no business targeting a multi-day moonshot
@@ -389,6 +429,12 @@ _BASE_POINTS = 2.0                          # v1 seed, pending calibration (thes
 # one here, just possibly more current). v1 seed, pending calibration, same status as
 # every other constant in this module.
 _P3_MID_POINTS = {"day": 1.0, "week": 1.5}
+
+# Near-tie NEUTRAL dead-band (2026-08-17): |net_score| below this permits a declared
+# NEUTRAL through ARI_THESIS_BIAS (see validate_thesis) — one WEAK session read or a
+# lone mid row is not enough evidence to FORCE a direction. v1 seed, pending
+# calibration, same status as the confidence-ceiling thresholds (2.0/4.0).
+ARI_NEUTRAL_BAND = 1.0
 
 
 def _is_week_confluent(item: dict, level_tiers, week_extremes) -> bool:

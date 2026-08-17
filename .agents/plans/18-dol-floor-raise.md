@@ -181,4 +181,5 @@ be the anti-direction of the day's bias — noted). Same-day touch window = boun
 
 Also drop one line here when Part A is committed (hash + whether thesis.md §8 doc rode
 along), so the L2 track knows the floor is live before encoding its §11 items.
-- Part A commit: **PENDING** (not yet implemented; the rows above are pre-computation).
+- Part A commit: **`d549103`** (2026-08-17) — floor live at 1.0×; thesis.md §8 doc rode
+  along; plan 19 spec included. The L2 track can encode its §11 items against this.
