@@ -694,10 +694,14 @@ This mechanic lets the former dominate the latter rather than washing out to a n
   unswept, undepleted, correct-side, NOT nested/duplicate-suppressed (§2.1b/§2.1d) pool —
   prefer the DOL menu's `D*` IDs directly. **2026-08-16 refit (from the 08-10..08-14 09:20
   forward tests):**
-  - **ATR-scaled draw floor.** Eligibility now requires `≥ max(5pts, 0.5 × avg_range_1h)` away
+  - **ATR-scaled draw floor.** Eligibility now requires `≥ max(5pts, 1.0 × avg_range_1h)` away
     (`DOL_MIN_DRAW_RATIO`) — a nearer pool completes on hourly noise (08-12: a 15-pt draw
     "completed" in 7 minutes; 08-13: a 10-pt draw "exhausted" a correct UP call that then ran
-    +350). The flat 5-pt guard remains as the latency-race backstop and the no-ATR fallback.
+    +350). Raised 0.5 → 1.0 (2026-08-16, plan 18) per `l2-mechanisms.md` §10.3 v2 (commit
+    `272cf7c`, 73 days / 132 named-pool arms): both rollover segments agree 0.5–0.7× is
+    opening-rotation fodder (60–75% swept pre-09:35) and ≥ 1.0× is safe (≤ 11%); 1.0× chosen
+    on post-rollover (live-regime) weighting of the ambiguous 0.7–1.0× band. The flat 5-pt
+    guard remains as the latency-race backstop and the no-ATR fallback.
   - **Distance bands.** Every entry renders `dist=Nx avg_1h` with a `BAND` (≤ 3.0×) or `FAR`
     tag. Take the best BAND pool by tier; FAR is legitimate ONLY for a TREND-regime call with
     HTF confirmation behind it — a RANGE call drawing to a FAR pool draws an audit warning

@@ -306,16 +306,20 @@ def _refit_vd(levels):
 
 
 def test_dol_floor_scales_with_avg_range():
-    # ar=20 -> floor = max(5, 0.5*20) = 10: a 7-pt pool is excluded, a 15-pt pool stays.
-    levels = {"up_near": (107.0, 106.5, "above", "day", None),
-              "up_ok":   (115.0, 114.5, "above", "day", None)}
+    # Plan 18 floor raise (0.5 -> 1.0): ar=20 -> floor = max(5, 1.0*20) = 20.
+    # (a) a 0.9x-away pool (18 pts) is excluded at the new floor; (b) a 1.1x-away pool
+    # (22 pts) is kept. The old 0.5x floor would have kept both.
+    levels = {"up_09x": (118.0, 117.5, "above", "day", None),
+              "up_11x": (122.0, 121.5, "above", "day", None)}
     b = _refit_bundle(levels=levels)
     m = build_menus(b, _refit_vd(levels))
     up = {e["level"] for e in m["dol"]["UP"] if e["tier"] != "projection"}
-    assert up == {"up_ok"}
+    assert up == {"up_11x"}
 
 
 def test_dol_floor_falls_back_to_flat_guard_without_avg_range():
+    # Plan 18 case (c): the flat 5-pt fallback when avg_range is absent is UNCHANGED
+    # by the 0.5 -> 1.0 floor raise (the ratio never applies without an ATR).
     levels = {"up_near": (107.0, 106.5, "above", "day", None)}
     b = _refit_bundle(levels=levels)
     b.avg_range_1h = {}                       # no ATR -> flat 5-pt guard, 7-pt pool stays
@@ -324,21 +328,23 @@ def test_dol_floor_falls_back_to_flat_guard_without_avg_range():
 
 
 def test_dol_band_tags_and_ratio():
-    # ar=20: 15pts -> 0.75x BAND; 90pts -> 4.5x FAR.
-    levels = {"up_band": (115.0, 114.5, "above", "day", None),
+    # ar=20: 30pts -> 1.5x BAND; 90pts -> 4.5x FAR. (Pool distances sit above the
+    # plan-18 floor of 1.0x so both survive the eligibility gate.)
+    levels = {"up_band": (130.0, 129.5, "above", "day", None),
               "up_far":  (190.0, 189.0, "above", "week", None)}
     b = _refit_bundle(levels=levels)
     m = build_menus(b, _refit_vd(levels))
     by_name = {e["level"]: e for e in m["dol"]["UP"]}
-    assert by_name["up_band"]["band"] == "BAND" and by_name["up_band"]["dist_ratio"] == 0.75
+    assert by_name["up_band"]["band"] == "BAND" and by_name["up_band"]["dist_ratio"] == 1.5
     assert by_name["up_far"]["band"] == "FAR" and by_name["up_far"]["dist_ratio"] == 4.5
 
 
 def test_dol_projection_offered_when_band_empty():
     # UP has only a FAR pool -> projection_up at day_hi + 1.0*ar (104 + 20 = 124),
-    # tick-snapped, tagged PROJECTION. DOWN has a BAND pool -> no projection_down.
+    # tick-snapped, tagged PROJECTION. DOWN has a BAND pool (30pts = 1.5x, above the
+    # plan-18 floor) -> no projection_down.
     levels = {"up_far":    (190.0, 189.0, "above", "week", None),
-              "down_band": (85.0, 85.5, "below", "day", None)}
+              "down_band": (70.0, 70.5, "below", "day", None)}
     b = _refit_bundle(levels=levels)
     m = build_menus(b, _refit_vd(levels))
     up_proj = [e for e in m["dol"]["UP"] if e["tier"] == "projection"]
@@ -346,6 +352,21 @@ def test_dol_projection_offered_when_band_empty():
     assert up_proj[0]["level"] == "projection_up" and up_proj[0]["price"] == 124.0
     assert up_proj[0]["band"] == "PROJECTION" and up_proj[0]["body"] is None
     assert not [e for e in m["dol"]["DOWN"] if e["tier"] == "projection"]
+
+
+def test_dol_floor_raise_frees_band_for_projection():
+    # Plan 18 case (d): a direction whose ONLY band pool sat at 0.8x (16 pts at ar=20 —
+    # legal under the old 0.5x floor, excluded at 1.0x) now has an empty band, so the
+    # stretch-gated projection is offered in its place (gates pass here: day-stretch
+    # (100-60)/20 = 2.0x <= 3.0, no weekly mid set).
+    levels = {"up_08x": (116.0, 115.5, "above", "day", None)}
+    b = _refit_bundle(levels=levels)
+    m = build_menus(b, _refit_vd(levels))
+    up = m["dol"]["UP"]
+    assert not [e for e in up if e["tier"] != "projection"]   # the 0.8x pool is gone
+    proj = [e for e in up if e["tier"] == "projection"]
+    assert len(proj) == 1 and proj[0]["level"] == "projection_up"
+    assert proj[0]["price"] == 124.0                          # day_hi 104 + 1.0*20
 
 
 def test_dol_projection_stretch_gated():

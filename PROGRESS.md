@@ -1,5 +1,29 @@
 ﻿# PROGRESS
 
+## Feature: DOL floor raise 0.5 → 1.0 — Plan 18 Part A
+### Status: ✅ Complete (unstaged — parent session commits; "Part A commit: PENDING" stands)
+**Plan File**: `.agents/plans/18-dol-floor-raise.md`
+
+`derive_facts.DOL_MIN_DRAW_RATIO` 0.5 → 1.0 (flat 5-pt guard + no-ATR fallback unchanged),
+per `l2-mechanisms.md` §10.3 v2 / commit `272cf7c`. Validated: `test_menus.py` 24/24 (cases
+a–d incl. new `test_dol_floor_raise_frees_band_for_projection`); deterministic 61-boundary
+sweep 0.5 vs 1.0 → 13 changed, exactly ONE bias flip (07-17 09:20 DOWN → no-liquidity
+NEUTRAL, the enumerated ripple-3 case, judged correct); knife-edge 0.9/1.1 zero bias
+differences; LLM mini-diff on the 4 changed 09:20 days all PASS with zero DOL-related
+rejections (08-05 inverted-falsifier caveat flagged to L2). L2 hand-off table filled with
+exact prices + 9 extra non-09:20 changed-boundary rows. Suites: agent 166 passed, bench 55
+identical, `tests/` 1379P/2F/16E baseline unchanged — 0 new failures. code-review PASSED
+(zero changeset issues); acceptance ACCEPTED 7/7.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/18-dol-floor-raise.md`
+- Detailed implementation summary
+- Divergences (66→61 boundary estimate; 08-05 model-falsifier artifact)
+- Test results, sweep/mini-diff validation, L2 hand-off status
+
+---
+
 ## Feature: L1 Facts-Completeness Fixes — Plan 17
 ### Status: ✅ Complete (unstaged)
 **Plan File**: `.agents/plans/17.l1-facts-completeness-fixes.md`

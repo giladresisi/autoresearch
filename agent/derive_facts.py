@@ -1029,7 +1029,14 @@ DOL_MIN_DRAW_DISTANCE_PTS = 5.0
 # multiples of MNQ's avg_range_1h (the same v1-seed ATR everything else uses):
 # - DOL_MIN_DRAW_RATIO: the REAL draw floor — a pool nearer than this completes on noise
 #   (08-12: 15pts/0.19x touched in 7min; 08-13: 10pts/0.13x "exhausted" a call that then
-#   ran +350). DOL_MIN_DRAW_DISTANCE_PTS above stays as the absolute latency-race guard
+#   ran +350). Raised 0.5 -> 1.0 (2026-08-16, plan 18) on l2-mechanisms.md §10.3 v2
+#   (commit 272cf7c: 73 days 05-04..08-14, 132 named-pool arms, pre/post-rollover split):
+#   both segments agree 0.5-0.7x is unusable (60-75% swept pre-09:35) and >= 1.0x is safe
+#   (<= 11%); the 0.7-1.0x band is regime-ambiguous (40% swept post-rollover) — 1.0x is
+#   chosen on post-rollover (live-regime) weighting. The hold-for-D2 counterfactual on
+#   the 26 swept near arms shows the deeper target is positive-EV in its own right
+#   (D2 reached 73% by 16:00, median +72.6 pts vs TP-at-near-D1).
+#   DOL_MIN_DRAW_DISTANCE_PTS above stays as the absolute latency-race guard
 #   (plan 12 Fix 2) AND as the fallback floor when avg_range_1h is unavailable (fixtures/
 #   standalone callers) — the two constants protect different things; don't merge them.
 # - DOL_BAND_MAX_RATIO: entries beyond this are tagged FAR (rendered + audit-warned for a
@@ -1041,7 +1048,7 @@ DOL_MIN_DRAW_DISTANCE_PTS = 5.0
 #   §2.1c stretch flag: no fresh trend-extension target once price is already stretched
 #   > DOL_BAND_MAX_RATIO from the opposite-side day extreme (the 08-13-right/08-14-wrong
 #   separator). Canonical names mirrored in schemas.DOL_PROJECTION_LEVELS.
-DOL_MIN_DRAW_RATIO = 0.5
+DOL_MIN_DRAW_RATIO = 1.0
 DOL_BAND_MAX_RATIO = 3.0
 DOL_PROJECTION_RATIO = 1.0
 # Direction-aware weekly-extension gate on projections: no projection in direction X when
@@ -1114,7 +1121,8 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None
 
     2026-08-16 DOL-menu refit (see the constants' own comment block): `avg_range_1h`/
     `day_hi`/`day_lo`/`stretch_mult` (all MNQ, all optional — absent leaves this function
-    byte-identical to before) enable (1) an ATR-scaled draw floor max(5pts, 0.5x avg_1h),
+    byte-identical to before) enable (1) an ATR-scaled draw floor
+    max(5pts, DOL_MIN_DRAW_RATIO x avg_1h),
     (2) per-entry `dist_ratio` + BAND/FAR tags, and (3) the stretch-gated
     `projection_up`/`projection_down` synthetic price-discovery draw appended when a
     direction has no named pool inside the band."""
