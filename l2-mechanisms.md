@@ -120,6 +120,15 @@ tuning; the rules are fixed.
   No separate "market entry" mechanism exists.
 - **Max-distance guard:** the trigger price must sit within a capped distance of current price
   (analogous to the S8 DOL proximity guard).
+- **No standing L1 plan → the mechanisms stay dark (decided 2026-08-17).** Every mechanism
+  assumes a DOL-bearing plan; when L1 resolves to no-liquidity NEUTRAL (or no plan is
+  armed for any reason), L3 places nothing, triggers nothing, and tracks state only.
+  Re-arming is L1's recall problem — the recall cadence fires at subsession boundaries and
+  can arm a fresh plan when liquidity re-forms — NOT L2's: no fallback DOL, no self-armed
+  thesis (the §10.2 adverse-day bounds rest entirely on the plan/DOL discipline).
+  Known cost: 07-17 under the 1.0x floor (the +91.25 oracle day goes untraded); accepted —
+  its only pool was consumed within 4 minutes of the open, exactly what §10.3 says such
+  pools do. Quantified going forward by the §11 planless-day shadow ledger.
 - **DOL-floor veto (all mechanisms, every entry decision):** an entry is vetoed unless at
   least ~60 pts remain between the entry/trigger price and the plan's DOL (the nearest un-hit
   DOL when the thesis names several; all mechanisms assume a DOL-bearing plan). Applies to
@@ -518,8 +527,9 @@ assumptions on the studied dates:
   doubly stretch-gated → the model adopts **no-liquidity NEUTRAL, dol=None** — no standing
   L1 arm at 09:20, so the +91.25 day is untradeable under the new floor. The §8 takeover
   validation STANDS as oracle-input evidence of mechanism correctness; only the
-  "real-input" badge is era-bound. Policy for setup-without-plan days: pending §11
-  encoding (recommended: mechanisms stay dark; re-arming is L1 recall's job).
+  "real-input" badge is era-bound. Policy for setup-without-plan days: DECIDED 2026-08-17
+  (§2 — mechanisms stay dark; re-arming is L1 recall's job; foregone setups measured by
+  the §11 planless-day shadow ledger).
 - **07-21 diverges: recorded bias UP** (the studied §6 +96.5 used DOWN). Old floor: the
   DOL (prev2_day_high 29220, 50.75 pts away) was swept by the 09:30 judas pre-settle →
   plan fulfilled flat, cost 0. NEW floor (mini-diff confirmed: model adopts UP +
@@ -776,4 +786,10 @@ pts away). §7 fired 31 times, up to 3/arm:
   penetrated, but the crossed trigger at cooldown end takes precedence → market re-entry
   28579, +146.5 preserved); 08-14 (crossed trigger at 09:32:00 → market 30245.5, day
   +99.50).
+- **Planless-day shadow ledger (forward holdout instrumentation):** on any session where
+  the 09:20 boundary resolves to NEUTRAL (no plan armed) but a mechanism setup would have
+  fired under an oracle plan, log the paper outcome (mechanism, entry, SL, result). The §2
+  stay-dark policy rests on one known instance (07-17); this ledger decides empirically
+  whether the foregone-setup cost is material — and if it ever is, the fix is upstream
+  (recall cadence / projection stretch-gates), not an L2-side plan source.
 - Per-mechanism L2-supplied invalidation criteria — deferred.
