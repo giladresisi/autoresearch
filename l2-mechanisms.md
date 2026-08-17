@@ -420,8 +420,10 @@ chase entries the §2 DOL-floor veto now suppresses).
     and the 09:32 push to 28685.5 prints in the first seconds BEFORE the entry, so the SL
     (28687.5) sits above the already-made extreme — never threatened → DOL (overnight low
     28554.75) at 09:34:29 +109 — **day +91.25 on 2 attempts**, entry 19 pts better than the
-    validated same-gap re-entry. 07-21 unaffected (no 5m-bound attempts); 07-23 unaffected
-    (no deeper-gap penetration in the stop window).
+    validated same-gap re-entry. (Provenance, 2026-08-17: this validation is ORACLE-INPUT —
+    under the plan-18 1.0x DOL floor the recorded L1 resolves 07-17 to no-liquidity
+    NEUTRAL, so no live plan would have armed; see §10.1.) 07-21 unaffected (no 5m-bound
+    attempts); 07-23 unaffected (no deeper-gap penetration in the stop window).
 - **Audit:** every bind / re-bind / disarm decision is logged (JSONL, extends the existing
   audit conventions) for post-session analysis.
 
@@ -493,12 +495,28 @@ assumptions on the studied dates:
 - **Match (validated numbers carry over):** 07-15 (DOWN, DOL asia_low 29745.75 — the +205
   ride's exact target), 07-16 (DOWN, prev2_day_low 29303.25 — matches the +159 arithmetic),
   07-17 (DOWN, london_low 28554.75 — EXACTLY the §8 takeover replay's TP; the +91.25 result
-  is therefore real-input-validated end to end), 07-24 (DOWN, london_low ≈ the +146.5
-  target).
-- **07-21 diverges: recorded bias UP** (the studied §6 +96.5 used DOWN). Under the recorded
-  thesis the DOL (prev2_day_high 29220, 50.75 pts away) is swept by the 09:30 judas before
-  the settle window ends → plan fulfilled flat. The studied gain would not have occurred
-  live, but neither would any loss — a real wrong-direction day cost 0.
+  was real-input-validated end to end UNDER THE 0.5x-FLOOR ERA in which it was recorded —
+  see the demotion note below), 07-24 (DOWN, london_low ≈ the +146.5 target).
+- **07-17 demotion under the plan-18 floor raise (mini-diff confirmed 2026-08-16, clean
+  first attempt):** with the 1.0x draw floor the DOWN menu empties and projection_down is
+  doubly stretch-gated → the model adopts **no-liquidity NEUTRAL, dol=None** — no standing
+  L1 arm at 09:20, so the +91.25 day is untradeable under the new floor. The §8 takeover
+  validation STANDS as oracle-input evidence of mechanism correctness; only the
+  "real-input" badge is era-bound. Policy for setup-without-plan days: pending §11
+  encoding (recommended: mechanisms stay dark; re-arming is L1 recall's job).
+- **07-21 diverges: recorded bias UP** (the studied §6 +96.5 used DOWN). Old floor: the
+  DOL (prev2_day_high 29220, 50.75 pts away) was swept by the 09:30 judas pre-settle →
+  plan fulfilled flat, cost 0. NEW floor (mini-diff confirmed: model adopts UP +
+  prev3_day_high 29796.5, 6.48x FAR, never reached): the plan STANDS, and the 1s-verified
+  L2 walk bleeds the full structural worst case — §5 binds the 08:55 bull gap
+  [29143.25, 29164] (laddered from the 09:30-created gap at 09:31:32), and the 29171
+  trigger is whipsawed three times (fills 09:31:40 / 09:35:47 / 09:43:10, stops 09:33:58 /
+  09:41:55 / 09:44:42) → **−92.25 = exactly 3 × (gap height + 10), locked out at 09:44:42**
+  — 46 minutes before the +158 rally the thesis correctly predicted. §6/§7 never arm (no
+  new day low against the thesis), the veto is non-binding (500+ pts remaining), and no
+  deeper-gap takeover exists (no gap below the failed one). A RIGHT-direction day, fully
+  bled on whipsaw timing: the first realization of §5's structural 3-attempt worst case,
+  and evidence that §5 lacks any churn guard analogous to §6's cycle gates (§11 candidate).
 - **07-23 diverges on DOL:** direction matches (DOWN) but the recorded DOL (prev2_day_low
   28700) sat 15.75 pts away at arm and was swept in the opening minute → plan complete,
   flat; the studied +304 is forfeited. SYSTEMIC FINDING: a DOL within ~60–80 pts at arm
@@ -523,13 +541,45 @@ bound the bleed when L1 is wrong (the live edge depends on it):
 - 08-14 inv (UP, DOL overnight high 30287.25, 45.75 away): every early entry fails the
   60-pt floor; no new day low until 10:59 keeps §6/§7 silent through the morning → ≈
   **0..−45**.
-- Plus the one REAL wrong-direction instance (07-21 recorded UP, §10.1): flat 0.
+- Plus the REAL recorded-L1 instances (§10.1): 07-21 under the old floor — flat 0; 07-21
+  under the plan-18 floor (standing UP plan, FAR DOL) — **−92.25**, the full structural
+  worst case 3 × (gap+10) realized on a 20.75-pt binding gap, with every brake
+  non-engaging (right-direction thesis, far DOL, no counter-thesis extreme, no deeper
+  gap).
+- **07-31 under the plan-18 DOL-floor raise — the deepest real instance (1s-verified
+  2026-08-16; floor 1.0x applied as an in-process pre-computation, plan 18 Part A NOT yet
+  committed — cite its hash here when it lands):** the recorded UP thesis no longer completes
+  at the near pool (+12 min, a flat day under the old 0.5x floor); the D1 moves out to
+  prev4_day_high 28763.75 (2.01x), which the day never reaches, so the plan stands through
+  the fade and the mechanisms trade it wrong-way three times — §5 long 28536.25 (fill
+  09:40:36, SL 28511.5 at 09:42:02) −24.75; the 09:42 stop-run penetrates the deeper 1m gap
+  [28496.75, 28508.5] on the very tick that takes the stop, but both re-entry cycles (09:42
+  entering bar, 09:43 re-entry) close red below the gap → color-void skips and price never
+  returns to it; then §6 arms on the break to new day lows — the prior-18:00 session low
+  28304.25 is first taken out at **09:54:02** (both the 1m walk's "~10:03" and a first 1s
+  pass's "10:02:45" mis-timed this; the 09:54 1m bar's 28294.75 low already undercuts it —
+  a lesson for §11: day-extreme tracking must be tick-level) — and fires twice: 09:59:02
+  exit-tick long ≈28348.25 off the [28340.5, 28352.75] gap created 09:57 (SL 28335.5,
+  stopped 10:00:25) −12.75, and 10:21 close-verdict long 28223.25 (capped SL 28193.25,
+  stopped 10:21:25) −30 → **day −67.50 on exactly 3 attempts**; the 10:35 cycle that a
+  mis-timed arming would have traded is budget-blocked. The §2 DOL-floor veto was live but
+  non-binding all day (227.5 / 415.75 / 540.5 pts remaining at the three entries), so this
+  bleed is NOT a near-DOL chase the veto could have caught — it is the honest cost of a far
+  DOL keeping a wrong plan alive, the mirror image of 07-23 (old floor: flat → +304
+  forfeited; new floor here: flat → −67.50 bled). Resolution notes: §6 prices market fills
+  at the mid of the 1s bar at placement (±1–2 pts vs a prior-1m-close proxy), and the 09:40
+  bar's high printed 09:40:08, BEFORE the 09:40:23 retrace into the §5 gap, so only 1s
+  sees the 09:40:36 trigger re-cross. Entry triggers and both structure-anchored stops are
+  identical at every resolution once the arming time is corrected.
 
-Conclusion: wrong-thesis bleed is bounded at roughly 0..−80/day — far under the naive
-3-attempt worst case — because (1) the DOL-floor veto blocks near-DOL chases outright,
-(2) wrong-direction DOLs tend to be swept early, completing the plan flat, and (3) the
-color/cycle gates starve counter-trend episode entries. Sample: five days; extend before
-treating as a distribution.
+Conclusion (restated 2026-08-17 after 07-21): the HARD bound on adverse-day bleed is
+structural — **3 × (bound-gap height + 10)** — and 07-21 realizes it in full (−92.25 on a
+20.75-pt gap). The soft brakes — (1) the DOL-floor veto on near-DOL chases, (2) early
+sweeps of wrong-direction DOLs completing plans flat, (3) §6/§7 color/cycle gates —
+typically hold observed bleed to 0..−70 (07-31's −67.50 was the prior deepest), but NONE
+of them engages on a right-direction plan with a far DOL whipsawing a §5 binding: §5 has
+no churn guard analogous to §6's cycles (§11 candidate). Sample: seven days; extend
+before treating as a distribution.
 
 ### 10.3 Unseen-date sweep — `extreme_reject_close` base rates (2026-08-16)
 
@@ -598,6 +648,29 @@ pts away). §7 fired 31 times, up to 3/arm:
   at −15..−30 long before the horizon exit. Conclusion: re-anchor to D2 and manage by the
   existing stop/invalidation machinery — no special near-pool TP policy is needed.
 
+  **Plan-18 hand-off — deterministic outcomes on the studied set (2026-08-16, floor 1.0x
+  pre-computed in process; Part A not yet committed):** exactly four studied days change
+  their D1. 07-31 → TP prev4_day_high 28763.75 (2.01x), never reached, turning a near-pool
+  completion into a standing wrong-way plan (−67.50, §10.2). 08-05 → the UP arm deepens
+  71.75 pts to prev3_week_high 30062.5 (1.71x), touched 09:45:08 (+25 min), while the studied
+  DOWN thesis and its whole L2 record are byte-identical — its DOL was the oracle TDO and the
+  DOWN menu holds nothing in the excluded band under either floor (D1 london_low 1.415x, D2
+  1.665x); an independent floor-override run of the facts pipeline reproduces the hand-off
+  prices exactly. 07-17 → the DOWN menu empties, no-liquidity NEUTRAL — mini-diff
+  CONFIRMED 2026-08-16 (model adopts NEUTRAL/dol=None on a clean first attempt) — the
+  §10.1 demotion is EXECUTED (real-input badge era-bound; §8's oracle validation stands).
+  07-21 → the UP menu goes FAR-only (prev3_day_high 29796.5, 6.48x, never reached;
+  projection_up refused by the day-stretch gate on a day that ran +158, flagged upstream
+  as a gate counter-example) — mini-diff CONFIRMED (model adopts UP + the FAR pool), and
+  the 1s L2 walk under that standing plan bleeds −92.25 with lockout at 09:44:42 (§10.1/
+  §10.2). Plan-18 Part A is implemented in-tree (`DOL_MIN_DRAW_RATIO = 1.0`) but
+  UNCOMMITTED as of 2026-08-17 — hash citations pending. Their full 61-boundary sweep
+  adds 9 changed NON-09:20 boundaries, none flipping expected_bias; all reviewed for L2
+  impact: none — every L2 record anchors at a 09:20 boundary, and the one flagged row
+  (07-16 09:00 DOWN going FAR-only) is not the 07-16 09:20 boundary our +159/+217 records
+  use (that one is unchanged). L2 re-verification of ALL FOUR changed 09:20 days is
+  COMPLETE (plan 20).
+
 ## 11. Implementation gaps (design-complete, work remaining)
 
 - 5m FVG detection + leg segmentation as L3 facts/data products (existing detection is 1hr/4hr
@@ -643,4 +716,22 @@ pts away). §7 fired 31 times, up to 3/arm:
   shared with the L1/thesis pipeline (2026-08-16 refit); propose to its owner rather than
   edit unilaterally. Note the 07-17 nuance: an entry that beats the sweep uses the sweep
   as its TP — the floor shapes DOL SELECTION, it must not veto already-armed plans.
+- IDEA ONLY, currently ZERO net evidence, NOT adopted: extend the §8 SL-cap skip gate to
+  §6-proper close-verdict entries. On 07-31 the 10:21 §6 entry carried an excursion-anchored
+  SL 71.75 pts away, capped to 30, and was stopped 25 s later — the exact pattern the gate
+  skips in §8 — but under the corrected ledger the gate is P&L-NEUTRAL on that day: skipping
+  10:21 frees the third attempt for the 10:35 cycle (SL exactly 30.0, allowed), which also
+  loses −30 → −67.50 either way; the gate only changes WHICH entry spends the last attempt.
+  If ever revisited, backcheck against every §6-validated close-verdict entry (07-21, 08-03,
+  08-05, 08-06, 08-10 — note 08-06's validated §6 entry USED the cap, so the gate would have
+  skipped a winner there); §6 and §8 rule text stand unchanged.
+- CANDIDATE (from 07-21, single-day but structural): a §5 re-entry churn guard. §5's
+  post-stop re-entry is a bare resting stop at the same trigger — on 07-21 the 29171
+  trigger whipsawed three times in 13 minutes (−92.25, the full 3×(gap+10) worst case)
+  inside a 60-pt chop range, with no §6-style cycle/color gating between attempts.
+  Candidate forms: require a fresh full exit-and-re-retrace of the binding gap between
+  attempts, or route ALL §5 re-entries through the §8 takeover episode machinery (not just
+  deeper-gap cases). Backcheck required against every validated §5/§4 re-entry (07-15,
+  07-17-oracle, 08-12, 08-14) before encoding — the 07-24 lesson (lockouts forfeit
+  collapses) cuts the other way.
 - Per-mechanism L2-supplied invalidation criteria — deferred.
