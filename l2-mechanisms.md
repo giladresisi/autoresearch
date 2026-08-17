@@ -402,19 +402,35 @@ chase entries the §2 DOL-floor veto now suppresses).
     breakdown bar enters via exit-tick — a fixed length gate forfeits that day's entire
     winner. Exit-tick/intra-bar entries are never length-gated (their SL distance is
     inherently small at the zone edge).
-  - **Cooldown boundary (1s-verified):** the stop-out bar's OWN close verdict fires at
-    cooldown end — state-based, same principle as the 07-24 cooldown precedent. (08-14: the
-    09:31 stop-out bar closes red below the takeover gap → attempt 2 fires at 09:32:00.)
+  - **Crossed-trigger precedence at cooldown end (2026-08-17, from the 07-24 backcheck):**
+    when the takeover has fired and the cooldown ends, check the FAILED binding's trigger
+    first. If price is already CROSSED beyond it in the trade direction — momentum resumed
+    without us — §2's crossed-trigger market execution takes precedence and the takeover
+    does NOT divert (07-24: the 09:35 stop-run penetrated two eligible deeper 1m gaps, but
+    at the 09:36:00 cooldown end price sat below the trigger → market 28579 → the −280
+    collapse capture +146.5, which the episode's SL-cap gate would otherwise have SKIPPED
+    at 45.25 pts — recreating the exact lockout the §2 cooldown rule was built to kill).
+    If the trigger is UNCROSSED — chop — the takeover/episode path governs (07-21: all
+    three cooldown ends uncrossed; 07-31 likewise). Reconciles every validated day; on
+    08-14 it slightly IMPROVES the day (below).
+  - **Cooldown boundary (1s-verified):** with the precedence rule above, cooldown-end
+    resolution order is: crossed trigger → market (same FVG-derived SL); else a completed
+    close verdict of the stop-out bar fires per the episode rules; else resting placement.
+    (08-14: at 09:32:00 the old trigger 30252.25 IS crossed → market short at the 09:32:00
+    1s mid 30245.5, SL 30268 → −22.50 — replacing the close-verdict entry 30245/SL
+    30270.75/−25.75 of the earlier reading.)
   - Validation (1s replay, 2026-08-16). 08-14: attempt-1 fill 30252.25 at 09:30:33 (the
     09:30:10 in-window penetration correctly voided; fresh retrace tick 09:30:30); the
     09:31 squeeze to 30268.75 takes the SL (30268) at 09:31:05 and the SAME tick is the
-    takeover penetration of the deeper 09:11 1m gap [30266.5, 30269.5]; the stop-out bar's
-    red close fires attempt 2 at 09:32:00 short 30245 (SL 30270.75), stopped 09:45:21
-    −25.75; then 09:46 red close skipped by the SL-cap gate (extreme 30275.5, dist 36),
+    takeover penetration of the deeper 09:11 1m gap [30266.5, 30269.5]; the collapse
+    leaves the trigger CROSSED at 09:32:00 → per the precedence rule, market short at
+    the 1s mid 30245.5 (SL 30268, the failed binding's), stopped 09:45:21 −22.50; then
+    09:46 red close skipped by the SL-cap gate (extreme 30275.5, dist 36),
     09:48 wrong-color skip, 09:49 SL-cap skip (dist 43.5), 10:05/10:06 wrong-color skips,
     10:07 close-entry 30262 (SL 30282.75, dist 20.75) → DOL 30124.25 at 10:59:52 +137.75 —
-    **day +96.25 on exactly 3 attempts** (without the rule, same-gap re-binds lock the plan
-    out around −60 and miss the move). 07-17: attempt-1 replays exactly as validated (fill
+    **day +99.50 on exactly 3 attempts** (without the takeover+gates, same-gap re-binds
+    lock the plan out around −60 and miss the move; the pre-precedence close-verdict
+    reading gave +96.25). 07-17: attempt-1 replays exactly as validated (fill
     28644.75 at 09:30:35, SL 28662.5 at 09:31:03, −17.75); takeover penetration 09:31:14;
     the 09:31 entering bar closes inside → cycle live → exit-tick entry 09:32:05 ≈28663.75,
     and the 09:32 push to 28685.5 prints in the first seconds BEFORE the entry, so the SL
@@ -456,7 +472,7 @@ chase entries the §2 DOL-floor veto now suppresses).
 
 Run 2026-08-15 at 1m resolution against the full updated rule set. Oracle inputs: L1 assumed
 to deliver, at 09:20, the day's actual post-09:30 direction and the liquidity level the move
-in fact reached (settle window applied through 09:30:30). Net **+232.25 over 4 days**
+in fact reached (settle window applied through 09:30:30). Net **+235.50 over 4 days**
 (2 wins, 1 accepted skip, 1 win-via-takeover; 08-14 figure is 1s-verified).
 
 - **08-11 (down, DOL 29666 = overnight low): no entry — accepted skip.** Open drive with no
@@ -475,7 +491,7 @@ in fact reached (settle window applied through 09:30:30). Net **+232.25 over 4 d
 - **08-13 (up, DOL 30001.5 = prev RTH high): +89.25.** Textbook §5: fresh 09:31 retrace into
   the 09:10 bull gap [29881.5, 29905.25] (wicked below, never a 5m close through), buy stop
   29912.25 filled 09:33, DOL TP during 09:36.
-- **08-14 (down, DOL 30124.25 = overnight low): +96.25** under the §8 deeper-gap takeover
+- **08-14 (down, DOL 30124.25 = overnight low): +99.50** under the §8 deeper-gap takeover
   (1s-verified sequence in §8 — attempt-1's real stop was the 09:31 squeeze, not 09:45 as
   the 1m read suggested); roughly −60 with lockout without it. No new day extreme printed
   (09:48 high 30280.75 vs overnight 30287.25) — §6/§7 correctly silent.
@@ -507,16 +523,23 @@ assumptions on the studied dates:
 - **07-21 diverges: recorded bias UP** (the studied §6 +96.5 used DOWN). Old floor: the
   DOL (prev2_day_high 29220, 50.75 pts away) was swept by the 09:30 judas pre-settle →
   plan fulfilled flat, cost 0. NEW floor (mini-diff confirmed: model adopts UP +
-  prev3_day_high 29796.5, 6.48x FAR, never reached): the plan STANDS, and the 1s-verified
-  L2 walk bleeds the full structural worst case — §5 binds the 08:55 bull gap
-  [29143.25, 29164] (laddered from the 09:30-created gap at 09:31:32), and the 29171
-  trigger is whipsawed three times (fills 09:31:40 / 09:35:47 / 09:43:10, stops 09:33:58 /
-  09:41:55 / 09:44:42) → **−92.25 = exactly 3 × (gap height + 10), locked out at 09:44:42**
-  — 46 minutes before the +158 rally the thesis correctly predicted. §6/§7 never arm (no
-  new day low against the thesis), the veto is non-binding (500+ pts remaining), and no
-  deeper-gap takeover exists (no gap below the failed one). A RIGHT-direction day, fully
-  bled on whipsaw timing: the first realization of §5's structural 3-attempt worst case,
-  and evidence that §5 lacks any churn guard analogous to §6's cycle gates (§11 candidate).
+  prev3_day_high 29796.5, 6.48x FAR, never reached): the plan STANDS. 1s-verified walk
+  (ERRATA 2026-08-17 — an earlier read reported −92.25 via a triple whipsaw, produced by
+  scanning only 5m gaps for the §8 takeover; the rule includes 1m gaps): §5 binds the
+  08:55 bull gap [29143.25, 29164] (laddered from the 09:30-created gap at 09:31:32),
+  fill 09:31:40 @ 29171, stopped 09:33:58 → −30.75 (attempt 1, the one ungated loss);
+  the stop tick ITSELF penetrates the deeper eligible 1m gap [29137.25, 29138.5]
+  (mid-bar 08:45) → §8 takeover fires — and at the 09:34:00 cooldown end the old trigger
+  is UNCROSSED (price 29139.5 vs 29171), so the episode path governs (§8 precedence
+  rule). Episode: 09:33 entering bar red-above → void; 09:34 re-enters and closes
+  green-above → close-entry 09:35:00 ≈ 29142.5 (SL 29131, excursion 29133 − 2, gate
+  passes at 11.5 pts) → survives the 09:41 dip (29135.5) by 4.5 pts, +82 MFE, stopped
+  09:44:46 → −11.5 (attempt 2). Attempt 3 is NEVER SPENT: every later cycle color-voids
+  or is skipped by the SL-cap gate (structural SL 49.5–92.75 pts as the excursion low
+  deepens to 29063), including the 10:18–10:24 rally re-entries. **Day −42.25 with one
+  attempt in reserve** — a right-direction day bled on timing but bounded by the §8
+  machinery; §6/§7 never arm (no counter-thesis day extreme) and the veto is non-binding
+  (500+ pts remaining).
 - **07-23 diverges on DOL:** direction matches (DOWN) but the recorded DOL (prev2_day_low
   28700) sat 15.75 pts away at arm and was swept in the opening minute → plan complete,
   flat; the studied +304 is forfeited. SYSTEMIC FINDING: a DOL within ~60–80 pts at arm
@@ -542,27 +565,29 @@ bound the bleed when L1 is wrong (the live edge depends on it):
   60-pt floor; no new day low until 10:59 keeps §6/§7 silent through the morning → ≈
   **0..−45**.
 - Plus the REAL recorded-L1 instances (§10.1): 07-21 under the old floor — flat 0; 07-21
-  under the plan-18 floor (standing UP plan, FAR DOL) — **−92.25**, the full structural
-  worst case 3 × (gap+10) realized on a 20.75-pt binding gap, with every brake
-  non-engaging (right-direction thesis, far DOL, no counter-thesis extreme, no deeper
-  gap).
+  under the plan-18 floor (standing UP plan, FAR DOL) — **−42.25 with an attempt in
+  reserve** (errata 2026-08-17: an earlier −92.25 read omitted 1m gaps from the takeover
+  scan; correctly applied, the §8 episode gates absorb the chop after attempt 1).
 - **07-31 under the plan-18 DOL-floor raise — the deepest real instance (1s-verified
   2026-08-16; floor 1.0x applied as an in-process pre-computation, plan 18 Part A NOT yet
   committed — cite its hash here when it lands):** the recorded UP thesis no longer completes
   at the near pool (+12 min, a flat day under the old 0.5x floor); the D1 moves out to
   prev4_day_high 28763.75 (2.01x), which the day never reaches, so the plan stands through
   the fade and the mechanisms trade it wrong-way three times — §5 long 28536.25 (fill
-  09:40:36, SL 28511.5 at 09:42:02) −24.75; the 09:42 stop-run penetrates the deeper 1m gap
-  [28496.75, 28508.5] on the very tick that takes the stop, but both re-entry cycles (09:42
-  entering bar, 09:43 re-entry) close red below the gap → color-void skips and price never
-  returns to it; then §6 arms on the break to new day lows — the prior-18:00 session low
+  09:40:36, SL 28511.5 at 09:42:02) −24.75; the 09:42 stop-run penetrates a LADDER of
+  deeper gaps and the §8 takeover binds the DEEPEST eligible one (errata 2026-08-17: the
+  1m gap [28455.75, 28477] created 08:53, not the 5m [28496.75, 28508.5] — the 1m scan;
+  two nearer 1m candidates were close-through dead, verified). Episode: 09:42 entering
+  bar closes red-above → void; 09:43 closes INSIDE → cycle live; 09:44:00 exit-tick long
+  ≈28474 (SL capped 30 → 28444), stopped 09:44:05 → −30 (attempt 2); the gap is never
+  re-entered. §6 then arms on the break to new day lows — the prior-18:00 session low
   28304.25 is first taken out at **09:54:02** (both the 1m walk's "~10:03" and a first 1s
   pass's "10:02:45" mis-timed this; the 09:54 1m bar's 28294.75 low already undercuts it —
-  a lesson for §11: day-extreme tracking must be tick-level) — and fires twice: 09:59:02
+  a lesson for §11: day-extreme tracking must be tick-level) — and fires once: 09:59:02
   exit-tick long ≈28348.25 off the [28340.5, 28352.75] gap created 09:57 (SL 28335.5,
-  stopped 10:00:25) −12.75, and 10:21 close-verdict long 28223.25 (capped SL 28193.25,
-  stopped 10:21:25) −30 → **day −67.50 on exactly 3 attempts**; the 10:35 cycle that a
-  mis-timed arming would have traded is budget-blocked. The §2 DOL-floor veto was live but
+  stopped 10:00:25) −12.75 (attempt 3) → **day −67.50 on exactly 3 attempts** — the SAME
+  total as the pre-errata read (the −30 is cap-invariant), with the 10:21 and 10:35
+  cycles budget-blocked. The §2 DOL-floor veto was live but
   non-binding all day (227.5 / 415.75 / 540.5 pts remaining at the three entries), so this
   bleed is NOT a near-DOL chase the veto could have caught — it is the honest cost of a far
   DOL keeping a wrong plan alive, the mirror image of 07-23 (old floor: flat → +304
@@ -572,14 +597,16 @@ bound the bleed when L1 is wrong (the live edge depends on it):
   sees the 09:40:36 trigger re-cross. Entry triggers and both structure-anchored stops are
   identical at every resolution once the arming time is corrected.
 
-Conclusion (restated 2026-08-17 after 07-21): the HARD bound on adverse-day bleed is
-structural — **3 × (bound-gap height + 10)** — and 07-21 realizes it in full (−92.25 on a
-20.75-pt gap). The soft brakes — (1) the DOL-floor veto on near-DOL chases, (2) early
-sweeps of wrong-direction DOLs completing plans flat, (3) §6/§7 color/cycle gates —
-typically hold observed bleed to 0..−70 (07-31's −67.50 was the prior deepest), but NONE
-of them engages on a right-direction plan with a far DOL whipsawing a §5 binding: §5 has
-no churn guard analogous to §6's cycles (§11 candidate). Sample: seven days; extend
-before treating as a distribution.
+Conclusion (re-restated 2026-08-17 after the 07-21 errata): the theoretical ceiling on
+adverse-day bleed remains structural — 3 × (bound-gap height + 10) — but NOTHING in the
+sample realizes it: with the §8 takeover correctly applied (1m gaps included), the brakes
+— (1) the DOL-floor veto on near-DOL chases, (2) early sweeps of wrong-direction DOLs
+completing plans flat, (3) the §6/§7/§8 color/cycle/SL-cap gates — hold every observed
+adverse day to **0..−70** (deepest: 07-31 −67.50; 07-21 corrected to −42.25 with an
+attempt unspent). The one loss no gate touches is a §5 FIRST entry into chop (07-21
+attempt 1, −30.75); the first-entry color-gate fix was backchecked and REJECTED — it
+costs ~−60 across the displacement winners (07-16 −35, 07-15 −11, 08-07 −10, 08-14 −4)
+against ~+31 saved. Sample: seven days; extend before treating as a distribution.
 
 ### 10.3 Unseen-date sweep — `extreme_reject_close` base rates (2026-08-16)
 
@@ -662,8 +689,9 @@ pts away). §7 fired 31 times, up to 3/arm:
   07-21 → the UP menu goes FAR-only (prev3_day_high 29796.5, 6.48x, never reached;
   projection_up refused by the day-stretch gate on a day that ran +158, flagged upstream
   as a gate counter-example) — mini-diff CONFIRMED (model adopts UP + the FAR pool), and
-  the 1s L2 walk under that standing plan bleeds −92.25 with lockout at 09:44:42 (§10.1/
-  §10.2). Plan-18 Part A is implemented in-tree (`DOL_MIN_DRAW_RATIO = 1.0`) but
+  the 1s L2 walk under that standing plan bleeds −42.25 with an attempt in reserve
+  (§10.1/§10.2; errata 2026-08-17 — the initial −92.25 read omitted 1m gaps from the
+  takeover scan). Plan-18 Part A is implemented in-tree (`DOL_MIN_DRAW_RATIO = 1.0`) but
   UNCOMMITTED as of 2026-08-17 — hash citations pending. Their full 61-boundary sweep
   adds 9 changed NON-09:20 boundaries, none flipping expected_bias; all reviewed for L2
   impact: none — every L2 record anchors at a 09:20 boundary, and the one flagged row
@@ -707,7 +735,8 @@ pts away). §7 fired 31 times, up to 3/arm:
 - 1s-replay verification: DONE 2026-08-16 for all package simulations (08-03 +200,
   08-05 −20-one-attempt with §6's budget preserved, 08-06 +266.5 clean, 08-10 §7 +96.25,
   08-11 no-entry, 08-12 +46.75 exact, 08-13 +89.25 clean) and the §8 takeover sequences
-  (07-17 +91.25, 08-14 +96.25); §4/§7/§8/§10 validation texts updated to 1s numbers.
+  (07-17 +91.25, 08-14 +99.50 post-precedence); §4/§7/§8/§10 validation texts updated to
+  1s numbers.
 - L2 DOL-proximity rule — DECISION-READY (data in §10.3 v2): raise the DOL draw floor
   from 0.5x to ≥0.7x avg_1h minimum, 1.0x recommended on post-rollover weighting; the
   re-anchored plan holds for D2 under the existing stop/invalidation machinery (D2 reached
@@ -726,12 +755,25 @@ pts away). §7 fired 31 times, up to 3/arm:
   08-05, 08-06, 08-10 — note 08-06's validated §6 entry USED the cap, so the gate would have
   skipped a winner there); §6 and §8 rule text stand unchanged.
 - CANDIDATE (from 07-21, single-day but structural): a §5 re-entry churn guard. §5's
-  post-stop re-entry is a bare resting stop at the same trigger — on 07-21 the 29171
-  trigger whipsawed three times in 13 minutes (−92.25, the full 3×(gap+10) worst case)
-  inside a 60-pt chop range, with no §6-style cycle/color gating between attempts.
-  Candidate forms: require a fresh full exit-and-re-retrace of the binding gap between
-  attempts, or route ALL §5 re-entries through the §8 takeover episode machinery (not just
-  deeper-gap cases). Backcheck required against every validated §5/§4 re-entry (07-15,
-  07-17-oracle, 08-12, 08-14) before encoding — the 07-24 lesson (lockouts forfeit
-  collapses) cuts the other way.
+  post-stop re-entry is a bare resting stop at the same trigger, with no §6-style
+  cycle/color gating between attempts. (Errata 2026-08-17: 07-21's original −92.25
+  triple-whipsaw motivation was an artifact of the takeover 1m-scan omission — correctly
+  applied, §8 absorbs the re-entries and the day is −42.25; the candidate's remaining
+  scope is stop-outs where NO deeper gap was penetrated, which currently has zero
+  motivating examples. A first-entry color-gate variant was backchecked and REJECTED:
+  it costs ~−60 across the displacement winners — 07-16 −35, 07-15 −11, 08-07 −10,
+  08-14 −4 — against ~+31 saved; §5 first entries stay tick-based.) Backcheck list for
+  any future form: 07-15, 07-17-oracle, 08-12, 08-14; the 07-24 lesson (lockouts forfeit
+  collapses) cuts against over-gating.
+- **Takeover scanner: MUST enumerate gaps of ALL timeframes** (the §8 text says "any
+  timeframe, 1m included" — yet two independent manual walks scanned only 5m and produced
+  a wrong 07-21 ledger and a mis-bound 07-31 takeover). Named regression tests for the
+  implementation: 07-21 (1m gap [29137.25, 29138.5] takes over at the 09:33:58 stop tick
+  → episode entry 09:35:00, day −42.25, attempt 3 unspent); 07-31 (binds the DEEPEST
+  eligible penetrated gap [28455.75, 28477], not the shallower 5m — exit-tick 09:44:00,
+  same −67.50 total); 08-12 and 08-05 (deeper 1m candidates exist but are close-through
+  DEAD → no takeover, validated records unchanged); 07-24 (two eligible deeper 1m gaps
+  penetrated, but the crossed trigger at cooldown end takes precedence → market re-entry
+  28579, +146.5 preserved); 08-14 (crossed trigger at 09:32:00 → market 30245.5, day
+  +99.50).
 - Per-mechanism L2-supplied invalidation criteria — deferred.
