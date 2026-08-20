@@ -17,7 +17,10 @@ takeover on re-entry (§8) and the 08-11..08-14 oracle-L1 forward test (§10) ad
 after the 08-14 study and the 07-17/07-21/07-23 backcheck; §10.3 unseen-date sweep
 (`extreme_reject_close` base rates, SL-cap knob finding) and the DOL-proximity study on
 the real S8 menu (0.5x draw floor insufficient; data-backed floor ~1.0x avg_1h) added
-2026-08-16. NOTE: the
+2026-08-16; §7 far-extreme fallback (post-09:30 extreme when the counter-thesis 24h day
+extreme is >150 pts at arm) added 2026-08-19 after the 08-18 gap-down study and a
+07-15..08-18 backcheck, with the §5 max-height 35→45 alternative recorded as a
+NOT-adopted candidate in §11. NOTE: the
 rules were tuned on the 07-14..08-06 sample — every trading day in that sample nets positive,
 several by sub-7-pt stop clearances; forward-test on unseen dates before trusting). Extends
 `agent-optimizations.md` §7 (mechanism enums). Defines four entry mechanisms the L2 trade
@@ -347,6 +350,39 @@ chase entries the §2 DOL-floor veto now suppresses).
     direction fires a **market entry at that bar's close**. A new-extreme bar closing in the
     adverse direction does not fire and does not disarm — the graph may still want to extend;
     stay armed for the next new-extreme bar.
+- **Far-extreme fallback (2026-08-19, from the 08-18 gap-down study):** when at plan arm the
+  counter-thesis 24h day extreme sits more than ~150 pts from price (starter knob, §9), the
+  machine tracks the **post-09:30 extreme** instead. After a large overnight displacement in
+  the thesis direction the 24h extreme is unreachable and §7 is otherwise dead weight on
+  exactly the days that gap in the thesis direction — the sweep-and-reject signature then
+  prints at the RTH extreme. Validated 08-18 (thesis DOWN, DOL prev1_week_low 29533.5, day
+  high 30124.25 printed 20:51 the prior evening, 425.5 pts away): armed 09:34 after the
+  09:31 high 29755; the 09:40 new-extreme bar closes green → correctly no fire; the 09:41
+  bar ticks 29770 — the deception high, which also terminated 3.75 pts inside an over-height
+  42.5-pt 5m bear gap no mechanism could bind — and closes red → market short 29760.25 at
+  09:42:00 (1s mid 29761.1), cap15 SL 29770 survives the 09:42:24 push (29767.25) by 2.75
+  pts (w3c30 29773 by 5.75) → TP 29533.5 at 11:01:26, **+226.75 on one attempt**, on a day
+  the unmodified rule set leaves entirely untraded (the only eligible bear 5m gaps are 42.5
+  and 1.75/3.25 pts — over/under the height filters — and no counter-thesis 24h extreme is
+  ever approached, so §5/§6/§7 all stay dark). The 150-pt threshold deliberately sits ABOVE
+  08-07's 139.75-pt arm distance, keeping the documented wrong-arm case (the 09:33 RTH high
+  under the 08:50 high 29867.25) on the strict 24h rule; the studied arm distances split
+  cleanly — ≤139.75 (07-15 119.25, 08-17 129, 08-13 133.75, 07-24 138.75, 08-07 139.75: all
+  strict) vs ≥229.5 (07-31 229.5, 07-16 337.5, 08-18 425.5, 07-21 471.5, 07-23 574.25,
+  07-17 596: fallback). Backcheck 07-15..08-18 (1m walk, known theses/DOLs, plan scope
+  enforced — a fire cannot occur after the plan's DOL is touched, which silences
+  07-17/07-23/08-17): inert on 07-15/07-16/07-23/07-24 (active, never fires in scope);
+  fires on exactly three days — 08-18 (+226.75), and the two standing wrong-plan days,
+  where it spends the plan's remaining shared attempt: 07-21 one fire 09:47 long 29116.25
+  (−15 cap15 / −24 w3c30; consumes the §10.1 reserve attempt, day −42.25 → −57.25/−66.25)
+  and 07-31 one fire 09:45 long 28433 replacing §6's cheaper 09:59 third attempt (−15
+  cap15 / −30 w3c30, day −67.50 → −69.75/−83.75). Under the default cap15 SL the §10.2
+  adverse-day band stays 0..−70; the w3c30 A/B must carry 07-31 −83.75 into its
+  comparison. Net on the window ≈ +209.5 (cap15) / +186.5 (w3c30). Caveat: the post-09:30
+  extreme is degenerate in the opening minutes (every burst tick is a new extreme) —
+  harmless, the count just keeps restarting and the earliest possible fire remains ≥4 bars
+  after the open — but the §10.2 lesson applies: extreme tracking must be tick-level on
+  the fallback track too.
 - **Stop-loss:** the entry bar's opposite-wick edge, CAPPED at 15 pts from the entry price
   (wick edge if nearer). The cap places the stop inside the swept zone — a plain retest of
   the sweep kills the trade (08-10's stop survived by 9.75 pts at 1s); a §6-style
@@ -470,7 +506,8 @@ chase entries the §2 DOL-floor veto now suppresses).
 | Stop-out cooldown | until the stop-out 1m bar closes | §2; acts on current state at the close (crossed trigger ⇒ market) |
 | DOL-floor veto | 60 pts remaining, entry → DOL | §2; ABSOLUTE floor, not an RR ratio; winners ≥65.75 / losing chases ≤45.5 on studied dates — thin band, tune early |
 | `extreme_reject_close` quiet count | 3 consecutive 1m closes | §7; tick-based restarts |
-| `extreme_reject_close` SL | opposite-wick edge, capped 15 pts from entry | §7; A/B alternative wick+3 capped 30 — identical on studied dates but +91 better on the §10.3 sweep (deep-wick winners); top-priority A/B |
+| `extreme_reject_close` SL | opposite-wick edge, capped 15 pts from entry | §7; A/B alternative wick+3 capped 30 — identical on studied dates but +91 better on the §10.3 sweep (deep-wick winners); top-priority A/B (note: cap15 keeps the far-extreme-fallback backcheck's adverse band at 0..−70; w3c30 carries 07-31 −83.75) |
+| `extreme_reject_close` far-extreme fallback threshold | 150 pts, arm-time distance to the counter-thesis 24h day extreme | §7; switches the machine to the post-09:30 extreme; must stay above 08-07's 139.75 (wrong-arm guard) and below 07-31's 229.5 — the studied distances leave a 139.75–229.5 dead zone; upgrade option: ATR-scale (~1.9x avg_1h) |
 | Takeover defer-entry gate | skip if excursion-SL distance > the 30-pt cap | §8; parameter-free (reuses the `fvg_1m_post_extreme` SL cap) |
 | Leg reversal threshold | max(30 pts, 25% of leg range) | §3 |
 | Min qualifying leg range | 50 pts | §3 ("significant") |
@@ -786,6 +823,26 @@ pts away). §7 fired 31 times, up to 3/arm:
   penetrated, but the crossed trigger at cooldown end takes precedence → market re-entry
   28579, +146.5 preserved); 08-14 (crossed trigger at 09:32:00 → market 30245.5, day
   +99.50).
+- **§7 far-extreme fallback — named regression tests (2026-08-19):** 08-18 (fallback active
+  at 425.5 pts; single fire, market short 29760.25 at 09:42:00 → TP prev1_week_low 29533.5
+  at 11:01:26, +226.75 — the day's ONLY entry); 08-07 (139.75 pts — must NOT activate; the
+  strict 24h rule governs, no wrong arm, §5's validated +230 ride untouched); 08-17 / 07-17
+  / 07-23 (fallback active but the plan completes at the DOL touch before any fire — zero
+  fires in scope); 07-21 and 07-31 (one fire each spending the plan's remaining shared
+  attempt — cap15 deltas −15 and −2.25); implementation must track the post-09:30 extreme
+  tick-level and disarm with the plan's `valid_while`, exactly like the 24h track.
+- **CANDIDATE, NOT adopted — §5 max-height cap 35 → 45 (2026-08-19, from the same 08-18
+  study):** the excluded 42.5-pt bear gap [29766.25, 29808.75] (created 04:05) would bind
+  on the fresh 09:40:58 retrace → stop-fill 29759.25 at 09:41:02, SL 29811.75, +225.75 to
+  prev1_week_low — capture equivalent to the adopted §7 fallback, so NOT required for
+  08-18; it would add coverage only for over-height days lacking the sweep-reject bar
+  signature (zero observed instances; 08-11's 73-pt gap fails either cap). If ever
+  revisited: (1) the §5 retrace precondition must demand a fresh post-window tick (the
+  08-14 precedent) — 08-18's stale 08:05 pre-arm penetration must NOT count as "already
+  entered", else the §2 crossed-trigger rule degenerates into a naked market short on the
+  opening pop (on 08-18 only the max-distance guard blocked that at 09:30:30, price 68.5
+  pts below the trigger); (2) sweep all studied dates for 35–45-pt gaps that would newly
+  bind or steal binding preference before adoption.
 - **Planless-day shadow ledger (forward holdout instrumentation):** on any session where
   the 09:20 boundary resolves to NEUTRAL (no plan armed) but a mechanism setup would have
   fired under an oracle plan, log the paper outcome (mechanism, entry, SL, result). The §2
