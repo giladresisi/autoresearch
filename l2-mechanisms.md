@@ -20,7 +20,9 @@ the real S8 menu (0.5x draw floor insufficient; data-backed floor ~1.0x avg_1h) 
 2026-08-16; §7 far-extreme fallback (post-09:30 extreme when the counter-thesis 24h day
 extreme is >150 pts at arm) added 2026-08-19 after the 08-18 gap-down study and a
 07-15..08-18 backcheck, with the §5 max-height 35→45 alternative recorded as a
-NOT-adopted candidate in §11. NOTE: the
+NOT-adopted candidate in §11 — that candidate was ADOPTED 2026-08-22 together with an entry
+buffer trim 7→3 and a 25-pt stop-loss cap, off a 1s replay calibrated to reproduce all ten
+documented 5m bindings exactly (§2 stop-loss, §9 knobs, §11 grid). NOTE: the
 rules were tuned on the 07-14..08-06 sample — every trading day in that sample nets positive,
 several by sub-7-pt stop clearances; forward-test on unseen dates before trusting). Extends
 `agent-optimizations.md` §7 (mechanism enums). Defines four entry mechanisms the L2 trade
@@ -149,9 +151,34 @@ tuning; the rules are fixed.
 - **Single stop-entry policy:** when multiple mechanisms are armed, only one resting stop-entry
   exists at a time — the one whose trigger price is closest to current price. Other armed
   mechanisms may only fire via market/limit entries while it rests. First trigger wins.
-- **Stop-loss:** at the opposite end of the bound FVG plus a small buffer. Total risk =
-  gap height + entry buffer + stop buffer. Stays subject to the existing validator rule (stop
-  must not satisfy any thesis `falsified_if`).
+- **Stop-loss (capped, 2026-08-22):** the **nearer** of (a) the opposite end of the bound FVG
+  plus the stop buffer — the structural anchor — and (b) a fixed **25 pts from the entry
+  price**. Structural risk is `gap height + entry buffer + stop buffer`, so with the 3-pt
+  buffers the cap binds from a gap height of **19 pts** upward; below that the stop is purely
+  structural and the cap is inert. Stays subject to the existing validator rule (stop must
+  not satisfy any thesis `falsified_if`).
+  - Rationale (calibrated 1s replay of all ten documented 5m bindings, 2026-08-22 — the
+    replay reproduces every recorded P&L exactly; see §11): gap height is a poor proxy for
+    how much adverse room an entry actually needs. Across the winners the room CONSUMED was
+    23.75 / 22.00 / 5.50 / 11.25 pts on gaps of 26.75 / 23.75 / 19.75 / 12.75 — while the
+    two over-height gaps (42.5 and 44 pts) consumed only **10.75 and 2.75**. The tallest
+    gaps needed the LEAST room: a tall gap is violent-displacement evidence, and if price
+    respects it at all it rejects from the edge. The structural stop is therefore
+    systematically mispriced in the upper height band, and the cap corrects it without
+    touching small-gap bindings.
+  - **25, not 20.** A 20-pt cap scores marginally higher on the sample but preserves the
+    08-07 winner by **0.25 pts** at the 3-pt entry buffer — inside the noise, one tick from
+    turning +202 into −20. At 25 the same two winners clear by 5.25 and 7.00. A 20-pt cap is
+    also outright destructive at the OLD 7-pt entry buffer (it kills both 08-07 and 08-13,
+    −300 on the sample): the affordable cap is a FUNCTION of the entry buffer, not an
+    independent knob — trimming the buffer improves the entry price and therefore shrinks
+    the excursion measured from it.
+  - No MINIMUM stop distance is imposed, deliberately: the 5-pt min-height filter already
+    floors initial bindings at 11 pts of risk, and the ladder / deepest-penetration /
+    takeover roles are min-height EXEMPT precisely because a small gap is the best stop
+    anchor in that role (07-15's 2.75-pt gap, 08-14's 3.0-pt takeover gap).
+  - Cap is measured from the FILL price, so it is fixed at entry and never re-computed;
+    a ladder re-bind (§2) recomputes both trigger and stop, hence a fresh cap.
 
 ## 3. "Last trend" — deterministic leg segmentation
 
@@ -492,12 +519,13 @@ chase entries the §2 DOL-floor veto now suppresses).
 
 | Parameter | Starter | Rationale |
 |---|---|---|
-| Entry buffer beyond FVG far end | 7 pts | Sits well against typical MNQ 5m wick noise; later upgrade option `max(7, 0.3 × 5m ATR)` |
-| Stop-loss buffer beyond opposite end | 3 pts | Total risk = gap height + 10 pts; tight for a wick-prone zone but price shouldn't come back gap+10 if the move is real — highest-variance knob: cleared by only 1.0–7.5 pts across the four validation examples; consider ATR-scaling early |
+| Entry buffer beyond FVG far end | **3 pts** (was 7 until 2026-08-22) | Trimmed after the §11 calibrated sweep: buffer reduction is monotonically positive across all ten documented bindings (+562.75 → +602.75 at structural stops; every day improves by exactly the trim, none flips win→loss) AND it is what makes a tight SL cap affordable. UNTESTED RISK: the sample contains only days that already filled at buffer 7, so it cannot show false triggers a smaller buffer creates — the open §11 no-entry-day scan. Buffer 0 scores higher still (+632.75) and is held back pending that scan |
+| Stop-loss buffer beyond opposite end | 3 pts | Structural risk = gap height + 6 pts under the 3-pt entry buffer; highest-variance knob — cleared by only 1.0–7.5 pts across the original four validation examples, which is why the 25-pt cap (not 20) was chosen |
+| Stop-loss cap (distance from fill) | 25 pts | §2; SL = nearer of structural and entry±25 → binds from gap height ≥ 19. Caps worst-case risk at 25/attempt (×3 ≈ 75 pts plan exposure, vs 162 structural at height 45). 20 rejected: preserves the 08-07 winner by 0.25 pts at buffer 3 and destroys it outright at buffer 7. No minimum counterpart — see §2 |
 | Min FVG height | 5 pts | Filters drift-noise gaps carrying no displacement information — initial binding only; ladder targets exempt (§2) |
 | Opening settle window | L1 arm time → 09:30:30 | §2; suspends placement/triggering through pre-open drift + RTH-open burst |
 | 5m distance invalidation | 60 pts anti-trade beyond the gap | §2; permanent, unlike the momentary max-distance guard |
-| Max FVG height | 35 pts | Caps worst-case risk at ~45 pts/attempt (×3 attempts ≈ 135 pts plan exposure) |
+| Max FVG height | **45 pts** (was 35 until 2026-08-22) | Raised after the §11 band sweep. NOTE its ORIGINAL rationale ("caps worst-case risk at ~45 pts/attempt") is now **obsolete** — the 25-pt SL cap bounds risk at any height. Under a corrected, completion-timestamped replay the only binding the raise still buys is 08-18 (+229.75); 08-21's 44-pt gap is never re-entered after real creation. Retained as a *character* filter, not a risk one — see the unbounded ablation in §11 |
 | Max distance, current price → trigger | 60 pts | Beyond that we donate too much of the multi-hour L1 move |
 | No-move zone around resting trigger | 15 pts | See §8 |
 | `fvg_1m_post_extreme` SL buffer beyond excursion extreme | 2 pts | §6; excursion-anchored, not gap-edge-anchored |
@@ -831,18 +859,81 @@ pts away). §7 fired 31 times, up to 3/arm:
   fires in scope); 07-21 and 07-31 (one fire each spending the plan's remaining shared
   attempt — cap15 deltas −15 and −2.25); implementation must track the post-09:30 extreme
   tick-level and disarm with the plan's `valid_while`, exactly like the 24h track.
-- **CANDIDATE, NOT adopted — §5 max-height cap 35 → 45 (2026-08-19, from the same 08-18
-  study):** the excluded 42.5-pt bear gap [29766.25, 29808.75] (created 04:05) would bind
-  on the fresh 09:40:58 retrace → stop-fill 29759.25 at 09:41:02, SL 29811.75, +225.75 to
-  prev1_week_low — capture equivalent to the adopted §7 fallback, so NOT required for
-  08-18; it would add coverage only for over-height days lacking the sweep-reject bar
-  signature (zero observed instances; 08-11's 73-pt gap fails either cap). If ever
-  revisited: (1) the §5 retrace precondition must demand a fresh post-window tick (the
-  08-14 precedent) — 08-18's stale 08:05 pre-arm penetration must NOT count as "already
-  entered", else the §2 crossed-trigger rule degenerates into a naked market short on the
-  opening pop (on 08-18 only the max-distance guard blocked that at 09:30:30, price 68.5
-  pts below the trigger); (2) sweep all studied dates for 35–45-pt gaps that would newly
-  bind or steal binding preference before adoption.
+- **ADOPTED 2026-08-22 — entry buffer 7→3, SL cap 25, max height 35→45 (calibrated sweep).**
+  Supersedes the 2026-08-19 "candidate B" entry. Method: a 1s replay of the §5 lifecycle
+  (crossing-IN retrace strictly after 09:30:30 — continuous presence inside the gap at the
+  boundary does NOT count, which is what the validated 08-13 walk did with its fresh 09:32:35
+  re-entry; resting stop fills AT its price when the tape reaches it) **calibrated against
+  all ten documented 5m bindings, reproducing every recorded P&L exactly** (07-17 −17.75,
+  07-21 −30.75, 07-31 −24.75, 08-07 +198, 08-12 −31, 08-13 +89.25, 08-14 −15.75, 08-17 +77,
+  08-18 +225.75, 08-21 +92.75).
+  **ERRATUM 2026-08-22 (same day): the 08-21 row above is LOOK-AHEAD CONTAMINATED and its
+  +92.75 is not attainable.** That replay timestamped each FVG with its third bar's LABEL
+  instead of the bar's COMPLETION, so a 5m gap became actionable up to 5 minutes before it
+  could be known. 08-21's 44-pt gap [29373.25, 29417.25] is labelled 09:35 but only exists
+  at **09:40:00**; the recorded fill at 09:36:04 is impossible, and between real creation
+  and the 09:54:07 DOL touch price never ticks back into it (max high 29361.50 vs the
+  29373.25 bottom) — so **08-21 has NO §5 entry under the strict reading**. The other nine
+  rows are unaffected (their gaps predate the arm or complete well before the fill —
+  08-18's is labelled 04:05 / completes 04:10 against an 09:41:02 fill), so the grid below
+  and the buffer/cap conclusions stand; only the 08-21 line and any total containing it
+  must be re-derived. **Every future replay MUST timestamp an FVG at third-bar completion.**
+  Grid totals over those ten (08-21 row inflated by the erratum):
+
+  | SL policy | buf 7 | buf 5 | buf 3 | buf 0 |
+  |---|---|---|---|---|
+  | structural | +562.75 | +582.75 | +602.75 | +632.75 |
+  | cap 30 | +564.50 | +582.75 | +602.75 | +632.75 |
+  | **cap 25** | +574.50 | +590.50 | **+606.50** | +632.75 |
+  | cap 20 | +262.00 ✗ | +272.00 ✗ | +617.25 | +640.50 |
+
+  Adopted cell: **buffer 3 / cap 25 = +606.50** (+43.75 over the 7/structural baseline),
+  worst-case risk per attempt 25 instead of 54. The ✗ cells are where cap 20 kills the
+  08-07 and 08-13 winners; it survives at buffer ≤3 only by 0.25 pts, hence 25.
+  Two earlier readings this sweep CORRECTED, both worth remembering: (1) a replay that
+  accepts a retrace tick AT 09:30:30 gives 08-13 a spurious 09:30:42 fill into the opening
+  whipsaw (MAE 49.5 vs the true 22.0) and reports −33.75 instead of +89.25 — the settle
+  window is inclusive of its final second; (2) filling a traded-through resting stop at the
+  1s bar MID instead of at the stop price mis-scores 07-17 (−14.88 vs −17.75).
+- **Max-height ablation — why the filter is retained (2026-08-22, completion-timestamped).**
+  With the SL capped at 25 the height filter no longer bounds risk, so it was ablated at
+  35 / 45 / unbounded over the 18 studied days (§5-only engine; absolute totals are NOT the
+  validated day results — other mechanisms and the §8 takeover are excluded — but the
+  columns share one engine so the DELTAS are exact): **+1495.88 / +1725.62 / +1799.62.**
+  Removing the ceiling entirely changes exactly ONE day: **08-11**, from no-entry to a
+  73-pt gap [29743.00, 29816.00] (created 09:40:00) giving market 29740.00 at 09:41:44,
+  capped SL 29765.00, → DOL +74.00. That is a WIN, and it is the day §10 records as an
+  "accepted skip" (open drive, no retrace). So the empirical case for ANY ceiling now rests
+  on a single favourable instance, not on risk control.
+  Retained at 45 anyway, for a reason the data cannot yet test: a 25-pt cap on a 73-pt gap
+  places the stop **48 pts inside the zone**, where the gap's own internal oscillation —
+  not a structural failure — decides the trade. 08-11 survived that; one sample is not
+  evidence that it generally does. **Open experiment:** re-run the ablation once more
+  over-height instances exist, and record whether capped stops inside tall gaps get taken
+  by intra-zone noise. If they do not, drop the ceiling entirely and let the DOL floor and
+  max-distance guard do the filtering (they already kill 4 of the 7 band gaps).
+- **§5 pre-arm penetration — OPEN RULE AMBIGUITY (2026-08-21, unresolved).** §2 voids
+  penetrations occurring DURING the settle window; §5 separately honours "or immediately if
+  price is already inside / has already entered it". Neither clause covers a penetration
+  that completed BEFORE the arm time, and the two readings diverge by a whole day: on
+  08-21 the bound gap [29472.25, 29485.00] (completes 09:20:00, so it genuinely exists at
+  the arm) was occupied 09:28:06–09:29:59 and never re-entered post-window, so the literal
+  reading gives a crossed-trigger market short 29447.50 at 09:30:31, capped SL 29472.50,
+  → DOL 09:54:07 **+174.00**, while a fresh-tick requirement gives a **FLAT day** — and
+  under the corrected FVG timestamps nothing else rescues it, since the 44-pt gap is never
+  re-entered after its real 09:40:00 creation. The ambiguity is therefore worth the WHOLE
+  day on 08-21, not the 77 pts an earlier look-ahead-contaminated read suggested. The 08-19
+  candidate-B note argued for the fresh-tick reading off 08-18, where the literal reading
+  would have shorted the opening pop on an 85-minute-stale penetration — but there the
+  max-distance guard blocked it anyway (68.5 pts), and on 08-21 the same guard permits it
+  (22.75 pts). Hypothesis to test before deciding: **the max-distance guard alone is the
+  correct discriminator and no recency clause is needed.** Both days are the named tests.
+- **OPEN — entry-buffer false-trigger scan (blocks buffer 3 → 0).** The adopted grid only
+  contains days that ALREADY filled at buffer 7, so it cannot measure the buffer's actual
+  job: suppressing entries on a 1–2 pt wick past the gap edge that immediately reverses.
+  Scan the studied dates for gaps that were retraced into but never filled at buffer 7, and
+  score what buffers 3 / 0 would have done. Until then buffer 0 (+632.75 structural,
+  +640.50 at cap 20) stays unadopted despite topping the grid.
 - **Planless-day shadow ledger (forward holdout instrumentation):** on any session where
   the 09:20 boundary resolves to NEUTRAL (no plan armed) but a mechanism setup would have
   fired under an oracle plan, log the paper outcome (mechanism, entry, SL, result). The §2
