@@ -1,0 +1,258 @@
+{
+  "boundary": "2026-07-24 09:20:00-04:00",
+  "backend": "openrouter",
+  "model": "anthropic/claude-haiku-4.5",
+  "verdict": "clean",
+  "fallback": false,
+  "retries": 0,
+  "thesis": {
+    "evidence": [
+      {
+        "criterion": "P1",
+        "asset": "MNQ",
+        "level": "london(cur)_high",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.0,
+        "side": "DOWN",
+        "mag_ratio": 1.0646,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "prev2_week_low",
+        "tier": "week",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "DOWN",
+        "mag_ratio": 1.2654,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "prev2_week_low",
+        "tier": "week",
+        "tf": "4h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 2.25,
+        "side": "DOWN",
+        "mag_ratio": 0.0706,
+        "mag_mult": 0.75
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "london(cur)_high",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.0,
+        "side": "DOWN",
+        "mag_ratio": 1.2127,
+        "mag_mult": 1.0
+      }
+    ],
+    "bias": "DOWN",
+    "regime": "HYBRID",
+    "dol_rationale": "london(cur)_low at D1 is the nearest unswept, undepleted draw on the DOWN side, 138 pts below current price (1.31x avg 1h range). The session-tier extremes (asia/london) are the active battlefield in NY-morning \u2014 both tickers tested but rejected going beyond their london-session highs, a coordinated rejection of upper structure that makes the lower session extreme a natural first target and exhaustion point.",
+    "dol": {
+      "level": "london(cur)_low",
+      "price": 28466.25
+    },
+    "falsified_if_rationale": "A 1h close above london(cur)_high (F1 in the DOWN menu) would signal a failure of the rejection read \u2014 if price reclaims above the level MNQ just failed at, the bearish momentum is broken and a retest of higher structure becomes likely. F1 uses 1h (the timeframe of the rejection itself) for confirmation speed.",
+    "falsified_if": [
+      {
+        "type": "n_closes_beyond",
+        "price": 28704.25,
+        "side": "above",
+        "tf": "1h",
+        "n": 1
+      }
+    ],
+    "exhausted_if_rationale": "london(cur)_low at X1 is the DOL itself \u2014 reaching the first support completes the downside thesis. The pool is fresh (swept only 199m ago on the lagger MNQ's side, not yet depleted), so a touch+beyond of this level (X1 in the DOWN menu) marks the move's natural conclusion and opens the question of whether price reverses or continues deeper.",
+    "exhausted_if": [
+      {
+        "type": "price_beyond",
+        "price": 28466.25,
+        "side": "below"
+      }
+    ],
+    "confidence": "MEDIUM",
+    "recall": {
+      "events": [
+        {
+          "type": "clock_after",
+          "et_time": "12:00"
+        }
+      ],
+      "max_age_min": 120
+    }
+  },
+  "reasoning": "MES swept its prev2_week_low (7468.25) at session open yesterday and has now closed beyond it on a 4h bar (7465.75 @ 2026-07-24 06:00), registering acceptance of the week-tier pool in the DOWN direction. This is a mature, week-tier P1 read confirming continuation into the lower structure. MNQ's london(cur)_high (28704.25) swept at 06:00:45 ET this morning and closed back BELOW it at 09:00 ET on the 1h bar (28591.75), a rejection of the session-tier resistance \u2014 a bearish reversal signal. The stretch from price to the opposite-side day extreme is 1.31x avg range, well below the high-stretch veto threshold (3.0x), so no discount applies. Session-maturity: 67% elapsed with 26 mature P1/P2 items \u2014 a normal ledger for NY-morning, not a contradiction. Both assets show net evidence favoring DOWN: MES accepts the week low (continuation), MNQ rejects the session high (reversal). The daily mid sits at 28600.5 (MNQ) and 7451.25 (MES); price at the cut is 28604.25 / 7452.25, marginally above the daily mids on both, but the rejection of the session-tier resistance is the fresher, more decisive signal. The DOL menu [DOWN] shows london(cur)_low (D1, unswept, 138 pts away) as the nearest eligible pool; this is the first-support test. London session just re-tested the daily lows overnight without taking them, a sign of resistance to the downside, so a break of london(cur)_low would confirm the bearish lean.",
+  "latency_total_sec": 16.336,
+  "usage_total": {
+    "input_tokens": 87862,
+    "output_tokens": 983,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0
+  },
+  "attempts": [
+    {
+      "usage": {
+        "input_tokens": 87862,
+        "output_tokens": 983,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "raw": {
+          "prompt_tokens": 87862,
+          "completion_tokens": 983,
+          "total_tokens": 88845,
+          "cost": 0.10093325,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 32625,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 0.10093325,
+            "upstream_inference_prompt_cost": 0.09601825,
+            "upstream_inference_completions_cost": 0.004915
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        }
+      },
+      "latency_sec": 16.336,
+      "model": "anthropic/claude-haiku-4.5",
+      "ok": true,
+      "violations": [],
+      "arith_overrides": [],
+      "bias": "DOWN",
+      "regime": "HYBRID",
+      "dol_rationale": "london(cur)_low at D1 is the nearest unswept, undepleted draw on the DOWN side, 138 pts below current price (1.31x avg 1h range). The session-tier extremes (asia/london) are the active battlefield in NY-morning \u2014 both tickers tested but rejected going beyond their london-session highs, a coordinated rejection of upper structure that makes the lower session extreme a natural first target and exhaustion point.",
+      "dol": {
+        "level": "london(cur)_low",
+        "price": 28466.25
+      },
+      "falsified_if_rationale": "A 1h close above london(cur)_high (F1 in the DOWN menu) would signal a failure of the rejection read \u2014 if price reclaims above the level MNQ just failed at, the bearish momentum is broken and a retest of higher structure becomes likely. F1 uses 1h (the timeframe of the rejection itself) for confirmation speed.",
+      "falsified_if": [
+        {
+          "type": "n_closes_beyond",
+          "price": 28704.25,
+          "side": "above",
+          "tf": "1h",
+          "n": 1
+        }
+      ],
+      "exhausted_if_rationale": "london(cur)_low at X1 is the DOL itself \u2014 reaching the first support completes the downside thesis. The pool is fresh (swept only 199m ago on the lagger MNQ's side, not yet depleted), so a touch+beyond of this level (X1 in the DOWN menu) marks the move's natural conclusion and opens the question of whether price reverses or continues deeper.",
+      "exhausted_if": [
+        {
+          "type": "price_beyond",
+          "price": 28466.25,
+          "side": "below"
+        }
+      ],
+      "confidence": "MEDIUM",
+      "recall": {
+        "events": [
+          {
+            "type": "clock_after",
+            "et_time": "12:00"
+          }
+        ],
+        "max_age_min": 120
+      },
+      "evidence": [
+        {
+          "criterion": "P1",
+          "asset": "MNQ",
+          "level": "london(cur)_high",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.0,
+          "side": "DOWN",
+          "mag_ratio": 1.0646,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "prev2_week_low",
+          "tier": "week",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "DOWN",
+          "mag_ratio": 1.2654,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "prev2_week_low",
+          "tier": "week",
+          "tf": "4h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 2.25,
+          "side": "DOWN",
+          "mag_ratio": 0.0706,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "london(cur)_high",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.0,
+          "side": "DOWN",
+          "mag_ratio": 1.2127,
+          "mag_mult": 1.0
+        }
+      ],
+      "reasoning": "MES swept its prev2_week_low (7468.25) at session open yesterday and has now closed beyond it on a 4h bar (7465.75 @ 2026-07-24 06:00), registering acceptance of the week-tier pool in the DOWN direction. This is a mature, week-tier P1 read confirming continuation into the lower structure. MNQ's london(cur)_high (28704.25) swept at 06:00:45 ET this morning and closed back BELOW it at 09:00 ET on the 1h bar (28591.75), a rejection of the session-tier resistance \u2014 a bearish reversal signal. The stretch from price to the opposite-side day extreme is 1.31x avg range, well below the high-stretch veto threshold (3.0x), so no discount applies. Session-maturity: 67% elapsed with 26 mature P1/P2 items \u2014 a normal ledger for NY-morning, not a contradiction. Both assets show net evidence favoring DOWN: MES accepts the week low (continuation), MNQ rejects the session high (reversal). The daily mid sits at 28600.5 (MNQ) and 7451.25 (MES); price at the cut is 28604.25 / 7452.25, marginally above the daily mids on both, but the rejection of the session-tier resistance is the fresher, more decisive signal. The DOL menu [DOWN] shows london(cur)_low (D1, unswept, 138 pts away) as the nearest eligible pool; this is the first-support test. London session just re-tested the daily lows overnight without taking them, a sign of resistance to the downside, so a break of london(cur)_low would confirm the bearish lean."
+    }
+  ],
+  "price_recap_after_boundary": {
+    "window_end": "2026-07-24 13:20:00-04:00",
+    "open": 28596.5,
+    "high": 28631.25,
+    "low": 28254.25,
+    "close": 28482.25,
+    "n_bars": 240
+  },
+  "predicate_walk_forward": {
+    "dol_touched_at": "2026-07-24 09:42:00-04:00",
+    "falsified_at": null,
+    "exhausted_at": null,
+    "recall_fired_at": null,
+    "first_terminal_event": "dol_touch"
+  }
+}

@@ -1,0 +1,536 @@
+{
+  "boundary": "2026-07-15 09:20:00-04:00",
+  "backend": "openrouter",
+  "model": "anthropic/claude-haiku-4.5",
+  "verdict": "clean",
+  "fallback": false,
+  "retries": 0,
+  "thesis": {
+    "evidence": [
+      {
+        "criterion": "P3",
+        "asset": "MNQ",
+        "level": "daily_mid",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MNQ",
+        "level": "weekly_mid",
+        "tier": "week",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MNQ",
+        "level": "weekly_mid",
+        "tier": "week",
+        "tf": "4h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MES",
+        "level": "daily_mid",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MES",
+        "level": "weekly_mid",
+        "tier": "week",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MES",
+        "level": "weekly_mid",
+        "tier": "week",
+        "tf": "4h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P1",
+        "asset": "MNQ",
+        "level": "prev1_day_high",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "UP",
+        "mag_ratio": 0.7215,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P1",
+        "asset": "MNQ",
+        "level": "prev1_day_high",
+        "tier": "day",
+        "tf": "4h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.6875,
+        "side": "UP",
+        "mag_ratio": 0.0059,
+        "mag_mult": 0.75
+      },
+      {
+        "criterion": "P2",
+        "asset": "MNQ",
+        "level": "prev2_day_high",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "DOWN",
+        "mag_ratio": 0.771,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P2",
+        "asset": "MNQ",
+        "level": "prev2_day_high",
+        "tier": "day",
+        "tf": "4h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 3.0,
+        "side": "DOWN",
+        "mag_ratio": 0.5603,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P1",
+        "asset": "MNQ",
+        "level": "london(cur)_low",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.0,
+        "side": "UP",
+        "mag_ratio": 1.3439,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "prev1_day_high",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.5,
+        "side": "DOWN",
+        "mag_ratio": 0.2156,
+        "mag_mult": 0.75
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "london(cur)_high",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.75,
+        "side": "DOWN",
+        "mag_ratio": 0.1916,
+        "mag_mult": 0.75
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "london(cur)_low",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.25,
+        "side": "UP",
+        "mag_ratio": 1.7485,
+        "mag_mult": 1.25
+      }
+    ],
+    "bias": "DOWN",
+    "regime": "HYBRID",
+    "dol_rationale": "The nearest eligible DOWN pool is asia(cur)_low @ 29745.75 (D1 on the menu, session tier, 210 pts away / 2.6\u00d7 avg range). While this is far in sparse structure, it is the only unswept, undepleted session-level low in the current session. Deeper levels (prev1_day_low @ 29303.25, prev1_week_low @ 28910.25) are valid but much farther (652+ pts); asia(cur)_low is the most recent structural anchor for a DOWN move and remains the DOL candidate despite distance.",
+    "dol": {
+      "level": "asia(cur)_low",
+      "price": 29745.75
+    },
+    "falsified_if_rationale": "london(cur)_high @ 30062.5 (1.33\u00d7 avg range above current price, only 107 pts) is the nearest unswept UP pool and the clearest veto of a DOWN thesis. If price breaks above it decisively, the thesis is negated. Menu entry F1 (price_beyond) captures this directly.",
+    "falsified_if": [
+      {
+        "type": "price_beyond",
+        "price": 30062.5,
+        "side": "above"
+      }
+    ],
+    "exhausted_if_rationale": "The DOL target is asia(cur)_low @ 29745.75. If price reaches or closes below it, the thesis has achieved its objective and is exhausted. Menu entry X1 (price_beyond) is the natural exhaustion trigger matching the DOL.",
+    "exhausted_if": [
+      {
+        "type": "price_beyond",
+        "price": 29745.75,
+        "side": "below"
+      }
+    ],
+    "confidence": "LOW",
+    "recall": {
+      "events": [
+        {
+          "type": "clock_after",
+          "et_time": "12:00"
+        }
+      ],
+      "max_age_min": 40
+    }
+  },
+  "reasoning": "At 09:19:59 ET on 2026-07-15, we are 66.7% through the current trading session (18:00 ET 2026-07-14 to ~17:00 ET 2026-07-15). The market is in NY-morning sub-session, inside the 09:15-11:30 whipsaw window. Price sits at 29955.5 (MNQ) / 7609.5 (MES), well above both daily and weekly midpoints.\n\nHTF CLOSE STATUS & MATURITY:\nMost recent mature P1 readings all reflect ACCEPTANCE of resistance levels:\n- MNQ prev1_day_high (29922.0): accepted beyond on both 1h (13 closes) and 4h (3 closes) \u2014 clearance WEAK on 4h. Both reads tagged '[SUGGESTED STALE: price has since reached equilibrium]' because price subsequently tested and re-crossed the daily mid. Per thesis.md \u00a72.1c, this acceptance no longer carries conviction; price has digested the original move and re-tested equilibrium.\n- MNQ prev2_day_high (30042.5): REJECTED on both 1h and 4h (closed before the level) \u2014 NORMAL clearance. This is a genuine rejection of resistance, pointing toward DOWN.\n- MNQ london(cur)_low (29871.75) [below]: swept at 08:21:40 (58m ago), immature on 4h (no close yet), but 1h close shows REJECTION (closed before 29871.75) with NORMAL clearance \u2014 points DOWN.\n- MNQ daily_mid & weekly_mid: both ACCEPTED on 1h (1h bar each); weekly also accepted on 4h. These are equilibrium reads, not sweep-based P1, and are auto-scored by code (P3).\n\nMES READINGS:\n- MES prev1_day_high (7613.75): swept at 08:50:20 (30m ago), 4h immature, but 1h close shows REJECTION with WEAK clearance \u2014 points DOWN.\n- MES london(cur)_high (7613.5): swept at 08:43:04 (37m ago), 1h shows REJECTION (7611.5 closed before 7613.5), immature 4h \u2014 points DOWN.\n- MES london(cur)_low (7593.25): swept at 08:21:51 (58m ago), 1h shows REJECTION (closed before) with STRONG clearance \u2014 points DOWN.\n- MES daily_mid & weekly_mid: both ACCEPTED on 1h; weekly also accepted 4h. Auto-scored (P3).\n\nNET TALLY OF MATURE, NON-STALE P1 ITEMS:\n**DOWN:** MNQ prev2_day_high (reject, day tier, 1h+4h) + MNQ london(cur)_low (reject, session tier, 1h) + MES prev1_day_high (reject, day tier, 1h) + MES london(cur)_high (reject, session tier, 1h) + MES london(cur)_low (reject, session tier, 1h) = multiple mature rejections of resistance on both assets, cluster of day-tier + session-tier reads, fresh (30\u201358m old).\n\n**UP:** Largely the stale P1 accepts (prev1_day_high, both assets) already discounted. Daily_mid & weekly_mid accepts are auto-scored P3, not discretionary P1.\n\nSMT CANDIDATES:\nAll meaningful (day/week tier) P2 candidates in the facts are tagged 'P2-SUPPRESSED (already nested when this divergence fired)' \u2014 they are grandfathered or suppressed and do not contribute fresh P2 weight. The only live SMT candidate without full suppression is london(cur)_high (session tier, so ineligible for P2 by design \u2014 thesis.md \u00a72.1).\n\nP3 & P4:\nP3 (equilibrium position) is auto-scored: both MNQ and MES sit above daily_mid (29904.12 / 7599.0) and both above weekly_mid (29682.88 / 7573.625). This normally leans bullish context. However, S4 equilibrium-cross history shows MNQ has been crossing the daily mid repeatedly in the past hours (last cross 2026-07-15 08:30:00 \u2014 a cross ABOVE the mid, 1h ago) \u2014 chop in the whipsaw window. No mature P4 reclaim/failed-reclaim events on the daily or weekly mids yet (would require an HTF close decisively back through after initially crossing the other direction).\n\nSTRETCH & DISTANCE:\nS9 stretch from opposite-side day extreme = 2.60\u00d7 avg 1h range (209.75 pts from asia(cur)_low). High stretch is a soft flag (thesis.md \u00a72.1c): price has traveled far from its day anchor (the low) without digestion. Nearest named DOWN pool (asia(cur)_low @ 29745.75) is also 2.60\u00d7 away. Nearest UP pool (london(cur)_high @ 30062.5) is only 1.33\u00d7 away \u2014 closer.\n\nSESSION MATURITY:\nsession_elapsed_frac = 0.667 (66.7% through). mature_evidence_count = 30 mature P1/P2-eligible items in the ledger. This is a rich ledger, not thin data-scarcity, so the early-morning caveat does not apply here. The high item count reflects the cascade of recent sweeps (19.5h into the true day since the session open at 18:00 ET yesterday).\n\nCROSS-ASSET CONTRADICTION CHECK:\nMNQ prev2_day_high: MNQ REJECTED (closed before 30042.5), MES never swept it \u2014 no symmetric P1 contradiction there. MNQ london(cur)_low: MNQ REJECTED, MES not swept \u2014 no contradiction. MES prev1_day_high: MES REJECTED, MNQ swept it earlier (20:20:33 ET 2026-07-14, ~13h ago, ACCEPTED at that time) \u2014 this is a transient divergence window (both swept, >15 min apart per S3), not a live contradiction. London(cur)_high: MES swept (leader lagger asymmetry: MES swept, MNQ unswept, so only MES has a close to read \u2014 no per-asset contradiction, only the cross-ticker SMT divergence). The prevailing read is DOWN from multiple mature rejections on both assets, with no live P1 contradiction flagged in the matrix.\n\nP5 FVG-FILLS:\nS9 lists many visited 1hr/4hr FVG zones with HELD/VIOLATED verdicts. Recent ones: MNQ 1hr 2026-07-14 21:00:00 bull zone HELD (accept, bullish continuation); MES 1hr 2026-07-14 19:00:00 bull zone HELD. Older zones show mixed held/violated \u2014 no single dominating P5 pattern that overrides the P1 rejection cluster.\n\nDOL CONSIDERATION:\nS8 DOL menu [DOWN] lists: asia(cur)_low (D1, session), prev1_day_low (D2, day), prev1_week_low (D3, week), prev5_day_low (D4, day). MNQ is above all these; a DOWN thesis targets the nearest unswept DOWN pool. asia(cur)_low @ 29745.75 is 210 pts away (2.6\u00d7 avg range) \u2014 very far, in sparse structure. prev1_day_low @ 29303.25 is 652 pts away \u2014 even farther. The nearest DOWN pool is quite distant, suggesting the market has already traveled far from structure. However, asia(cur)_low is the MOST RECENT session-tier low and the nearest eligible (not yet swept, not depleted). Per S8, D1 is the first entry. A DOWN bias would draw on asia(cur)_low as its target.\n\nP3 AUTO-SCORE (code-derived, not modeled):\nMNQ above daily_mid, above weekly_mid \u2192 P3 reads as \"accept above\" (bullish position). MES above daily_mid, above weekly_mid \u2192 same. Code auto-injects these as 2 mature items on the UP side. However, the P1 rejection cluster (5+ mature items on DOWN) numerically out-tallies the 2 P3 items + stale accepts. Net score leans DOWN, despite UP equilibrium position. Per thesis.md \u00a76, a P3 bullish-position read vs. P1 rejections from actual price movement is a contradiction: equilibrium context vs. immediate reversal evidence. This is a genuine cross-asset setup (no exact same-level P1 disagreement, but the theme of 'price sat above mids but 5 separate level rejections in quick succession' is an implicit contradiction) \u2014 per thesis.md \u00a76, cap confidence at MEDIUM (not HIGH) and use short recall.\n\nCONFIDENCE ASSESSMENT:\nDown-side evidence is fresh (30\u201358m old sweeps), multiple (5+ rejections on both assets), and focused (day-tier + session-tier resistance all failing). Stretch is high (2.6\u00d7, undigested), which is a soft discount on confidence. P3 bullish equilibrium context is a counter-signal (the position reads UP). No P2 fresh evidence (suppressions or ineligibility). Session-maturity is not a data-scarcity issue (rich ledger). These factors together: strong DOWN read from P1/P5 (multiple rejections, some with NORMAL+ clearance), contradicted by automatic P3 UP context (equilibrium). Net score leans DOWN but not decisively enough to ignore the equilibrium context \u2014 confidence = MEDIUM. Stretch discount + P3 context contradiction both point to MEDIUM as the ceiling per thesis.md \u00a72.1c and \u00a76.\n\nFALSIFICATION:\nA DOWN thesis is falsified if price breaks decisively ABOVE the nearest UP draw, london(cur)_high @ 30062.5 (only 107 pts away, 1.33\u00d7 avg range) \u2014 currently within reach on any strong momentum bar. S8 menu [DOWN] offers F1: price_beyond(30062.5, above) \u2014 this is the cleanest falsification (the level that, if swept, would invalidate the DOWN thesis immediately).\n\nEXHAUSTION:\nA DOWN thesis is exhausted if price reaches its DOL, asia(cur)_low @ 29745.75, or trades beyond it (X1: price_beyond(29745.75, below)). Exhaustion could also fire if price takes 2+ hours without progress (T2 exhaustion: time_elapsed(120)) or if it digests and the bounce resumes (a longer-term recovery condition, harder to capture with simple predicates). X1 is the primary exhaustion.\n\nRECALL:\nWe are inside the 09:15-11:30 whipsaw window \u2014 a period of mechanical chop and frequent false moves. A short recall (next sub-session boundary at 12:00 ET, 40 minutes away) is appropriate (thesis.md \u00a71 session-anchored recall). The 12:00 ET boundary is when NY-evening begins and the tape typically steadies. Alternatively, time_elapsed(60) = 1 hour. Prefer the session boundary: R5 from the menu is clock_after(et_time=12:00).",
+  "latency_total_sec": 42.093,
+  "usage_total": {
+    "input_tokens": 84104,
+    "output_tokens": 3267,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0
+  },
+  "attempts": [
+    {
+      "usage": {
+        "input_tokens": 84104,
+        "output_tokens": 3267,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "raw": {
+          "prompt_tokens": 84104,
+          "completion_tokens": 3267,
+          "total_tokens": 87371,
+          "cost": 0.10858075,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 32567,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 0.10858075,
+            "upstream_inference_prompt_cost": 0.09224575,
+            "upstream_inference_completions_cost": 0.016335
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        }
+      },
+      "latency_sec": 42.093,
+      "model": "anthropic/claude-haiku-4.5",
+      "ok": true,
+      "violations": [],
+      "arith_overrides": [
+        "confidence MEDIUM -> LOW (ceiling LOW, net_score -1.3125, contradiction True)"
+      ],
+      "bias": "DOWN",
+      "regime": "HYBRID",
+      "dol_rationale": "The nearest eligible DOWN pool is asia(cur)_low @ 29745.75 (D1 on the menu, session tier, 210 pts away / 2.6\u00d7 avg range). While this is far in sparse structure, it is the only unswept, undepleted session-level low in the current session. Deeper levels (prev1_day_low @ 29303.25, prev1_week_low @ 28910.25) are valid but much farther (652+ pts); asia(cur)_low is the most recent structural anchor for a DOWN move and remains the DOL candidate despite distance.",
+      "dol": {
+        "level": "asia(cur)_low",
+        "price": 29745.75
+      },
+      "falsified_if_rationale": "london(cur)_high @ 30062.5 (1.33\u00d7 avg range above current price, only 107 pts) is the nearest unswept UP pool and the clearest veto of a DOWN thesis. If price breaks above it decisively, the thesis is negated. Menu entry F1 (price_beyond) captures this directly.",
+      "falsified_if": [
+        {
+          "type": "price_beyond",
+          "price": 30062.5,
+          "side": "above"
+        }
+      ],
+      "exhausted_if_rationale": "The DOL target is asia(cur)_low @ 29745.75. If price reaches or closes below it, the thesis has achieved its objective and is exhausted. Menu entry X1 (price_beyond) is the natural exhaustion trigger matching the DOL.",
+      "exhausted_if": [
+        {
+          "type": "price_beyond",
+          "price": 29745.75,
+          "side": "below"
+        }
+      ],
+      "confidence": "LOW",
+      "recall": {
+        "events": [
+          {
+            "type": "clock_after",
+            "et_time": "12:00"
+          }
+        ],
+        "max_age_min": 40
+      },
+      "evidence": [
+        {
+          "criterion": "P3",
+          "asset": "MNQ",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MNQ",
+          "level": "weekly_mid",
+          "tier": "week",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MNQ",
+          "level": "weekly_mid",
+          "tier": "week",
+          "tf": "4h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MES",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MES",
+          "level": "weekly_mid",
+          "tier": "week",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MES",
+          "level": "weekly_mid",
+          "tier": "week",
+          "tf": "4h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MNQ",
+          "level": "prev1_day_high",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "UP",
+          "mag_ratio": 0.7215,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MNQ",
+          "level": "prev1_day_high",
+          "tier": "day",
+          "tf": "4h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.6875,
+          "side": "UP",
+          "mag_ratio": 0.0059,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P2",
+          "asset": "MNQ",
+          "level": "prev2_day_high",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "DOWN",
+          "mag_ratio": 0.771,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P2",
+          "asset": "MNQ",
+          "level": "prev2_day_high",
+          "tier": "day",
+          "tf": "4h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 3.0,
+          "side": "DOWN",
+          "mag_ratio": 0.5603,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MNQ",
+          "level": "london(cur)_low",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.0,
+          "side": "UP",
+          "mag_ratio": 1.3439,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "prev1_day_high",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": 0.2156,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "london(cur)_high",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.75,
+          "side": "DOWN",
+          "mag_ratio": 0.1916,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "london(cur)_low",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.25,
+          "side": "UP",
+          "mag_ratio": 1.7485,
+          "mag_mult": 1.25
+        }
+      ],
+      "reasoning": "At 09:19:59 ET on 2026-07-15, we are 66.7% through the current trading session (18:00 ET 2026-07-14 to ~17:00 ET 2026-07-15). The market is in NY-morning sub-session, inside the 09:15-11:30 whipsaw window. Price sits at 29955.5 (MNQ) / 7609.5 (MES), well above both daily and weekly midpoints.\n\nHTF CLOSE STATUS & MATURITY:\nMost recent mature P1 readings all reflect ACCEPTANCE of resistance levels:\n- MNQ prev1_day_high (29922.0): accepted beyond on both 1h (13 closes) and 4h (3 closes) \u2014 clearance WEAK on 4h. Both reads tagged '[SUGGESTED STALE: price has since reached equilibrium]' because price subsequently tested and re-crossed the daily mid. Per thesis.md \u00a72.1c, this acceptance no longer carries conviction; price has digested the original move and re-tested equilibrium.\n- MNQ prev2_day_high (30042.5): REJECTED on both 1h and 4h (closed before the level) \u2014 NORMAL clearance. This is a genuine rejection of resistance, pointing toward DOWN.\n- MNQ london(cur)_low (29871.75) [below]: swept at 08:21:40 (58m ago), immature on 4h (no close yet), but 1h close shows REJECTION (closed before 29871.75) with NORMAL clearance \u2014 points DOWN.\n- MNQ daily_mid & weekly_mid: both ACCEPTED on 1h (1h bar each); weekly also accepted on 4h. These are equilibrium reads, not sweep-based P1, and are auto-scored by code (P3).\n\nMES READINGS:\n- MES prev1_day_high (7613.75): swept at 08:50:20 (30m ago), 4h immature, but 1h close shows REJECTION with WEAK clearance \u2014 points DOWN.\n- MES london(cur)_high (7613.5): swept at 08:43:04 (37m ago), 1h shows REJECTION (7611.5 closed before 7613.5), immature 4h \u2014 points DOWN.\n- MES london(cur)_low (7593.25): swept at 08:21:51 (58m ago), 1h shows REJECTION (closed before) with STRONG clearance \u2014 points DOWN.\n- MES daily_mid & weekly_mid: both ACCEPTED on 1h; weekly also accepted 4h. Auto-scored (P3).\n\nNET TALLY OF MATURE, NON-STALE P1 ITEMS:\n**DOWN:** MNQ prev2_day_high (reject, day tier, 1h+4h) + MNQ london(cur)_low (reject, session tier, 1h) + MES prev1_day_high (reject, day tier, 1h) + MES london(cur)_high (reject, session tier, 1h) + MES london(cur)_low (reject, session tier, 1h) = multiple mature rejections of resistance on both assets, cluster of day-tier + session-tier reads, fresh (30\u201358m old).\n\n**UP:** Largely the stale P1 accepts (prev1_day_high, both assets) already discounted. Daily_mid & weekly_mid accepts are auto-scored P3, not discretionary P1.\n\nSMT CANDIDATES:\nAll meaningful (day/week tier) P2 candidates in the facts are tagged 'P2-SUPPRESSED (already nested when this divergence fired)' \u2014 they are grandfathered or suppressed and do not contribute fresh P2 weight. The only live SMT candidate without full suppression is london(cur)_high (session tier, so ineligible for P2 by design \u2014 thesis.md \u00a72.1).\n\nP3 & P4:\nP3 (equilibrium position) is auto-scored: both MNQ and MES sit above daily_mid (29904.12 / 7599.0) and both above weekly_mid (29682.88 / 7573.625). This normally leans bullish context. However, S4 equilibrium-cross history shows MNQ has been crossing the daily mid repeatedly in the past hours (last cross 2026-07-15 08:30:00 \u2014 a cross ABOVE the mid, 1h ago) \u2014 chop in the whipsaw window. No mature P4 reclaim/failed-reclaim events on the daily or weekly mids yet (would require an HTF close decisively back through after initially crossing the other direction).\n\nSTRETCH & DISTANCE:\nS9 stretch from opposite-side day extreme = 2.60\u00d7 avg 1h range (209.75 pts from asia(cur)_low). High stretch is a soft flag (thesis.md \u00a72.1c): price has traveled far from its day anchor (the low) without digestion. Nearest named DOWN pool (asia(cur)_low @ 29745.75) is also 2.60\u00d7 away. Nearest UP pool (london(cur)_high @ 30062.5) is only 1.33\u00d7 away \u2014 closer.\n\nSESSION MATURITY:\nsession_elapsed_frac = 0.667 (66.7% through). mature_evidence_count = 30 mature P1/P2-eligible items in the ledger. This is a rich ledger, not thin data-scarcity, so the early-morning caveat does not apply here. The high item count reflects the cascade of recent sweeps (19.5h into the true day since the session open at 18:00 ET yesterday).\n\nCROSS-ASSET CONTRADICTION CHECK:\nMNQ prev2_day_high: MNQ REJECTED (closed before 30042.5), MES never swept it \u2014 no symmetric P1 contradiction there. MNQ london(cur)_low: MNQ REJECTED, MES not swept \u2014 no contradiction. MES prev1_day_high: MES REJECTED, MNQ swept it earlier (20:20:33 ET 2026-07-14, ~13h ago, ACCEPTED at that time) \u2014 this is a transient divergence window (both swept, >15 min apart per S3), not a live contradiction. London(cur)_high: MES swept (leader lagger asymmetry: MES swept, MNQ unswept, so only MES has a close to read \u2014 no per-asset contradiction, only the cross-ticker SMT divergence). The prevailing read is DOWN from multiple mature rejections on both assets, with no live P1 contradiction flagged in the matrix.\n\nP5 FVG-FILLS:\nS9 lists many visited 1hr/4hr FVG zones with HELD/VIOLATED verdicts. Recent ones: MNQ 1hr 2026-07-14 21:00:00 bull zone HELD (accept, bullish continuation); MES 1hr 2026-07-14 19:00:00 bull zone HELD. Older zones show mixed held/violated \u2014 no single dominating P5 pattern that overrides the P1 rejection cluster.\n\nDOL CONSIDERATION:\nS8 DOL menu [DOWN] lists: asia(cur)_low (D1, session), prev1_day_low (D2, day), prev1_week_low (D3, week), prev5_day_low (D4, day). MNQ is above all these; a DOWN thesis targets the nearest unswept DOWN pool. asia(cur)_low @ 29745.75 is 210 pts away (2.6\u00d7 avg range) \u2014 very far, in sparse structure. prev1_day_low @ 29303.25 is 652 pts away \u2014 even farther. The nearest DOWN pool is quite distant, suggesting the market has already traveled far from structure. However, asia(cur)_low is the MOST RECENT session-tier low and the nearest eligible (not yet swept, not depleted). Per S8, D1 is the first entry. A DOWN bias would draw on asia(cur)_low as its target.\n\nP3 AUTO-SCORE (code-derived, not modeled):\nMNQ above daily_mid, above weekly_mid \u2192 P3 reads as \"accept above\" (bullish position). MES above daily_mid, above weekly_mid \u2192 same. Code auto-injects these as 2 mature items on the UP side. However, the P1 rejection cluster (5+ mature items on DOWN) numerically out-tallies the 2 P3 items + stale accepts. Net score leans DOWN, despite UP equilibrium position. Per thesis.md \u00a76, a P3 bullish-position read vs. P1 rejections from actual price movement is a contradiction: equilibrium context vs. immediate reversal evidence. This is a genuine cross-asset setup (no exact same-level P1 disagreement, but the theme of 'price sat above mids but 5 separate level rejections in quick succession' is an implicit contradiction) \u2014 per thesis.md \u00a76, cap confidence at MEDIUM (not HIGH) and use short recall.\n\nCONFIDENCE ASSESSMENT:\nDown-side evidence is fresh (30\u201358m old sweeps), multiple (5+ rejections on both assets), and focused (day-tier + session-tier resistance all failing). Stretch is high (2.6\u00d7, undigested), which is a soft discount on confidence. P3 bullish equilibrium context is a counter-signal (the position reads UP). No P2 fresh evidence (suppressions or ineligibility). Session-maturity is not a data-scarcity issue (rich ledger). These factors together: strong DOWN read from P1/P5 (multiple rejections, some with NORMAL+ clearance), contradicted by automatic P3 UP context (equilibrium). Net score leans DOWN but not decisively enough to ignore the equilibrium context \u2014 confidence = MEDIUM. Stretch discount + P3 context contradiction both point to MEDIUM as the ceiling per thesis.md \u00a72.1c and \u00a76.\n\nFALSIFICATION:\nA DOWN thesis is falsified if price breaks decisively ABOVE the nearest UP draw, london(cur)_high @ 30062.5 (only 107 pts away, 1.33\u00d7 avg range) \u2014 currently within reach on any strong momentum bar. S8 menu [DOWN] offers F1: price_beyond(30062.5, above) \u2014 this is the cleanest falsification (the level that, if swept, would invalidate the DOWN thesis immediately).\n\nEXHAUSTION:\nA DOWN thesis is exhausted if price reaches its DOL, asia(cur)_low @ 29745.75, or trades beyond it (X1: price_beyond(29745.75, below)). Exhaustion could also fire if price takes 2+ hours without progress (T2 exhaustion: time_elapsed(120)) or if it digests and the bounce resumes (a longer-term recovery condition, harder to capture with simple predicates). X1 is the primary exhaustion.\n\nRECALL:\nWe are inside the 09:15-11:30 whipsaw window \u2014 a period of mechanical chop and frequent false moves. A short recall (next sub-session boundary at 12:00 ET, 40 minutes away) is appropriate (thesis.md \u00a71 session-anchored recall). The 12:00 ET boundary is when NY-evening begins and the tape typically steadies. Alternatively, time_elapsed(60) = 1 hour. Prefer the session boundary: R5 from the menu is clock_after(et_time=12:00)."
+    }
+  ],
+  "price_recap_after_boundary": {
+    "window_end": "2026-07-15 13:20:00-04:00",
+    "open": 29943.0,
+    "high": 29978.25,
+    "low": 29396.75,
+    "close": 29580.0,
+    "n_bars": 240
+  },
+  "predicate_walk_forward": {
+    "dol_touched_at": "2026-07-15 10:22:00-04:00",
+    "falsified_at": null,
+    "exhausted_at": null,
+    "recall_fired_at": null,
+    "first_terminal_event": "dol_touch"
+  }
+}

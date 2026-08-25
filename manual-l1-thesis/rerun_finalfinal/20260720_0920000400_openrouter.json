@@ -1,0 +1,460 @@
+{
+  "boundary": "2026-07-20 09:20:00-04:00",
+  "backend": "openrouter",
+  "model": "anthropic/claude-haiku-4.5",
+  "verdict": "clean",
+  "fallback": false,
+  "retries": 0,
+  "thesis": {
+    "evidence": [
+      {
+        "criterion": "P5",
+        "asset": "MNQ",
+        "level": "MNQ 1hr 2026-07-19 18:00:00-04:00 bull",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "points": 1.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P5",
+        "asset": "MNQ",
+        "level": "MNQ 1hr 2026-07-20 03:00:00-04:00 bull",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "points": 1.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P5",
+        "asset": "MNQ",
+        "level": "MNQ 1hr 2026-07-20 07:00:00-04:00 bull",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "points": 1.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P5",
+        "asset": "MES",
+        "level": "MES 1hr 2026-07-20 03:00:00-04:00 bull",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "points": 1.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MNQ",
+        "level": "daily_mid",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MNQ",
+        "level": "daily_mid",
+        "tier": "day",
+        "tf": "4h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MNQ",
+        "level": "weekly_mid",
+        "tier": "week",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.5,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MES",
+        "level": "daily_mid",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MES",
+        "level": "daily_mid",
+        "tier": "day",
+        "tf": "4h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.0,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P1",
+        "asset": "MNQ",
+        "level": "london(cur)_high",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.75,
+        "side": "UP",
+        "mag_ratio": 0.2214,
+        "mag_mult": 0.75
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "london(cur)_high",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.75,
+        "side": "DOWN",
+        "mag_ratio": 0.0978,
+        "mag_mult": 0.75
+      }
+    ],
+    "bias": "UP",
+    "regime": "TREND",
+    "dol_rationale": "D1 prev1_day_high (29220.0) is the nearest eligible draw on the UP side, only 180.5 pts above current price (1.49x avg_1h range), representing fresh day-session structure that price has climbed toward all morning. Alternatives D2\u2013D7 are progressively farther (prev2_day_high 686pts away, week highs 950+ pts) and sit outside the active intraday structure window. prev1_day_high is the cleanest, nearest, in-session target.",
+    "dol": {
+      "level": "prev1_day_high",
+      "price": 29220.0
+    },
+    "falsified_if_rationale": "F1 n_closes_beyond(28908.62, below, 5m, n=2) from the menu \u2014 two consecutive 5m closes below the daily mid would signal that the morning bounce has definitively lost momentum and reversed into a deeper pullback. This is sharper than F5/F6 (1h/4h below daily mid, which are still forming) and serves as an intraday halt signal within the session maturity window.",
+    "falsified_if": [
+      {
+        "type": "n_closes_beyond",
+        "price": 28908.62,
+        "side": "below",
+        "tf": "5m",
+        "n": 2
+      }
+    ],
+    "exhausted_if_rationale": "X1 price_beyond(29220.0, above) \u2014 the DOL itself. Once prev1_day_high is eclipsed, the thesis target is met and the bullish move into higher prev-day/week structure (which remain far, 600+ pts out) shifts into a continuation or extension context requiring a new thesis call.",
+    "exhausted_if": [
+      {
+        "type": "price_beyond",
+        "price": 29220.0,
+        "side": "above"
+      }
+    ],
+    "confidence": "MEDIUM",
+    "recall": {
+      "events": [
+        {
+          "type": "n_closes_beyond",
+          "price": 28908.62,
+          "side": "below",
+          "tf": "5m",
+          "n": 3
+        },
+        {
+          "type": "clock_after",
+          "et_time": "12:00"
+        }
+      ],
+      "max_age_min": 35
+    }
+  },
+  "reasoning": "MNQ london(cur)_high swept at 07:05 ET and accepted beyond 1h close (29024.5 @ 09:00, weak clearance but above level 28997.75), leaning bullish continuation. MES london(cur)_high swept at 07:13 ET but rejected (closed 7527.25 below level 7529.0) at 09:00 1h close, a cross-asset P1 contradiction at a shared level (\u00a76 contradiction cap applies). MNQ daily mid accepts above (close 29024.5 > 28908.62), MES daily mid accepts above (close 7527.25 > 7513.75), both equilibrium reads align bullish. Weekly mid: MNQ just barely re-entered and rejected (close 29024.5 above, but next 1h bar closed 29023.25 below 29102.38 \u2014 not yet a clean rejection, still forming). MES weekly mid sits below (7528.25 < 7552.5), accepts in discount. Three recent FVG bull zones (MNQ 1hr 2026-07-19 18:00, 2026-07-20 03:00, 2026-07-20 07:00, MES 1hr 2026-07-20 03:00) all held as support (accept) \u2014 consistent bullish bias. Daily and session-tier structure favor continuation over reversal. Stretch of 2.75x avg 1h range from opposite-side day extreme indicates price has moved meaningfully away from structure origin, not a fresh breakout. Session elapsed 66.7%, ledger mature (22 items ready). The cross-asset contradiction on london(cur)_high (MNQ accept vs MES reject) is real and caps confidence below HIGH; LTF (30m) corroborates bullish lean \u2014 MNQ holding near highs, MES failing but not yet decisively breaking. No immature day/week items pending resolution. Nearest DOL [UP] is D1 (prev1_day_high @ 29220.0, 180.5 pts away, 1.49x avg_1h) \u2014 tight, meaningful structure. Nearest [DOWN] is D1 (london(cur)_low @ 28765.5, 274 pts, 2.27x avg_1h) \u2014 much farther.",
+  "latency_total_sec": 19.472,
+  "usage_total": {
+    "input_tokens": 86014,
+    "output_tokens": 1356,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0
+  },
+  "attempts": [
+    {
+      "usage": {
+        "input_tokens": 86014,
+        "output_tokens": 1356,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "raw": {
+          "prompt_tokens": 86014,
+          "completion_tokens": 1356,
+          "total_tokens": 87370,
+          "cost": 0.10080075,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 32027,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 0.10080075,
+            "upstream_inference_prompt_cost": 0.09402075,
+            "upstream_inference_completions_cost": 0.00678
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        }
+      },
+      "latency_sec": 19.472,
+      "model": "anthropic/claude-haiku-4.5",
+      "ok": true,
+      "violations": [],
+      "arith_overrides": [],
+      "bias": "UP",
+      "regime": "TREND",
+      "dol_rationale": "D1 prev1_day_high (29220.0) is the nearest eligible draw on the UP side, only 180.5 pts above current price (1.49x avg_1h range), representing fresh day-session structure that price has climbed toward all morning. Alternatives D2\u2013D7 are progressively farther (prev2_day_high 686pts away, week highs 950+ pts) and sit outside the active intraday structure window. prev1_day_high is the cleanest, nearest, in-session target.",
+      "dol": {
+        "level": "prev1_day_high",
+        "price": 29220.0
+      },
+      "falsified_if_rationale": "F1 n_closes_beyond(28908.62, below, 5m, n=2) from the menu \u2014 two consecutive 5m closes below the daily mid would signal that the morning bounce has definitively lost momentum and reversed into a deeper pullback. This is sharper than F5/F6 (1h/4h below daily mid, which are still forming) and serves as an intraday halt signal within the session maturity window.",
+      "falsified_if": [
+        {
+          "type": "n_closes_beyond",
+          "price": 28908.62,
+          "side": "below",
+          "tf": "5m",
+          "n": 2
+        }
+      ],
+      "exhausted_if_rationale": "X1 price_beyond(29220.0, above) \u2014 the DOL itself. Once prev1_day_high is eclipsed, the thesis target is met and the bullish move into higher prev-day/week structure (which remain far, 600+ pts out) shifts into a continuation or extension context requiring a new thesis call.",
+      "exhausted_if": [
+        {
+          "type": "price_beyond",
+          "price": 29220.0,
+          "side": "above"
+        }
+      ],
+      "confidence": "MEDIUM",
+      "recall": {
+        "events": [
+          {
+            "type": "n_closes_beyond",
+            "price": 28908.62,
+            "side": "below",
+            "tf": "5m",
+            "n": 3
+          },
+          {
+            "type": "clock_after",
+            "et_time": "12:00"
+          }
+        ],
+        "max_age_min": 35
+      },
+      "evidence": [
+        {
+          "criterion": "P5",
+          "asset": "MNQ",
+          "level": "MNQ 1hr 2026-07-19 18:00:00-04:00 bull",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MNQ",
+          "level": "MNQ 1hr 2026-07-20 03:00:00-04:00 bull",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MNQ",
+          "level": "MNQ 1hr 2026-07-20 07:00:00-04:00 bull",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MES",
+          "level": "MES 1hr 2026-07-20 03:00:00-04:00 bull",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MNQ",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MNQ",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "4h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MNQ",
+          "level": "weekly_mid",
+          "tier": "week",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MES",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MES",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "4h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.0,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MNQ",
+          "level": "london(cur)_high",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.75,
+          "side": "UP",
+          "mag_ratio": 0.2214,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "london(cur)_high",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.75,
+          "side": "DOWN",
+          "mag_ratio": 0.0978,
+          "mag_mult": 0.75
+        }
+      ],
+      "reasoning": "MNQ london(cur)_high swept at 07:05 ET and accepted beyond 1h close (29024.5 @ 09:00, weak clearance but above level 28997.75), leaning bullish continuation. MES london(cur)_high swept at 07:13 ET but rejected (closed 7527.25 below level 7529.0) at 09:00 1h close, a cross-asset P1 contradiction at a shared level (\u00a76 contradiction cap applies). MNQ daily mid accepts above (close 29024.5 > 28908.62), MES daily mid accepts above (close 7527.25 > 7513.75), both equilibrium reads align bullish. Weekly mid: MNQ just barely re-entered and rejected (close 29024.5 above, but next 1h bar closed 29023.25 below 29102.38 \u2014 not yet a clean rejection, still forming). MES weekly mid sits below (7528.25 < 7552.5), accepts in discount. Three recent FVG bull zones (MNQ 1hr 2026-07-19 18:00, 2026-07-20 03:00, 2026-07-20 07:00, MES 1hr 2026-07-20 03:00) all held as support (accept) \u2014 consistent bullish bias. Daily and session-tier structure favor continuation over reversal. Stretch of 2.75x avg 1h range from opposite-side day extreme indicates price has moved meaningfully away from structure origin, not a fresh breakout. Session elapsed 66.7%, ledger mature (22 items ready). The cross-asset contradiction on london(cur)_high (MNQ accept vs MES reject) is real and caps confidence below HIGH; LTF (30m) corroborates bullish lean \u2014 MNQ holding near highs, MES failing but not yet decisively breaking. No immature day/week items pending resolution. Nearest DOL [UP] is D1 (prev1_day_high @ 29220.0, 180.5 pts away, 1.49x avg_1h) \u2014 tight, meaningful structure. Nearest [DOWN] is D1 (london(cur)_low @ 28765.5, 274 pts, 2.27x avg_1h) \u2014 much farther."
+    }
+  ],
+  "price_recap_after_boundary": {
+    "window_end": "2026-07-20 13:20:00-04:00",
+    "open": 29043.75,
+    "high": 29192.5,
+    "low": 28873.25,
+    "close": 28952.75,
+    "n_bars": 240
+  },
+  "predicate_walk_forward": {
+    "dol_touched_at": null,
+    "falsified_at": null,
+    "exhausted_at": null,
+    "recall_fired_at": "2026-07-20 12:00:00-04:00",
+    "first_terminal_event": null
+  }
+}

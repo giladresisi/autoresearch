@@ -1,0 +1,562 @@
+{
+  "boundary": "2026-07-23 09:20:00-04:00",
+  "backend": "openrouter",
+  "model": "anthropic/claude-haiku-4.5",
+  "verdict": "clean",
+  "fallback": false,
+  "retries": 0,
+  "thesis": {
+    "evidence": [
+      {
+        "criterion": "P4",
+        "asset": "MNQ",
+        "level": "daily_mid",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "points": 1.5,
+        "side": null,
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P4",
+        "asset": "MES",
+        "level": "daily_mid",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "points": 1.5,
+        "side": null,
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MNQ",
+        "level": "daily_mid",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.0,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MNQ",
+        "level": "weekly_mid",
+        "tier": "week",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.5,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MES",
+        "level": "daily_mid",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.0,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MES",
+        "level": "weekly_mid",
+        "tier": "week",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.5,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P1",
+        "asset": "MNQ",
+        "level": "prev1_day_low",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.5,
+        "side": "DOWN",
+        "mag_ratio": 1.4932,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P1",
+        "asset": "MNQ",
+        "level": "prev1_day_low",
+        "tier": "day",
+        "tf": "4h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 2.25,
+        "side": "UP",
+        "mag_ratio": 0.5287,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P1",
+        "asset": "MNQ",
+        "level": "london(cur)_low",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.0,
+        "side": "DOWN",
+        "mag_ratio": 1.1564,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "prev1_day_low",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.875,
+        "side": "DOWN",
+        "mag_ratio": 2.1832,
+        "mag_mult": 1.25
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "prev1_day_low",
+        "tier": "day",
+        "tf": "4h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.6875,
+        "side": "UP",
+        "mag_ratio": 0.32,
+        "mag_mult": 0.75
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "prev2_day_low",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.125,
+        "side": "DOWN",
+        "mag_ratio": 0.4249,
+        "mag_mult": 0.75
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "prev1_week_low",
+        "tier": "week",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.5,
+        "side": "DOWN",
+        "mag_ratio": 0.4103,
+        "mag_mult": 0.75
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "prev2_week_low",
+        "tier": "week",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.5,
+        "side": "DOWN",
+        "mag_ratio": 0.1319,
+        "mag_mult": 0.75
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "london(cur)_low",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.25,
+        "side": "DOWN",
+        "mag_ratio": 1.7143,
+        "mag_mult": 1.25
+      }
+    ],
+    "bias": "DOWN",
+    "regime": "TREND",
+    "dol_rationale": "prev2_day_low (28700.0, D1 from the DOWN menu) is the nearest eligible undepleted low on the correct side. It is only 15.75 pts away and coincides with cross-family confluence (untracked daily low 28700 from 2026-07-21), offering strong structural support for a downside draw. prev1_week_low (28408.25, D2) is deeper and a higher-tier target, but D1's proximity and confluence make it the primary immediate magnet.",
+    "dol": {
+      "level": "prev2_day_low",
+      "price": 28700.0
+    },
+    "falsified_if_rationale": "Daily mid (28992.88) is the nearest anti-pool on the UP side. If price closes ABOVE it on a 1h bar (n_closes_beyond tf=1h side=above), the down thesis's core negation (the equilibrium rejection pattern) breaks, meaning price has begun reclaiming upside structure. This corresponds to S8 menu F1 (price_beyond side=below on prev2_day_low) reframed as its mechanical opposite to avoid self-invalidating predicates.",
+    "falsified_if": [
+      {
+        "type": "n_closes_beyond",
+        "price": 28992.88,
+        "side": "above",
+        "tf": "1h",
+        "n": 1
+      }
+    ],
+    "exhausted_if_rationale": "prev2_day_low (the DOL) touched or swept fully (price_beyond side=below) would mean the draw has been executed and the move is complete; at that point the thesis either succeeded (reached target) or is spent. This is the standard exhaustion condition for a directional thesis \u2014 when the primary DOL is reached.",
+    "exhausted_if": [
+      {
+        "type": "price_beyond",
+        "price": 28700.0,
+        "side": "below"
+      }
+    ],
+    "confidence": "MEDIUM",
+    "recall": {
+      "events": [
+        {
+          "type": "clock_after",
+          "et_time": "12:00"
+        }
+      ],
+      "max_age_min": 90
+    }
+  },
+  "reasoning": "The session presents a strong bearish cascade established overnight and early morning. At 09:19 ET we are inside the 09:15-11:30 whipsaw window, with price (MNQ 28715.75, MES 7456.5) sitting severely stretched (4.87x avg 1h range below the day high) after sweeping multiple lows since Asia/London hours. BOTH assets have accepted beyond their own prev1_day_low and london(cur)_low on 1h closes (P1 continuation read, DOWN direction). MES has additionally accepted beyond prev2_day_low and prev1/prev2_week_low (P1 stack), and completed the critical P2 divergences: MES swept and confirmed beyond both prev1_week_low (wick 08:36:57) and prev2_day_low (wick 08:36:57), while MNQ failed both \u2014 live SMT pairs at meaningful (week/day) tiers with MES's own 1h closes already rejecting (closing BACK ABOVE) those swept lows, a strong reversal signal (P2). Daily_mid and weekly_mid both show REJECTED reads (closed before on 1h) \u2014 price is below both equilibria and failing to reclaim them, reinforcing the downside lean. The S9 stretch flag (4.87x, beyond 3.0x threshold) indicates price has run far from structure, but this does not contradict the DOWN thesis \u2014 it confirms the extension of the existing downtrend. Session maturity shows 34 mature P1/P2 items (not thin), supporting confidence. The prior-day's own 4h close on MES prev1_day_low showed a REJECT (closed back before 7511.25, per S9), while MES's 1h close has since ACCEPTED beyond (7466.0), a cross-tf contradiction that the model must account for: the older 4h read is stale relative to the fresher 1h confirmation. Tallying mature evidence: MES scores heavily DOWN (4 accept-beyond items at day/week tiers, 2 P2 rejects of SMTs at meaningful tiers, 2 mid rejects), MNQ scores mixed (1 accept london low, 1 reject own day low, 2 mid rejects), net leans DOWN. The lack of ANY UP-side evidence (no unswept highs, no daily_mid accept, no bullish P2) and the visible exhaustion of yesterday's structure (all nearby lows depleted) reinforce a directional DOWN bias. Sparse structure is present (nearest UP pool is 4.02x away: london_high, 468 pts distant), consistent with a deep pullback consuming local supply.",
+  "latency_total_sec": 22.705,
+  "usage_total": {
+    "input_tokens": 94000,
+    "output_tokens": 1501,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0
+  },
+  "attempts": [
+    {
+      "usage": {
+        "input_tokens": 94000,
+        "output_tokens": 1501,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "raw": {
+          "prompt_tokens": 94000,
+          "completion_tokens": 1501,
+          "total_tokens": 95501,
+          "cost": 0.10966175,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 32627,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 0.10966175,
+            "upstream_inference_prompt_cost": 0.10215675,
+            "upstream_inference_completions_cost": 0.007505
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        }
+      },
+      "latency_sec": 22.705,
+      "model": "anthropic/claude-haiku-4.5",
+      "ok": true,
+      "violations": [],
+      "arith_overrides": [],
+      "bias": "DOWN",
+      "regime": "TREND",
+      "dol_rationale": "prev2_day_low (28700.0, D1 from the DOWN menu) is the nearest eligible undepleted low on the correct side. It is only 15.75 pts away and coincides with cross-family confluence (untracked daily low 28700 from 2026-07-21), offering strong structural support for a downside draw. prev1_week_low (28408.25, D2) is deeper and a higher-tier target, but D1's proximity and confluence make it the primary immediate magnet.",
+      "dol": {
+        "level": "prev2_day_low",
+        "price": 28700.0
+      },
+      "falsified_if_rationale": "Daily mid (28992.88) is the nearest anti-pool on the UP side. If price closes ABOVE it on a 1h bar (n_closes_beyond tf=1h side=above), the down thesis's core negation (the equilibrium rejection pattern) breaks, meaning price has begun reclaiming upside structure. This corresponds to S8 menu F1 (price_beyond side=below on prev2_day_low) reframed as its mechanical opposite to avoid self-invalidating predicates.",
+      "falsified_if": [
+        {
+          "type": "n_closes_beyond",
+          "price": 28992.88,
+          "side": "above",
+          "tf": "1h",
+          "n": 1
+        }
+      ],
+      "exhausted_if_rationale": "prev2_day_low (the DOL) touched or swept fully (price_beyond side=below) would mean the draw has been executed and the move is complete; at that point the thesis either succeeded (reached target) or is spent. This is the standard exhaustion condition for a directional thesis \u2014 when the primary DOL is reached.",
+      "exhausted_if": [
+        {
+          "type": "price_beyond",
+          "price": 28700.0,
+          "side": "below"
+        }
+      ],
+      "confidence": "MEDIUM",
+      "recall": {
+        "events": [
+          {
+            "type": "clock_after",
+            "et_time": "12:00"
+          }
+        ],
+        "max_age_min": 90
+      },
+      "evidence": [
+        {
+          "criterion": "P4",
+          "asset": "MNQ",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "points": 1.5,
+          "side": null,
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P4",
+          "asset": "MES",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "points": 1.5,
+          "side": null,
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MNQ",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.0,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MNQ",
+          "level": "weekly_mid",
+          "tier": "week",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MES",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.0,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MES",
+          "level": "weekly_mid",
+          "tier": "week",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MNQ",
+          "level": "prev1_day_low",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": 1.4932,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MNQ",
+          "level": "prev1_day_low",
+          "tier": "day",
+          "tf": "4h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 2.25,
+          "side": "UP",
+          "mag_ratio": 0.5287,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MNQ",
+          "level": "london(cur)_low",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.0,
+          "side": "DOWN",
+          "mag_ratio": 1.1564,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "prev1_day_low",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.875,
+          "side": "DOWN",
+          "mag_ratio": 2.1832,
+          "mag_mult": 1.25
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "prev1_day_low",
+          "tier": "day",
+          "tf": "4h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.6875,
+          "side": "UP",
+          "mag_ratio": 0.32,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "prev2_day_low",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.125,
+          "side": "DOWN",
+          "mag_ratio": 0.4249,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "prev1_week_low",
+          "tier": "week",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": 0.4103,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "prev2_week_low",
+          "tier": "week",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": 0.1319,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "london(cur)_low",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.25,
+          "side": "DOWN",
+          "mag_ratio": 1.7143,
+          "mag_mult": 1.25
+        }
+      ],
+      "reasoning": "The session presents a strong bearish cascade established overnight and early morning. At 09:19 ET we are inside the 09:15-11:30 whipsaw window, with price (MNQ 28715.75, MES 7456.5) sitting severely stretched (4.87x avg 1h range below the day high) after sweeping multiple lows since Asia/London hours. BOTH assets have accepted beyond their own prev1_day_low and london(cur)_low on 1h closes (P1 continuation read, DOWN direction). MES has additionally accepted beyond prev2_day_low and prev1/prev2_week_low (P1 stack), and completed the critical P2 divergences: MES swept and confirmed beyond both prev1_week_low (wick 08:36:57) and prev2_day_low (wick 08:36:57), while MNQ failed both \u2014 live SMT pairs at meaningful (week/day) tiers with MES's own 1h closes already rejecting (closing BACK ABOVE) those swept lows, a strong reversal signal (P2). Daily_mid and weekly_mid both show REJECTED reads (closed before on 1h) \u2014 price is below both equilibria and failing to reclaim them, reinforcing the downside lean. The S9 stretch flag (4.87x, beyond 3.0x threshold) indicates price has run far from structure, but this does not contradict the DOWN thesis \u2014 it confirms the extension of the existing downtrend. Session maturity shows 34 mature P1/P2 items (not thin), supporting confidence. The prior-day's own 4h close on MES prev1_day_low showed a REJECT (closed back before 7511.25, per S9), while MES's 1h close has since ACCEPTED beyond (7466.0), a cross-tf contradiction that the model must account for: the older 4h read is stale relative to the fresher 1h confirmation. Tallying mature evidence: MES scores heavily DOWN (4 accept-beyond items at day/week tiers, 2 P2 rejects of SMTs at meaningful tiers, 2 mid rejects), MNQ scores mixed (1 accept london low, 1 reject own day low, 2 mid rejects), net leans DOWN. The lack of ANY UP-side evidence (no unswept highs, no daily_mid accept, no bullish P2) and the visible exhaustion of yesterday's structure (all nearby lows depleted) reinforce a directional DOWN bias. Sparse structure is present (nearest UP pool is 4.02x away: london_high, 468 pts distant), consistent with a deep pullback consuming local supply."
+    }
+  ],
+  "price_recap_after_boundary": {
+    "window_end": "2026-07-23 13:20:00-04:00",
+    "open": 28708.75,
+    "high": 28883.75,
+    "low": 28432.5,
+    "close": 28661.5,
+    "n_bars": 240
+  },
+  "predicate_walk_forward": {
+    "dol_touched_at": "2026-07-23 09:24:00-04:00",
+    "falsified_at": null,
+    "exhausted_at": null,
+    "recall_fired_at": null,
+    "first_terminal_event": "dol_touch"
+  }
+}
