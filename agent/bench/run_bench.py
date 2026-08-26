@@ -31,14 +31,18 @@ import pandas as pd
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _AGENT = os.path.dirname(_HERE)
 _REPO = os.path.dirname(_AGENT)
-for _p in (_HERE, _AGENT, os.path.join(_AGENT, "contracts"),
+for _p in (_HERE, _AGENT, _REPO, os.path.join(_AGENT, "contracts"),
            os.path.join(_REPO, "calibration")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 from config import BenchConfig, SAFETY_NETS  # noqa: E402
 from lifecycle import BenchDecision, run_day  # noqa: E402
-from facts import ParquetFactsSource  # noqa: E402
+# NOTE: `agent.bench.facts` is imported by its FULL dotted path, not as a bare
+# `facts`. `agent/facts/` (the cycle-1 facts layer) is a package of that same name
+# and `agent/` sits ahead of `agent/bench/` on sys.path here, so a bare
+# `from facts import ...` resolves to the WRONG module.
+from agent.bench.facts import ParquetFactsSource  # noqa: E402
 
 from confidence import confidence  # noqa: E402  (agent/confidence.py)
 from run_agent import decide_thesis, make_backend  # noqa: E402

@@ -200,9 +200,10 @@ def test_system_prompt_byte_stable():
     b = build_system_prompt()
     assert a == b
     assert a.encode("utf-8") == b.encode("utf-8")
-    # Fixed KB order, not glob order: smt first, next-move last.
-    assert a.index("# FILE: smt.md") < a.index("# FILE: decisions/daily-trend.md")
-    assert a.index("# FILE: decisions/daily-trend.md") < a.index("# FILE: decisions/next-move.md")
+    # Fixed KB order, not glob order: smt first, the decision doc last. (Cycle-1
+    # cutover: decisions/thesis.md replaced daily-trend.md + next-move.md.)
+    assert a.index("# FILE: smt.md") < a.index("# FILE: decisions/thesis.md")
+    assert a.index("# FILE: entry-confirmation.md") < a.index("# FILE: decisions/thesis.md")
 
 
 # --------------------------------------------------------------------------- #

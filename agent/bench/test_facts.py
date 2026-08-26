@@ -13,12 +13,17 @@ import pandas as pd
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (_HERE, os.path.dirname(_HERE), os.path.join(os.path.dirname(_HERE), "contracts"),
+for _p in (_HERE, os.path.dirname(_HERE), os.path.dirname(os.path.dirname(_HERE)),
+           os.path.join(os.path.dirname(_HERE), "contracts"),
            os.path.join(os.path.dirname(os.path.dirname(_HERE)), "calibration")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from facts import DEFAULT_MAIN, LOOKBACK, ParquetFactsSource  # noqa: E402
+# NOTE: `agent.bench.facts` is imported by its FULL dotted path, not as a bare
+# `facts`. `agent/facts/` (the cycle-1 facts layer) is a package of that same name
+# and `agent/` sits ahead of `agent/bench/` on sys.path here, so a bare
+# `from facts import ...` resolves to the WRONG module.
+from agent.bench.facts import DEFAULT_MAIN, LOOKBACK, ParquetFactsSource  # noqa: E402
 from derive_facts import (  # noqa: E402
     FVG_LOOKBACK_DAYS, NEAR_MATURITY_WINDOW_MIN, compute_facts,
     render_evidence_text, render_facts_text,

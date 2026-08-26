@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (_HERE, os.path.dirname(_HERE), os.path.join(os.path.dirname(_HERE), "contracts")):
+for _p in (_HERE, os.path.dirname(_HERE), os.path.dirname(os.path.dirname(_HERE)),
+           os.path.join(os.path.dirname(_HERE), "contracts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -186,7 +187,7 @@ def test_requires_shell_key_in_real_mode(monkeypatch):
 
 def test_api_error_degrades_to_failsafe():
     # Spec §4: a backend/transport error becomes a failsafe decision (logged), not an abort.
-    from facts import FactsResult
+    from agent.bench.facts import FactsResult
 
     class RaisingBackend:
         name = "raising"

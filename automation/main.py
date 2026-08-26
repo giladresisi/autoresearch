@@ -1006,6 +1006,34 @@ class SmtV2Dispatcher:
             return None
 
     @staticmethod
+    def _build_trader(out_dir):
+        """Build the cycle-1 Analyzer/Planner/Executor graft. Returns None unless
+        ACT_TRADER is set, so with the flag off the live process's import state is
+        completely untouched and the pipeline is byte-identical by construction.
+
+        Cycle 1 places NO orders — the chain stops at `trader_decisions.jsonl`. Any
+        construction failure degrades to None; the live session is never aborted by it.
+        """
+        try:
+            # Raw env pre-check BEFORE any sys.path mutation/import: flag OFF must
+            # leave the live process's import state completely untouched.
+            if os.environ.get(
+                    "ACT_TRADER", "1").strip().lower() in ("0", "false", "no", "off"):
+                return None
+            _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if _repo not in sys.path:
+                sys.path.insert(0, _repo)
+            from agent.trader.graft import TraderGraft
+            from agent.trader.analyzer import thesis_via_decide_thesis
+            from agent.run_agent import make_backend
+            backend = thesis_via_decide_thesis(make_backend(
+                os.environ.get("ACT_TRADER_BACKEND", "openrouter"),
+                os.environ.get("ACT_TRADER_MODEL") or None))
+            return TraderGraft(out_dir, backend)
+        except Exception:
+            return None
+
+    @staticmethod
     def _build_worker(out_dir):
         """Build the async decision worker via the shared factory (never imports the heavy
         backtest module). Returns None if disabled or on any construction failure — the live
@@ -1044,19 +1072,28 @@ class SmtV2Dispatcher:
         # comments.md). Degrade-to-None on any failure keeps live running.
         self._worker = None
         self._primary = None
+        self._trader = None
         try:
             self._worker = self._build_worker(SESSIONS_DIR / str(today))
             self._primary = self._build_primary(SESSIONS_DIR / str(today), today)
         except Exception:
             self._worker = None
             self._primary = None
+        # Built LAST and guarded separately: folding it into the block above would let a
+        # trader failure discard an already-constructed DecisionWorker without closing
+        # it, leaking the polling daemon thread the retry comment below guards against.
+        try:
+            self._trader = self._build_trader(SESSIONS_DIR / str(today))
+        except Exception:
+            self._trader = None
         # If pipeline init raises, the exception propagates to the tick callback and this
         # method retries every second — close the just-built worker first, or each retry
         # leaks one polling daemon thread (review finding: worker-thread churn).
         try:
             self._pipeline = SessionPipeline(mnq_1m_df, mes_1m_df, self._emit,
                                              ai_decisions=self._worker,
-                                             trade_primary=self._primary)
+                                             trade_primary=self._primary,
+                                             trader=self._trader)
             _cme_start = pd.Timestamp(cme_session_start(now))
             today_at_open = mnq_1m_df[
                 (mnq_1m_df.index >= _cme_start) & (mnq_1m_df.index <= now)

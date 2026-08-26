@@ -43,11 +43,15 @@ _AGENT = os.path.join(REPO_ROOT, "agent")
 _BENCH = os.path.join(_AGENT, "bench")
 _CONTRACTS = os.path.join(_AGENT, "contracts")
 _CALIB = os.path.join(REPO_ROOT, "calibration")
-for _p in (_AGENT, _BENCH, _CONTRACTS, _CALIB):
+for _p in (_AGENT, _BENCH, REPO_ROOT, _CONTRACTS, _CALIB):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from facts import ParquetFactsSource  # noqa: E402  (agent/bench/facts.py)
+# NOTE: `agent.bench.facts` is imported by its FULL dotted path, not as a bare
+# `facts`. `agent/facts/` (the cycle-1 facts layer) is a package of that same name
+# and `agent/` sits ahead of `agent/bench/` on sys.path here, so a bare
+# `from facts import ...` resolves to the WRONG module.
+from agent.bench.facts import ParquetFactsSource  # noqa: E402
 from lifecycle import _SweepTracker  # noqa: E402  (agent/bench/lifecycle.py)
 from predicates import MarketView, eval_any  # noqa: E402  (agent/contracts/predicates.py)
 from run_agent import (  # noqa: E402  (agent/run_agent.py)

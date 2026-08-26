@@ -10,13 +10,18 @@ import sys
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (_HERE, os.path.dirname(_HERE), os.path.join(os.path.dirname(_HERE), "contracts"),
+for _p in (_HERE, os.path.dirname(_HERE), os.path.dirname(os.path.dirname(_HERE)),
+           os.path.join(os.path.dirname(_HERE), "contracts"),
            os.path.join(os.path.dirname(os.path.dirname(_HERE)), "calibration")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 from config import BenchConfig  # noqa: E402
-from facts import DEFAULT_MAIN, ParquetFactsSource  # noqa: E402
+# NOTE: `agent.bench.facts` is imported by its FULL dotted path, not as a bare
+# `facts`. `agent/facts/` (the cycle-1 facts layer) is a package of that same name
+# and `agent/` sits ahead of `agent/bench/` on sys.path here, so a bare
+# `from facts import ...` resolves to the WRONG module.
+from agent.bench.facts import DEFAULT_MAIN, ParquetFactsSource  # noqa: E402
 import run_bench  # noqa: E402
 import score  # noqa: E402
 import report  # noqa: E402

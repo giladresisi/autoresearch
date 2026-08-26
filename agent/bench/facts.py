@@ -68,6 +68,231 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+class BoundarySliceError(Exception):
+    """Raised by `slice_for_boundary` when the frames cannot support a bundle.
+
+    Carries the SAME `reason` strings `build_facts` has always reported, so the
+    degraded-result contract is unchanged.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def slice_for_boundary(raw_by_ticker: dict, norm_by_ticker: dict,
+                       boundary: pd.Timestamp, tickers=("MNQ", "MES"),
+                       lookback: pd.Timedelta = LOOKBACK) -> tuple:
+    """The ONE boundary -> (primary slice, ATH) rule. -> (prim, ath).
+
+    Extracted (cycle-1 addendum change E) so the OFFLINE parquet source
+    (`ParquetFactsSource.build_facts`) and the ONLINE in-memory assembler
+    (`agent.facts.assemble.build_bundle`) cannot drift. They differ only in where the
+    two frames come from; every rule below is shared:
+
+      * `prim` = the `lookback` window ending strictly BEFORE `boundary`, taken from the
+        MAINTENANCE-DROPPED frame — this is what `compute_facts` derives levels from.
+      * `ath` = the max high strictly before `boundary` from the RAW frame, maintenance
+        bars INCLUDED. Dropping them first can move the maximum, so the two frames are
+        not interchangeable here.
+
+    Two copies of this is precisely the failure mode this project has already paid for
+    twice (the 2026-07-08 online/offline facts divergence, and the near-miss that
+    prompted this extraction).
+    """
+    prim, ath = {}, {}
+    for tk in tickers:
+        raw = raw_by_ticker.get(tk)
+        if raw is None or len(raw) == 0:
+            raise BoundarySliceError("no-data-before-boundary")
+        before = raw[raw.index < boundary]
+        if len(before) == 0:
+            raise BoundarySliceError("no-data-before-boundary")
+        ath[tk] = float(before["High"].max()) if "High" in before.columns             else float(before["high"].max())
+        norm = norm_by_ticker.get(tk)
+        if norm is None or len(norm) == 0:
+            raise BoundarySliceError("empty-primary-slice")
+        sl = norm[(norm.index >= boundary - lookback) & (norm.index < boundary)]
+        if len(sl) == 0:
+            raise BoundarySliceError("empty-primary-slice")
+        prim[tk] = sl
+    return prim, ath
+
+
+def bundle_for_boundary(raw_by_ticker: dict, norm_by_ticker: dict,
+                        boundary: pd.Timestamp, tickers=("MNQ", "MES"),
+                        lookback: pd.Timedelta = LOOKBACK):
+    """`slice_for_boundary` + `compute_facts`. -> (bundle, prim). Raises
+    `BoundarySliceError` on a degraded input; `compute_facts` errors propagate."""
+    prim, ath = slice_for_boundary(raw_by_ticker, norm_by_ticker, boundary,
+                                   tickers=tickers, lookback=lookback)
+    bundle = compute_facts(
+        prim["MNQ"], prim["MES"], ath_mnq=ath.get("MNQ"), ath_mes=ath.get("MES"),
+        hist_mnq=norm_by_ticker.get("MNQ"), hist_mes=norm_by_ticker.get("MES"),
+        now=None)
+    return bundle, prim
+
+
+def bundle_to_l1_view(bundle) -> tuple:
+    """The L1 view of a computed FactsBundle: (validator_dict, menu_text,
+    evidence_text, evidence_magnitude).
+
+    Extracted verbatim out of `ParquetFactsSource.build_facts` (cycle-1 Task 10) so the
+    ONLINE assembler (`agent.facts.assemble.assemble_facts`) and the OFFLINE bench build
+    the additive S8/S9 overlays from one piece of code. Two copies of this would make
+    the facts-parity gate compare a fork against itself.
+
+    Every key here is an ADDITIVE overlay on the bench's own dict copy — the shared
+    `facts_to_validator_dict` result stays byte-stable for the shadow engine's hash.
+    """
+    vd = facts_to_validator_dict(bundle)   # core view (shadow-parity)
+    # S8 menus: an additive L1 overlay on the bench's OWN validator_dict copy (the
+    # shared facts_to_validator_dict stays byte-stable for the shadow engine's hash).
+    bundle.menus = build_menus(bundle, vd)
+    vd["menus"] = bundle.menus
+    # plan 15 Task 4: FVG-zone ids allowed as P5 evidence `level` values (additive overlay
+    # on the bench's own validator_dict copy, like menus — never in the shadow-hash dict).
+    vd["fvg_zones"] = [z["id"] for z in bundle.fvg_zones]
+    # 2026-08-02: structured FVG-zone metadata (keyed by id) for score_thesis_evidence's
+    # same-move dedup -- the plain id list above is schema-facing only (level-name
+    # validation), this carries what the dedup pre-pass needs to detect "adjacent bars,
+    # one continuous move" (asset/tf/kind/ts) without re-parsing the id string. `ts` is
+    # stringified (JSON/artifact-safe, like fvg_zones above) and re-parsed with
+    # pd.Timestamp on the scoring side.
+    vd["fvg_zone_meta"] = {
+        z["id"]: {"asset": z["asset"], "tf": z["tf"], "kind": z["kind"], "ts": str(z["ts"])}
+        for z in (bundle.fvg_zones or [])
+    }
+    # plan 15 Task 7: `now` for the audit-only pending_resolution.resolves_at > now check.
+    vd["now"] = str(bundle.now) if bundle.now is not None else None
+    # thesis.md §2.1b/§2.1d: nested/duplicate-sweep levels excluded from fresh P1
+    # evidence (lists, not sets -- JSON/artifact-safe, like fvg_zones above).
+    vd["suppressed_p1_levels"] = {
+        tkr: sorted(names) for tkr, names in (bundle.suppressed_p1_levels or {}).items()
+    }
+    # thesis.md §2.1b: P2/SMT nesting suppression (additive overlay, like
+    # suppressed_p1_levels above — never in the shadow-hash dict).
+    vd["suppressed_p2_sites"] = {
+        tkr: sorted(names) for tkr, names in (bundle.suppressed_p2_sites or {}).items()
+    }
+    # thesis.md §3a: near-maturity pre-confirmation candidates (additive overlay, like
+    # suppressed_p1_levels above — never in the shadow-hash dict).
+    vd["near_maturity_candidates"] = list(bundle.near_maturity_candidates or [])
+    # 2026-08-02 evidence-direction ground truth: the SAME per-level HTF-close verdict
+    # already computed for every named level (bundle.htf_close_status, incl. the
+    # daily_mid/weekly_mid synthetic "levels" plan 17 Fix 3 added) exposed as a flat
+    # None|bool per (asset, level, tf) -- None = never swept / no qualifying close yet
+    # (immature), True = closed BEYOND (accept), False = closed back before (reject).
+    # Additive overlay, like suppressed_p1_levels above — never in the shadow-hash
+    # dict. Two consumers: (1) SEM_EVIDENCE_DIRECTION_MISMATCH cross-checks every
+    # declared P1/P2 item's mature/direction claim against this instead of trusting it
+    # (closes the 2026-07-15 prev1_week_high fabrication class — a level that was NEVER
+    # swept has every tf entry None, directly contradicting a declared mature=True); (2)
+    # score_thesis_evidence's P3 auto-derivation reads the two mid names straight out of
+    # this same dict rather than needing its own separate overlay.
+    vd["level_htf_close_status"] = {
+        tkr: {name: {tf: (None if (status or {}).get(tf) is None
+                          else bool(status[tf]["beyond"]))
+                    for tf in ("1h", "4h")}
+              for name, status in (bundle.htf_close_status.get(tkr) or {}).items()}
+        for tkr in ("MNQ", "MES")
+    }
+    # 2026-08-02 P1/P2 auto-derivation: level_htf_close_status has no tier or price
+    # (facts_to_validator_dict's own "levels" view deliberately omits tier -- see its
+    # docstring -- and score_thesis_evidence only receives narrow sub-dicts, not the
+    # full facts blob), so this carries both straight from bundle.levels for the day-
+    # tier-confluent-with-week-tier tier bump (thesis.md §2.1e promotion) as well as
+    # auto-injecting P1 items. Additive overlay, like suppressed_p1_levels above.
+    vd["level_tiers"] = {
+        tkr: {name: {"tier": tier, "price": price}
+              for name, (price, _body, side, tier, _active) in
+              (bundle.levels.get(tkr) or {}).items() if side is not None}
+        for tkr in ("MNQ", "MES")
+    }
+    # thesis.md §2.1 (2026-08-15): running-extreme tier promotion — a session-tier
+    # level that IS the running day/week extreme scores at that tier (P1 weight; the
+    # matching P2 promotion lives on bundle.smt_candidates itself). Overrides the
+    # tier straight in level_tiers so the P1 auto-injection and §2.1e machinery see
+    # the promoted tier with no scorer change.
+    for _tkr, _promos in (bundle.promoted_session_levels or {}).items():
+        for _name, _ptier in (_promos or {}).items():
+            _entry = (vd["level_tiers"].get(_tkr) or {}).get(_name)
+            if _entry is not None:
+                _entry["tier"] = _ptier
+    # 2026-08-02 P2 auto-derivation: JSON-safe view of bundle.smt_candidates (drops
+    # swept_at/type -- not needed for scoring) so score_thesis_evidence can auto-inject
+    # a P2 item for every meaningful, unsuppressed divergence directly, the same way
+    # P3 is auto-derived from level_htf_close_status.
+    vd["smt_candidates"] = [
+        {"level": c.get("level"), "tier": c.get("tier"),
+         "swept_ticker": c.get("swept_ticker"), "unswept_ticker": c.get("unswept_ticker"),
+         "meaningful": bool(c.get("meaningful"))}
+        for c in (bundle.smt_candidates or [])
+    ]
+    # 2026-08-02 thesis.md §2.1e promotion: the CURRENT week's own high/low, for the
+    # narrow day-tier-confluent-with-week-tier tier bump in score_thesis_evidence
+    # (2026-07-15 root-cause: prev2_day_high sat within a tight cluster of the week's
+    # own high on both assets -- a day-tier SMT that is ALSO the week's extreme deserves
+    # week-tier weight, not day-tier). Deliberately NOT the same mechanism as the
+    # existing _confluence_notes (audit-only, OLD untracked extremes only) -- this
+    # compares against the CURRENT, actively-tracked week extreme.
+    vd["week_extremes"] = {
+        tkr: {"hi": bundle.week_hi.get(tkr), "lo": bundle.week_lo.get(tkr)}
+        for tkr in ("MNQ", "MES")
+    }
+    # thesis.md §10 (2026-08-05): P3-vs-P4 mid promotion, PER TF — whether each mid's
+    # crossing on that tf is still the live, un-superseded story (derive_facts.
+    # _mid_tf_state). JSON-safe as-is ({tf: {"fresh": bool, "cross_dir": str}}, no
+    # timestamps).
+    vd["mid_reclaim"] = {
+        tkr: dict(bundle.mid_reclaim.get(tkr) or {}) for tkr in ("MNQ", "MES")
+    }
+    # thesis.md §10 (2026-08-05): partial-bar reversal — does the currently-forming
+    # next-tf bar already undermine a level/mid's just-completed bar verdict
+    # (derive_facts._htf_reversal_tier). JSON-safe as-is ({level: {tf: str}}).
+    vd["htf_reversal"] = {
+        tkr: dict(bundle.htf_reversal.get(tkr) or {}) for tkr in ("MNQ", "MES")
+    }
+    # thesis.md §2.1 P3 (2026-08-15, #3): unconditional per-asset position vs each
+    # mid — feeds the position-only P3 injection for mids with no HTF crossing at all.
+    # JSON-safe as-is (floats/strings only).
+    vd["mid_position"] = {
+        tkr: dict(bundle.mid_position.get(tkr) or {}) for tkr in ("MNQ", "MES")
+    }
+    # thesis.md §2.1 P2 Stage 2 input (2026-08-15): recross distance in avg-1h-range
+    # units per level/mid with a reversal entry — read only by the EXPERIMENTAL
+    # discount-fire A/B (production leaves the knob off). JSON-safe as-is.
+    vd["recross_distance"] = {
+        tkr: dict(bundle.recross_distance.get(tkr) or {}) for tkr in ("MNQ", "MES")
+    }
+    # thesis.md §2.1c (2026-08-15, #6): equilibrium-reversion staleness as a HARD P1
+    # gate — the flagged names only (lists, JSON-safe, like suppressed_p1_levels).
+    vd["p1_stale_levels"] = {
+        tkr: sorted(name for name, flag in
+                    (bundle.p1_equilibrium_stale.get(tkr) or {}).items() if flag)
+        for tkr in ("MNQ", "MES")
+    }
+    menu_text = render_menus_text(bundle)              # reuses cached bundle.menus
+    magnitude = build_evidence_magnitude(bundle)  # plan 14 Task 5: code-derived
+    # magnitude threaded into the render so the model can SEE the WEAK/NORMAL/STRONG
+    # clearance label before declaring bias (gap fix: same ratio, no new computation).
+    evidence_text = render_evidence_text(bundle, magnitude=magnitude)
+    # 2026-08-05: same ratios, JSON-safe nested-dict shape ({asset: {level: {tf:
+    # ratio}}}, tuple keys -> nested dicts) so validate_thesis's own ARI_THESIS_BIAS
+    # re-check can apply the SAME clearance-magnitude weighting the real scoring path
+    # (_derive_thesis_arithmetic) already does -- previously validate_thesis re-scored
+    # with an unweighted x1.0 on every item, which could disagree with the REAL,
+    # magnitude-weighted net score closely enough to flip which side of a tie the
+    # declared bias fell on (2026-07-20 09:20 ET: true net score was an exact 0.0 tie
+    # -- NEUTRAL -- but the unweighted re-check computed +0.5 UP and waved a declared
+    # UP bias through clean).
+    vd["evidence_magnitude"] = {}
+    for (_asset, _level, _tf), _ratio in magnitude.items():
+        vd["evidence_magnitude"].setdefault(_asset, {}).setdefault(
+            _level, {})[_tf] = _ratio
+    return vd, menu_text, evidence_text, magnitude
+
+
 class ParquetFactsSource:
     """Loads the full 1s (facts) + 1m (walk) parquets once, then serves facts snapshots
     at arbitrary boundaries and per-date session bars. `main_dir` defaults to the
@@ -100,178 +325,22 @@ class ParquetFactsSource:
         parity)."""
         res = FactsResult(boundary=boundary)
         try:
-            prim = {}
-            ath = {}
-            for tk in self.tickers:
-                raw = self._raw_1s[tk]
-                before = raw[raw.index < boundary]
-                if len(before) == 0:
-                    res.degraded = True
-                    res.error = "no-data-before-boundary"
-                    return res
-                ath[tk] = float(before["High"].max())
-                norm = self._norm_1s[tk]
-                prim[tk] = norm[(norm.index >= boundary - LOOKBACK) & (norm.index < boundary)]
-                if len(prim[tk]) == 0:
-                    res.degraded = True
-                    res.error = "empty-primary-slice"
-                    return res
-
-            bundle = compute_facts(
-                prim["MNQ"], prim["MES"], ath_mnq=ath.get("MNQ"), ath_mes=ath.get("MES"),
-                hist_mnq=self._norm_1s.get("MNQ"), hist_mes=self._norm_1s.get("MES"),
-                now=None)
+            # The slicing rule lives in `bundle_for_boundary`, shared verbatim with the
+            # online assembler (cycle-1 addendum change E).
+            bundle, prim = bundle_for_boundary(self._raw_1s, self._norm_1s, boundary,
+                                               tickers=tuple(self.tickers))
+        except BoundarySliceError as exc:
+            res.degraded = True
+            res.error = exc.reason
+            return res
         except (IndexError, KeyError, ValueError) as exc:
             res.degraded = True
             res.error = f"compute_facts:{type(exc).__name__}"
             return res
 
         res.text = render_facts_text(bundle)
-        res.validator_dict = facts_to_validator_dict(bundle)   # core view (shadow-parity)
-        # S8 menus: an additive L1 overlay on the bench's OWN validator_dict copy (the
-        # shared facts_to_validator_dict stays byte-stable for the shadow engine's hash).
-        bundle.menus = build_menus(bundle, res.validator_dict)
-        res.validator_dict["menus"] = bundle.menus
-        # plan 15 Task 4: FVG-zone ids allowed as P5 evidence `level` values (additive overlay
-        # on the bench's own validator_dict copy, like menus — never in the shadow-hash dict).
-        res.validator_dict["fvg_zones"] = [z["id"] for z in bundle.fvg_zones]
-        # 2026-08-02: structured FVG-zone metadata (keyed by id) for score_thesis_evidence's
-        # same-move dedup -- the plain id list above is schema-facing only (level-name
-        # validation), this carries what the dedup pre-pass needs to detect "adjacent bars,
-        # one continuous move" (asset/tf/kind/ts) without re-parsing the id string. `ts` is
-        # stringified (JSON/artifact-safe, like fvg_zones above) and re-parsed with
-        # pd.Timestamp on the scoring side.
-        res.validator_dict["fvg_zone_meta"] = {
-            z["id"]: {"asset": z["asset"], "tf": z["tf"], "kind": z["kind"], "ts": str(z["ts"])}
-            for z in (bundle.fvg_zones or [])
-        }
-        # plan 15 Task 7: `now` for the audit-only pending_resolution.resolves_at > now check.
-        res.validator_dict["now"] = str(bundle.now) if bundle.now is not None else None
-        # thesis.md §2.1b/§2.1d: nested/duplicate-sweep levels excluded from fresh P1
-        # evidence (lists, not sets -- JSON/artifact-safe, like fvg_zones above).
-        res.validator_dict["suppressed_p1_levels"] = {
-            tkr: sorted(names) for tkr, names in (bundle.suppressed_p1_levels or {}).items()
-        }
-        # thesis.md §2.1b: P2/SMT nesting suppression (additive overlay, like
-        # suppressed_p1_levels above — never in the shadow-hash dict).
-        res.validator_dict["suppressed_p2_sites"] = {
-            tkr: sorted(names) for tkr, names in (bundle.suppressed_p2_sites or {}).items()
-        }
-        # thesis.md §3a: near-maturity pre-confirmation candidates (additive overlay, like
-        # suppressed_p1_levels above — never in the shadow-hash dict).
-        res.validator_dict["near_maturity_candidates"] = list(bundle.near_maturity_candidates or [])
-        # 2026-08-02 evidence-direction ground truth: the SAME per-level HTF-close verdict
-        # already computed for every named level (bundle.htf_close_status, incl. the
-        # daily_mid/weekly_mid synthetic "levels" plan 17 Fix 3 added) exposed as a flat
-        # None|bool per (asset, level, tf) -- None = never swept / no qualifying close yet
-        # (immature), True = closed BEYOND (accept), False = closed back before (reject).
-        # Additive overlay, like suppressed_p1_levels above — never in the shadow-hash
-        # dict. Two consumers: (1) SEM_EVIDENCE_DIRECTION_MISMATCH cross-checks every
-        # declared P1/P2 item's mature/direction claim against this instead of trusting it
-        # (closes the 2026-07-15 prev1_week_high fabrication class — a level that was NEVER
-        # swept has every tf entry None, directly contradicting a declared mature=True); (2)
-        # score_thesis_evidence's P3 auto-derivation reads the two mid names straight out of
-        # this same dict rather than needing its own separate overlay.
-        res.validator_dict["level_htf_close_status"] = {
-            tkr: {name: {tf: (None if (status or {}).get(tf) is None
-                              else bool(status[tf]["beyond"]))
-                        for tf in ("1h", "4h")}
-                  for name, status in (bundle.htf_close_status.get(tkr) or {}).items()}
-            for tkr in ("MNQ", "MES")
-        }
-        # 2026-08-02 P1/P2 auto-derivation: level_htf_close_status has no tier or price
-        # (facts_to_validator_dict's own "levels" view deliberately omits tier -- see its
-        # docstring -- and score_thesis_evidence only receives narrow sub-dicts, not the
-        # full facts blob), so this carries both straight from bundle.levels for the day-
-        # tier-confluent-with-week-tier tier bump (thesis.md §2.1e promotion) as well as
-        # auto-injecting P1 items. Additive overlay, like suppressed_p1_levels above.
-        res.validator_dict["level_tiers"] = {
-            tkr: {name: {"tier": tier, "price": price}
-                  for name, (price, _body, side, tier, _active) in
-                  (bundle.levels.get(tkr) or {}).items() if side is not None}
-            for tkr in ("MNQ", "MES")
-        }
-        # thesis.md §2.1 (2026-08-15): running-extreme tier promotion — a session-tier
-        # level that IS the running day/week extreme scores at that tier (P1 weight; the
-        # matching P2 promotion lives on bundle.smt_candidates itself). Overrides the
-        # tier straight in level_tiers so the P1 auto-injection and §2.1e machinery see
-        # the promoted tier with no scorer change.
-        for _tkr, _promos in (bundle.promoted_session_levels or {}).items():
-            for _name, _ptier in (_promos or {}).items():
-                _entry = (res.validator_dict["level_tiers"].get(_tkr) or {}).get(_name)
-                if _entry is not None:
-                    _entry["tier"] = _ptier
-        # 2026-08-02 P2 auto-derivation: JSON-safe view of bundle.smt_candidates (drops
-        # swept_at/type -- not needed for scoring) so score_thesis_evidence can auto-inject
-        # a P2 item for every meaningful, unsuppressed divergence directly, the same way
-        # P3 is auto-derived from level_htf_close_status.
-        res.validator_dict["smt_candidates"] = [
-            {"level": c.get("level"), "tier": c.get("tier"),
-             "swept_ticker": c.get("swept_ticker"), "unswept_ticker": c.get("unswept_ticker"),
-             "meaningful": bool(c.get("meaningful"))}
-            for c in (bundle.smt_candidates or [])
-        ]
-        # 2026-08-02 thesis.md §2.1e promotion: the CURRENT week's own high/low, for the
-        # narrow day-tier-confluent-with-week-tier tier bump in score_thesis_evidence
-        # (2026-07-15 root-cause: prev2_day_high sat within a tight cluster of the week's
-        # own high on both assets -- a day-tier SMT that is ALSO the week's extreme deserves
-        # week-tier weight, not day-tier). Deliberately NOT the same mechanism as the
-        # existing _confluence_notes (audit-only, OLD untracked extremes only) -- this
-        # compares against the CURRENT, actively-tracked week extreme.
-        res.validator_dict["week_extremes"] = {
-            tkr: {"hi": bundle.week_hi.get(tkr), "lo": bundle.week_lo.get(tkr)}
-            for tkr in ("MNQ", "MES")
-        }
-        # thesis.md §10 (2026-08-05): P3-vs-P4 mid promotion, PER TF — whether each mid's
-        # crossing on that tf is still the live, un-superseded story (derive_facts.
-        # _mid_tf_state). JSON-safe as-is ({tf: {"fresh": bool, "cross_dir": str}}, no
-        # timestamps).
-        res.validator_dict["mid_reclaim"] = {
-            tkr: dict(bundle.mid_reclaim.get(tkr) or {}) for tkr in ("MNQ", "MES")
-        }
-        # thesis.md §10 (2026-08-05): partial-bar reversal — does the currently-forming
-        # next-tf bar already undermine a level/mid's just-completed bar verdict
-        # (derive_facts._htf_reversal_tier). JSON-safe as-is ({level: {tf: str}}).
-        res.validator_dict["htf_reversal"] = {
-            tkr: dict(bundle.htf_reversal.get(tkr) or {}) for tkr in ("MNQ", "MES")
-        }
-        # thesis.md §2.1 P3 (2026-08-15, #3): unconditional per-asset position vs each
-        # mid — feeds the position-only P3 injection for mids with no HTF crossing at all.
-        # JSON-safe as-is (floats/strings only).
-        res.validator_dict["mid_position"] = {
-            tkr: dict(bundle.mid_position.get(tkr) or {}) for tkr in ("MNQ", "MES")
-        }
-        # thesis.md §2.1 P2 Stage 2 input (2026-08-15): recross distance in avg-1h-range
-        # units per level/mid with a reversal entry — read only by the EXPERIMENTAL
-        # discount-fire A/B (production leaves the knob off). JSON-safe as-is.
-        res.validator_dict["recross_distance"] = {
-            tkr: dict(bundle.recross_distance.get(tkr) or {}) for tkr in ("MNQ", "MES")
-        }
-        # thesis.md §2.1c (2026-08-15, #6): equilibrium-reversion staleness as a HARD P1
-        # gate — the flagged names only (lists, JSON-safe, like suppressed_p1_levels).
-        res.validator_dict["p1_stale_levels"] = {
-            tkr: sorted(name for name, flag in
-                        (bundle.p1_equilibrium_stale.get(tkr) or {}).items() if flag)
-            for tkr in ("MNQ", "MES")
-        }
-        res.menu_text = render_menus_text(bundle)              # reuses cached bundle.menus
-        res.evidence_magnitude = build_evidence_magnitude(bundle)  # plan 14 Task 5: code-derived
-        # magnitude threaded into the render so the model can SEE the WEAK/NORMAL/STRONG
-        # clearance label before declaring bias (gap fix: same ratio, no new computation).
-        res.evidence_text = render_evidence_text(bundle, magnitude=res.evidence_magnitude)
-        # 2026-08-05: same ratios, JSON-safe nested-dict shape ({asset: {level: {tf:
-        # ratio}}}, tuple keys -> nested dicts) so validate_thesis's own ARI_THESIS_BIAS
-        # re-check can apply the SAME clearance-magnitude weighting the real scoring path
-        # (_derive_thesis_arithmetic) already does -- previously validate_thesis re-scored
-        # with an unweighted x1.0 on every item, which could disagree with the REAL,
-        # magnitude-weighted net score closely enough to flip which side of a tie the
-        # declared bias fell on (2026-07-20 09:20 ET: true net score was an exact 0.0 tie
-        # -- NEUTRAL -- but the unweighted re-check computed +0.5 UP and waved a declared
-        # UP bias through clean).
-        res.validator_dict["evidence_magnitude"] = {}
-        for (_asset, _level, _tf), _ratio in res.evidence_magnitude.items():
-            res.validator_dict["evidence_magnitude"].setdefault(_asset, {}).setdefault(
-                _level, {})[_tf] = _ratio
+        (res.validator_dict, res.menu_text, res.evidence_text,
+         res.evidence_magnitude) = bundle_to_l1_view(bundle)
         res.content_hash = _sha(res.text)                      # core hash: S0–S7 only (parity)
         res.now = bundle.now
         res.max_ts = bundle.now

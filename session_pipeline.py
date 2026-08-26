@@ -255,9 +255,15 @@ class SessionPipeline:
         emit_fn: Callable[[dict], None],
         ai_decisions=None,
         trade_primary=None,
+        trader=None,
     ) -> None:
         self._hist_mnq_1m = hist_mnq_1m
         self._hist_mes_1m = hist_mes_1m
+        # Cycle-1 Analyzer/Planner/Executor graft (flag-gated, default None). ADDITIVE:
+        # unlike trade_primary below, this hook does NOT early-return, so the legacy
+        # engine keeps running and emitting exactly as before. When None the pipeline
+        # does ZERO extra work and touches ZERO state → byte-identical by construction.
+        self._trader = trader
         # AI-trader v2 PRIMARY runner (spec §3 `primary`, flag-gated, default None). When set
         # the v2 loop owns entries/management and the legacy hypothesis execution is bypassed
         # (one-brain, spec §4); None ⇒ zero extra work, byte-identical by construction.
@@ -1070,6 +1076,24 @@ class SessionPipeline:
 
         if self._ai_decisions is not None:
             self._ai_decisions_on_bar(now, today_mnq, today_mes)
+
+        # Cycle-1 trader graft (Analyzer → Planner → Executor). Additive and
+        # observation-only: it places no orders, writes only its own files, and never
+        # early-returns — the legacy engine below runs unchanged. Any failure is
+        # swallowed; the trader must never crash the bar loop.
+        if self._trader is not None:
+            try:
+                # The hist_* frames are passed for the same reason
+                # _build_ai_decisions_frames passes them: today_* is the CURRENT CME
+                # session only (~15 h), while the Analyzer's window is 17 days and the
+                # Executor's level window is 14. Without history the level universe is
+                # empty and the thesis is decided on nothing.
+                self._trader.on_bar(now, today_mnq, today_mes,
+                                    bar_complete=bar_complete,
+                                    hist_mnq=self._hist_mnq_1m,
+                                    hist_mes=self._hist_mes_1m)
+            except Exception:
+                pass
 
         # Re-run daily level computation at two transitions per CME session day.
         # 00:00 ET (London session start): today's midnight open is now available as TDO,

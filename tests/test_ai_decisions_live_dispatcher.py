@@ -29,10 +29,13 @@ class _FakePipeline:
 
     last = {}
 
-    def __init__(self, mnq, mes, emit, ai_decisions=None, trade_primary=None):
-        _FakePipeline.last = {"ai_decisions": ai_decisions, "trade_primary": trade_primary}
+    def __init__(self, mnq, mes, emit, ai_decisions=None, trade_primary=None,
+                 trader=None):
+        _FakePipeline.last = {"ai_decisions": ai_decisions,
+                              "trade_primary": trade_primary, "trader": trader}
         self.ai_decisions = ai_decisions
         self.trade_primary = trade_primary
+        self.trader = trader
 
     def on_session_start(self, now, today_at_open, force_reset=False):
         pass
@@ -199,3 +202,72 @@ def test_engine_build_failure_degrades(monkeypatch, tmp_path, _fake_pipeline):
     assert _FakePipeline.last["ai_decisions"] is None
     # live keeps running: on_1m_bar still works (no raise) with no worker attached
     d.on_1m_bar(now, pd.Series(dtype=float), pd.Series(dtype=float), _hist(), _hist())
+
+
+# --- cycle-1 trader graft (added with the ACT_TRADER wiring) ----------------- #
+
+def test_trader_flag_off_builds_no_trader(monkeypatch, tmp_path, _fake_pipeline):
+    """ACT_TRADER=0 is the explicit OPT-OUT — the kill switch. It is the only way to
+    get no graft; unset now means ON (every orchestrator session runs the chain)."""
+    monkeypatch.setattr(main, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setenv("ACT_TRADER", "0")
+    d = main.SmtV2Dispatcher()
+    d.on_session_start(_now(), _hist(), _hist())
+    assert d._trader is None
+    assert _FakePipeline.last["trader"] is None
+
+
+def test_trader_unset_attaches_the_graft_by_default(monkeypatch, tmp_path, _fake_pipeline):
+    """Unset ⇒ ON. Nothing to configure: every orchestrator session runs the chain."""
+    monkeypatch.setattr(main, "SESSIONS_DIR", tmp_path)
+    monkeypatch.delenv("ACT_TRADER", raising=False)
+    sentinel = object()
+    monkeypatch.setattr(main.SmtV2Dispatcher, "_build_trader",
+                        staticmethod(lambda out_dir: sentinel))
+    d = main.SmtV2Dispatcher()
+    d.on_session_start(_now(), _hist(), _hist())
+    assert _FakePipeline.last["trader"] is sentinel
+
+
+def test_trader_flag_on_attaches_the_graft(monkeypatch, tmp_path, _fake_pipeline):
+    monkeypatch.setattr(main, "SESSIONS_DIR", tmp_path)
+    sentinel = object()
+    captured = {}
+
+    def _fake_build_trader(out_dir):
+        captured["out_dir"] = out_dir
+        return sentinel
+
+    monkeypatch.setattr(main.SmtV2Dispatcher, "_build_trader",
+                        staticmethod(_fake_build_trader))
+    now = _now()
+    d = main.SmtV2Dispatcher()
+    d.on_session_start(now, _hist(), _hist())
+    assert _FakePipeline.last["trader"] is sentinel
+    assert captured["out_dir"] == tmp_path / str(main.cme_session_date(now))
+
+
+def test_trader_build_failure_degrades_to_none(monkeypatch, tmp_path, _fake_pipeline):
+    """A broken trader must never abort the live session."""
+    monkeypatch.setattr(main, "SESSIONS_DIR", tmp_path)
+
+    def _boom(out_dir):
+        raise RuntimeError("trader build failed")
+
+    monkeypatch.setattr(main.SmtV2Dispatcher, "_build_trader", staticmethod(_boom))
+    d = main.SmtV2Dispatcher()
+    d.on_session_start(_now(), _hist(), _hist())     # must NOT raise
+    assert d._trader is None
+    assert _FakePipeline.last["trader"] is None
+
+
+def test_trader_env_flag_never_imports_the_package_when_off(monkeypatch):
+    """The OPT-OUT must leave the live process's import state untouched (review finding
+    N2 for the AI-decisions worker; the same rule applies here) — that is what makes it
+    a usable kill switch mid-incident."""
+    import inspect
+    monkeypatch.setenv("ACT_TRADER", "0")
+    src = inspect.getsource(main.SmtV2Dispatcher._build_trader)
+    env_line = src.index('os.environ.get(')
+    assert src.index("from agent.trader.graft import") > env_line
+    assert main.SmtV2Dispatcher._build_trader(None) is None

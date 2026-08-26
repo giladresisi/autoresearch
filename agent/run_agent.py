@@ -56,14 +56,30 @@ from validate_results import parse_facts  # noqa: E402  (calibration/validate_re
 # prompt bytes must be identical every run for the prompt cache to hit.        #
 # --------------------------------------------------------------------------- #
 DOCS_ROOT = os.path.join(REPO_ROOT, "agent-docs", "strategy")
+# Cycle-1 cutover: `decisions/thesis.md` REPLACES `decisions/daily-trend.md` +
+# `decisions/next-move.md` — it is not appended to them. Every recorded L1 run used
+# exactly this 6-file configuration (`manual-l1-thesis/test_l1_thesis_manual.py`
+# MANUAL_KB_FILES); keeping the v1 decision docs alongside it would put contradictory
+# v1 and v2 policy in one system prompt and invalidate every recorded result.
+# `agent/test_kb_cutover.py` pins the two lists byte-equal.
+#
+# BLAST RADIUS — read before assuming this only affects L1. `KB_FILES` is module-level
+# and `build_system_prompt()` is called by ALL FOUR decide functions, so this cutover
+# also changes the system prompt of the v1 AI-decisions engine (`decide_daily` /
+# `decide_next`, reached in live via ACT_AI_DECISIONS=1 → automation/main._build_worker
+# → agent/decisions/engine.py). Those two calls now run WITHOUT `daily-trend.md` /
+# `next-move.md` and WITH v2 `thesis.md` instead. That engine is observation-only (it
+# logs decisions and never acts on them) and defaults to OFF, so this is not a trading
+# hazard — but its recorded output is no longer comparable to anything captured before
+# this change, and it should be re-baselined or the cutover scoped per-call before the
+# v1 engine's logs are trusted again.
 KB_FILES = (
     "smt.md",
     "liquidity-levels.md",
     "equilibrium.md",
     "session-structure.md",
     "entry-confirmation.md",
-    "decisions/daily-trend.md",
-    "decisions/next-move.md",
+    "decisions/thesis.md",
 )
 _KB_SEP = "\n\n---\n\n"
 

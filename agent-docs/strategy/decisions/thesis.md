@@ -1,11 +1,13 @@
 # DECISION: Level-1 Thesis (direction · regime · DOL · falsification/exhaustion)
 
 > Pure policy — every change to weights/thresholds/predicates is a strategy change: **backtest/
-> bench before merging**. All numbers are v1 seeds pending calibration. AUTHORING ONLY at this
-> stage: this doc is NOT wired into `run_agent.KB_FILES` yet, and `daily-trend.md` / `next-move.md`
-> remain the live KB for shadow mode / the A/B baseline until a gated cutover (see
-> `agent-optimizations.md` §2.1, §11 "KB doc restructuring"). This doc cherry-picks and
-> supersedes the DIRECTIONAL content of both — it is not a merge in place.
+> bench before merging**. All numbers are v1 seeds pending calibration. **LIVE as of the cycle-1
+> plan (`.agents/plans/21.facts-analyzer-executor-cycle1.md`, Task 11): this doc IS the live L1
+> KB — `run_agent.KB_FILES` now lists it and no longer lists `daily-trend.md` / `next-move.md`.**
+> The cutover is a REPLACE, not an append: production `KB_FILES` is byte-identical to the
+> `MANUAL_KB_FILES` list every recorded L1 run used (`manual-l1-thesis/test_l1_thesis_manual.py`),
+> pinned by `agent/test_kb_cutover.py`. This doc cherry-picks and supersedes the DIRECTIONAL
+> content of both v1 docs — it is not a merge in place.
 >
 > Output target: ONE standing `thesis.json` per `agent-optimizations.md` §2.1 — bias, regime,
 > DOL, `falsified_if`, `exhausted_if`, `confidence` (code-derived, self-report is audit-only §8),
