@@ -22,7 +22,14 @@ extreme is >150 pts at arm) added 2026-08-19 after the 08-18 gap-down study and 
 07-15..08-18 backcheck, with the §5 max-height 35→45 alternative recorded as a
 NOT-adopted candidate in §11 — that candidate was ADOPTED 2026-08-22 together with an entry
 buffer trim 7→3 and a 25-pt stop-loss cap, off a 1s replay calibrated to reproduce all ten
-documented 5m bindings exactly (§2 stop-loss, §9 knobs, §11 grid). NOTE: the
+documented 5m bindings exactly (§2 stop-loss, §9 knobs, §11 grid); the §7 fallback was
+RE-KEYED from arm-time DISTANCE (>150 pts) to the AGE of the counter-thesis 24h extreme
+(>2h) on 2026-08-26 after the 08-25 study — 08-07 and 08-25 are adjacent in distance and
+need opposite answers, and a 19-day re-keyed backcheck gives +655.37 vs +466.00 (§7, §9,
+§11 named tests); §6 was SETTLED for implementation on 2026-08-26 — the un-thresholded
+RR-to-DOL clause retired as provably inert, the USABLE-5m test given an exhaustive
+four-part definition, four normative clauses added in §6.1 after an independent simulator
+hit every ambiguity, and §6.2 flagging the §6 day records as ERA-BOUND. NOTE: the
 rules were tuned on the 07-14..08-06 sample — every trading day in that sample nets positive,
 several by sub-7-pt stop clearances; forward-test on unseen dates before trusting). Extends
 `agent-optimizations.md` §7 (mechanism enums). Defines four entry mechanisms the L2 trade
@@ -289,13 +296,33 @@ resting order beyond them.
 
 - **Preconditions (all required; L2 arms the class, L3 verifies continuously):**
   - L1 supplies direction AND a DOL (the RR test needs the target).
-  - No usable 5m FVG: every eligible 5m gap is beyond the max-distance guard or offers bad
-    risk:reward to the DOL at its fixed entry price. Bad RR disqualifies that 5m gap from
-    binding entirely — so this mechanism never coexists with a resting 5m stop-entry, and no
-    cross-mechanism cancel is ever needed. (A resting 1m negation stop from §4's widened
-    fallback MAY coexist — the same 5m-unusable state arms both; single-stop-entry policy and
-    first-trigger-wins apply.) If a usable 5m binding appears before this
-    mechanism's trade triggers, this mechanism stands down.
+  - **No usable 5m FVG** — DEFINITION SETTLED 2026-08-26, and it is exhaustive: a
+    thesis-direction 5m gap counts as USABLE at a moment iff ALL of (a) height in the
+    [min, max] band, (b) NOT inverted — no 5m close through it in the anti-trade direction
+    since creation, (c) NOT permanently distance-invalidated (§2, 60 pts anti-trade beyond
+    the gap), and (d) its fixed trigger is within the max-distance guard of current price.
+    If no gap is usable, the precondition holds. **The former "or offers bad risk:reward to
+    the DOL at its fixed entry price" clause is DELETED** — see the RR-clause retirement
+    note below. A usable gap disqualifies this mechanism entirely — so it never coexists
+    with a resting 5m stop-entry, and no cross-mechanism cancel is ever needed. (A resting 1m
+    negation stop from §4's widened fallback MAY coexist — the same 5m-unusable state arms
+    both; single-stop-entry policy and first-trigger-wins apply.) If a usable 5m binding
+    appears before this mechanism's trade triggers, this mechanism stands down.
+    - **RR-clause retirement (2026-08-26).** The RR test was never implementable: §6 stated
+      it only qualitatively, §9 never carried a threshold, and §11 listed it as an
+      unimplemented gap. Solving for the threshold R* from the recorded days gives an
+      unbounded-below interval, **0 ≤ R* < 3.57**: the only upper constraint comes from 5m
+      gaps that DID bind (08-13's RR 3.57 is the tightest; 07-17 5.07, 08-07 7.92, 08-14 8.13,
+      08-18 9.03, 07-31 9.19), and there is **no lower constraint at all**, because at every
+      recorded §6 fire the count of usable 5m gaps was ZERO — the precondition was satisfied
+      by inversion / distance-invalidation / max-distance, never by RR. Robustness scan over
+      09:30–12:00: a usable 5m gap exists in 0/150 minutes on 07-21 and 1/150 on 08-05, so
+      those two days are airtight regardless of fire timing; 08-06 (52/150, max RR 3.65) and
+      08-10 (45/150, max RR 2.85) are timing-dependent — and the worst case cuts the same
+      way, since 08-06 firing beside its usable gap would demand R* ≥ 3.65, contradicting
+      R* < 3.57. Either the clause is inert or the record is inconsistent under ANY single
+      threshold. **Resolution: R* = 0, clause deleted.** This reproduces every recorded day
+      unchanged and removes the last under-specified rule from §6's preconditions.
   - A new day extreme printed against the thesis direction after the last 5m FVG's creation
     (the 5m structure is stale relative to where price now is).
   - Thesis-direction (continuation) 1m FVGs have been created since that extreme — they are
@@ -356,6 +383,58 @@ resting order beyond them.
   unchanged, the veto and §7 simply sit in front of them. On 07-21/08-03/08-05 §6's validated
   entries all pass the veto.)
 
+### 6.1 Deterministic reading — SETTLED 2026-08-26 (read this before implementing §6)
+
+The §6 prose above admits more than one reading in four places, and a first independent
+simulator hit every one of them. These are now normative; implement exactly this.
+
+1. **Intra-bar ordering is load-bearing.** The episode begins at the TICK that first enters
+   the gap strictly beyond the near edge. The early-runaway test and the episode's excursion
+   extreme are evaluated ONLY over ticks at or after that tick — never over the whole
+   entering bar. Named trap: 08-06's 09:38 bar prints 29437.00 (= gap top + 25) at 09:38:14,
+   **thirteen seconds BEFORE price enters the gap at 09:38:27**; scanning the whole bar fires
+   a phantom runaway on a print that preceded the episode.
+2. **Early-runaway fills at the trigger price** (`exit-side edge ± 25`), not at the market
+   mid. Named test: 07-21 gap B fills **29149.75** = 29174.75 − 25 exactly. Close-verdict and
+   exit-tick entries DO fill at the 1s mid at placement.
+3. **The stop-out cooldown gates entry evaluation** — no cycle may complete while it is in
+   force, and all gap cycles reset to idle across it (a fresh re-entry is required after).
+   Without this the machine re-enters within seconds of every stop-out.
+4. **Candidate-gap evaluation order:** most-recently-ENTERED gap first, per §6's own
+   parenthetical ("naturally the last-entered gap at each retrace extreme"); the first gap to
+   complete its cycle fires. Measured OUTCOME-NEUTRAL on all four recorded days (creation
+   order gives byte-identical results), so this is a tie-break convention, not a result driver
+   — specified only so two implementations agree.
+
+**Known residual (±1 cycle, deliberately left open, do NOT silently "fix" it):** the
+subsequent-bar gate is implemented DOC-LITERAL — previous completed bar closed inside the
+gap, or beyond it on the exit side, or against its own open → the exit tick fires; closed
+with-trend-coloured beyond the gap on the adverse side → defer to the current bar's close.
+An alternative raw-exit-tick reading (no previous-bar gate) matches 08-06 better (+150.00 vs
+the recorded +145.75, entry 29426.00 at 09:43:06 vs the recorded 29430.25) but is worse on
+08-05 (+250.88 vs +235.38 doc-literal, recorded +237.50) and directly contradicts §6's own
+statement that the colour gates "skipped the noise cycles that a raw exit-tick rule would
+have taken". Doc-literal is therefore the specified reading; the discrepancy is a known
+±1-cycle uncertainty on 08-06, not a defect to chase.
+
+### 6.2 The §6 day records are ERA-BOUND — do not use them as verbatim regression targets
+
+The four §6 numbers above were recorded under rule sets that no longer exist. Re-deriving
+them requires era-matching, and two of the four CHANGE under current rules by design:
+
+| Day | Recorded | Era of record | Under CURRENT rules |
+|---|---|---|---|
+| 08-05 | +237.50, one entry | max height 35, no DOL-floor veto | **+235.38, one entry** — reproduces (2.12 = fill convention) |
+| 08-10 | +34.25, three entries | pre-veto | **no fire** — CORRECT, and §6 already says so: the 09:51/09:59 entries are veto-suppressed at 45.5 pts remaining and the day belongs to §7 |
+| 08-06 | +145.75, one entry | **max height 35** | one entry, +125.12 — shape reproduces; at max height 45 the 36.75-pt gap [29375.25, 29412.00] becomes a candidate and adds a −26.12 cycle |
+| 07-21 | +96.50, two entries | max height 35, pre-veto | +61.00, three entries — runaway leg exact (29149.75, −30.00); one extra close-verdict cycle at 09:38:00 unexplained by any stated rule |
+
+An implementation should be checked against the CURRENT-rules column, not the recorded one.
+The 08-06 height interaction is the sharpest lesson: **a knob change dated after a validation
+silently invalidates that validation's entry set**, and §6 records carry no era stamp.
+Remaining known gap: 07-21's extra 09:38:00 cycle — one cycle, −27.88, cause not identified;
+treat a reproduction within one cycle of these figures as passing.
+
 ## 7. Mechanism: `extreme_reject_close`
 
 ICT basis: liquidity sweep / turtle soup — a stop-run through a fresh day extreme that
@@ -377,10 +456,17 @@ chase entries the §2 DOL-floor veto now suppresses).
     direction fires a **market entry at that bar's close**. A new-extreme bar closing in the
     adverse direction does not fire and does not disarm — the graph may still want to extend;
     stay armed for the next new-extreme bar.
-- **Far-extreme fallback (2026-08-19, from the 08-18 gap-down study):** when at plan arm the
-  counter-thesis 24h day extreme sits more than ~150 pts from price (starter knob, §9), the
-  machine tracks the **post-09:30 extreme** instead. After a large overnight displacement in
-  the thesis direction the 24h extreme is unreachable and §7 is otherwise dead weight on
+- **Stale-extreme fallback (re-keyed from DISTANCE to AGE 2026-08-26; originally the
+  far-extreme fallback, 2026-08-19, from the 08-18 gap-down study):** when at plan arm the
+  counter-thesis 24h day extreme is more than ~2h old (starter knob, §9), the machine tracks
+  the **post-09:30 extreme** instead. The invariant: this gate identifies the liquidity pool
+  whose sweep the mechanism is waiting for, and STALENESS decides which pool that is. An
+  extreme set forty minutes ago IS the liquidity the market is currently working — the RTH
+  move is still inside that structure and must take it out before the signature means
+  anything; an extreme belonging to an earlier session phase is not, and the RTH leg prints
+  its own sweep signature. Argue future counter-examples against that invariant rather than
+  adding a fourth knob. After a large overnight displacement in the thesis direction the
+  24h extreme is unreachable and §7 is otherwise dead weight on
   exactly the days that gap in the thesis direction — the sweep-and-reject signature then
   prints at the RTH extreme. Validated 08-18 (thesis DOWN, DOL prev1_week_low 29533.5, day
   high 30124.25 printed 20:51 the prior evening, 425.5 pts away): armed 09:34 after the
@@ -391,25 +477,59 @@ chase entries the §2 DOL-floor veto now suppresses).
   pts (w3c30 29773 by 5.75) → TP 29533.5 at 11:01:26, **+226.75 on one attempt**, on a day
   the unmodified rule set leaves entirely untraded (the only eligible bear 5m gaps are 42.5
   and 1.75/3.25 pts — over/under the height filters — and no counter-thesis 24h extreme is
-  ever approached, so §5/§6/§7 all stay dark). The 150-pt threshold deliberately sits ABOVE
-  08-07's 139.75-pt arm distance, keeping the documented wrong-arm case (the 09:33 RTH high
-  under the 08:50 high 29867.25) on the strict 24h rule; the studied arm distances split
-  cleanly — ≤139.75 (07-15 119.25, 08-17 129, 08-13 133.75, 07-24 138.75, 08-07 139.75: all
-  strict) vs ≥229.5 (07-31 229.5, 07-16 337.5, 08-18 425.5, 07-21 471.5, 07-23 574.25,
-  07-17 596: fallback). Backcheck 07-15..08-18 (1m walk, known theses/DOLs, plan scope
-  enforced — a fire cannot occur after the plan's DOL is touched, which silences
-  07-17/07-23/08-17): inert on 07-15/07-16/07-23/07-24 (active, never fires in scope);
-  fires on exactly three days — 08-18 (+226.75), and the two standing wrong-plan days,
-  where it spends the plan's remaining shared attempt: 07-21 one fire 09:47 long 29116.25
-  (−15 cap15 / −24 w3c30; consumes the §10.1 reserve attempt, day −42.25 → −57.25/−66.25)
-  and 07-31 one fire 09:45 long 28433 replacing §6's cheaper 09:59 third attempt (−15
-  cap15 / −30 w3c30, day −67.50 → −69.75/−83.75). Under the default cap15 SL the §10.2
-  adverse-day band stays 0..−70; the w3c30 A/B must carry 07-31 −83.75 into its
-  comparison. Net on the window ≈ +209.5 (cap15) / +186.5 (w3c30). Caveat: the post-09:30
-  extreme is degenerate in the opening minutes (every burst tick is a new extreme) —
-  harmless, the count just keeps restarting and the earliest possible fire remains ≥4 bars
-  after the open — but the §10.2 lesson applies: extreme tracking must be tick-level on
-  the fallback track too.
+  ever approached, so §5/§6/§7 all stay dark).
+  - **Why distance was replaced (2026-08-26, from the 08-25 study).** The 150-pt threshold
+    was calibrated to sit above 08-07's arm distance, keeping the documented wrong-arm case
+    (the 09:33 RTH high under the 08:50 high 29867.25) on the strict 24h rule. **08-25 breaks
+    that split.** Thesis DOWN, DOL daily_mid 29218.38: the counter-thesis 24h high 29420.00
+    sits only 123.50 pts away — inside the old "strict" cluster — yet the RTH rally tops at
+    29416.00, **4.00 pts short** of it, so the strict rule never arms and the day's whole move
+    is forfeited. 08-07 (152.50) and 08-25 (123.50) are ADJACENT in distance and need OPPOSITE
+    answers, so no distance threshold separates them. Their AGES do, with room to spare:
+    08-07's extreme was set 08:54, **0.60h** before the arm; 08-25's at 05:57, **3.55h**.
+    Measured ages over 07-15..08-25 leave a wide gap with nothing in it — 0.02, 0.02, 0.07,
+    0.42, 0.55, **0.60 … 1.90**, 2.43, 3.55, 6.42, 7.28, 8.00, 12.65, 12.65, 13.65, 14.50,
+    14.92, 15.43, 15.50 — so T is not a fitted knob: totals are IDENTICAL for any T in
+    1.0h–3.0h.
+  - **Second defect the re-key fixes: the old threshold depended on an unpinned measurement
+    instant.** 08-07's arm distance is 135.75 at a 09:20 arm but **152.50 at 09:30** — it
+    straddles 150, so the same day is "strict" or "fallback" depending only on when you
+    measure, and the documented wrong arm fires in the 09:30 reading. §7 said "arm-time
+    distance" without pinning the instant while L1 arms at 09:20 and the §2 settle window ends
+    09:30:30. Age moves by ten minutes across that span instead of by 17 pts against a 14-pt
+    margin. **Implementations must still pin the instant explicitly: the plan's arm timestamp.**
+  - **Re-keyed backcheck (2026-08-26, 19 days 07-15..08-25, MNQ 1m arming + 1s resolution,
+    recorded theses/DOLs, plan scope enforced).** Totals — strict 24h **+50.75** · distance>150
+    **+466.00** · 6h-session-block anchor **+35.75** · **age>2h +655.37**. Age is identical to
+    distance>150 on 17 of the 19 days and better on exactly two: it keeps 08-07 strict (saving
+    the −15 wrong arm) and catches 08-25 (+174.37 — market short 29392.75 at 09:50:00 off the
+    09:49 new-extreme red bar, cap15 SL 29407.75 never approached, TP daily_mid 10:23:21).
+    Delta **+189.37**, and it survives dropping 07-21 — the one day carrying a position that
+    reaches neither SL nor DOL and is marked at the close — entirely: +436.87 vs +247.50, same
+    delta. A **6h-session-block** anchor was also tested and REJECTED: it is worthless for §7
+    (+35.75, below strict) because §7 needs a NEW extreme beyond the reference AFTER arming —
+    on 08-25 it arms 09:53 off the 09:49 high and that high is never exceeded, so it never
+    fires, while it picks up a −15 on 07-21. It changes §6, not §7. Caveat: this is a §7-ONLY
+    backcheck, so nothing competes for the shared 3-attempt counter and fire counts run higher
+    than the day records (07-21 2 vs 1, 07-31 3 vs 1); the same overstatement applies to all
+    four policies, so the ranking holds but the totals are not day P&L. Harness validated
+    against four independent records in this doc before use: 08-18 +226.75 exact, 08-05 −15.00
+    exact, 07-31 28433.00 and 07-21 29116.25 price-exact (entry stamped one bar later by
+    labelling convention), 08-10 +95.75 vs the recorded +96.25 (1m close vs 1s mid).
+  - Original distance-era backcheck 07-15..08-18 (1m walk, known theses/DOLs, plan scope
+    enforced — a fire cannot occur after the plan's DOL is touched, which silences
+    07-17/07-23/08-17): inert on 07-15/07-16/07-23/07-24 (active, never fires in scope);
+    fires on exactly three days — 08-18 (+226.75), and the two standing wrong-plan days,
+    where it spends the plan's remaining shared attempt: 07-21 one fire 09:47 long 29116.25
+    (−15 cap15 / −24 w3c30; consumes the §10.1 reserve attempt, day −42.25 → −57.25/−66.25)
+    and 07-31 one fire 09:45 long 28433 replacing §6's cheaper 09:59 third attempt (−15
+    cap15 / −30 w3c30, day −67.50 → −69.75/−83.75). Under the default cap15 SL the §10.2
+    adverse-day band stays 0..−70; the w3c30 A/B must carry 07-31 −83.75 into its
+    comparison. Net on the window ≈ +209.5 (cap15) / +186.5 (w3c30). Caveat: the post-09:30
+    extreme is degenerate in the opening minutes (every burst tick is a new extreme) —
+    harmless, the count just keeps restarting and the earliest possible fire remains ≥4 bars
+    after the open — but the §10.2 lesson applies: extreme tracking must be tick-level on
+    the fallback track too.
 - **Stop-loss:** the entry bar's opposite-wick edge, CAPPED at 15 pts from the entry price
   (wick edge if nearer). The cap places the stop inside the swept zone — a plain retest of
   the sweep kills the trade (08-10's stop survived by 9.75 pts at 1s); a §6-style
@@ -535,7 +655,7 @@ chase entries the §2 DOL-floor veto now suppresses).
 | DOL-floor veto | 60 pts remaining, entry → DOL | §2; ABSOLUTE floor, not an RR ratio; winners ≥65.75 / losing chases ≤45.5 on studied dates — thin band, tune early |
 | `extreme_reject_close` quiet count | 3 consecutive 1m closes | §7; tick-based restarts |
 | `extreme_reject_close` SL | opposite-wick edge, capped 15 pts from entry | §7; A/B alternative wick+3 capped 30 — identical on studied dates but +91 better on the §10.3 sweep (deep-wick winners); top-priority A/B (note: cap15 keeps the far-extreme-fallback backcheck's adverse band at 0..−70; w3c30 carries 07-31 −83.75) |
-| `extreme_reject_close` far-extreme fallback threshold | 150 pts, arm-time distance to the counter-thesis 24h day extreme | §7; switches the machine to the post-09:30 extreme; must stay above 08-07's 139.75 (wrong-arm guard) and below 07-31's 229.5 — the studied distances leave a 139.75–229.5 dead zone; upgrade option: ATR-scale (~1.9x avg_1h) |
+| `extreme_reject_close` stale-extreme fallback threshold | **2h, AGE of the counter-thesis 24h day extreme at the plan arm** (was: 150 pts of arm-time DISTANCE, until 2026-08-26) | §7; switches the machine to the post-09:30 extreme. NOT a fitted knob — totals identical for any T in 1.0h–3.0h (measured ages gap from 0.60h to 1.90h with nothing between). Re-keyed off 08-25, which no distance threshold can separate from 08-07 (123.50 vs 152.50 pts, opposite correct answers; ages 3.55h vs 0.60h). Backcheck 07-15..08-25: age +655.37 vs distance>150 +466.00 vs strict +50.75 vs 6h-block +35.75. Pin the measurement instant to the plan arm — the old distance key straddled 150 between a 09:20 and a 09:30 reading of 08-07 |
 | Takeover defer-entry gate | skip if excursion-SL distance > the 30-pt cap | §8; parameter-free (reuses the `fvg_1m_post_extreme` SL cap) |
 | Leg reversal threshold | max(30 pts, 25% of leg range) | §3 |
 | Min qualifying leg range | 50 pts | §3 ("significant") |
@@ -787,9 +907,15 @@ pts away). §7 fired 31 times, up to 3/arm:
   seconds-level order move, 1m-fallback binding for spike legs, opening settle window,
   stop-out cooldown, crossed-trigger market execution).
 - `fvg_1m_post_extreme` support: day-extreme tracking relative to 5m-FVG creation times,
-  per-gap RR-to-DOL disqualification test, strictly-inside entry detection, episode state
+  the four-part USABLE-5m test (§6 — height band, not inverted, not distance-invalidated,
+  trigger within the max-distance guard), strictly-inside entry detection, episode state
   machine (entering-bar close verdicts, close-color gates, early-runaway trigger,
-  excursion-extreme tracking with SL cap), exit-tick market execution.
+  excursion-extreme tracking with SL cap), exit-tick market execution. **The per-gap
+  RR-to-DOL disqualification test is RETIRED (2026-08-26) — do not implement it**; it was
+  never threshold-specified and is provably inert on the recorded days (§6). Implement the
+  normative clauses in §6.1 (intra-bar ordering, runaway fill price, cooldown gating,
+  candidate ordering) and validate against §6.2's CURRENT-rules column, not the recorded
+  day numbers.
 - 5m distance-invalidation tracking (per-gap max anti-trade excursion, permanent kill flag).
 - DOL-floor veto at every entry decision point (placement, re-bind, crossed-trigger
   execution, episode fire, post-stop re-entry); nearest-un-hit-DOL selection for
@@ -851,14 +977,21 @@ pts away). §7 fired 31 times, up to 3/arm:
   penetrated, but the crossed trigger at cooldown end takes precedence → market re-entry
   28579, +146.5 preserved); 08-14 (crossed trigger at 09:32:00 → market 30245.5, day
   +99.50).
-- **§7 far-extreme fallback — named regression tests (2026-08-19):** 08-18 (fallback active
-  at 425.5 pts; single fire, market short 29760.25 at 09:42:00 → TP prev1_week_low 29533.5
-  at 11:01:26, +226.75 — the day's ONLY entry); 08-07 (139.75 pts — must NOT activate; the
-  strict 24h rule governs, no wrong arm, §5's validated +230 ride untouched); 08-17 / 07-17
-  / 07-23 (fallback active but the plan completes at the DOL touch before any fire — zero
-  fires in scope); 07-21 and 07-31 (one fire each spending the plan's remaining shared
+- **§7 stale-extreme fallback — named regression tests (2026-08-19; re-keyed to AGE
+  2026-08-26):** 08-18 (extreme 12.65h old — fallback ACTIVE; single fire, market short
+  29760.25 at 09:42:00 → TP prev1_week_low 29533.5 at 11:01:26, +226.75 — the day's ONLY
+  entry); **08-25 (extreme 3.55h old — fallback ACTIVE; market short 29392.75 at 09:50:00 off
+  the 09:49 new-extreme red bar, cap15 SL 29407.75 never approached, TP daily_mid 29218.38 at
+  10:23:21, +174.37 — the day's ONLY entry, and the case that retired the distance key)**;
+  08-07 (extreme 0.60h old — must NOT activate; the strict 24h rule governs, no wrong arm,
+  §5's validated +230 ride untouched — note this day sat at 135.75 pts at a 09:20 arm but
+  152.50 at 09:30, i.e. it FAILED the old distance guard under the 09:30 reading); 08-17 /
+  07-17 / 07-23 (fallback active but the plan completes at the DOL touch before any fire —
+  zero fires in scope); 07-21 and 07-31 (one fire each spending the plan's remaining shared
   attempt — cap15 deltas −15 and −2.25); implementation must track the post-09:30 extreme
-  tick-level and disarm with the plan's `valid_while`, exactly like the 24h track.
+  tick-level, pin the age measurement to the plan-arm timestamp, and disarm with the plan's
+  `valid_while`, exactly like the 24h track. A 6h-session-block anchor was tested and
+  REJECTED for §7 (+35.75, below strict) — see §7.
 - **ADOPTED 2026-08-22 — entry buffer 7→3, SL cap 25, max height 35→45 (calibrated sweep).**
   Supersedes the 2026-08-19 "candidate B" entry. Method: a 1s replay of the §5 lifecycle
   (crossing-IN retrace strictly after 09:30:30 — continuous presence inside the gap at the
