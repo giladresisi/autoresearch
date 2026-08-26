@@ -26,7 +26,10 @@ documented 5m bindings exactly (§2 stop-loss, §9 knobs, §11 grid); the §7 fa
 RE-KEYED from arm-time DISTANCE (>150 pts) to the AGE of the counter-thesis 24h extreme
 (>2h) on 2026-08-26 after the 08-25 study — 08-07 and 08-25 are adjacent in distance and
 need opposite answers, and a 19-day re-keyed backcheck gives +655.37 vs +466.00 (§7, §9,
-§11 named tests); §6 was SETTLED for implementation on 2026-08-26 — the un-thresholded
+§11 named tests); §5's pre-arm-penetration ambiguity was RESOLVED 2026-08-26 in favour of the
+FRESH-TICK reading (a 19-day §5-only 1s A/B: fresh +570.50 vs literal +410.50, and the
+"max-distance guard alone suffices" hypothesis REFUTED — the guard delays the literal entry
+into a chase rather than blocking it); §6 was SETTLED for implementation on 2026-08-26 — the un-thresholded
 RR-to-DOL clause retired as provably inert, the USABLE-5m test given an exhaustive
 four-part definition, four normative clauses added in §6.1 after an independent simulator
 hit every ambiguity, and §6.2 flagging the §6 day records as ERA-BOUND. NOTE: the
@@ -265,10 +268,14 @@ limit fade inside it) converts the textbook anticipation entry into a confirmati
   never by leg age.
 - **Binding (L3), two-phase:** find an eligible thesis-direction 5m FVG per the relevance rule
   above. The stop-entry is placed only **after price retraces into that FVG** — "into" = any tick
-  entering the gap's range — or immediately if price is already inside / has already entered
-  it. Order sits `entry buffer` beyond the FVG's far end in the continuation direction (e.g.
-  short below a bearish FVG's lower bound during a downtrend). Full negation of the gap is
-  accepted as the cost of certainty.
+  entering the gap's range. **SETTLED 2026-08-26: the retrace-in tick must be FRESH, i.e. strictly
+  after the settle window ends (09:30:30).** Penetrations completed before the window ends —
+  whether pre-arm or in-window — count for eligibility and close-through tracking ONLY; they do
+  not satisfy this precondition and do not arm §2's crossed-trigger market execution. (This
+  supersedes the earlier "or immediately if price is already inside / has already entered it"
+  clause, which is DELETED; see the §11 resolution.) Order sits `entry buffer` beyond the FVG's
+  far end in the continuation direction (e.g. short below a bearish FVG's lower bound during a
+  downtrend). Full negation of the gap is accepted as the cost of certainty.
 - **Double-FVG variant:** if the counter-trend bump created its own opposite-direction 5m
   FVGs, place the single stop-entry beyond the **farther** of the two far ends (trend FVG vs.
   bump FVG — e.g. the lower of the two lower bounds for a short) — full change-of-delivery
@@ -896,9 +903,55 @@ pts away). §7 fired 31 times, up to 3/arm:
 
 ## 11. Implementation gaps (design-complete, work remaining)
 
+### 11.0 Scope split for the entry-mechanisms cycle (written 2026-08-26)
+
+Everything in §§1–10 is RULE, and rules are now unambiguous — no `OPEN RULE AMBIGUITY` items
+remain. Everything still open below is either a KNOB VALUE or needs data that does not exist
+yet. §9 already states the governing principle: *"Numeric values are starting points for
+regression tuning; the rules are fixed."* So the implementing cycle builds rules and reads
+knobs from config; a later tuning cycle moves the knobs against the real engine.
+
+**IN SCOPE — the implementing cycle must deliver these:**
+- Every mechanism rule in §§2–8, with knobs read from config at §9's starting values.
+- The pinned conventions, each of which silently changes behaviour if got wrong:
+  **5m bars left-labelled / left-closed / 18:00-ET-session-anchored** (§11, 07-23 item);
+  **FVGs timestamped at third-bar COMPLETION**, never the label (§11 erratum);
+  **§5 retrace-in must be a FRESH tick after 09:30:30** (§5 / §11 resolution);
+  **§6.1's four clauses** (intra-bar ordering, runaway fill price, cooldown gating, candidate
+  order); **§7's stale-extreme anchor keyed on AGE measured at the plan arm** (§7 / §9).
+- All named regression tests: §8's takeover set, §7's stale-extreme set, §11's §5 fresh-tick
+  set (08-21 flat, 08-11 flat, 08-18 enters 09:40:58), and §6.2's CURRENT-rules column.
+- The **planless-day shadow ledger's logging hook only** — cheap, and the data cannot be
+  collected retroactively. Log the paper outcome; do not act on it.
+
+**DO NOT IMPLEMENT — retired, replaced or unadopted (listed so they are not rebuilt from
+stale prose elsewhere):** the §6 per-gap RR-to-DOL disqualification test (RETIRED, §6);
+§5's "or immediately if price is already inside / has already entered it" clause (DELETED,
+§5); §7's distance-keyed (>150 pts) fallback (REPLACED by the age key, §7); the
+6h-session-block anchor (TESTED AND REJECTED for §7, §7); the §8 SL-cap skip gate extended to
+§6-proper (IDEA ONLY, zero net evidence, below); the §5 re-entry churn guard (CANDIDATE, zero
+motivating examples, below).
+
+**DEFERRED to a follow-up tuning cycle — what each one needs before it can be settled:**
+
+| Deferred item | What it needs | Why it can wait |
+|---|---|---|
+| §7 SL cap: cap15 vs w3c30 | The §10.3 24-session blind sweep RE-RUN under the age anchor, on the implementation's own engine | Knob value; the rule is identical either way, and both policies capture the same winners byte-identically on the studied set |
+| Entry buffer 3 → 0 | A scan of gaps that were retraced into but NEVER filled at buffer 7 — which requires an engine that emits non-fills, i.e. it can only be measured after implementation | Knob value; buffer 3 is adopted and measured safe; buffer 0 stays unadopted until the false-trigger cost is known |
+| Max-height ceiling (45 vs unbounded) | More over-height (>45 pt) gap instances; the current case rests on a single favourable day (08-11) | Knob value; the 25-pt SL cap already bounds risk at any height, so the ceiling is a character filter, not a risk one |
+| Planless-day shadow ledger (the DECISION) | Forward sessions where L1 resolves NEUTRAL but a mechanism setup would have fired under an oracle plan | The logging hook is in scope now; the stay-dark policy it tests can only be judged once the ledger has entries |
+| §6 SL-cap skip gate extension | A motivating example — currently P&L-neutral on the one day it was checked | Zero net evidence; implementing it now would be fitting to noise |
+| §5 re-entry churn guard | Stop-outs where NO deeper gap was penetrated; the original motivation was an errata artifact | Zero motivating examples remain |
+| DOL draw floor 0.5x → 1.0x | Not an L2 change at all — it lands in `derive_facts.DOL_MIN_DRAW_RATIO`, shared with the L1/thesis pipeline | Different owner; propose upstream rather than editing from L2 |
+| Per-mechanism L2-supplied invalidation criteria | A design pass that has not been started | Explicitly deferred since the doc's first draft |
+
+**Rule of thumb for the implementing cycle:** if a change would alter a NUMBER, it is deferred;
+if it would alter BEHAVIOUR, it is in scope and specified above.
+
 - 5m FVG detection + leg segmentation as L3 facts/data products (existing detection is 1hr/4hr
   in `daily.py` and 1m-based `detect_fvg` in `strategy_smt.py`; 5m does not exist yet).
-- 5m bar construction/alignment for FVG detection.
+- 5m bar construction/alignment for FVG detection — **convention pinned, see the 07-23 item
+  below: left-labelled, left-closed, 18:00-ET-session-anchored.**
 - New §7 mechanism enum entries (`fvg_negation_reversal`, `fvg_return_continuation`,
   `fvg_1m_post_extreme`, `extreme_reject_close`) +
   validator support.
@@ -928,11 +981,29 @@ pts away). §7 fired 31 times, up to 3/arm:
 - Deeper-gap takeover support (§8): post-stop deeper-penetration detection (stop-out bar
   included), per-plan gap blacklist, §6 episode machinery reused in re-entry mode, the
   defer-entry SL-cap gate.
-- 07-23 5m bar-construction discrepancy: a 1m-resampled 5m series shows the 09:40–09:44 bar
-  closing 28856, above the bound gap top 28827.5, BEFORE the validated fill — which §2
-  close-through eligibility should have killed. Likely a 5m bar-alignment difference vs the
-  original study; reconcile during implementation (the §8 backcheck verdict is unaffected —
-  no deeper gap was penetrated either way).
+- **07-23 5m bar-construction discrepancy — RESOLVED 2026-08-26. It is an ALIGNMENT
+  difference, not a resolution one, and the house convention says the studied 07-23 entry
+  never existed.** Measured both ways on 07-23:
+  - **1m-resampled and 1s-resampled 5m series are BYTE-IDENTICAL** under the same alignment
+    (09:40 bar = O 28797.50 / H 28883.75 / L 28796.50 / **C 28856.00** from either source),
+    so source resolution is NOT the cause and no 1s rebuild is needed.
+  - The whole discrepancy is label/close side. **Left-labelled, left-closed** (bar `T` spans
+    `[T, T+5m)` and completes at `T+5m`) puts the 09:40–09:44 bar's close at **28856.00**,
+    ABOVE the bound gap top 28827.5 → anti-trade inversion → the gap is DEAD from 09:45:00.
+    **Right-labelled/right-closed** (grid 09:41–09:45) closes the same-labelled bar at
+    **28813.50**, below the top → gap survives. That single choice is worth the whole trade.
+  - **CONVENTION PINNED: left-labelled, left-closed, 18:00-ET-session-anchored**, matching the
+    house 1h/4h convention already used by `derive_facts` (18:00/22:00/02:00/06:00/10:00/14:00
+    labelled by their START). For 5m the session anchor coincides with the clock grid, so the
+    only real decision is the label side — make it explicit in the resampler, do not inherit a
+    library default.
+  - **Consequence:** under the pinned convention the bound gap inverts at 09:45:00 and 07-23's
+    studied fill — which occurred after it — is INVALID; the +304 was produced by a
+    right-labelled series. No headline number moves, because §10.1 already forfeits 07-23's
+    +304 for an independent reason (under the recorded L1 the DOL was swept in the opening
+    minute, completing the plan flat). The §8 backcheck verdict is likewise unaffected — no
+    deeper gap was penetrated either way. **This is why the convention must be fixed before
+    implementation: it silently decides close-through eligibility for every 5m mechanism.**
 - 1s-replay verification: DONE 2026-08-16 for all package simulations (08-03 +200,
   08-05 −20-one-attempt with §6's budget preserved, 08-06 +266.5 clean, 08-10 §7 +96.25,
   08-11 no-entry, 08-12 +46.75 exact, 08-13 +89.25 clean) and the §8 takeover sequences
@@ -1045,22 +1116,78 @@ pts away). §7 fired 31 times, up to 3/arm:
   over-height instances exist, and record whether capped stops inside tall gaps get taken
   by intra-zone noise. If they do not, drop the ceiling entirely and let the DOL floor and
   max-distance guard do the filtering (they already kill 4 of the 7 band gaps).
-- **§5 pre-arm penetration — OPEN RULE AMBIGUITY (2026-08-21, unresolved).** §2 voids
-  penetrations occurring DURING the settle window; §5 separately honours "or immediately if
-  price is already inside / has already entered it". Neither clause covers a penetration
-  that completed BEFORE the arm time, and the two readings diverge by a whole day: on
-  08-21 the bound gap [29472.25, 29485.00] (completes 09:20:00, so it genuinely exists at
-  the arm) was occupied 09:28:06–09:29:59 and never re-entered post-window, so the literal
-  reading gives a crossed-trigger market short 29447.50 at 09:30:31, capped SL 29472.50,
-  → DOL 09:54:07 **+174.00**, while a fresh-tick requirement gives a **FLAT day** — and
-  under the corrected FVG timestamps nothing else rescues it, since the 44-pt gap is never
-  re-entered after its real 09:40:00 creation. The ambiguity is therefore worth the WHOLE
-  day on 08-21, not the 77 pts an earlier look-ahead-contaminated read suggested. The 08-19
-  candidate-B note argued for the fresh-tick reading off 08-18, where the literal reading
-  would have shorted the opening pop on an 85-minute-stale penetration — but there the
-  max-distance guard blocked it anyway (68.5 pts), and on 08-21 the same guard permits it
-  (22.75 pts). Hypothesis to test before deciding: **the max-distance guard alone is the
-  correct discriminator and no recency clause is needed.** Both days are the named tests.
+- **§5 pre-arm penetration — RESOLVED 2026-08-26: the FRESH-TICK reading wins, and the
+  max-distance-guard hypothesis is REFUTED.** History: §2 voids penetrations occurring DURING
+  the settle window, §5 separately honoured "or immediately if price is already inside / has
+  already entered it", and neither covered a penetration completed before the arm. The 08-19
+  note proposed that **the max-distance guard alone is the correct discriminator and no
+  recency clause is needed** — that hypothesis has now been tested and is FALSE.
+  - **Method (2026-08-26).** §5-only 1s A/B over 19 days 07-15..08-25 at the adopted knobs
+    (buffer 3, SL cap 25, band 5–45, max-distance 60, DOL floor 60). For each day the
+    most-recently-created eligible thesis-direction 5m gap was taken as the binding, and the
+    two readings scored: LITERAL (any prior penetration satisfies the precondition; act on
+    current state at the window end) vs FRESH (a tick entering the gap strictly after
+    09:30:30). Crucially the max-distance guard is modelled as MOMENTARY, as §2 defines it —
+    a blocked order waits and places as soon as the trigger comes back within 60 pts. Eight
+    days diverge. **LITERAL +410.50 vs FRESH +570.50 — FRESH by +160.00.**
+  - **Why the guard cannot carry it.** Modelled correctly, the guard does not PREVENT the
+    literal entry, it DELAYS it into a worse one. On 07-24, 07-31 and 08-18 the trigger is out
+    of range at the window end, price then runs further from the gap, and the order places at
+    the guard boundary as a crossed-trigger market fill 55–60 pts past the trigger — hitting
+    the 25-pt cap on all three (−25.00 each) and displacing the fresh-tick entries those days
+    actually paid for (+166.00, −20.75, +229.75). That is the chase-into-momentum pathology the
+    DOL-floor veto was built for, except the veto cannot see it: all three had ample room to
+    the DOL. The 08-19 note read the guard as blocking 08-18 outright; it only blocks it at the
+    instant of the window end.
+  - **Cost of the decision, recorded honestly.** FRESH forfeits the two days LITERAL wins:
+    08-21 +169.00 (the case that opened this item) and 08-11 +136.25 — 305.25 pts of realised
+    upside given up, against 75.00 of chases avoided and 395.75 of displaced winners recovered.
+    08-11 is the doc's own "accepted skip", so FRESH is what §10 already assumes.
+  - **Harness validated on five independent points before the verdict** (all offsets are the
+    2026-08-22 buffer 7→3 trim, i.e. exactly 4.00 pts): FRESH reproduces 07-17 −13.75 (recorded
+    −17.75), 07-31 −20.75 (recorded −24.75), 08-18 +229.75 (recorded +225.75); FRESH reproduces
+    08-11's recorded FLAT; and LITERAL reproduces this item's own recorded 08-21 figure, +169.00
+    vs +174.00 (the 5-pt gap is the 09:30:30 vs 09:30:31 fill instant). 07-15 also matches §2's
+    note that the fresh re-entry fills better than a window-end market entry for the same ride
+    (+209.25 vs +205.25).
+  - **Per-day evidence (the eight divergent days; §5-only, attempt 1, adopted knobs).** The
+    binding gap, its trigger, and the trigger's distance from price at the window end:
+
+    | Day | th | bound gap | trig | dist @09:30:30 | LITERAL | FRESH |
+    |---|---|---|---|---|---|---|
+    | 07-15 | DOWN | [29958.00, 29967.00] h9.00 | 29955.00 | 4.00 | 09:30:30 fill 29951.00 TP **+205.25** | 09:30:47 fill 29955.00 TP **+209.25** |
+    | 07-17 | DOWN | [28651.75, 28659.50] h7.75 | 28648.75 | 16.75 | 09:30:30 fill 28632.00 STOP **−25.00** | 09:30:35 fill 28648.75 STOP **−13.75** |
+    | 07-24 | DOWN | [28601.50, 28606.75] h5.25 | 28598.50 | 85.75 | 09:30:35 fill 28539.25 STOP **−25.00** | 09:35:46 fill 28598.50 TP **+166.00** |
+    | 07-31 | UP | [28514.50, 28529.25] h14.75 | 28532.25 | 64.75 | 09:31:00 fill 28587.25 STOP **−25.00** | 09:40:23 fill 28532.25 STOP **−20.75** |
+    | 08-11 | DOWN | [29835.00, 29855.25] h20.25 | 29832.00 | 29.75 | 09:30:30 fill 29802.25 TP **+136.25** | no fresh re-entry → **FLAT** |
+    | 08-18 | DOWN | [29766.25, 29808.75] h42.50 | 29763.25 | 78.25 | 09:30:39 fill 29703.50 STOP **−25.00** | 09:40:58 fill 29763.25 TP **+229.75** |
+    | 08-21 | DOWN | [29472.25, 29485.00] h12.75 | 29469.25 | 26.75 | 09:30:30 fill 29442.50 TP **+169.00** | no fresh re-entry → **FLAT** |
+    | 08-24 | DOWN | [29270.75, 29281.75] h11.00 | 29267.75 | 114.00 | plan complete before the guard allows → 0.00 | no fresh re-entry → **FLAT** |
+    | | | | | | **+410.50** | **+570.50** |
+
+    Read the `dist @09:30:30` column against the outcome: every LITERAL loss is a day whose
+    trigger was OUT of the 60-pt guard at the window end (85.75 / 64.75 / 78.25) — i.e. the
+    guard fired, and the entry happened anyway, later and worse. Every LITERAL win is a day
+    already INSIDE the guard (29.75 / 26.75). The guard is not a filter on this decision; it
+    is only a delay.
+  - **Not captured by this A/B (favours FRESH further):** it models attempt 1 only. On 08-25
+    both readings enter, but LITERAL spends TWO attempts (−50.00) where FRESH spends one
+    (−25.00) — the literal reading burns budget as well as price.
+  - Named regression tests: **08-21 must be FLAT** (prior penetration only, no fresh re-entry);
+    **08-11 must be FLAT** (the §10 accepted skip); **08-18 must enter 09:40:58 at 29763.25**,
+    NOT at the window end; 07-17 and 07-31 must enter on their fresh ticks.
+- **§7 SL-cap A/B — narrowed 2026-08-26, NOT yet settled; cap15 stays the default.** Re-run
+  under the newly adopted age anchor, 19 days 07-15..08-25: **cap15 +655.37 vs w3c30 +353.87**
+  — cap15 ahead by 301.50, the OPPOSITE of the §10.3 unseen sweep (which preferred w3c30 by
+  ~+91 on the strength of one deep-wick +316.5 winner). Both policies capture the same three
+  winners byte-identically (08-10 +95.75, 08-18 +226.75, 08-25 +174.37); the whole difference
+  is loss size on the adverse days (07-31 −45.00 vs −89.00, 08-05 −15.00 vs −30.00) plus one
+  path-dependent effect — on 07-21 cap15's tighter first stop leaves budget for a second entry
+  that rides to +233.50, which w3c30 never takes. Excluding 07-21 entirely, cap15 still leads
+  +436.87 vs +377.87. **Verdict: the studied set and the unseen sweep disagree, and the studied
+  set is the tuned one, so this does NOT overturn §10.3.** Settling it requires re-running the
+  §10.3 24-session blind sweep under the age anchor — deferrable, since this is a knob VALUE
+  and the rule is unchanged either way.
 - **OPEN — entry-buffer false-trigger scan (blocks buffer 3 → 0).** The adopted grid only
   contains days that ALREADY filled at buffer 7, so it cannot measure the buffer's actual
   job: suppressing entries on a 1–2 pt wick past the gap edge that immediately reverses.
