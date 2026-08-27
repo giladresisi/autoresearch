@@ -85,3 +85,64 @@ def test_anti_excursion_records_real_distance_past_the_far_end():
     out = update_fvg_states(facts, pd.concat([df, later]), "5min")
     assert out[0].extra["max_anti_excursion"] == 10.0
     assert out[0].state is FactState.LIVE
+
+
+# ── identity vs existence (l2-mechanisms.md §2, pinned 2026-08-27) ──────────────
+# added during implementation (not in the plan)
+
+def _bull_fvg_frame():
+    """1m bars 16:29..16:34 with a bull FVG on 16:30 / 16:31 / 16:32.
+
+    bar1 16:30 High=101, bar3 16:32 Low=103 -> gap [101, 103], middle bar 16:31.
+    """
+    tz = "America/New_York"
+    rows = [("16:29", 100, 101, 99, 100), ("16:30", 100, 101, 99, 100),
+            ("16:31", 101, 108, 101, 107), ("16:32", 105, 112, 103, 110),
+            # Lows kept BELOW 16:31's high (108) and 16:32's high (112) so the tail
+            # forms no second imbalance — this frame must contain exactly one gap.
+            ("16:33", 106, 111, 104, 110), ("16:34", 106, 111, 104, 110)]
+    idx = [pd.Timestamp("2026-08-21 " + t, tz=tz) for t, *_ in rows]
+    return pd.DataFrame(
+        [{"Open": o, "High": h, "Low": l, "Close": c} for _, o, h, l, c in rows],
+        index=idx)
+
+
+def test_fvg_identity_is_the_middle_bar():
+    """The gap is named for the bar it is VISIBLE across — what a chart shows."""
+    facts, _ = detect_fvgs(_bull_fvg_frame(), "1min", "MNQ", {})
+    assert len(facts) == 1
+    assert facts[0].reference_ts == pd.Timestamp("2026-08-21 16:31",
+                                                 tz="America/New_York")
+
+
+def test_fvg_exists_from_is_the_third_bars_completion_not_its_label():
+    """EXISTENCE is third-bar COMPLETION: label(16:32) + 1min = 16:33:00.
+
+    A consumer reading the third bar's LABEL as the instant is early by one bar-width
+    — the §11 08-21 erratum (a fill recorded 09:36:04 on a gap that existed at 09:40).
+    """
+    facts, _ = detect_fvgs(_bull_fvg_frame(), "1min", "MNQ", {})
+    tz = "America/New_York"
+    assert facts[0].extra["confirm_bar_ts"] == pd.Timestamp("2026-08-21 16:32", tz=tz)
+    assert facts[0].extra["exists_from"] == pd.Timestamp("2026-08-21 16:33", tz=tz)
+
+
+def test_the_gap_is_not_detected_before_its_third_bar_completes():
+    """Detection timing must match existence. `bars.resample` emits COMPLETED bins only,
+    so a frame whose last bin is 16:32 means 16:32 has closed — i.e. it is 16:33:00."""
+    df = _bull_fvg_frame()
+    seen_at = [df.index[n - 1] for n in range(3, len(df) + 1)
+               if detect_fvgs(df.iloc[:n], "1min", "MNQ", {})[0]]
+    assert seen_at, "the gap must be detected at some point"
+    assert seen_at[0] == pd.Timestamp("2026-08-21 16:32", tz="America/New_York")
+
+
+def test_exists_from_scan_start_matches_the_legacy_confirm_bar_ts_behaviour():
+    """The switch to `exists_from` is behaviour-preserving: it selects the same first bar
+    the old `searchsorted(confirm_bar_ts, side='right')` did."""
+    df = _bull_fvg_frame()
+    facts, _ = detect_fvgs(df, "1min", "MNQ", {})
+    f = facts[0]
+    legacy = int(df.index.searchsorted(f.extra["confirm_bar_ts"], side="right"))
+    current = int(df.index.searchsorted(f.extra["exists_from"], side="left"))
+    assert legacy == current

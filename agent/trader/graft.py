@@ -83,11 +83,16 @@ def trader_enabled() -> bool:
 
 class TraderGraft:
     def __init__(self, state_dir, backend, *, requirement=EXECUTOR_REQUIREMENT,
-                 threaded: bool = True) -> None:
+                 threaded: bool = True, arrival_latency_sec: float = 0.0) -> None:
+        """`arrival_latency_sec` withholds the thesis until `armed_at + latency` in BAR
+        time. 0.0 (the default, and what live constructs) is cycle-1 behaviour exactly;
+        cycle-2 replay sets it to reproduce, deterministically, the wall-clock delay live
+        gets for free from running the call on a thread."""
         self.state_dir = str(state_dir)
         self._req = requirement
         self._journal = Journal(state_dir)
-        self._analyzer = (Analyzer(state_dir, backend, threaded=threaded)
+        self._analyzer = (Analyzer(state_dir, backend, threaded=threaded,
+                                   arrival_latency_sec=arrival_latency_sec)
                           if backend is not None else None)
         self._snapshot_date = None
         self._plans = PlanStore(state_dir)
@@ -155,7 +160,7 @@ class TraderGraft:
         if FACTS_ALL_SESSION or self._executor is not None:
             self._maint.on_bar(now, bars, closed)
 
-        thesis = self._analyzer.standing_thesis()
+        thesis = self._analyzer.standing_thesis(now=now)
         if thesis is None:
             return                                     # dark day — nothing to arm
 
@@ -210,6 +215,16 @@ class TraderGraft:
 
     def plan(self):
         return self._plan
+
+    def last_bar_minute(self):
+        """The floored minute of the LAST bar this graft was handed, or None.
+
+        Set by `_bar_closed` at the top of `_run`, before any early return, so it tracks
+        every bar the runner delivered — including bars after the plan died, which is
+        exactly the distinction cycle-2's "the run continues past the DOL touch" gate
+        needs to make. Every on-disk artifact stops earlier than the loop does.
+        """
+        return self._last_minute
 
     def bind_state(self):
         return self._executor.bind_state() if self._executor is not None else None

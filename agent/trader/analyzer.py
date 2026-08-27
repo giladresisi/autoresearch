@@ -102,7 +102,7 @@ def thesis_via_decide_thesis(llm_backend, *, docs_root=None):
         if docs_root is not None:
             kwargs["docs_root"] = docs_root
         outcome = decide_thesis(facts_text, context_text, facts, llm_backend, **kwargs)
-        return _thesis_block(outcome)
+        return _thesis_block(outcome), _meta_from_outcome(outcome)
     return _call
 
 
@@ -115,6 +115,50 @@ def _thesis_block(outcome):
         if isinstance(got, dict):
             return got
     return None
+
+
+_META_FIELDS = ("latency_sec", "usage", "cost", "retries", "verdict")
+
+# `run_agent.CallOutcome` does NOT name its fields the way the meta contract does: it
+# carries `latency_total` and `usage_total`, and no cost at all. Reading only the
+# contract names off a real outcome would silently record nothing but `retries` and
+# `verdict`, leaving the whole point of the capture (re-fitting the arrival latency from
+# real data) unserved. The contract name wins when present; these are the fallbacks.
+_META_ALIASES = {"latency_sec": ("latency_total",), "usage": ("usage_total",)}
+
+
+def _split_result(result):
+    """-> (thesis_dict | None, meta_dict).
+
+    The backend contract is widened, not replaced: a bare dict is still valid and
+    yields an empty meta, so every cycle-1 caller and test keeps working.
+    """
+    meta = {}
+    if isinstance(result, tuple) and len(result) == 2:
+        result, meta = result[0], (result[1] or {})
+    thesis = _thesis_block(result)
+    if not isinstance(meta, dict):
+        meta = {}
+    return thesis, {k: v for k, v in meta.items() if k in _META_FIELDS}
+
+
+def _meta_from_outcome(outcome):
+    """Pull the provenance fields off a `CallOutcome`. Absent attributes are dropped
+    rather than defaulted, so a missing field is visible as missing.
+
+    `cost` has no source anywhere in the tree today (no price table exists), so it stays
+    absent on the real path rather than being fabricated from a guessed rate."""
+    out = {}
+    for f in _META_FIELDS:
+        got = getattr(outcome, f, None)
+        if got is None:
+            for alias in _META_ALIASES.get(f, ()):
+                got = getattr(outcome, alias, None)
+                if got is not None:
+                    break
+        if got is not None:
+            out[f] = got
+    return out
 
 
 def stands(thesis) -> bool:
@@ -133,16 +177,19 @@ def stands(thesis) -> bool:
 
 class Analyzer:
     def __init__(self, state_dir, backend, *, requirement=ANALYZER_REQUIREMENT,
-                 threaded: bool = False) -> None:
+                 threaded: bool = False, arrival_latency_sec: float = 0.0) -> None:
         self.state_dir = str(state_dir)
         self._backend = backend
         self._requirement = requirement
         self._threaded = bool(threaded)
+        self._arrival = float(arrival_latency_sec or 0.0)
         self._thread = None
         self._lock = threading.Lock()
         self._armed_date = None
+        self._armed_at = None
         self._thesis = None
         self._health = None
+        self._meta: dict = {}
         self._deferred_until = None
         self._deferred_date = None
         self._load()
@@ -161,19 +208,26 @@ class Analyzer:
                 blob = json.load(fh)
             self._thesis = blob.get("thesis")
             self._health = blob.get("facts_health")
+            self._meta = blob.get("call_meta") or {}
             armed = blob.get("armed_date")
             self._armed_date = pd.Timestamp(armed).date() if armed else None
+            armed_at = blob.get("armed_at")
+            self._armed_at = pd.Timestamp(armed_at) if armed_at else None
         except Exception:
             self._thesis, self._armed_date, self._health = None, None, None
+            self._armed_at, self._meta = None, {}
 
     def _save(self) -> None:
         try:
             os.makedirs(self.state_dir, exist_ok=True)
             blob = {
                 "armed_date": str(self._armed_date) if self._armed_date else None,
+                "armed_at": (self._armed_at.isoformat()
+                             if self._armed_at is not None else None),
                 "thesis": self._thesis,
                 "stands": stands(self._thesis),
                 "facts_health": self._health,
+                "call_meta": self._meta,
                 "requirement": {"name": self._requirement.name,
                                 "version": self._requirement.version},
             }
@@ -222,8 +276,10 @@ class Analyzer:
 
             return self._arm(now, bars)
         except Exception:
-            self._thesis = None
-            self._save()
+            with self._lock:
+                self._thesis = None
+                self._meta = {}                # never leave a previous call's provenance
+                self._save()                   # attached to a thesis that no longer exists
             return None
 
     def _arm(self, now: pd.Timestamp, bars: dict):
@@ -234,7 +290,9 @@ class Analyzer:
             # worker from a previous arm cannot interleave its own persist.
             with self._lock:
                 self._armed_date = now.date()
+                self._armed_at = now
                 self._thesis = None
+                self._meta = {}
                 self._save()
 
             if not self._threaded:
@@ -249,8 +307,10 @@ class Analyzer:
             self._thread.start()
             return None
         except Exception:
-            self._thesis = None
-            self._save()
+            with self._lock:
+                self._thesis = None
+                self._meta = {}
+                self._save()
             return None
 
     # -- thesis.md §3a --------------------------------------------------------- #
@@ -306,16 +366,19 @@ class Analyzer:
         try:
             facts_text, context_text, facts, magnitude = assemble_facts(None, bars, now)
             health = _view_provenance(facts, facts_text, now)
-            thesis = _thesis_block(self._backend(facts_text, context_text, facts,
-                                                 evidence_magnitude=magnitude))
+            result = self._backend(facts_text, context_text, facts,
+                                   evidence_magnitude=magnitude)
+            thesis, meta = _split_result(result)
             with self._lock:
                 self._health = health
                 self._thesis = thesis if isinstance(thesis, dict) else None
+                self._meta = meta if self._thesis is not None else {}
                 self._save()
             return self._thesis
         except Exception:
             with self._lock:
                 self._thesis = None
+                self._meta = {}
                 self._save()
             return None
 
@@ -324,10 +387,38 @@ class Analyzer:
         t = self._thread
         return t is not None and t.is_alive()
 
-    def standing_thesis(self):
-        """The thesis if it stands (directional + DOL), else None — a dark day."""
+    def standing_thesis(self, now=None):
+        """The thesis if it stands AND has arrived, else None.
+
+        `now` is BAR time. With `arrival_latency_sec > 0` the thesis is withheld until
+        `armed_at + latency` — reproducing, deterministically, the wall-clock delay that
+        live gets for free from running the call on a thread. Callers that pass no `now`
+        bypass the gate, which is what every cycle-1 caller does.
+        """
         with self._lock:
-            return self._thesis if stands(self._thesis) else None
+            thesis = self._thesis if stands(self._thesis) else None
+            if thesis is None or now is None or self._arrival <= 0:
+                return thesis
+            if self._armed_at is None:
+                return thesis
+            if now < self._armed_at + pd.Timedelta(seconds=self._arrival):
+                return None
+            return thesis
+
+    def armed_at(self):
+        """Bar time of the arm, or None. Provenance for the arrival gate."""
+        with self._lock:
+            return self._armed_at
+
+    def call_meta(self) -> dict:
+        """Latency / token usage / cost / retries for the standing thesis's call.
+
+        Provenance only — never sent to the model. Recorded on BOTH the live and replay
+        paths so the arrival-latency constant can be re-fitted from real data instead of
+        guessed (recorded 09:20 calls ranged 16.3-103.9 s, p50 ~39 s).
+        """
+        with self._lock:
+            return dict(self._meta)
 
     def facts_health(self):
         """What the facts layer actually held at decision time. Provenance for cycle-2

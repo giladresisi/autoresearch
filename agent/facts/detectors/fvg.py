@@ -79,7 +79,17 @@ def detect_fvgs(bars: pd.DataFrame, tf: str, ticker: str,
             provenance={"detector": "fvg", "tf": tf},
             extra={"direction": direction, "max_anti_excursion": 0.0,
                    "height": round(hi - lo, 6),
-                   "creating_bar_ts": ref_ts, "confirm_bar_ts": idx[i + 1]},
+                   # IDENTITY vs EXISTENCE (l2-mechanisms.md §2, pinned 2026-08-27).
+                   # `reference_ts` / `creating_bar_ts` = the MIDDLE bar: the gap's name,
+                   # the bar it is visible across on a chart. `confirm_bar_ts` = the third
+                   # bar's LABEL. `exists_from` = that bar's COMPLETION — the earliest
+                   # instant anything may act on the gap. They differ by one bar-width, and
+                   # a consumer that reads a LABEL as an instant is early by exactly that
+                   # much: the §11 08-21 erratum is that mistake, an entry recorded 09:36:04
+                   # on a gap that only existed at 09:40:00. Time-gated rules read
+                   # `exists_from`, never the labels.
+                   "creating_bar_ts": ref_ts, "confirm_bar_ts": idx[i + 1],
+                   "exists_from": idx[i + 1] + span},
         )
         fact.label = fact_label(fact)
         out.append(fact)
@@ -111,10 +121,21 @@ def update_fvg_states(facts: "list[Fact]", bars: pd.DataFrame, tf: str) -> "list
     for f in facts:
         if f.cls is not FactClass.FVG:
             continue
-        after_ts = f.extra.get("confirm_bar_ts") or f.reference_ts
-        if not isinstance(after_ts, pd.Timestamp):
-            after_ts = pd.Timestamp(after_ts)
-        start = int(idx.searchsorted(after_ts, side="right"))
+        # Scan from the gap's EXISTENCE instant (third-bar completion), inclusive.
+        # `exists_from` is already the next bar's label, so side="left" starts at that
+        # bar — identical to the legacy `searchsorted(confirm_bar_ts, side="right")`,
+        # which is why this carries no behaviour change; it just stops the correctness
+        # from depending on a label/instant coincidence.
+        exists_from = f.extra.get("exists_from")
+        if exists_from is not None:
+            after_ts = pd.Timestamp(exists_from)
+            side = "left"
+        else:
+            after_ts = f.extra.get("confirm_bar_ts") or f.reference_ts
+            if not isinstance(after_ts, pd.Timestamp):
+                after_ts = pd.Timestamp(after_ts)
+            side = "right"
+        start = int(idx.searchsorted(after_ts, side=side))
         if start >= len(idx):
             continue
         c, h, l = closes[start:], highs[start:], lows[start:]

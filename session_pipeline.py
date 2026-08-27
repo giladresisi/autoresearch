@@ -256,6 +256,7 @@ class SessionPipeline:
         ai_decisions=None,
         trade_primary=None,
         trader=None,
+        trader_only=False,
     ) -> None:
         self._hist_mnq_1m = hist_mnq_1m
         self._hist_mes_1m = hist_mes_1m
@@ -264,6 +265,20 @@ class SessionPipeline:
         # engine keeps running and emitting exactly as before. When None the pipeline
         # does ZERO extra work and touches ZERO state → byte-identical by construction.
         self._trader = trader
+        # TRADER-ONLY (cycle 2): run the Analyzer/Planner/Executor and NOTHING else — the
+        # legacy trend/detection/liquidity/hypothesis/strategy path below is skipped
+        # wholesale. The replay uses this so a session exercises only the new chain; live
+        # inherits the identical code path (cycle 4 verifies it there).
+        #
+        # DEFAULT False. That is load-bearing: with it False this flag costs one boolean
+        # test per bar and the legacy path is byte-identical, which is what acceptance
+        # gate 7 (regression.py against locked baselines) proves.
+        #
+        # Safe to skip because the trader reads NOTHING the skipped code produces: its
+        # inputs are `now`, `today_mnq`, `today_mes` (arguments) and `self._hist_mnq_1m` /
+        # `self._hist_mes_1m`, which are assigned in __init__ and never reassigned. The
+        # `_daily_triggered` guard above is satisfied by on_session_start, which still runs.
+        self._trader_only = bool(trader_only)
         # AI-trader v2 PRIMARY runner (spec §3 `primary`, flag-gated, default None). When set
         # the v2 loop owns entries/management and the legacy hypothesis execution is bypassed
         # (one-brain, spec §4); None ⇒ zero extra work, byte-identical by construction.
@@ -1094,6 +1109,13 @@ class SessionPipeline:
                                     hist_mes=self._hist_mes_1m)
             except Exception:
                 pass
+
+        if self._trader_only:
+            # Everything below is the legacy engine. Skipping it here (rather than at each
+            # call site) keeps the boundary in ONE place and guarantees no legacy state is
+            # touched: no daily recompute, no trend, no SMT detection, no liquidity update,
+            # no hypothesis, no strategy, no bar_state write.
+            return []
 
         # Re-run daily level computation at two transitions per CME session day.
         # 00:00 ET (London session start): today's midnight open is now available as TDO,

@@ -79,6 +79,25 @@ tuning; the rules are fixed.
   wick-crossed hours earlier). Fresh and partially-mitigated gaps both qualify. Wick-deception
   protection comes from the entry/stop buffers and the ladder re-bind below, not from
   tick-disqualification.
+- **FVG timestamping — two DISTINCT instants; never conflate them (PINNED 2026-08-27):**
+  - **IDENTITY** (the gap's name, its stable key, and how it is reported) = **the MIDDLE
+    bar's timestamp**. A three-bar pattern on bars `T-1 / T / T+1` is "the FVG at `T`" — the
+    bar the imbalance is visible across, and the bar a charting platform draws it against.
+    Worked example (1m): bars 16:30 / 16:31 / 16:32 → the gap is **16:31**.
+  - **EXISTENCE** (the earliest instant anything may act on it) = **the THIRD bar's
+    COMPLETION** = `label(T+1) + timeframe`. The pattern cannot be known before that bar
+    closes. Same example → the 16:31 gap exists from **16:33:00**.
+  - Everything time-gated reads EXISTENCE, never identity: close-based eligibility and the
+    close-through scan (both start at existence), §4's "creating bar at or after 09:30",
+    §6's "1m FVGs created since that extreme", and every binding decision. A gap is invisible
+    to the engine until its existence instant, and carries its identity timestamp forever
+    after.
+  - **Reading older prose in this document.** Text written before this split uses the THIRD
+    bar's LABEL as the identity — e.g. "labelled 09:35 … only exists at 09:40:00" (§11
+    erratum) and "labelled 04:05 / completes 04:10". Under the pinned convention those same
+    gaps are identified **09:30** and **04:00**. Only the NAME moves: both EXISTENCE instants
+    (09:40:00, 04:10) are unchanged, so every conclusion drawn from them — the 08-21 erratum
+    and its "no §5 entry" verdict included — stands exactly as written.
 - **Distance invalidation (5m gaps):** once price displaces beyond a 5m FVG in the
   anti-trade direction by more than ~60 pts, that gap is **permanently** dead for entry — it
   does not revive when price returns (unlike the max-distance guard, which is momentary). A
@@ -915,7 +934,8 @@ knobs from config; a later tuning cycle moves the knobs against the real engine.
 - Every mechanism rule in §§2–8, with knobs read from config at §9's starting values.
 - The pinned conventions, each of which silently changes behaviour if got wrong:
   **5m bars left-labelled / left-closed / 18:00-ET-session-anchored** (§11, 07-23 item);
-  **FVGs timestamped at third-bar COMPLETION**, never the label (§11 erratum);
+  **FVG IDENTITY = the MIDDLE bar, FVG EXISTENCE = third-bar COMPLETION** — two
+  distinct instants, never conflated (§2 convention, §11 erratum);
   **§5 retrace-in must be a FRESH tick after 09:30:30** (§5 / §11 resolution);
   **§6.1's four clauses** (intra-bar ordering, runaway fill price, cooldown gating, candidate
   order); **§7's stale-extreme anchor keyed on AGE measured at the plan arm** (§7 / §9).
@@ -1081,7 +1101,10 @@ if it would alter BEHAVIOUR, it is in scope and specified above.
   rows are unaffected (their gaps predate the arm or complete well before the fill —
   08-18's is labelled 04:05 / completes 04:10 against an 09:41:02 fill), so the grid below
   and the buffer/cap conclusions stand; only the 08-21 line and any total containing it
-  must be re-derived. **Every future replay MUST timestamp an FVG at third-bar completion.**
+  must be re-derived. **Every future replay MUST gate an FVG's ACTIONABILITY on third-bar completion.**
+  (Its IDENTITY stays the middle bar — §2. What completion pins is the earliest
+  instant the gap may be acted on, not its name; the gap called 09:35 here is the
+  09:30 gap under the pinned convention, existing from the same 09:40:00.)
   Grid totals over those ten (08-21 row inflated by the erratum):
 
   | SL policy | buf 7 | buf 5 | buf 3 | buf 0 |
