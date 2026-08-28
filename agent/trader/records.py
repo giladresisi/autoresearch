@@ -104,6 +104,18 @@ class DecisionRecorder:
                     "reason": reason})
         self._write(rec)
 
+    def order_event(self, *, now, plan_id, mechanism, kind, **extra) -> None:
+        """A simulated order-lifecycle event: `fill`, `stop_out`, `take_profit`.
+
+        The event's own `time` is dropped in favour of `now`: they are the same bar
+        instant, and `_base` already renders it in the ISO form every other record uses.
+        """
+        rec = self._base(str(kind), now, plan_id, mechanism)
+        extra.pop("time", None)
+        rec.update({k: (_iso(v) if hasattr(v, "isoformat") else v)
+                    for k, v in extra.items()})
+        self._write(rec)
+
     def plan_dead(self, *, now, plan_id, reason, detail=None) -> None:
         rec = self._base("plan_dead", now, plan_id, None)
         rec.update({"reason": reason, "detail": detail or {}})

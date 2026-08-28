@@ -18,7 +18,7 @@ import pandas as pd
 from agent.facts.bars import _session_origin
 from agent.facts.batch import FVG_TIMEFRAMES, LEG_TIMEFRAME, _tf_frame
 from agent.facts.detectors._common import normalize, truncate
-from agent.facts.detectors.extremes import running_extremes
+from agent.facts.detectors.extremes import post_0930_since, running_extremes
 from agent.facts.detectors.fvg import detect_fvgs, update_fvg_states
 from agent.facts.detectors.legs import segment_legs
 from agent.facts.records import FactClass
@@ -76,7 +76,11 @@ def _one_ticker(store: FactStore, st: dict, tkr: str, raw, now: pd.Timestamp,
     since = _session_origin(now) if now is not None else win.index[0]
     if len(win) and win.index[0] > since:
         since = win.index[0]
-    store.replace_class(FactClass.EXTREME, tkr, running_extremes(win, since, tkr))
+    ex_facts = running_extremes(win, since, tkr, track="24h")
+    rth = post_0930_since(now)
+    if rth is not None and len(win) and win.index[-1] >= rth:
+        ex_facts += running_extremes(win, rth, tkr, track="post_0930")
+    store.replace_class(FactClass.EXTREME, tkr, ex_facts)
     if now is not None:
         store.extend_coverage(FactClass.EXTREME, tkr, since)
 

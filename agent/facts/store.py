@@ -133,6 +133,35 @@ class FactStore:
                 return CoverageStatus.OK
         return CoverageStatus.COMPLETE_AT_CAP if at_time_cap else CoverageStatus.INSUFFICIENT
 
+    def coverage_report(self, req, *, prices: dict, atrs: dict,
+                        at_time_cap: bool = False,
+                        envelope_atr_mult: float = 2.0) -> dict:
+        """Per (class, ticker) coverage, for diagnosis and for the run artifact.
+
+        The bug this exists for was invisible because `ensure_coverage` collapses
+        every class and ticker into ONE value: a permanently-insufficient MES class
+        is indistinguishable from a genuinely capped MNQ one.
+        """
+        out = {}
+        for cls in _participating(req):
+            for tkr in (req.tickers or ()):
+                price = (prices or {}).get(tkr)
+                atr = (atrs or {}).get(tkr) or DEFAULT_AVG_RANGE_1H
+                span = self.price_span(cls, tkr)
+                if price is None:
+                    status = CoverageStatus.INSUFFICIENT
+                    need = None
+                else:
+                    env = float(envelope_atr_mult) * float(atr)
+                    need = (price - env, price + env)
+                    status = self.coverage_status(cls, tkr, price=price, envelope=env,
+                                                  at_time_cap=at_time_cap)
+                out[f"{cls.value}:{tkr}"] = {
+                    "status": status.value, "span": span, "need": need,
+                    "count": len(self.query(cls=cls, ticker=tkr)),
+                }
+        return out
+
     def health(self, cls: FactClass, ticker: str) -> dict:
         facts = self.query(cls=cls, ticker=ticker)
         stamps = [f.reference_ts for f in facts if f.reference_ts is not None]
@@ -181,26 +210,55 @@ class FactStore:
 DEFAULT_AVG_RANGE_1H = 60.0
 _EXTEND_STEPS = (0.5, 1.0)      # fractions of the requirement's declared window (the cap)
 
+# Only classes whose MEMBERS SIT AT PRICES a mechanism might bind or target can answer
+# "do we hold facts where we need them". LEG and EXTREME are derived summaries — a
+# leg's span is its own range, EXTREME holds exactly day_high/day_low — so including
+# them asks a question they cannot answer, and they then pin the status forever.
+# Measured on 08-13: LEG/MES is empty on every real day (legs.QUALIFY_RANGE_PTS is 50
+# absolute MNQ points; MES ranges are ~1/4 of that), so its span is None -> INSUFFICIENT
+# on every bar regardless of any other fix.
+COVERAGE_CLASSES = (FactClass.LEVEL, FactClass.FVG)
 
-def ensure_coverage(store: FactStore, bars: dict, req, now: pd.Timestamp, price: float,
-                    envelope_atr_mult: float = 2.0,
-                    avg_range_1h: "float | None" = None) -> CoverageStatus:
-    """Extend coverage backward until every declared class spans the price envelope, or
-    the requirement's own time cap is reached.
+
+def _participating(req):
+    return tuple(c for c in (req.fact_classes or ()) if c in COVERAGE_CLASSES)
+
+
+def ensure_coverage(store: FactStore, bars: dict, req, now: pd.Timestamp,
+                    prices: dict, *, envelope_atr_mult: float = 2.0,
+                    atrs: "dict | None" = None) -> CoverageStatus:
+    """Extend coverage backward until every PARTICIPATING class spans its ticker's own
+    price envelope, or the requirement's own time cap is reached.
+
+    `prices` and `atrs` are PER TICKER. A single price applied across tickers compares
+    MNQ's 30,215 against MES's ~7,790 span and can never be satisfied (measured 08-13:
+    100/100 calls returned COMPLETE_AT_CAP and no re-fetch ever fired).
 
     Startup, restart and a mid-session refill all take THIS path — there is no separate
-    "cold start" code. Returns `COMPLETE_AT_CAP` (never `INSUFFICIENT`) once the cap is
-    reached: having looked as far back as policy allows IS a complete answer.
+    "cold start" code. Once the cap is reached the answer is `COMPLETE_AT_CAP`, never
+    `INSUFFICIENT`: having looked as far back as policy allows IS a complete answer.
+
+    ONE exception, and it is not about lookback depth: a ticker with NO price in
+    `prices` reports `INSUFFICIENT` at any depth, because the question cannot be
+    answered at all and no amount of extending backward will change that. Extending the
+    cap guarantee to cover it would mean claiming completeness for a ticker that was
+    never judged — the units bug this function exists to fix, wearing a better word.
     """
     from agent.facts.batch import run_batch          # local: batch imports the store
 
-    envelope = float(envelope_atr_mult) * float(avg_range_1h or DEFAULT_AVG_RANGE_1H)
+    atrs = atrs or {}
+    classes = _participating(req)
 
     def _all_ok(at_cap: bool) -> CoverageStatus:
         worst = CoverageStatus.OK
-        for cls in req.fact_classes:
-            for tkr in req.tickers:
-                st = store.coverage_status(cls, tkr, price=price, envelope=envelope,
+        for cls in classes:
+            for tkr in (req.tickers or ()):
+                price = (prices or {}).get(tkr)
+                if price is None:
+                    return CoverageStatus.INSUFFICIENT
+                env = float(envelope_atr_mult) * float(
+                    atrs.get(tkr) or DEFAULT_AVG_RANGE_1H)
+                st = store.coverage_status(cls, tkr, price=price, envelope=env,
                                            at_time_cap=at_cap)
                 if st is CoverageStatus.INSUFFICIENT:
                     return CoverageStatus.INSUFFICIENT
@@ -221,7 +279,7 @@ def ensure_coverage(store: FactStore, bars: dict, req, now: pd.Timestamp, price:
         (store.requested_from(cls, tkr) is not None
          and (req.windows or {}).get(cls) is not None
          and store.requested_from(cls, tkr) <= now - req.windows[cls])
-        for cls in req.fact_classes for tkr in req.tickers
+        for cls in classes for tkr in (req.tickers or ())
     )
     if at_cap_already:
         return _all_ok(at_cap=True)

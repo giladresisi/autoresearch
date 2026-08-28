@@ -222,7 +222,7 @@ def test_blacklisted_gap_is_never_bound(tmp_path):
 
 def test_falsified_price_predicate_kills_the_plan(tmp_path):
     plan = dict(PLAN, dol={"level": "x", "price": 28000.0},
-                valid_while=[{"kind": "price_beyond", "side": "below", "price": 29790.0}])
+                valid_while=[{"type": "price_beyond", "side": "below", "price": 29790.0}])
     ex = _drive(tmp_path, plan, last="09:40")
     assert ex.bind_state()["plan_alive"] is False
     assert ex.bind_state()["dead_reason"] == "falsified"
@@ -230,7 +230,7 @@ def test_falsified_price_predicate_kills_the_plan(tmp_path):
 
 def test_unknown_predicate_kinds_do_not_kill_the_plan(tmp_path):
     plan = dict(PLAN, dol={"level": "x", "price": 28000.0},
-                valid_while=[{"kind": "some_future_predicate", "whatever": 1}])
+                valid_while=[{"type": "some_future_predicate", "whatever": 1}])
     ex = _drive(tmp_path, plan, last="09:40")
     assert ex.bind_state()["plan_alive"] is True
 

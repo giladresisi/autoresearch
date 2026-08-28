@@ -46,9 +46,16 @@ class FactsMaintainer:
         self._req = requirement
         self._ticker = ticker
         self._inc_state: dict = {}
-        self._avg_range_1h = None
         self._last_cascade = None
-        self._now_price = None
+        # PER TICKER. One price and one ATR applied across tickers judged MES's ~7,790
+        # span against MNQ's 30,215 and made every MES class permanently INSUFFICIENT
+        # (measured 08-13). `now_price` / `avg_range_1h` stay as the PRIMARY ticker's
+        # values so every existing caller keeps working.
+        self._prices: dict = {}
+        self._atrs: dict = {}
+        # The last bar time seen, so the coverage artifact can compute the at-cap
+        # condition instead of hard-coding it False.
+        self._last_now = None
 
     # -- accessors ------------------------------------------------------------- #
 
@@ -57,8 +64,16 @@ class FactsMaintainer:
         return self._store
 
     @property
+    def prices(self) -> dict:
+        return dict(self._prices)
+
+    @property
+    def atrs(self) -> dict:
+        return dict(self._atrs)
+
+    @property
     def avg_range_1h(self):
-        return self._avg_range_1h
+        return self._atrs.get(self._ticker)
 
     @property
     def last_cascade(self):
@@ -66,12 +81,44 @@ class FactsMaintainer:
 
     @property
     def now_price(self):
-        return self._now_price
+        return self._prices.get(self._ticker)
+
+    def coverage_report(self) -> dict:
+        """Per (class, ticker) coverage as of the last bar.
+
+        `at_time_cap` is COMPUTED, not hard-coded False. This report is the instrument
+        built to make the 08-13 units bug visible; reporting `insufficient` for the
+        legitimate at-cap case (a new high — nothing above exists to fetch) makes that
+        word ambiguous between "the bug is back" and "we looked as far back as policy
+        allows", which is the exact distinction `COMPLETE_AT_CAP` exists to draw.
+        """
+        return self._store.coverage_report(self._req, prices=self._prices,
+                                           atrs=self._atrs,
+                                           at_time_cap=self._at_time_cap())
+
+    def _at_time_cap(self) -> bool:
+        """Has every participating (class, ticker) been driven back to its declared
+        window? Same condition `ensure_coverage` uses for its own short-circuit."""
+        from agent.facts.store import _participating
+        now = self._last_now
+        if now is None:
+            return False
+        windows = self._req.windows or {}
+        try:
+            return all(
+                (self._store.requested_from(cls, tkr) is not None
+                 and windows.get(cls) is not None
+                 and self._store.requested_from(cls, tkr) <= now - windows[cls])
+                for cls in _participating(self._req)
+                for tkr in (self._req.tickers or ())
+            )
+        except Exception:
+            return False
 
     def state(self) -> dict:
         return {"last_cascade": self._last_cascade,
-                "avg_range_1h": self._avg_range_1h,
-                "now_price": self._now_price}
+                "avg_range_1h": self.avg_range_1h,
+                "now_price": self.now_price}
 
     # -- the driver ------------------------------------------------------------ #
 
@@ -85,9 +132,14 @@ class FactsMaintainer:
         if now is None:
             return
 
-        mnq = truncate(normalize((bars or {}).get(self._ticker)), now)
-        if len(mnq):
-            self._now_price = float(mnq["Close"].iloc[-1])
+        # A price for EVERY ticker, not just the primary: the coverage precondition
+        # judges each ticker against its own price.
+        frames = {}
+        for tkr, raw in (bars or {}).items():
+            frame = truncate(normalize(raw), now)
+            frames[tkr] = frame
+            if len(frame):
+                self._prices[tkr] = float(frame["Close"].iloc[-1])
 
         # The cascade. Swallowed: a detector must never take the bar loop down.
         try:
@@ -96,22 +148,24 @@ class FactsMaintainer:
         except Exception:
             pass
 
+        self._last_now = now
+
         if not bar_complete:
             return                                    # per-second path ends here
 
         self._last_cascade = str(now)
 
         try:
-            self._refresh_avg_range(mnq)
+            for tkr, frame in frames.items():
+                self._refresh_avg_range(tkr, frame)
             ensure_coverage(self._store, bars or {}, self._req, now,
-                            price=self._now_price or 0.0,
-                            avg_range_1h=self._avg_range_1h)
+                            prices=self._prices, atrs=self._atrs)
         except Exception:
             pass
 
     # -- internals -------------------------------------------------------------- #
 
-    def _refresh_avg_range(self, mnq: pd.DataFrame) -> None:
+    def _refresh_avg_range(self, ticker: str, mnq: pd.DataFrame) -> None:
         """Mean true range of the last 20 completed 1h bars — the coverage envelope's
         ATR proxy. Recomputed on bar close only.
 
@@ -127,6 +181,6 @@ class FactsMaintainer:
             if len(h1) == 0:
                 return
             tail = h1.tail(ATR_BARS)
-            self._avg_range_1h = float((tail["High"] - tail["Low"]).mean())
+            self._atrs[ticker] = float((tail["High"] - tail["Low"]).mean())
         except Exception:
             pass

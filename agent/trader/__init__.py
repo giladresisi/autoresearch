@@ -7,5 +7,9 @@ the additive `_ai_decisions_on_bar` template instead and the code lives here.
 
 Nothing in this package imports `live_orders`, writes `events.jsonl` / `daily.json` /
 `hypothesis.json` / `position.json` / `smts.json`, calls any `smt_state` mutator, or
-calls `paths.set_state_dir()`. Cycle 1 stops at the intended-entry RECORD — no orders.
+calls `paths.set_state_dir()`.
+
+Cycle 1 stopped at the intended-entry RECORD. Cycle 3 adds a SIMULATED order lifecycle
+(`order_sim.py`) so the §2/§8 spine — ladder, cooldown, attempt budget — has a fill to
+act on. It is still a simulation: no broker is reached and no order is placed.
 """

@@ -16,6 +16,7 @@ determinism, plus an arrival gate to restore live's timing shape.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -29,6 +30,8 @@ if _REPO not in sys.path:
 from backtest_smt import run_backtest_v2                       # noqa: E402
 from agent.trader.cached_backend import (                      # noqa: E402
     CachedThesisBackend, NetworkCallRefused)
+from agent.trader.fixed_backend import (                       # noqa: E402
+    FixedThesisBackend, OracleThesisError, validate_oracle_thesis)
 from agent.trader.thesis_cache import ThesisCache              # noqa: E402
 
 TZ = "America/New_York"
@@ -93,25 +96,33 @@ def _prompt_parts():
 
 
 def build_replay_trader(date, run_dir, *, allow_calls, arrival_latency_sec,
-                        arm_hhmm=None):
+                        arm_hhmm=None, thesis=None, gate_arrival=True):
     from agent.trader.graft import TraderGraft
 
-    sys_fn, task, schema_fn, model_id = _prompt_parts()
-    inner = _real_backend() if allow_calls else None
-    backend = CachedThesisBackend(
-        inner, cache=ThesisCache(), model_id=model_id,
-        system_prompt_fn=sys_fn, task_prompt=task, schema_fn=schema_fn,
-        allow_calls=allow_calls, boundary_hint=str(date),
-    )
+    if thesis is not None:
+        # The oracle path never constructs a cache: the recorder's content key hashes
+        # the prompt, so an injected entry is unauthorable and self-invalidating.
+        backend = FixedThesisBackend(thesis)
+    else:
+        sys_fn, task, schema_fn, model_id = _prompt_parts()
+        inner = _real_backend() if allow_calls else None
+        backend = CachedThesisBackend(
+            inner, cache=ThesisCache(), model_id=model_id,
+            system_prompt_fn=sys_fn, task_prompt=task, schema_fn=schema_fn,
+            allow_calls=allow_calls, boundary_hint=str(date),
+        )
     if arm_hhmm:
         # Scoped and restored by `run_replay` -- see `_arm_env`.
         os.environ[ARM_ENV] = arm_hhmm
 
+    # A fixed backend returns instantly, so the gate is the ONLY thing keeping the
+    # thesis from being visible at the arm instant. Explicit, not inherited.
+    latency = arrival_latency_sec if gate_arrival else 0.0
+
     # `arrival_latency_sec` goes through the constructor rather than by overwriting
     # `graft._analyzer` afterwards (the plan's shape), which built and threw away a whole
     # Analyzer -- including its state-file load -- on every replayed date.
-    return TraderGraft(run_dir, backend, threaded=False,
-                       arrival_latency_sec=arrival_latency_sec)
+    return TraderGraft(run_dir, backend, threaded=False, arrival_latency_sec=latency)
 
 
 class _arm_env:
@@ -143,7 +154,8 @@ class _arm_env:
 
 
 def run_replay(dates, *, allow_calls=False,
-               arrival_latency_sec=DEFAULT_ARRIVAL_LATENCY_SEC, arm_hhmm=None):
+               arrival_latency_sec=DEFAULT_ARRIVAL_LATENCY_SEC, arm_hhmm=None,
+               thesis=None, gate_arrival=True):
     """Replay each date's trading session.
 
     Returns `{date: {"run_dir", "cache", "last_bar", "legacy"}}`:
@@ -178,7 +190,21 @@ def run_replay(dates, *, allow_calls=False,
     calls" would be unfalsifiable. The counters on the backend survive the swallow, so
     they are checked here, after the run. Divergence from the plan, which assumed the
     exception would propagate out of `run_replay`.
+
+    `thesis=` injects a SYNTHETIC (oracle) thesis instead of reading a recording -- see
+    `agent/trader/fixed_backend.py`. It is refused up front rather than at the arm bar,
+    because `Analyzer._call` and `TraderGraft.on_bar` both swallow, so a malformed oracle
+    would otherwise finish the run silently as a dark day. `gate_arrival=False` makes the
+    injected thesis visible at the arm instant.
     """
+    if thesis is not None and allow_calls:
+        raise ValueError("thesis= (oracle) and allow_calls= (seed) are mutually "
+                         "exclusive: an oracle run must not reach the model")
+    if thesis is not None:
+        errs = validate_oracle_thesis(thesis)
+        if errs:
+            raise OracleThesisError("; ".join(errs))
+
     out = {}
     for date in dates:
         window = replay_window_for(date)
@@ -188,7 +214,8 @@ def run_replay(dates, *, allow_calls=False,
             _c["run_dir"] = str(run_dir)
             graft = build_replay_trader(d, run_dir, allow_calls=allow_calls,
                                         arrival_latency_sec=arrival_latency_sec,
-                                        arm_hhmm=arm_hhmm)
+                                        arm_hhmm=arm_hhmm, thesis=thesis,
+                                        gate_arrival=gate_arrival)
             _c["backend"] = graft._analyzer._backend
             _c["graft"] = graft
             return graft
@@ -220,17 +247,51 @@ def run_replay(dates, *, allow_calls=False,
                 raise RuntimeError(f"{date}: replay trader failed to build\n{fh.read()}")
 
         backend = captured.get("backend")
-        stats = {"hits": getattr(backend, "hits", 0),
-                 "misses": getattr(backend, "misses", 0),
-                 "calls": getattr(backend, "calls", 0),
-                 "refusals": getattr(backend, "refusals", 0)}
+        if thesis is not None:
+            # An oracle run has no cache and reaches no model, so every counter is
+            # zero BY CONSTRUCTION. Read explicitly rather than off the backend:
+            # `FixedThesisBackend.calls` counts how many times the ORACLE was served,
+            # which is a different quantity from `calls` here (MODEL calls) and would
+            # report 1 for a run that never touched the network.
+            stats = {"hits": 0, "misses": 0, "calls": 0, "refusals": 0}
+        else:
+            stats = {"hits": getattr(backend, "hits", 0),
+                     "misses": getattr(backend, "misses", 0),
+                     "calls": getattr(backend, "calls", 0),
+                     "refusals": getattr(backend, "refusals", 0)}
         if stats["refusals"]:
             raise NetworkCallRefused(
                 f"{date}: {stats['refusals']} thesis cache miss(es) with calls "
                 f"disallowed (last key {getattr(backend, 'last_key', None)}) -- "
                 "seed the cache with `--seed` first")
         graft = captured.get("graft")
+
+        # Per (class, ticker) coverage as of the last bar. `ensure_coverage` collapses
+        # every class and ticker into ONE value, which is why the 08-13 units bug was
+        # invisible for a whole cycle; this is the un-collapsed view, on disk.
+        if thesis is not None:
+            # NOT best-effort: for a §10-style oracle study this file IS the record of
+            # what was run. A silently dropped provenance stamp leaves a run dir whose
+            # thesis cannot be recovered, in the one module that otherwise raises rather
+            # than hand back a silent-empty result.
+            os.makedirs(run_dir, exist_ok=True)
+            with open(os.path.join(run_dir, "thesis_source.json"), "w",
+                      encoding="utf-8") as fh:
+                json.dump({"thesis_source": "injected", "thesis": thesis,
+                           "gate_arrival": bool(gate_arrival)}, fh,
+                          default=str, indent=2)
+
+        cov = graft.coverage_report() if graft is not None else {}
+        try:
+            os.makedirs(run_dir, exist_ok=True)
+            with open(os.path.join(run_dir, "coverage_report.json"), "w",
+                      encoding="utf-8") as fh:
+                json.dump(cov, fh, default=str, indent=2)
+        except Exception:
+            pass
+
         out[date] = {"run_dir": run_dir, "legacy": legacy, "cache": stats,
+                     "coverage": cov,
                      "last_bar": (graft.last_bar_minute()
                                   if graft is not None else None)}
     return out

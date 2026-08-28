@@ -46,5 +46,10 @@ def fact_label(fact: Fact) -> str:
         return (f"{fact.ticker} {fact.timeframe} leg {fact.extra.get('direction','?')} "
                 f"{when} range={fact.extra.get('range','?')}")
     if fact.cls is FactClass.EXTREME:
-        return f"{fact.ticker} {fact.extra.get('kind', 'extreme')} {fact.price} ({when})"
+        # The track is suffixed only when it is NOT the 24h one, so every label written
+        # before the second track existed stays byte-identical.
+        track = fact.extra.get("track")
+        suffix = f" [{track}]" if track and track != "24h" else ""
+        return (f"{fact.ticker} {fact.extra.get('kind', 'extreme')} {fact.price}"
+                f"{suffix} ({when})")
     return f"{fact.ticker} {fact.cls.value} {when}"

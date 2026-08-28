@@ -19,7 +19,7 @@ import pandas as pd
 
 from agent.facts.bars import _session_origin, resample
 from agent.facts.detectors._common import normalize, truncate
-from agent.facts.detectors.extremes import running_extremes
+from agent.facts.detectors.extremes import post_0930_since, running_extremes
 from agent.facts.detectors.fvg import detect_fvgs, update_fvg_states
 from agent.facts.detectors.legs import segment_legs
 from agent.facts.detectors.levels import (apply_sweep_states, apply_supersession,
@@ -104,10 +104,18 @@ def run_batch(store: FactStore, bars_by_ticker: dict, req, now: pd.Timestamp) ->
                 elif cls is FactClass.LEG:
                     facts = segment_legs(_tf_frame(win, LEG_TIMEFRAME), now, tkr)
                 elif cls is FactClass.EXTREME:
+                    # TWO tracks. §7 follows the 24h extreme and falls back to the
+                    # post-09:30 one when it is stale; §6 needs a day extreme printed
+                    # after the last 5m FVG. One track cannot serve both.
+                    facts = []
                     since = _session_origin(now) if now is not None else None
                     if since is not None and len(win) and win.index[0] > since:
                         since = win.index[0]
-                    facts = running_extremes(win, since, tkr)
+                    if since is not None:
+                        facts += running_extremes(win, since, tkr, track="24h")
+                    rth = post_0930_since(now)
+                    if rth is not None and len(win) and win.index[-1] >= rth:
+                        facts += running_extremes(win, rth, tkr, track="post_0930")
                 elif cls is FactClass.ANCHOR:
                     facts = _anchor_facts(win, now, tkr)
 

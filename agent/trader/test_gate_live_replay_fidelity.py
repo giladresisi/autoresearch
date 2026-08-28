@@ -38,6 +38,22 @@ def _load(name):
     return json.load(open(p, encoding="utf-8"))
 
 
+# The record kinds that EXISTED when the live fixture was captured (cycle 1, before the
+# simulated order lifecycle). The Executor now also books `fill` / `stop_out` /
+# `take_profit`, which the 2026-08-25 live run could not have written because the
+# lifecycle did not exist yet. Comparing the raw record lists therefore compares a
+# current replay against a fixture of an older vintage and fails for a reason that has
+# nothing to do with fidelity. Both sides are restricted to these kinds; that the new
+# ones are genuinely present is asserted separately, below, so the restriction cannot
+# quietly absorb a lost decision.
+LIVE_RECORD_KINDS = ("bind", "unbind", "intended_entry", "veto", "plan_dead")
+LIFECYCLE_KINDS = ("fill", "stop_out", "take_profit")
+
+
+def _binding_only(recs):
+    return [r for r in recs if r.get("kind") in LIVE_RECORD_KINDS]
+
+
 def _key(rec):
     """The decision identity: what it decided, on what, at what prices."""
     return (rec.get("kind"), rec.get("mechanism"), rec.get("artifact_id"),
@@ -83,10 +99,41 @@ def test_the_live_fixture_has_the_three_expected_records():
     assert kinds == ["bind", "intended_entry", "veto"]
 
 
+# ── ERA NOTE (2026-08-28) ───────────────────────────────────────────────────────
+# The live fixture was captured in cycle 1, which had NO fill model. Its order could
+# never fill, so the Executor kept re-evaluating the same binding and eventually vetoed
+# it on max_distance at 10:43. Under the Phase-1 order lifecycle the trigger (29277, a
+# short) is already crossed at the 10:41 bind — price 29237.75 — so §2's crossed-trigger
+# rule fills it, and a filled position correctly stops further binding. The veto is
+# therefore a cycle-1 ARTEFACT of having nothing to fill, not a behaviour to preserve.
+#
+# What still must match, and does: the thesis, the plan, the bound artifact
+# (1dfeba17a1c9), and the intended entry's trigger/stop (29277 / 29291). Those are the
+# fidelity claims. The comparison is made over the COMMON PREFIX for that reason.
+LIVE_ERA_TAIL = ("veto",)   # kinds the fixture carries only because it never filled
+
+
+def _pre_lifecycle(records):
+    """The fixture's records up to the point its era diverges from ours."""
+    return [r for r in records if r["kind"] not in LIVE_ERA_TAIL]
+
 def test_replay_reproduces_the_same_decision_kinds_in_the_same_order(_replayed):
-    live = [r["kind"] for r in _load("trader_decisions.jsonl")]
-    replay = [r["kind"] for r in _replay_records(_replayed)]
-    assert replay == live
+    live = [r["kind"] for r in _pre_lifecycle(_binding_only(_load("trader_decisions.jsonl")))]
+    replay = [r["kind"] for r in _binding_only(_replay_records(_replayed))]
+    assert replay == live, "the common prefix must match; see ERA NOTE for the tail"
+
+
+def test_the_replay_also_books_the_order_lifecycle_the_live_fixture_predates(_replayed):
+    """The counterpart to `LIVE_RECORD_KINDS`: the filtered comparisons above are only
+    honest if the excluded records actually exist. 08-25's intended entry rests, and the
+    tape reaches its trigger, so the replay must book a fill the fixture cannot carry."""
+    assert not [r for r in _load("trader_decisions.jsonl")
+                if r["kind"] in LIFECYCLE_KINDS], \
+        "the live fixture predates the lifecycle; if it carries one, re-pin this gate"
+    booked = [r["kind"] for r in _replay_records(_replayed)
+              if r["kind"] in LIFECYCLE_KINDS]
+    assert "fill" in booked, \
+        "the resting stop-entry never filled -- the lifecycle is not being driven"
 
 
 def test_replay_binds_the_same_artifact(_replayed):
@@ -106,17 +153,24 @@ def test_replay_reproduces_the_intended_entry_trigger_and_stop(_replayed):
     assert rentry["dol"] == live["dol"] == 29157.5
 
 
-def test_replay_reproduces_the_max_distance_veto(_replayed):
-    live = [r for r in _load("trader_decisions.jsonl") if r["kind"] == "veto"][0]
-    rveto = [r for r in _replay_records(_replayed) if r["kind"] == "veto"][0]
-    assert rveto["reason"] == live["reason"] == "max_distance"
-    assert rveto["detail"]["cap"] == live["detail"]["cap"] == 60.0
+def test_the_live_veto_is_an_era_artefact_and_the_replay_fills_instead(_replayed):
+    """Replaces the old "reproduce the veto" assertion. The fixture's 10:43 veto exists
+    ONLY because cycle 1 had no fill model: its order rested unfilled, so the binding was
+    re-evaluated until price ran 76.5 pts from the trigger. With the lifecycle the same
+    already-crossed trigger fills, and a held position stops re-binding — so no veto can
+    occur, and demanding one would pin a defect."""
+    live_veto = [r for r in _load("trader_decisions.jsonl") if r["kind"] == "veto"]
+    assert len(live_veto) == 1 and live_veto[0]["reason"] == "max_distance"
+    assert live_veto[0]["detail"]["cap"] == 60.0
+    rec = _replay_records(_replayed)
+    assert not [r for r in rec if r["kind"] == "veto"],         "a filled position must not go on to veto its own binding"
+    assert [r for r in rec if r["kind"] in LIFECYCLE_KINDS],         "if the replay neither vetoes NOR fills, the binding was lost — a real defect"
 
 
 def test_the_full_decision_identity_matches(_replayed):
-    live = [_key(r) for r in _load("trader_decisions.jsonl")]
-    rep = [_key(r) for r in _replay_records(_replayed)]
-    assert rep == live
+    live = [_key(r) for r in _pre_lifecycle(_binding_only(_load("trader_decisions.jsonl")))]
+    rep = [_key(r) for r in _binding_only(_replay_records(_replayed))]
+    assert rep == live, "artifact, trigger and stop must match across the common prefix"
 
 
 def test_the_arm_env_override_is_restored_after_the_run(_replayed):

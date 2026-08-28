@@ -204,9 +204,18 @@ class TraderGraft:
             pass
 
     def _derive(self, thesis: dict, bars: dict, now) -> "dict | None":
+        # Per-ticker prices. The maintainer's own dict is authoritative once it has run;
+        # on the ARMING bar it has not (under FACTS_ALL_SESSION=False maintenance is
+        # gated on an Executor existing), so the frames are read directly for whatever
+        # it is still missing rather than judging every class against a missing price.
+        prices = dict(self._maint.prices)
+        for tkr, frame in (bars or {}).items():
+            if prices.get(tkr) is None:
+                px = _last_close(frame)
+                if px:
+                    prices[tkr] = px
         ensure_coverage(self._maint.store, bars, self._req, now,
-                        price=_last_close(bars.get(PLAN_TICKER)),
-                        avg_range_1h=self._maint.avg_range_1h)
+                        prices=prices, atrs=self._maint.atrs)
         legs = segment_legs(resample(_as_frame(bars.get(PLAN_TICKER)), "5min"),
                             now, PLAN_TICKER)
         return derive_plan(thesis, legs, now)
@@ -228,6 +237,14 @@ class TraderGraft:
 
     def bind_state(self):
         return self._executor.bind_state() if self._executor is not None else None
+
+    def coverage_report(self) -> dict:
+        """Per (class, ticker) coverage as of the last bar — the run artifact that made
+        the 08-13 units bug visible. Never raises: it is diagnostic output."""
+        try:
+            return self._maint.coverage_report()
+        except Exception:
+            return {}
 
     @property
     def store(self):
