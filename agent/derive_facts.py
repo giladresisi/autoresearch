@@ -1341,7 +1341,7 @@ def _predicate_menu(mnq_levels: dict, vlevels: dict, now_price: float, day_mid,
     """Per-direction candidate falsification / exhaustion / recall / evidence predicates
     with unique IDs and concrete params, generated from _MENU_PREDICATE_CFG (config-driven).
     `evidence` family (thesis.md P1/P2) is informational scoring input, like the S3b
-    candidate cards — not meant to be copied verbatim into falsified_if/exhausted_if/
+    candidate cards — not meant to be copied verbatim into falsified_if/
     recall, though nothing prevents reusing the same predicate there via the escape hatch."""
     out = {}
     for direction in ("UP", "DOWN"):

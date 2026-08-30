@@ -30,11 +30,11 @@ def mkbars(start: str, closes, highs=None, lows=None, freq="1min") -> pd.DataFra
 
 
 def thesis(bias="UP", dol_price=100.0, dol_level="prev1_day_high",
-           falsified_if=None, exhausted_if=None, recall=None, confidence="MEDIUM"):
+           falsified_if=None, recall=None, confidence="MEDIUM"):
     return {
         "bias": bias, "regime": "TREND",
         "dol": {"level": dol_level, "price": dol_price} if bias in ("UP", "DOWN") else None,
-        "falsified_if": falsified_if or [], "exhausted_if": exhausted_if or [],
+        "falsified_if": falsified_if or [],
         "confidence": confidence,
         "recall": recall or {"events": [], "max_age_min": 0}, "reasoning": "t",
     }

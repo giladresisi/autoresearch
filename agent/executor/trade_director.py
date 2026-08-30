@@ -215,7 +215,7 @@ class TradeDirector:
 
     def on_profitable_exit(self, ts=None, facts_ref=None, market_view=None,
                            pnl: float = 1.0) -> None:
-        """Profitable exit (spec §5): thesis still valid → recall L2; thesis exhausted → L1."""
+        """Profitable exit (spec §5): thesis still valid → recall L2; DOL drawn → L1."""
         if self.state != State.IN_POSITION:
             return
         self.position_open = False
@@ -251,7 +251,7 @@ class TradeDirector:
         """Bar-close tick: evaluate the standing decisions' predicates and drive the
         state machine. HALTED still manages an open position but arms nothing new.
 
-        A thesis falsified_if / exhausted_if fires in ANY state → thesis death. A recall
+        A thesis falsified_if fires in ANY state → thesis death. A recall
         TTL (max_age) is a HARD thesis expiry only while a CONFIDENT thesis stands
         (AWAITING_SETUP / SETUP_ARMED / IN_POSITION); in THESIS_LOW_CONF the same max_age
         is a re-ask (recall L1), not a death (spec §5)."""
@@ -276,17 +276,19 @@ class TradeDirector:
 
     def _thesis_dead(self, mv) -> bool:
         t = self.thesis
-        return bool(t) and (eval_any(t.falsified_if, mv) or eval_any(t.exhausted_if, mv))
+        return bool(t) and eval_any(t.falsified_if, mv)
 
     def _thesis_ttl_expired(self, mv) -> bool:
         t = self.thesis
         return bool(t) and self._ttl_expired(t.recall, self.thesis_issued_at, mv)
 
     def _thesis_exhausted(self, mv) -> bool:
-        return bool(self.thesis) and mv is not None and eval_any(self.thesis.exhausted_if, mv)
+        # EXHAUSTION REMOVED 2026-08-29: reaching the DOL *is* the exhaustion, and the DOL
+        # touch is handled by the caller. Nothing else can exhaust a thesis.
+        return False
 
     def _on_thesis_death(self, ts, mv, facts_ref) -> None:
-        """Thesis falsified/exhausted/TTL. With an open position, run on_dol_falsified
+        """Thesis falsified/TTL. With an open position, run on_dol_falsified
         deterministically first (no AI call), then drop + recall L1 (unless halted)."""
         prev_halted = self.state == State.HALTED
         if self.position_open:
@@ -317,8 +319,8 @@ class TradeDirector:
         p = self.plan
         if p is None:
             return
-        # setup falsified / exhausted / TTL → recall L2.
-        if (eval_any(p.setup_falsified_if, mv) or eval_any(p.setup_exhausted_if, mv)
+        # setup falsified / TTL → recall L2.
+        if (eval_any(p.setup_falsified_if, mv)
                 or self._ttl_expired(p.recall, self.plan_issued_at, mv)):
             self._drop_plan()
             self._goto(State.AWAITING_SETUP, "setup_invalidated", ts)

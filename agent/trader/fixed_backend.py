@@ -60,14 +60,18 @@ def validate_oracle_thesis(thesis) -> "list[str]":
         if not isinstance(dol, dict) or dol.get("price") is None:
             errs.append("a directional oracle thesis needs dol {level, price}")
 
-    # Required EXPLICITLY, not defaulted: an empty list means the plan can only die at
-    # the DOL, and a stress run measured against a plan that never dies is worthless.
-    for field in ("falsified_if", "exhausted_if"):
-        preds = thesis.get(field)
-        if not preds:
-            errs.append(f"{field} must be given explicitly and non-empty")
-            continue
-        errs += validate_predicate_list(preds, field)
+    # `falsified_if` is required EXPLICITLY, not defaulted. `exhausted_if` was removed
+    # 2026-08-29 — reaching the DOL *is* the exhaustion, so requiring it demanded a field
+    # with no consumer. (Found by the first real `--thesis` run: the validator rejected a
+    # correct oracle thesis for omitting a field the Planner had stopped reading.)
+    preds = thesis.get("falsified_if")
+    if not preds:
+        errs.append("falsified_if must be given explicitly and non-empty")
+    else:
+        errs += validate_predicate_list(preds, "falsified_if")
+    if thesis.get("exhausted_if"):
+        errs.append("exhausted_if was removed 2026-08-29 — reaching the DOL is the "
+                    "exhaustion; drop the field")
 
     return errs
 

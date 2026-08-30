@@ -1,4 +1,4 @@
-# DECISION: Level-1 Thesis (direction · regime · DOL · falsification/exhaustion)
+# DECISION: Level-1 Thesis (direction · regime · DOL · falsification)
 
 > Pure policy — every change to weights/thresholds/predicates is a strategy change: **backtest/
 > bench before merging**. All numbers are v1 seeds pending calibration. **LIVE as of the cycle-1
@@ -10,18 +10,26 @@
 > content of both v1 docs — it is not a merge in place.
 >
 > Output target: ONE standing `thesis.json` per `agent-optimizations.md` §2.1 — bias, regime,
-> DOL, `falsified_if`, `exhausted_if`, `confidence` (code-derived, self-report is audit-only §8),
+> DOL, `falsified_if`, `confidence` (code-derived, self-report is audit-only §8),
 > `recall`. Predicates use the CLOSED vocabulary of §6 only: `price_beyond`, `n_closes_beyond`,
 > `level_swept`, `level_depleted`, `time_elapsed`, `clock_after`, `all_of`/`any_of` (depth 1).
-> Prefer S8 menu items (IDs `D*`/`F*`/`X*`/`R*`, `derive_facts.render_menus_text`) when a menu
+> Prefer S8 menu items (IDs `D*`/`F*`/`R*`, `derive_facts.render_menus_text`) when a menu
 > item fits; otherwise use the documented escape hatch — any schema-valid, facts-grounded
 > predicate built from the same atoms (e.g. `n_closes_beyond(tf="1h"/"4h")`, not yet a generated
 > menu family — see §8 gaps).
 
+> **EXHAUSTION REMOVED 2026-08-29.** There is no `exhausted_if` field. **Reaching the DOL IS
+> the exhaustion** — every thesis ever recorded set `exhausted_if` to exactly the DOL price
+> (08-25's own rationale: "london(cur)_low, *the DOL itself* — reaching it exhausts the DOWN
+> thesis by delivering the immediate draw"), so the field only ever duplicated the DOL touch.
+> `l2-mechanisms.md` never used it, and its backchecks define plan scope as "a fire cannot occur
+> after the plan's DOL is touched". Do NOT emit `exhausted_if`; the schema rejects it. The S8
+> predicate menu's `X*` (exhaustion) entries are ignored — select only `D*`, `F*` and `R*`.
+
 ## 1. Cadence
 
 Event-driven only (`agent-optimizations.md` §3/§5): the mandatory 18:00 ET session-open call,
-plus recall events / TTL expiry / `falsified_if` / `exhausted_if` firing. No fixed intraday
+plus recall events / TTL expiry / `falsified_if` firing. No fixed intraday
 checkpoints (06:00/09:20/13:00 are retired — §11 reuse map). A flip in bias still requires the
 hysteresis baked into whichever predicate fired (e.g. `n_closes_beyond(..., n=2)`), not a raw
 re-narration of the same evidence on every call.
@@ -788,8 +796,6 @@ thesis:
                                            # code-rejected if already true at the current price —
                                            # thesis.falsified_if cannot self-invalidate at issuance
                                            # (validate_contracts XL_FALSIFIED_IF_ALREADY_TRUE)
-  exhausted_if: [ <predicate> ]           # typically DOL touch + optional beyond/time terms
-                                           # same issuance-time check (XL_EXHAUSTED_IF_ALREADY_TRUE)
   confidence: HIGH | MEDIUM | LOW          # code-derived from the evidence ledger below
                                            # (validate_contracts.score_thesis_evidence); self-report
                                            # is a starting point, silently clamped to the computed

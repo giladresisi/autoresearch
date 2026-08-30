@@ -150,29 +150,31 @@ def _completed_closes_by_tf(bars_upto_now: pd.DataFrame, ts: pd.Timestamp) -> di
 def walk_predicates_forward(mnq_bars_after_boundary: pd.DataFrame, levels: dict,
                             thesis: dict, boundary: pd.Timestamp) -> dict:
     """Walk 1m MNQ bars strictly after `boundary` and report the FIRST bar (if any)
-    at which the thesis's dol/falsified_if/exhausted_if/recall.events actually
+    at which the thesis's dol/falsified_if/recall.events actually
     fire — using the SAME MarketView/eval_any machinery
     (agent/contracts/predicates.py) and the SAME sweep tracker
     (agent/bench/lifecycle.py::_SweepTracker) the bench uses, but with
     completed-bins-only close tracking (see _completed_closes_by_tf) so a
     tf=5m/15m/1h/4h predicate can't fire on a still-forming bar.
 
-    Returns {dol_touched_at, falsified_at, exhausted_at, recall_fired_at,
+    Returns {dol_touched_at, falsified_at, recall_fired_at,
     first_terminal_event} — all timestamps are the FIRST bar where that event
     was true, or None if it never fired within the walked window.
-    first_terminal_event is whichever of dol_touch/exhausted_if/falsified_if
-    happened earliest (whichever would have ended the standing thesis first);
+    first_terminal_event is whichever of dol_touch/falsified_if happened
+    earliest (whichever would have ended the standing thesis first);
     recall_fired_at is reported separately since a recall event governs
-    re-asking, not the thesis's falsification/exhaustion fate.
+    re-asking, not the thesis's falsification fate.
+
+    EXHAUSTION REMOVED 2026-08-29: reaching the DOL *is* the exhaustion, so
+    `dol_touched_at` is the only completion signal now.
     """
     falsified_if = thesis.get("falsified_if") or []
-    exhausted_if = thesis.get("exhausted_if") or []
     recall_events = (thesis.get("recall") or {}).get("events") or []
     dol = thesis.get("dol") or {}
     dol_price = dol.get("price") if isinstance(dol, dict) else None
     bias = thesis.get("bias")
 
-    out = {"dol_touched_at": None, "falsified_at": None, "exhausted_at": None,
+    out = {"dol_touched_at": None, "falsified_at": None,
           "recall_fired_at": None, "first_terminal_event": None}
     if len(mnq_bars_after_boundary) == 0:
         return out
@@ -192,8 +194,6 @@ def walk_predicates_forward(mnq_bars_after_boundary: pd.DataFrame, levels: dict,
             touched = (bias == "UP" and hi >= dol_price) or (bias == "DOWN" and lo <= dol_price)
             if touched:
                 out["dol_touched_at"] = str(ts)
-        if out["exhausted_at"] is None and exhausted_if and eval_any(exhausted_if, mv):
-            out["exhausted_at"] = str(ts)
         if out["falsified_at"] is None and falsified_if and eval_any(falsified_if, mv):
             out["falsified_at"] = str(ts)
         if out["recall_fired_at"] is None and recall_events and eval_any(recall_events, mv):
@@ -201,11 +201,10 @@ def walk_predicates_forward(mnq_bars_after_boundary: pd.DataFrame, levels: dict,
 
         # A terminal event already found on an earlier bar -> stop walking; nothing
         # after the FIRST terminal event changes the answer to "what killed this".
-        if out["dol_touched_at"] or out["exhausted_at"] or out["falsified_at"]:
+        if out["dol_touched_at"] or out["falsified_at"]:
             break
 
     candidates = [(k, v) for k, v in (
-        ("exhausted_if", out["exhausted_at"]),
         ("falsified_if", out["falsified_at"]),
         ("dol_touch", out["dol_touched_at"]),
     ) if v]
@@ -245,13 +244,6 @@ def render_explanation_md(result: dict) -> str:
         json.dumps(t.get("falsified_if"), indent=2, default=str),
         "```",
         "",
-        f"**exhausted_if rationale:** {t.get('exhausted_if_rationale')}",
-        "",
-        "**exhausted_if:**",
-        "```json",
-        json.dumps(t.get("exhausted_if"), indent=2, default=str),
-        "```",
-        "",
         "**recall:**",
         "```json",
         json.dumps(t.get("recall"), indent=2, default=str),
@@ -272,7 +264,7 @@ def render_explanation_md(result: dict) -> str:
         json.dumps(result.get("price_recap_after_boundary"), indent=2, default=str),
         "```",
         "",
-        "## Predicate walk-forward (did falsified_if / exhausted_if / recall actually fire?)",
+        "## Predicate walk-forward (did falsified_if / recall actually fire?)",
         "",
         "Evaluated bar-by-bar against the real MNQ 1m bars after the boundary, using the "
         "same MarketView/eval_any machinery and sweep tracker the bench uses — not a "

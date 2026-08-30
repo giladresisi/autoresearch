@@ -63,7 +63,17 @@ def derive_plan(thesis: dict, legs, now: pd.Timestamp) -> "dict | None":
         else:
             armed.insert(0, "fvg_return_continuation")     # thesis rides it
 
-    valid_while = list(thesis.get("falsified_if") or []) + list(thesis.get("exhausted_if") or [])
+    # `valid_while` carries the FALSIFIERS only, and nothing acts on them (see
+    # Executor._death). EXHAUSTION IS DROPPED ENTIRELY: reaching the DOL *is* the
+    # exhaustion, and L1 says so itself — every recorded thesis sets `exhausted_if` to
+    # exactly the DOL price, 08-25's rationale spelling it out as "london(cur)_low, the
+    # DOL itself — reaching it exhausts the DOWN thesis by delivering the immediate
+    # draw". Carrying it as a second predicate only duplicated the DOL touch.
+    #
+    # Dropped HERE and not in L1's schema on purpose: `thesis_key()` hashes the schema,
+    # so changing the contract would invalidate every recorded thesis and force a
+    # re-seed of every date. Ignoring the field downstream costs nothing.
+    valid_while = list(thesis.get("falsified_if") or [])
 
     return {
         "plan_id": _plan_id(thesis, now),

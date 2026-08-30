@@ -64,7 +64,7 @@ T0 = pd.Timestamp("2026-05-19 18:00", tz="America/New_York")
 def _thesis(confidence="HIGH", falsified=None, exhausted=None, recall=None, tid="th1"):
     return {"thesis_id": tid, "bias": "UP", "regime": "TREND", "confidence": confidence,
             "dol": {"level": "pdh", "price": 20000.0},
-            "falsified_if": falsified or [], "exhausted_if": exhausted or [],
+            "falsified_if": falsified or [],
             "recall": recall if recall is not None else {"events": [], "max_age_min": 0},
             "reasoning": "x"}
 
@@ -76,7 +76,7 @@ def _setup(pid="pl1", falsified=None, be=None):
             "stop": {"price": 19600.0},
             "breakeven": {"raise_to_be_if": be or []},
             "exit": {"target": {"level": "pdh", "price": 19950.0}, "management": []},
-            "setup_falsified_if": falsified or [], "setup_exhausted_if": [],
+            "setup_falsified_if": falsified or [],
             "on_dol_falsified": {"action": "MARKET_CLOSE", "params": {}},
             "recall": None, "reasoning": "x"}
 
@@ -334,17 +334,21 @@ def test_profitable_exit_valid_thesis_calls_l2():
     assert len(d.provider.plan_reqs) == n + 1
 
 
-def test_profitable_exit_exhausted_thesis_calls_l1():
-    exh = [{"type": "price_beyond", "price": 19900, "side": "above"}]
+def test_profitable_exit_recalls_l2_because_a_thesis_can_no_longer_be_exhausted():
+    """Inverted 2026-08-29. This asserted that a fired `exhausted_if` routed a profitable
+    exit to NO_THESIS + an L1 call. EXHAUSTION REMOVED: reaching the DOL *is* the
+    exhaustion (every recorded thesis set `exhausted_if` to exactly the DOL price), so
+    `_thesis_exhausted` is now always False and a profitable exit always recalls L2 with
+    the thesis intact. The DOL-drawn path is what routes back to L1."""
     d = _director()
     d.on_session_open(T0, "facts")
-    d.on_thesis_arrived(_thesis("HIGH", exhausted=exh), ts=T0)
+    d.on_thesis_arrived(_thesis("HIGH"), ts=T0)
     d.on_plan_arrived(_setup(), ts=T0)
     d.on_fill(ts=T0)
-    n = len(d.provider.thesis_reqs)
-    d.on_profitable_exit(ts=T0, market_view=_mv(price=19950), pnl=50.0)  # exhausted fires
-    assert d.state == State.NO_THESIS
-    assert len(d.provider.thesis_reqs) == n + 1
+    n_l1 = len(d.provider.thesis_reqs)
+    d.on_profitable_exit(ts=T0, market_view=_mv(price=19950), pnl=50.0)
+    assert d.state == State.AWAITING_SETUP
+    assert len(d.provider.thesis_reqs) == n_l1, "no L1 recall — the thesis still stands"
 
 
 # --------------------------------------------------------------------------- #

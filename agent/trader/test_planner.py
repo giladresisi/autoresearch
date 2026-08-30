@@ -6,7 +6,7 @@ from agent.trader.plan_store import PlanStore
 NOW = pd.Timestamp("2026-08-13 09:20", tz="America/New_York")
 THESIS = {"thesis_id": "t1", "bias": "DOWN", "confidence": "MEDIUM",
           "dol": {"level": "prev1_week_low", "price": 29533.5},
-          "falsified_if": [], "exhausted_if": []}
+          "falsified_if": []}
 
 
 def _leg(direction, extreme_ts, rng=120.0):
@@ -106,11 +106,18 @@ def test_larger_range_leg_wins_when_two_are_fresh():
     assert "fvg_return_continuation" in plan["armed_classes"]
 
 
-def test_valid_while_merges_falsified_and_exhausted_predicates():
-    th = dict(THESIS, falsified_if=[{"kind": "price_beyond", "price": 1.0}],
-              exhausted_if=[{"kind": "clock_after", "at": "10:00"}])
-    assert len(derive_plan(th, [], NOW)["valid_while"]) == 2
-
+def test_valid_while_carries_falsifiers_only_and_drops_exhaustion():
+    """Exhaustion is DROPPED: reaching the DOL is the exhaustion. Every recorded thesis
+    sets `exhausted_if` to exactly the DOL price — 08-25's rationale says so outright,
+    "london(cur)_low, the DOL itself". Carrying it as a second predicate only duplicated
+    the DOL touch. Removed from L1's SCHEMA too (2026-08-29), so a thesis carrying it is
+    now rejected outright; this pins that the Planner ignores it even if one appears."""
+    f = {"type": "price_beyond", "price": 29420.0, "side": "above"}
+    x = {"type": "price_beyond", "price": 29157.5, "side": "below"}
+    plan = derive_plan({"bias": "DOWN", "dol": {"price": 29157.5},
+                        "falsified_if": [f], "exhausted_if": [x]}, [], NOW)
+    assert plan["valid_while"] == [f]
+    assert x not in plan["valid_while"], "exhaustion must not reach the plan"
 
 def test_plan_id_is_stable_for_the_same_thesis_and_time():
     a = derive_plan(THESIS, [], NOW)["plan_id"]

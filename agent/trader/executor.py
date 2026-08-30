@@ -51,6 +51,8 @@ from agent.facts.requirements import EXECUTOR_REQUIREMENT
 from agent.contracts.predicates import (MarketView, eval_predicate,
                                         validate_predicate_list)
 from agent.trader.order_sim import OrderSim, RestingOrder
+from agent.trader.retrace import RetraceGate
+from agent.trader.takeover import deepest_penetrated, resolve_cooldown_end
 from agent.trader.records import DecisionRecorder
 
 # l2-mechanisms.md §9 starting values.
@@ -71,6 +73,9 @@ MAX_ATTEMPTS = 3                     # §8; per plan_id, shared across mechanism
 # `n_closes_beyond` reads at most `n` closes, and 24h holds 6 completed 4h bars.
 HTF_VIEW_TAIL = pd.Timedelta(hours=24)
 PRIMARY_TF = "5min"
+FALLBACK_TF = "1min"                 # §4's widened fallback, §6, §8
+RTH_OPEN_HOUR = 9                    # §4: creating bar at or after 09:30
+RTH_OPEN_MINUTE = 30
 
 _SHORT = ("DOWN", "SHORT")
 
@@ -106,11 +111,22 @@ class Executor:
         # The simulated order lifecycle. A SIMULATION, never a broker call.
         self._sim = OrderSim(dol=self._dol_price())
         self._emitted: set = set()
+        # One-shot: the falsifier is recorded the FIRST time it fires and never again.
+        # It is not a state change, so re-recording it every bar would bury the session.
+        self._falsify_recorded = False
         self._vetoed: set = set()
         self._last_minute = None
         # The stop-out whose §2 cooldown-end resolution has already run, so the
         # resolution fires exactly once per stop-out.
         self._cooldown_resolved_for = None
+        # §5's two-phase gate. Lazy: the settle end is DATE-dependent and `arm_ts`
+        # may be supplied later in replay, so it is built on the first bar.
+        self._retrace = None
+        # The bar row `_drive_orders` last saw, so the fresh-retrace path
+        # can resolve an order it places against the SAME bar.
+        self._last_row = None
+        # §8: the open deeper-gap penetration window, or None.
+        self._tk_window = None
         self._state = {
             "tracking": False,
             "plan_alive": True,
@@ -131,6 +147,11 @@ class Executor:
             "predicate_errors": validate_predicate_list(
                 self._plan.get("valid_while") or [], "valid_while"),
             "order_error": None,
+            "retrace_error": None,
+            "takeover_error": None,
+            "cooldown_resolution": None,
+            "takeover_id": None,
+            "takeover_label": None,
         }
 
     # -- public ---------------------------------------------------------------- #
@@ -207,6 +228,7 @@ class Executor:
         # over 1s bars: resolving fills and stop-outs only at the minute close would
         # mis-time the §2 cooldown by up to 59 s and lose intra-minute stop-outs
         # entirely — §10.2's own lesson that this tracking has to be tick-level.
+        self._last_row = mnq.iloc[-1] if len(mnq) else None
         self._drive_orders(now, mnq)
 
         # 3. Plan death — evaluated every bar, with nothing open. Over bars SINCE THE
@@ -232,6 +254,40 @@ class Executor:
                 self._sim.cancel()
         if not self._state["plan_alive"]:
             return                    # no more BINDING; facts above keep accumulating
+
+        # 3b. §5 phase one, PER SECOND. The fresh-retrace precondition is a TICK
+        # test: sampling it only on bar closes would miss every penetration that
+        # opens and closes inside one minute, which is most of them.
+        # §8's penetration window opens on the stop-out bar and closes on the first tick
+        # at or after the cooldown expiry — the same tick §2's cooldown-end resolution
+        # acts on, and therefore the next attempt. That boundary tick's own range is
+        # deliberately NOT folded in: the scan must answer "what did price penetrate
+        # BETWEEN the stop-out and the re-entry decision", and including the decision
+        # tick itself would let the re-entry justify its own binding.
+        if self._tk_window is not None:
+            try:
+                if self._in_cooldown(now):
+                    self._extend_takeover_window(now)
+                else:
+                    self._tk_window = None
+            except Exception as exc:
+                self._tk_window = None
+                self._state["takeover_error"] = f"{type(exc).__name__}: {exc}"
+
+        # Both halves record their failures rather than swallowing them, for the reason
+        # `_drive_orders` spells out: a raise on every tick makes the mechanism inert,
+        # and inert reads EXACTLY like "the precondition was never met" — which is what
+        # 08-21's and 08-11's FLAT verdicts also look like. Production is silent, so the
+        # diagnostic goes into state.
+        try:
+            opened = self._note_retrace(now)
+        except Exception as exc:
+            opened = set()
+            self._state["retrace_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            self._place_on_fresh_retrace(now, opened)
+        except Exception as exc:
+            self._state["retrace_error"] = f"{type(exc).__name__}: {exc}"
 
         if not bar_complete:
             return                                    # per-second path ends here
@@ -280,13 +336,106 @@ class Executor:
             # diagnostic goes into state (project convention: production is silent).
             self._state["order_error"] = f"{type(exc).__name__}: {exc}"
 
+    def _settle_end_ts(self, now: pd.Timestamp) -> pd.Timestamp:
+        """The instant the settle window closes on `now`'s date: 09:30:30 ET.
+
+        Factored out of `_in_settle`, which computed it inline. §5's fresh-retrace gate
+        needs the same instant, and two copies of this arithmetic would be a defect
+        waiting to happen — the whole 08-21 verdict turns on which side of it a tick
+        falls.
+        """
+        return now.normalize() + pd.Timedelta(
+            hours=SETTLE_END_HOUR, minutes=SETTLE_END_MINUTE,
+            seconds=SETTLE_UNTIL_SECONDS)
+
     def _in_settle(self, now: pd.Timestamp) -> bool:
         """arm -> 09:30:30 inclusive of the arm, exclusive of the end instant."""
         if self._arm_ts is None or now < self._arm_ts:
             return True
-        end = now.normalize() + pd.Timedelta(
-            hours=SETTLE_END_HOUR, minutes=SETTLE_END_MINUTE, seconds=SETTLE_UNTIL_SECONDS)
-        return now < end
+        return now < self._settle_end_ts(now)
+
+    def _note_retrace(self, now: pd.Timestamp) -> "set":
+        """§5 phase one, on the PER-SECOND path: feed every eligible 5m gap this tick.
+
+        Returns the gap ids whose fresh-retrace precondition became satisfied ON THIS
+        TICK, so the caller can act at the instant it opens rather than at the next 1m
+        close (see `_place_on_fresh_retrace`).
+
+        Constructed lazily rather than in `__init__` because the settle end is
+        DATE-dependent and `arm_ts` may be supplied later in replay.
+
+        Range basis, not close basis: `OrderSim` fills a resting order against the bar's
+        extremes, so a retrace test reading only the close would refuse to place an order
+        for a penetration the fill model already believes was reachable.
+        """
+        if now is None:
+            return set()
+        if self._retrace is None:
+            self._retrace = RetraceGate(self._settle_end_ts(now))
+        price = self._state.get("now_price")
+        if price is None:
+            return set()
+        low = self._state.get("now_low", price)
+        high = self._state.get("now_high", price)
+        opened = set()
+        # `initial=False`, NOT the plain eligible set. §2 exempts ladder / deepest-
+        # penetration targets from the MINIMUM height, so `_ladder_target` can select a
+        # sub-5-pt gap that `_eligible_gaps` never returns — and a gap the gate was never
+        # fed can never earn a fresh retrace, so §5's placement would be blocked forever
+        # and the ladder deepening silently inert (07-15's 2.75-pt gap is the documented
+        # instance). The gate must see everything the binding path can bind.
+        mechanism = self._entry_mechanism()
+        want = self._selection_direction(mechanism) if mechanism else None
+        for f in self._gaps_on(PRIMARY_TF, now, initial=False, direction=want):
+            if self._retrace.fresh_entry_seen(f.id):
+                continue
+            self._retrace.note_tick(f.id, price, f.price_low, f.price_high, now,
+                                    low=low, high=high)
+            if self._retrace.fresh_entry_seen(f.id):
+                opened.add(f.id)
+        return opened
+
+    def _place_on_fresh_retrace(self, now: pd.Timestamp, opened: "set") -> None:
+        """§5 phase two, AT THE TICK the precondition opens — not at the next bar close.
+
+        This is a correctness requirement of the fill model, not a nicety. §5's
+        precondition is tick-level, and on 08-18 the fresh retrace and the trigger cross
+        both fall inside the 09:40 minute: deferring placement to the 09:41:00 close
+        finds the trigger ALREADY crossed, so §2 converts the entry into a market fill at
+        the 1s mid (29764.375) instead of a resting stop filling AT its trigger
+        (29763.25) — 1.125 pts worse, and one minute late, on a named case the doc pins
+        to the second. The plan for this cycle did not anticipate it; it is the same
+        class of error as the phase-1 ladder defect, where the fill model and the
+        decision layer disagreed about what price the tape had already passed.
+
+        Deliberately narrow: it fires only on the TRANSITION, only for the gap already
+        bound (the bar-close path owns SELECTION), and only when nothing rests and
+        nothing is open. Everything else stays on the bar-close cascade.
+        """
+        bound_id = self._state.get("bound_id")
+        if not opened or bound_id not in opened:
+            return
+        if self._sim.resting is not None or self._sim.position is not None:
+            return
+        if self._state.get("in_settle") or self._in_cooldown(now):
+            return
+        if self._cooldown_pending():
+            return                 # §8's cooldown-end precedence owns this resolution
+        mechanism = self._state.get("mechanism")
+        if mechanism != "fvg_return_continuation":
+            return
+        gap = self._store.get(bound_id)
+        if gap is None:
+            return
+        had = self._sim.resting
+        self._guard_and_place(now, mechanism, gap, self._state.get("now_price"),
+                              resting_only=True)
+        placed = (self._sim.resting is not None and self._sim.resting is not had)
+        if placed and self._sim.position is None and self._last_row is not None:
+            # The order exists DURING this bar, and this bar's tape may already reach
+            # it. Resolving only on the next call would stamp 08-18's fill 09:40:59
+            # against the doc's 09:40:58 and leave a second of the move unaccounted.
+            self._drive_orders(now, pd.DataFrame([self._last_row]))
 
     def _since_arm(self, mnq: pd.DataFrame) -> pd.DataFrame:
         if self._arm_ts is None or len(mnq) == 0:
@@ -326,10 +475,30 @@ class Executor:
         if cap is not None and int(self._plan.get("attempts_used") or 0) >= int(cap):
             return "attempts_exhausted", {"attempts_used": self._plan.get("attempts_used")}
 
-        if bar_complete:
+        # FALSIFICATION IS RECORDED, NEVER ACTED ON (2026-08-29).
+        #
+        # `l2-mechanisms.md` has lookahead BY DESIGN: it assumes L1's direction and DOL
+        # were right, because the studies were done knowing what the graph did. A
+        # falsifier only has work to do when the direction is WRONG, which cannot happen
+        # inside that frame — so the doc never used one. §7's backcheck states its own
+        # method plainly: "a fire cannot occur after the plan's DOL is touched". Even
+        # §10.2, the one place with a deliberately inverted thesis, names its brakes as
+        # the DOL-floor veto, early sweeps completing plans flat, and the §6/§7/§8 gates
+        # — not predicates.
+        #
+        # So acting on falsification was OUR addition, not the spec's, and it put the
+        # implementation ahead of every number the record contains. Recording it keeps
+        # the evidence for a later decision (block or kill on falsification) without
+        # changing a single outcome now: this branch returns None, so plan death is
+        # exactly `dol_reached` / `attempts_exhausted`, which is what the studies used.
+        if bar_complete and self._state["plan_alive"]:
             fired = self._falsified(mnq, now)
-            if fired is not None:
-                return "falsified", fired
+            if fired is not None and not self._falsify_recorded:
+                self._falsify_recorded = True
+                self._rec.would_have_falsified(
+                    now=now, plan_id=self._plan.get("plan_id"),
+                    predicate=fired.get("predicate") if isinstance(fired, dict) else fired,
+                    detail=fired)
         return None, None
 
     def _market_view(self, now: pd.Timestamp, mnq: pd.DataFrame) -> MarketView:
@@ -451,33 +620,156 @@ class Executor:
             return False
         return excursion > DISTANCE_INVALIDATION_PTS
 
-    def _eligible_gaps(self, now: pd.Timestamp, *, initial: bool = True) -> list:
-        """Live MNQ gaps on the primary timeframe facing the trade direction.
+    @staticmethod
+    def _exists_by(fact, now) -> bool:
+        """Has this fact's EXISTENCE instant arrived?
 
-        A SHORT plan trades from bear gaps (supply above), a LONG plan from bull gaps.
-        Blacklisted artifacts are excluded — a gap that already produced a stop-out is
-        not re-bindable for this plan.
+        §2 (pinned 2026-08-27): identity is the MIDDLE bar; EXISTENCE is the third bar's
+        COMPLETION. Everything time-gated reads existence. Gating on `reference_ts`
+        admits a 5m gap ten minutes early — the look-ahead the §11 08-21 erratum
+        documents, where a 09:36:04 fill was recorded on a gap that existed at 09:40:00.
 
-        `initial=False` is the LADDER-TARGET role, which is exempt from §2's minimum
-        height (but not its maximum).
+        The `or reference_ts` fallback exists only so facts predating the field stay
+        readable; the detector always populates it.
         """
-        want = "bear" if self._is_short() else "bull"
+        if now is None:
+            return True
+        at = fact.extra.get("exists_from") or fact.reference_ts
+        if at is None:
+            return True
+        # No unconditional `pd.Timestamp(at)`: this runs once per live gap per SECOND on
+        # the retrace path, and the detector always stores a Timestamp already. The
+        # re-wrap is kept only for facts loaded from a snapshot, where it may be a string.
+        if not isinstance(at, pd.Timestamp):
+            at = pd.Timestamp(at)
+        return at <= now
+
+    def _gaps_on(self, tf: str, now: pd.Timestamp, *, initial: bool = True,
+                 direction: "str | None" = None) -> list:
+        """Live MNQ gaps on ONE timeframe facing `direction` (default: the trade
+        direction).
+
+        §4's 1m fallback, §6 and §8's takeover all need 1m gaps. §11 records two
+        independent manual walks that scanned only 5m and produced a wrong 07-21 ledger
+        and a mis-bound 07-31 takeover — a timeframe-blind query reproduces exactly that
+        failure, so the timeframe is an explicit argument with no default.
+
+        Blacklisted artifacts are excluded — a gap that already produced a stop-out and
+        whose edge a deeper penetration falsified is not re-bindable for this plan (§8).
+
+        `initial=False` is the LADDER-TARGET / deepest-penetration role, exempt from
+        §2's minimum height (but not its maximum).
+        """
+        want = direction or ("bear" if self._is_short() else "bull")
         black = set(self._plan.get("blacklist") or ())
         out = []
         for f in self._store.query(cls=FactClass.FVG, ticker=self._ticker,
                                    state=FactState.LIVE):
-            if f.timeframe != PRIMARY_TF or f.extra.get("direction") != want:
+            if f.timeframe != tf or f.extra.get("direction") != want:
                 continue
             if f.id in black:
                 continue
-            if f.reference_ts is not None and now is not None and f.reference_ts > now:
+            if not self._exists_by(f, now):
                 continue
             if not self._height_ok(f, initial=initial):
                 continue
-            if self._distance_dead(f):
-                continue
+            if tf == PRIMARY_TF and self._distance_dead(f):
+                continue          # §4: 5m distance invalidation does NOT extend to 1m
             out.append(f)
         return out
+
+    def _eligible_gaps(self, now: pd.Timestamp, *, initial: bool = True) -> list:
+        """The 5m query. Kept as a named method because it is the primary-timeframe call
+        site the ladder and the §8 recency selection both use."""
+        return self._gaps_on(PRIMARY_TF, now, initial=initial)
+
+    # -- §4 / §6: mechanism-specific gap selection ---------------------------- #
+
+    def _selection_direction(self, mechanism) -> str:
+        """Which gap DIRECTION a mechanism binds.
+
+        §5 rides the thesis, so it binds thesis-direction gaps (bear for a short). §4
+        REVERSES the last trend, so it binds the COUNTER-thesis gap — "a bullish FVG
+        from the uptrend when expecting down". Getting this backwards makes §4 bind the
+        continuation gap and silently turns it into a second §5.
+
+        `_levels_for` is unaffected: the trigger and stop are derived from the TRADE
+        direction, so a short below a bullish gap's lower bound comes out correctly.
+        """
+        thesis = "bear" if self._is_short() else "bull"
+        if mechanism == "fvg_negation_reversal":
+            return "bull" if self._is_short() else "bear"
+        return thesis
+
+    def _within_max_distance(self, gap, price) -> bool:
+        """§6's USABLE part (d): the gap's FIXED trigger is inside the max-distance
+        guard of current price. Unlike (a)-(c) this is MOMENTARY, not permanent."""
+        if price is None:
+            return True
+        try:
+            trigger, _ = self._levels_for(gap)
+        except (TypeError, ValueError):
+            return False
+        return abs(float(trigger) - float(price)) <= MAX_DISTANCE_PTS
+
+    def usable_5m_gaps(self, now: pd.Timestamp, price, *, direction=None) -> list:
+        """§6's four-part USABLE test, SETTLED 2026-08-26 and exhaustive.
+
+        A thesis-direction 5m gap is USABLE at a moment iff ALL of: (a) height in the
+        [min, max] band, (b) NOT inverted — no 5m close through it in the anti-trade
+        direction since creation, (c) NOT permanently distance-invalidated, (d) its fixed
+        trigger within the max-distance guard of current price. (a)-(c) are what
+        `_gaps_on` already enforces — the height band, `FactState.LIVE`, and
+        `_distance_dead`; (d) is added here.
+
+        The former "or offers bad risk:reward to the DOL" clause is DELETED. Solving for
+        its threshold from the recorded days gives 0 <= R* < 3.57 with NO lower
+        constraint at all — at every recorded §6 fire the count of usable 5m gaps was
+        ZERO. R* = 0, the clause is inert, and rebuilding it is on §11.0's retired list.
+
+        This is the state §6 arms on and §4's 1m fallback widens into: "the same
+        5m-unusable state that arms §6".
+        """
+        return [g for g in self._gaps_on(PRIMARY_TF, now, direction=direction)
+                if self._within_max_distance(g, price)]
+
+    def _created_at_or_after_rth(self, gap, now: pd.Timestamp) -> bool:
+        """§4's 1m-fallback filter: the gap's CREATING (third) bar at or after 09:30 ET.
+
+        EXISTENCE-side, and §2 says so explicitly — read `exists_from`, never
+        `reference_ts`. A 1m gap identified 09:29 exists at 09:31 and qualifies; one
+        identified 09:28 exists at 09:30 and also qualifies. The pattern's EARLIER bars
+        may be pre-open, which is load-bearing on 08-03, whose rescue gap builds on the
+        09:29 bar. Reading the identity here silently changes which rescue gaps exist.
+        """
+        at = gap.extra.get("exists_from") or gap.reference_ts
+        if at is None or now is None:
+            return False
+        open_ts = now.normalize() + pd.Timedelta(hours=RTH_OPEN_HOUR,
+                                                 minutes=RTH_OPEN_MINUTE)
+        return pd.Timestamp(at) >= open_ts
+
+    def _selection_gaps(self, now: pd.Timestamp, mechanism, price) -> list:
+        """The candidate set for `mechanism`, including §4's widened 1m fallback.
+
+        §4's fallback (widened 2026-08-15) applies whenever NO USABLE 5m FVG exists for
+        the reversal — the leg printed none, or every 5m candidate is
+        distance-invalidated or beyond the max-distance guard. It then binds the most
+        recently created eligible counter-thesis 1m FVG, requiring only that the gap's
+        creating bar is at or after 09:30.
+
+        §2's 5m distance invalidation does NOT extend to 1m-bound gaps (close-through
+        eligibility only, for now) — that exemption lives in `_gaps_on`.
+        """
+        want = self._selection_direction(mechanism)
+        if mechanism != "fvg_negation_reversal":
+            return self._gaps_on(PRIMARY_TF, now, direction=want)
+
+        usable = self.usable_5m_gaps(now, price, direction=want)
+        if usable:
+            return usable
+        return [g for g in self._gaps_on("1min", now, direction=want)
+                if self._created_at_or_after_rth(g, now)]
 
     def _in_no_move_zone(self, price) -> bool:
         """§8: do not cancel/replace while price is within ~15 pts of the resting
@@ -512,7 +804,8 @@ class Executor:
             return float(gap.price_high) >= float(bound.price_high)
         return float(gap.price_low) <= float(bound.price_low)
 
-    def _ladder_target(self, now: pd.Timestamp, price, *, bound_id=None):
+    def _ladder_target(self, now: pd.Timestamp, price, *, bound_id=None,
+                       direction=None):
         """§2's ladder re-bind: the DEEPEST eligible same-direction 5m gap along the
         adverse path that price has ticked INTO.
 
@@ -537,7 +830,10 @@ class Executor:
         bound = self._store.get(anchor) if anchor else None
 
         best = None
-        for f in self._eligible_gaps(now, initial=False):
+        # "the next eligible SAME-DIRECTION 5m FVG": same direction as the BINDING, which
+        # for §4 is the counter-thesis one. Defaulting to the trade direction would make
+        # the ladder search a gap set the negation binding is not even in.
+        for f in self._gaps_on(PRIMARY_TF, now, initial=False, direction=direction):
             if not self._height_ok(f, initial=False):
                 continue
             lo, hi = float(f.price_low), float(f.price_high)
@@ -554,6 +850,27 @@ class Executor:
             elif (lo < float(best.price_low)) if long_ else (hi > float(best.price_high)):
                 best = f
         return best
+
+    @staticmethod
+    def _created(fact):
+        """§8's recency key: EXISTENCE, never identity.
+
+        Two gaps can rank in OPPOSITE orders under the two keys — an earlier-named gap
+        whose third bar completes later is the newer artifact — so which key is used is a
+        behaviour choice, not a formatting one.
+        """
+        return fact.extra.get("exists_from") or fact.reference_ts
+
+    def _newest(self, gaps):
+        """§8's binding preference: 'the most recently created eligible FVG'.
+
+        A named method rather than an inline `max(...)` because it IS the selection rule,
+        and a rule only a call site expresses cannot be tested without re-implementing it
+        in the test — which asserts the test's arithmetic, not the engine's.
+        """
+        if not gaps:
+            return None
+        return max(gaps, key=lambda g: (self._created(g), g.id))
 
     def _levels_for(self, gap):
         """(trigger, stop) for a gap, per l2 §2: stop-entry beyond the far end with the
@@ -584,14 +901,71 @@ class Executor:
         failed_id = event.get("artifact_id")
         if not failed_id:
             return
-        deeper = self._ladder_target(pd.Timestamp(event.get("time")),
-                                     self._state.get("now_price"),
-                                     bound_id=failed_id)
-        if deeper is not None and deeper.id != failed_id:
-            bl = list(self._plan.get("blacklist") or ())
-            if failed_id not in bl:
-                bl.append(failed_id)
-            self._plan["blacklist"] = bl
+        now = pd.Timestamp(event.get("time"))
+        # The penetration window opens on the STOP-OUT BAR ITSELF (§8) — on 08-14 the SL
+        # tick and the takeover penetration are the SAME tick — and stays open until the
+        # next attempt, so it is a running range, not a single reading.
+        px = self._state.get("now_price")
+        self._tk_window = {"low": self._state.get("now_low", px) or px,
+                           "high": self._state.get("now_high", px) or px,
+                           "failed_id": failed_id}
+        self._scan_takeover(now)
+
+    def _takeover_candidates(self, now: pd.Timestamp) -> list:
+        """Every eligible thesis-appropriate gap on EVERY timeframe.
+
+        §11 escalates this to an imperative — "Takeover scanner MUST enumerate gaps of
+        ALL timeframes" — because two independent manual walks scanned only 5m and
+        produced a wrong 07-21 ledger and a mis-bound 07-31 takeover. Before Task 2 the
+        query could not express it: `_eligible_gaps` hard-filtered to 5m.
+
+        `initial=False` is the min-height exemption: this is the deepest-penetration
+        binding role, and 08-14's takeover gap is 3.0 pts tall. §4's creating-bar >= 09:30
+        filter does not apply either — that gap was created 09:11.
+        """
+        out = []
+        for tf in (PRIMARY_TF, "1min"):
+            out.extend(self._gaps_on(tf, now, initial=False))
+        return out
+
+    def _scan_takeover(self, now: pd.Timestamp) -> None:
+        """Re-run §8's deepest-penetration scan over the open window.
+
+        Idempotent and monotone: the window only widens, so a later call can only find a
+        DEEPER gap. Called at the stop-out and again on every tick until the cooldown
+        resolves, because the window runs "between the stop-out and the next attempt".
+        """
+        win = self._tk_window
+        if not win:
+            return
+        failed = self._store.get(win["failed_id"])
+        if failed is None:
+            return
+        deeper = deepest_penetrated(self._takeover_candidates(now), failed,
+                                    self._plan.get("direction"),
+                                    low=win.get("low"), high=win.get("high"))
+        if deeper is None:
+            return                     # no deeper gap: the SAME gap may re-bind (07-23)
+        self._state["takeover_id"] = deeper.id
+        self._state["takeover_label"] = deeper.label
+        # The blacklist is strictly CONDITIONAL on this penetration. An unconditional one
+        # breaks 07-23's validated same-gap re-entry.
+        bl = list(self._plan.get("blacklist") or ())
+        if win["failed_id"] not in bl:
+            bl.append(win["failed_id"])
+        self._plan["blacklist"] = bl
+
+    def _extend_takeover_window(self, now: pd.Timestamp) -> None:
+        """Widen the open penetration window with this tick, then re-scan."""
+        win = self._tk_window
+        if not win:
+            return
+        lo, hi = self._state.get("now_low"), self._state.get("now_high")
+        if lo is not None:
+            win["low"] = lo if win.get("low") is None else min(win["low"], lo)
+        if hi is not None:
+            win["high"] = hi if win.get("high") is None else max(win["high"], hi)
+        self._scan_takeover(now)
 
     def _in_cooldown(self, now: pd.Timestamp) -> bool:
         """§2: after a stop-out, no placement or triggering until the 1m bar in which
@@ -662,18 +1036,38 @@ class Executor:
         return self._cooldown_resolved_for != so.get("time")
 
     def _resolve_cooldown_end(self, now: pd.Timestamp) -> None:
-        """§2's cooldown-end resolution, acting on CURRENT state.
+        """§2's cooldown-end resolution, under §8's precedence rule.
 
         NO fresh-precondition requirement — that is the difference from the settle
         window. Mid-session, post-stop state reflects a real displacement that just took
         the stop; demanding it repeat forfeits the move (07-24: the breakdown crossed the
         trigger 19 s after the stop, and a lockout watched the -280 collapse flat).
 
-        Order: crossed trigger -> market (same FVG-derived stop); else resting placement.
+        §8 adds the precedence question this method now asks out loud. When a deeper-gap
+        takeover HAS fired, the FAILED binding's trigger is checked FIRST: if price is
+        already crossed beyond it, momentum resumed without us and §2's crossed-trigger
+        market execution takes precedence — the takeover does NOT divert. Diverting there
+        is what would have SKIPPED 07-24's +146.5 at 45.25 pts under the episode's SL-cap
+        gate, recreating the exact lockout the cooldown rule was built to kill. If the
+        trigger is UNCROSSED (07-21's three cooldown ends, and 07-31's), the
+        takeover/episode path governs.
+
+        The decision is delegated to `takeover.resolve_cooldown_end` rather than
+        re-derived here: it is §8's rule, its ordering is load-bearing, and two copies of
+        a three-way precedence rule is how they come to disagree.
+
+        NOTE the third branch. `close_verdict` is passed as None because the episode
+        machinery is not wired into this entry path in this cycle, so a completed close
+        verdict of the stop-out bar can never be offered here; the resolution therefore
+        collapses to crossed-trigger -> market, else resting. That is the FULL documented
+        order minus a branch that cannot yet fire, not a different order.
         """
         trigger, stop = self._state.get("trigger"), self._state.get("stop")
         if trigger is None or stop is None or self._crossing_price() is None:
             return
+        self._state["cooldown_resolution"] = resolve_cooldown_end(
+            failed_trigger=trigger, price=self._crossing_price(),
+            direction=self._plan.get("direction"), close_verdict=None)
         self._enter(now, trigger, stop, self._state.get("bound_id"))
 
     def _rebind_and_guard(self, now: pd.Timestamp) -> None:
@@ -702,10 +1096,11 @@ class Executor:
         if self._sim.position is not None:
             return
 
-        gap = (self._ladder_target(now, price)
+        want = self._selection_direction(mechanism)
+        gap = (self._ladder_target(now, price, direction=want)
                if self._sim.resting is not None else None)
         if gap is None:
-            gaps = self._eligible_gaps(now)
+            gaps = self._selection_gaps(now, mechanism, price)
             if not gaps:
                 self._clear_binding()
                 return
@@ -748,11 +1143,8 @@ class Executor:
             # crossed trigger at INITIAL PLACEMENT executes as a market order — "the
             # resting stop-entry is the normal case, market the degenerate case of the
             # same mechanism". Excluding them silenced 08-25 completely.
-            def _created(f):
-                return f.extra.get("exists_from") or f.reference_ts
-
-            newest = max(gaps, key=lambda g: (_created(g), g.id))
-            if still_eligible and _created(newest) <= _created(bound):
+            newest = self._newest(gaps)
+            if still_eligible and self._created(newest) <= self._created(bound):
                 gap = bound                # nothing newer has appeared; keep the binding
             else:
                 gap = newest
@@ -765,6 +1157,20 @@ class Executor:
                            mechanism=mechanism, artifact_id=gap.id,
                            artifact_label=gap.label, trigger=trigger, stop=stop)
         self._state.update({"trigger": trigger, "stop": stop})
+        self._guard_and_place(now, mechanism, gap, price)
+
+    def _guard_and_place(self, now, mechanism, gap, price,
+                         *, resting_only: bool = False) -> None:
+        """§2's guards, then §5's precondition, then the order.
+
+        Split out of `_rebind_and_guard` so the per-second fresh-retrace path can reach
+        exactly the same sequence — same guards, same veto records, same placement rules
+        — without duplicating any of it. The bar-close path owns gap SELECTION; this owns
+        what happens once a gap is selected.
+        """
+        if price is None:
+            return
+        trigger, stop = self._levels_for(gap)
 
         # --- guards, in order ------------------------------------------------- #
         distance = abs(trigger - price)
@@ -786,6 +1192,22 @@ class Executor:
 
         if self._state["in_settle"]:
             return                                     # tracked, never entered (l2 §2)
+
+        # §5's two-phase binding: the order is placed only after a FRESH retrace INTO
+        # the bound gap — a tick entering its range strictly after 09:30:30. Without
+        # this the binding is a naked stop-entry on eligibility alone, which is the
+        # LITERAL reading the 19-day A/B measured at +410.50 against FRESH's +570.50.
+        #
+        # Ahead of the `intended_entry` record, not after it: that record answers "where
+        # would I have entered", and with the precondition unmet the answer is nowhere.
+        # 08-21's named test asserts the absence of BOTH.
+        #
+        # Note this is NOT re-armed after a stop-out — §2's cooldown "acts on the current
+        # state" with no fresh-precondition requirement, and re-arming here is the §5
+        # re-entry churn guard §11.0 retired.
+        if mechanism == "fvg_return_continuation" and (
+                self._retrace is None or not self._retrace.fresh_entry_seen(gap.id)):
+            return
 
         key = (mechanism, gap.id)
         if key not in self._emitted:
@@ -814,7 +1236,23 @@ class Executor:
             return
         cur = self._sim.resting
         if cur is None or cur.artifact_id != gap.id or cur.trigger != float(trigger):
-            self._enter(now, trigger, stop, gap.id)
+            if resting_only:
+                # §5's fresh-retrace path. NEVER the crossed-trigger market branch:
+                # the precondition is "price is INSIDE the gap right now", and the
+                # trigger sits one entry buffer beyond its far end, so price cannot
+                # have crossed the trigger on an EARLIER bar and stayed there. What
+                # can happen — and does on 08-18 — is that the same 1s bar both
+                # enters the gap and reaches the trigger. §11's fill convention is
+                # explicit for that: a resting stop fills AT ITS PRICE when the tape
+                # reaches it, and filling it at the bar MID instead "mis-scores
+                # 07-17 (-14.88 vs -17.75)". It is also `order_sim`'s stated
+                # same-bar rule — resolve ADVERSELY — since for a short 29763.25 is
+                # the worse fill of the two and 29764.875 the free 1.625 pts.
+                self._sim.place(RestingOrder(
+                    direction=self._plan.get("direction"), trigger=float(trigger),
+                    stop=float(stop), artifact_id=gap.id, placed_at=now))
+            else:
+                self._enter(now, trigger, stop, gap.id)
 
     def _entry_mechanism(self):
         for name in ("fvg_negation_reversal", "fvg_return_continuation"):

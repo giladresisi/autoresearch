@@ -265,10 +265,9 @@ def _run_standing(decision, walk, cfg, session_end_ts, ref, lc: Lifecycle) -> No
     dol_price = decision.dol_price
     thesis = decision.thesis or {}
     falsified_if = thesis.get("falsified_if") or []
-    exhausted_if = thesis.get("exhausted_if") or []
     tracker = _SweepTracker(decision.levels)
     ttl_min = cfg.ttl_for(decision.gate) if cfg.net_on("ttl") else None
-    need_closes = _uses_closes(falsified_if) or _uses_closes(exhausted_if)
+    need_closes = _uses_closes(falsified_if)
 
     mfe = mae = 0.0
     mfe_ts = walk.index[0]
@@ -288,11 +287,13 @@ def _run_standing(decision, walk, cfg, session_end_ts, ref, lc: Lifecycle) -> No
         if adv > mae:
             mae = adv
 
-        # (1) completed — DOL drawn (or an exhausted_if predicate fires).
+        # (1) completed — DOL drawn. EXHAUSTION REMOVED 2026-08-29: reaching the DOL
+        # *is* the exhaustion (every recorded thesis set exhausted_if to exactly the DOL
+        # price), so this is now a DOL touch and nothing else.
         mv = _market_view(decision, walk, ts, tracker, need_closes)
         dol_touched = dol_price is not None and (
             (bias == "UP" and hi >= dol_price) or (bias == "DOWN" and lo <= dol_price))
-        if dol_touched or (exhausted_if and eval_any(exhausted_if, mv)):
+        if dol_touched:
             _finish(lc, ts, "completed", ref, bias, dol_price, mfe, mae, mfe_ts)
             return
 

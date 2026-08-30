@@ -104,7 +104,7 @@ def test_distance_covered_arithmetic():
                   lows=[49, 51, 54, 54, 54] + [54] * 200)
     d = BenchDecision("d1", pd.Timestamp("2026-06-25 09:00", tz=TZ),
                       {"bias": "UP", "dol": {"level": "L", "price": 60.0},
-                       "falsified_if": [], "exhausted_if": [],
+                       "falsified_if": [],
                        "recall": {"events": [], "max_age_min": 0}, "confidence": "MEDIUM"},
                       gate="MEDIUM")
     lc = run_lifecycle(d, bars, _cfg(), END)
@@ -225,7 +225,7 @@ def test_rescore_reproduces_churn_cap_abort(tmp_path):
         logged.append({
             "decision_id": f"d{i}", "date": "2026-06-25",
             "thesis": {"bias": "UP", "dol": {"level": "L", "price": 999.0},
-                       "falsified_if": fals, "exhausted_if": [],
+                       "falsified_if": fals,
                        "recall": {"events": [], "max_age_min": 0}, "confidence": "MEDIUM"},
             "bench": {"gate": "MEDIUM", "self_report": "MEDIUM", "failsafe": False,
                       "levels": {}, "daily_mid": None, "sess_hi": None, "sess_lo": None},

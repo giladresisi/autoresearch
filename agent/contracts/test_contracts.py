@@ -26,8 +26,6 @@ def valid_thesis() -> dict:
         "falsified_if_rationale": "close back below prev_day_low invalidates the UP read",
         "falsified_if": [{"type": "n_closes_beyond", "price": 19500, "side": "below",
                           "tf": "5m", "n": 2}],
-        "exhausted_if_rationale": "the DOL itself is the exhaustion price",
-        "exhausted_if": [{"type": "price_beyond", "price": 20000, "side": "above"}],
         "recall": {"events": [], "max_age_min": 60},
         # A directional (UP/DOWN) bias with an EMPTY evidence ledger is rejected
         # (ARI_THESIS_BIAS) — this fixture's bias is UP, so it needs a real, UP-consistent
@@ -48,7 +46,6 @@ def valid_setup() -> dict:
         "exit": {"target": {"level": "intraday_high", "price": 19950.0},
                  "management": [{"kind": "raise_to_breakeven", "params": {}, "when": []}]},
         "setup_falsified_if": [],
-        "setup_exhausted_if": [],
         "on_dol_falsified": {"action": "MARKET_CLOSE", "params": {}},
         "recall": None, "reasoning": "audit",
     }
@@ -138,7 +135,6 @@ def test_thesis_dol_wrong_side_down_rejected():
         "bias": "DOWN", "regime": "RANGE", "confidence": "MEDIUM",
         "dol": {"level": "prev_day_high", "price": 20000.0},         # above 19800 — wrong side
         "falsified_if": [],
-        "exhausted_if": [{"type": "price_beyond", "price": 20000, "side": "below"}],
         "recall": {"events": [], "max_age_min": 60}, "reasoning": "x",
     }
     assert "SEM_DOL_WRONG_SIDE" in validate_thesis(t, FACTS).codes()
@@ -156,7 +152,6 @@ def test_thesis_dol_correct_side_accepted():
         "bias": "DOWN", "regime": "RANGE", "confidence": "MEDIUM",
         "dol": {"level": "prev_day_low", "price": 19500.0},         # below 19800 — correct
         "falsified_if": [],
-        "exhausted_if": [{"type": "price_beyond", "price": 19500, "side": "below"}],
         "recall": {"events": [], "max_age_min": 60}, "reasoning": "x",
         "evidence": [_ev(level="prev_day_low", direction="accept")],   # accept-beyond a low = DOWN
     }
@@ -196,12 +191,14 @@ def test_target_equal_to_dol_exhaustion_rejected():
     assert "XL_TARGET_AT_DOL" in r.codes()
 
 
-def test_target_beyond_exhaustion_rejected():
+def test_target_at_the_dol_rejected():
+    """Replaces test_target_beyond_exhaustion_rejected. EXHAUSTION REMOVED 2026-08-29:
+    reaching the DOL *is* the exhaustion, so the two old checks — a target tripping a
+    thesis `exhausted_if`, and a target sitting AT the DOL — collapse into one."""
     p = valid_setup()
-    # exhausted_if fires strictly above 20000; a target past it trips the predicate check.
-    p["exit"]["target"] = {"level": "prev_day_high", "price": 20100.0}
+    p["exit"]["target"] = {"level": "prev_day_high", "price": 20000.0}
     r = validate_trade_plan(p, thesis=valid_thesis(), facts=FACTS)
-    assert "XL_TARGET_IS_THESIS_EXHAUSTION" in r.codes()
+    assert "XL_TARGET_AT_DOL" in r.codes()
 
 
 def test_valid_pair_accepted():
@@ -232,11 +229,9 @@ def test_falsified_if_already_true_rejected():
     assert "XL_FALSIFIED_IF_ALREADY_TRUE" in validate_thesis(t, FACTS).codes()
 
 
-def test_exhausted_if_already_true_rejected():
-    t = valid_thesis()
-    t["exhausted_if"] = [{"type": "price_beyond", "price": 19700, "side": "above"}]
-    assert "XL_EXHAUSTED_IF_ALREADY_TRUE" in validate_thesis(t, FACTS).codes()
-
+# test_exhausted_if_already_true_rejected REMOVED 2026-08-29 together with
+# XL_EXHAUSTED_IF_ALREADY_TRUE: there is no exhausted_if to be already true.
+# XL_FALSIFIED_IF_ALREADY_TRUE still covers the surviving half of that rule.
 
 def test_falsified_if_not_yet_true_accepted():
     r = validate_thesis(valid_thesis(), FACTS)   # falsifies below 19500; price is 19800
@@ -1560,7 +1555,6 @@ def test_projection_dol_exempt_from_level_not_in_facts():
     from schemas import DOL_PROJECTION_LEVELS
     t = valid_thesis()
     t["dol"] = {"level": "projection_up", "price": 19910.0}
-    t["exhausted_if"] = [{"type": "price_beyond", "price": 19910.0, "side": "above"}]
     assert "projection_up" in DOL_PROJECTION_LEVELS
     codes = validate_thesis(t, FACTS).codes()
     assert "SEM_LEVEL_NOT_IN_FACTS" not in codes
@@ -1618,7 +1612,6 @@ def test_falsifier_anti_side_ok_and_down_mirrored():
     t2 = valid_thesis()
     t2["bias"] = "DOWN"
     t2["dol"] = {"level": "prev_day_low", "price": 19500.0}
-    t2["exhausted_if"] = [{"type": "price_beyond", "price": 19500.0, "side": "below"}]
     t2["falsified_if"] = [{"type": "n_closes_beyond", "price": 19950.0, "side": "above",
                            "tf": "5m", "n": 2}]
     t2["evidence"] = [_ev(level="prev_day_low", direction="accept")]   # DOWN-consistent
@@ -1637,15 +1630,16 @@ def test_falsifier_side_checked_inside_composites():
     assert "SEM_FALSIFIER_WRONG_SIDE" in validate_thesis(t, FACTS).codes()
 
 
-def test_falsifier_check_skips_neutral_and_exhausted_if():
+def test_falsifier_check_skips_neutral():
     t = valid_thesis()
     t["bias"] = "NEUTRAL"
     t["dol"] = None
     t["evidence"] = []
     t["falsified_if"] = [{"type": "price_beyond", "price": 20000.0, "side": "above"}]
     assert "SEM_FALSIFIER_WRONG_SIDE" not in validate_thesis(t, FACTS).codes()
-    t2 = valid_thesis()   # UP; exhausted_if is thesis-side BY DESIGN (DOL touch)
-    assert "SEM_FALSIFIER_WRONG_SIDE" not in validate_thesis(t2, FACTS).codes()
+    # (The companion half of this test checked that a thesis-side `exhausted_if` was
+    # exempt from the falsifier side-check. Exhaustion was removed 2026-08-29 — reaching
+    # the DOL IS the exhaustion — so there is nothing left to exempt.)
 
 
 def test_ari_neutral_deadband_accepts_neutral_on_thin_net():
@@ -1667,7 +1661,6 @@ def test_ari_neutral_deadband_still_rejects_strong_net_and_opposite_direction():
     t2 = valid_thesis()
     t2["bias"] = "DOWN"        # opposite of a thin +0.75 net -> still rejected
     t2["dol"] = {"level": "prev_day_low", "price": 19500.0}
-    t2["exhausted_if"] = [{"type": "price_beyond", "price": 19500.0, "side": "below"}]
     t2["falsified_if"] = [{"type": "n_closes_beyond", "price": 19950.0, "side": "above",
                            "tf": "5m", "n": 2}]
     t2["evidence"] = [_ev(tier="session", level="prev_day_high", direction="accept")]

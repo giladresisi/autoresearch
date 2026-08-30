@@ -41,7 +41,7 @@ def announce(record: dict) -> None:
     try:
         bits = ["[TRADER] %s %s" % (record.get("time"), record.get("kind"))]
         for key in ("mechanism", "artifact_label", "trigger", "stop", "dol",
-                    "reason", "detail", "plan_id"):
+                    "reason", "predicate", "detail", "plan_id"):
             val = record.get(key)
             if val not in (None, ""):
                 bits.append("%s=%s" % (key, val))
@@ -115,6 +115,21 @@ class DecisionRecorder:
         rec.update({k: (_iso(v) if hasattr(v, "isoformat") else v)
                     for k, v in extra.items()})
         self._write(rec)
+
+    def would_have_falsified(self, *, now, plan_id, predicate, detail=None) -> None:
+        """The thesis falsifier fired. Recorded, NOT acted on — the plan lives.
+
+        Its only purpose is to answer a question nobody can answer today: what would
+        killing the plan here have cost or saved? Because the future rule under
+        consideration is kill-the-plan, the FIRE TIME alone reconstructs the
+        counterfactual — everything the plan did afterwards is what it would have
+        forgone. That is why this is a timestamp and a predicate rather than a flag.
+
+        Emitted once per plan (Executor holds a one-shot latch): a falsifier that stays
+        true would otherwise repeat on every bar close for the rest of the session.
+        """
+        self._write({**self._base("would_have_falsified", now, plan_id, None),
+                     "predicate": predicate, "detail": detail})
 
     def plan_dead(self, *, now, plan_id, reason, detail=None) -> None:
         rec = self._base("plan_dead", now, plan_id, None)

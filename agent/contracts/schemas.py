@@ -105,8 +105,13 @@ class Thesis:
     dol: Optional[dict] = None                       # {"level": str, "price": float}
     falsified_if_rationale: Optional[str] = None
     falsified_if: list = field(default_factory=list)  # [predicate]
-    exhausted_if_rationale: Optional[str] = None
-    exhausted_if: list = field(default_factory=list)  # [predicate]
+    # EXHAUSTION REMOVED 2026-08-29: reaching the DOL *is* the exhaustion. Every
+    # recorded thesis set `exhausted_if` to exactly the DOL price (08-25's own
+    # rationale: "london(cur)_low, the DOL itself — reaching it exhausts the DOWN
+    # thesis by delivering the immediate draw"), so it only ever duplicated the DOL
+    # touch. `l2-mechanisms.md` never used it — the word appears zero times there —
+    # and its backchecks define plan scope as "a fire cannot occur after the plan's
+    # DOL is touched".
     confidence: Optional[str] = None
     recall: Optional[dict] = None                    # {"events": [pred], "max_age_min": int}
     evidence: list = field(default_factory=list)      # [P1/P2 evidence item] — §2.1
@@ -121,8 +126,6 @@ class Thesis:
             dol_rationale=d.get("dol_rationale"), dol=d.get("dol"),
             falsified_if_rationale=d.get("falsified_if_rationale"),
             falsified_if=list(d.get("falsified_if") or []),
-            exhausted_if_rationale=d.get("exhausted_if_rationale"),
-            exhausted_if=list(d.get("exhausted_if") or []),
             confidence=d.get("confidence"), recall=d.get("recall"),
             evidence=list(d.get("evidence") or []),
             reasoning=d.get("reasoning"))
@@ -133,9 +136,7 @@ class Thesis:
             "facts_hash": self.facts_hash, "bias": self.bias, "regime": self.regime,
             "dol_rationale": self.dol_rationale, "dol": self.dol,
             "falsified_if_rationale": self.falsified_if_rationale,
-            "falsified_if": self.falsified_if,
-            "exhausted_if_rationale": self.exhausted_if_rationale,
-            "exhausted_if": self.exhausted_if, "confidence": self.confidence,
+            "falsified_if": self.falsified_if, "confidence": self.confidence,
             "recall": self.recall, "evidence": self.evidence,
             "reasoning": self.reasoning,
         }
@@ -156,7 +157,6 @@ class TradePlan:
     breakeven: Optional[dict] = None
     exit: Optional[dict] = None                      # {"target": {...}, "management": [...]}
     setup_falsified_if: list = field(default_factory=list)
-    setup_exhausted_if: list = field(default_factory=list)
     on_dol_falsified: Optional[dict] = None          # mandatory on SETUP
     recall: Optional[dict] = None                    # WAIT only
     reasoning: Optional[str] = None
@@ -169,7 +169,6 @@ class TradePlan:
             verdict=d.get("verdict"), entry=d.get("entry"), stop=d.get("stop"),
             breakeven=d.get("breakeven"), exit=d.get("exit"),
             setup_falsified_if=list(d.get("setup_falsified_if") or []),
-            setup_exhausted_if=list(d.get("setup_exhausted_if") or []),
             on_dol_falsified=d.get("on_dol_falsified"), recall=d.get("recall"),
             reasoning=d.get("reasoning"))
 
@@ -179,7 +178,6 @@ class TradePlan:
             "verdict": self.verdict, "entry": self.entry, "stop": self.stop,
             "breakeven": self.breakeven, "exit": self.exit,
             "setup_falsified_if": self.setup_falsified_if,
-            "setup_exhausted_if": self.setup_exhausted_if,
             "on_dol_falsified": self.on_dol_falsified, "recall": self.recall,
             "reasoning": self.reasoning,
         }
@@ -201,9 +199,7 @@ def failsafe_thesis() -> dict:
         "bias": "NEUTRAL", "regime": "RANGE",
         "dol_rationale": "none — failsafe thesis, no directional call", "dol": None,
         "falsified_if_rationale": "none — failsafe thesis, no predicates armed",
-        "falsified_if": [],
-        "exhausted_if_rationale": "none — failsafe thesis, no predicates armed",
-        "exhausted_if": [], "confidence": "LOW",
+        "falsified_if": [], "confidence": "LOW",
         "recall": {"events": [], "max_age_min": FAILSAFE_RECALL_MAX_AGE_MIN},
         "evidence": [],
         "reasoning": "fail-safe neutral/low thesis (offline/failsafe)",
@@ -214,7 +210,7 @@ def failsafe_plan() -> dict:
     """The L2 fail-safe: a WAIT (no setup armed). Its recall re-asks after a short TTL."""
     return {
         "verdict": "WAIT", "entry": None, "stop": None, "breakeven": None, "exit": None,
-        "setup_falsified_if": [], "setup_exhausted_if": [], "on_dol_falsified": None,
+        "setup_falsified_if": [], "on_dol_falsified": None,
         "recall": {"events": [{"type": "time_elapsed", "minutes": 30}], "max_age_min": 30},
         "reasoning": "fail-safe WAIT (offline/failsafe)",
     }
@@ -258,7 +254,7 @@ def _atom(ptype: str, props: dict) -> dict:
 # minutes > 0, non-empty `of`) — "constraints live in code, not the schema" (spec §5).
 #
 # The atoms live in `$defs` and every predicate field references `#/$defs/predicate` — WITHOUT
-# $defs the union is inlined into each of falsified_if / exhausted_if / recall.events (and the
+# $defs the union is inlined into each of falsified_if / recall.events (and the
 # composites re-inline all six atoms), and the Anthropic constrained-decoding grammar compiler
 # rejects the result as "grammar too large". $ref keeps the compiled grammar small.
 _ATOM_PROPS = {
@@ -377,12 +373,12 @@ THESIS_SCHEMA = {
         "reasoning": {"type": "string"},
         "bias": {"enum": sorted(BIASES)},
         "regime": {"enum": sorted(DAILY_REGIMES)},
-        # dol_rationale/falsified_if_rationale/exhausted_if_rationale (prototype, 2026-07-28
+        # dol_rationale/falsified_if_rationale (prototype, 2026-07-28
         # audit): each sits IMMEDIATELY BEFORE the field it justifies in generation order, so
         # under strict schema-constrained decoding the model must emit real derivation tokens
         # right before committing to the value — the same "reasoning before commitment" trick
         # `evidence`/`reasoning` already use ahead of `bias`, applied one level further down.
-        # A 5-sample audit of past runs found `dol` and `falsified_if`/`exhausted_if` (which sit
+        # A 5-sample audit of past runs found `dol` and `falsified_if` (which sit
         # AFTER the free-text `reasoning` field closes) routinely carry a level/threshold with
         # zero supporting derivation anywhere in the prose, while `regime` (which sits right
         # after `reasoning`) never showed this gap — the leak tracks how far downstream of
@@ -391,14 +387,11 @@ THESIS_SCHEMA = {
         "dol": _DOL,
         "falsified_if_rationale": {"type": "string"},
         "falsified_if": _PRED_LIST,
-        "exhausted_if_rationale": {"type": "string"},
-        "exhausted_if": _PRED_LIST,
         "confidence": {"enum": sorted(CONFIDENCES)},
         "recall": _RECALL,
     },
     "required": ["evidence", "reasoning", "bias", "regime", "dol_rationale", "dol",
-                 "falsified_if_rationale", "falsified_if", "exhausted_if_rationale",
-                 "exhausted_if", "confidence", "recall"],
+                 "falsified_if_rationale", "falsified_if", "confidence", "recall"],
     "additionalProperties": False,
 }
 
@@ -453,7 +446,7 @@ def build_thesis_schema(valid_levels=None, extra_evidence_levels=None,
         level_enum = {"enum": sorted(ev_names)}
         schema["properties"]["evidence"]["items"]["properties"]["level"] = level_enum
         schema["properties"]["dol"]["anyOf"][0]["properties"]["level"] = dol_enum
-        # level_swept/level_depleted predicates (falsified_if/exhausted_if/recall.events)
+        # level_swept/level_depleted predicates (falsified_if/recall.events)
         # reference a level by `name`, not `level` — same malformed-name risk, same fix.
         # These atom defs live in $defs (shared via $ref), so patch them there too. They must
         # name a REAL price level (real_enum), never a synthetic mid / FVG-zone id / DOL
@@ -523,7 +516,6 @@ TRADE_PLAN_SCHEMA = {
             "required": ["target", "management"], "additionalProperties": False,
         }),
         "setup_falsified_if": _PRED_LIST,
-        "setup_exhausted_if": _PRED_LIST,
         "on_dol_falsified": _nullable({
             "type": "object",
             "properties": {"action": {"enum": sorted(DOL_FALSIFIED_ACTIONS)},
@@ -534,7 +526,7 @@ TRADE_PLAN_SCHEMA = {
         "reasoning": {"type": "string"},
     },
     "required": ["verdict", "entry", "stop", "breakeven", "exit",
-                 "setup_falsified_if", "setup_exhausted_if", "on_dol_falsified",
+                 "setup_falsified_if", "on_dol_falsified",
                  "recall", "reasoning"],
     "additionalProperties": False,
 }

@@ -34,8 +34,8 @@ def test_price_beyond_falsifier_actually_fires(tmp_path):
     df = _bars(idx, 29500.0, 29600.0, 29450.0, 29550.0)
     st = _run(tmp_path, _plan(valid_while=[
         {"type": "price_beyond", "price": 29420.0, "side": "above"}]), df, idx)
-    assert st["plan_alive"] is False
-    assert st["dead_reason"] == "falsified"
+    assert st["plan_alive"] is True, "falsification is RECORDED, never acted on"
+    assert st["dead_reason"] is None
 
 
 def test_a_falsifier_that_is_not_reached_leaves_the_plan_alive(tmp_path):
@@ -62,8 +62,8 @@ def test_n_closes_beyond_fires_after_n_completed_closes(tmp_path):
     st = _run(tmp_path, _plan(valid_while=[
         {"type": "n_closes_beyond", "price": 29420.0, "side": "above",
          "tf": "1m", "n": 2}]), df, idx)
-    assert st["plan_alive"] is False
-    assert st["dead_reason"] == "falsified"
+    assert st["plan_alive"] is True, "falsification is RECORDED, never acted on"
+    assert st["dead_reason"] is None
 
 
 def test_clock_after_fires_at_the_stated_et_time(tmp_path):
@@ -71,7 +71,7 @@ def test_clock_after_fires_at_the_stated_et_time(tmp_path):
     df = _bars(idx, 29300.0, 29310.0, 29290.0, 29300.0)
     st = _run(tmp_path, _plan(valid_while=[
         {"type": "clock_after", "et_time": "10:00"}]), df, idx)
-    assert st["plan_alive"] is False
+    assert st["plan_alive"] is True, "recorded, not acted on"
 
 
 def test_all_of_requires_every_sub_predicate(tmp_path):
@@ -83,16 +83,20 @@ def test_all_of_requires_every_sub_predicate(tmp_path):
     assert alive["plan_alive"] is True
 
 
-def test_the_death_detail_names_the_predicate_that_fired(tmp_path):
+def test_the_recorded_falsification_names_the_predicate_that_fired(tmp_path):
     idx = pd.date_range("2026-08-25 09:20", periods=3, freq="1min", tz=TZ)
     df = _bars(idx, 29500.0, 29560.0, 29450.0, 29550.0)
     pred = {"type": "price_beyond", "price": 29420.0, "side": "above"}
     ex = Executor(str(tmp_path), _plan(valid_while=[pred]), arm_ts=idx[0])
     seen = []
-    ex._rec.plan_dead = lambda **kw: seen.append(kw)
+    ex._rec.would_have_falsified = lambda **kw: seen.append(kw)
+    ex._rec.plan_dead = lambda **kw: seen.append({"UNEXPECTED_DEATH": kw})
     for t in idx:
         ex.on_bar(t, {"MNQ": df[df.index <= t]}, bar_complete=True)
-    assert seen and seen[0]["detail"]["predicate"] == pred
+    assert seen, "the falsifier fired, so it must have been recorded"
+    assert "UNEXPECTED_DEATH" not in seen[0], "a falsifier must not kill the plan"
+    assert seen[0]["predicate"] == pred
+    assert len(seen) == 1, "one-shot: a standing falsifier must not repeat every bar"
 
 
 def test_an_unknown_predicate_kind_no_longer_silently_fails_open(tmp_path):
@@ -126,8 +130,8 @@ def test_a_higher_timeframe_close_predicate_can_actually_fire(tmp_path):
     st = _run(tmp_path, _plan(valid_while=[
         {"type": "n_closes_beyond", "price": 29420.0, "side": "above",
          "tf": "5m", "n": 2}]), df, idx)
-    assert st["plan_alive"] is False
-    assert st["dead_reason"] == "falsified"
+    assert st["plan_alive"] is True, "falsification is RECORDED, never acted on"
+    assert st["dead_reason"] is None
 
 
 def test_a_level_swept_predicate_reads_the_stores_real_sweep_state(tmp_path):

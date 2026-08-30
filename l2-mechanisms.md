@@ -562,7 +562,11 @@ chase entries the §2 DOL-floor veto now suppresses).
   wick+3-capped-30 alternative was identical on the studied dates but WON the §10.3
   unseen sweep by ~+91 (it kept a deep-wick +316.5 winner the 15-cap stopped at −15) —
   the highest-priority §9 A/B, single-flip sensitive.
-- **Scope:** lives and dies with the plan's `valid_while`/thesis — unscoped it fires two
+- **Scope:** lives and dies with the plan — **the DOL touch and the attempt budget**, which is
+  what this document's own backchecks enforce ("plan scope enforced — a fire cannot occur
+  after the plan's DOL is touched"). Falsification is deliberately NOT part of scope here:
+  this document assumes L1's direction and DOL were right, so a falsifier has no work to do
+  inside its frame. Unscoped it fires two
   losing shorts into the 07-21 11:14/11:28 new-day-high rally, hours after the plan
   completed. Shared per-plan 3-attempt counter, stop-out cooldown (§2), DOL-floor veto (§2)
   all apply; the settle window (§2) is moot in practice — the earliest possible fire is ≥4
@@ -594,7 +598,10 @@ chase entries the §2 DOL-floor veto now suppresses).
 - **Disarm:** the order never outlives its justification. A reversal order is pulled when the
   bound leg ages out (extreme > 60 min old); a continuation order is NOT subject to leg age —
   it is pulled only when the bound FVG becomes ineligible (closed through) with no eligible
-  replacement, or when the thesis itself is invalidated/exhausted.
+  replacement, or when the plan completes at its DOL. (The original wording here read "or
+  when the thesis itself is invalidated/exhausted". That is OUT OF FRAME for this document
+  and was never operationalised in any study — see the §7 scope note. Exhaustion in
+  particular is the DOL: every recorded thesis sets `exhausted_if` to exactly the DOL price.)
 - **Attempt counter:** after a stop-out with the setup still valid, L3 re-arms the same plan
   and re-binds to whatever FVG is *now* eligible (not necessarily the one that just failed).
   The 3-attempt counter remains per `plan_id` regardless of which FVG each attempt bound.
@@ -1224,3 +1231,60 @@ if it would alter BEHAVIOUR, it is in scope and specified above.
   whether the foregone-setup cost is material — and if it ever is, the fix is upstream
   (recall cadence / projection stretch-gates), not an L2-side plan source.
 - Per-mechanism L2-supplied invalidation criteria — deferred.
+
+
+### 11.1 Named-case registry — era stamps and pinning tests (added 2026-08-29, ADDITIVE)
+
+Every figure above now also lives, once, in `agent/trader/named_cases.py`, and
+`agent/trader/test_named_cases.py` fails when this document and that registry disagree
+about any of them — in either direction, and including a pinning test that has been
+renamed away. Two representations of the same rules always diverge; being *surprised* by
+it is what this stops.
+
+The ERA column exists because §6.2 found the general problem while §6's own records
+carried no era stamp: **a knob change dated AFTER a validation silently invalidates that
+validation's entry set.** A pre-2026-08-22 P&L may not be asserted as a current target
+without an explained delta (`explained_delta` in the registry carries it).
+
+| Day | § | Documented outcome | Era | Pinned by |
+|---|---|---|---|---|
+| 07-21 | §11 takeover scanner | entry 09:35:00, P&L -42.25, 2 att | `age-anchor-20260826 (2026-08-26)` | `test_0721_the_1m_gap_takes_over_at_the_stop_tick` |
+| 07-21 | §6.2 | P&L +61.00, 3 att *(accepted tolerance)* | `age-anchor-20260826 (2026-08-26)` | `test_0721_within_one_cycle_of_the_current_rules_figure` |
+| 07-24 | §8 crossed-trigger precedence | entry 09:36:00, @ 28579.0, P&L +146.50 | `age-anchor-20260826 (2026-08-26)` | `test_0724_crossed_trigger_precedence_preserves_the_collapse_capture` |
+| 07-31 | §11 takeover scanner / §10.2 | entry 09:44:00, P&L -67.50, 3 att | `age-anchor-20260826 (2026-08-26)` | `test_0731_binds_the_deepest_penetrated_gap` |
+| 08-05 | §11 takeover scanner | no takeover *(day-level gap)* | `age-anchor-20260826 (2026-08-26)` | `test_a_close_through_dead_candidate_is_never_a_takeover` |
+| 08-05 | §6.2 | P&L +235.38, 1 att *(day-level gap)* | `age-anchor-20260826 (2026-08-26)` | `test_0805_is_registered_as_unreproducible_with_its_reason` |
+| 08-06 | §6.2 | P&L +125.12, 1 att *(accepted tolerance)* | `age-anchor-20260826 (2026-08-26)` | `test_0806_adds_the_negative_cycle_the_height_raise_admits` |
+| 08-07 | §7 / §11 §7 named tests | strict 24h track | `age-anchor-20260826 (2026-08-26)` | `test_a_fresh_extreme_keeps_the_strict_24h_track` |
+| 08-10 | §6.2 | no fire | `age-anchor-20260826 (2026-08-26)` | `test_0810_does_not_fire_at_all` |
+| 08-11 | §10 | FLAT | `buffer7-h35 (2026-08-19)` | `test_0811_is_a_no_entry_day_with_every_mechanism_armed` |
+| 08-11 | §10 / §11 §5 | FLAT | `age-anchor-20260826 (2026-08-26)` | `test_0811_is_flat_the_documented_accepted_skip` |
+| 08-12 | §10 | P&L +46.75, 2 att | `buffer7-h35 (2026-08-19)` | `test_0812_spends_two_attempts_and_the_dol_floor_vetoes_the_first_fallback_candidate` |
+| 08-12 | §11 takeover scanner | no takeover *(day-level gap)* | `age-anchor-20260826 (2026-08-26)` | `test_a_close_through_dead_candidate_is_never_a_takeover` |
+| 08-13 | §10 | entry 09:33:26, @ 29908.25, P&L +89.25, 1 att | `buffer7-h35 (2026-08-19)` | `test_0813_binds_the_5m_continuation_and_no_other_mechanism_preempts_it` |
+| 08-14 | §10 | P&L +99.50, 3 att | `age-anchor-20260826 (2026-08-26)` | `test_0814_reaches_its_dol_on_a_documented_second_but_NOT_the_documented_shape` |
+| 08-14 | §8 / §10 | entry 09:32:00, @ 30245.5, P&L +99.50, 3 att | `age-anchor-20260826 (2026-08-26)` | `test_0814_market_at_the_1s_mid_and_exactly_three_attempts` |
+| 08-18 | §11 §5 per-day evidence | entry 09:40:58, @ 29763.25, P&L +229.75, 1 att *(day-level gap)* | `adopted-20260822 (2026-08-22)` | `test_0818_enters_on_its_fresh_tick_not_at_the_window_end` |
+| 08-18 | §7 / §11 §7 named tests | entry 09:42:00, @ 29760.25, P&L +226.75, 1 att *(day-level gap)* | `age-anchor-20260826 (2026-08-26)` | `test_0818_fires_once_the_days_only_entry` |
+| 08-21 | §11 ERRATUM 2026-08-22 | P&L +92.75 **EXCLUDED** | `buffer7-h35 (2026-08-19)` | `test_the_0821_fill_row_is_registered_as_EXCLUDED_with_its_reason` |
+| 08-21 | §11 §5 pre-arm penetration | FLAT | `age-anchor-20260826 (2026-08-26)` | `test_0821_is_flat_prior_penetration_only` |
+| 08-25 | §7 / §11 §7 named tests | entry 09:50:00, @ 29392.75, P&L +174.37, 1 att | `age-anchor-20260826 (2026-08-26)` | `test_0825_fires_and_is_the_case_that_retired_the_distance_key` |
+
+**Eras.** `pre-veto` (before 2026-08-15's DOL-floor veto and §8 takeover) ·
+`buffer7-h35` (entry buffer 7, structural stop, max height 35) ·
+`adopted-20260822` (buffer 3, SL cap 25, max height 45) ·
+`age-anchor-20260826` (those knobs plus §7's AGE-keyed anchor and §5's FRESH tick).
+
+**Marks.** *(accepted tolerance)* — the document pre-accepts a reproduction within one
+cycle and says not to chase it. *(day-level gap)* — the ENTRY reproduces but the day's
+P&L cannot be checked from what is recorded here; `named_cases.NO_DAY_REPRODUCTION` gives
+each reason. **EXCLUDED** — recorded, marked, and never used as a target.
+
+**The nine uncontaminated calibrated rows** (07-17, 07-21, 07-31, 08-07, 08-12, 08-13,
+08-14, 08-17, 08-18) are one `buffer7-h35` measurement superseded by the same 4.00-pt
+entry-buffer trim; 08-21's row stays recorded and marked rather than deleted, because
+deleting it loses the knowledge that it was considered and why it failed.
+
+**Boundary held:** this table says WHAT was measured and WHICH test enforces it. It does
+not say HOW the Executor stores facts — implementation changes far faster than rules, and
+that is how a specification rots.

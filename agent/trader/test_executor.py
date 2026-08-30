@@ -123,11 +123,32 @@ def test_executor_swallows_detector_exceptions(tmp_path, monkeypatch):
 # produces a bear gap.
 
 def _gappy(start="2026-08-13 09:00", n=180, base=29800.0):
-    """A staircase down with displacement bars, so 5m bear FVGs really form."""
+    """A staircase down with displacement bars AND pullbacks, so 5m bear FVGs form and
+    price then RETRACES INTO them.
+
+    The pullback leg is not decoration. §5 is a two-phase mechanism: the stop-entry is
+    placed only after price retraces into the bound gap on a tick strictly after the
+    settle window ends. A monotone staircase never retraces, so under the implemented
+    rule it correctly produces no entry at all — and every binding assertion below would
+    pass vacuously again, which is exactly the defect this fixture replaced.
+    """
     idx = pd.date_range(start, periods=n, freq="1min", tz="America/New_York")
     px, cur = [], base
     for i in range(n):
-        cur -= 12.0 if (i % 15) in (5, 6, 7) else 0.2
+        phase = i % 20
+        if phase in (5, 6, 7):
+            cur -= 12.0                     # displacement: this is what leaves the gap
+        elif phase in (17, 18):
+            # The pullback, deliberately well AFTER the gap's existence instant (its
+            # third 5m bar completes at minute 15) and with price OUTSIDE the gap until
+            # then. §5's 'into' is a tick ENTERING the range: a gap that comes into
+            # existence with price already inside it has not been retraced into, and
+            # the 'or immediately if price is already inside' clause is DELETED.
+            cur += 12.0
+        elif phase == 19:
+            cur -= 12.0                     # and back down toward the trigger
+        else:
+            cur -= 0.2
         px.append(cur)
     s = pd.Series(px, index=idx)
     return pd.DataFrame({"Open": s, "High": s + 1.5, "Low": s - 1.5, "Close": s,
@@ -220,12 +241,17 @@ def test_blacklisted_gap_is_never_bound(tmp_path):
     assert ex2.bind_state()["bound_id"] != bound
 
 
-def test_falsified_price_predicate_kills_the_plan(tmp_path):
+def test_a_fired_falsifier_is_recorded_and_the_plan_LIVES(tmp_path):
+    """Falsification is recorded, never acted on (2026-08-29). `l2-mechanisms.md` assumes
+    L1's direction and DOL were right — a falsifier has no work to do inside that frame —
+    and its §7 backcheck states the real scope rule: "a fire cannot occur after the plan's
+    DOL is touched". Acting on it was our addition, not the spec's, and it put the
+    implementation ahead of every number the record contains."""
     plan = dict(PLAN, dol={"level": "x", "price": 28000.0},
                 valid_while=[{"type": "price_beyond", "side": "below", "price": 29790.0}])
     ex = _drive(tmp_path, plan, last="09:40")
-    assert ex.bind_state()["plan_alive"] is False
-    assert ex.bind_state()["dead_reason"] == "falsified"
+    assert ex.bind_state()["plan_alive"] is True
+    assert ex.bind_state()["dead_reason"] is None
 
 
 def test_unknown_predicate_kinds_do_not_kill_the_plan(tmp_path):

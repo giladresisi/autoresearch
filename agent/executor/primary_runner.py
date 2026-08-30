@@ -122,14 +122,14 @@ class PrimaryRunner:
         names: set = set()
         t = self.director.thesis
         if t is not None:
-            for fld in (t.falsified_if, t.exhausted_if):
+            for fld in (t.falsified_if,):
                 for p in fld or []:
                     names |= referenced_levels(p)
             for p in (t.recall or {}).get("events") or []:
                 names |= referenced_levels(p)
         p_ = self.director.plan
         if p_ is not None:
-            for fld in (p_.setup_falsified_if, p_.setup_exhausted_if):
+            for fld in (p_.setup_falsified_if,):
                 for pr in fld or []:
                     names |= referenced_levels(pr)
         return names

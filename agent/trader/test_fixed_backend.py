@@ -7,8 +7,7 @@ from agent.trader.fixed_backend import (FixedThesisBackend, OracleThesisError,
 def _thesis(**over):
     t = {"bias": "DOWN", "regime": "TREND", "confidence": "MEDIUM",
          "dol": {"level": "oracle_dol", "price": 29000.0},
-         "falsified_if": [{"type": "price_beyond", "price": 29420.0, "side": "above"}],
-         "exhausted_if": [{"type": "price_beyond", "price": 29000.0, "side": "below"}]}
+         "falsified_if": [{"type": "price_beyond", "price": 29420.0, "side": "above"}]}
     t.update(over)
     return t
 
@@ -23,9 +22,19 @@ def test_a_thesis_without_falsified_if_is_rejected():
     assert any("falsified_if" in e for e in errs)
 
 
-def test_a_thesis_without_exhausted_if_is_rejected():
-    errs = validate_oracle_thesis(_thesis(exhausted_if=None))
-    assert any("exhausted_if" in e for e in errs)
+def test_a_thesis_CARRYING_exhausted_if_is_rejected():
+    """Inverted 2026-08-29. Exhaustion was removed — reaching the DOL *is* the exhaustion,
+    and every recorded thesis set `exhausted_if` to exactly the DOL price. The validator
+    used to REQUIRE this field; it now rejects it, so a stale oracle written against the
+    old contract fails loudly instead of carrying a field with no consumer."""
+    errs = validate_oracle_thesis(_thesis(
+        exhausted_if=[{"type": "price_beyond", "price": 29000.0, "side": "below"}]))
+    assert any("exhausted_if" in e and "removed" in e for e in errs)
+
+
+def test_a_thesis_without_exhausted_if_is_ACCEPTED():
+    """The normal case now: omitting it is correct."""
+    assert validate_oracle_thesis(_thesis()) == []
 
 
 def test_an_unknown_predicate_kind_is_rejected_loudly():
@@ -91,7 +100,6 @@ def test_a_neutral_oracle_is_allowed_and_stands_false():
     """A dark-day oracle is a legitimate experiment; it just must not arm."""
     from agent.trader.analyzer import stands
     t = {"bias": "NEUTRAL", "regime": "RANGE", "confidence": "LOW", "dol": None,
-         "falsified_if": [{"type": "clock_after", "et_time": "16:00"}],
-         "exhausted_if": [{"type": "clock_after", "et_time": "16:00"}]}
+         "falsified_if": [{"type": "clock_after", "et_time": "16:00"}]}
     assert validate_oracle_thesis(t) == []
     assert stands(t) is False

@@ -39,12 +39,11 @@ FACTS = {
 }
 
 
-def _thesis(falsified=None, exhausted=None, recall_events=None) -> dict:
+def _thesis(falsified=None, recall_events=None) -> dict:
     return {
         "bias": "UP", "regime": "TREND", "confidence": "HIGH",
         "dol": {"level": "up_pool", "price": 110.0},
         "falsified_if": falsified or [],
-        "exhausted_if": exhausted or [],
         "recall": {"events": recall_events or [], "max_age_min": 60},
         "reasoning": "x",
     }
@@ -54,24 +53,25 @@ def test_menu_matching_predicate_passes_and_tagged_menu_hit():
     t = _thesis(
         falsified=[{"type": "n_closes_beyond", "price": 99.0, "side": "below",
                     "tf": "5m", "n": 2}],
-        exhausted=[{"type": "price_beyond", "price": 110.0, "side": "above"}],
         recall_events=[{"type": "time_elapsed", "minutes": 60}])
     assert validate_thesis(t, FACTS).ok
     audit = classify_predicates(t, FACTS)
     assert audit["fields"]["falsified_if"][0]["tag"] == "menu_hit"
     assert audit["fields"]["falsified_if"][0]["menu_id"] == "F1"
-    assert audit["fields"]["exhausted_if"][0]["menu_id"] == "X1"
     assert audit["fields"]["recall"][0]["menu_id"] == "R1"
-    assert audit["n_menu_hit"] == 3 and audit["n_escape_hatch"] == 0
+    assert audit["n_menu_hit"] == 2 and audit["n_escape_hatch"] == 0
     assert audit["menu_hit_ratio"] == 1.0
     assert audit["dol_menu_hit"] and audit["dol_menu_id"] == "D1"
 
 
 def test_int_vs_float_still_matches_menu():
-    # the model may emit 110 where the menu has 110.0 — canonicalisation normalises.
-    t = _thesis(exhausted=[{"type": "price_beyond", "price": 110, "side": "above"}])
+    # the model may emit 99 where the menu has 99.0 — canonicalisation normalises.
+    # Uses F1 (the falsification entry) since the X* exhaustion entries are no longer
+    # selectable: exhaustion was removed 2026-08-29 (reaching the DOL IS the exhaustion).
+    t = _thesis(falsified=[{"type": "n_closes_beyond", "price": 99, "side": "below",
+                            "tf": "5m", "n": 2}])
     audit = classify_predicates(t, FACTS)
-    assert audit["fields"]["exhausted_if"][0]["tag"] == "menu_hit"
+    assert audit["fields"]["falsified_if"][0]["tag"] == "menu_hit"
 
 
 def test_escape_hatch_valid_predicate_passes_with_tag():
@@ -95,7 +95,7 @@ def test_escape_hatch_non_facts_level_rejected():
 
 def test_neutral_thesis_has_empty_tags():
     t = {"bias": "NEUTRAL", "regime": "RANGE", "confidence": "LOW", "dol": None,
-         "falsified_if": [], "exhausted_if": [],
+         "falsified_if": [],
          "recall": {"events": [], "max_age_min": 60}, "reasoning": "x"}
     audit = classify_predicates(t, FACTS)
     assert audit["direction"] is None
@@ -106,7 +106,7 @@ def test_neutral_thesis_has_empty_tags():
 def test_classify_without_menus_all_escape_hatch():
     # production facts without a menu block → everything is escape_hatch (no crash).
     facts_no_menu = {"now_price": 100.0, "levels": FACTS["levels"]}
-    t = _thesis(exhausted=[{"type": "price_beyond", "price": 110.0, "side": "above"}])
+    t = _thesis(falsified=[{"type": "price_beyond", "price": 90.0, "side": "below"}])
     audit = classify_predicates(t, facts_no_menu)
-    assert audit["fields"]["exhausted_if"][0]["tag"] == "escape_hatch"
+    assert audit["fields"]["falsified_if"][0]["tag"] == "escape_hatch"
     assert audit["dol_menu_hit"] is False

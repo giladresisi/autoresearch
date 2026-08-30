@@ -13,8 +13,7 @@ pytestmark = pytest.mark.timeout(900)
 
 ORACLE = {"bias": "DOWN", "regime": "TREND", "confidence": "HIGH",
           "dol": {"level": "oracle_dol", "price": 29700.0},
-          "falsified_if": [{"type": "price_beyond", "price": 30100.0, "side": "above"}],
-          "exhausted_if": [{"type": "price_beyond", "price": 29700.0, "side": "below"}]}
+          "falsified_if": [{"type": "price_beyond", "price": 30100.0, "side": "above"}]}
 
 
 @pytest.fixture(scope="module")

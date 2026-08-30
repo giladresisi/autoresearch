@@ -99,41 +99,97 @@ def test_the_live_fixture_has_the_three_expected_records():
     assert kinds == ["bind", "intended_entry", "veto"]
 
 
-# ── ERA NOTE (2026-08-28) ───────────────────────────────────────────────────────
-# The live fixture was captured in cycle 1, which had NO fill model. Its order could
-# never fill, so the Executor kept re-evaluating the same binding and eventually vetoed
-# it on max_distance at 10:43. Under the Phase-1 order lifecycle the trigger (29277, a
-# short) is already crossed at the 10:41 bind — price 29237.75 — so §2's crossed-trigger
-# rule fills it, and a filled position correctly stops further binding. The veto is
-# therefore a cycle-1 ARTEFACT of having nothing to fill, not a behaviour to preserve.
+# ── ERA NOTE (2026-08-28, extended 2026-08-29) ─────────────────────────────────
+# The live fixture was captured in cycle 1, and it predates TWO rules it cannot be held
+# against.
+#
+# 1. NO FILL MODEL. Its order could never fill, so the Executor kept re-evaluating the
+#    same binding and eventually vetoed it on max_distance at 10:43.
+#
+# 2. NO §5 FRESH-RETRACE PRECONDITION (settled 2026-08-26, implemented this cycle). The
+#    fixture's `intended_entry` is a LITERAL-reading entry: the order was placed on
+#    ELIGIBILITY ALONE, at a trigger already 40.25 pts crossed (bind price 29237.75 vs
+#    trigger 29277.0 on a short). §5 now requires price to retrace INTO the bound gap on
+#    a tick after the settle window — and over this fixture's ENTIRE window price never
+#    touches [29280.0, 29288.0] at all: the window high is 29268.5, eleven and a half
+#    points below the gap's bottom, and falling. There is no retrace to be fresh about.
+#
+#    That is exactly the pathology the 19-day A/B settled against: "the guard delays the
+#    literal entry into a chase rather than blocking it". So the replay declining here is
+#    the RULE WORKING, not fidelity lost — and `test_the_gap_is_never_retraced_into`
+#    below pins the tape fact so this cannot become an excuse for a real regression.
 #
 # What still must match, and does: the thesis, the plan, the bound artifact
-# (1dfeba17a1c9), and the intended entry's trigger/stop (29277 / 29291). Those are the
-# fidelity claims. The comparison is made over the COMMON PREFIX for that reason.
-LIVE_ERA_TAIL = ("veto",)   # kinds the fixture carries only because it never filled
+# (1dfeba17a1c9), and the BIND's trigger/stop (29277 / 29291). Those are the fidelity
+# claims. The comparison is made over the COMMON PREFIX for that reason.
+LIVE_ERA_TAIL = ("veto", "intended_entry")   # kinds the fixture carries from an older era
+
+GAP_LOW, GAP_HIGH = 29280.0, 29288.0
 
 
 def _pre_lifecycle(records):
     """The fixture's records up to the point its era diverges from ours."""
     return [r for r in records if r["kind"] not in LIVE_ERA_TAIL]
 
+
 def test_replay_reproduces_the_same_decision_kinds_in_the_same_order(_replayed):
+    """Over the COMMON PREFIX — both sides stripped of the kinds their own era produces
+    for reasons the other era cannot have."""
     live = [r["kind"] for r in _pre_lifecycle(_binding_only(_load("trader_decisions.jsonl")))]
-    replay = [r["kind"] for r in _binding_only(_replay_records(_replayed))]
+    replay = [r["kind"] for r in _pre_lifecycle(_binding_only(_replay_records(_replayed)))]
     assert replay == live, "the common prefix must match; see ERA NOTE for the tail"
 
 
-def test_the_replay_also_books_the_order_lifecycle_the_live_fixture_predates(_replayed):
-    """The counterpart to `LIVE_RECORD_KINDS`: the filtered comparisons above are only
-    honest if the excluded records actually exist. 08-25's intended entry rests, and the
-    tape reaches its trigger, so the replay must book a fill the fixture cannot carry."""
+def _gap_untouched_in_window():
+    """(checked, touched) — whether the tape is present, and whether price ever came
+    into the bound gap during the fidelity window."""
+    from backtest_smt import _main_dir_for_date
+    path = _main_dir_for_date(DATE) / "MNQ_1s.parquet"
+    if not path.exists():
+        return False, None
+    df = pd.read_parquet(path)
+    bars = df[(df.index >= pd.Timestamp(f"{DATE} 10:39", tz=TZ))
+              & (df.index <= pd.Timestamp(f"{DATE} 11:00", tz=TZ))]
+    if not len(bars):
+        return False, None
+    return True, bool(((bars["High"] >= GAP_LOW) & (bars["Low"] <= GAP_HIGH)).any())
+
+
+def test_the_replay_declines_the_entry_under_the_fresh_retrace_rule(_replayed):
+    """§5's precondition is unmet for the whole window, so nothing may be placed and
+    nothing may fill. The fixture's own entry is a LITERAL-era chase at a trigger already
+    40.25 pts crossed.
+
+    The TAPE FACT is asserted in the same test, not beside it. Split apart, this
+    assertion certifies inertness: finding a future bug that stops §5 placing would make
+    it pass, and a machine without the out-of-repo 1s tape would skip the control while
+    the weakened gate still went green. Fused, "the rule is working" and "why" stand or
+    fall together — and with no tape the whole claim is skipped rather than half-made.
+    """
+    checked, touched = _gap_untouched_in_window()
+    if not checked:
+        pytest.skip(f"no 1s tape for {DATE} — the decline claim is unverifiable")
+    assert not touched, "price DID re-enter the gap; the era note no longer applies"
+
+    rec = _replay_records(_replayed)
+    assert [r for r in rec if r["kind"] == "bind"], "the binding itself must survive"
+    assert not [r for r in rec if r["kind"] == "intended_entry"]
+    assert not [r for r in rec if r["kind"] in LIFECYCLE_KINDS]
     assert not [r for r in _load("trader_decisions.jsonl")
-                if r["kind"] in LIFECYCLE_KINDS], \
-        "the live fixture predates the lifecycle; if it carries one, re-pin this gate"
-    booked = [r["kind"] for r in _replay_records(_replayed)
-              if r["kind"] in LIFECYCLE_KINDS]
-    assert "fill" in booked, \
-        "the resting stop-entry never filled -- the lifecycle is not being driven"
+                if r["kind"] in LIFECYCLE_KINDS],         "the live fixture predates the lifecycle; if it carries one, re-pin this gate"
+
+
+def test_the_window_high_stays_below_the_gap_by_a_wide_margin():
+    """Not a near miss: the window high is 29268.5, eleven and a half points under the
+    gap's bottom, and falling. A marginal miss would deserve a different era note."""
+    from backtest_smt import _main_dir_for_date
+    path = _main_dir_for_date(DATE) / "MNQ_1s.parquet"
+    if not path.exists():
+        pytest.skip(f"no 1s tape for {DATE}")
+    df = pd.read_parquet(path)
+    bars = df[(df.index >= pd.Timestamp(f"{DATE} 10:39", tz=TZ))
+              & (df.index <= pd.Timestamp(f"{DATE} 11:00", tz=TZ))]
+    assert float(bars["High"].max()) <= GAP_LOW - 10.0
 
 
 def test_replay_binds_the_same_artifact(_replayed):
@@ -143,33 +199,34 @@ def test_replay_binds_the_same_artifact(_replayed):
     assert rbind["artifact_label"] == live["artifact_label"]
 
 
-def test_replay_reproduces_the_intended_entry_trigger_and_stop(_replayed):
+def test_replay_reproduces_the_trigger_and_stop_the_live_run_computed(_replayed):
+    """Read off the BIND, which both eras emit. The prices are the fidelity claim; which
+    record kind carries them is an era detail."""
     live = [r for r in _load("trader_decisions.jsonl")
             if r["kind"] == "intended_entry"][0]
-    rentry = [r for r in _replay_records(_replayed)
-              if r["kind"] == "intended_entry"][0]
-    assert rentry["trigger"] == live["trigger"] == 29277.0
-    assert rentry["stop"] == live["stop"] == 29291.0
-    assert rentry["dol"] == live["dol"] == 29157.5
+    rbind = [r for r in _replay_records(_replayed) if r["kind"] == "bind"][0]
+    assert rbind["trigger"] == live["trigger"] == 29277.0
+    assert rbind["stop"] == live["stop"] == 29291.0
+    assert live["dol"] == 29157.5
 
 
-def test_the_live_veto_is_an_era_artefact_and_the_replay_fills_instead(_replayed):
-    """Replaces the old "reproduce the veto" assertion. The fixture's 10:43 veto exists
-    ONLY because cycle 1 had no fill model: its order rested unfilled, so the binding was
-    re-evaluated until price ran 76.5 pts from the trigger. With the lifecycle the same
-    already-crossed trigger fills, and a held position stops re-binding — so no veto can
-    occur, and demanding one would pin a defect."""
+def test_the_max_distance_veto_survives_but_for_the_opposite_reason(_replayed):
+    """The fixture's 10:43 veto exists because cycle 1 had nothing to fill. The current
+    run vetoes too — because §5 declines to place — and the numbers behind it are the
+    same tape, so the DETAIL must still name the 60-pt cap."""
     live_veto = [r for r in _load("trader_decisions.jsonl") if r["kind"] == "veto"]
     assert len(live_veto) == 1 and live_veto[0]["reason"] == "max_distance"
     assert live_veto[0]["detail"]["cap"] == 60.0
     rec = _replay_records(_replayed)
-    assert not [r for r in rec if r["kind"] == "veto"],         "a filled position must not go on to veto its own binding"
-    assert [r for r in rec if r["kind"] in LIFECYCLE_KINDS],         "if the replay neither vetoes NOR fills, the binding was lost — a real defect"
+    vetoes = [r for r in rec if r["kind"] == "veto"]
+    assert vetoes and vetoes[0]["reason"] == "max_distance"
+    assert vetoes[0]["detail"]["cap"] == 60.0
+    assert vetoes[0]["artifact_id"] == live_veto[0]["artifact_id"]
 
 
 def test_the_full_decision_identity_matches(_replayed):
     live = [_key(r) for r in _pre_lifecycle(_binding_only(_load("trader_decisions.jsonl")))]
-    rep = [_key(r) for r in _binding_only(_replay_records(_replayed))]
+    rep = [_key(r) for r in _pre_lifecycle(_binding_only(_replay_records(_replayed)))]
     assert rep == live, "artifact, trigger and stop must match across the common prefix"
 
 

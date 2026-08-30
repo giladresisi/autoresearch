@@ -138,7 +138,7 @@ def test_nested_composite_rejected_by_schema():
 def test_thesis_schema_accepts_failsafe_and_valid_predicates():
     t = failsafe_thesis()
     t["falsified_if"] = [_atom_examples()[1]]
-    t["exhausted_if"] = [{"type": "all_of", "of": _atom_examples()[:2]}]
+    t["falsified_if"] = [{"type": "all_of", "of": _atom_examples()[:2]}]
     V(THESIS_SCHEMA).validate(t)
 
 

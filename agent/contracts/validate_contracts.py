@@ -9,7 +9,6 @@ Three layers, mirroring the v1 `agent/validator.py` shape:
                   the entry target is unswept/undepleted and on the correct side of price
                   (carries the v1 TARGET CONTRACT).
   3. Cross-level — the stop must NOT satisfy any thesis `falsified_if` predicate, and the
-                  exit target must NOT satisfy any thesis `exhausted_if` predicate (spec §6).
 
 Public API mirrors `validator.py`: `validate_thesis`, `validate_trade_plan`, and a
 combined `validate_contracts`. All return a `ContractValidation` (list of violations).
@@ -100,8 +99,6 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
 
     for msg in validate_predicate_list(t.falsified_if, "thesis.falsified_if"):
         r.add("syntactic", "SYN_BAD_PREDICATE", msg, "thesis.falsified_if")
-    for msg in validate_predicate_list(t.exhausted_if, "thesis.exhausted_if"):
-        r.add("syntactic", "SYN_BAD_PREDICATE", msg, "thesis.exhausted_if")
 
     # recall: when present, its events must be a valid predicate list.
     if t.recall is not None:
@@ -302,8 +299,7 @@ def _validate_pending_resolution(item: dict, where: str, r: ContractValidation, 
 
 def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
     levels = facts.get("levels") or {}
-    names = set(_iter_predicate_levels(t.falsified_if)) \
-        | set(_iter_predicate_levels(t.exhausted_if))
+    names = set(_iter_predicate_levels(t.falsified_if))
     if t.recall:
         names |= set(_iter_predicate_levels((t.recall or {}).get("events") or []))
     if isinstance(t.dol, dict) and t.dol.get("level"):
@@ -326,8 +322,8 @@ def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
                   f"level '{name}' referenced by the thesis is not present in the facts",
                   "thesis")
 
-    # XL_FALSIFIED_IF_ALREADY_TRUE / XL_EXHAUSTED_IF_ALREADY_TRUE: a thesis whose own
-    # falsified_if/exhausted_if already evaluates true against the CURRENT price is
+    # XL_FALSIFIED_IF_ALREADY_TRUE: a thesis whose own
+    # falsified_if already evaluates true against the CURRENT price is
     # self-invalidating (or self-completing) at issuance — the 2026-07-02 08:00 bug, where
     # falsified_if was anchored 5pts from a price already on the wrong side of it and fired
     # 10 minutes later regardless of what the market actually did. Reuses the same
@@ -341,10 +337,6 @@ def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
             r.add("cross_level", "XL_FALSIFIED_IF_ALREADY_TRUE",
                   f"falsified_if would already be satisfied at the current price {now_price} "
                   "(thesis self-invalidates at issuance)", "thesis.falsified_if")
-        if t.exhausted_if and eval_any(t.exhausted_if, view):
-            r.add("cross_level", "XL_EXHAUSTED_IF_ALREADY_TRUE",
-                  f"exhausted_if would already be satisfied at the current price {now_price} "
-                  "(thesis is already exhausted at issuance)", "thesis.exhausted_if")
 
     # SEM_DOL_WRONG_SIDE (plan 12 Fix 2): a directional thesis's DOL (draw-on-liquidity) must
     # sit on the bias side of the current price — an UP thesis draws to a pool ABOVE price, a
@@ -371,7 +363,7 @@ def _semantic_thesis(t: Thesis, facts: dict, r: ContractValidation) -> None:
     # A thesis-side falsifier fires on the thesis SUCCEEDING (2026-08-05 09:20 ET: an UP
     # thesis carried `price_beyond(29990.75, above)` — an old near pool recycled as a
     # "falsifier" — so the walk-forward "falsified" it 12 minutes before its genuine DOL
-    # touch). Mirrors SEM_DOL_WRONG_SIDE. exhausted_if is deliberately NOT checked — its
+    # touch). Mirrors SEM_DOL_WRONG_SIDE. (Exhaustion was removed 2026-08-29 — its
     # DOL-touch term is thesis-side by design.
     if t.is_directional():
         _own_side = "above" if t.bias == "UP" else "below"
@@ -1359,9 +1351,8 @@ def _syn_setup(p: TradePlan, r: ContractValidation) -> None:
         for msg in validate_predicate_list((m or {}).get("when"), f"{where}.when"):
             r.add("syntactic", "SYN_BAD_PREDICATE", msg, where)
 
-    for fld in ("setup_falsified_if", "setup_exhausted_if"):
-        for msg in validate_predicate_list(getattr(p, fld), f"trade_plan.{fld}"):
-            r.add("syntactic", "SYN_BAD_PREDICATE", msg, f"trade_plan.{fld}")
+    for msg in validate_predicate_list(p.setup_falsified_if, "trade_plan.setup_falsified_if"):
+        r.add("syntactic", "SYN_BAD_PREDICATE", msg, "trade_plan.setup_falsified_if")
 
     if isinstance(p.breakeven, dict):
         for msg in validate_predicate_list(p.breakeven.get("raise_to_be_if"),
@@ -1375,8 +1366,7 @@ def _semantic_plan(p: TradePlan, facts: dict, r: ContractValidation) -> None:
 
     # every level referenced by the plan's predicates must exist in the facts.
     names = set()
-    for fld in ("setup_falsified_if", "setup_exhausted_if"):
-        names |= set(_iter_predicate_levels(getattr(p, fld)))
+    names |= set(_iter_predicate_levels(p.setup_falsified_if))
     for m in (p.entry or {}).get("mechanisms") or []:
         names |= set(_iter_predicate_levels((m or {}).get("valid_while") or []))
     if p.recall:
@@ -1429,13 +1419,9 @@ def _cross_level(p: TradePlan, thesis, r: ContractValidation) -> None:
     target_price = target.get("price")
     if isinstance(target_price, (int, float)):
         tp = float(target_price)
-        # (a) strict-beyond exhaustion terms: does price AT the target trip exhausted_if.
-        if t.exhausted_if and eval_any(t.exhausted_if, MarketView.price_only(tp)):
-            r.add("cross_level", "XL_TARGET_IS_THESIS_EXHAUSTION",
-                  f"exit target {target_price} would satisfy a thesis exhausted_if "
-                  "predicate (targeting the thesis exhaustion point)",
-                  "trade_plan.exit.target")
-        # (b) the DOL-touch case: exhausted_if is "typically DOL touch" (spec §2.1), which
+        # The DOL-touch case. EXHAUSTION REMOVED 2026-08-29: reaching the DOL *is* the
+        # exhaustion, so the two old checks (a thesis `exhausted_if` predicate, and the DOL
+        # itself) collapse into this one. A strict price_beyond cannot fire at equality, so
         # a strict price_beyond can't fire at equality — the target must sit STRICTLY before
         # the DOL, never AT it (targeting the exhaustion draw itself).
         dol_price = (t.dol or {}).get("price")
@@ -1505,7 +1491,7 @@ def classify_predicates(thesis, facts: Optional[dict] = None) -> dict:
     validate_thesis (grounding) are the gates. A failsafe/NEUTRAL thesis (no direction, no
     predicates) yields empty tags. Also tags whether the chosen DOL is a DOL-menu entry.
 
-    Returns {direction, dol_menu_hit, dol_menu_id, fields{falsified_if/exhausted_if/recall:
+    Returns {direction, dol_menu_hit, dol_menu_id, fields{falsified_if/recall:
     [{predicate, tag, menu_id}]}, n_menu_hit, n_escape_hatch, menu_hit_ratio}.
     """
     d = thesis.to_dict() if isinstance(thesis, Thesis) else (thesis or {})
@@ -1517,7 +1503,6 @@ def classify_predicates(thesis, facts: Optional[dict] = None) -> dict:
     n_hit = n_esc = 0
     field_map = {
         "falsified_if": t.falsified_if,
-        "exhausted_if": t.exhausted_if,
         "recall": ((t.recall or {}).get("events") or []),
     }
     for fname, preds in field_map.items():

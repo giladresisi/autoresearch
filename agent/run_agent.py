@@ -703,8 +703,8 @@ def _retry_prompt(violations: list[str]) -> str:
         "match it, or if you believe your evidence was right, change your evidence items "
         "instead and let the label follow); confidence must respect its computed "
         "ceiling; any directional target/DOL must exist in the facts, be unswept/"
-        "undepleted, and sit on the correct side of current price; a falsified_if/"
-        "exhausted_if predicate must not already be true at the current price. Keep "
+        "undepleted, and sit on the correct side of current price; a falsified_if "
+        "predicate must not already be true at the current price. Keep "
         "unrelated fields identical and return a fresh, complete JSON decision matching "
         "the schema."
     )
@@ -798,8 +798,6 @@ def _run_call(backend: Backend, system: str, base_user: str, schema: dict,
             "dol": parsed.get("dol"),
             "falsified_if_rationale": parsed.get("falsified_if_rationale"),
             "falsified_if": parsed.get("falsified_if"),
-            "exhausted_if_rationale": parsed.get("exhausted_if_rationale"),
-            "exhausted_if": parsed.get("exhausted_if"),
             "confidence": parsed.get("confidence"),
             "recall": parsed.get("recall"),
             "evidence": parsed.get("evidence"),
@@ -896,12 +894,12 @@ _TASK_THESIS = (
     "Decide where the market is going and what would prove you wrong, as of 'now' (the "
     "last S0 timestamp). Return a thesis JSON matching the schema. The schema requests "
     "fields in this order: evidence, then reasoning, then bias/regime/dol_rationale/dol/"
-    "falsified_if_rationale/falsified_if/exhausted_if_rationale/exhausted_if/confidence/"
+    "falsified_if_rationale/falsified_if/confidence/"
     "recall — DELIBERATELY evidence-and-reasoning-first, so you enumerate and think "
     "through your evidence before committing to bias (UP/DOWN/NEUTRAL), regime, a DOL "
-    "(draw-on-liquidity) when directional, and structured falsified_if/exhausted_if/"
+    "(draw-on-liquidity) when directional, and structured falsified_if/"
     "recall predicates.\n"
-    "\nRATIONALE FIELDS (dol_rationale, falsified_if_rationale, exhausted_if_rationale). "
+    "\nRATIONALE FIELDS (dol_rationale, falsified_if_rationale). "
     "Your main `reasoning` field closes BEFORE these three values are generated, so nothing "
     "in `reasoning` can justify them after the fact — each rationale is your ONLY chance to "
     "derive the field it immediately precedes, in 1-2 sentences, citing the specific facts "
@@ -910,10 +908,10 @@ _TASK_THESIS = (
     "etc.) — not a restatement of the DOL menu, an actual comparison. falsified_if_rationale: "
     "state why THIS threshold/level, not a different one — if you copied it from the S8 "
     "predicate menu, say which menu entry and why that one over the others offered. "
-    "exhausted_if_rationale: same, for the exhaustion condition. If a rationale would just "
+    "If a rationale would just "
     "restate the value with no real derivation, that is a sign you have not actually decided "
     "why — reconsider the pick, do not paper over it with filler text. When bias is NEUTRAL "
-    "and dol/falsified_if/exhausted_if are all null/empty (no-liquidity case below), each "
+    "and dol/falsified_if are both null/empty (no-liquidity case below), each "
     "rationale should say so briefly (e.g. 'none — NEUTRAL, no DOL menu eligible').\n"
     "\nPREDICATE VOCABULARY (closed; the schema enforces it). Each predicate is one of the "
     "six atoms — price_beyond(price, side), n_closes_beyond(price, side, tf, n), "
@@ -922,10 +920,12 @@ _TASK_THESIS = (
     "contain another composite). No other predicate type exists.\n"
     "\nMENUS (facts section S8). S8 pre-computes, for each direction, an eligible DOL menu "
     "(unswept/undepleted pools on the correct side of price, with IDs D1, D2, …) and a "
-    "predicate menu (falsification F*, exhaustion X*, recall R*) with concrete params. "
+    "predicate menu (falsification F*, recall R*) with concrete params. "
     "SELECT BY COPYING a menu entry's params EXACTLY — pick your DOL from the DOL menu for "
-    "your bias, your exhausted_if from the X entries (the draw is reached), your "
-    "falsified_if from the F entries, and your recall.events from the R entries. Escape "
+    "your bias, your falsified_if from the F entries, and your recall.events from the R "
+    "entries. The menu's X (exhaustion) entries are IGNORED: reaching the DOL IS the "
+    "exhaustion — every recorded thesis set exhausted_if to exactly the DOL price, so the "
+    "field only duplicated the DOL touch (removed 2026-08-29). Escape "
     "hatch: you MAY emit an off-menu predicate, but it must be schema-valid and every level "
     "it names must exist in the facts (unswept/undepleted where the menu requires). Prefer "
     "menu entries.\n"
@@ -1051,7 +1051,7 @@ _TASK_THESIS = (
     "nearby lows/highs — there is nothing left to draw to, the same situation as price "
     "beyond the all-time high with no resistance above it. Do NOT invent an off-menu DOL "
     "or reuse an already-swept level. Declare bias NEUTRAL, confidence LOW, dol null, "
-    "falsified_if/exhausted_if empty (thesis.md §8) — code enforces this regardless of "
+    "falsified_if empty (thesis.md §8) — code enforces this regardless of "
     "your evidence ledger's net score, so declaring NEUTRAL here is correct, not a hedge. "
     "\n- Nested / duplicate levels (thesis.md §2.1b/§2.1d): a swept level tagged "
     "'[nested/duplicate ...]' in the S9 close-status block is EITHER an older prevN level "
@@ -1087,7 +1087,7 @@ _TASK_PLAN = (
     "WAIT matching the schema. A SETUP carries entry mechanisms (closed enum kinds), a "
     "direction, a stop, an exit target (a level in the facts, unswept/undepleted, on the "
     "correct side of price and BEFORE the thesis DOL), management mechanisms, structured "
-    "setup_falsified_if / setup_exhausted_if predicates, and a MANDATORY on_dol_falsified "
+    "setup_falsified_if predicates, and a MANDATORY on_dol_falsified "
     "action. The stop must NOT sit where a thesis falsified_if predicate would fire. A WAIT "
     "carries a recall (events + max_age_min). Return JSON matching the schema.\n\n"
     "STANDING THESIS (verbatim):\n"
