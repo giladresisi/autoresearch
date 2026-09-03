@@ -15,7 +15,8 @@ import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _AGENT = os.path.dirname(_HERE)
-PACKAGES = (os.path.join(_AGENT, "facts"), os.path.join(_AGENT, "trader"))
+PACKAGES = (os.path.join(_AGENT, "facts"), os.path.join(_AGENT, "trader"),
+            os.path.join(_AGENT, "study"))
 
 FORBIDDEN_CALLS = frozenset({
     "save_daily", "save_position", "save_hypothesis", "save_smts", "save_global",
