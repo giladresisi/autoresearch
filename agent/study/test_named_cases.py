@@ -155,3 +155,29 @@ def test_the_deferred_work_is_named_rather_than_forgotten():
     for item in ("Mid-move target revision", "counterpart-divergence veto",
                  "tiered give-back exit ladder"):
         assert item in doc, item
+
+
+# --------------------------------------------------------------------------- #
+# phase 5: the step-0 verdict must stay visible
+# --------------------------------------------------------------------------- #
+def test_the_candidate_tier_is_recorded_and_marked_unimplemented():
+    """B9 failed step 0. The document must say so where a reader of the RULE will see
+    it, not only in a section they might skip."""
+    cands = nc.of_kind("candidate")
+    assert len(cands) >= 4
+    doc = nc.read_doc()
+    assert "## 9. CANDIDATE" in doc
+    assert "**DO NOT** implement a hard decline from this text." in doc
+
+
+def test_the_rule_section_itself_warns_that_it_is_not_a_rule():
+    """§2.1 reads like a rule. A reader who stops there must still learn that step 0
+    rejected it — the warning lives inside §2, not only in §9."""
+    doc = nc.read_doc()
+    rules = doc[doc.index("## 2. The rules"):doc.index("## 3. Evidence")]
+    assert "NOT A RULE YET" in rules
+    assert "§9" in rules
+
+
+def test_the_status_header_points_at_the_step0_verdict():
+    assert "did\nNOT pass step 0" in nc.read_doc()[:500]

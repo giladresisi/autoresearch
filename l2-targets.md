@@ -1,6 +1,7 @@
 # l2-targets.md — target selection at the fill
 
-**Status: study output, not implemented.** Nothing in this document runs. It is the phase-4
+**Status: study output, not implemented.** Nothing in this document runs, and §2's rules did
+NOT pass step 0 of `docs/entry-mechanism-change-protocol.md` — see §9. It is the phase-4
 write-up of cycle 4, and it exists so that a phase-5 decision to implement any of it can be
 taken on evidence rather than on memory.
 
@@ -43,6 +44,10 @@ Two rules, composed. They are **not** equally trustworthy and §6 says so in det
 
 Eligible means: ahead of the origin in the move's direction, in that instrument's own price
 space, and not already swept.
+
+> **NOT A RULE YET — see §9.** "Decline" has three readings (veto the entry, take it with no
+> hard TP, take it with a fallback target) and the threshold is measured from an anchor
+> production does not have. Step 0 of the change protocol rejects it as written.
 
 ### 2.2 B8g — the selection rule
 
@@ -248,3 +253,77 @@ enforced by `agent/study/test_holdout.py`.
 
 **The holdout is spent.** Any further tuning needs a new one, and there is no more
 2026-05 → 08 data to take it from.
+
+---
+
+## 9. CANDIDATE — B9 as an upstream proposal, not an L2 rule
+
+**Status: CANDIDATE. Not implemented, and must not be implemented from this text.**
+
+Recorded 2026-09-05 after running step 0 of `docs/entry-mechanism-change-protocol.md` against
+B9. Step 0 asks whether a proposal is a RULE yet; B9 is not, on four counts. This section is
+the protocol's prescribed home for a proposal carrying its evidence and its open questions —
+the tier before §§2-8, not a weaker version of them.
+
+### 9.1 What is proposed
+
+That when no eligible named pool sits within a small multiple of `avg_range_1h`, the system
+should recognise that **no pool-based target is available** rather than naming one anyway.
+
+### 9.2 The evidence, which is good
+
+On the 21 held-out sessions, the gate admitted only sessions that had a pool-based answer:
+`P(labelled | acted)` = **100% on both instruments**, 12 of 12 and 13 of 13, trained on
+discovery and applied blind. Acting only on admitted sessions lifted act accuracy from 38.1%
+to 50.0% (MNQ) and 44.4% to 53.9% (MES). On roughly a quarter of sessions no named pool is
+drawn to at all, and those sessions are identifiable in advance from one forward-computable
+number.
+
+### 9.3 Why it is not a rule yet
+
+**(a) The threshold does not transfer — units mismatch.** The study measured `d0` from the
+**move origin**, a lookahead-derived construct. `derive_facts._dol_menu` measures
+`abs(price - now_price)`, from the price at the call. The study measured the difference
+directly: MNQ's median distance to the draw falls from **210.5 points at the origin to 127.8 at
++2 minutes**. So "2.0 × avg_range_1h from the origin" is roughly 1.2× from the fill. Shipping
+2.0 would be a different rule at an unvalidated threshold. **This is the blocking one**, and it
+is a defect in how the study was framed, not in the finding.
+
+**(b) It is a choice between existing rules.** `DOL_PROJECTION_RATIO` already detects B9's
+exact condition — *"when a direction has NO named pool inside the band"* — and already answers
+it, by emitting a stretch-gated synthetic `projection_up` / `projection_down` draw at the day
+extreme, unswept by construction, expressly so that L2 has a real TP. B9 proposes declining
+where the system currently projects. Choosing between those is a rule decision.
+
+**(c) Hard exclusion was already considered and rejected.** `DOL_BAND_MAX_RATIO`'s own note:
+entries beyond the band are *"tagged FAR (rendered + audit-warned) …, NOT excluded: a far pool
+is sometimes the honest answer, and hard exclusion would silently rewrite no-liquidity
+semantics."* B9's decline is that exclusion. Not on the DO NOT IMPLEMENT list, but rejected in
+the same spirit, for a reason this study never addressed.
+
+**(d) Wrong owner.** `l2-mechanisms.md` §11.0 is explicit that the draw floor is *"Not an L2
+change at all — it lands in `derive_facts.DOL_MIN_DRAW_RATIO`, shared with the L1/thesis
+pipeline. Different owner; propose upstream rather than editing from L2."*
+
+**And an ambiguity this document previously glossed:** "decline to set a pool-based target" has
+three readings — veto the entry, take it with no hard TP, or take it with a fallback target.
+Three mechanisms, three P&L profiles. §2.1 does not say which, and two implementers would not
+agree.
+
+### 9.4 What would resolve it
+
+| blocker | what it needs |
+|---|---|
+| (a) units | Stage B re-derived with `d0` measured from the entry instant rather than the origin. Cannot be validated the way the original was — the holdout is spent |
+| (b) projection vs decline | A decision, informed by how the projection draw actually performs on the sessions B9 would have declined |
+| (c) hard exclusion | An answer to the no-liquidity-semantics objection, which this study did not consider |
+| (d) owner | Route it as a proposal to the L1/thesis pipeline, not an L2 edit |
+
+### 9.5 The honest framing
+
+B9 is **evidence bearing on an already-parameterised decision**, not a new mechanism. The
+system has already chosen what to do when no pool is near: project. This study says that
+choice is being made on roughly a quarter of sessions, and that those sessions are predictable.
+That belongs upstream as input to the projection policy.
+
+**DO NOT** implement a hard decline from this text.

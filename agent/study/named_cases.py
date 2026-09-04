@@ -33,7 +33,7 @@ _REPO = os.path.dirname(os.path.dirname(_HERE))
 DOC = os.path.join(_REPO, "l2-targets.md")
 
 SPLITS = ("discovery", "holdout", "both", "none")
-KINDS = ("result", "negative", "registry", "definition")
+KINDS = ("result", "negative", "registry", "definition", "candidate")
 
 #: Committed artifacts a figure may be sourced from.
 SOURCES = (
@@ -202,6 +202,33 @@ CASES: "tuple[StudyCase, ...]" = (
         source=".agents/rule-search/stage_c_holdout.json",
         claim="act accuracy counts an unexplained acted session as a miss",
         doc_quotes=("An unexplained session inside the acted\nset counts as a miss",)),
+    # ---- phase 5: step 0 said not yet -------------------------------------- #
+    StudyCase(
+        key="cand-b9-step0", kind="candidate", doc_section="9", split="none",
+        source=".agents/plans/29.cycle4-rule-search.md",
+        claim="B9 failed step 0 of the change protocol and is recorded as a CANDIDATE",
+        doc_quotes=("**Status: CANDIDATE. Not implemented, and must not be implemented from",
+                    "**DO NOT** implement a hard decline from this text."),
+        note="The protocol's own path: CANDIDATE -> resolve -> a rule -> the eight steps."),
+    StudyCase(
+        key="cand-b9-units", kind="candidate", doc_section="9.3", split="none",
+        source=".agents/rule-search/stage_b_hazard.json",
+        claim="the threshold was measured from the move origin, not from the fill",
+        value=2.0,
+        doc_quotes=("**210.5 points at the origin to 127.8 at",
+                    "**This is the blocking one**"),
+        note="A defect in how the study was framed, not in the finding."),
+    StudyCase(
+        key="cand-b9-projection-conflict", kind="candidate", doc_section="9.3", split="none",
+        source=".agents/plans/29.cycle4-rule-search.md",
+        claim="production already answers B9's condition by emitting a projection draw",
+        doc_quotes=("where the system currently projects.",
+                    "hard exclusion would silently rewrite no-liquidity")),
+    StudyCase(
+        key="cand-b9-decline-ambiguity", kind="candidate", doc_section="9.3", split="none",
+        source=".agents/plans/29.cycle4-rule-search.md",
+        claim="'decline to set a target' has three readings and the document does not choose",
+        doc_quotes=("Three mechanisms, three P&L profiles.",)),
     StudyCase(
         key="def-holdout-spent", kind="definition", doc_section="8", split="holdout",
         source=".agents/rule-search/stage_c_holdout.json",
