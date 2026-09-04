@@ -53,8 +53,17 @@ def test_the_gap_only_rule_is_not_worse_than_the_two_feature_one(hazard_payload)
         assert hazard_payload["deltas"]["B8g-B8/%s" % tk]["delta"] >= 0
 
 
+def test_abstaining_beats_acting_on_everything(hazard_payload):
+    """B9's whole claim: naming a target only where a pool is near raises the share of
+    ACTED sessions we get right, even though it lowers coverage."""
+    for tk in ("MNQ", "MES"):
+        rows = {r["threshold"]: r for r in hazard_payload["abstain"][tk]}
+        assert rows[2.0]["act_accuracy"] > rows[None]["act_accuracy"] + 0.10
+        assert rows[2.0]["coverage"] < 1.0
+
+
 def test_the_report_writes_a_diffable_artifact(tmp_path):
     from report_hazard import report
     report(CORPUS, str(tmp_path))
     saved = json.load(open(tmp_path / "stage_b_hazard.json", encoding="utf-8"))
-    assert set(saved) == {"families", "permutation", "deltas", "tables"}
+    assert set(saved) == {"families", "permutation", "deltas", "tables", "abstain"}

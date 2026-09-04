@@ -268,3 +268,59 @@ def permutation_gap_test(obs, ticker: str, n_perm: int = 2000, seed: int = SEED)
             "stop_median_gap": round(st.median([x.gap_ahead for x in v if x.stop]), 4),
             "continue_median_gap": round(
                 st.median([x.gap_ahead for x in v if not x.stop]), 4)}
+
+
+#: B9: act only when the nearest eligible pool is within this multiple of `avg_range_1h`.
+#: 2.0 is the joint optimum on both instruments; the curve rises to it and falls after, which
+#: is the shape of a real optimum rather than a fitted edge. Chosen in-sample — Stage C tests it.
+ABSTAIN_MAX_D0 = 2.0
+ABSTAIN_THRESHOLDS = (1.0, 1.5, 2.0, 2.5, None)
+
+
+def segment_d0(labels, cands, tickers=("MNQ", "MES")) -> dict:
+    """`(date, segment, ticker) -> (distance to the NEAREST eligible pool, was unexplained)`.
+
+    `d0` is forward-computable at the fill: it needs the candidate universe and the origin,
+    both of which exist at the decision instant. `unexplained` is the outcome it predicts.
+    """
+    elig = eligible_by_segment(cands)
+    out = {}
+    for lab in labels:
+        tk = lab.get("ticker")
+        if tk not in tickers:
+            continue
+        rows = elig.get((lab["date"], lab["segment"], tk), [])
+        avg = (lab.get("avg_range_1h") or {}).get(tk)
+        if not rows or not avg:
+            continue
+        out[(lab["date"], lab["segment"], tk)] = (
+            rows[0]["dist_from_start"] / avg, lab.get("status") == "unexplained")
+    return out
+
+
+def abstain_curve(labels, cands, obs, ticker: str,
+                  thresholds=ABSTAIN_THRESHOLDS) -> "list[dict]":
+    """Act only where `d0 <= t`; report what that buys.
+
+    **act_accuracy** is the honest production number: of every session we ACT on, the share
+    where we name the right pool. It counts an unexplained session as a miss, because in
+    production we would have named a target there and been wrong — which is precisely what
+    `acc | labelled` hides, and why B8g's 62-68% overstates what shipping it would deliver.
+    """
+    d0 = segment_d0(labels, cands, (ticker,))
+    per = dict(score_loso(obs, "B8g", ticker)["per_seg"])
+    rows = []
+    keys = [k for k in d0 if k[2] == ticker]
+    for t in thresholds:
+        cov = [k for k in keys if t is None or d0[k][0] <= t]
+        if not cov:
+            continue
+        lab_cov = [k for k in cov if not d0[k][1]]
+        correct = sum(per.get((k[0], k[1]), 0) for k in lab_cov)
+        rows.append({
+            "threshold": t, "n_total": len(keys), "n_covered": len(cov),
+            "coverage": round(len(cov) / len(keys), 4),
+            "p_labelled": round(len(lab_cov) / len(cov), 4),
+            "acc_given_labelled": round(correct / max(len(lab_cov), 1), 4),
+            "act_accuracy": round(correct / len(cov), 4)})
+    return rows

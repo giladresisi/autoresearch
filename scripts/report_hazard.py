@@ -17,9 +17,9 @@ _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-from agent.study.hazard import (DIST_EDGES, GAP_EDGES, bootstrap_delta,   # noqa: E402
-                                features, fit_hazard, permutation_gap_test,
-                                pool_observations, score_loso)
+from agent.study.hazard import (DIST_EDGES, GAP_EDGES, abstain_curve,     # noqa: E402
+                                bootstrap_delta, features, fit_hazard,
+                                permutation_gap_test, pool_observations, score_loso)
 
 CORPUS = os.path.join(_REPO, ".agents", "label-corpus")
 OUT_DIR = os.path.join(_REPO, ".agents", "rule-search")
@@ -113,6 +113,24 @@ def report(corpus: str, out_dir: str) -> dict:
     print("\n   Read as a sentence: the move keeps going while the next pool is close and")
     print("   stops when the next one is more than ~1.5 hourly ranges away — regardless of")
     print("   how far it has already travelled (B8g matches B8 without reading distance).")
+
+    _hdr("B9: abstain when the nearest pool is far — the honest production number")
+    payload["abstain"] = {}
+    print("   %-4s %-6s %-12s %-13s %-14s %s"
+          % ("", "t", "coverage", "P(labelled)", "acc|labelled", "ACT ACCURACY"))
+    for tk in TICKERS:
+        payload["abstain"][tk] = abstain_curve(labels, cands, obs, tk)
+        for r in payload["abstain"][tk]:
+            print("   %-4s %-6s %2d/%2d (%3.0f%%)  %-13s %-14s %.0f%%"
+                  % (tk, "all" if r["threshold"] is None else "%.1f" % r["threshold"],
+                     r["n_covered"], r["n_total"], 100 * r["coverage"],
+                     "%.0f%%" % (100 * r["p_labelled"]),
+                     "%.0f%%" % (100 * r["acc_given_labelled"]),
+                     100 * r["act_accuracy"]))
+    print("")
+    print("   act_accuracy counts an unexplained session as a miss, because in")
+    print("   production we would have named a target there and been wrong.")
+    print("   It is what shipping delivers; acc|labelled is not.")
 
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "stage_b_hazard.json")

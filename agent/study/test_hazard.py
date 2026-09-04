@@ -167,3 +167,62 @@ def test_the_module_never_reads_a_result_field_or_a_wall_clock():
     for banned in ("overshoot", "lag_min", "own_extreme", "extreme_ts"):
         assert '["%s"]' % banned not in src, banned
     assert "datetime.now" not in src and "get_et_now" not in src
+
+
+# --------------------------------------------------------------------------- #
+# B9 -- the abstain rule
+# --------------------------------------------------------------------------- #
+def test_d0_is_the_distance_to_the_nearest_eligible_pool():
+    from agent.study.hazard import segment_d0
+    d = segment_d0([_l("d", 0, "MNQ", avg=100.0)],
+                   [_c("d", 0, "MNQ", 150.0, 50.0, "draw"),
+                    _c("d", 0, "MNQ", 110.0, 10.0, "reached_passed")])
+    assert d[("d", 0, "MNQ")] == (pytest.approx(0.1), False)
+
+
+def test_an_unexplained_segment_is_flagged_for_the_abstain_target():
+    from agent.study.hazard import segment_d0
+    lab = _l("d", 0, "MNQ")
+    lab["status"] = "unexplained"
+    d = segment_d0([lab], [_c("d", 0, "MNQ", 150.0, 50.0, "near_miss_out_of_band")])
+    assert d[("d", 0, "MNQ")][1] is True
+
+
+def test_act_accuracy_counts_an_unexplained_session_as_a_miss():
+    """The honest production number. `acc | labelled` hides the sessions where no pool was
+    the draw at all -- in production we would have named a target there and been wrong."""
+    from agent.study.hazard import abstain_curve
+    labels, cands, obs = [], [], []
+    for i in range(4):
+        seg = ("2026-08-0%d" % (i + 1), 0)
+        lab = _l(seg[0], 0, "MNQ")
+        if i == 3:
+            lab["status"] = "unexplained"
+        labels.append(lab)
+        cands += [_c(seg[0], 0, "MNQ", 110.0, 10.0, "reached_passed"),
+                  _c(seg[0], 0, "MNQ", 150.0, 50.0,
+                     "draw" if i < 3 else "near_miss_out_of_band")]
+        obs += [_obs(0, 0.1, 0.4, False, seg=seg), _obs(1, 0.5, None, True, seg=seg)]
+    rows = {r["threshold"]: r for r in abstain_curve(labels, cands, obs, "MNQ")}
+    allrow = rows[None]
+    assert allrow["n_covered"] == 4
+    assert allrow["p_labelled"] == pytest.approx(0.75)
+    assert allrow["act_accuracy"] <= allrow["acc_given_labelled"]
+
+
+def test_a_tighter_threshold_trades_coverage_for_purity():
+    from agent.study.hazard import abstain_curve
+    labels, cands, obs = [], [], []
+    for i in range(6):
+        seg = ("2026-08-0%d" % (i + 1), 0)
+        far = i >= 3
+        labels.append(dict(_l(seg[0], 0, "MNQ"),
+                           status="unexplained" if far else "labelled"))
+        d0 = 300.0 if far else 10.0
+        cands += [_c(seg[0], 0, "MNQ", 100.0 + d0, d0,
+                     "near_miss_out_of_band" if far else "draw")]
+        obs += [_obs(0, d0 / 100.0, None, True, seg=seg)]
+    rows = {r["threshold"]: r for r in abstain_curve(labels, cands, obs, "MNQ")}
+    assert rows[2.0]["coverage"] == pytest.approx(0.5)
+    assert rows[2.0]["p_labelled"] == 1.0
+    assert rows[None]["p_labelled"] == pytest.approx(0.5)

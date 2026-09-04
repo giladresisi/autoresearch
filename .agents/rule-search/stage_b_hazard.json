@@ -1,4 +1,100 @@
 {
+  "abstain": {
+    "MES": [
+      {
+        "acc_given_labelled": 0.6522,
+        "act_accuracy": 0.6522,
+        "coverage": 0.3833,
+        "n_covered": 23,
+        "n_total": 60,
+        "p_labelled": 1.0,
+        "threshold": 1.0
+      },
+      {
+        "acc_given_labelled": 0.6562,
+        "act_accuracy": 0.6562,
+        "coverage": 0.5333,
+        "n_covered": 32,
+        "n_total": 60,
+        "p_labelled": 1.0,
+        "threshold": 1.5
+      },
+      {
+        "acc_given_labelled": 0.6944,
+        "act_accuracy": 0.6757,
+        "coverage": 0.6167,
+        "n_covered": 37,
+        "n_total": 60,
+        "p_labelled": 0.973,
+        "threshold": 2.0
+      },
+      {
+        "acc_given_labelled": 0.6905,
+        "act_accuracy": 0.6042,
+        "coverage": 0.8,
+        "n_covered": 48,
+        "n_total": 60,
+        "p_labelled": 0.875,
+        "threshold": 2.5
+      },
+      {
+        "acc_given_labelled": 0.6818,
+        "act_accuracy": 0.5,
+        "coverage": 1.0,
+        "n_covered": 60,
+        "n_total": 60,
+        "p_labelled": 0.7333,
+        "threshold": null
+      }
+    ],
+    "MNQ": [
+      {
+        "acc_given_labelled": 0.5385,
+        "act_accuracy": 0.5385,
+        "coverage": 0.2203,
+        "n_covered": 13,
+        "n_total": 59,
+        "p_labelled": 1.0,
+        "threshold": 1.0
+      },
+      {
+        "acc_given_labelled": 0.5652,
+        "act_accuracy": 0.5652,
+        "coverage": 0.3898,
+        "n_covered": 23,
+        "n_total": 59,
+        "p_labelled": 1.0,
+        "threshold": 1.5
+      },
+      {
+        "acc_given_labelled": 0.6471,
+        "act_accuracy": 0.6471,
+        "coverage": 0.5763,
+        "n_covered": 34,
+        "n_total": 59,
+        "p_labelled": 1.0,
+        "threshold": 2.0
+      },
+      {
+        "acc_given_labelled": 0.6136,
+        "act_accuracy": 0.587,
+        "coverage": 0.7797,
+        "n_covered": 46,
+        "n_total": 59,
+        "p_labelled": 0.9565,
+        "threshold": 2.5
+      },
+      {
+        "acc_given_labelled": 0.625,
+        "act_accuracy": 0.5085,
+        "coverage": 1.0,
+        "n_covered": 59,
+        "n_total": 59,
+        "p_labelled": 0.8136,
+        "threshold": null
+      }
+    ]
+  },
   "deltas": {
     "B3-B8g/MES": {
       "delta": -0.2045,
