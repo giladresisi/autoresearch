@@ -1,0 +1,14 @@
+{
+  "band_mult": 0.15,
+  "candidate_rows": 7195,
+  "censored_segments": 4,
+  "label_rows": 280,
+  "labelled": 174,
+  "segments": 140,
+  "sessions": 84,
+  "tickers": [
+    "MNQ",
+    "MES"
+  ],
+  "unexplained": 106
+}
