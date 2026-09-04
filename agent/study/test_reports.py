@@ -67,3 +67,44 @@ def test_the_report_writes_a_diffable_artifact(tmp_path):
     report(CORPUS, str(tmp_path))
     saved = json.load(open(tmp_path / "stage_b_hazard.json", encoding="utf-8"))
     assert set(saved) == {"families", "permutation", "deltas", "tables", "abstain"}
+
+
+# --------------------------------------------------------------------------- #
+# Stage C -- the spent holdout. These tests re-run a measurement that is already
+# spent; they guard the recorded result against drift, they do not spend anything.
+# --------------------------------------------------------------------------- #
+@pytest.fixture(scope="module")
+def holdout_payload(tmp_path_factory):
+    from report_holdout import report
+    return report(CORPUS, str(tmp_path_factory.mktemp("stage-c")))
+
+
+def test_the_holdout_script_trains_on_discovery_and_scores_the_held_back_sessions(
+        holdout_payload):
+    assert holdout_payload["family"] == "B8g"
+    assert holdout_payload["abstain_max_d0"] == 2.0
+    for tk in ("MNQ", "MES"):
+        assert holdout_payload["per_ticker"][tk]["everything"]["n_total"] > 0
+
+
+def test_the_abstain_rule_excluded_every_unexplainable_holdout_session(holdout_payload):
+    """B9's claim, on data it never saw: of the sessions the composed rule ACTS on,
+    all of them had a pool-based answer. 12/12 MNQ and 13/13 MES."""
+    for tk in ("MNQ", "MES"):
+        assert holdout_payload["per_ticker"][tk]["acted"]["p_labelled"] == 1.0
+
+
+def test_abstaining_still_beat_acting_on_everything_out_of_sample(holdout_payload):
+    for tk in ("MNQ", "MES"):
+        r = holdout_payload["per_ticker"][tk]
+        assert r["acted"]["act_accuracy"] > r["everything"]["act_accuracy"]
+        assert r["acted"]["coverage"] < 1.0
+
+
+def test_the_holdout_result_is_recorded_at_its_measured_value(holdout_payload):
+    """Pins the numbers plan 29 §C quotes. The holdout cannot be re-spent, so a change
+    here means the corpus or the rule moved underneath a result that is final."""
+    mnq = holdout_payload["per_ticker"]["MNQ"]["acted"]
+    mes = holdout_payload["per_ticker"]["MES"]["acted"]
+    assert (mnq["n_covered"], mnq["act_accuracy"]) == (12, 0.5)
+    assert (mes["n_covered"], mes["act_accuracy"]) == (13, pytest.approx(0.5385, abs=1e-3))
