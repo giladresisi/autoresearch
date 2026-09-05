@@ -44,6 +44,8 @@ SOURCES = (
     ".agents/plans/29.cycle4-rule-search.md",
     ".agents/plans/28.cycle4-candidate-labelling.md",
     ".agents/plans/27.cycle4-session-skeleton.md",
+    ".agents/plans/30.cycle4-decision-instant.md",
+    ".agents/rule-search/decision_instant.json",
 )
 
 
@@ -229,6 +231,43 @@ CASES: "tuple[StudyCase, ...]" = (
         source=".agents/plans/29.cycle4-rule-search.md",
         claim="'decline to set a target' has three readings and the document does not choose",
         doc_quotes=("Three mechanisms, three P&L profiles.",)),
+    # ---- plan 30: the anchor fix -------------------------------------------- #
+    StudyCase(
+        key="p30-b8g-ports", kind="result", doc_section="2.2", split="discovery",
+        source=".agents/rule-search/decision_instant.json",
+        claim="B8g survives re-derivation at a production-computable clock instant",
+        n=48, value=0.636,
+        doc_quotes=("**This rule ports (plan 30, 2026-09-05).**",
+                    "**The rule was not an artefact of"),
+        note="Its feature is pool-to-pool and never references the anchor, which is why it "
+             "was the half expected to survive."),
+    StudyCase(
+        key="p30-anchor-coverage-cost", kind="result", doc_section="2.2", split="discovery",
+        source=".agents/rule-search/decision_instant.json",
+        claim="a clock anchor cannot name a target once the draw has been passed",
+        n=92, value=0.21,
+        doc_quotes=("**56–58% (MNQ)** and **46–48% (MES)**",),
+        note="MNQ loses ~5 points, MES ~21. MES's draws sit nearer and are taken sooner."),
+    StudyCase(
+        key="p30-threshold-converts", kind="result", doc_section="9.4", split="discovery",
+        source=".agents/plans/30.cycle4-decision-instant.md",
+        claim="B9's threshold converts from 2.0 at the origin to about 1.0 from now_price",
+        n=43, value=1.0,
+        doc_quotes=("**1.0 × avg_range_1h**, not 2.0",
+                    "The mechanism translates; only its number was"),
+        note="Plan 30 predicted ~1.2 before measuring; the measured value is 1.0."),
+    StudyCase(
+        key="p30-discovery-grade", kind="definition", doc_section="9.4", split="discovery",
+        source=".agents/plans/30.cycle4-decision-instant.md",
+        claim="plan 30's figures carry two re-fitted parameters and no out-of-sample check",
+        doc_quotes=("**Discovery-grade only**",)),
+    StudyCase(
+        key="forward-holdout-reserved", kind="definition", doc_section="10", split="none",
+        source=".agents/plans/30.cycle4-decision-instant.md",
+        claim="sessions after 2026-09-02 are reserved unread as the only clean validator",
+        doc_quotes=("**Sessions after 2026-09-02 are reserved and unread. Do not look at them.**",
+                    "the decision expires by being deferred")),
+
     StudyCase(
         key="def-holdout-spent", kind="definition", doc_section="8", split="holdout",
         source=".agents/rule-search/stage_c_holdout.json",

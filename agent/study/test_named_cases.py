@@ -181,3 +181,42 @@ def test_the_rule_section_itself_warns_that_it_is_not_a_rule():
 
 def test_the_status_header_points_at_the_step0_verdict():
     assert "did\nNOT pass step 0" in nc.read_doc()[:500]
+
+
+# --------------------------------------------------------------------------- #
+# plan 30: the anchor fix, and the reservation it forced
+# --------------------------------------------------------------------------- #
+def test_the_document_records_which_rule_ported_and_which_did_not():
+    """Plan 30's whole point: B8g's feature is anchor-free and B9's was not. A document
+    that reports only the survivor hides the asymmetry that made it worth testing."""
+    doc = nc.read_doc()
+    assert "**This rule ports (plan 30, 2026-09-05).**" in doc
+    assert "1.0 × avg_range_1h**, not 2.0" in doc
+
+
+def test_the_coverage_cost_of_a_computable_anchor_is_stated():
+    """Accuracy on USABLE sessions flatters a clock anchor, because sessions whose draw
+    has already been passed simply vanish. The all-session figure must be present."""
+    assert "**56–58% (MNQ)** and **46–48% (MES)**" in nc.read_doc()
+
+
+def test_plan_30_figures_are_marked_discovery_grade():
+    """Two re-fitted parameters, 36 cells, no holdout left. Quoting them as results is
+    the same mistake cycle 4 made and corrected."""
+    assert "**Discovery-grade only**" in nc.read_doc()
+
+
+def test_the_forward_holdout_reservation_is_recorded():
+    """It is clean only for as long as nobody looks, so the commitment has to exist
+    before the work that would be validated against it."""
+    doc = nc.read_doc()
+    assert "**Sessions after 2026-09-02 are reserved and unread. Do not look at them.**" in doc
+    assert "## 10. The forward holdout is RESERVED" in doc
+
+
+def test_the_reservation_records_why_historical_blocks_were_rejected():
+    """2026-04 was a sustained uptrend; a single historical block tests regime transfer
+    rather than the rule."""
+    doc = nc.read_doc()
+    assert "never pooled" in doc
+    assert "unusual sustained" in doc

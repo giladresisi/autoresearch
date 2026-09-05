@@ -46,8 +46,13 @@ Eligible means: ahead of the origin in the move's direction, in that instrument'
 space, and not already swept.
 
 > **NOT A RULE YET — see §9.** "Decline" has three readings (veto the entry, take it with no
-> hard TP, take it with a fallback target) and the threshold is measured from an anchor
+> hard TP, take it with a fallback target) and the threshold above is measured from an anchor
 > production does not have. Step 0 of the change protocol rejects it as written.
+>
+> **Plan 30 (2026-09-05) resolved the anchor half.** Measured from `now_price` at a fixed
+> clock instant — the coordinates `_dol_menu` actually uses — the threshold is about
+> **1.0 × avg_range_1h**, not 2.0. The mechanism translates; only its number was
+> anchor-bound. The three-way ambiguity in "decline" is untouched and still blocks.
 
 ### 2.2 B8g — the selection rule
 
@@ -67,6 +72,19 @@ travelled.
 **Distance from the origin earns no place in the rule.** Adding it changes nothing on MNQ and
 costs accuracy on MES. This reverses the framing the study started with: "how far will it go"
 is the wrong question, and "where does the structure thin out" is the right one.
+
+**This rule ports (plan 30, 2026-09-05).** Its feature is pool-to-pool and never references the
+anchor, so it was the half expected to survive re-derivation at a production-computable instant
+— and it does: on usable sessions, 62.8 / 63.6 / 67.5% (MNQ) and 62.5 / 64.5 / 63.6% (MES) at
+09:32 / 09:35 / 09:40, against 62.5 / 68.2% origin-anchored. **The rule was not an artefact of
+the lookahead origin.**
+
+**But a computable anchor costs coverage, and unequally.** A clock instant cannot name a target
+on a session whose draw price has already been passed. Over *every* session rather than the
+usable ones, B8g falls to **56–58% (MNQ)** and **46–48% (MES)** — MNQ loses about 5 points,
+**MES about 21**. MES's draws sit nearer in normalised terms and are taken sooner; a quarter to
+a third of its sessions are already decided before a fixed clock instant arrives. A later
+instant does not help.
 
 ---
 
@@ -314,7 +332,7 @@ agree.
 
 | blocker | what it needs |
 |---|---|
-| (a) units | Stage B re-derived with `d0` measured from the entry instant rather than the origin. Cannot be validated the way the original was — the holdout is spent |
+| (a) units | **DONE — plan 30, 2026-09-05.** Re-derived at 09:32 / 09:35 / 09:40 from `now_price`. B8g ports; B9's threshold converts 2.0 → ~1.0. **Discovery-grade only**: the threshold AND the instant were re-fitted over 36 cells with no holdout left, and cycle 4 measured discovery optimism on this corpus at ~15 points |
 | (b) projection vs decline | A decision, informed by how the projection draw actually performs on the sessions B9 would have declined |
 | (c) hard exclusion | An answer to the no-liquidity-semantics objection, which this study did not consider |
 | (d) owner | Route it as a proposal to the L1/thesis pipeline, not an L2 edit |
@@ -327,3 +345,31 @@ choice is being made on roughly a quarter of sessions, and that those sessions a
 That belongs upstream as input to the projection policy.
 
 **DO NOT** implement a hard decline from this text.
+
+---
+
+## 10. The forward holdout is RESERVED
+
+**Sessions after 2026-09-02 are reserved and unread. Do not look at them.**
+
+Recorded 2026-09-05, before any work that could be validated against them.
+
+Cycle 4's holdout is spent, and plan 30 spent the discovery set again — its figures carry two
+re-fitted parameters and no out-of-sample check. Every remaining question about this study
+(does B8g's ~56% hold, is B9's converted threshold right, do the unrun families add anything)
+needs a validation source that does not exist inside 2026-05 → 08.
+
+Three candidates were considered:
+
+- **An earlier historical block.** Rejected as a single block: 2026-04 was an unusual sustained
+  uptrend, and every other historical block carries its own regime. One block tests *regime
+  transfer*, not the rule, and when it fails you cannot tell which failed. If historical data
+  is used it must be **several separated blocks reported individually**, never pooled.
+- **Re-splitting 2026-05 → 08.** Rejected. Analyst contamination is now range-wide — every
+  session's structure has been examined in aggregate — and no re-split repairs that.
+- **Forward sessions.** The parquets end 2026-09-02, so everything after it is untouched by
+  construction: right regime, zero contamination, and it accrues on its own.
+
+At roughly 20 sessions a month a usable block exists within two months. **It is clean only for
+as long as nobody looks**, which is why this is written down now rather than when it is needed
+— the decision expires by being deferred, and by then the reservation is worthless.
