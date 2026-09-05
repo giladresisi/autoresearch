@@ -39,8 +39,11 @@ Two rules, composed. They are **not** equally trustworthy and §6 says so in det
 
 ### 2.1 B9 — the confidence rule
 
-> **Decline to set a pool-based target unless an eligible pool sits within 2.0 × avg_range_1h
-> of the move's origin.**
+> **Decline to set a pool-based target unless an eligible pool sits within about
+> 1.0 × avg_range_1h of the current price.**
+>
+> *(As first measured: 2.0 × from the move's origin — an anchor production cannot compute.
+> Plan 30 re-derived it in `now_price` coordinates; see below and §9.)*
 
 Eligible means: ahead of the origin in the move's direction, in that instrument's own price
 space, and not already swept.
@@ -228,12 +231,26 @@ every unexplainable held-out session without a single miss, and its lift survive
 **B8g did not.** Its accuracy fell about 15 points out of sample. It still beats every
 alternative, but its discovery figure was not its true rate.
 
-**Consequence for a phase-5 decision.** B9 is a gate that declines to act: its failure mode is
-a missed opportunity. B8g names a price: its failure mode is taking profit in the wrong place.
-**If anything ships, B9 should ship first and alone.** It requires no new detectors — the
-candidate universe and `avg_range_1h` already exist — and it improves on today's behaviour by
-identifying, before the fact, the roughly quarter of sessions on which no pool-based target is
-available at all.
+**Consequence for a phase-5 decision — SUPERSEDED 2026-09-05, and the reversal is recorded
+rather than silently applied.**
+
+This section originally read: *"If anything ships, B9 should ship first and alone."* That
+recommendation was written before step 0 and plan 30, and both contradict it:
+
+- **B9 carries every remaining blocker.** Step 0 found three that plan 30 did not touch: what
+  "decline" means has three readings, hard exclusion was already rejected once by
+  `DOL_BAND_MAX_RATIO`'s own note, and the change lands in a different owner's code (§9).
+- **B8g carries none of them, and it ports.** Plan 30 re-derived it at a production-computable
+  instant and its accuracy held (§2.2).
+
+So the trust asymmetry above — B9 generalised, B8g was flattered — is a statement about
+**measurement**, and it does not survive contact with **implementability**. Neither ships
+today. Of the two, B8g is the one that *could*, and B9 is the one that cannot until §9's
+blockers are answered.
+
+The failure-mode argument still stands and still favours B9 in the abstract: a gate that
+declines to act fails by missing an opportunity, while a rule that names a price fails by
+taking profit in the wrong place. It is simply not available.
 
 Nothing here has been through `docs/entry-mechanism-change-protocol.md`. Its step 0 — *is this
 a RULE yet* — is the gate, and the inverted-thesis check applies to both rules.
@@ -333,7 +350,7 @@ agree.
 | blocker | what it needs |
 |---|---|
 | (a) units | **DONE — plan 30, 2026-09-05.** Re-derived at 09:32 / 09:35 / 09:40 from `now_price`. B8g ports; B9's threshold converts 2.0 → ~1.0. **Discovery-grade only**: the threshold AND the instant were re-fitted over 36 cells with no holdout left, and cycle 4 measured discovery optimism on this corpus at ~15 points |
-| (b) projection vs decline | A decision, informed by how the projection draw actually performs on the sessions B9 would have declined |
+| (b) projection vs decline | **DONE — 2026-09-05, and it closes B9. See §9.6.** |
 | (c) hard exclusion | An answer to the no-liquidity-semantics objection, which this study did not consider |
 | (d) owner | Route it as a proposal to the L1/thesis pipeline, not an L2 edit |
 
@@ -345,6 +362,58 @@ choice is being made on roughly a quarter of sessions, and that those sessions a
 That belongs upstream as input to the projection policy.
 
 **DO NOT** implement a hard decline from this text.
+
+### 9.6 CLOSED — B9 is vacuous against production's own menu (2026-09-05)
+
+Blocker (b) was answered by building the DOL menu with production's code
+(`bundle_to_l1_view`) at 09:35 on the 56 MNQ discovery sessions where it resolves, and
+measuring what it offers against where the move actually stopped.
+
+**The finding that closes it: `d0 <= 1.0` contains ZERO sessions.**
+
+`_dol_menu` filters every pool nearer than `max(5pts, DOL_MIN_DRAW_RATIO x avg_1h)`, and
+`DOL_MIN_DRAW_RATIO` is **1.0**. So the nearest entry production ever offers is at least
+1.0 x avg_1h away, by construction. Plan 30 re-derived B9's threshold to ~1.0 from `now_price`
+— which means **"act only when a pool is within 1.0" and "never offer a pool within 1.0" are
+the same number pointing in opposite directions.** Applied to production's menu, B9 declines
+every session. The rule is not wrong; it is empty.
+
+**And where B9 would decline, production's answer is the better of the two available:**
+
+| zone at 09:35 | n | median distance from the offered target to the actual extreme |
+|---|---|---|
+| `d0` 1.0-3.0 — production offers the nearest named pool | 38 | 0.80 x avg_1h (a random price in the move scores 0.85) |
+| projection fired — production offers the synthetic draw | 7 | **1.56** |
+| the same 7 sessions, had it offered the far named pool instead | 6 | **2.70** |
+
+In its own zone the projection beats the alternative by more than a full hourly range, so
+declining there would replace a better-than-alternative answer with none. It is still not
+*accurate* — a 1.56 error against a median move of 1.68 is the size of the move — but "not
+accurate" and "worse than nothing" are different claims, and only the second would justify
+B9.
+
+**B9 is CLOSED.** Not refuted as an observation — the ~25% of sessions with no pool-based
+answer are real and predictable — but closed as a *rule*: it is unimplementable against the
+menu production actually builds, and the behaviour it would replace is better than declining.
+§9.5's framing was right and is now measured: this is evidence about the projection policy,
+not a new mechanism.
+
+### 9.7 A limitation this exposed, which applies to B8g too
+
+**The study never used production's candidate set.** `agent/study/candidates.universe` takes
+every level in the bundle; `_dol_menu` additionally applies a proximity floor, a wrong-side
+filter, P1 suppression and depletion. Plan 30 fixed the *anchor* mismatch and left the
+*universe* mismatch untouched — it was not visible until the menu was built with production's
+own code.
+
+So B8g's stack is not the stack production would walk: it contains pools the menu excludes.
+The gap sequence B8g reads is therefore not the gap sequence production would present, and its
+measured accuracy does not transfer without re-deriving on the menu's own entries.
+
+**This is a MUST-FIX before any implementation and is deliberately not fixed here** — the
+cycle is being closed, and re-deriving on the menu is a fresh measurement with no clean
+validator (§10). It is recorded so the next attempt starts from it rather than rediscovering
+it after building something.
 
 ---
 

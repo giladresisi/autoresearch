@@ -220,3 +220,39 @@ def test_the_reservation_records_why_historical_blocks_were_rejected():
     doc = nc.read_doc()
     assert "never pooled" in doc
     assert "unusual sustained" in doc
+
+
+# --------------------------------------------------------------------------- #
+# blocker (b): what closed B9, and the limitation it exposed
+# --------------------------------------------------------------------------- #
+def test_b9_is_recorded_as_closed_not_merely_deferred():
+    """It was recommended twice and is now closed by evidence. A document that leaves it
+    open invites the next session to pick it back up."""
+    doc = nc.read_doc()
+    assert "**B9 is CLOSED.**" in doc
+    assert nc.by_key("b9-closed").n == 0
+
+
+def test_the_vacuity_finding_is_stated_with_its_mechanism():
+    """B9's re-derived threshold (~1.0 from now_price) collides exactly with
+    DOL_MIN_DRAW_RATIO = 1.0, which filters everything nearer. Same number, opposite
+    directions — the rule declines every session."""
+    doc = nc.read_doc()
+    assert "contains ZERO sessions" in doc
+    assert "DOL_MIN_DRAW_RATIO" in doc
+
+
+def test_the_projection_is_credited_where_it_beats_the_alternative():
+    """Closing B9 rests on the projection being better than the far pool, not on it being
+    good. Both halves must be in the document."""
+    doc = nc.read_doc()
+    assert "better-than-alternative answer with none" in doc
+    assert "the size of the move" in doc
+
+
+def test_the_universe_mismatch_is_recorded_as_a_must_fix():
+    """It applies to B8g too, and it was invisible until production's own menu was built.
+    Recorded so the next attempt starts from it rather than rediscovering it."""
+    doc = nc.read_doc()
+    assert "**The study never used production's candidate set.**" in doc
+    assert "MUST-FIX before any implementation" in doc

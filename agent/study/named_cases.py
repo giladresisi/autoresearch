@@ -268,6 +268,39 @@ CASES: "tuple[StudyCase, ...]" = (
         doc_quotes=("**Sessions after 2026-09-02 are reserved and unread. Do not look at them.**",
                     "the decision expires by being deferred")),
 
+    # ---- blocker (b): the projection question, and what it closed ----------- #
+    StudyCase(
+        key="b9-vacuous", kind="result", doc_section="9.6", split="discovery",
+        source=".agents/plans/30.cycle4-decision-instant.md",
+        claim="B9's re-derived threshold and production's draw floor are the same number, "
+              "pointing in opposite directions",
+        n=56, value=0.0,
+        doc_quotes=("contains ZERO sessions.**",
+                    "the same number pointing in opposite directions.**"),
+        note="_dol_menu filters everything nearer than max(5pts, 1.0 x avg_1h), so the "
+             "nearest entry it offers is always >= 1.0 away. B9 would decline every session."),
+    StudyCase(
+        key="projection-beats-the-far-pool", kind="result", doc_section="9.6",
+        split="discovery", source=".agents/plans/30.cycle4-decision-instant.md",
+        claim="in its own zone the projection is closer to the extreme than the far named pool",
+        n=7, value=1.56,
+        doc_quotes=("| projection fired — production offers the synthetic draw | 7 | **1.56** |",
+                    "declining there would replace a better-than-alternative answer with none"),
+        note="1.56 vs 2.70 x avg_1h. Still not accurate — the error is the size of the move — "
+             "but 'not accurate' and 'worse than nothing' are different claims."),
+    StudyCase(
+        key="b9-closed", kind="candidate", doc_section="9.6", split="none",
+        source=".agents/plans/30.cycle4-decision-instant.md",
+        claim="B9 is closed as a rule and survives only as evidence about the projection policy",
+        n=0,
+        doc_quotes=("**B9 is CLOSED.**",)),
+    StudyCase(
+        key="universe-mismatch", kind="definition", doc_section="9.7", split="none",
+        source=".agents/plans/30.cycle4-decision-instant.md",
+        claim="the study never used production's candidate set, which affects B8g too",
+        doc_quotes=("**The study never used production's candidate set.**",
+                    "**This is a MUST-FIX before any implementation")),
+
     StudyCase(
         key="def-holdout-spent", kind="definition", doc_section="8", split="holdout",
         source=".agents/rule-search/stage_c_holdout.json",
