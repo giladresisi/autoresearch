@@ -1,0 +1,87 @@
+dates with a recorded baseline event stream: ['2026-05-18', '2026-05-19']
+
+== 2026-05-18: 9 episodes that placed at least one stop
+   fill 05-17 19:15 down @ 29181.25 | recorded stops 3  mine 2  same-minute 1  same-price 0
+      ladder: initial 'day_low' vs recorded 'day_low' OK
+      ladder: secondary 'prev1_day_low' vs recorded 'prev1_day_low' OK
+      recorded 05-17 19:40 initial        29153.75 | mine 29126.75
+      recorded 05-17 19:41 secondary      29112.25 | mine (none at this minute)
+      recorded 05-17 19:42 secondary       29066.0 | mine (none at this minute)
+   fill 05-17 22:11 up   @ 29016.25 | recorded stops 2  mine 0  same-minute 0  same-price 0
+      ladder: initial 'day_mid' vs recorded 'day_mid' OK
+      recorded 05-18 00:14 initial         29064.5 | mine (none at this minute)
+      recorded 05-18 00:15 initial        29081.25 | mine (none at this minute)
+   fill 05-18 03:25 up   @ 29093.0 | recorded stops 3  mine 1  same-minute 0  same-price 0
+      ladder: secondary 'london_high' vs recorded 'london_high' OK
+      recorded 05-18 03:28 secondary      29130.25 | mine (none at this minute)
+      recorded 05-18 03:30 secondary      29136.75 | mine (none at this minute)
+      recorded 05-18 03:31 secondary       29150.0 | mine (none at this minute)
+   fill 05-18 03:47 up   @ 29093.25 | recorded stops 2  mine 1  same-minute 0  same-price 0
+      ladder: secondary 'london_high' vs recorded 'london_high' OK
+      recorded 05-18 04:05 secondary       29153.0 | mine (none at this minute)
+      recorded 05-18 04:06 secondary       29173.5 | mine (none at this minute)
+   fill 05-18 07:32 up   @ 29108.75 | recorded stops 4  mine 2  same-minute 1  same-price 1
+      ladder: secondary 'london_high' vs recorded 'ny_morning_high' MISMATCH
+      recorded 05-18 07:40 secondary      29138.75 | mine (none at this minute)
+      recorded 05-18 07:41 secondary      29214.75 | mine 29214.75
+      recorded 05-18 07:42 secondary       29228.0 | mine (none at this minute)
+      recorded 05-18 07:45 secondary       29233.5 | mine (none at this minute)
+   fill 05-18 09:50 up   @ 29168.0 | recorded stops 1  mine 1  same-minute 0  same-price 0
+      ladder: initial 'london_high' vs recorded 'synthetic_85pct' MISMATCH
+      recorded 05-18 09:52 initial         29363.0 | mine (none at this minute)
+   fill 05-18 12:06 up   @ 28995.75 | recorded stops 2  mine 1  same-minute 0  same-price 0
+      ladder: secondary 'prev1_day_low' vs recorded 'TDO' MISMATCH
+      recorded 05-18 12:21 secondary       29029.0 | mine (none at this minute)
+      recorded 05-18 12:22 secondary       29055.0 | mine (none at this minute)
+   fill 05-18 14:55 up   @ 28834.25 | recorded stops 2  mine 1  same-minute 0  same-price 0
+      ladder: secondary 'ny_morning_low' vs recorded 'ny_morning_low' OK
+      recorded 05-18 15:02 secondary       28876.0 | mine (none at this minute)
+      recorded 05-18 15:06 secondary      28987.25 | mine (none at this minute)
+   fill 05-18 15:31 up   @ 28934.25 | recorded stops 2  mine 0  same-minute 0  same-price 0
+      ladder: secondary 'ny_evening_high' vs recorded 'ny_morning_low' MISMATCH
+      recorded 05-18 15:32 secondary      28934.25 | mine (none at this minute)
+      recorded 05-18 15:33 secondary       28960.0 | mine (none at this minute)
+
+== 2026-05-19: 5 episodes that placed at least one stop
+   fill 05-18 23:06 up   @ 28971.5 | recorded stops 5  mine 0  same-minute 0  same-price 0
+      ladder: secondary 'week_mid' vs recorded 'london_low' MISMATCH
+      recorded 05-18 23:09 secondary      28982.75 | mine (none at this minute)
+      recorded 05-18 23:10 secondary       28986.0 | mine (none at this minute)
+      recorded 05-18 23:11 secondary       28986.5 | mine (none at this minute)
+      recorded 05-18 23:12 secondary      28988.75 | mine (none at this minute)
+   fill 05-19 02:53 up   @ 29013.5 | recorded stops 5  mine 3  same-minute 2  same-price 1
+      ladder: initial 'TWO' vs recorded 'synthetic_85pct' MISMATCH
+      ladder: secondary 'week_mid' vs recorded 'TWO' MISMATCH
+      recorded 05-19 03:43 initial        29048.75 | mine (none at this minute)
+      recorded 05-19 03:45 initial        29076.25 | mine (none at this minute)
+      recorded 05-19 03:46 secondary      29085.25 | mine 29076.25
+      recorded 05-19 03:47 secondary       29098.0 | mine (none at this minute)
+   fill 05-19 12:51 up   @ 28991.0 | recorded stops 1  mine 0  same-minute 0  same-price 0
+      ladder: secondary 'london_high' vs recorded 'ny_morning_high' MISMATCH
+      recorded 05-19 13:10 secondary      29058.75 | mine (none at this minute)
+   fill 05-19 13:25 down @ 29101.5 | recorded stops 3  mine 3  same-minute 2  same-price 2
+      ladder: initial 'week_mid' vs recorded 'week_mid' OK
+      recorded 05-19 13:48 initial         29101.0 | mine (none at this minute)
+      recorded 05-19 13:50 initial        29089.75 | mine 29089.75
+      recorded 05-19 13:55 initial        29066.25 | mine 29066.25
+   fill 05-19 14:13 down @ 29082.75 | recorded stops 4  mine 1  same-minute 0  same-price 0
+      ladder: secondary 'TDO' vs recorded 'TDO' OK
+      recorded 05-19 14:54 secondary       29004.0 | mine (none at this minute)
+      recorded 05-19 14:55 secondary       28990.5 | mine (none at this minute)
+      recorded 05-19 14:56 secondary      28974.75 | mine (none at this minute)
+      recorded 05-19 14:59 secondary       28964.0 | mine (none at this minute)
+
+======================================================================
+episodes 14 | recorded stop events 39 | same-minute 6 | same-price 4 | ladder names OK 8
+GATE: FAIL
+
+=== MACHINE-ONLY DECOMPOSITION ===
+
+testable stop events (price is machine-derived): 39
+  EXACT match : 39
+  within 0.25 : 0
+  skipped (initial_mid, needs the rung price): 0
+  initial      9/9
+  secondary    30/30
+
+VERDICT: stop-price arithmetic reproduces 39/39 EXACTLY (100%).
