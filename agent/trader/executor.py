@@ -41,6 +41,8 @@ class reads through `_store` / `_avg_range_1h`.
 """
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from agent.facts.bars import resample
@@ -64,6 +66,7 @@ DOL_FLOOR_PTS = 60.0                 # this much must REMAIN between trigger and
 ENTRY_BUFFER_PTS = 3.0               # beyond the gap's far end, the wick-deception guard
 STOP_BUFFER_PTS = 3.0
 STOP_CAP_PTS = 25.0                  # nearer of structural stop and this cap (2026-08-22)
+TICK_PTS = 0.25                      # MNQ/MES tick; market fills snap to this grid
 MIN_FVG_HEIGHT_PTS = 5.0             # §9; INITIAL binding only — ladder targets exempt
 MAX_FVG_HEIGHT_PTS = 45.0            # §9; raised from 35 on 2026-08-22
 DISTANCE_INVALIDATION_PTS = 60.0     # §9; PERMANENT, unlike the max-distance guard
@@ -1013,11 +1016,36 @@ class Executor:
         return (float(price) >= float(trigger)) if not self._is_short() \
             else (float(price) <= float(trigger))
 
+    def _snap_adverse(self, price: float) -> float:
+        """Round a price onto the tick grid AGAINST the trade: up for a long, down for
+        a short. A price already on the grid is returned unchanged — the epsilon guard
+        is load-bearing, because `x / 0.25` on a float can land a hair under an
+        integer and a bare floor() would then walk an exact tick backwards."""
+        ticks = float(price) / TICK_PTS
+        nearest = round(ticks)
+        if abs(ticks - nearest) <= 1e-9:
+            snapped = nearest
+        else:
+            snapped = math.floor(ticks) if self._is_short() else math.ceil(ticks)
+        return round(snapped * TICK_PTS, 4)
+
     def _market_price(self):
         """§11's market-fill price: the 1s mid of the bar at placement, falling back to
-        the close when no mid has been seen (direct-construction callers)."""
+        the close when no mid has been seen (direct-construction callers).
+
+        SNAPPED TO THE TICK, ADVERSELY. The mid of a 1s bar spanning an ODD number of
+        ticks lands halfway between two of them — 08-19's second entry booked
+        **29672.875** on an instrument that trades in 0.25 — and every P&L quoted off a
+        crossed trigger inherits a price no broker would give. The snap goes AWAY from
+        the taker, which is `order_sim`'s standing rule that ambiguity resolves
+        adversely applied to the one place the fill price itself was ambiguous. It
+        moves a fill by at most half a tick, an order of magnitude inside §11's own
+        ±2 pt market-fill tolerance, so no calibrated row moves.
+        """
         mid = self._state.get("now_mid")
-        return mid if mid is not None else self._state.get("now_price")
+        if mid is None:
+            return self._state.get("now_price")
+        return self._snap_adverse(float(mid))
 
     def _crossing_price(self):
         """The price the CROSSED test reads: the bar's extreme in the trade direction,

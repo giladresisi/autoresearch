@@ -332,3 +332,73 @@ def test_attempts_used_is_asserted_not_scored():
     for date in ROWS:
         row, res = _run(date)
         assert res[5] == row["pnl"]
+
+
+# --- the tick grid: a market fill is a PRICE, not an average ------------------ #
+
+def _mkexec(tmp_path, direction: str):
+    from agent.trader.executor import Executor
+    return Executor(str(tmp_path),
+                    {"plan_id": "tick", "direction": direction,
+                     "dol": {"price": 29000.0 if direction == "DOWN" else 30000.0},
+                     "armed_classes": ["fvg_return_continuation"]},
+                    arm_ts=pd.Timestamp("2026-08-19 09:20", tz=TZ))
+
+
+def test_a_market_fill_snaps_to_the_tick_grid_against_the_trade(tmp_path):
+    """08-19's second entry booked **29672.875** on an instrument that trades in 0.25.
+
+    The mid of a 1s bar spanning an ODD number of ticks lands halfway between two of
+    them, and `_market_price` handed that straight to `fill_market`. No broker fills
+    there, and every P&L quoted off a crossed trigger inherits the error.
+
+    The snap goes AWAY from the taker — up for a buy, down for a sell — which is
+    `order_sim`'s standing rule that ambiguity resolves adversely, applied to the one
+    place the fill price itself was ambiguous.
+    """
+    short = _mkexec(tmp_path, "DOWN")
+    short._state["now_mid"] = 29672.875
+    assert short._market_price() == 29672.75
+
+    long_ = _mkexec(tmp_path, "UP")
+    long_._state["now_mid"] = 29672.875
+    assert long_._market_price() == 29673.00
+
+
+def test_the_snap_leaves_an_on_grid_mid_untouched(tmp_path):
+    """§8's documented 08-14 instance is a market short at the 1s mid **30245.5**, and
+    07-21's cooldown-end reads 29137.25. Both are already on the grid; a snap that
+    moved them would rewrite a pinned number to fix a cosmetic one."""
+    for direction, mid in (("DOWN", 30245.5), ("UP", 30245.5),
+                           ("DOWN", 29137.25), ("UP", 29137.25)):
+        ex = _mkexec(tmp_path, direction)
+        ex._state["now_mid"] = mid
+        assert ex._market_price() == mid, f"{direction} @ {mid} was moved off its tick"
+
+
+def test_the_snap_never_favours_the_trade_and_never_exceeds_half_a_tick(tmp_path):
+    """The property, over every mid a 1s bar can produce: bar extremes are on the grid,
+    so their mean is always a multiple of 0.125 — i.e. on a tick or exactly between
+    two. Nothing else is reachable, and the correction is bounded by half a tick, well
+    inside §11's own +/-2 pt market-fill tolerance."""
+    from agent.trader.executor import TICK_PTS
+
+    for i in range(400):
+        mid = 29000.0 + i * 0.125
+        for direction, sign in (("UP", 1.0), ("DOWN", -1.0)):
+            ex = _mkexec(tmp_path, direction)
+            ex._state["now_mid"] = mid
+            got = ex._market_price()
+            assert abs(round(got / TICK_PTS) - got / TICK_PTS) < 1e-9, \
+                f"{got} is not on the {TICK_PTS} grid"
+            assert sign * (got - mid) >= 0.0, "the snap moved the fill in our favour"
+            assert abs(got - mid) <= TICK_PTS / 2.0
+
+
+def test_the_fallback_close_is_already_on_grid_and_survives_the_snap(tmp_path):
+    """`now_price` is a real bar CLOSE — on the grid by construction. The fallback path
+    exists for direct-construction callers that never set a mid, and must stay exact."""
+    ex = _mkexec(tmp_path, "DOWN")
+    ex._state["now_price"] = 29672.75
+    assert ex._state.get("now_mid") is None
+    assert ex._market_price() == 29672.75

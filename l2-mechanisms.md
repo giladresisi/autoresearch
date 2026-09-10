@@ -422,7 +422,13 @@ simulator hit every one of them. These are now normative; implement exactly this
    a phantom runaway on a print that preceded the episode.
 2. **Early-runaway fills at the trigger price** (`exit-side edge ± 25`), not at the market
    mid. Named test: 07-21 gap B fills **29149.75** = 29174.75 − 25 exactly. Close-verdict and
-   exit-tick entries DO fill at the 1s mid at placement.
+   exit-tick entries DO fill at the 1s mid at placement — **snapped to the 0.25 tick AGAINST
+   the trade** (up for a long, down for a short), added 2026-09-10. The mid of a 1s bar
+   spanning an odd number of ticks is off-grid: 08-19's second entry booked **29672.875**, a
+   price no broker gives, and every P&L quoted off a crossed trigger inherited it. The snap
+   direction follows this section's standing rule that ambiguity resolves adversely, and it
+   moves a fill by at most half a tick — an order of magnitude inside the ±2 pt market-fill
+   tolerance §11 measures itself to, so no recorded row moves.
 3. **The stop-out cooldown gates entry evaluation** — no cycle may complete while it is in
    force, and all gap cycles reset to idle across it (a fresh re-entry is required after).
    Without this the machine re-enters within seconds of every stop-out.
