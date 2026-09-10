@@ -32,14 +32,38 @@ from predicates import MarketView, eval_any    # noqa: E402
 from risk_gate import RiskGate, RiskGateConfig  # noqa: E402
 
 MAX_ENTRY_ATTEMPTS = 3
-# Effective-confidence tiers that count as "confident" (advance L1 -> L2). LOW parks in
-# THESIS_LOW_CONF and recalls L1. (spec §2.2 / §8; threshold is config-overridable.)
-_CONFIDENT_TIERS = {"HIGH", "MEDIUM"}
+_DIRECTIONAL = ("UP", "DOWN", "LONG", "SHORT")
+
+
+def _actionable(thesis) -> bool:
+    """What advances L1 -> L2: the thesis is DIRECTIONAL and names a DOL.
+
+    CONFIDENCE DELIBERATELY DOES NOT GATE (2026-09-10). It used to — spec §2.2/§8 let
+    only HIGH/MEDIUM through and parked LOW — and two things retired that rule:
+
+      - the gate read the model's SELF-REPORTED tier, which `agent/confidence.py`
+        records as batch-proven INVERTED (self-reported `high` 0% correct, `low` 41%);
+      - across the seven real-09:20-thesis replays of 2026-09-09/10 the tiers did not
+        separate at all: LOW and MEDIUM days alike were dead by 09:52, and the two LOW
+        days supplied both the only no-fill and a full attempt-budget burn
+        (`move-the-needle.md` §4).
+
+    The tier is still computed and recorded on `thesis_tier` — audit-only, the status
+    `agent/confidence.py` already claims for it — so the question stays settleable on a
+    real corpus. It just decides nothing.
+
+    This is the same rule `agent/trader/analyzer.stands` applies on the L2 replay path,
+    which has never gated on confidence. One rule, two stacks, one docstring apiece.
+    """
+    d = thesis.to_dict() if isinstance(thesis, Thesis) else (thesis or {})
+    if str(d.get("bias") or "").upper() not in _DIRECTIONAL:
+        return False
+    return d.get("dol") is not None
 
 
 class State(str, Enum):
     NO_THESIS = "NO_THESIS"
-    THESIS_LOW_CONF = "THESIS_LOW_CONF"
+    THESIS_NOT_ACTIONABLE = "THESIS_NOT_ACTIONABLE"
     AWAITING_SETUP = "AWAITING_SETUP"
     SETUP_ARMED = "SETUP_ARMED"
     IN_POSITION = "IN_POSITION"
@@ -132,7 +156,8 @@ class TradeDirector:
         self._call_l1(facts_ref, "session_open", ts)
 
     def on_thesis_arrived(self, thesis, ts=None, facts=None) -> None:
-        """Level-1 result delivery. Confidence (code-derived tier) gates L1->L2."""
+        """Level-1 result delivery. ACTIONABILITY gates L1->L2; confidence does not —
+        see `_actionable`. The tier is still computed and recorded, audit-only."""
         self._awaiting_thesis = False
         if self.state == State.HALTED:
             return
@@ -141,10 +166,10 @@ class TradeDirector:
         self.thesis_tier = (self._confidence_fn(self.thesis, facts) or "LOW").upper()
         # A fresh thesis invalidates any dependent plan / arming.
         self._drop_plan()
-        if self.thesis_tier in _CONFIDENT_TIERS:
-            self._enter_awaiting_setup("thesis_confident", ts, facts_ref=facts)
+        if _actionable(self.thesis):
+            self._enter_awaiting_setup("thesis_actionable", ts, facts_ref=facts)
         else:
-            self._goto(State.THESIS_LOW_CONF, "thesis_low_conf", ts)
+            self._goto(State.THESIS_NOT_ACTIONABLE, "thesis_not_actionable", ts)
 
     def on_thesis_failed(self, ts=None) -> None:
         """L1 call failed/timed out (spec §4): retain standing decisions, no new thesis."""
@@ -253,7 +278,7 @@ class TradeDirector:
 
         A thesis falsified_if fires in ANY state → thesis death. A recall
         TTL (max_age) is a HARD thesis expiry only while a CONFIDENT thesis stands
-        (AWAITING_SETUP / SETUP_ARMED / IN_POSITION); in THESIS_LOW_CONF the same max_age
+        (AWAITING_SETUP / SETUP_ARMED / IN_POSITION); in THESIS_NOT_ACTIONABLE the same max_age
         is a re-ask (recall L1), not a death (spec §5)."""
         if self.thesis is not None and self._thesis_dead(market_view):
             self._on_thesis_death(ts, market_view, facts_ref)
@@ -263,7 +288,7 @@ class TradeDirector:
             self._on_thesis_death(ts, market_view, facts_ref)
             return
 
-        if self.state == State.THESIS_LOW_CONF:
+        if self.state == State.THESIS_NOT_ACTIONABLE:
             self._maybe_recall_l1(ts, market_view, facts_ref)
         elif self.state == State.AWAITING_SETUP:
             self._maybe_recall_l2(ts, market_view, facts_ref)
@@ -362,7 +387,7 @@ class TradeDirector:
         if t is None:
             return
         events = (t.recall or {}).get("events")
-        if eval_any(events, mv) or self._lowconf_ttl_expired(t.recall, self.thesis_issued_at, mv):
+        if eval_any(events, mv) or self._parked_ttl_expired(t.recall, self.thesis_issued_at, mv):
             self._call_l1(facts_ref, "recall", ts)
 
     def _maybe_recall_l2(self, ts, mv, facts_ref) -> None:
@@ -376,7 +401,7 @@ class TradeDirector:
     def _ttl_expired(self, recall, issued_at, mv) -> bool:
         """max_age TTL: elapsed minutes since the decision issued >= max_age_min. Used for
         the standing-decision hard-expiry paths (confident thesis / plan / WAIT), which honor
-        the declared max_age verbatim and do NOT apply the low-conf default (spec §5: no
+        the declared max_age verbatim and do NOT apply the parked default (spec §5: no
         change to standing-thesis TTL tiers)."""
         if not recall or issued_at is None or mv is None or mv.now is None:
             return False
@@ -386,9 +411,9 @@ class TradeDirector:
         elapsed = (mv.now - issued_at).total_seconds() / 60.0
         return elapsed >= max_age
 
-    def _lowconf_ttl_expired(self, recall, issued_at, mv) -> bool:
-        """Plan 12 Fix 1 — the THESIS_LOW_CONF re-ask TTL, code-enforced to a default so a
-        valid low-conf thesis with a 0/absent model-authored max_age (and no firing recall
+    def _parked_ttl_expired(self, recall, issued_at, mv) -> bool:
+        """Plan 12 Fix 1 — the THESIS_NOT_ACTIONABLE re-ask TTL, code-enforced to a default
+        so a parked thesis with a 0/absent model-authored max_age (and no firing recall
         event) is re-called at the default instead of leaving the executor blind all session.
         A smaller declared max_age is respected; a missing/zero/large one is clamped to the
         default (schemas.effective_recall_max_age)."""

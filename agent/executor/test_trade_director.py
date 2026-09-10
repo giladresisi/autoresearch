@@ -61,9 +61,13 @@ class FakeMechanism:
 T0 = pd.Timestamp("2026-05-19 18:00", tz="America/New_York")
 
 
-def _thesis(confidence="HIGH", falsified=None, exhausted=None, recall=None, tid="th1"):
-    return {"thesis_id": tid, "bias": "UP", "regime": "TREND", "confidence": confidence,
-            "dol": {"level": "pdh", "price": 20000.0},
+_DOL = {"level": "pdh", "price": 20000.0}
+
+
+def _thesis(confidence="HIGH", falsified=None, exhausted=None, recall=None, tid="th1",
+            bias="UP", dol=_DOL):
+    return {"thesis_id": tid, "bias": bias, "regime": "TREND", "confidence": confidence,
+            "dol": dol,
             "falsified_if": falsified or [],
             "recall": recall if recall is not None else {"events": [], "max_age_min": 0},
             "reasoning": "x"}
@@ -96,7 +100,7 @@ def _director(**kw):
 
 
 # --------------------------------------------------------------------------- #
-# NO_THESIS / session open / confidence gate                                  #
+# NO_THESIS / session open / the actionability gate                           #
 # --------------------------------------------------------------------------- #
 def test_session_open_calls_l1_once():
     d = _director()
@@ -106,11 +110,56 @@ def test_session_open_calls_l1_once():
     assert d.provider.plan_reqs == []
 
 
-def test_low_conf_thesis_no_l2():
+def test_a_low_confidence_thesis_is_NOT_parked_and_calls_l2():
+    """CONFIDENCE NO LONGER GATES (2026-09-10). It used to: LOW parked in what was then
+    called THESIS_LOW_CONF and never reached L2.
+
+    Two things retired that rule. The gate read the model's SELF-REPORTED tier, which
+    `agent/confidence.py` records as batch-proven INVERTED — self-reported `high` was 0%
+    correct and `low` 41%. And across the seven real-thesis replays of 2026-09-09/10 the
+    tiers did not separate at all: LOW and MEDIUM days alike were dead by 09:52, and the
+    two LOW days supplied both the only no-fill and a full attempt-budget burn
+    (`move-the-needle.md` §4).
+
+    This is also what the L2 replay path already does — `agent/trader/analyzer.stands`
+    has never gated on confidence, and said so in a docstring. Two stacks now agree."""
     d = _director()
     d.on_session_open(T0, "facts")
     d.on_thesis_arrived(_thesis(confidence="LOW"), ts=T0)
-    assert d.state == State.THESIS_LOW_CONF
+    assert d.state == State.AWAITING_SETUP
+    assert len(d.provider.plan_reqs) == 1
+
+
+def test_the_tier_is_still_computed_and_recorded_it_just_decides_nothing():
+    """Audit-only, which is the status `agent/confidence.py` already claims for it. The
+    field has to survive for the question to be settleable later on a real corpus — the
+    change is that it stops deciding, not that it stops existing."""
+    for tier in ("HIGH", "MEDIUM", "LOW"):
+        d = _director()
+        d.on_session_open(T0, "facts")
+        d.on_thesis_arrived(_thesis(confidence=tier), ts=T0)
+        assert d.thesis_tier == tier
+        assert d.state == State.AWAITING_SETUP, f"{tier} must not change the state"
+
+
+def test_a_neutral_thesis_parks_regardless_of_a_confident_tier():
+    """The gate is ACTIONABILITY now, so it has to hold at the other extreme too: a
+    HIGH-confidence NEUTRAL call is still nothing to trade."""
+    d = _director()
+    d.on_session_open(T0, "facts")
+    d.on_thesis_arrived(_thesis(confidence="HIGH", bias="NEUTRAL"), ts=T0)
+    assert d.state == State.THESIS_NOT_ACTIONABLE
+    assert d.provider.plan_reqs == []
+
+
+def test_a_directional_thesis_with_no_dol_parks():
+    """Directional but with nothing to draw to. `analyzer.stands` requires both, and the
+    no-liquidity override in `validate_contracts.score_thesis_evidence` already turns this
+    case NEUTRAL upstream — this is the downstream guard for when it does not."""
+    d = _director()
+    d.on_session_open(T0, "facts")
+    d.on_thesis_arrived(_thesis(confidence="HIGH", dol=None), ts=T0)
+    assert d.state == State.THESIS_NOT_ACTIONABLE
     assert d.provider.plan_reqs == []
 
 
@@ -122,48 +171,48 @@ def test_confident_thesis_calls_l2():
     assert len(d.provider.plan_reqs) == 1
 
 
-def test_low_conf_recall_on_event_recalls_l1():
+def test_parked_thesis_recall_on_event_recalls_l1():
     ev = [{"type": "price_beyond", "price": 20500, "side": "above"}]
     d = _director()
     d.on_session_open(T0, "facts")
-    d.on_thesis_arrived(_thesis(confidence="LOW", recall={"events": ev, "max_age_min": 0}), ts=T0)
+    d.on_thesis_arrived(_thesis(bias="NEUTRAL", recall={"events": ev, "max_age_min": 0}), ts=T0)
     before = len(d.provider.thesis_reqs)
     d.on_bar(T0, _mv(price=20600))                 # event fires
     assert len(d.provider.thesis_reqs) == before + 1
-    assert d.state == State.THESIS_LOW_CONF        # not dropped — a re-ask, not a death
+    assert d.state == State.THESIS_NOT_ACTIONABLE        # not dropped — a re-ask, not a death
 
 
-def test_low_conf_max_age_recalls_l1():
+def test_parked_thesis_max_age_recalls_l1():
     d = _director()
     d.on_session_open(T0, "facts")
-    d.on_thesis_arrived(_thesis(confidence="LOW", recall={"events": [], "max_age_min": 30}), ts=T0)
+    d.on_thesis_arrived(_thesis(bias="NEUTRAL", recall={"events": [], "max_age_min": 30}), ts=T0)
     before = len(d.provider.thesis_reqs)
     d.on_bar(T0, _mv(now=T0 + pd.Timedelta(minutes=31)))
     assert len(d.provider.thesis_reqs) == before + 1
-    assert d.state == State.THESIS_LOW_CONF
+    assert d.state == State.THESIS_NOT_ACTIONABLE
 
 
-def test_low_conf_default_max_age_recalls_l1():
+def test_parked_thesis_default_max_age_recalls_l1():
     """Plan 12 Fix 1: a valid low-conf thesis with a 0/absent model-authored max_age (and no
     firing recall event) re-calls L1 at the code-enforced default (60m) instead of leaving the
-    executor blind all session (the THESIS_LOW_CONF analog of the 07-02 th_04 20.5h wait)."""
+    executor blind all session (the THESIS_NOT_ACTIONABLE analog of the 07-02 th_04 20.5h wait)."""
     d = _director()
     d.on_session_open(T0, "facts")
-    d.on_thesis_arrived(_thesis(confidence="LOW", recall={"events": [], "max_age_min": 0}), ts=T0)
-    assert d.state == State.THESIS_LOW_CONF
+    d.on_thesis_arrived(_thesis(bias="NEUTRAL", recall={"events": [], "max_age_min": 0}), ts=T0)
+    assert d.state == State.THESIS_NOT_ACTIONABLE
     before = len(d.provider.thesis_reqs)
     d.on_bar(T0, _mv(now=T0 + pd.Timedelta(minutes=59)))
     assert len(d.provider.thesis_reqs) == before        # default TTL not yet reached
     d.on_bar(T0, _mv(now=T0 + pd.Timedelta(minutes=61)))
     assert len(d.provider.thesis_reqs) == before + 1     # re-asked at the default
-    assert d.state == State.THESIS_LOW_CONF              # a re-ask, not a death
+    assert d.state == State.THESIS_NOT_ACTIONABLE              # a re-ask, not a death
 
 
-def test_low_conf_sooner_max_age_respected():
+def test_parked_thesis_sooner_max_age_respected():
     """A declared max_age BELOW the default is respected (re-call sooner)."""
     d = _director()
     d.on_session_open(T0, "facts")
-    d.on_thesis_arrived(_thesis(confidence="LOW", recall={"events": [], "max_age_min": 15}), ts=T0)
+    d.on_thesis_arrived(_thesis(bias="NEUTRAL", recall={"events": [], "max_age_min": 15}), ts=T0)
     before = len(d.provider.thesis_reqs)
     d.on_bar(T0, _mv(now=T0 + pd.Timedelta(minutes=14)))
     assert len(d.provider.thesis_reqs) == before
@@ -179,14 +228,14 @@ def test_failsafe_thesis_schedules_l1_recall_at_max_age():
     assert fs["recall"]["max_age_min"] == 60
     d = _director()
     d.on_session_open(T0, "facts")
-    d.on_thesis_arrived(fs, ts=T0)                 # NEUTRAL/LOW → THESIS_LOW_CONF
-    assert d.state == State.THESIS_LOW_CONF
+    d.on_thesis_arrived(fs, ts=T0)                 # NEUTRAL → not actionable
+    assert d.state == State.THESIS_NOT_ACTIONABLE
     before = len(d.provider.thesis_reqs)
     d.on_bar(T0, _mv(now=T0 + pd.Timedelta(minutes=59)))
     assert len(d.provider.thesis_reqs) == before   # not yet
     d.on_bar(T0, _mv(now=T0 + pd.Timedelta(minutes=61)))
     assert len(d.provider.thesis_reqs) == before + 1
-    assert d.state == State.THESIS_LOW_CONF
+    assert d.state == State.THESIS_NOT_ACTIONABLE
 
 
 # --------------------------------------------------------------------------- #
@@ -234,11 +283,11 @@ def test_thesis_falsified_in_awaiting_setup():
     assert len(d.provider.thesis_reqs) == n1 + 1
 
 
-def test_thesis_falsified_in_thesis_low_conf():
+def test_thesis_falsified_while_parked():
     fals = [{"type": "price_beyond", "price": 19000, "side": "below"}]
     d = _director()
     d.on_session_open(T0, "facts")
-    d.on_thesis_arrived(_thesis("LOW", falsified=fals), ts=T0)
+    d.on_thesis_arrived(_thesis(bias="NEUTRAL", falsified=fals), ts=T0)
     n1 = len(d.provider.thesis_reqs)
     d.on_bar(T0, _mv(price=18000))
     assert d.state == State.NO_THESIS

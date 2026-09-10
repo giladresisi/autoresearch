@@ -8,7 +8,7 @@ predicate evaluation. The DecisionService runs synchronously in the backtest (`p
 each drive → deterministic; arrival is offset by the latency budget) and threaded when live.
 
 Under the StubBackend the thesis is a NEUTRAL/LOW fail-safe → the director never leaves
-THESIS_LOW_CONF, never arms a SETUP, and the mechanism adapter is never invoked → the primary
+THESIS_NOT_ACTIONABLE, never arms a SETUP, and the mechanism adapter is never invoked → the primary
 backtest produces zero trades. That is the intended structure-POC behaviour: this validates
 the plumbing / state machine / contracts, not decision quality (deferred with the internals).
 """

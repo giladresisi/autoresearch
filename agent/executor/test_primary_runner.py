@@ -2,7 +2,7 @@
 
 Drives the whole v2 primary stack (bus + DecisionService + TradeDirector + mechanism
 adapter) over the committed golden facts frames with the StubBackend — no LLM, no broker.
-Asserts the structure: a NEUTRAL/LOW stub thesis parks in THESIS_LOW_CONF and arms zero
+Asserts the structure: a NEUTRAL/LOW stub thesis parks in THESIS_NOT_ACTIONABLE and arms zero
 mechanisms (no entry while low-conf / WAIT), and that the stub run is deterministic."""
 
 import os
@@ -56,8 +56,8 @@ def test_primary_stub_low_conf_arms_nothing(tmp_path):
     # Advance a bar well past the latency budget → the thesis matures and is delivered.
     runner.on_bar(open_ts + pd.Timedelta(minutes=3), _frames())
 
-    # Stub → NEUTRAL/LOW thesis → parked in THESIS_LOW_CONF, no plan call, nothing armed.
-    assert runner.director.state == State.THESIS_LOW_CONF
+    # Stub → NEUTRAL/LOW thesis → parked in THESIS_NOT_ACTIONABLE, no plan call, nothing armed.
+    assert runner.director.state == State.THESIS_NOT_ACTIONABLE
     assert runner.director.thesis.bias == "NEUTRAL"
     assert runner.mechanism.armed == []                 # zero entries (no SETUP arms)
     assert runner.director.position_open is False

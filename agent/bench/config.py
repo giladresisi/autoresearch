@@ -17,12 +17,19 @@ import pandas as pd
 # `acceptance_flip` / `opposite_extreme` are the standing code-injected nets.
 SAFETY_NETS = ("ttl", "acceptance_flip", "opposite_extreme")
 
-# Bench-only diagnostic gate sources (plan 11). PRODUCTION gate behavior is unchanged —
-# this override only decides which confidence value the BENCH engine uses for `stands()`:
-#   calibrated       — the code-computed confidence gate (spec §8; default = production).
+# Bench-only diagnostic gate sources (plan 11). Nothing trades off the bench — this
+# override only decides which confidence value the BENCH engine uses for `stands()`:
+#   calibrated       — the code-computed confidence gate (spec §8).
 #   self             — the model's self-reported confidence (audit-only in production).
-#   stand-directional— any valid directional thesis stands (lifecycle observation while
-#                      the calibration table is placeholder).
+#   stand-directional— any valid directional thesis stands.
+#
+# NOTE (2026-09-10): `calibrated` was the default BECAUSE it mirrored production. It no
+# longer does — `trade_director._actionable` and `trader/analyzer.stands` both dropped the
+# confidence gate, so `stand-directional` is now the production-shaped source. The default
+# is left on `calibrated` DELIBERATELY: every recorded scorecard was measured against it,
+# and moving it silently would rewrite the comparison baseline for all of them. Pass
+# gate_source="stand-directional" for a production-shaped run, and see move-the-needle.md
+# §4 — settling which one is right is exactly what a real corpus is still owed.
 # The source is stamped into run metadata + every scorecard header so a diagnostic run is
 # never mistaken for a production-config run.
 GATE_SOURCES = ("calibrated", "self", "stand-directional")
