@@ -129,10 +129,12 @@ CASES: "tuple[NamedCase, ...]" = (
                    "test_0818_binds_the_expected_artifact"),
         explained_delta="The §11 calibrated grid records +225.75 for this binding at "
                         "the buffer-7 knobs; the FRESH column at buffer 3 gives "
-                        "+229.75 — exactly the 4.00-pt entry-buffer trim. NOTE the P&L "
-                        "itself is NOT reproducible in the replay window: the DOL is "
-                        "touched at 11:01:26 and `replay.py` ends at 11:00 by "
-                        "construction. The ENTRY (second, price, artifact) is exact.",
+                        "+229.75 — exactly the 4.00-pt entry-buffer trim. The P&L was "
+                        "NOT reproducible while `replay.py` ended at 11:00 and the DOL "
+                        "is touched at 11:01:26. Since the window moved to 13:00 "
+                        "(2026-09-09) the replay books it: take_profit 29533.5 at "
+                        "11:01:26 for +229.75, to the cent. Entry, exit and P&L are all "
+                        "exact.",
         doc_quotes=("**08-18 must enter 09:40:58 at 29763.25**",
                     "09:40:58 fill 29763.25 TP **+229.75**"),
     ),
@@ -591,11 +593,15 @@ NO_DAY_REPRODUCTION = {
                              "its fill and stop, not by its bounds.",
     "sec6-0805-current": "No DOL recorded for 08-05 and none derivable — see "
                          "NO_ORACLE_THESIS.",
-    "sec5-0818-fresh-entry":
-        "The ENTRY reproduces exactly (09:40:58 @ 29763.25 on the documented artifact); "
-        "the +229.75 does not, because the DOL is touched at 11:01:26 and the replay "
-        "window ends at 11:00 by construction.",
-    "sec7-0818": "Same window truncation: the 11:01:26 TP falls outside the replay.",
+    # sec5-0818-fresh-entry WAS listed here — "the +229.75 does not reproduce, the DOL
+    # is touched at 11:01:26 and the window ends at 11:00". The window moved to 13:00 on
+    # 2026-09-09 and the replay now books +229.75 at 11:01:26 exactly, so the gap is
+    # CLOSED and the entry is removed rather than reworded. Pinned by
+    # test_named_sec5.py::test_0818s_exit_now_reproduces_inside_the_window.
+    "sec7-0818": "§7 is not wired into the Executor, so no replay books this day's "
+                 "outcome. (Until 2026-09-09 the stated reason was the 11:00 window "
+                 "truncating the 11:01:26 TP; the window now reaches it, and this is "
+                 "the reason that was underneath.)",
 }
 
 

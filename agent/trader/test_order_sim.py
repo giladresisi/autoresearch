@@ -122,3 +122,35 @@ def test_the_last_stop_out_is_retained_for_the_cooldown():
 def test_no_events_are_emitted_while_flat_with_nothing_resting():
     s = OrderSim(dol=30001.5)
     assert s.on_bar(_t("09:32"), _bar(29890.0, 29999.0, 29800.0, 29900.0)) == []
+
+
+# -- the window-end mark (2026-09-09) ---------------------------------------- #
+
+def test_mark_open_books_a_still_open_position_at_the_given_price():
+    """The replay window is fixed, so a position open at its end is the RUN ending, not
+    a decision. Before this existed it emitted nothing, so a runner was worth zero while
+    every fast stop-out booked in full."""
+    sim = OrderSim(dol=30000.0)
+    sim.place(_long())
+    sim.on_bar(_t("09:32"), _bar(29895.0, 29905.0, 29890.0, 29902.0))
+    ev = sim.mark_open(_t("13:00"), 29950.0)
+    assert ev["kind"] == "mark"
+    assert ev["price"] == 29950.0
+    assert ev["entry"] == 29900.0
+    assert ev["direction"] == "UP"
+    assert sim.position is None
+
+
+def test_mark_open_is_a_noop_when_flat():
+    sim = OrderSim(dol=30000.0)
+    assert sim.mark_open(_t("13:00"), 29950.0) is None
+
+
+def test_a_mark_is_not_a_stop_out_and_never_arms_the_cooldown():
+    """`last_stop_out` drives the §2 cooldown and the attempt budget. A mark that set it
+    would spend an attempt on the window ending."""
+    sim = OrderSim(dol=30000.0)
+    sim.place(_long())
+    sim.on_bar(_t("09:32"), _bar(29895.0, 29905.0, 29890.0, 29902.0))
+    sim.mark_open(_t("13:00"), 29950.0)
+    assert sim.last_stop_out is None

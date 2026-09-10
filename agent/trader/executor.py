@@ -116,6 +116,10 @@ class Executor:
         self._falsify_recorded = False
         self._vetoed: set = set()
         self._last_minute = None
+        # The last bar instant this Executor was handed. BAR time, never a wall clock
+        # (the gate in `test_executor.py` forbids one here). Only `mark_open_position`
+        # reads it, and only after the loop has finished.
+        self._last_ts = None
         # The stop-out whose §2 cooldown-end resolution has already run, so the
         # resolution fires exactly once per stop-out.
         self._cooldown_resolved_for = None
@@ -187,6 +191,7 @@ class Executor:
         if now is None:
             return
         bar_complete = self.bar_closed(now, bar_complete)
+        self._last_ts = now
         if self._arm_ts is not None and now >= self._arm_ts:
             self._state["tracking"] = True
         self._state["in_settle"] = self._in_settle(now)
@@ -335,6 +340,32 @@ class Executor:
             # the artifact reads exactly like "no entry was ever triggered". The
             # diagnostic goes into state (project convention: production is silent).
             self._state["order_error"] = f"{type(exc).__name__}: {exc}"
+
+    def mark_open_position(self) -> "dict | None":
+        """Book a position still open when the RUN ends, at the last bar it was handed.
+
+        Called by the replay runner AFTER the bar loop, never from inside it — which is
+        why it takes no arguments: the instant and the price are the last ones this
+        Executor actually saw, so the runner cannot invent either. Returns the recorded
+        event, or None when nothing was open.
+
+        A MARK is not an exit; `order_sim.mark_open` carries the reasoning.
+        """
+        try:
+            price = self._state.get("now_price")
+            if self._last_ts is None or price is None:
+                return None
+            ev = self._sim.mark_open(self._last_ts, price)
+            if ev is None:
+                return None
+            self._rec.order_event(
+                now=self._last_ts, plan_id=self._plan.get("plan_id"),
+                mechanism=self._state.get("mechanism"),
+                artifact_label=self._label_for(ev.get("artifact_id")), **ev)
+            return ev
+        except Exception as exc:
+            self._state["order_error"] = f"{type(exc).__name__}: {exc}"
+            return None
 
     def _settle_end_ts(self, now: pd.Timestamp) -> pd.Timestamp:
         """The instant the settle window closes on `now`'s date: 09:30:30 ET.

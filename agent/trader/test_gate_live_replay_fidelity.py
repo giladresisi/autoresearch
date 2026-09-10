@@ -81,9 +81,14 @@ def _replayed(tmp_path_factory):
     monkey = pytest.MonkeyPatch()
     monkey.setattr(R, "_real_backend", lambda: (lambda *a, **k: (live_thesis, {})))
     day = pd.Timestamp(DATE, tz=TZ).normalize()
+    # This window is CALIBRATED against the live run's own decisions, so it stays
+    # 10:39-11:00 whatever `WINDOW_END_ET` says (13:00 since 2026-09-09). The stub takes
+    # `window_end` and ignores it: the signature has to track `replay_window_for`'s, and
+    # a stub that silently accepted fewer arguments is what made this a TypeError rather
+    # than a fidelity failure.
     monkey.setattr(R, "replay_window_for",
-                   lambda d: (day + pd.Timedelta(hours=10, minutes=39),
-                              day + pd.Timedelta(hours=11, minutes=0)))
+                   lambda d, window_end=None: (day + pd.Timedelta(hours=10, minutes=39),
+                                               day + pd.Timedelta(hours=11, minutes=0)))
     monkey.setenv("ACT_THESIS_CACHE_DIR", str(tmp_path_factory.mktemp("fidelity_cache")))
     try:
         res = run_replay([DATE], allow_calls=True, arrival_latency_sec=40.0,

@@ -56,19 +56,29 @@ def test_a_replay_window_outside_1s_mode_is_refused_not_ignored():
                                                                  tz=TZ)))
 
 
-def test_the_window_is_0920_to_1100_et():
+def test_the_window_is_0920_to_1300_et():
     from agent.trader.replay import replay_window_for
     w0, w1 = replay_window_for("2026-08-12")
     assert (w0.hour, w0.minute) == (9, 20)
-    assert (w1.hour, w1.minute) == (11, 0)
+    assert (w1.hour, w1.minute) == (13, 0)
     assert w0.tzinfo is not None and str(w0.tz) == TZ
 
 
-def test_the_window_end_is_1100_not_the_dol():
-    """The run must ALWAYS reach 11:00. Stopping at the DOL makes two A/B variants cover
-    different windows whenever a change moves the touch time."""
+def test_the_window_end_is_a_constant_not_the_dol():
+    """The run must ALWAYS reach the same clock time. Stopping at the DOL makes two A/B
+    variants cover different windows whenever a change moves the touch time.
+
+    13:00 (2026-09-09, was 11:00) is the position policy's hard-close horizon. The 11:00
+    cut did not merely shorten the run: a position open at the cut emitted nothing, so
+    runners booked zero while stop-outs booked in full."""
     from agent.trader.replay import replay_window_for
     _, w1 = replay_window_for("2026-08-12")
+    assert w1 == pd.Timestamp("2026-08-12 13:00", tz=TZ)
+
+
+def test_the_window_end_is_overridable_for_the_calibrated_fixtures():
+    from agent.trader.replay import replay_window_for
+    _, w1 = replay_window_for("2026-08-12", (11, 0))
     assert w1 == pd.Timestamp("2026-08-12 11:00", tz=TZ)
 
 
@@ -211,3 +221,80 @@ def test_the_cli_exposes_dates_seed_and_latency_flags():
     assert "--seed" in out.stdout
     assert "--arrival-latency-sec" in out.stdout
     assert "--clear-cache" in out.stdout
+
+
+# -- the dirty-run-dir guard (2026-09-09) ------------------------------------ #
+
+def test_a_run_dir_holding_an_earlier_runs_artifacts_is_refused(tmp_path):
+    """Run dirs are `<session date>/<HH-MM-SS>` with no calendar day, so same-second
+    starts on different days collide. A real collision on 2026-08-18 spliced two runs'
+    decision logs AND made the Analyzer reuse the older run's thesis instead of calling
+    the model — a seeded run that reached no model and reported a winner where the real
+    thesis is NEUTRAL."""
+    from agent.trader.replay import _refuse_a_dirty_run_dir
+    (tmp_path / "thesis_state.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(RuntimeError) as exc:
+        _refuse_a_dirty_run_dir(str(tmp_path))
+    assert "thesis_state.json" in str(exc.value)
+
+
+def test_a_fresh_run_dir_is_accepted(tmp_path):
+    from agent.trader.replay import _refuse_a_dirty_run_dir
+    _refuse_a_dirty_run_dir(str(tmp_path))          # must not raise
+    _refuse_a_dirty_run_dir(str(tmp_path / "does-not-exist-yet"))
+
+def test_a_started_instant_whose_run_dir_is_occupied_is_bumped(tmp_path, monkeypatch):
+    """The FIX for the collision, as opposed to the guard that merely detects it.
+
+    Run dirs are named from the SESSION date plus a TH HH-MM-SS stamp, so two runs of one
+    session date starting at the same second on different calendar days collide. The
+    naming belongs to the legacy regression (pinned by tests/test_paths.py), so replay
+    instead chooses a `started` whose directory is free.
+    """
+    import datetime
+    from zoneinfo import ZoneInfo
+    import paths
+    from agent.trader.replay import _fresh_started
+
+    monkeypatch.setenv("ACT_REGRESSION_DIR", str(tmp_path / "reg"))
+    started = datetime.datetime(2026, 6, 2, 10, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+    occupied = paths.regression_run_dir("2026-06-02", started)
+    (occupied / "thesis_state.json").write_text("{}", encoding="utf-8")
+
+    got = _fresh_started("2026-06-02", started)
+    assert got == started + datetime.timedelta(seconds=1)
+    assert paths.regression_run_dir("2026-06-02", got).name != occupied.name
+
+
+def test_a_free_started_instant_is_returned_unchanged(tmp_path, monkeypatch):
+    import datetime
+    from zoneinfo import ZoneInfo
+    from agent.trader.replay import _fresh_started
+
+    monkeypatch.setenv("ACT_REGRESSION_DIR", str(tmp_path / "reg"))
+    started = datetime.datetime(2026, 6, 2, 10, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+    assert _fresh_started("2026-06-02", started) == started
+
+
+def test_an_empty_run_dir_does_not_count_as_occupied(tmp_path, monkeypatch):
+    """Probing CREATES directories, so a collision leaves empty folders behind. An empty
+    folder is inert and must not push the next run along."""
+    import datetime
+    from zoneinfo import ZoneInfo
+    import paths
+    from agent.trader.replay import _fresh_started
+
+    monkeypatch.setenv("ACT_REGRESSION_DIR", str(tmp_path / "reg"))
+    started = datetime.datetime(2026, 6, 2, 10, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+    paths.regression_run_dir("2026-06-02", started)          # exists, but empty
+    assert _fresh_started("2026-06-02", started) == started
+
+
+def test_the_runner_passes_its_chosen_started_to_the_backtest():
+    """Otherwise `run_backtest_v2` picks its own `now` and the probe guarantees nothing:
+    the directory checked and the directory written would be different ones."""
+    import inspect
+    from agent.trader import replay as R
+    src = inspect.getsource(R.run_replay)
+    assert "_fresh_started(date" in src
+    assert "started=started" in src

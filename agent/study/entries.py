@@ -59,8 +59,9 @@ _AGG = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume":
 #: `FACTS_ALL_SESSION = False` the graft drives no facts maintenance until an Executor
 #: exists, so the store begins accumulating at the arm bar and not before.
 ARM_ET = (9, 21)
-#: Clause 10's hard close. The replay window stops at 11:00; the policy runs to 13:00, so
-#: the feed does too — a fill after 11:00 is still a fill the policy has to manage.
+#: Clause 10's hard close, and — since 2026-09-09 — `replay.WINDOW_END_ET` as well. The
+#: two were 11:00 and 13:00 respectively while this feed was written, so the note here
+#: used to explain why the feed ran two hours past the replay; they now agree.
 WINDOW_END_ET = (13, 0)
 
 #: `TraderGraft.EXECUTOR_HISTORY`. Bounded once, at the first bar, exactly as the graft

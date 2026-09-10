@@ -1,4 +1,4 @@
-"""Simulated order lifecycle: rest -> fill -> stop-out / take-profit.
+"""Simulated order lifecycle: rest -> fill -> stop-out / take-profit / mark.
 
 Cycle 1 stopped at an `intended_entry` RECORD, which is why nothing downstream of an
 entry could be built. Every remaining §2/§8 spine rule presupposes a fill: the ladder
@@ -91,6 +91,23 @@ class OrderSim:
             elif tp:
                 events.append(self._close(now, "take_profit", self._dol))
         return events
+
+    def mark_open(self, now, price) -> "dict | None":
+        """Book a still-open position at the tape's last print. A MARK, NOT an exit.
+
+        The replay window is fixed by design (`replay.WINDOW_END_ET`), so a position
+        still open when the window ends is not a decision anything took -- it is the run
+        ending. Emitting nothing, which is what happened before this existed, makes a
+        runner contribute ZERO to any P&L tally while every fast stop-out books in full:
+        a silent bias toward losers in exactly the direction that flatters a tight stop.
+
+        The `kind` stays distinct from `stop_out` / `take_profit` so nothing downstream
+        can quote a mark as an exit -- plan 31 §3.1 records that conflating the two
+        already produced one wrong reading in this project.
+        """
+        if self.position is None:
+            return None
+        return self._close(now, "mark", price)
 
     # -- internals ------------------------------------------------------------- #
 

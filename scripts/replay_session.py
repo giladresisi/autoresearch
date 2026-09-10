@@ -21,6 +21,8 @@ if _REPO not in sys.path:
 
 from agent.trader.replay import DEFAULT_ARRIVAL_LATENCY_SEC, run_replay   # noqa: E402
 from agent.trader.thesis_cache import ThesisCache                         # noqa: E402
+from scripts.report_replay_pnl import (MNQ_PNL_PER_POINT, contracts,      # noqa: E402
+                                       render, summarize)
 
 
 def main() -> int:
@@ -40,6 +42,9 @@ def main() -> int:
                     help="path to a JSON oracle thesis")
     ap.add_argument("--no-arrival-gate", action="store_true",
                     help="oracle runs only: make the thesis visible at the arm instant")
+    ap.add_argument("--window-end", default=None, metavar="HH:MM",
+                    help="override the window end (default 13:00; the fidelity "
+                         "fixtures were calibrated at 11:00)")
     args = ap.parse_args()
 
     if args.clear_cache:
@@ -69,13 +74,38 @@ def main() -> int:
         ap.error("--no-arrival-gate applies to oracle runs only "
                  "(pass --thesis or --thesis-file)")
 
+    window_end = None
+    if args.window_end:
+        try:
+            hh, mm = args.window_end.split(":")
+            window_end = (int(hh), int(mm))
+        except ValueError:
+            ap.error("--window-end takes HH:MM")
+
     dates = [d.strip() for d in args.dates.split(",") if d.strip()]
     res = run_replay(dates, allow_calls=args.seed,
                      arrival_latency_sec=args.arrival_latency_sec,
                      arm_hhmm=args.arm_hhmm, thesis=oracle,
-                     gate_arrival=not args.no_arrival_gate)
+                     gate_arrival=not args.no_arrival_gate, window_end=window_end)
+
+    # The P&L, printed per date and then totalled. Best-effort per date: a report that
+    # cannot be built must not hide the run that succeeded, but it must say so rather
+    # than leave a blank where a number belongs.
+    total = 0.0
     for d in dates:
-        print(f"[replay] {d} done -> {(res.get(d) or {}).get('run_dir')}")
+        run_dir = (res.get(d) or {}).get("run_dir")
+        print(f"[replay] {d} done -> {run_dir}")
+        try:
+            summary = summarize(run_dir)
+            total += summary["total_pts"]
+            print(render(summary, d))
+        except Exception as exc:
+            print(f"[pnl] {d}: could not summarize {run_dir}: "
+                  f"{type(exc).__name__}: {exc}")
+    if len(dates) > 1:
+        print(f"[pnl] ALL DATES {total:+.2f} pts = "
+              f"${total * MNQ_PNL_PER_POINT * contracts():+.2f} "
+              f"at {contracts()} contract(s)")
     return 0
 
 

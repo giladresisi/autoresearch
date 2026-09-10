@@ -98,16 +98,19 @@ def test_0818_spends_exactly_one_attempt(r0818):
     assert len(_kinds(rec, "stop_out")) == case.attempts_used - 1
 
 
-def test_0818s_exit_falls_OUTSIDE_the_replay_window(r0818):
-    """VALIDATION GAP, asserted rather than hidden. The documented +229.75 is taken at
-    the 11:01:26 DOL touch, and `replay.py`'s window ends at 11:00 by construction —
-    so this replay CANNOT book that exit. What it can prove, and does above, is that the
-    entry is exact to the second, the price and the bound artifact.
+def test_0818s_exit_now_reproduces_inside_the_window(r0818):
+    """VALIDATION GAP, now CLOSED. This test used to assert the opposite — that the
+    trade was still alive at 11:00 and the documented +229.75 could not be booked,
+    because the DOL is touched at 11:01:26 and the window ended at 11:00.
 
-    The assertion here is that the trade is still ALIVE at the window end: no stop-out
-    and no take-profit. A stop-out inside the window would contradict the documented
-    result outright and is the failure this guards.
+    The window moved to 13:00 on 2026-09-09 and the exit falls inside it. The documented
+    figure reproduces to the cent, which is a stronger check than the old one: the entry
+    was already exact, and now the whole trade is.
     """
-    _case, rec = r0818
+    case, rec = r0818
     assert _kinds(rec, "stop_out") == []
-    assert _kinds(rec, "take_profit") == []
+    tps = _kinds(rec, "take_profit")
+    assert len(tps) == 1, [t["time"] for t in tps]
+    assert tps[0]["time"].endswith("11:01:26-04:00"), tps[0]["time"]
+    # Short: entry - exit. Read off the record rather than restated as a literal.
+    assert tps[0]["entry"] - tps[0]["price"] == case.pnl

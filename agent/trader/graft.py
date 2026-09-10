@@ -238,6 +238,13 @@ class TraderGraft:
     def bind_state(self):
         return self._executor.bind_state() if self._executor is not None else None
 
+    def mark_open_position(self):
+        """Book a position still open when the RUN ends. The runner's call, made after
+        the bar loop — see `Executor.mark_open_position`. None when nothing was open,
+        which includes a dark day with no Executor at all."""
+        return (self._executor.mark_open_position()
+                if self._executor is not None else None)
+
     def coverage_report(self) -> dict:
         """Per (class, ticker) coverage as of the last bar — the run artifact that made
         the 08-13 units bug visible. Never raises: it is diagnostic output."""

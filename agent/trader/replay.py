@@ -1,13 +1,21 @@
-"""Trading-session replay: 09:20 -> 11:00 ET, 1s bars, no legacy engine.
+"""Trading-session replay: 09:20 -> 13:00 ET, 1s bars, no legacy engine.
 
 **What is under test.** The thesis is served from a recording, so a replay exercises the
 PLANNER and the EXECUTOR. The Analyzer is fixed input. Analyzer quality has its own
 instrument -- the standalone `manual-l1-thesis/test_l1_thesis_manual.py` harness.
 
-**Why the window always runs to 11:00.** Stopping at the DOL touch would make run length
-data-dependent: change something that moves the touch time and two A/B variants cover
-different windows. Instead the Executor records `plan_dead` with reason `dol_reached` and
-its timestamp, and analysis truncates.
+**Why the window always runs to its end.** Stopping at the DOL touch would make run
+length data-dependent: change something that moves the touch time and two A/B variants
+cover different windows. Instead the Executor records `plan_dead` with reason
+`dol_reached` and its timestamp, and analysis truncates.
+
+**Why the end moved from 11:00 to 13:00 (2026-09-09).** 13:00 is the position policy's
+own hard-close horizon, and an 11:00 cut does not merely shorten the run -- it BIASES it.
+A position still open at the cut used to emit nothing at all, so every fast stop-out
+booked in full while every runner contributed zero, in the one direction that flatters a
+tight stop. The companion fix is `OrderSim.mark_open`: whatever is open at the end is
+MARKED, never called an exit. The fixed-window property is unchanged, only longer; the
+cost is ~2.2x the bar loop.
 
 **Why inline, not threaded.** Live runs the Analyzer on a thread so a 40-100 s model call
 cannot stall the bar loop. Replay has no wall clock to protect, and a thread would make
@@ -16,9 +24,11 @@ determinism, plus an arrival gate to restore live's timing shape.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import sys
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -27,6 +37,7 @@ _REPO = os.path.dirname(os.path.dirname(_HERE))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
+import paths                                                   # noqa: E402
 from backtest_smt import run_backtest_v2                       # noqa: E402
 from agent.trader.cached_backend import (                      # noqa: E402
     CachedThesisBackend, NetworkCallRefused)
@@ -35,8 +46,12 @@ from agent.trader.fixed_backend import (                       # noqa: E402
 from agent.trader.thesis_cache import ThesisCache              # noqa: E402
 
 TZ = "America/New_York"
+_ET = ZoneInfo(TZ)
 WINDOW_START_ET = (9, 20)
-WINDOW_END_ET = (11, 0)
+#: The policy's hard-close horizon (plan 33 clause 10). A CONSTANT, not a data-dependent
+#: stop -- see the module docstring. Overridable per run for the fidelity fixtures that
+#: were calibrated against the old 11:00 cut.
+WINDOW_END_ET = (13, 0)
 ARM_ENV = "ACT_TRADER_ARM_HHMM"
 
 # Measured p50 of ten recorded 09:20 calls (range 16.3-103.9 s, driven almost entirely by
@@ -45,10 +60,12 @@ ARM_ENV = "ACT_TRADER_ARM_HHMM"
 DEFAULT_ARRIVAL_LATENCY_SEC = 40.0
 
 
-def replay_window_for(date: str):
+def replay_window_for(date: str, window_end=None):
+    """`window_end` is an `(hour, minute)` pair overriding `WINDOW_END_ET`."""
     day = pd.Timestamp(date, tz=TZ).normalize()
+    end = tuple(window_end) if window_end else WINDOW_END_ET
     return (day + pd.Timedelta(hours=WINDOW_START_ET[0], minutes=WINDOW_START_ET[1]),
-            day + pd.Timedelta(hours=WINDOW_END_ET[0], minutes=WINDOW_END_ET[1]))
+            day + pd.Timedelta(hours=end[0], minutes=end[1]))
 
 
 def _backend_name() -> str:
@@ -153,9 +170,90 @@ class _arm_env:
         return False
 
 
+#: Artifacts whose presence means another run already owns this directory.
+#: `thesis_state.json` is the dangerous one -- see `_refuse_a_dirty_run_dir`.
+_RUN_DIR_ARTIFACTS = ("trader_decisions.jsonl", "thesis_state.json", "plans.json")
+
+
+#: How many one-second bumps `_fresh_started` will try before giving up. A collision
+#: needs two runs of the same SESSION date to start at the same TH second, so needing
+#: even two bumps is already extraordinary; 120 is a bound, not an expectation.
+_MAX_STAMP_BUMPS = 120
+
+
+def _fresh_started(date: str, started: datetime.datetime) -> datetime.datetime:
+    """A run-start instant whose run directory is not already occupied.
+
+    THE COLLISION. `paths.regression_run_dir` names a run
+    `<regression>/sessions/<SESSION date>/<HH-MM-SS TH>` — the session date, never the
+    calendar day it was run on. So two replays of one session date, started at the same
+    wall-clock second on different days, are handed the SAME directory. That is not
+    hypothetical: a 2026-08-18 replay run on 2026-09-09 at 12:54:54 landed in a folder
+    written on 2026-08-29, and both consequences were silent (see
+    `_refuse_a_dirty_run_dir` for what they were).
+
+    The naming scheme itself is shared with the legacy regression and pinned by
+    `tests/test_paths.py` and `tests/test_regression_run_dirs.py`, so it is not this
+    module's to change. What IS available: `run_backtest_v2` accepts `started` and
+    derives the stamp from it. Replay simply picks one that is free.
+
+    Probing calls `regression_run_dir` rather than restating the TH stamp arithmetic
+    here, where it could drift from the function that actually names the run. That
+    creates the directory as a side effect, which is harmless: a candidate that is
+    already OCCUPIED existed before the probe, and the first FREE candidate is the one
+    the run then uses — so no orphan directories accumulate.
+    """
+    for _ in range(_MAX_STAMP_BUMPS):
+        candidate = paths.regression_run_dir(str(date), started)
+        if not _run_dir_artifacts(str(candidate)):
+            return started
+        started = started + datetime.timedelta(seconds=1)
+    raise RuntimeError(
+        f"{date}: could not find a free run directory in {_MAX_STAMP_BUMPS} seconds "
+        f"from {started}; {paths.regression_sessions_dir() / str(date)} is saturated")
+
+
+def _run_dir_artifacts(run_dir: str) -> list:
+    return [n for n in _RUN_DIR_ARTIFACTS
+            if os.path.exists(os.path.join(run_dir, n))]
+
+
+def _refuse_a_dirty_run_dir(run_dir: str) -> None:
+    """Refuse to run into a directory another run has already written.
+
+    FOUND THE HARD WAY, 2026-09-09. Run directories are named
+    `regression/sessions/<session date>/<HH-MM-SS>` with NO day component, so two runs of
+    the same session date started at the same wall-clock second on different calendar
+    days land in the same folder. A seeded 2026-08-18 replay did exactly that, colliding
+    with a run from 2026-08-29, and the consequences were both silent:
+
+      * `DecisionRecorder` APPENDS, so the older run's four records were prepended to
+        this run's stream and the session read as two entries instead of one;
+      * worse, `Analyzer._load` reads `thesis_state.json` from the state dir, and
+        `maybe_run` early-returns when `armed_date` matches the bar date. The stale file
+        was that session's thesis, so the Analyzer NEVER CALLED THE MODEL. A `--seed` run
+        produced no cache entry, inherited a previous run's (oracle) thesis, and reported
+        a +229.75 winner. The real 09:20 call for that date returns NEUTRAL -- a dark day
+        with no trade at all.
+
+    That is an unfalsifiable run: the same failure `NetworkCallRefused` exists to stop,
+    arriving through a different door. Raising here is the guard; renaming the directory
+    scheme would be the cure, but `paths.regression_run_dir` is shared with the legacy
+    regression and its locked baselines, so it is not this module's to change.
+    """
+    present = _run_dir_artifacts(run_dir)
+    if present:
+        raise RuntimeError(
+            f"run directory {run_dir} already holds {', '.join(present)} from an earlier "
+            "run. Run-dir names carry no calendar day, so same-second starts on "
+            "different days collide; appending to it would splice two runs' artifacts "
+            "and could silently reuse the older run's thesis. Move or delete it, or "
+            "start the run a second later.")
+
+
 def run_replay(dates, *, allow_calls=False,
                arrival_latency_sec=DEFAULT_ARRIVAL_LATENCY_SEC, arm_hhmm=None,
-               thesis=None, gate_arrival=True):
+               thesis=None, gate_arrival=True, window_end=None):
     """Replay each date's trading session.
 
     Returns `{date: {"run_dir", "cache", "last_bar", "legacy"}}`:
@@ -166,6 +264,9 @@ def run_replay(dates, *, allow_calls=False,
       last_bar  the floored minute of the last bar the graft was handed. The only
                 in-memory record of how far the loop actually got: every on-disk
                 artifact stops when the Executor stops writing, which is earlier.
+      mark      the `mark` event booking a position still open at the window end, or
+                None. A MARK IS NOT AN EXIT (`OrderSim.mark_open`); it exists so a
+                runner is not silently worth zero.
       legacy    `run_backtest_v2`'s raw return `{trades, events, metrics, stats}`.
                 EXPECTED TO BE EMPTY of trades -- see below.
 
@@ -207,11 +308,16 @@ def run_replay(dates, *, allow_calls=False,
 
     out = {}
     for date in dates:
-        window = replay_window_for(date)
+        window = replay_window_for(date, window_end)
+        # Chosen HERE, not left to `run_backtest_v2`'s own `now`, so the run lands in a
+        # directory no earlier run occupies. Outside the bar loop, where a wall clock is
+        # legitimate (CLAUDE.md's rule bans one INSIDE it).
+        started = _fresh_started(date, datetime.datetime.now(_ET))
         captured = {}
 
         def _factory(d, run_dir, _c=captured):
             _c["run_dir"] = str(run_dir)
+            _refuse_a_dirty_run_dir(str(run_dir))
             graft = build_replay_trader(d, run_dir, allow_calls=allow_calls,
                                         arrival_latency_sec=arrival_latency_sec,
                                         arm_hhmm=arm_hhmm, thesis=thesis,
@@ -222,7 +328,7 @@ def run_replay(dates, *, allow_calls=False,
 
         with _arm_env(arm_hhmm):
             legacy = run_backtest_v2(
-                date, date, mode="1s", write_events=False,
+                date, date, mode="1s", write_events=False, started=started,
                 trader_factory=_factory, replay_window=window,
                 trader_only=True)
 
@@ -266,6 +372,11 @@ def run_replay(dates, *, allow_calls=False,
                 "seed the cache with `--seed` first")
         graft = captured.get("graft")
 
+        # Whatever is still open when the WINDOW ends, booked at the last bar the
+        # Executor saw. After the loop, never inside it, and driven from here rather
+        # than from the Executor because the window end is the RUNNER's knowledge.
+        mark = graft.mark_open_position() if graft is not None else None
+
         # Per (class, ticker) coverage as of the last bar. `ensure_coverage` collapses
         # every class and ticker into ONE value, which is why the 08-13 units bug was
         # invisible for a whole cycle; this is the un-collapsed view, on disk.
@@ -291,7 +402,7 @@ def run_replay(dates, *, allow_calls=False,
             pass
 
         out[date] = {"run_dir": run_dir, "legacy": legacy, "cache": stats,
-                     "coverage": cov,
+                     "coverage": cov, "mark": mark,
                      "last_bar": (graft.last_bar_minute()
                                   if graft is not None else None)}
     return out

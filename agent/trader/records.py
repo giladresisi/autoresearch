@@ -41,6 +41,11 @@ def announce(record: dict) -> None:
     try:
         bits = ["[TRADER] %s %s" % (record.get("time"), record.get("kind"))]
         for key in ("mechanism", "artifact_label", "trigger", "stop", "dol",
+                    # The order lifecycle's own numbers. Without them a `fill` /
+                    # `stop_out` / `take_profit` / `mark` line reaches stdout with no
+                    # price on it, and the session's P&L is unreadable from the log
+                    # alone -- recoverable only by parsing the JSONL afterwards.
+                    "direction", "entry", "price",
                     "reason", "predicate", "detail", "plan_id"):
             val = record.get(key)
             if val not in (None, ""):
