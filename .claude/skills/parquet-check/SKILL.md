@@ -95,6 +95,14 @@ subfolders are never overwritten. The `promotion` field:
 
 This promotion runs only in `session-end` mode; `orchestrator-start` never promotes.
 
+**Rollover due — `rollover` block.** Present in every run: `{due, already_rolled, prep_date,
+reason}`. If `due` is `true`, the quarterly contract roll is outstanding and a
+**CONTRACT ROLLOVER DUE** banner is also printed to stderr. Promotion targets the ledger's
+newest subfolder, so leaving it undone piles new-contract sessions into the old era's folder.
+Go to the rollover-prep section below and run `trade.py rollover-prep` after this check
+completes. `already_rolled: true` means the row landed but `.env` was not advanced — do not
+re-run the roll; escalate.
+
 **1m parquets** — for each instrument in `instruments_1m`:
 - `action`: ok / repair_from_backup
 - `repair_success`: true / false / null (null = dry-run or healthy)
@@ -152,40 +160,86 @@ safety net that re-checks the entire body.
 
 ## Contract rollover-prep (quarterly — gated on `ROLLOVER_PREP_DATE`)
 
-**Session-end only.** Read `ROLLOVER_PREP_DATE` from `.env`. If the current date is **on or
-after** it, the quarterly contract has rolled and the data must be migrated. Run this ONCE per
-roll, AFTER the engine's normal merge + promote — so the last old-contract session lands in the
-*current* (old) subfolder before anything is back-adjusted. Before promoting, also confirm the
-live 1m+1s are full through the old contract's last session (gap-fill with the **old** conids,
-which are still in `.env` at this point, if not):
+**Trigger: the date, not the mode.** Read `ROLLOVER_PREP_DATE` from `.env`. If the current date
+is **on or after** it and no `rollover_ledger.json` row covers it yet, the quarterly contract has
+rolled and the data must be migrated — **including when the user only asked for an offline
+gap-fill and promote**. It is not session-end-only; a plain `trade.py gap-fill` + `trade.py
+promote` on or after the prep date must be followed by the roll, or `main/` keeps accumulating
+old-contract data under the stale era.
 
-1. **Look up the new front-month conids** (IB `ContFuture` for MNQ + MES) and the new expiry
-   (3rd Friday of the new quarter); next prep date = the **Saturday before** that expiry.
-2. **Measure the per-symbol gap** = (new-front close − current-conid close) at the nearest
-   common 1m bar to the switch (the old contract's last-session close).
-3. **Append a new newest row** to `<main>/rollover_ledger.json`:
+`trade.py gap-fill` and `trade.py promote` print a **CONTRACT ROLLOVER DUE** banner in this
+situation. If you see it, do not stop at promote.
+
+### Do it with the CLI
+
+```powershell
+uv run python trade.py rollover-prep --dry-run   # resolve conids + measure gaps, change nothing
+uv run python trade.py rollover-prep             # execute
+```
+
+`scripts/rollover_prep.py` performs every step below in the correct order, refuses to run when
+the preconditions are not met, and records per-step state in `<main>/.rollover_prep_state.json`
+so a crash midway never re-applies the destructive in-place back-adjustment. Prefer it over
+doing the steps by hand.
+
+### The required order (and why each step depends on the one before)
+
+```
+trade.py gap-fill  ->  trade.py promote  ->  trade.py rollover-prep
+(OLD conids)           (freezes old era)     (shifts live, opens new era)
+```
+
+- **Gap-fill before touching `.env` conids.** Swap the conids first and IB returns new-contract
+  prices appended onto old-contract history — a ~300-point discontinuity baked into the live
+  parquets with no seam marker.
+- **Promote before the ledger row, never after.** `_current_main_subdir()` reads `rows[0]`, so
+  the moment the new row exists, promote targets the **new** subfolder. Promote after the roll
+  and the old contract's final session lands in the new era's folder as raw, un-back-adjusted
+  bars on a back-adjusted scale. The old subfolder is never written again after the roll, so
+  it must be complete through the old contract's last session first.
+
+Steps, in execution order:
+
+1. **Look up the new front-month conids and expiry** for MNQ + MES. Enumerate `reqContractDetails`
+   and take the first expiry after the current one — **not `ContFuture`**: IB rolls its continuous
+   contract at/near expiry, but the prep date is the Saturday *before* expiry, so on prep day
+   `ContFuture` still resolves to the contract you are rolling away from. Next prep date = the
+   **Saturday before** the new expiry.
+2. **Measure the per-symbol gap** = (new-front close − current-conid close) at their last common
+   1m bar (the old contract's last-session close). Fetch with `endDateTime=''` — IB rejects an
+   explicit `endDateTime` for CME equity-index futures 1m bars (error 162 / 10339).
+3. **Back-adjust the LIVE parquets** in place: `OHLC += gap` per symbol (volume untouched),
+   shifting old-contract history onto the new contract's price scale. Leave all `main/`
+   subfolders raw/as-is — only the *live* parquets shift.
+4. **Re-seed `global.json`**: set `all_time_high` to the back-adjusted live `MNQ_1m` `High`
+   max (= old ATH + gap) so rule2b's ATH / recovery guard stays on the new price scale. The
+   seed's corruption guard (`session_pipeline.on_session_start`) would re-anchor a stale value
+   on the next restart anyway, but set it explicitly here; `session_ath` re-derives from it on
+   the next restart. (This is the GIL-23 recurrence fix — a stale ATH silently disables the
+   recovery guard and the strategy fades the trend.)
+5. **Create `<main>/<new YYYY-MM>/` and copy the back-adjusted live parquets into it** — before
+   the ledger row names it. Both readers fall back to the flat `general_main_dir()` (which holds
+   stale pre-restructure data) when a row points at a missing subfolder, and `_current_main_subdir`
+   accepts an *empty* directory as valid — so a row written ahead of the data silently routes
+   backtests and promotion at nothing.
+6. **Prepend a new newest row** to `<main>/rollover_ledger.json` — at **index 0**, not appended:
+   `_current_main_subdir()` reads `rows[0]` and `_main_dir_for_date` takes the first row with
+   `prep_date <= date`, both treating the array as newest-first. **Appending is a silent no-op** —
+   no error, and every reader keeps resolving to the previous era.
    `{"prep_date":"<this prep date>","subfolder":"<new YYYY-MM>","expiry":"<new expiry>",`
    `"mnq":{old_conid,new_conid,gap},"mes":{...}}`.
-4. **Create** `<main>/<new YYYY-MM>/`.
-5. **Back-adjust the LIVE parquets** in place: `OHLC += gap` per symbol (volume untouched),
-   shifting old-contract history onto the new contract's price scale. Leave all `main/`
-   subfolders raw/as-is — only the *live* parquets shift. Then **copy** the back-adjusted live
-   parquets → the new subfolder.
-   - **Re-seed `global.json`**: set `all_time_high` to the back-adjusted live `MNQ_1m` `High`
-     max (= old ATH + gap) so rule2b's ATH / recovery guard stays on the new price scale. The
-     seed's corruption guard (`session_pipeline.on_session_start`) would re-anchor a stale value
-     on the next restart anyway, but set it explicitly here; `session_ath` re-derives from it on
-     the next restart. (This is the GIL-23 recurrence fix — a stale ATH silently disables the
-     recovery guard and the strategy fades the trend.)
-6. **Update `.env`**: `MNQ_CONID`/`MES_CONID` → new conids, `ROLLOVER_PREP_DATE` → next prep date.
-7. **Notify the user**: what rolled, gaps, new conids, new subfolder, next prep date. The next
+7. **Update `.env` last**: `MNQ_CONID`/`MES_CONID` → new conids, `ROLLOVER_PREP_DATE` → next prep
+   date. Last so that a failure at any earlier step leaves `.env` naming the OLD conids, and a
+   re-run measures against the same contract instead of splicing new prices onto old history.
+8. **Notify the user**: what rolled, gaps, new conids, new subfolder, next prep date. The next
    orchestrator restart gap-fills forward with the new conids; `daily` re-derives levels from
    the now-shifted data.
 
 Backtests then route per date via `backtest_smt._main_dir_for_date` (pre-roll dates → the frozen
 raw subfolder; on/after → the new back-adjusted one). **This rollover-prep is the one exception
-to the no-code-changes HARD RULE below** — it edits `.env` + `rollover_ledger.json` and creates a
-subfolder.
+to the no-code-changes HARD RULE below** — running `trade.py rollover-prep` rewrites `.env` +
+`rollover_ledger.json` and creates a subfolder. Invoke it as a command; do not hand-edit those
+files, and do not edit any `.py`.
 
 ## Step 4 — Final summary
 

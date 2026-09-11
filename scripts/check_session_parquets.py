@@ -974,6 +974,21 @@ def main():
             except Exception:
                 pass
 
+    # ── Quarterly contract roll due? ────────────────────────────────────────────
+    # Surfaced in the report (and on stderr) because promotion targets the ledger's newest
+    # subfolder: once ROLLOVER_PREP_DATE has passed with no row covering it, every further
+    # promote keeps piling new-contract sessions into the OLD era's folder. The roll itself
+    # is `trade.py rollover-prep` — never performed here.
+    try:
+        from scripts.rollover_prep import due_banner, load_ledger, rollover_status
+        _status = rollover_status(load_ledger(), os.environ.get("ROLLOVER_PREP_DATE"),
+                                  pd.Timestamp.now(tz="America/New_York").date().isoformat())
+        report["rollover"] = _status
+        if _status["due"]:
+            print(due_banner(), file=sys.stderr)
+    except Exception as _exc:
+        report["rollover"] = {"error": str(_exc)}
+
     report["exit_code"] = exit_code
     print(json.dumps(report, indent=2))
     sys.exit(exit_code)

@@ -24,6 +24,8 @@ Usage:
   python trade.py terminate              # Kill orchestrator and automation.main
   python trade.py gap-fill               # IB-backfill main 1s+1m parquets up to now (orchestrator must NOT be running)
   python trade.py promote                # Copy live parquets over main (prior main backed up to .bak) — run after gap-fill
+  python trade.py rollover-prep          # Quarterly contract roll — run ONLY after gap-fill + promote (see --dry-run)
+  python trade.py rollover-prep --dry-run  # Resolve new conids + measure gaps, change nothing
 
 Add --force / -f to bypass position.json state checks and override broker state:
   python trade.py close --force
@@ -176,6 +178,24 @@ def _terminate_all() -> list[str]:
             pass
 
     return killed
+
+
+def _warn_if_rollover_due() -> None:
+    """Print the contract-rollover banner when the quarterly roll is due but has not run.
+
+    Bolted onto gap-fill and promote because those are the two commands an operator (or agent)
+    reaches for offline, and neither previously gave any hint that ROLLOVER_PREP_DATE had
+    arrived — the roll was documented only inside the parquet-check skill, which a plain
+    "gap-fill and promote" request never opens. Never fatal: a broken ledger or a missing .env
+    must not take down the command it is guarding.
+    """
+    try:
+        from scripts.rollover_prep import due_banner
+        banner = due_banner()
+    except Exception:
+        return
+    if banner:
+        print(banner)
 
 
 def main() -> None:
@@ -398,10 +418,12 @@ def main() -> None:
         load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
         from gap_fill import gap_fill_until_now
 
+        _warn_if_rollover_due()
         print("Gap-filling main 1s + 1m parquets up to now "
               "(do NOT run while the live orchestrator/session is up — IB client-id conflict)...")
         gap_fill_until_now()
         print("Gap-fill complete")
+        _warn_if_rollover_due()
 
     elif cmd == "promote":
         # Same promotion parquet-check runs at session end: copy the live parquets
@@ -416,6 +438,25 @@ def main() -> None:
                   + ", ".join(sorted(promoted)))
         else:
             print("No live parquets found — nothing promoted")
+        # Printed AFTER the promote: at this point the old contract's final session is frozen
+        # in its own subfolder, which is exactly the precondition the roll needs.
+        _warn_if_rollover_due()
+
+    elif cmd == "rollover-prep":
+        from scripts.rollover_prep import run_rollover_prep
+
+        dry = "--dry-run" in args
+        plan = run_rollover_prep(dry_run=dry)
+        if dry:
+            print("DRY RUN — nothing changed. Planned roll:")
+        for sym in ("mnq", "mes"):
+            print(f"  {sym.upper()}: conid {plan['old_conids'][sym]} -> {plan['new_conids'][sym]}"
+                  f"  gap {plan['gaps'][sym]:+.2f}  @ {plan['boundaries'][sym]}")
+        print(f"  expiry {plan['expiry']}  subfolder main/{plan['subfolder']}")
+        print(f"  next ROLLOVER_PREP_DATE {plan['next_prep_date']}")
+        if not dry:
+            print("Rollover complete. The next gap-fill uses the new conids; `daily` "
+                  "re-derives levels from the shifted data.")
 
     elif cmd == "terminate":
         killed = _terminate_all()
