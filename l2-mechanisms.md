@@ -1237,6 +1237,91 @@ if it would alter BEHAVIOUR, it is in scope and specified above.
   whether the foregone-setup cost is material — and if it ever is, the fix is upstream
   (recall cadence / projection stretch-gates), not an L2-side plan source.
 - Per-mechanism L2-supplied invalidation criteria — deferred.
+- **CANDIDATE (2026-09-12) — pre-open exhaustion entry. NOT a rule; recorded with its
+  evidence and its open questions, per `docs/entry-mechanism-change-protocol.md` step 0.**
+  The case it targets: the day's manipulation completes BEFORE 09:30 and the run starts at
+  the bell, so §2's settle window and §5's fresh-tick rule both decline the trade.
+  **Motivating day 08-21** — the 09:25 5m bar sweeps to 29417.25, rallies **68.00 pts** to
+  29485.25 (traversing the top of §5's bound gap [29472.25, 29485.00] by 0.25), and the
+  09:29 1m bar closes 29469.75, back below the gap. Production vetoed its own trigger
+  29469.25 at 09:32 (`distance 72.0 vs cap 60.0`) and died `dol_reached` 09:37:20; from
+  that price the day ran 249.00 pts with 3.25 pts of adverse excursion.
+
+  **Criteria as proposed** (direction is the L1 thesis's, evaluated in that direction only):
+  (1) a counter-thesis swing inside 09:15–09:29; (2) a thesis-direction 1m continuation FVG
+  fully filled by the swing extreme; (3) MNQ and MES disagreeing about how far back into
+  their own 1m gap stack they filled — the "1m SMT fill"; (4) the **09:29 1m bar closing in
+  the thesis direction**, the manipulation-is-finished confirmation; (5) entry either market
+  at 09:30:00 (**E1**) or at the first second within the first minute at which the 1s close
+  has held beyond the 09:29 far wick for 10 s (**E2**); (6) SL = 09:29 counter-side wick +
+  3, capped tighter than §2's 25.
+
+  **Corpus and funnel** (1s replay, MNQ, 2026-05-01..09-04, 95 sessions with a usable
+  pre-open 5m grid). 5m-close-reject encoding: 69 sessions clear a 30-pt pre-open swing →
+  12 traverse and close-reject an eligible 5m FVG → **6** survive the 09:29 close-direction
+  filter → **5** survive the SMT veto. The 1m-SMT-fill encoding gives **31** fires (22
+  `MNQ-deeper` / 9 `MNQ-shallower`).
+
+  **Verdict: NEGATIVE on every null-compared measure. Do not implement as an entry.**
+  - **MFE before stop (the stop is part of the entry, so this is the right metric), scored
+    against a matched null — same entry instant, same stop construction, no setup filter.**
+    E1 fires n=31 vs null n=160: at cap 8, median R **1.22 vs 0.00** but **R≥3 29% vs 27%**
+    and p75 R **3.11 vs 3.18**; at cap 25, median R 0.77 vs 0.54 and **R≥3 19% vs 23%**.
+    E2 fires n=17 vs null n=79 at cap 10: median R **0.80 vs 1.23**, R≥3 29% vs 23%. The
+    setup lifts the MEDIAN (it avoids the opening-second stop-out an arbitrary 09:30 entry
+    takes) and does **not** lift the tail, which is the part that pays.
+  - **Realised P&L, best cell of a 3-entry × 7-policy × 6-cap sweep:** E2 / breakeven-at-1R
+    / cap 12 = **+531.75 pts** on 17 taken of 31 — but **2 wins** (06-25 +436.25, 08-11
+    +191.50), 7 breakeven scratches, 8 losses of −12.00. **Remove the top two days and it is
+    −96.00.** 08-21 books **−12.00** in that cell. Both winners come from `mark` (hold to
+    13:00), an exit production does not have.
+  - **The one measure that separates is DIRECTION, not fill.** MFE as a fraction of the
+    09:30–13:00 range: E2 fires median **0.699** vs null **0.500**, and ≥0.75 of the range
+    on **47.1% vs 24.0%**. Consistent with the first-round symmetric-barrier reading (±50
+    first-touch right on **10 of 12** early fires vs a 54% null). If anything here is worth
+    keeping it is a **direction/confidence input to L1/L2**, not an entry mechanism.
+
+  **Open rule-level questions — each would be answered differently by two implementations,
+  so none of this can start at step 1 as written:**
+  1. **Which array defines the SMT, and which polarity.** On 08-21 the 5m arrays say MES ran
+     further past its gap (MNQ = laggard); the 1m stacks say MNQ filled back to a gap created
+     three minutes earlier than MES did (MNQ = the one swept). Opposite verdicts, same
+     instant. Neither polarity separates: best-of-both-entries R≥2 lands at 36% for
+     `MNQ-deeper` (n=22) and 33% for `MNQ-shallower` (n=9), against 39% for the unfiltered
+     set.
+  2. **Which entry.** They are complementary, not rankable. Adverse excursion before the
+     trade runs: 08-21 **3.25 (E1) vs 21.50 (E2)**; 06-25 41.25 vs **8.00**; 08-31 21.25 vs
+     **6.25**; 07-10 24.00 vs **14.25**; 06-24 **0.00** vs 179.50. Six of eight days have a
+     ≤15-pt-heat fill under one or the other — but **no single (entry, cap) keeps 08-21 and
+     the aggregate**, because the tight cap the aggregate needs stops 08-21 at 09:30:15.
+  3. **Does an opening spike through the 09:29 wick falsify "the manipulation is finished"?**
+     Worth 33R on 06-25 alone: with an abort-on-close-beyond-the-wick clause the day is a
+     no-trade at +1 s; without it the 10 s hold enters at +24 s and never stops.
+  4. **The encoding is not pinned.** Two faithful readings of the same prose — manipulation
+     measured on the 09:25 5m bar with a 5m close-reject, vs anywhere in 09:15–09:29 with
+     the 09:29 1m close-reject — produce 6 days each and agree on only 4. Admitting 1m gaps
+     alongside 5m takes the set from 6 to **36**.
+
+  **DO NOT rebuild these from the prose above:**
+  - *"The 09:30 bar's wick exceeds the 09:29 bar's wick"* as a gating rule. It separates 11
+    of 12 early fires perfectly and is **tautological with the stop** — the stop is the 09:29
+    wick + 3, so it restates "the stop was hit in the first minute". Diagnostic only.
+  - *A 50-pt pre-open swing floor.* It is anti-selective here: raising 30 → 50 cuts the
+    36-day set to 10 and the R≥3 count from 8/36 to **1/10**, removing 05-18, 06-30, 08-11
+    and 06-25 while keeping mostly zeros. 08-21's 68-pt swing is characteristic of the
+    LOSERS in this population, not the winners.
+  - *Fixed R-multiple targets.* Uniformly destructive across the sweep — they cap the only
+    trades that pay for the rest.
+
+  **Two findings that stand independently of this candidate, and are the reason it is worth
+  keeping the record:**
+  - **Exit policy dominates entry choice.** At a fixed entry and cap the spread across exit
+    policies is 500+ pts; across entry rules it is far smaller. Anything measured on entries
+    while an exit varies is measuring the exit.
+  - **An isolated measurement without its own null is not evidence.** This candidate looked
+    strong for four iterations on "R≥2 on 21 of 36 fires, median R 2.44" — figures computed
+    with no baseline. The matched null for that same cell is 34%, with an identical R≥3 rate.
+    Compute the null at the same time as the metric, or do not quote the metric.
 
 
 ### 11.1 Named-case registry — era stamps and pinning tests (added 2026-08-29, ADDITIVE)
