@@ -53,6 +53,15 @@ pytestmark = pytest.mark.skipif(
 # 1. Golden text identity — the core Phase-1 gate.                             #
 # --------------------------------------------------------------------------- #
 def test_render_facts_text_byte_identical_to_golden():
+    """RE-BASELINED 2026-09-12 by plan 34 (TDO -> the midnight open).
+
+    Until then this golden was byte-for-byte the PRE-REFACTOR print-script's stdout, and
+    that historical claim now has exactly one documented exception. The re-baseline diff
+    was 32 lines and wholly accounted for: TDO's price on both tickers (MNQ 29393.25 ->
+    29284.0, MES 7485.5 -> 7475.25), its two cross-context lines re-sorting (the S2 sort
+    key is -price), and one new parser-visible draw line per ticker. NO other level moved.
+    The gate's ongoing job -- catching unintended render drift -- is unchanged.
+    """
     mnq, mes = _load_fixture_slices()
     bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
     rendered = render_facts_text(bundle)
@@ -336,7 +345,9 @@ def test_duplicate_sweep_losers_session_open_cascade_collapses_regardless_of_pri
          "london(prev1)_low": (95.0, 95.0, "below", "session", pd.Timestamp("2026-01-01")),
          "ny_morning(prev1)_low": (90.0, 90.0, "below", "session", pd.Timestamp("2026-01-01"))}
     swept_at = {"asia(prev1)_low": t, "london(prev1)_low": t, "ny_morning(prev1)_low": t}
-    losers = derive_facts._duplicate_sweep_losers(lv, swept_at)
+    # plan 34: the opening bar is an ARGUMENT now -- TDO moved to the midnight open and
+    # is no longer this key's carrier. Same intent, same expectation.
+    losers = derive_facts._duplicate_sweep_losers(lv, swept_at, session_open=t)
     assert losers == {"asia(prev1)_low", "london(prev1)_low"}    # 90.0 is the deepest low
 
 
@@ -1038,3 +1049,69 @@ def test_mid_tf_state_opposite_side_extreme_after_crossing_unfreshens():
 
     _status2, reclaim2 = derive_facts._mid_tf_state(df, mid, "1h", now, lo_before, lo_before)
     assert reclaim2["fresh"] is True   # both extremes predate the crossing -> still fresh
+
+
+# --------------------------------------------------------------------------- #
+# plan 34: TDO anchored at the midnight open, eligible as a DOL draw           #
+# --------------------------------------------------------------------------- #
+def test_midnight_open_takes_the_first_bar_at_or_after_midnight():
+    idx = pd.date_range("2026-07-13 18:00", "2026-07-14 02:00", freq="1h",
+                        tz="America/New_York")
+    frame = pd.DataFrame({"open": range(len(idx)), "high": range(len(idx)),
+                          "low": range(len(idx)), "close": range(len(idx))}, index=idx)
+    price, ts = derive_facts._midnight_open(frame, datetime.date(2026, 7, 14))
+    assert ts == pd.Timestamp("2026-07-14 00:00", tz="America/New_York")
+    assert price == float(frame.loc[ts, "open"])
+
+
+def test_midnight_open_falls_back_to_the_frames_first_bar_when_midnight_is_missing():
+    """Thin/holiday history: no bar at or after 00:00 ET. The session open is the honest
+    fallback -- the pre-plan-34 behaviour -- never an exception and never None."""
+    idx = pd.date_range("2026-07-13 18:00", "2026-07-13 22:00", freq="1h",
+                        tz="America/New_York")
+    frame = pd.DataFrame({"open": [7.0, 8.0, 9.0, 10.0, 11.0], "high": 0, "low": 0,
+                          "close": 0}, index=idx)
+    price, ts = derive_facts._midnight_open(frame, datetime.date(2026, 7, 14))
+    assert (price, ts) == (7.0, idx[0])
+
+
+def test_duplicate_sweep_losers_keys_on_the_session_open_passed_in_not_on_tdo():
+    """THE RIPPLE GUARD. Re-anchoring TDO to midnight must not move §2.1d's gap-cascade
+    collapse key off the 18:00 session open. The caller supplies the opening bar; TDO's
+    own timestamp is no longer consulted."""
+    sess_open = pd.Timestamp("2026-07-13 18:00:00", tz="America/New_York")
+    lv = {"TDO": (29500.0, None, None, "session",
+                  pd.Timestamp("2026-07-14 00:00:00", tz="America/New_York")),
+          "asia(prev1)_low": (100.0, 100.0, "below", "session", pd.Timestamp("2026-01-01")),
+          "london(prev1)_low": (95.0, 95.0, "below", "session", pd.Timestamp("2026-01-01")),
+          "ny_morning(prev1)_low": (90.0, 90.0, "below", "session",
+                                    pd.Timestamp("2026-01-01"))}
+    swept_at = {"asia(prev1)_low": sess_open, "london(prev1)_low": sess_open,
+                "ny_morning(prev1)_low": sess_open}
+    losers = derive_facts._duplicate_sweep_losers(lv, swept_at, session_open=sess_open)
+    assert losers == {"asia(prev1)_low", "london(prev1)_low"}
+
+
+def test_tdo_reaches_the_validator_dict_unswept_with_a_side():
+    """A pre-arm cross does not spend an open price: there is no resting liquidity at it.
+    It must arrive in the validator view side-tagged and NOT swept, or the semantic
+    check would reject a thesis that names it."""
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    vd = derive_facts.facts_to_validator_dict(bundle)
+    tdo = vd["levels"].get("TDO")
+    assert tdo is not None, "TDO must be visible to the semantic validator"
+    assert tdo["swept"] is False and tdo["depleted"] is False
+    expected = "above" if tdo["price"] > vd["now_price"] else "below"
+    assert tdo["side"] == expected
+
+
+def test_tdo_emits_no_p1_sweep_card():
+    """Scope guard: plan 34 makes TDO a TARGET, not evidence. A sweep card would feed
+    P1 scoring and change decisions this change never argued for."""
+    mnq, mes = _load_fixture_slices()
+    bundle = compute_facts(mnq, mes, ath_mnq=ATH_MNQ, ath_mes=ATH_MES)
+    text = render_facts_text(bundle)
+    for line in text.splitlines():
+        if line.startswith("MNQ TDO ") or line.startswith("MES TDO "):
+            assert "sweep" not in line.lower(), f"TDO became P1 evidence: {line}"

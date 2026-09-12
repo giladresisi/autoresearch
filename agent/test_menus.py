@@ -432,3 +432,67 @@ def test_dol_projection_weekly_extension_gate_direction_aware():
     m2 = build_menus(b2, _refit_vd(levels))
     assert [e for e in m2["dol"]["UP"] if e["tier"] == "projection"]
     assert [e for e in m2["dol"]["DOWN"] if e["tier"] == "projection"]
+
+
+# --------------------------------------------------------------------------- #
+# plan 34: open-price levels (TDO) as eligible DOL draws, both directions      #
+# --------------------------------------------------------------------------- #
+# An open price carries no `side`: it is neither resistance nor support, it is a
+# reference. It is offered on whichever side of price it sits, and only for the names
+# in DOL_OPEN_PRICE_LEVELS -- a generic "any side-less level" rule would re-admit
+# `sideless` above, whose exclusion is a pinned contract (a level with no side is not a
+# pool). Evidence: 2026-09-09, where an UP thesis had no menu entry nearer than
+# london(cur)_high @ 29634.00 (never reached, closest approach 40.00) while the midnight
+# open at 29561.75 was crossed at 09:59:20.
+
+def _bundle_with_tdo(tdo_price):
+    b = _bundle()
+    b.levels["MNQ"]["TDO"] = (tdo_price, None, None, "session", None)
+    b.levels["MNQ"]["TWO"] = (105.0, None, None, "session", None)
+    return b
+
+
+def _vd_with_tdo(tdo_price):
+    vd = _vd()
+    vd["levels"]["TDO"] = {"price": tdo_price, "side": "high", "swept": False,
+                           "depleted": False}
+    vd["levels"]["TWO"] = {"price": 105.0, "side": "high", "swept": False,
+                           "depleted": False}
+    return vd
+
+
+def test_dol_menu_offers_tdo_above_price_as_an_up_draw():
+    m = build_menus(_bundle_with_tdo(115.0), _vd_with_tdo(115.0))
+    assert "TDO" in {e["level"] for e in m["dol"]["UP"]}
+    assert "TDO" not in {e["level"] for e in m["dol"]["DOWN"]}
+
+
+def test_dol_menu_offers_tdo_below_price_as_a_down_draw():
+    m = build_menus(_bundle_with_tdo(85.0), _vd_with_tdo(85.0))
+    assert "TDO" in {e["level"] for e in m["dol"]["DOWN"]}
+    assert "TDO" not in {e["level"] for e in m["dol"]["UP"]}
+
+
+def test_dol_menu_applies_the_draw_floor_to_tdo_like_any_other_draw():
+    """The open price is not exempt from the proximity guard: 2.0 pts from a 100.0 price
+    is inside DOL_MIN_DRAW_DISTANCE_PTS and is a race, not a draw."""
+    m = build_menus(_bundle_with_tdo(102.0), _vd_with_tdo(102.0))
+    assert "TDO" not in {e["level"] for e in m["dol"]["UP"]}
+    assert "TDO" not in {e["level"] for e in m["dol"]["DOWN"]}
+
+
+def test_dol_menu_does_not_offer_two_scope_limit():
+    """TWO is the same shape as TDO and is deliberately NOT admitted: it was not asked
+    for and carries no evidence. Widening is a one-tuple change to
+    DOL_OPEN_PRICE_LEVELS."""
+    m = build_menus(_bundle_with_tdo(115.0), _vd_with_tdo(115.0))
+    assert "TWO" not in {e["level"] for e in m["dol"]["UP"]}
+    assert "TWO" not in {e["level"] for e in m["dol"]["DOWN"]}
+
+
+def test_dol_menu_still_excludes_a_generic_sideless_level():
+    """The pinned contract from test_dol_menu_only_eligible_pools, restated against the
+    open-price change so it cannot be widened by accident."""
+    m = build_menus(_bundle_with_tdo(115.0), _vd_with_tdo(115.0))
+    assert "sideless" not in {e["level"] for e in m["dol"]["UP"]}
+    assert "sideless" not in {e["level"] for e in m["dol"]["DOWN"]}

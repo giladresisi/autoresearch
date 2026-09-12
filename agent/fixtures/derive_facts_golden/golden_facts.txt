@@ -8,7 +8,7 @@ current-week trade dates: [datetime.date(2026, 5, 18), datetime.date(2026, 5, 19
 ENGINE week anchor (session_pipeline._week_start_ts): 2026-05-14 18:00:00-04:00
 
 ## S1 LEVELS MNQ (price = wick extreme; body = close extreme)
-TDO (session open 2026-05-18 18:00:00-04:00): 29393.25
+TDO (midnight open 2026-05-19 00:00:00-04:00): 29284.0
 TWO (bar 2026-05-18 18:00:00-04:00): 29393.25
 prev1_day (2026-05-18): high=29713.0 (body 29711.75) low=29107.5 (body 29109.25) close=29373.75 (range pos 0.44)
 week running [ENGINE anchor 2026-05-14 18:00:00-04:00]: high=29713.0 low=29095.5 mid=29404.250
@@ -22,16 +22,17 @@ london(cur, closed): high=29418.5 (body 29417.75) low=29131.0 (body 29132.5)
 prev1_day_high 29713.0 [above]: NOT swept (closest approach 229.75 short @ 2026-05-18 20:21:38-04:00, age 786m)
 asia(cur)_high 29483.25 [above]: NOT swept (closest approach 64.75 short @ 2026-05-19 03:48:36-04:00, age 339m)
 london(cur)_high 29418.5 [above]: NOT swept (closest approach 174.25 short @ 2026-05-19 07:03:10-04:00, age 145m)
-TDO 29393.25: first above-cross 2026-05-18 18:00:00-04:00 (age 928m)
-TDO 29393.25: first below-cross 2026-05-18 18:00:00-04:00 (age 928m)
 TWO 29393.25: first above-cross 2026-05-18 18:00:00-04:00 (age 928m)
 TWO 29393.25: first below-cross 2026-05-18 18:00:00-04:00 (age 928m)
+TDO 29284.0: first above-cross 2026-05-19 00:00:00-04:00 (age 568m)
+TDO 29284.0: first below-cross 2026-05-19 00:00:00-04:00 (age 568m)
+TDO 29284.0 [above]: NOT swept at the plan boundary (open price -- no resting liquidity, so a pre-boundary cross does not spend it) | crossed before the boundary: above 2026-05-19 00:00:00-04:00; below 2026-05-19 00:00:00-04:00
 asia(cur)_low 29223.25 [below]: swept 2026-05-19 00:19:02-04:00 (age 549m) | max excursion beyond 127.75 (DEPLETED, thr 20.0) | body15m: 2026-05-19 00:15:00-04:00 (age 553m)
 london(cur)_low 29131.0 [below]: swept 2026-05-19 08:01:02-04:00 (age 87m) | max excursion beyond 35.50 (DEPLETED, thr 20.0) | body15m: 2026-05-19 09:15:00-04:00 (age 13m)
 prev1_day_low 29107.5 [below]: swept 2026-05-19 09:20:53-04:00 (age 7m) | max excursion beyond 12.00 (not depleted, thr 40.0) | body15m: 2026-05-19 09:15:00-04:00 (age 13m)
 
 ## S1 LEVELS MES (price = wick extreme; body = close extreme)
-TDO (session open 2026-05-18 18:00:00-04:00): 7485.5
+TDO (midnight open 2026-05-19 00:00:00-04:00): 7475.25
 TWO (bar 2026-05-18 18:00:00-04:00): 7485.5
 prev1_day (2026-05-18): high=7516.75 (body 7516.75) low=7435.25 (body 7436.5) close=7483.75 (range pos 0.60)
 week running [ENGINE anchor 2026-05-14 18:00:00-04:00]: high=7516.75 low=7435.25 mid=7476.000
@@ -45,10 +46,11 @@ london(cur, closed): high=7495.5 (body 7495.5) low=7446.5 (body 7446.75)
 prev1_day_high 7516.75 [above]: NOT swept (closest approach 13.50 short @ 2026-05-18 20:21:39-04:00, age 786m)
 asia(cur)_high 7503.25 [above]: NOT swept (closest approach 7.75 short @ 2026-05-19 03:48:32-04:00, age 339m)
 london(cur)_high 7495.5 [above]: NOT swept (closest approach 27.75 short @ 2026-05-19 07:03:09-04:00, age 145m)
-TDO 7485.5: first above-cross 2026-05-18 18:00:00-04:00 (age 928m)
-TDO 7485.5: first below-cross 2026-05-18 18:00:00-04:00 (age 928m)
 TWO 7485.5: first above-cross 2026-05-18 18:00:00-04:00 (age 928m)
 TWO 7485.5: first below-cross 2026-05-18 18:00:00-04:00 (age 928m)
+TDO 7475.25: first above-cross 2026-05-19 00:00:00-04:00 (age 568m)
+TDO 7475.25: first below-cross 2026-05-19 00:00:00-04:00 (age 568m)
+TDO 7475.25 [above]: NOT swept at the plan boundary (open price -- no resting liquidity, so a pre-boundary cross does not spend it) | crossed before the boundary: above 2026-05-19 00:00:00-04:00; below 2026-05-19 00:00:00-04:00
 asia(cur)_low 7465.25 [below]: swept 2026-05-19 00:18:31-04:00 (age 549m) | max excursion beyond 22.50 (DEPLETED, thr 3.0) | body15m: 2026-05-19 00:15:00-04:00 (age 553m)
 london(cur)_low 7446.5 [below]: swept 2026-05-19 09:20:52-04:00 (age 7m) | max excursion beyond 3.75 (DEPLETED, thr 3.0) | body15m: 2026-05-19 09:15:00-04:00 (age 13m)
 prev1_day_low 7435.25 [below]: NOT swept (closest approach 7.50 short @ 2026-05-19 09:21:31-04:00, age 6m)

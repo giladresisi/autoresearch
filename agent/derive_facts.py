@@ -216,6 +216,26 @@ def excursion_beyond(frame, level, side):
     return max(0.0, float(frame["high"].max()) - level)
 
 
+def _midnight_open(frame, trade_date):
+    """`(price, timestamp)` of the first bar at or after 00:00 ET on `trade_date`.
+
+    plan 34. TDO is the ICT True Day Open -- the MIDNIGHT reference -- not the 18:00
+    session open it was previously anchored on. The two are different prices on almost
+    every date (2026-09-09: 29561.75 vs 29528.00), and the 18:00 reading also disagreed
+    with `strategy_smt.compute_tdo`'s midnight mode, so the repo carried two TDOs under
+    one name.
+
+    Falls back to the frame's FIRST bar when no bar sits at or after midnight (thin or
+    holiday history) -- the pre-plan-34 value, so a degraded session loses precision
+    rather than the level.
+    """
+    if frame is None or len(frame) == 0:
+        return None, None
+    at_or_after = frame.loc[pd.Timestamp(trade_date, tz=TZ):]
+    bar = at_or_after if len(at_or_after) else frame
+    return float(bar["open"].iloc[0]), bar.index[0]
+
+
 def closest_approach(frame, level, side):
     """For a NOT-swept level: how close price came and when (laggard test-and-fail data)."""
     if len(frame) == 0:
@@ -639,7 +659,7 @@ def _p1_equilibrium_staleness(bundle: "FactsBundle", data: dict) -> dict:
     return out
 
 
-def _duplicate_sweep_losers(lv: dict, swept_at: dict) -> set:
+def _duplicate_sweep_losers(lv: dict, swept_at: dict, *, session_open=None) -> set:
     """thesis.md §2.1d: when two or more named levels for the SAME asset share the
     identical sweep timestamp and side, they MAY be restatements of one physical price
     move — but a shared 1-second timestamp alone is not proof of that: a fast multi-level
@@ -650,7 +670,9 @@ def _duplicate_sweep_losers(lv: dict, swept_at: dict) -> set:
     one point away) and, separately, `prev1_day_low` (2026-07-16 09:00 ET MNQ case).
 
     Only collapse a group when EITHER:
-    - the shared timestamp IS the session's own opening bar (`lv["TDO"]`'s active_from) —
+    - the shared timestamp IS the session's own opening bar (`session_open`,
+      supplied by the caller: plan 34 moved TDO to the midnight open, so reading it off
+      `lv["TDO"]` would silently move this collapse key off 18:00) —
       the legitimate "already breached before this session's visible history began" gap-
       cascade case, where the price spread among the crossed levels is irrelevant; or
     - the colliding items share the EXACT same price — a true structural duplicate (e.g. a
@@ -660,7 +682,6 @@ def _duplicate_sweep_losers(lv: dict, swept_at: dict) -> set:
     Keeps only the highest-tier-weighted representative within a collapsing group (week >
     day > session; ties broken by the more extreme price) and suppresses the rest from
     fresh P1 evidence."""
-    session_open = (lv.get("TDO") or (None,) * 5)[4]
     groups: dict = {}
     for name, (price, _body, side, tier, _active_from) in lv.items():
         t = swept_at.get(name)
@@ -1024,6 +1045,20 @@ _EPS = 1e-6
 # validator's SEM_DOL_WRONG_SIDE check + the scoring suspect_completion flag are the
 # belt-and-suspenders for the residual latency race.
 DOL_MIN_DRAW_DISTANCE_PTS = 5.0
+# plan 34 -- level names that are an OPEN PRICE rather than a pool. They carry no `side`
+# (an open is neither resistance nor support) and are offered as a draw on whichever side
+# of them price currently sits, in EITHER direction. Named explicitly rather than derived
+# from `side is None`: a side-less level is not automatically a draw, and
+# `test_dol_menu_only_eligible_pools` pins that. TWO is the same shape and is deliberately
+# NOT here -- it was never asked for and carries no evidence; widening is a one-tuple edit.
+#
+# Spent-ness is measured from the PLAN BOUNDARY forward, not from the level's own instant.
+# An open price is crossed at 00:00 by definition and usually again pre-09:30 (7 of 7
+# sample days, 2026-09-12), so anchoring the sweep at its own instant would mark it spent
+# before every arm and make it permanently ineligible. There is no resting liquidity at an
+# open to consume: it is spent when the armed plan reaches it (`dol_reached`).
+DOL_OPEN_PRICE_LEVELS = ("TDO",)
+
 
 # 2026-08-16 DOL-menu refit (from the 08-10..08-14 09:20 forward tests). All ratios are
 # multiples of MNQ's avg_range_1h (the same v1-seed ATR everything else uses):
@@ -1137,6 +1172,12 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None
         if name in suppressed:
             continue
         price, body, side, tier, _active = tup
+        if (side is None and name in DOL_OPEN_PRICE_LEVELS
+                and isinstance(price, (int, float))):
+            # plan 34: an open price draws in EITHER direction -- it is resistance while
+            # price is under it and support while price is over it. Everything below
+            # (draw floor, band tagging, swept/depleted) then applies unchanged.
+            side = "above" if price > now_price else "below"
         if side not in ("above", "below") or not isinstance(price, (int, float)):
             continue
         v = vlevels.get(name, {})
@@ -2086,13 +2127,14 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
             wide_start = df.index[0]
         wide_cache[tkr] = df.loc[wide_start:now]
         L(f"\n## S1 LEVELS {tkr} (price = wick extreme; body = close extreme)")
-        tdo = float(sess_now["open"].iloc[0])
-        L(f"TDO (session open {sess_now.index[0]}): {tdo}")
+        tdo, tdo_ts = _midnight_open(sess_now, td_now)
+        L(f"TDO (midnight open {tdo_ts}): {tdo}")
         two, two_ts = compute_two(df, week_tds, now)
         L(f"TWO (bar {two_ts}): {two}")
 
         lv = {}
-        lv["TDO"] = (tdo, None, None, "session", sess_now.index[0])
+        if tdo is not None:
+            lv["TDO"] = (tdo, None, None, "session", tdo_ts)
         if two is not None:
             lv["TWO"] = (two, None, None, "session", sess_now.index[0])
         for lbl, d in (("prev1_day", prev1_td), ("prev2_day", prev2_td)):
@@ -2233,10 +2275,31 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
         bundle.swept_at.setdefault(tkr, {})
         for name, (price, body, side, tier, active_from) in sorted(lv.items(), key=lambda kv: -kv[1][0]):
             if side is None:
+                crossings = []
                 for s in ("above", "below"):
                     t = first_cross(sess_now.loc[active_from:], price, s)
                     if t is not None:
                         L(f"{name} {price}: first {s}-cross {t} (age {age_min(t, now):.0f}m)")
+                        crossings.append(f"{s} {t}")
+                if name in DOL_OPEN_PRICE_LEVELS:
+                    # plan 34: an open price is a DRAW, on whichever side of it price now
+                    # sits. Rendered in the sweep-line shape so `parse_facts` carries it
+                    # into the validator view -- without it the semantic check would
+                    # reject a thesis naming TDO as a level absent from the facts.
+                    # NOT swept: pre-boundary crosses (the 00:00 one is definitional) do
+                    # not spend an open price. No add_card -- this is a target, never P1
+                    # evidence.
+                    last_close = float(sess_now["close"].iloc[-1])
+                    draw_side = "above" if price > last_close else "below"
+                    ctx = (f" | crossed before the boundary: {'; '.join(crossings)}"
+                           if crossings else "")
+                    # Deliberately NOT written into `bundle.swept_at`: that dict feeds
+                    # P1 evidence and the HTF close-status view, neither of which this
+                    # change argues for. The menu reads swept/depleted from the PARSED
+                    # text (`vlevels`), which the line below supplies.
+                    L(f"{name} {price} [{draw_side}]: NOT swept at the plan boundary "
+                      f"(open price -- no resting liquidity, so a pre-boundary cross "
+                      f"does not spend it){ctx}")
                 continue
             frame = sess_now.loc[active_from:]
             t = first_cross(frame, price, side)
@@ -2268,7 +2331,9 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
     for tkr in ("MNQ", "MES"):
         nested = _nested_prev_levels(levels[tkr])
         nested_session = _nested_session_levels(levels[tkr])
-        dup_losers = _duplicate_sweep_losers(levels[tkr], bundle.swept_at.get(tkr, {}))
+        dup_losers = _duplicate_sweep_losers(
+            levels[tkr], bundle.swept_at.get(tkr, {}),
+            session_open=(sess_cache[tkr].index[0] if len(sess_cache.get(tkr, ())) else None))
         # thesis.md §2.1b (2026-08-15): most-extreme-swept-only — see
         # _extremity_shadowed_levels.
         extremity = _extremity_shadowed_levels(levels[tkr], bundle.swept_at.get(tkr, {}))
