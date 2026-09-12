@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ for _p in (_AGENT, os.path.join(_AGENT, "contracts"), os.path.join(_REPO, "calib
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import paths  # noqa: E402
 from derive_facts import (  # noqa: E402
     DEPLETE, TZ, build_evidence_magnitude, build_menus, compute_facts,
     facts_to_validator_dict, load, render_facts_text, render_menus_text,
@@ -293,21 +295,88 @@ def bundle_to_l1_view(bundle) -> tuple:
     return vd, menu_text, evidence_text, magnitude
 
 
-class ParquetFactsSource:
-    """Loads the full 1s (facts) + 1m (walk) parquets once, then serves facts snapshots
-    at arbitrary boundaries and per-date session bars. `main_dir` defaults to the
-    machine's back-adjusted 2026-09 main; tests point it at a tmp dir."""
+def main_dir_for_date(date_str: str) -> str:
+    """Per-contract main folder for a TRADE DATE, per `<main>/rollover_ledger.json`.
 
-    def __init__(self, main_dir: str = DEFAULT_MAIN, tickers=("MNQ", "MES")):
-        self.main_dir = main_dir
+    Same rule as `backtest_smt._main_dir_for_date` (and the three other copies in
+    plot_session / regression.plot_regression / scripts.check_session_parquets): rows are
+    newest-first, the first row whose `prep_date` is <= `date_str` wins, ISO dates compare
+    correctly as strings, and anything missing falls back to the flat main dir.
+
+    Duplicated rather than imported because `backtest_smt` is the legacy engine and pulling
+    it in would drag a module-load manifest read into every facts build.
+    """
+    main = paths.general_main_dir()
+    ledger = main / "rollover_ledger.json"
+    if not ledger.exists():
+        return str(main)
+    try:
+        rows = json.loads(ledger.read_text(encoding="utf-8"))
+    except Exception:
+        return str(main)
+    for row in rows:
+        if str(date_str) >= str(row.get("prep_date", "")):
+            sub = main / str(row.get("subfolder", ""))
+            return str(sub if sub.exists() else main)
+    return str(main)
+
+
+class ParquetFactsSource:
+    """Loads the 1s (facts) + 1m (walk) parquets and serves facts snapshots at arbitrary
+    boundaries plus per-date session bars.
+
+    **`main_dir` now defaults to PER-DATE CONTRACT ROUTING (2026-09-12), not one folder.**
+    It used to default to the latest contract for every boundary while `run_replay` routed
+    per date through the rollover ledger, so on any pre-roll date the two described
+    different instruments — measured at exactly 293.25 pts across the June->Sept roll,
+    matching the gap the ledger itself records. Nothing errored: facts simply came back on
+    the wrong price scale, and a DOL built from them landed on the wrong side of price,
+    killing plans `dol_reached` at the arm. That trap cost three separate analyses in one
+    session, and it re-arms at every roll.
+
+    Passing `main_dir=` explicitly PINS that folder for every date, which is what the tests
+    and `manual-l1-thesis` rely on; pinning still overrides the ledger completely.
+
+    **Routing NEVER mutates this object.** `_raw_1s` / `_norm_1s` / `_norm_1m` stay bound to
+    the default folder for the life of the source; `build_facts` and `session_bars` select
+    their frames locally via `frames_for`. An earlier draft swapped the attributes in place
+    and `test_facts.py`'s MODULE-SCOPED `source` fixture caught it immediately: one build on
+    a pre-roll date left every later test in the module reading the other contract. That is
+    the same silent cross-contamination this change exists to remove, so it must not be
+    reintroduced as shared mutable state.
+
+    Consequence worth knowing: code that reads the frame attributes DIRECTLY is unrouted and
+    always sees the default contract (`manual-l1-thesis` checks `_raw_1s[tk].index[-1]`
+    before its first build, and `test_facts._bundle_at` builds bundles straight off them).
+    Callers that want a specific date's contract should ask `frames_for(date)`.
+    """
+
+    def __init__(self, main_dir: "str | None" = None, tickers=("MNQ", "MES")):
+        self.pinned_main_dir = main_dir
         self.tickers = tuple(tickers)
-        self._raw_1s = {}     # capital-col frames (for ATH parity with prepare_cuts)
-        self._norm_1s = {}    # derive_facts.load-normalised (maintenance-dropped)
-        self._norm_1m = {}
-        for tk in self.tickers:
-            self._raw_1s[tk] = self._load_raw(os.path.join(main_dir, f"{tk}_1s.parquet"))
-            self._norm_1s[tk] = load(os.path.join(main_dir, f"{tk}_1s.parquet"))
-            self._norm_1m[tk] = load(os.path.join(main_dir, f"{tk}_1m.parquet"))
+        self._frames: dict = {}           # folder -> (raw_1s, norm_1s, norm_1m)
+        self.main_dir = main_dir or DEFAULT_MAIN
+        self._raw_1s, self._norm_1s, self._norm_1m = self._load_folder(self.main_dir)
+
+    def main_dir_for(self, date_str: str) -> str:
+        """The folder this source reads for `date_str` — the pin if one was given,
+        otherwise the ledger's answer."""
+        return self.pinned_main_dir or main_dir_for_date(str(date_str))
+
+    def _load_folder(self, folder: str):
+        """(raw_1s, norm_1s, norm_1m) for `folder`, loaded once and cached."""
+        if folder not in self._frames:
+            raw, n1s, n1m = {}, {}, {}
+            for tk in self.tickers:
+                raw[tk] = self._load_raw(os.path.join(folder, f"{tk}_1s.parquet"))
+                n1s[tk] = load(os.path.join(folder, f"{tk}_1s.parquet"))
+                n1m[tk] = load(os.path.join(folder, f"{tk}_1m.parquet"))
+            self._frames[folder] = (raw, n1s, n1m)
+        return self._frames[folder]
+
+    def frames_for(self, date_str: str):
+        """(raw_1s, norm_1s, norm_1m) for the contract that owns `date_str`."""
+        return self._load_folder(self.main_dir_for(date_str))
 
     @staticmethod
     def _load_raw(path: str) -> pd.DataFrame:
@@ -325,9 +394,16 @@ class ParquetFactsSource:
         parity)."""
         res = FactsResult(boundary=boundary)
         try:
+            raw_1s, norm_1s, _ = self.frames_for(
+                pd.Timestamp(boundary).date().isoformat())
+        except (OSError, ValueError) as exc:               # missing contract folder
+            res.degraded = True
+            res.error = f"contract_routing:{type(exc).__name__}"
+            return res
+        try:
             # The slicing rule lives in `bundle_for_boundary`, shared verbatim with the
             # online assembler (cycle-1 addendum change E).
-            bundle, prim = bundle_for_boundary(self._raw_1s, self._norm_1s, boundary,
+            bundle, prim = bundle_for_boundary(raw_1s, norm_1s, boundary,
                                                tickers=tuple(self.tickers))
         except BoundarySliceError as exc:
             res.degraded = True
@@ -363,7 +439,7 @@ class ParquetFactsSource:
     def session_bars(self, date: str) -> pd.DataFrame:
         """The 1m MNQ session bars the engine walks (maintenance-dropped, session-scoped)."""
         d = datetime.date.fromisoformat(date)
-        norm = self._norm_1m["MNQ"]
+        norm = self.frames_for(date)[2]["MNQ"]
         bars = norm[(norm.index + pd.Timedelta(hours=7)).date == d]
         return bars.sort_index()
 

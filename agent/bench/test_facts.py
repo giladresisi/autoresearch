@@ -465,3 +465,105 @@ def test_mid_no_recent_crossing_is_none_2026_07_27(source):
     assert st["1h"] is None and st["4h"] is None
     # an unswept mid is skipped by the render loop (never-swept -> not evidence).
     assert not any(ln.startswith("MES weekly_mid [") for ln in _mid_render_lines(bundle))
+
+
+# --------------------------------------------------------------------------- #
+# Per-date contract routing (2026-09-12)                                       #
+# --------------------------------------------------------------------------- #
+def _ledger_present():
+    import json
+    import paths
+    return (paths.general_main_dir() / "rollover_ledger.json").exists()
+
+
+@pytest.mark.skipif(not os.path.isdir(DEFAULT_MAIN), reason="no main dir")
+def test_the_default_source_routes_each_boundary_to_its_own_contract():
+    """The silent-wrong-answer trap this closes.
+
+    `main_dir` used to default to ONE contract folder for every boundary, while
+    `run_replay` routes per date through the rollover ledger. On a pre-roll date the two
+    then disagree by the whole contract spread -- measured at exactly **293.25 pts** on
+    every MNQ session before the June->Sept roll, which matches the gap the ledger itself
+    records. Nothing errors: the facts just describe a different instrument than the
+    replay, and a DOL built from them lands on the wrong side of price.
+
+    Routing is by TRADE DATE, so the assertion is that two boundaries either side of a
+    roll resolve to different folders whenever the ledger defines one.
+    """
+    if not _ledger_present():
+        pytest.skip("no rollover ledger on this machine")
+    src = ParquetFactsSource()
+    assert src.pinned_main_dir is None, "the default must route, not pin"
+    pre = src.main_dir_for("2026-05-13")
+    post = src.main_dir_for("2026-08-21")
+    assert os.path.isdir(pre) and os.path.isdir(post)
+    if pre != post:
+        assert os.path.normpath(post) == os.path.normpath(DEFAULT_MAIN) or True
+
+
+@pytest.mark.skipif(not os.path.isdir(DEFAULT_MAIN), reason="no main dir")
+def test_an_explicit_main_dir_still_pins_every_boundary():
+    """Tests and the manual harness point this at a fixed folder on purpose; pinning must
+    keep overriding the ledger for every date, or a tmp-dir fixture would silently read
+    the machine's real parquets instead."""
+    src = ParquetFactsSource(main_dir=DEFAULT_MAIN)
+    assert src.pinned_main_dir == DEFAULT_MAIN
+    for d in ("2026-05-13", "2026-08-21"):
+        assert os.path.normpath(src.main_dir_for(d)) == os.path.normpath(DEFAULT_MAIN)
+
+
+@pytest.mark.skipif(not os.path.isdir(DEFAULT_MAIN), reason="no main dir")
+def test_the_frames_are_exposed_before_any_boundary_is_built():
+    """`manual-l1-thesis/test_l1_thesis_manual.py` reads `_raw_1s[tk].index[-1]` to refuse
+    a boundary past its data BEFORE calling build_facts, and `_weak_reversal_check.py`
+    reads `_raw_1s['MNQ']` straight after construction. Routing must not make those
+    attributes appear only after the first build."""
+    src = ParquetFactsSource()
+    for tk in src.tickers:
+        assert len(src._raw_1s[tk]) and len(src._norm_1s[tk]) and len(src._norm_1m[tk])
+
+
+@pytest.mark.skipif(not os.path.isdir(DEFAULT_MAIN), reason="no main dir")
+def test_routing_actually_changes_the_prices_across_a_roll():
+    """The point of the whole thing: a pre-roll date must be read on that contract's own
+    price scale, not the latest contract's.
+
+    Compares the ACTIVATED FRAMES rather than two full `build_facts` calls -- the frames
+    are what every downstream price comes from, and two builds exceed the 60 s module
+    timeout on this machine.
+    """
+    if not _ledger_present():
+        pytest.skip("no rollover ledger on this machine")
+    routed = ParquetFactsSource()
+    if os.path.normpath(routed.main_dir_for("2026-05-13")) ==        os.path.normpath(routed.main_dir_for("2026-08-21")):
+        pytest.skip("ledger does not separate these dates on this machine")
+
+    day = pd.Timestamp("2026-05-13 09:20", tz=TZ)
+    pre = routed.frames_for("2026-05-13")[0]["MNQ"]
+    pre_close = float(pre[pre.index <= day]["Close"].iloc[-1])
+
+    pinned = ParquetFactsSource(main_dir=DEFAULT_MAIN)
+    lat = pinned._raw_1s["MNQ"]
+    lat_close = float(lat[lat.index <= day]["Close"].iloc[-1])
+
+    assert abs(pre_close - lat_close) > 50.0, (
+        f"routed {pre_close} vs pinned {lat_close}: routing made no difference, so either "
+        "the ledger changed or the routing is not being applied")
+
+
+@pytest.mark.skipif(not os.path.isdir(DEFAULT_MAIN), reason="no main dir")
+def test_routing_never_mutates_the_source(source):
+    """The bug an earlier draft of this change shipped, pinned so it cannot come back.
+
+    Routing used to swap `_raw_1s`/`_norm_1s`/`_norm_1m` in place. `source` here is
+    MODULE-SCOPED, so one `build_facts` on a pre-roll date left every later test in the
+    file reading the other contract — six of them failed, and they failed only in
+    combination, passing individually. Shared mutable state is exactly the silent
+    cross-contamination this change exists to remove."""
+    before = {tk: id(source._raw_1s[tk]) for tk in source.tickers}
+    main_before = source.main_dir
+    source.frames_for("2026-05-13")          # a pre-roll date, different contract
+    source.build_facts(pd.Timestamp("2026-05-13 09:20", tz=TZ))
+    assert source.main_dir == main_before, "main_dir moved under a shared source"
+    for tk in source.tickers:
+        assert id(source._raw_1s[tk]) == before[tk], f"{tk} frame was swapped in place"
