@@ -44,6 +44,8 @@ OHLC_COLS = ["Open", "High", "Low", "Close"]
 TICK = 0.25                     # MNQ and MES both tick 0.25; gaps are whole ticks
 STATE_NAME = ".rollover_prep_state.json"
 IB_CLIENT_ID = 19               # distinct from check_session_parquets (17) and gap_fill (10)
+MAX_1M_LOOKBACK_DAYS = 14       # IB's empirical cap for 1m bars with endDateTime='' (data/sources.py)
+ANCHOR_TOLERANCE = pd.Timedelta("1D")   # how far from the seam a common bar may sit
 
 # CME month codes for the quarterly cycle (Mar/Jun/Sep/Dec).
 _MONTH_CODE = {3: "H", 6: "M", 9: "U", 12: "Z"}
@@ -74,6 +76,24 @@ def contract_code(symbol: str, expiry: str) -> str:
 def subfolder_for(expiry: str) -> str:
     """Main subfolder name for a contract era, e.g. "2026-12-18" -> "2026-12"."""
     return expiry[:7]
+
+
+def today_str() -> str:
+    """The date ROLLOVER_PREP_DATE is compared against — the CME session date, not a wall clock.
+
+    `date.today()` reads the machine clock, which is Asia/Bangkok here: its date rolls over at
+    11:00 ET, i.e. in the MIDDLE of a trading session, so a prep date would come due while the
+    old contract's last session was still open. A plain ET date has the opposite problem — it
+    still reads Friday late on Friday night, after that session has closed and the roll is
+    genuinely ready.
+
+    `cme_session_date` is the project's existing convention and lands exactly where the roll
+    wants it: it advances to the prep date at 18:00 ET on the old contract's last session day —
+    after its 17:00 ET close. That is the semantic of "the Saturday before expiry" throughout
+    the ledger (the June roll's prep_date 2026-06-13 pairs with a 2026-06-12 16:59 ET boundary).
+    """
+    from session_times import session_date_str
+    return session_date_str()
 
 
 def rollover_status(rows: list, env_prep_date: str | None, today: str) -> dict:
@@ -232,24 +252,101 @@ def env_path() -> Path:
     return Path(__file__).resolve().parent.parent / ".env"
 
 
-def update_env(new_conids: dict, expiry: str, next_prep: str, old_conids: dict,
-               old_expiry: str, today: str) -> None:
-    """Rewrite MNQ_CONID / MES_CONID / ROLLOVER_PREP_DATE in .env, preserving every other line.
+def _old_conids_from_ledger(rows: list) -> dict:
+    """Conids of the contract being rolled AWAY from = the newest row's `new_conid` per symbol.
 
-    Done LAST so that a failure at any earlier step leaves .env still naming the OLD conids —
-    a re-run then gap-fills and measures against the same contract rather than splicing
-    new-contract prices onto old-contract history.
+    Sourced from the ledger rather than `.env` because the operator edits `.env` to the new
+    front month before the roll runs, which destroys the old numbers. The ledger is the durable
+    record of which contract each era's data was fetched with.
+    """
+    if not rows:
+        raise RuntimeError("rollover_ledger.json is empty — cannot determine the current conids.")
+    out = {}
+    for sym in ("mnq", "mes"):
+        conid = (rows[0].get(sym) or {}).get("new_conid")
+        if not conid:
+            raise RuntimeError(
+                f"Newest rollover_ledger.json row has no {sym}.new_conid — cannot determine the "
+                "contract being rolled away from. Fill it in before rolling."
+            )
+        out[sym] = int(conid)
+    return out
+
+
+def read_env_value(key: str) -> str | None:
+    """`key` from the environment, falling back to parsing `.env` WITHOUT mutating os.environ.
+
+    The status checks must be side-effect free. `load_dotenv()` here injected the whole `.env`
+    into the process as a side effect of merely *asking* whether a roll was due — silently
+    re-populating conids a caller had deliberately unset, and leaking real config into anything
+    that ran afterwards.
+    """
+    val = os.environ.get(key)
+    if val is not None:
+        return val
+    p = env_path()
+    if not p.exists():
+        return None
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith(f"{key}="):
+                return line.split("=", 1)[1].split("#", 1)[0].strip()
+    except OSError:
+        return None
+    return None
+
+
+def env_conids() -> dict:
+    """MNQ/MES conids currently set in the environment (0 when absent or unparseable)."""
+    out = {}
+    for sym, key in (("mnq", "MNQ_CONID"), ("mes", "MES_CONID")):
+        try:
+            out[sym] = int(os.environ.get(key, "0"))
+        except ValueError:
+            out[sym] = 0
+    return out
+
+
+def verify_env_conids(expected_new: dict, expiry: str) -> None:
+    """Confirm `.env` already names the new front month; raise an actionable error if not.
+
+    The operator owns the conid lines — the roll is gated on them having made that edit. But
+    "I updated it" has to be CHECKED, not taken on trust: if the edit never landed (typo, wrong
+    line, unsaved buffer) the roll would shift the parquets onto the new scale while every
+    later fetch still returned old-contract prices — the same discontinuity this whole ordering
+    exists to prevent, just mirrored. Reading `.env` here is confirmation, not inference: the
+    roll never proceeds on the strength of the answer alone.
+    """
+    have = env_conids()
+    wrong = {s: (have[s], expected_new[s]) for s in ("mnq", "mes") if have[s] != expected_new[s]}
+    if not wrong:
+        return
+    lines = [
+        "`.env` does not name the new front month yet — refusing to roll.",
+        "Set these two lines in .env, then re-run:",
+    ]
+    for sym in ("mnq", "mes"):
+        ticker = sym.upper()
+        lines.append(
+            f"  {ticker}_CONID={expected_new[sym]}   # {contract_code(ticker, expiry)} — "
+            f"{date.fromisoformat(expiry).strftime('%B %Y')}, expires {expiry}"
+        )
+    for sym, (got, want) in wrong.items():
+        lines.append(f"  ({sym.upper()}_CONID is currently {got or 'unset'}, expected {want})")
+    lines.append("Leave ROLLOVER_PREP_DATE alone — the roll advances it once it completes.")
+    raise RuntimeError("\n".join(lines))
+
+
+def update_env_prep_date(next_prep: str) -> None:
+    """Advance ROLLOVER_PREP_DATE only, preserving every other line.
+
+    The conid lines are the operator's to edit and are already verified by the time this runs;
+    the prep date is the COMPLETION marker and belongs to the code, so it can never claim a
+    roll that did not finish. Written last, after the parquets and ledger are in place.
     """
     p = env_path()
     text = p.read_text(encoding="utf-8")
-    for sym, key in (("mnq", "MNQ_CONID"), ("mes", "MES_CONID")):
-        ticker = key.split("_")[0]
-        old_label = f"{contract_code(ticker, old_expiry)}/{old_conids[sym]}" if old_expiry \
-            else str(old_conids[sym])
-        comment = (f"  # {contract_code(ticker, expiry)} — "
-                   f"{date.fromisoformat(expiry).strftime('%B %Y')}, "
-                   f"expires {expiry} (rolled from {old_label} on {today})")
-        text = re.sub(rf"(?m)^{key}=.*$", f"{key}={new_conids[sym]}{comment}", text)
     text = re.sub(r"(?m)^ROLLOVER_PREP_DATE=.*$", f"ROLLOVER_PREP_DATE={next_prep}", text)
     shutil.copy2(p, p.parent / (p.name + ".preroll.bak"))
     tmp = p.parent / (p.name + ".tmp")
@@ -292,6 +389,18 @@ def resolve_next_quarterly(ib, symbol: str, current_expiry: str) -> tuple[int, s
     return int(conid), f"{last[:4]}-{last[4:6]}-{last[6:]}"
 
 
+def seam_anchor(symbol: str) -> pd.Timestamp:
+    """Timestamp the back-adjustment must be anchored at: the last bar of old-contract data.
+
+    This is the SEAM — where shifted old-contract history meets future new-contract bars — so
+    it is the only point at which measuring the gap makes the two sides join cleanly.
+    """
+    p = paths.general_live_dir() / f"{symbol.upper()}_1m.parquet"
+    if not p.exists():
+        raise RuntimeError(f"Cannot determine the seam: {p} is missing.")
+    return pd.read_parquet(p).index[-1]
+
+
 def _fetch_recent_1m(ib, conid: int, days: int = 4) -> pd.Series:
     """Most-recent 1m closes for a conid, as a tz-aware Series indexed by bar time.
 
@@ -317,27 +426,88 @@ def _fetch_recent_1m(ib, conid: int, days: int = 4) -> pd.Series:
     return pd.Series(df["close"].to_numpy(), index=idx).sort_index()
 
 
-def measure_gap(ib, old_conid: int, new_conid: int) -> tuple[float, pd.Timestamp]:
-    """(gap, boundary) where gap = new_front_close - old_conid_close at their last common 1m bar.
+def measure_gap(ib, old_conid: int, new_conid: int,
+                anchor: pd.Timestamp) -> tuple[float, pd.Timestamp]:
+    """(gap, boundary) where gap = new_front_close - old_conid_close at the data's SEAM.
 
-    The last common bar is the old contract's final session close — the switch point the
-    back-adjustment is anchored to.
+    `anchor` is the last bar of old-contract data (see seam_anchor). Measuring at the latest
+    bar the two contracts happen to share is only equivalent when the roll runs immediately
+    after the old contract's final session — which is the intent, but not guaranteed. The old
+    contract keeps trading until its own expiry (a week past the prep date), so both legs
+    resume quoting at the next session open while the gate holds the parquets frozen at the
+    seam. A roll that slips even one session would then anchor the shift at a bar that is not
+    the seam, and the join between shifted history and future bars would be off by the carry
+    drift between those two moments — small, silent, and permanent.
+
+    So: take the latest common bar at or before the anchor, and refuse if that is more than a
+    day away rather than quietly anchoring somewhere else.
     """
-    old = _fetch_recent_1m(ib, old_conid)
-    new = _fetch_recent_1m(ib, new_conid)
+    now = pd.Timestamp.now(tz="America/New_York")
+    days = int((now - anchor).total_seconds() // 86400) + 3
+    days = max(2, min(days, MAX_1M_LOOKBACK_DAYS))
+
+    old = _fetch_recent_1m(ib, old_conid, days)
+    new = _fetch_recent_1m(ib, new_conid, days)
     common = old.index.intersection(new.index)
     if len(common) == 0:
         raise RuntimeError(
             f"No overlapping 1m bars between conids {old_conid} and {new_conid} — "
             "cannot measure the rollover gap."
         )
-    boundary = common.max()
+
+    at_or_before = common[common <= anchor]
+    if len(at_or_before) == 0:
+        raise RuntimeError(
+            f"No common 1m bar at or before the seam {anchor} within the last {days} days "
+            f"(conids {old_conid}/{new_conid}). The roll has been delayed past what IB will "
+            "serve for 1m bars — resolve by hand."
+        )
+    boundary = at_or_before.max()
+    if anchor - boundary > ANCHOR_TOLERANCE:
+        raise RuntimeError(
+            f"Nearest common 1m bar to the seam {anchor} is {boundary}, "
+            f"{anchor - boundary} earlier — beyond the {ANCHOR_TOLERANCE} tolerance. "
+            "Refusing to anchor the shift there."
+        )
     return round_to_tick(float(new.loc[boundary]) - float(old.loc[boundary])), boundary
 
 
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+
+MAX_GAP_FRACTION = 0.03   # a quarterly carry gap runs ~1% of index level; 3% is a generous ceiling
+
+
+def _sanity_check_gaps(gaps: dict, rows: list) -> None:
+    """Reject an implausible measured gap before it silently shifts the whole history.
+
+    The gap is applied to every bar ever recorded, so a bad measurement — IB handing back a
+    stale or wrong-contract bar — corrupts the entire series with no visible seam. Matters most
+    when the roll runs unattended: nobody is reading the number before it lands.
+
+    A quarterly carry gap is ~1% of the index level (June→Sept was MNQ +293.25 on ~29k). Zero is
+    rejected outright: it almost certainly means both legs resolved to the SAME contract.
+    """
+    live = paths.general_live_dir()
+    for sym in ("mnq", "mes"):
+        gap = gaps[sym]
+        if gap == 0:
+            raise RuntimeError(
+                f"{sym.upper()} rollover gap measured as exactly 0 — the old and new legs almost "
+                "certainly resolved to the same contract. Refusing to roll."
+            )
+        p = live / f"{sym.upper()}_1m.parquet"
+        if not p.exists():
+            continue
+        level = float(pd.read_parquet(p)["Close"].iloc[-1])
+        if abs(gap) > abs(level) * MAX_GAP_FRACTION:
+            raise RuntimeError(
+                f"{sym.upper()} rollover gap {gap:+.2f} is more than "
+                f"{MAX_GAP_FRACTION:.0%} of the {level:.2f} price level — implausible for a "
+                "quarterly carry. Refusing to roll; check the IB data by hand."
+            )
+
 
 def _preflight(status: dict) -> None:
     """Refuse to roll unless gap-fill + promote have already run for the old contract.
@@ -377,25 +547,46 @@ def run_rollover_prep(today: str | None = None, dry_run: bool = False) -> dict:
     flat legacy main dir when a row names a subfolder that does not exist yet.
     """
     load_dotenv(dotenv_path=env_path())
-    today = today or date.today().isoformat()
+    today = today or today_str()
 
     rows = load_ledger()
     status = rollover_status(rows, os.environ.get("ROLLOVER_PREP_DATE"), today)
     _preflight(status)
 
     prep_date = status["prep_date"]
-    old_conids = {"mnq": int(os.environ["MNQ_CONID"]), "mes": int(os.environ["MES_CONID"])}
     cur_expiry = str(rows[0].get("expiry", "")) if rows else ""
+    # Old conids come from the LEDGER, not .env: the operator updates the .env conid lines
+    # BEFORE this runs, so by now .env names the new contract and the old numbers are gone.
+    # The newest row's `new_conid` is the contract we are rolling away from.
+    old_conids = _old_conids_from_ledger(rows)
 
     from ib_insync import IB
     ib = IB()
-    ib.connect(os.environ.get("IB_HOST", "127.0.0.1"),
-               int(os.environ.get("IB_PORT", "4002")), clientId=IB_CLIENT_ID)
+    # readonly: this never places orders, and it skips the open/completed-order bootstrap.
+    # RequestTimeout is raised from the 4s default because the roll runs at weekends, when the
+    # Gateway is often slow right after its daily restart.
+    ib.RequestTimeout = 30
+    host = os.environ.get("IB_HOST", "127.0.0.1")
+    port = int(os.environ.get("IB_PORT", "4002"))
+    try:
+        ib.connect(host, port, clientId=IB_CLIENT_ID, readonly=True)
+    except Exception as exc:
+        # A bare asyncio.TimeoutError stringifies to '', so the default message would be the
+        # useless "ERROR:". The socket can accept while the Gateway is still logged out, so
+        # "IB is reachable" is not the same as "IB will serve data".
+        raise RuntimeError(
+            f"Could not establish a usable IB session at {host}:{port} "
+            f"({type(exc).__name__}{': ' + str(exc) if str(exc) else ''}). The port accepts "
+            "connections but the Gateway is not serving requests — typically it is still "
+            "restarting or logged out. Nothing has been changed; retry once IB is healthy."
+        ) from exc
     try:
         new_conids, expiries, gaps, boundaries = {}, {}, {}, {}
         for sym, ticker in (("mnq", "MNQ"), ("mes", "MES")):
             conid, expiry = resolve_next_quarterly(ib, ticker, cur_expiry)
-            gap, boundary = measure_gap(ib, old_conids[sym], conid)
+            # Anchor on the live parquet's last bar — the seam — not on whatever bar the two
+            # contracts most recently share.
+            gap, boundary = measure_gap(ib, old_conids[sym], conid, seam_anchor(ticker))
             new_conids[sym], expiries[sym], gaps[sym], boundaries[sym] = conid, expiry, gap, boundary
             print(f"[rollover] {ticker}: {contract_code(ticker, expiry)} conid={conid} "
                   f"expiry={expiry} gap={gap:+.2f} @ {boundary}", file=sys.stderr)
@@ -417,9 +608,17 @@ def run_rollover_prep(today: str | None = None, dry_run: bool = False) -> dict:
         "old_conids": old_conids, "new_conids": new_conids,
         "boundaries": {k: str(v) for k, v in boundaries.items()},
     }
+    _sanity_check_gaps(gaps, rows)
+
     if dry_run:
+        # The dry run is what the operator reads to learn which conids to put in .env, so it
+        # must not require .env to already name them.
         plan["dry_run"] = True
+        plan["env_conids_ok"] = env_conids() == new_conids
         return plan
+
+    # Last gate before anything destructive: .env must already name the new front month.
+    verify_env_conids(new_conids, expiry)
 
     done = _load_state(prep_date)
     live = paths.general_live_dir()
@@ -467,15 +666,61 @@ def run_rollover_prep(today: str | None = None, dry_run: bool = False) -> dict:
         print(f"[rollover] ledger row prepended: {row['subfolder']}", file=sys.stderr)
         done = _mark_step(prep_date, "ledger", done)
 
-    # 5. .env last: conids + the next quarter's prep date.
+    # 5. .env last: advance the completion marker. The conid lines were the operator's edit and
+    #    were verified before any of the above ran.
     if "env" not in done:
-        update_env(new_conids, expiry, next_prep, old_conids, cur_expiry, today)
-        print(f"[rollover] .env updated — conids rolled, ROLLOVER_PREP_DATE={next_prep}",
-              file=sys.stderr)
+        update_env_prep_date(next_prep)
+        print(f"[rollover] .env ROLLOVER_PREP_DATE={next_prep}", file=sys.stderr)
         done = _mark_step(prep_date, "env", done)
 
     _clear_state()
     return plan
+
+
+def rollover_block_reason(today: str | None = None) -> str | None:
+    """Why IB fetching must stop right now, or None when it may proceed.
+
+    A pending roll has two phases and only the second one blocks:
+
+      A. due, but the old contract's final session is not frozen in its own subfolder yet.
+         The old-conid gap-fill is exactly what has to happen — allow it.
+      B. due, and live == the current main subfolder (gap-fill AND promote have run). Every
+         further fetch now risks landing on the wrong side of the price-scale switch, so stop
+         until the roll completes.
+
+    Phase B is detected with the same preflight the roll itself uses, so the gate opens and
+    closes on one definition. Completing the roll writes the ledger row, which makes the status
+    not-due — so the gate reopens by construction, with no separate approval flag to go stale.
+    """
+    try:
+        rows = load_ledger()
+        status = rollover_status(rows, read_env_value("ROLLOVER_PREP_DATE"), today or today_str())
+        if not status["due"]:
+            return None
+        try:
+            _preflight(status)
+        except RuntimeError:
+            return None          # phase A — the old-conid fetch is the next required step
+    except Exception:
+        return None              # never let the gate itself break the command it guards
+
+    return (
+        "\n"
+        "=============== BLOCKED: CONTRACT ROLLOVER PENDING ===============\n"
+        f"  {status['reason']}\n"
+        "  The old contract's final session is already gap-filled and promoted, so the\n"
+        "  next IB fetch would land on the wrong side of the price-scale switch.\n"
+        "\n"
+        "  To clear this:\n"
+        "    1. uv run python trade.py rollover-prep --dry-run   (prints the new conids)\n"
+        "    2. set MNQ_CONID / MES_CONID in .env to those values\n"
+        "       (leave ROLLOVER_PREP_DATE alone — the roll advances it on completion)\n"
+        "    3. uv run python trade.py rollover-prep\n"
+        "\n"
+        "  Step 3 verifies .env actually names the new front month before it shifts\n"
+        "  anything, and reopens this gate by writing the ledger row.\n"
+        "==================================================================\n"
+    )
 
 
 def due_banner(today: str | None = None) -> str | None:
@@ -484,9 +729,8 @@ def due_banner(today: str | None = None) -> str | None:
     Called by `trade.py gap-fill` and `trade.py promote` so the roll cannot be missed by an
     operator (or agent) who never opened the parquet-check skill.
     """
-    load_dotenv(dotenv_path=env_path())
-    today = today or date.today().isoformat()
-    status = rollover_status(load_ledger(), os.environ.get("ROLLOVER_PREP_DATE"), today)
+    today = today or today_str()
+    status = rollover_status(load_ledger(), read_env_value("ROLLOVER_PREP_DATE"), today)
     if not status["due"]:
         return None
     return (

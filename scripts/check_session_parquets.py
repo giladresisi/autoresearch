@@ -874,6 +874,22 @@ def main():
     }
     exit_code = 0
 
+    # Third IB-fetch path (targeted fills / rebuilds / gap-fill-to-now use MNQ_CONID/MES_CONID),
+    # so it needs the same rollover gate as gap_fill. A dry run reads nothing from IB and is the
+    # safe way to inspect state while a roll is pending, so it is exempt.
+    if not args.dry_run:
+        try:
+            from scripts.rollover_prep import rollover_block_reason
+            _block = rollover_block_reason()
+        except Exception:
+            _block = None
+        if _block:
+            print(_block, file=sys.stderr)
+            report["rollover_blocked"] = True
+            report["exit_code"] = 4
+            print(json.dumps(report, indent=2))
+            sys.exit(4)
+
     ib = None
     try:
         if not args.dry_run:
@@ -980,9 +996,9 @@ def main():
     # promote keeps piling new-contract sessions into the OLD era's folder. The roll itself
     # is `trade.py rollover-prep` — never performed here.
     try:
-        from scripts.rollover_prep import due_banner, load_ledger, rollover_status
+        from scripts.rollover_prep import due_banner, load_ledger, rollover_status, today_str
         _status = rollover_status(load_ledger(), os.environ.get("ROLLOVER_PREP_DATE"),
-                                  pd.Timestamp.now(tz="America/New_York").date().isoformat())
+                                  today_str())
         report["rollover"] = _status
         if _status["due"]:
             print(due_banner(), file=sys.stderr)

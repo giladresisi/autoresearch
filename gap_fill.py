@@ -37,6 +37,25 @@ def check_ib_reachable() -> None:
         sys.exit(1)
 
 
+def check_rollover_not_pending() -> None:
+    """Refuse to fetch while a quarterly roll is pending. Exits the process if one is.
+
+    This is the single chokepoint for IB backfill: `trade.py gap-fill` uses it AND so does
+    `orchestrator.main`'s pre-session check, so blocking here stops the offline path and the
+    production startup — and therefore the live realtime subscription, which only opens after
+    startup gets past this point. Exits rather than warns, for the same reason
+    check_ib_reachable does: a warning would be scrolled past and the corruption is silent.
+    """
+    try:
+        from scripts.rollover_prep import rollover_block_reason
+        reason = rollover_block_reason()
+    except Exception:
+        return
+    if reason:
+        print(reason, flush=True)
+        sys.exit(1)
+
+
 def gap_fill_until_now(
     bar_data_dir: Path | None = None,
     *,
@@ -56,6 +75,8 @@ def gap_fill_until_now(
     Skips gracefully (no source constructed) when MNQ_CONID/MES_CONID are absent.
     """
     bar_data_dir = bar_data_dir or paths.general_live_dir()
+
+    check_rollover_not_pending()
 
     if check_reachable:
         check_ib_reachable()

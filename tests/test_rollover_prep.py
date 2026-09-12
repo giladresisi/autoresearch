@@ -7,6 +7,7 @@ Every test runs under conftest's `_isolate_global_state`, so paths.general_main_
 general_live_dir() point into tmp_path — no test can touch the real ledger or global.json.
 """
 import json
+import os
 
 import pandas as pd
 import pytest
@@ -81,6 +82,50 @@ def test_already_rolled_when_ledger_advanced_but_env_did_not():
 
 def test_missing_env_prep_date_is_not_due():
     assert rp.rollover_status(LEDGER_PRE_ROLL, None, today="2026-09-12")["due"] is False
+
+
+# ---------------------------------------------------------------------------
+# today_str — the due-check must key off the CME session date, not a wall clock
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("et_now,expected,why", [
+    ("2026-09-11 10:00", "2026-09-11", "mid-session Friday: last old-contract session still open"),
+    ("2026-09-11 16:59", "2026-09-11", "Friday close: session not yet rolled over"),
+    ("2026-09-11 18:00", "2026-09-12", "after the 17:00 ET close: the roll is ready"),
+    ("2026-09-11 23:11", "2026-09-12", "Friday night ET = Saturday in Bangkok"),
+    ("2026-09-12 09:00", "2026-09-12", "Saturday morning ET"),
+])
+def test_today_str_tracks_the_cme_session_date(monkeypatch, et_now, expected, why):
+    """The machine clock is Asia/Bangkok, whose date rolls at 11:00 ET — mid-session. A bare
+    ET date has the opposite flaw, still reading Friday late Friday night. Only the CME
+    session date advances exactly when the old contract's last session has closed."""
+    import datetime as _dt
+    import session_times
+    et = _dt.datetime.fromisoformat(et_now).replace(tzinfo=session_times._ET)
+
+    class _FrozenDatetime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return et.astimezone(tz) if tz else et
+
+    monkeypatch.setattr(session_times.datetime, "datetime", _FrozenDatetime)
+    assert rp.today_str() == expected, why
+
+
+def test_prep_date_is_not_due_while_the_last_old_session_is_still_open(monkeypatch):
+    """Regression: keying off the Bangkok wall clock made the roll come due at 11:00 ET
+    Friday — with the old contract's final session still trading."""
+    import datetime as _dt
+    import session_times
+    et = _dt.datetime(2026, 9, 11, 12, 0, tzinfo=session_times._ET)   # 00:00 Sat in Bangkok
+
+    class _FrozenDatetime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return et.astimezone(tz) if tz else et
+
+    monkeypatch.setattr(session_times.datetime, "datetime", _FrozenDatetime)
+    assert rp.rollover_status(LEDGER_PRE_ROLL, "2026-09-12", rp.today_str())["due"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -188,40 +233,14 @@ def test_state_roundtrip_and_scoping_to_the_prep_date():
 # .env rewrite
 # ---------------------------------------------------------------------------
 
-def test_update_env_rewrites_conids_and_prep_date_only(tmp_path, monkeypatch):
-    env = tmp_path / ".env"
-    env.write_text(
-        "IB_PORT=4002\n"
-        "MNQ_CONID=793356225   # MNQU6 — September 2026, expires 2026-09-18\n"
-        "MES_CONID=793356217   # MESU6 — September 2026, expires 2026-09-18\n"
-        "ROLLOVER_PREP_DATE=2026-09-12\n"
-        "PMT_FILLS_URL=https://example.invalid/fills\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(rp, "env_path", lambda: env)
-    rp.update_env({"mnq": 111, "mes": 222}, "2026-12-18", "2026-12-12",
-                  {"mnq": 793356225, "mes": 793356217}, "2026-09-18", "2026-09-12")
-
-    text = env.read_text(encoding="utf-8")
-    assert "MNQ_CONID=111" in text and "MES_CONID=222" in text
-    assert "ROLLOVER_PREP_DATE=2026-12-12" in text
-    assert "MNQZ6" in text and "rolled from MNQU6/793356225" in text
-    # Untouched lines survive verbatim.
-    assert "IB_PORT=4002" in text
-    assert "PMT_FILLS_URL=https://example.invalid/fills" in text
-    # Old values are gone.
-    assert "793356225\n" not in text.replace("rolled from MNQU6/793356225", "")
-    assert (tmp_path / ".env.preroll.bak").exists()
-
-
 # ---------------------------------------------------------------------------
 # Preflight — refuses to roll before gap-fill + promote have run
 # ---------------------------------------------------------------------------
 
-def _write_parquets(directory, last_ts):
+def _write_parquets(directory, last_ts, close=1.5):
     idx = pd.date_range(end=last_ts, periods=3, freq="1min", tz="America/New_York")
-    df = pd.DataFrame({"Open": 1.0, "High": 2.0, "Low": 0.5, "Close": 1.5, "Volume": 1},
-                      index=idx)
+    df = pd.DataFrame({"Open": close, "High": close + 1, "Low": close - 1, "Close": close,
+                       "Volume": 1}, index=idx)
     directory.mkdir(parents=True, exist_ok=True)
     for name in rp.PARQUET_NAMES:
         df.to_parquet(directory / name)
@@ -261,6 +280,266 @@ def test_preflight_refuses_when_already_rolled():
     with pytest.raises(RuntimeError, match="Refusing to roll"):
         rp._preflight({"due": False, "already_rolled": True,
                        "prep_date": "2026-09-12", "reason": "already covered"})
+
+
+# ---------------------------------------------------------------------------
+# The gate: blocks IB fetching only once the old era is frozen
+# ---------------------------------------------------------------------------
+
+def _set_env_prep_date(monkeypatch, value="2026-09-12"):
+    monkeypatch.setattr(rp, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ROLLOVER_PREP_DATE", value)
+
+
+def test_gate_does_not_mutate_the_environment(monkeypatch, tmp_path):
+    """Regression: the gate called load_dotenv(), so merely ASKING whether a roll was due
+    injected the whole .env into the process — silently restoring conids a caller had
+    deliberately unset, and leaking real config into everything that ran after it."""
+    env = tmp_path / ".env"
+    env.write_text("MNQ_CONID=793356225\nMES_CONID=793356217\n"
+                   "ROLLOVER_PREP_DATE=2026-09-12\nSECRET=leaked\n", encoding="utf-8")
+    monkeypatch.setattr(rp, "env_path", lambda: env)
+    monkeypatch.delenv("MNQ_CONID", raising=False)
+    monkeypatch.delenv("MES_CONID", raising=False)
+    monkeypatch.delenv("ROLLOVER_PREP_DATE", raising=False)
+    monkeypatch.delenv("SECRET", raising=False)
+
+    rp.write_ledger(LEDGER_PRE_ROLL)
+    rp.rollover_block_reason(today="2026-09-12")
+    rp.due_banner(today="2026-09-12")
+
+    for key in ("MNQ_CONID", "MES_CONID", "ROLLOVER_PREP_DATE", "SECRET"):
+        assert key not in os.environ, f"{key} leaked into os.environ"
+
+
+def test_read_env_value_prefers_the_environment_then_falls_back_to_the_file(monkeypatch, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("ROLLOVER_PREP_DATE=2026-09-12\nMNQ_CONID=793356225   # MNQU6 comment\n",
+                   encoding="utf-8")
+    monkeypatch.setattr(rp, "env_path", lambda: env)
+    monkeypatch.delenv("ROLLOVER_PREP_DATE", raising=False)
+    monkeypatch.delenv("MNQ_CONID", raising=False)
+    assert rp.read_env_value("ROLLOVER_PREP_DATE") == "2026-09-12"
+    assert rp.read_env_value("MNQ_CONID") == "793356225"      # trailing comment stripped
+    assert rp.read_env_value("NOT_PRESENT") is None
+    monkeypatch.setenv("ROLLOVER_PREP_DATE", "2026-12-12")
+    assert rp.read_env_value("ROLLOVER_PREP_DATE") == "2026-12-12"
+
+
+def test_gate_open_before_the_prep_date(monkeypatch):
+    import paths
+    _set_env_prep_date(monkeypatch)
+    rp.write_ledger(LEDGER_PRE_ROLL)
+    _write_parquets(paths.general_live_dir(), "2026-09-11 16:59")
+    _write_parquets(paths.general_main_dir() / "2026-09", "2026-09-11 16:59")
+    assert rp.rollover_block_reason(today="2026-09-11") is None
+
+
+def test_gate_open_in_phase_a_so_the_old_conid_gapfill_can_run(monkeypatch):
+    """Due, but main is behind live — the old-conid gap-fill is the required next step."""
+    import paths
+    _set_env_prep_date(monkeypatch)
+    rp.write_ledger(LEDGER_PRE_ROLL)
+    _write_parquets(paths.general_live_dir(), "2026-09-10 11:35")
+    _write_parquets(paths.general_main_dir() / "2026-09", "2026-09-04 09:59")
+    assert rp.rollover_block_reason(today="2026-09-12") is None
+
+
+def test_gate_blocks_in_phase_b_once_gapfill_and_promote_are_done(monkeypatch):
+    import paths
+    _set_env_prep_date(monkeypatch)
+    rp.write_ledger(LEDGER_PRE_ROLL)
+    _write_parquets(paths.general_live_dir(), "2026-09-11 16:59")
+    _write_parquets(paths.general_main_dir() / "2026-09", "2026-09-11 16:59")
+    reason = rp.rollover_block_reason(today="2026-09-12")
+    assert reason is not None and "ROLLOVER PENDING" in reason
+
+
+def test_gate_reopens_once_the_ledger_row_lands(monkeypatch):
+    """Completing the roll must reopen the gate by itself — no separate approval flag."""
+    import paths
+    _set_env_prep_date(monkeypatch)
+    rp.write_ledger(LEDGER_PRE_ROLL)
+    _write_parquets(paths.general_live_dir(), "2026-09-11 16:59")
+    _write_parquets(paths.general_main_dir() / "2026-09", "2026-09-11 16:59")
+    assert rp.rollover_block_reason(today="2026-09-12") is not None
+
+    row = rp.build_ledger_row("2026-09-12", "2026-12-18", {"mnq": 299.75, "mes": 67.75},
+                              {"mnq": 793356225, "mes": 793356217},
+                              {"mnq": 815824267, "mes": 815824257})
+    rp.write_ledger(rp.prepend_row(rp.load_ledger(), row))
+    assert rp.rollover_block_reason(today="2026-09-12") is None
+
+
+# ---------------------------------------------------------------------------
+# .env verification — a mistaken "yes" must not get through
+# ---------------------------------------------------------------------------
+
+def test_verify_env_conids_passes_when_env_matches(monkeypatch):
+    monkeypatch.setenv("MNQ_CONID", "815824267")
+    monkeypatch.setenv("MES_CONID", "815824257")
+    rp.verify_env_conids({"mnq": 815824267, "mes": 815824257}, "2026-12-18")
+
+
+def test_verify_env_conids_refuses_when_env_still_names_the_old_contract(monkeypatch):
+    """The operator said they updated .env but did not — refuse before anything is shifted."""
+    monkeypatch.setenv("MNQ_CONID", "793356225")
+    monkeypatch.setenv("MES_CONID", "793356217")
+    with pytest.raises(RuntimeError) as exc:
+        rp.verify_env_conids({"mnq": 815824267, "mes": 815824257}, "2026-12-18")
+    msg = str(exc.value)
+    assert "MNQ_CONID=815824267" in msg and "MES_CONID=815824257" in msg
+    assert "ROLLOVER_PREP_DATE" in msg
+
+
+def test_verify_env_conids_refuses_a_half_done_edit(monkeypatch):
+    monkeypatch.setenv("MNQ_CONID", "815824267")
+    monkeypatch.setenv("MES_CONID", "793356217")
+    with pytest.raises(RuntimeError, match="MES_CONID is currently 793356217"):
+        rp.verify_env_conids({"mnq": 815824267, "mes": 815824257}, "2026-12-18")
+
+
+def test_old_conids_come_from_the_ledger_not_env(monkeypatch):
+    """.env names the NEW contract by the time the roll runs, so the old numbers must not
+    be read from there."""
+    monkeypatch.setenv("MNQ_CONID", "815824267")
+    monkeypatch.setenv("MES_CONID", "815824257")
+    rows = [{"prep_date": "2026-06-13", "subfolder": "2026-09", "expiry": "2026-09-18",
+             "mnq": {"old_conid": 770561201, "new_conid": 793356225, "gap": 293.25},
+             "mes": {"old_conid": 770561194, "new_conid": 793356217, "gap": 62.5}}]
+    assert rp._old_conids_from_ledger(rows) == {"mnq": 793356225, "mes": 793356217}
+
+
+def test_old_conids_from_ledger_raises_on_a_row_without_them():
+    with pytest.raises(RuntimeError, match="no mnq.new_conid"):
+        rp._old_conids_from_ledger([{"prep_date": "2026-06-13", "subfolder": "2026-09"}])
+
+
+def test_update_env_prep_date_leaves_conids_alone(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text("MNQ_CONID=815824267   # MNQZ6\nROLLOVER_PREP_DATE=2026-09-12\nX=1\n",
+                   encoding="utf-8")
+    monkeypatch.setattr(rp, "env_path", lambda: env)
+    rp.update_env_prep_date("2026-12-12")
+    text = env.read_text(encoding="utf-8")
+    assert "ROLLOVER_PREP_DATE=2026-12-12" in text
+    assert "MNQ_CONID=815824267   # MNQZ6" in text
+    assert "X=1" in text
+
+
+# ---------------------------------------------------------------------------
+# Gap sanity guard — protects the unattended path
+# ---------------------------------------------------------------------------
+
+def test_sanity_check_accepts_a_realistic_carry_gap():
+    import paths
+    _write_parquets(paths.general_live_dir(), "2026-09-11 16:59", close=29000.0)
+    rp._sanity_check_gaps({"mnq": 299.75, "mes": 67.75}, LEDGER_PRE_ROLL)
+
+
+def test_sanity_check_rejects_a_zero_gap():
+    """Zero almost always means both legs resolved to the same contract."""
+    with pytest.raises(RuntimeError, match="same contract"):
+        rp._sanity_check_gaps({"mnq": 0.0, "mes": 67.75}, LEDGER_PRE_ROLL)
+
+
+def test_sanity_check_rejects_an_implausibly_large_gap():
+    import paths
+    _write_parquets(paths.general_live_dir(), "2026-09-11 16:59", close=29000.0)
+    with pytest.raises(RuntimeError, match="implausible"):
+        rp._sanity_check_gaps({"mnq": 5000.0, "mes": 67.75}, LEDGER_PRE_ROLL)
+
+
+# ---------------------------------------------------------------------------
+# measure_gap must anchor at the data's SEAM, not the latest shared bar
+# ---------------------------------------------------------------------------
+
+class _FakeIB:
+    """Returns canned 1m close series per conid, mimicking _fetch_recent_1m's output."""
+    def __init__(self, series_by_conid):
+        self.series = series_by_conid
+        self.days_requested = None
+
+
+def _series(start, periods, value, step=0.0):
+    idx = pd.date_range(start, periods=periods, freq="1min", tz="America/New_York")
+    return pd.Series([value + i * step for i in range(periods)], index=idx)
+
+
+def _patch_fetch(monkeypatch, series_by_conid):
+    def fake(ib, conid, days=4):
+        ib.days_requested = days
+        return series_by_conid[conid]
+    monkeypatch.setattr(rp, "_fetch_recent_1m", fake)
+
+
+def test_measure_gap_anchors_at_the_seam_not_the_latest_common_bar(monkeypatch):
+    """The old contract trades on past the prep date, so both legs resume quoting while the
+    gate holds the parquets frozen. Anchoring on the latest shared bar would measure the gap
+    at the wrong moment and leave a permanent carry-drift error at the join."""
+    seam = pd.Timestamp("2026-09-11 16:59", tz="America/New_York")
+    # Both contracts keep printing for another two sessions past the seam, at a drifting gap.
+    old = _series("2026-09-11 16:55", 200, 29000.0)
+    new = _series("2026-09-11 16:55", 200, 29299.75)
+    new.iloc[5:] = new.iloc[5:] + 12.0       # later bars carry a different (drifted) gap
+    _patch_fetch(monkeypatch, {1: old, 2: new})
+
+    gap, boundary = rp.measure_gap(_FakeIB({}), 1, 2, seam)
+    assert boundary == seam
+    assert gap == 299.75                      # the seam's gap, not the drifted later one
+
+
+def test_measure_gap_falls_back_to_the_latest_common_bar_at_or_before_the_seam(monkeypatch):
+    seam = pd.Timestamp("2026-09-11 16:59", tz="America/New_York")
+    old = _series("2026-09-11 16:50", 5, 29000.0)     # ends 16:54, before the seam
+    new = _series("2026-09-11 16:50", 5, 29299.75)
+    _patch_fetch(monkeypatch, {1: old, 2: new})
+
+    gap, boundary = rp.measure_gap(_FakeIB({}), 1, 2, seam)
+    assert boundary == pd.Timestamp("2026-09-11 16:54", tz="America/New_York")
+    assert gap == 299.75
+
+
+def test_measure_gap_refuses_when_the_nearest_bar_is_far_from_the_seam(monkeypatch):
+    """Rather than quietly anchoring days away from the join."""
+    seam = pd.Timestamp("2026-09-11 16:59", tz="America/New_York")
+    old = _series("2026-09-08 10:00", 5, 29000.0)
+    new = _series("2026-09-08 10:00", 5, 29299.75)
+    _patch_fetch(monkeypatch, {1: old, 2: new})
+
+    with pytest.raises(RuntimeError, match="beyond the .* tolerance"):
+        rp.measure_gap(_FakeIB({}), 1, 2, seam)
+
+
+def test_measure_gap_refuses_when_no_common_bar_precedes_the_seam(monkeypatch):
+    seam = pd.Timestamp("2026-09-11 16:59", tz="America/New_York")
+    old = _series("2026-09-14 10:00", 5, 29000.0)     # everything is AFTER the seam
+    new = _series("2026-09-14 10:00", 5, 29299.75)
+    _patch_fetch(monkeypatch, {1: old, 2: new})
+
+    with pytest.raises(RuntimeError, match="No common 1m bar at or before the seam"):
+        rp.measure_gap(_FakeIB({}), 1, 2, seam)
+
+
+def test_measure_gap_widens_the_lookback_for_a_delayed_roll(monkeypatch):
+    """A roll that slips must still reach back to the seam, capped at IB's 1m limit."""
+    now = pd.Timestamp.now(tz="America/New_York")
+    seam = now - pd.Timedelta(days=6)
+    idx = pd.date_range(seam - pd.Timedelta(minutes=2), periods=3, freq="1min",
+                        tz="America/New_York")
+    old = pd.Series([29000.0] * 3, index=idx)
+    new = pd.Series([29299.75] * 3, index=idx)
+    ib = _FakeIB({})
+    _patch_fetch(monkeypatch, {1: old, 2: new})
+
+    rp.measure_gap(ib, 1, 2, seam)
+    assert 8 <= ib.days_requested <= rp.MAX_1M_LOOKBACK_DAYS
+
+
+def test_seam_anchor_reads_the_live_parquet_tail():
+    import paths
+    _write_parquets(paths.general_live_dir(), "2026-09-11 16:59")
+    assert rp.seam_anchor("MNQ") == pd.Timestamp("2026-09-11 16:59", tz="America/New_York")
 
 
 # ---------------------------------------------------------------------------

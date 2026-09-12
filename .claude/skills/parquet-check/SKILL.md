@@ -132,6 +132,8 @@ Always judge success from `merge_success` / `repair_success`, not the exit code:
   guidance above; check the `reason` field).
 - **`exit_code = 3`**: script error; read `check_session_stderr.log`, report the raw
   error to the user.
+- **`exit_code = 4`**: **blocked — a quarterly contract roll is pending.** Nothing was read from
+  IB and nothing was changed. Go to the rollover-prep section and complete the roll.
 
 ## Step 3 — LLM severity judgment for ambiguous cases
 
@@ -170,12 +172,48 @@ old-contract data under the stale era.
 `trade.py gap-fill` and `trade.py promote` print a **CONTRACT ROLLOVER DUE** banner in this
 situation. If you see it, do not stop at promote.
 
+### The gate — IB fetching stops until the roll completes
+
+Once the prep date has passed **and** the old contract's final session is gap-filled and
+promoted, every IB-fetch path refuses to run:
+
+- `gap_fill.gap_fill_until_now` — covers `trade.py gap-fill` **and** `orchestrator.main`'s
+  pre-session backfill, so production startup stops too (and with it the live realtime
+  subscription, which only opens after startup passes this point). Exits 1.
+- `scripts/check_session_parquets.py` — exits **4** with `rollover_blocked: true` in the report.
+  `--dry-run` is exempt: it reads nothing from IB and is the safe way to inspect state.
+
+The window this closes: between the operator editing `.env` and the roll finishing, `.env` names
+the new contract while the parquets are still on the old scale. Any fetch in that window splices
+new-contract prices onto old-contract history. The gate means nothing *acts* in that window —
+notably the Sunday 18:00 ET orchestrator restart.
+
+The gate keys off the same preflight the roll uses, so it has two phases: **not** blocked while
+the old-conid gap-fill is still the required next step, blocked once live and main agree.
+Completing the roll writes the ledger row, which makes the status not-due — so the gate reopens
+by construction, with no separate approval flag that can go stale.
+
 ### Do it with the CLI
 
 ```powershell
-uv run python trade.py rollover-prep --dry-run   # resolve conids + measure gaps, change nothing
-uv run python trade.py rollover-prep             # execute
+uv run python trade.py rollover-prep --dry-run   # prints the new conids + gaps, changes nothing
+# operator edits the two conid lines in .env      (see below)
+uv run python trade.py rollover-prep             # verifies .env, then executes
 ```
+
+**Who owns what in `.env`:** the operator sets `MNQ_CONID` / `MES_CONID`; the code advances
+`ROLLOVER_PREP_DATE` on completion, so that date can never claim a roll that did not finish.
+Do not edit `ROLLOVER_PREP_DATE` by hand, and do not edit the conids for the agent.
+
+`rollover-prep` **verifies** `.env` names the expected new front month before anything is
+shifted, and refuses with the exact lines to set if not. This is deliberate: an operator's "yes
+I updated it" that did not land would shift the parquets onto the new scale while every later
+fetch still returned old-contract prices — the same discontinuity, mirrored. Asking is the
+workflow; verifying is what makes it safe.
+
+It also rejects an implausible measured gap (zero, or more than 3% of the price level) before
+applying it — the shift touches every bar ever recorded, and nobody is reading the number when
+the roll runs unattended.
 
 `scripts/rollover_prep.py` performs every step below in the correct order, refuses to run when
 the preconditions are not met, and records per-step state in `<main>/.rollover_prep_state.json`
@@ -205,9 +243,16 @@ Steps, in execution order:
    contract at/near expiry, but the prep date is the Saturday *before* expiry, so on prep day
    `ContFuture` still resolves to the contract you are rolling away from. Next prep date = the
    **Saturday before** the new expiry.
-2. **Measure the per-symbol gap** = (new-front close − current-conid close) at their last common
-   1m bar (the old contract's last-session close). Fetch with `endDateTime=''` — IB rejects an
-   explicit `endDateTime` for CME equity-index futures 1m bars (error 162 / 10339).
+2. **Measure the per-symbol gap** = (new-front close − current-conid close) at the data's
+   **seam** — the last bar in the live 1m parquet, i.e. the old contract's final session close.
+   Anchor there, NOT at the latest bar the two contracts happen to share: the old contract keeps
+   trading until its own expiry (a week past the prep date), so both legs resume quoting at the
+   next session open while the gate holds the parquets frozen. A roll delayed even one session
+   would otherwise anchor the shift away from the join and bake in the carry drift between those
+   two moments. The code takes the latest common bar at or before the seam and refuses beyond a
+   1-day tolerance. Fetch with `endDateTime=''` — IB rejects an explicit `endDateTime` for CME
+   equity-index futures 1m bars (error 162 / 10339) — widening the lookback for a delayed roll,
+   capped at IB's 14-day 1m limit.
 3. **Back-adjust the LIVE parquets** in place: `OHLC += gap` per symbol (volume untouched),
    shifting old-contract history onto the new contract's price scale. Leave all `main/`
    subfolders raw/as-is — only the *live* parquets shift.
@@ -228,9 +273,10 @@ Steps, in execution order:
    no error, and every reader keeps resolving to the previous era.
    `{"prep_date":"<this prep date>","subfolder":"<new YYYY-MM>","expiry":"<new expiry>",`
    `"mnq":{old_conid,new_conid,gap},"mes":{...}}`.
-7. **Update `.env` last**: `MNQ_CONID`/`MES_CONID` → new conids, `ROLLOVER_PREP_DATE` → next prep
-   date. Last so that a failure at any earlier step leaves `.env` naming the OLD conids, and a
-   re-run measures against the same contract instead of splicing new prices onto old history.
+7. **Advance `ROLLOVER_PREP_DATE` last** — the completion marker, written only after the
+   parquets and ledger are in place. The conid lines were the operator's edit and were verified
+   before step 3. Note the old conids are read from the **ledger's newest row** (`<sym>.new_conid`),
+   not `.env`: by the time the roll runs, `.env` names the new contract and the old numbers are gone.
 8. **Notify the user**: what rolled, gaps, new conids, new subfolder, next prep date. The next
    orchestrator restart gap-fills forward with the new conids; `daily` re-derives levels from
    the now-shifted data.
