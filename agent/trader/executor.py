@@ -57,6 +57,8 @@ from agent.trader.retrace import RetraceGate
 from agent.trader.takeover import deepest_penetrated, resolve_cooldown_end
 from agent.trader.records import DecisionRecorder
 from agent.trader.target import select_target
+from agent.trader.arbiter import Arbiter
+from agent.trader.market_mechanisms import MarketMechanisms
 
 # l2-mechanisms.md §9 starting values.
 SETTLE_UNTIL_SECONDS = 30            # settle window ends at 09:30:30
@@ -131,6 +133,12 @@ class Executor:
         self._target_price = None
         self._target_level = None
         self._target_since = None
+        # §6/§7, finally reachable. Built here rather than lazily so `state()` is
+        # inspectable from the first bar; §7's own machine is seeded on the first bar
+        # that can measure its anchor (see `MarketMechanisms.seed_sec7`).
+        self._market = MarketMechanisms(
+            self._plan.get("direction"), arm_ts,
+            max_attempts=int(self._plan.get("max_attempts") or MAX_ATTEMPTS))
         self._emitted: set = set()
         # One-shot: the falsifier is recorded the FIRST time it fires and never again.
         # It is not a state change, so re-recording it every bar would bury the session.
@@ -318,6 +326,14 @@ class Executor:
         except Exception as exc:
             self._state["retrace_error"] = f"{type(exc).__name__}: {exc}"
 
+        # 3c. §6's TICK path. Clause 1 makes intra-bar ordering load-bearing — the
+        # episode begins at the tick that first enters the gap and the runaway test runs
+        # only over ticks at or after it — so this cannot wait for the bar close.
+        try:
+            self._drive_market_mechanisms(now, mnq, bar=None)
+        except Exception as exc:
+            self._state["market_mech_error"] = f"{type(exc).__name__}: {exc}"
+
         if not bar_complete:
             return                                    # per-second path ends here
 
@@ -327,6 +343,15 @@ class Executor:
             self._rebind_and_guard(now)
         except Exception:
             pass
+
+        # 4b. §7 and §6's close verdict, AFTER the re-bind so `usable_5m_gaps` and the
+        # resting slot reflect this bar. §6 is disarmed whenever a usable 5m gap exists
+        # (`Arbiter.sec6_armed`), which is what keeps it from coexisting with a resting
+        # 5m stop-entry.
+        try:
+            self._drive_market_mechanisms(now, mnq, bar=self._completed_1m(mnq, now))
+        except Exception as exc:
+            self._state["market_mech_error"] = f"{type(exc).__name__}: {exc}"
 
     # -- internals -------------------------------------------------------------- #
 
@@ -985,6 +1010,13 @@ class Executor:
         """
         self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
         self._plan.setdefault("max_attempts", MAX_ATTEMPTS)
+        # The SHARED per-plan budget, tallied per mechanism for the artifact only
+        # (`Arbiter.spent_by` is "RECORDED, never scored"). Spent at the same instant as
+        # the plan's own counter so the two can never disagree.
+        try:
+            self._market.arbiter.spend(self._state.get("mechanism"))
+        except Exception:
+            pass
 
         failed_id = event.get("artifact_id")
         if not failed_id:
@@ -1371,6 +1403,110 @@ class Executor:
                     stop=float(stop), artifact_id=gap.id, placed_at=now))
             else:
                 self._enter(now, trigger, stop, gap.id)
+
+    def _drive_market_mechanisms(self, now, mnq, *, bar) -> None:
+        """§6 and §7: drive, arbitrate, and enter by MARKET if one fires.
+
+        `bar=None` is the per-second path (§6's tick clauses only); a bar is the
+        bar-close path (§7's machine plus §6's close verdict).
+
+        Preconditions checked here rather than inside the machines, because they are the
+        Executor's knowledge: nothing fires while a position is open (one position at a
+        time), during the settle window, inside a stop-out cooldown (§6.1 clause 3, which
+        ALSO resets every gap cycle), or with the shared attempt budget spent.
+        """
+        if not self._state["plan_alive"] or self._sim.position is not None:
+            return
+        if self._state["in_settle"] or not len(mnq):
+            return
+        if self._in_cooldown(now):
+            # Clause 3: no cycle may complete while the cooldown is in force, and every
+            # gap cycle resets across it.
+            self._market.reset_cycles()
+            return
+        cap = self._plan.get("max_attempts")
+        if cap is not None and int(self._plan.get("attempts_used") or 0) >= int(cap):
+            return
+
+        price = self._state.get("now_price")
+        self._market.seed_sec7(self._since_arm(mnq))
+
+        # §6's arming is the arbitration form of its own precondition.
+        usable = self.usable_5m_gaps(now, price)
+        armed6 = Arbiter.sec6_armed(usable_5m_gaps=len(usable or ()))
+        self._market.sync_episodes(
+            self._gaps_on(FALLBACK_TF, now) if armed6 else (), armed=armed6)
+
+        fires = []
+        if bar is None:
+            fires.append(("fvg_1m_post_extreme",
+                          self._market.sec6_on_tick(now, price,
+                                                    bar_open=self._bar_open_of(mnq),
+                                                    mid=self._market_price())))
+        else:
+            fires.append(("extreme_reject_close",
+                          self._market.sec7_on_bar_close(now, bar)))
+            fires.append(("fvg_1m_post_extreme",
+                          self._market.sec6_on_bar_close(now, bar,
+                                                         mid=self._market_price())))
+        fire = self._market.pick(fires)
+        if fire is None:
+            return
+        self._enter_by_market(now, fire)
+
+    @staticmethod
+    def _completed_1m(mnq, now):
+        """The 1m bar that just COMPLETED, or None.
+
+        §6's close verdict and §7 are state machines over completed 1m bars — both
+        compare the bar's Close against its Open or against a level, and any later
+        bar-close mechanism will too. The driver hands this Executor 1s bars, and
+        the wiring's first cut passed
+        `self._last_row`, the last 1s row: on a one-second bar Open and Close are the same
+        print or one tick apart, so every colour test was noise and §7 could not fire at
+        all. Left-labelled, so the minute that just closed at `now` carries label
+        `now - 1min`.
+        """
+        try:
+            if mnq is None or not len(mnq):
+                return None
+            label = now.floor("1min") - pd.Timedelta(minutes=1)
+            seg = mnq[(mnq.index >= label) & (mnq.index < label + pd.Timedelta(minutes=1))]
+            if not len(seg):
+                return None
+            return pd.Series({"Open": float(seg.iloc[0]["Open"]),
+                              "High": float(seg["High"].max()),
+                              "Low": float(seg["Low"].min()),
+                              "Close": float(seg.iloc[-1]["Close"])}, name=label)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _bar_open_of(mnq):
+        """The in-progress minute's open — §6.1 clause 2's beyond-open condition."""
+        try:
+            return float(mnq.iloc[-1]["Open"])
+        except Exception:
+            return None
+
+    def _enter_by_market(self, now, fire: dict) -> None:
+        """A §6/§7 market entry. Same lifecycle as a resting fill: record, pick the
+        target at the fill, spend one attempt from the SHARED budget."""
+        mechanism = fire.get("mechanism")
+        self._state["mechanism"] = mechanism
+        ev = self._sim.fill_market(now, direction=fire.get("direction"),
+                                   price=float(fire["price"]),
+                                   stop=float(fire["stop"]),
+                                   artifact_id=fire.get("gap_id") or mechanism)
+        self._rec.order_event(now=now, plan_id=self._plan.get("plan_id"),
+                              mechanism=mechanism,
+                              artifact_label=self._label_for(ev.get("artifact_id")),
+                              **ev)
+        self._set_target_on_fill(now)
+        # NO attempt is spent HERE. The budget counts STOP-OUTS, not entries
+        # (`_on_stop_out`, and `order_sim`'s own "the attempt counter counts stop-outs"),
+        # so incrementing on the fill double-counted every §6/§7 trade that then stopped
+        # out — 09-03 read `attempts_used: 3` against two trades before this was fixed.
 
     def _entry_mechanism(self):
         for name in ("fvg_negation_reversal", "fvg_return_continuation"):
