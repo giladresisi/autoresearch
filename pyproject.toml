@@ -30,7 +30,8 @@ dev = [
 [tool.pytest.ini_options]
 # Exclude live integration tests from standard runs; use -m integration to opt in explicitly.
 # 60 s ceiling prevents any single test from hanging the suite indefinitely.
-addopts = "--timeout=60 -m 'not integration'"
+addopts = "--timeout=60 -m 'not integration and not slow'"
 markers = [
     "integration: marks tests as integration tests requiring live network access (deselect with '-m not integration')",
+    "slow: replays a real 1s session tape; minutes, not seconds (run with '-m slow')",
 ]

@@ -26,7 +26,7 @@ TZ = "America/New_York"
 
 # See test_gate_replay.py: the project's 60 s default is sized for unit tests, and the
 # module fixture below replays a real session.
-pytestmark = pytest.mark.timeout(900)
+pytestmark = [pytest.mark.timeout(900), pytest.mark.slow]
 
 
 def _load(name):

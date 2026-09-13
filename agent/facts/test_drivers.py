@@ -50,6 +50,7 @@ def test_batch_is_price_unbounded_within_its_time_window():
     assert max(prices) - min(prices) > 0
 
 
+@pytest.mark.slow
 def test_incremental_matches_batch_for_the_same_window():
     """THE seam invariant: a fact near the boundary is identical from either producer.
 

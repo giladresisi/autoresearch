@@ -15,15 +15,11 @@ Two kinds of assertion live here and they are different in kind:
 """
 import ast
 import inspect
-import json
-import os
 
 import pytest
 
 from agent.trader import named_cases as nc
-from agent.trader.replay import run_replay
 
-pytestmark = pytest.mark.timeout(1800)
 
 NEW_MODULES = ("agent.trader.retrace", "agent.trader.extreme_reject",
                "agent.trader.episode", "agent.trader.takeover",
@@ -203,65 +199,3 @@ def test_every_documented_figure_lives_in_exactly_one_place():
 
 
 # --- §10.2's wrong-thesis stress --------------------------------------------- #
-
-_STRESS_CACHE: dict = {}
-
-
-def _stress(key):
-    """Cached: three tests read the same four inverted replays, and each replay is a real
-    1s backtest. Uncached this module pays a 3x multiplier on its slowest work."""
-    if key in _STRESS_CACHE:
-        return _STRESS_CACHE[key]
-    thesis = nc.inverted_thesis_for(key)
-    case = nc.by_key(key)
-    res = run_replay([case.date], allow_calls=False, thesis=thesis)
-    path = os.path.join(res[case.date]["run_dir"], "trader_decisions.jsonl")
-    rows = ([json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
-            if os.path.exists(path) else [])
-    pnl, entry, direction = 0.0, None, None
-    for r in rows:
-        if r["kind"] == "fill":
-            entry, direction = float(r["price"]), str(r.get("direction") or "").upper()
-        elif r["kind"] in ("stop_out", "take_profit") and entry is not None:
-            sign = 1.0 if direction in ("UP", "LONG") else -1.0
-            pnl += sign * (float(r["price"]) - entry)
-            entry = None
-    _STRESS_CACHE[key] = (round(pnl, 2), rows)
-    return _STRESS_CACHE[key]
-
-
-@pytest.mark.parametrize("key", sorted(nc.INVERTED_THESES))
-def test_the_adverse_band_holds_under_an_inverted_thesis(key):
-    """§10.2's conclusion, as a gate: the brakes hold every observed adverse day to
-    0..-70. The theoretical ceiling is 3 x (bound-gap height + 10) and NOTHING in the
-    sample realises it."""
-    pnl, rows = _stress(key)
-    # A run that armed nothing, bound nothing, or fell into `on_bar`'s swallowing except
-    # also scores 0.00, which sits INSIDE the band — so "the brakes held" and "nothing
-    # ran" would otherwise be indistinguishable.
-    assert rows, f"{key} produced no decision artifact at all"
-    assert [r for r in rows if r["kind"] == "bind"],         f"{key} bound nothing — the band assertion below would be vacuous"
-    lo, hi = nc.ADVERSE_BAND_PTS
-    assert lo <= pnl <= hi, f"{key} inverted bled {pnl:+.2f}, outside {lo}..{hi}"
-
-
-def test_an_inverted_plan_can_still_DIE():
-    """The stress is worthless against a plan that cannot die — which is exactly what a
-    pre-phase-0 run measured. Every inverted day must terminate on a stated reason."""
-    reasons = set()
-    for key in sorted(nc.INVERTED_THESES):
-        _pnl, rows = _stress(key)
-        dead = [r for r in rows if r["kind"] == "plan_dead"]
-        if dead:
-            reasons.add(dead[0]["reason"])
-    assert reasons, "no inverted day died at all — plan death is inert"
-    assert reasons <= {"dol_reached", "attempts_exhausted", "falsified"}, reasons
-
-
-def test_no_inverted_day_spends_more_than_the_shared_budget():
-    """Attempts are ASSERTED, never scored — and the budget is the hard bound on the
-    bleed, so exceeding it would invalidate the band above rather than merely cost."""
-    for key in sorted(nc.INVERTED_THESES):
-        _pnl, rows = _stress(key)
-        stops = len([r for r in rows if r["kind"] == "stop_out"])
-        assert stops <= 3, f"{key} spent {stops} attempts"

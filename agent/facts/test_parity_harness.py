@@ -11,6 +11,7 @@ def test_panel_dates_are_the_recorded_l1_set():
 
 
 @pytest.mark.timeout(900)
+@pytest.mark.slow
 def test_compare_at_returns_a_structured_diff():
     """Runs the real thing: two full 17-day `compute_facts` passes over the 1s
     parquets, ~60 s. The project-wide 60 s ceiling is raised for this ONE test —

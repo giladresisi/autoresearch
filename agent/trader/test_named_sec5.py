@@ -14,7 +14,7 @@ import pytest
 from agent.trader import named_cases as nc
 from agent.trader.replay import run_replay
 
-pytestmark = pytest.mark.timeout(1800)
+pytestmark = [pytest.mark.timeout(1800), pytest.mark.slow]
 
 
 def _decisions(entry):

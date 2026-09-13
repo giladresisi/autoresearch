@@ -51,6 +51,7 @@ def _synthetic_bars(days=20):
                          "Volume": 1.0}, index=idx)
 
 
+@pytest.mark.slow
 def test_assembler_produces_a_real_view_on_real_shaped_bars():
     from agent.facts.store import FactStore
     bars = {"MNQ": _synthetic_bars(), "MES": _synthetic_bars()}
@@ -71,6 +72,7 @@ def test_assembler_ignores_the_store_entirely():
     assert "store." not in src, "assemble_facts must not read the FactStore"
 
 
+@pytest.mark.slow
 def test_no_lookahead_bars_at_or_after_now_are_excluded():
     from agent.facts.store import FactStore
     bars = {"MNQ": _synthetic_bars(), "MES": _synthetic_bars()}

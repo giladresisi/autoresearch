@@ -20,7 +20,7 @@ import pytest
 from agent.trader import named_cases as nc
 from agent.trader.replay import run_replay
 
-pytestmark = pytest.mark.timeout(1800)
+pytestmark = [pytest.mark.timeout(1800), pytest.mark.slow]
 
 #: Every delta below resolves into these two adoptions and nothing else.
 BUFFER_TRIM = 4.00                # entry buffer 7 -> 3

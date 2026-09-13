@@ -7,7 +7,7 @@ import pytest
 from agent.trader.replay import run_replay
 
 DATE = "2026-08-13"
-pytestmark = pytest.mark.timeout(900)
+pytestmark = [pytest.mark.timeout(900), pytest.mark.slow]
 
 # 08-13 recorded: UP, DOL prev1_day_high 30001.5, touched 09:36:07.
 # §10.2 inversion: DOWN with a symmetric opposite-side DOL, and a falsifier price
