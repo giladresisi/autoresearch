@@ -13,7 +13,6 @@ results/
 queue/
 
 # Agent prompt files (generated per-session by launchers)
-CLAUDE.md
 AGENTS.md
 
 # Experimental code/artifacts
@@ -72,3 +71,25 @@ orchestrator.pid
 
 # Local regression notes
 regression.md
+
+# POC/blind-test working folder (slices, per-run facts, agent outputs) - never tracked
+agent-docs/strategy/poc/
+
+# Calibration sweep cut folders (regenerable facts + per-run agent outputs) - never tracked
+calibration/cuts/
+
+# L1 lifecycle bench run artifacts (plan 10; per-run lifecycles/decisions/scorecards) - never tracked
+agent/bench/runs/
+
+# Manual L1 thesis test run artifacts (regenerable per-run JSON + explanation markdown; the
+# harness script itself IS tracked) - never commit these
+manual-l1-thesis/*.json
+manual-l1-thesis/latest_explanation*.md
+
+# Cycle 5 position-policy sweep artifacts (plan 33). Regenerable from
+# `scripts/report_position_policy.py` and the study modules, and together they were 97%
+# of f4a5c44's 519k inserted lines (12.6 MB). The CONCLUSIONS drawn from them live in
+# `.agents/plans/33.cycle5-position-policy.md` §9 and the execution report; these are the
+# raw per-session rows behind those tables. Untracked, NOT deleted.
+.agents/rule-search/position_policy.json
+.agents/rule-search/position_policy_stop_width_sweep.json

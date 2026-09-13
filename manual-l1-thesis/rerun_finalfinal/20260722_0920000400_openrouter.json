@@ -1,0 +1,864 @@
+{
+  "boundary": "2026-07-22 09:20:00-04:00",
+  "backend": "openrouter",
+  "model": "anthropic/claude-haiku-4.5",
+  "verdict": "clean",
+  "fallback": false,
+  "retries": 1,
+  "thesis": {
+    "evidence": [
+      {
+        "criterion": "P5",
+        "asset": "MNQ",
+        "level": "MNQ 1hr 2026-07-22 01:00:00-04:00 bear",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "points": 1.5,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P5",
+        "asset": "MNQ",
+        "level": "MNQ 1hr 2026-07-22 02:00:00-04:00 bear",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "points": 1.5,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P5",
+        "asset": "MNQ",
+        "level": "MNQ 1hr 2026-07-22 07:00:00-04:00 bear",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "points": 1.5,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P5",
+        "asset": "MNQ",
+        "level": "MNQ 4hr 2026-07-21 22:00:00-04:00 bear",
+        "tier": "day",
+        "tf": "4h",
+        "direction": "accept",
+        "mature": true,
+        "points": 2.25,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P5",
+        "asset": "MES",
+        "level": "MES 1hr 2026-07-22 02:00:00-04:00 bear",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "points": 1.5,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P5",
+        "asset": "MES",
+        "level": "MES 1hr 2026-07-22 07:00:00-04:00 bear",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "points": 1.5,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MNQ",
+        "level": "daily_mid",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.0,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MES",
+        "level": "daily_mid",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.0,
+        "side": "DOWN",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P3",
+        "asset": "MES",
+        "level": "weekly_mid",
+        "tier": "week",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.5,
+        "side": "UP",
+        "mag_ratio": null,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P2",
+        "asset": "MNQ",
+        "level": "prev2_day_high",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "DOWN",
+        "mag_ratio": 2.361,
+        "mag_mult": 1.25
+      },
+      {
+        "criterion": "P2",
+        "asset": "MNQ",
+        "level": "prev2_day_high",
+        "tier": "day",
+        "tf": "4h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 1.6875,
+        "side": "DOWN",
+        "mag_ratio": 0.3654,
+        "mag_mult": 0.75
+      },
+      {
+        "criterion": "P2",
+        "asset": "MNQ",
+        "level": "prev3_day_high",
+        "tier": "day",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.0,
+        "side": "DOWN",
+        "mag_ratio": 2.7305,
+        "mag_mult": 1.25
+      },
+      {
+        "criterion": "P2",
+        "asset": "MNQ",
+        "level": "prev3_day_high",
+        "tier": "day",
+        "tf": "4h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 2.25,
+        "side": "DOWN",
+        "mag_ratio": 0.5205,
+        "mag_mult": 1.0
+      },
+      {
+        "criterion": "P1",
+        "asset": "MNQ",
+        "level": "london(cur)_low",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "accept",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.75,
+        "side": "DOWN",
+        "mag_ratio": 0.1243,
+        "mag_mult": 0.75
+      },
+      {
+        "criterion": "P1",
+        "asset": "MES",
+        "level": "london(cur)_low",
+        "tier": "session",
+        "tf": "1h",
+        "direction": "reject",
+        "mature": true,
+        "exhausted": false,
+        "points": 0.75,
+        "side": "UP",
+        "mag_ratio": 0.2644,
+        "mag_mult": 0.75
+      }
+    ],
+    "bias": "DOWN",
+    "regime": "HYBRID",
+    "dol_rationale": "prev1_day_low (D1 from the DOWN menu) is the nearest unswept day-tier support pool on the correct side; alternatives like prev1_week_low (D2, farther at 28408.25) and prev3_day_low (D3, same as prev1_week) exist but are deeper backups. prev1_day_low sits 379.25 pts away from current price (29079.25), offering a clear intraday target that aligns with the recent structural lows (london(cur)_low already depleted; prev4_day_low already swept). Choosing the nearest available eligible pool ensures a realistic near-term draw.",
+    "dol": {
+      "level": "prev1_day_low",
+      "price": 28700.0
+    },
+    "falsified_if_rationale": "Menu entry F1 (price_beyond(price=29239.0, side=above)) \u2014 the london(cur)_high. If price pushes back through and holds above london(cur)_high (only 160 pts above the current price), it signals a failure of the downside setup and a reversion to upside continuation; london(cur)_high is the immediate nearest resistance and thus the most responsive falsifier for this DOWN thesis without requiring a multi-close confirmation delay.",
+    "falsified_if": [
+      {
+        "type": "price_beyond",
+        "price": 29239.0,
+        "side": "above"
+      }
+    ],
+    "exhausted_if_rationale": "Menu entry X1 (price_beyond(price=28700.0, side=below)) \u2014 reaching the DOL. Once price closes or wicks below the prev1_day_low at 28700.0, the thesis's primary target is reached and the downside move from the high rejections is exhausted. This is the physical level crossing that ends the intended draw.",
+    "exhausted_if": [
+      {
+        "type": "price_beyond",
+        "price": 28700.0,
+        "side": "below"
+      }
+    ],
+    "confidence": "MEDIUM",
+    "recall": {
+      "events": [
+        {
+          "type": "n_closes_beyond",
+          "price": 29149.25,
+          "side": "above",
+          "tf": "1h",
+          "n": 2
+        },
+        {
+          "type": "clock_after",
+          "et_time": "12:00"
+        }
+      ],
+      "max_age_min": 60
+    }
+  },
+  "reasoning": "Market has formed a strong bearish bias across both tickers over the past ~12 hours. MNQ london(cur)_low swept and accepted beyond (closed below the level decisively at 29016.75), signaling downside continuation from the session-tier liquidity pool. The P2 divergences on prev2_day_high and prev3_day_high are substantive: MNQ swept both (as the lagger) while MES failed to confirm, and MNQ's subsequent HTF closes (1h and 4h) rejected those highs by closing below them \u2014 genuine reversal signals, not weak pokes. Six mature FVG fills (three 1hr bear zones and one 4hr bear zone on MNQ, two 1hr bear zones on MES) all HELD their bias (closed within their zones or stayed below resistance), a cluster of continuation evidence that reinforces the downside lean. Daily mid was rejected on MNQ (closed below 29149.25 after the checkpoint sweep) \u2014 a small rejection but still on the bearish side. The 3.47x avg 1h stretch from the opposite (upside) day extreme indicates price has run far from its recent low and is currently near/slightly below the day's own mid, a setup where continuation downside toward the structural lows is a natural follow. Regime is HYBRID: overnight Asia/London moves set multiple lows (prev lows, asia(cur)_low swept), NY morning retraced and tested highs (london(cur)_high approached but not swept), and now the market is in the early critical 09:15\u201311:30 whipsaw window where continuation or reversal both remain possible \u2014 but the P2 rejections and FVG holds lean the flow DOWN. Confidence is MEDIUM because: (a) session maturity is only ~67% (thin ledger early in NY morning proper at 09:19, just past the 09:15 whipsaw window open), so evidence is accumulating but not yet overwhelming; (b) multiple evidence items are concentrated in FVG fills and P2 reversals, all pointing DOWN, but no immature day-tier items await resolution that would clinch the read; (c) the session-tier P1 accept (london(cur)_low) is fresh but small relative to the week/day-tier P2 and P5 cluster. The DOL \u2014 prev1_day_low at 28700.0 \u2014 is the nearest unswept pool on the DOWN side, offering a clear target if the downside thesis holds.",
+  "latency_total_sec": 46.48,
+  "usage_total": {
+    "input_tokens": 169905,
+    "output_tokens": 3655,
+    "cache_read_input_tokens": 32456,
+    "cache_creation_input_tokens": 0
+  },
+  "attempts": [
+    {
+      "usage": {
+        "input_tokens": 83843,
+        "output_tokens": 1968,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "raw": {
+          "prompt_tokens": 83843,
+          "completion_tokens": 1968,
+          "total_tokens": 85811,
+          "cost": 0.101797,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 32456,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 0.101797,
+            "upstream_inference_prompt_cost": 0.091957,
+            "upstream_inference_completions_cost": 0.00984
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        }
+      },
+      "latency_sec": 25.47,
+      "model": "anthropic/claude-haiku-4.5",
+      "ok": false,
+      "violations": [
+        "[SEM_LEVEL_NOT_IN_FACTS] (thesis) level 'weekly_mid' referenced by the thesis is not present in the facts"
+      ],
+      "arith_overrides": [],
+      "bias": "DOWN",
+      "regime": "HYBRID",
+      "dol_rationale": "prev1_day_low (D1 from the DOWN menu) is the nearest unswept day-tier support pool on the correct side; alternatives like prev1_week_low (D2, farther at 28408.25) and prev3_day_low (D3, same as prev1_week) exist but are deeper backups. prev1_day_low sits 379.25 pts away, offering a clear intraday target that aligns with the recent structural lows (london(cur)_low already depleted; prev4_day_low already swept). Choosing the nearest available eligible pool ensures a realistic near-term draw.",
+      "dol": {
+        "level": "prev1_day_low",
+        "price": 28700.0
+      },
+      "falsified_if_rationale": "Menu entry F5 (n_closes_beyond(price=29031.75, side=below, tf=1h, n=1)) targets the weekly_mid \u2014 the pivotal equilibrium level. If an 1h close closes ABOVE (beyond the 'below' side in reverse) the weekly mid after the current downside setup, the thesis that price is headed to the daily low is falsified; price would be reclaiming equilibrium and flipping to continuation UP. This is the most conservative single-condition falsifier, requiring only one 1h bar to reverse the thesis. F6 (same for 4h) is the alternative, but n=1 on 1h is faster feedback and avoids waiting hours for a 4h reversal signal.",
+      "falsified_if": [
+        {
+          "type": "n_closes_beyond",
+          "price": 29031.75,
+          "side": "below",
+          "tf": "1h",
+          "n": 1
+        }
+      ],
+      "exhausted_if_rationale": "Menu entry X1 (price_beyond(price=28700.0, side=below)) \u2014 reaching the DOL. Once price closes or touches below the prev1_day_low at 28700.0, the thesis's primary target is reached and the reversal from the high setup (prev high rejections, bear FVG holds) is exhausted. No need for a second condition; the physical level crossing ends the move.",
+      "exhausted_if": [
+        {
+          "type": "price_beyond",
+          "price": 28700.0,
+          "side": "below"
+        }
+      ],
+      "confidence": "MEDIUM",
+      "recall": {
+        "events": [
+          {
+            "type": "n_closes_beyond",
+            "price": 29031.75,
+            "side": "below",
+            "tf": "1h",
+            "n": 2
+          },
+          {
+            "type": "clock_after",
+            "et_time": "12:00"
+          }
+        ],
+        "max_age_min": 60
+      },
+      "evidence": [
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "weekly_mid",
+          "tier": "week",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 2.0,
+          "side": null,
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MNQ",
+          "level": "MNQ 1hr 2026-07-22 01:00:00-04:00 bear",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MNQ",
+          "level": "MNQ 1hr 2026-07-22 02:00:00-04:00 bear",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MNQ",
+          "level": "MNQ 1hr 2026-07-22 07:00:00-04:00 bear",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MNQ",
+          "level": "MNQ 4hr 2026-07-21 22:00:00-04:00 bear",
+          "tier": "day",
+          "tf": "4h",
+          "direction": "accept",
+          "mature": true,
+          "points": 2.25,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MES",
+          "level": "MES 1hr 2026-07-22 02:00:00-04:00 bear",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MES",
+          "level": "MES 1hr 2026-07-22 07:00:00-04:00 bear",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MNQ",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.0,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MES",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.0,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MES",
+          "level": "weekly_mid",
+          "tier": "week",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.5,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P2",
+          "asset": "MNQ",
+          "level": "prev2_day_high",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "DOWN",
+          "mag_ratio": 2.361,
+          "mag_mult": 1.25
+        },
+        {
+          "criterion": "P2",
+          "asset": "MNQ",
+          "level": "prev2_day_high",
+          "tier": "day",
+          "tf": "4h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.6875,
+          "side": "DOWN",
+          "mag_ratio": 0.3654,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P2",
+          "asset": "MNQ",
+          "level": "prev3_day_high",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "DOWN",
+          "mag_ratio": 2.7305,
+          "mag_mult": 1.25
+        },
+        {
+          "criterion": "P2",
+          "asset": "MNQ",
+          "level": "prev3_day_high",
+          "tier": "day",
+          "tf": "4h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 2.25,
+          "side": "DOWN",
+          "mag_ratio": 0.5205,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MNQ",
+          "level": "london(cur)_low",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.75,
+          "side": "DOWN",
+          "mag_ratio": 0.1243,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "london(cur)_low",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.75,
+          "side": "UP",
+          "mag_ratio": 0.2644,
+          "mag_mult": 0.75
+        }
+      ],
+      "reasoning": "Market has formed a strong bearish bias across both tickers over the past ~12 hours. MNQ london(cur)_low swept and accepted beyond (closed below the level decisively at 29016.75), signaling downside continuation from the session-tier liquidity pool. MES weekly_mid was accepted beyond (close 7514.75 below the mid 7513.75) on the 1h, but this is a thin acceptance and contradicted by MES's own P1 rejection of london(cur)_low (closed back above it), creating a cross-asset split on the session tier. However, the P2 divergences on prev2_day_high and prev3_day_high are substantive: MNQ swept both (as the lagger) while MES failed to confirm, and MNQ's subsequent HTF closes (1h and 4h) rejected those highs by closing below them \u2014 genuine reversal signals, not weak pokes. Five mature FVG fills (three 1hr bear zones and one 4hr bear zone on MNQ, two 1hr bear zones on MES) all HELD their bias (closed within their zones or stayed below resistance), a cluster of continuation evidence that reinforces the downside lean. Daily mid was rejected on MNQ (closed below after the checkpoint sweep), though it is now immature for 4h. Weekly mid holds 97% acceptance (closes above) over the full session, suggesting price is in the upper half of weekly range \u2014 but this is an equilibrium position read (P3, auto-scored), not a bias driver; the KEY is that MNQ's recent P2 rejects and FVG holds point DOWN. The 3.47x avg 1h stretch from the opposite (upside) day extreme indicates price has run far from its recent low and is currently ABOVE the day's own mid (29149.25), a setup where continuation downside (filling back toward structure) is a natural follow. Regime is HYBRID: overnight Asia/London moves set multiple lows (prev lows, asia(cur)_low swept), NY morning retraced and tested highs (london(cur)_high approached but not swept), and now the market is in the early critical 09:15\u201311:30 whipsaw window where continuation or reversal both remain possible \u2014 but the P2 rejections and FVG holds lean the flow DOWN. Confidence is MEDIUM, not HIGH, because: (a) session maturity is only ~67% (thin ledger early in NY morning proper, 09:19 is just past the 09:15 whipsaw window open), so the evidence is accumulating but not yet overwhelming; (b) a cross-asset P1 split exists on the session tier (MNQ accepts a low sweep, MES rejects it), which caps confidence per \u00a76; (c) immature 4hr closes on key equilibrium levels (daily_mid, weekly_mid for MNQ) mean the full HTF verdict is not yet in. The DOL \u2014 prev1_day_low at 28700.0 \u2014 is the nearest unswept pool on the DOWN side, 379.25 pts below price, offering a clear target if the downside thesis holds."
+    },
+    {
+      "usage": {
+        "input_tokens": 86062,
+        "output_tokens": 1687,
+        "cache_read_input_tokens": 32456,
+        "cache_creation_input_tokens": 0,
+        "raw": {
+          "prompt_tokens": 86062,
+          "completion_tokens": 1687,
+          "total_tokens": 87749,
+          "cost": 0.0652866,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 32456,
+            "cache_write_tokens": 0,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 0.0652866,
+            "upstream_inference_prompt_cost": 0.0568516,
+            "upstream_inference_completions_cost": 0.008435
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        }
+      },
+      "latency_sec": 21.01,
+      "model": "anthropic/claude-haiku-4.5",
+      "ok": true,
+      "violations": [],
+      "arith_overrides": [],
+      "bias": "DOWN",
+      "regime": "HYBRID",
+      "dol_rationale": "prev1_day_low (D1 from the DOWN menu) is the nearest unswept day-tier support pool on the correct side; alternatives like prev1_week_low (D2, farther at 28408.25) and prev3_day_low (D3, same as prev1_week) exist but are deeper backups. prev1_day_low sits 379.25 pts away from current price (29079.25), offering a clear intraday target that aligns with the recent structural lows (london(cur)_low already depleted; prev4_day_low already swept). Choosing the nearest available eligible pool ensures a realistic near-term draw.",
+      "dol": {
+        "level": "prev1_day_low",
+        "price": 28700.0
+      },
+      "falsified_if_rationale": "Menu entry F1 (price_beyond(price=29239.0, side=above)) \u2014 the london(cur)_high. If price pushes back through and holds above london(cur)_high (only 160 pts above the current price), it signals a failure of the downside setup and a reversion to upside continuation; london(cur)_high is the immediate nearest resistance and thus the most responsive falsifier for this DOWN thesis without requiring a multi-close confirmation delay.",
+      "falsified_if": [
+        {
+          "type": "price_beyond",
+          "price": 29239.0,
+          "side": "above"
+        }
+      ],
+      "exhausted_if_rationale": "Menu entry X1 (price_beyond(price=28700.0, side=below)) \u2014 reaching the DOL. Once price closes or wicks below the prev1_day_low at 28700.0, the thesis's primary target is reached and the downside move from the high rejections is exhausted. This is the physical level crossing that ends the intended draw.",
+      "exhausted_if": [
+        {
+          "type": "price_beyond",
+          "price": 28700.0,
+          "side": "below"
+        }
+      ],
+      "confidence": "MEDIUM",
+      "recall": {
+        "events": [
+          {
+            "type": "n_closes_beyond",
+            "price": 29149.25,
+            "side": "above",
+            "tf": "1h",
+            "n": 2
+          },
+          {
+            "type": "clock_after",
+            "et_time": "12:00"
+          }
+        ],
+        "max_age_min": 60
+      },
+      "evidence": [
+        {
+          "criterion": "P5",
+          "asset": "MNQ",
+          "level": "MNQ 1hr 2026-07-22 01:00:00-04:00 bear",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MNQ",
+          "level": "MNQ 1hr 2026-07-22 02:00:00-04:00 bear",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MNQ",
+          "level": "MNQ 1hr 2026-07-22 07:00:00-04:00 bear",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MNQ",
+          "level": "MNQ 4hr 2026-07-21 22:00:00-04:00 bear",
+          "tier": "day",
+          "tf": "4h",
+          "direction": "accept",
+          "mature": true,
+          "points": 2.25,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MES",
+          "level": "MES 1hr 2026-07-22 02:00:00-04:00 bear",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P5",
+          "asset": "MES",
+          "level": "MES 1hr 2026-07-22 07:00:00-04:00 bear",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "points": 1.5,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MNQ",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.0,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MES",
+          "level": "daily_mid",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.0,
+          "side": "DOWN",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P3",
+          "asset": "MES",
+          "level": "weekly_mid",
+          "tier": "week",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.5,
+          "side": "UP",
+          "mag_ratio": null,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P2",
+          "asset": "MNQ",
+          "level": "prev2_day_high",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "DOWN",
+          "mag_ratio": 2.361,
+          "mag_mult": 1.25
+        },
+        {
+          "criterion": "P2",
+          "asset": "MNQ",
+          "level": "prev2_day_high",
+          "tier": "day",
+          "tf": "4h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 1.6875,
+          "side": "DOWN",
+          "mag_ratio": 0.3654,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P2",
+          "asset": "MNQ",
+          "level": "prev3_day_high",
+          "tier": "day",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.0,
+          "side": "DOWN",
+          "mag_ratio": 2.7305,
+          "mag_mult": 1.25
+        },
+        {
+          "criterion": "P2",
+          "asset": "MNQ",
+          "level": "prev3_day_high",
+          "tier": "day",
+          "tf": "4h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 2.25,
+          "side": "DOWN",
+          "mag_ratio": 0.5205,
+          "mag_mult": 1.0
+        },
+        {
+          "criterion": "P1",
+          "asset": "MNQ",
+          "level": "london(cur)_low",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "accept",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.75,
+          "side": "DOWN",
+          "mag_ratio": 0.1243,
+          "mag_mult": 0.75
+        },
+        {
+          "criterion": "P1",
+          "asset": "MES",
+          "level": "london(cur)_low",
+          "tier": "session",
+          "tf": "1h",
+          "direction": "reject",
+          "mature": true,
+          "exhausted": false,
+          "points": 0.75,
+          "side": "UP",
+          "mag_ratio": 0.2644,
+          "mag_mult": 0.75
+        }
+      ],
+      "reasoning": "Market has formed a strong bearish bias across both tickers over the past ~12 hours. MNQ london(cur)_low swept and accepted beyond (closed below the level decisively at 29016.75), signaling downside continuation from the session-tier liquidity pool. The P2 divergences on prev2_day_high and prev3_day_high are substantive: MNQ swept both (as the lagger) while MES failed to confirm, and MNQ's subsequent HTF closes (1h and 4h) rejected those highs by closing below them \u2014 genuine reversal signals, not weak pokes. Six mature FVG fills (three 1hr bear zones and one 4hr bear zone on MNQ, two 1hr bear zones on MES) all HELD their bias (closed within their zones or stayed below resistance), a cluster of continuation evidence that reinforces the downside lean. Daily mid was rejected on MNQ (closed below 29149.25 after the checkpoint sweep) \u2014 a small rejection but still on the bearish side. The 3.47x avg 1h stretch from the opposite (upside) day extreme indicates price has run far from its recent low and is currently near/slightly below the day's own mid, a setup where continuation downside toward the structural lows is a natural follow. Regime is HYBRID: overnight Asia/London moves set multiple lows (prev lows, asia(cur)_low swept), NY morning retraced and tested highs (london(cur)_high approached but not swept), and now the market is in the early critical 09:15\u201311:30 whipsaw window where continuation or reversal both remain possible \u2014 but the P2 rejections and FVG holds lean the flow DOWN. Confidence is MEDIUM because: (a) session maturity is only ~67% (thin ledger early in NY morning proper at 09:19, just past the 09:15 whipsaw window open), so evidence is accumulating but not yet overwhelming; (b) multiple evidence items are concentrated in FVG fills and P2 reversals, all pointing DOWN, but no immature day-tier items await resolution that would clinch the read; (c) the session-tier P1 accept (london(cur)_low) is fresh but small relative to the week/day-tier P2 and P5 cluster. The DOL \u2014 prev1_day_low at 28700.0 \u2014 is the nearest unswept pool on the DOWN side, offering a clear target if the downside thesis holds."
+    }
+  ],
+  "price_recap_after_boundary": {
+    "window_end": "2026-07-22 13:20:00-04:00",
+    "open": 29070.5,
+    "high": 29342.5,
+    "low": 29069.0,
+    "close": 29302.25,
+    "n_bars": 240
+  },
+  "predicate_walk_forward": {
+    "dol_touched_at": null,
+    "falsified_at": "2026-07-22 09:55:00-04:00",
+    "exhausted_at": null,
+    "recall_fired_at": null,
+    "first_terminal_event": "falsified_if"
+  }
+}

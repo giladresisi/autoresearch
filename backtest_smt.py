@@ -5,6 +5,7 @@ import math as _math
 import os
 import statistics
 import sys
+import traceback
 from pathlib import Path
 
 import pandas as pd
@@ -1217,9 +1218,108 @@ def _ath_as_of(frame, end_pos: int) -> float:
     return _m if _m == _m else 0.0  # NaN guard (NaN != NaN)
 
 
+def replay_slice(bars_1s, hist_1m, *, window_start, window_end):
+    """Narrow a session's 1s bars to a replay window and EXTEND the 1m history to meet it.
+
+    Returns `(sliced_1s, extended_hist_1m)`.
+
+    **Why the history must be extended.** `TraderGraft._frames` builds the Analyzer's and
+    Executor's view as `concat([hist[hist.index < today.index[0]], today])`. In a normal
+    1s backtest `today` starts at the session open and `hist` ends there, so they meet.
+    Move `today`'s start forward to 09:20 without touching `hist` and the whole overnight
+    session disappears from the merged frame — and because the bundle is still non-empty,
+    NOTHING reports it. That is exactly the cycle-1 B2 defect (a thesis decided against an
+    empty level universe, silently). So the window start moves `hist`'s end with it.
+
+    The extension is resampled to 1m because `hist_*` is a 1m frame everywhere else in the
+    pipeline and `_frames` concatenates the two directly. `label="left"` matches how
+    `_mnq_1m_agg` is built above, so a bridged minute carries the same stamp it would have
+    had if it had come from the pre-aggregated view.
+    """
+    sliced = bars_1s[(bars_1s.index >= window_start) & (bars_1s.index < window_end)]
+
+    if hist_1m is None or len(hist_1m) == 0:
+        return sliced, hist_1m
+
+    hist_end = hist_1m.index[-1]
+    if window_start <= hist_end:
+        return sliced, hist_1m                    # nothing to bridge
+
+    bridge_src = bars_1s[(bars_1s.index > hist_end) & (bars_1s.index < window_start)]
+    if len(bridge_src) == 0:
+        return sliced, hist_1m
+
+    agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+    bridge = bridge_src.resample("1min", label="left").agg(agg).dropna(subset=["Open"])
+    # `hist_end` is a bin LABEL, not the bin's end: the 59 seconds after it belong to a
+    # minute hist ALREADY carries. Filtering the 1s source by `> hist_end` therefore lets
+    # that partial minute back in, and the resample re-stamps it onto the existing label —
+    # a duplicated 1m bar with a truncated Open/Volume, and a non-unique DatetimeIndex on
+    # the frame handed to SessionPipeline. Drop the bin by LABEL, after resampling.
+    bridge = bridge[(bridge.index > hist_end) & (bridge.index < window_start)]
+    if len(bridge) == 0:
+        return sliced, hist_1m
+
+    extended = pd.concat([hist_1m, bridge[hist_1m.columns]])
+    return sliced, extended
+
+
+def _ai_decisions_enabled() -> bool:
+    """Read the AI-decisions master flag. decisions_config only imports os/dataclasses, so
+    this is cheap and side-effect-free; default OFF keeps regressions byte-identical."""
+    try:
+        _agent_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
+        if _agent_dir not in sys.path:
+            sys.path.insert(0, _agent_dir)
+        import decisions_config as _sc
+        return bool(_sc.AI_DECISIONS_ENABLED)
+    except Exception:
+        # Fall back to the raw env read so a decisions_config import problem can never
+        # flip the flag on (or break a flag-OFF regression).
+        val = os.environ.get("ACT_AI_DECISIONS")
+        return val is not None and val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _build_decision_worker(run_dir):
+    """Wrap the day's DecisionEngine in the async DecisionWorker — THE execution model in
+    both modes (prod-agent.md:82). Shares the construction site with the live dispatcher via
+    decisions.live_factory. Raises on failure — the caller degrades to None."""
+    _agent_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
+    if _agent_dir not in sys.path:
+        sys.path.insert(0, _agent_dir)
+    from decisions.live_factory import build_decision_worker
+    return build_decision_worker(run_dir)
+
+
+def _ai_primary_enabled() -> bool:
+    """Read the v2 primary-mode gate (ACT_AI_MODE=primary). Default OFF ⇒ never build the
+    v2 stack ⇒ byte-identical regressions."""
+    try:
+        _agent_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
+        if _agent_dir not in sys.path:
+            sys.path.insert(0, _agent_dir)
+        import decisions_config as _sc
+        return bool(_sc.AI_PRIMARY_ENABLED)
+    except Exception:
+        return os.environ.get("ACT_AI_MODE", "").strip().lower() == "primary"
+
+
+def _build_primary_runner(run_dir, date):
+    """Construct the v2 PrimaryRunner (backtest = synchronous, deterministic). Shares the
+    construction site with the live dispatcher via decisions.live_factory. Raises on failure
+    — the caller degrades to None (the trading run is never aborted by an AI init problem)."""
+    _agent_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
+    if _agent_dir not in sys.path:
+        sys.path.insert(0, _agent_dir)
+    from decisions.live_factory import build_primary_runner
+    return build_primary_runner(run_dir, date=str(date), threaded=False)
+
+
 def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True,
                     mode: str = "1m", started: "datetime.datetime | None" = None,
-                    reset_pending: bool = True) -> dict:
+                    reset_pending: bool = True,
+                    trader_factory=None, replay_window=None,
+                    trader_only=False) -> dict:
     """SMT v2 backtest: dispatches daily/hypothesis/trend/strategy per bar.
 
     Self-contained — does not use any globals from the existing run_backtest path.
@@ -1245,6 +1345,15 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
              does not wipe _PENDING_STORE); reset_pending only matters for the per-date-CALL
              pattern run_regression uses.
 
+    trader_factory: cycle-2 replay. `(date, run_dir) -> trader graft | None`, handed to
+             SessionPipeline's existing `trader=` seam. A FACTORY rather than an instance
+             because this function loops over dates and each date needs its own graft and
+             output directory. None (the default) leaves the legacy path untouched.
+
+    replay_window: cycle-2 replay. `(window_start, window_end)` timestamps; when set, the
+             1s branch narrows the session bars to that window AND extends `hist_*` to
+             meet it (see `replay_slice`). None (the default) is the legacy full session.
+
     Returns a dict with keys: trades, events, metrics.
     """
     import json as _json
@@ -1257,6 +1366,11 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
     if started is None:
         from zoneinfo import ZoneInfo as _ZI
         started = datetime.datetime.now(_ZI("America/New_York"))
+
+    if replay_window is not None and mode != "1s":
+        # Only the 1s branch applies the window. Ignoring it silently would run a FULL
+        # session while the caller believed it had asked for 09:20-11:00.
+        raise ValueError("replay_window requires mode='1s' (got %r)" % (mode,))
 
     _smt_state.set_in_memory_mode(True, reset_pending=reset_pending)
     # Per-date set_state_dir below mutates the module-global prefix; remember the caller's
@@ -1305,6 +1419,9 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         _run_dir = paths.regression_run_dir(str(date), started)
         paths.set_state_dir(_run_dir)
         _smt_state.reset_in_memory()
+        # Cycle-2 replay stash. Initialised on EVERY path that reaches the session-slice
+        # block below (the 1m branch included), or a 1m run would raise NameError there.
+        _replay_sess = None
 
         # ------------------------------------------------------------------ #
         # Per-day timestamps                                                   #
@@ -1328,6 +1445,21 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             _mes_hist_start = _mes_1m_agg.index.searchsorted(_hist_cutoff, side="left")
             hist_mnq_1m   = _mnq_1m_agg.iloc[_mnq_hist_start:_mnq_hist_end]
             hist_mes_1m   = _mes_1m_agg.iloc[_mes_hist_start:_mes_hist_end]
+            # Cycle-2 replay window. ADDITIVE: with replay_window None nothing here runs
+            # and the legacy 1s path is byte-identical. It MUST happen here, before the
+            # pipeline is constructed below, because it EXTENDS hist_* — applying it
+            # later (where mnq_1s_sess is built) would leave the pipeline holding the
+            # unextended history and silently drop the whole overnight session from the
+            # Analyzer's facts. See replay_slice's docstring.
+            if replay_window is not None:
+                _w0, _w1 = replay_window
+                _rs_mnq, hist_mnq_1m = replay_slice(
+                    mnq_all, hist_mnq_1m, window_start=_w0, window_end=_w1)
+                _rs_mes, hist_mes_1m = replay_slice(
+                    mes_all, hist_mes_1m, window_start=_w0, window_end=_w1)
+                if _rs_mnq.empty:
+                    continue
+                _replay_sess = (_rs_mnq, _rs_mes)
             # Raw 1s bars spanning the full session window (18:00 prev day → 17:00 today)
             _mnq_today = mnq_all[(mnq_all.index >= session_start_ts) & (mnq_all.index < session_end_ts)]
             if _mnq_today.empty:
@@ -1352,7 +1484,56 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
 
         # Pipeline handles state reset, ATH seeding, resamples, and run_daily.
         day_events: list[dict] = []
-        pipeline = SessionPipeline(hist_mnq_1m, hist_mes_1m, day_events.append)
+        # An engine-init failure (e.g. flag ON but no API key) must NEVER abort the
+        # backtest — degrade to no-engine instead of killing the trading-side run.
+        _decision_worker = None
+        _primary_runner = None
+        if _ai_decisions_enabled():
+            try:
+                _decision_worker = _build_decision_worker(_run_dir)
+            except Exception:
+                # Degrade to no-engine (never abort the trading run) but leave a
+                # structured breadcrumb — a silent total loss of the AI run is
+                # indistinguishable from flag-OFF otherwise.
+                _decision_worker = None
+                try:
+                    with open(os.path.join(_run_dir, "ai_decisions_init_error.txt"),
+                              "w", encoding="utf-8") as _fh:
+                        _fh.write(traceback.format_exc())
+                except Exception:
+                    pass
+        elif _ai_primary_enabled():
+            try:
+                _primary_runner = _build_primary_runner(_run_dir, date)
+            except Exception:
+                _primary_runner = None
+                try:
+                    with open(os.path.join(_run_dir, "ai_primary_init_error.txt"),
+                              "w", encoding="utf-8") as _fh:
+                        _fh.write(traceback.format_exc())
+                except Exception:
+                    pass
+        # Cycle-2 replay: build this date's trader graft and hand it to the constructor
+        # seam SessionPipeline already exposes. A factory failure degrades to no-trader
+        # (never aborts the run) but leaves a structured breadcrumb.
+        _trader = None
+        if trader_factory is not None:
+            try:
+                _trader = trader_factory(date, _run_dir)
+            except Exception:
+                _trader = None
+                try:
+                    with open(os.path.join(_run_dir, "trader_init_error.txt"),
+                              "w", encoding="utf-8") as _fh:
+                        _fh.write(traceback.format_exc())
+                except Exception:
+                    pass
+
+        pipeline = SessionPipeline(hist_mnq_1m, hist_mes_1m, day_events.append,
+                                   ai_decisions=_decision_worker,
+                                   trade_primary=_primary_runner,
+                                   trader=_trader,
+                                   trader_only=trader_only)
         pipeline.on_session_start(session_start_ts, today_at_open, force_reset=True)
 
         # Seed this run's ATH from the TRUE all-time high as of the session open (the full
@@ -1393,12 +1574,15 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         ]
 
         if mode == "1s":
-            mnq_1s_sess = mnq_all[
-                (mnq_all.index >= session_start_ts) & (mnq_all.index < session_end_ts)
-            ]
-            mes_1s_sess = mes_all[
-                (mes_all.index >= session_start_ts) & (mes_all.index < session_end_ts)
-            ]
+            if _replay_sess is not None:
+                mnq_1s_sess, mes_1s_sess = _replay_sess
+            else:
+                mnq_1s_sess = mnq_all[
+                    (mnq_all.index >= session_start_ts) & (mnq_all.index < session_end_ts)
+                ]
+                mes_1s_sess = mes_all[
+                    (mes_all.index >= session_start_ts) & (mes_all.index < session_end_ts)
+                ]
             if mnq_1s_sess.empty:
                 continue
         elif mnq_session_bars.empty:
@@ -1589,6 +1773,33 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
                     "pnl_dollars": round(pnl_dollars, 2),
                 })
                 entry_event = None
+
+        # GIL-44 Phase-3: day-end AI-decisions finalize + dual logging. The AI decision is
+        # NEVER read back into strategy logic, and AI events-native lines are appended
+        # ONLY here (after trade pairing → trades byte-identical), each carrying
+        # source:"ai-decisions" so the non-AI event subsequence is unchanged (filter it out
+        # to recover the flag-OFF baseline).
+        if _decision_worker is not None:
+            try:
+                _sess_parquet = _mnq_today if mode == "1s" else mnq_1m_today
+                # drain (unbounded) → deterministic finalize (sort audit + events_native,
+                # recompute discarded from the arrival-vs-supersede timeline). Per-day
+                # shutdown so a multi-date range never leaks worker threads (H7).
+                _decision_worker.finalize_deterministic(session_parquet=_sess_parquet)
+            except Exception:
+                pass
+            try:
+                day_events.extend(_decision_worker.events_native)
+            finally:
+                _decision_worker.shutdown()
+
+        # PRIMARY: standing state + audit already went to the JSON bus / audit JSONL; the
+        # v2 loop emits no legacy events (zero trades under stub). Just finalize the runner.
+        if _primary_runner is not None:
+            try:
+                _primary_runner.finalize()
+            except Exception:
+                pass
 
         all_events.extend(day_events)
         all_trades.extend(day_trades)

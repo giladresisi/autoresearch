@@ -1,5 +1,276 @@
 ﻿# PROGRESS
 
+## Feature: DOL floor raise 0.5 → 1.0 — Plan 18 Part A
+### Status: ✅ Complete (unstaged — parent session commits; "Part A commit: PENDING" stands)
+**Plan File**: `.agents/plans/18-dol-floor-raise.md`
+
+`derive_facts.DOL_MIN_DRAW_RATIO` 0.5 → 1.0 (flat 5-pt guard + no-ATR fallback unchanged),
+per `l2-mechanisms.md` §10.3 v2 / commit `272cf7c`. Validated: `test_menus.py` 24/24 (cases
+a–d incl. new `test_dol_floor_raise_frees_band_for_projection`); deterministic 61-boundary
+sweep 0.5 vs 1.0 → 13 changed, exactly ONE bias flip (07-17 09:20 DOWN → no-liquidity
+NEUTRAL, the enumerated ripple-3 case, judged correct); knife-edge 0.9/1.1 zero bias
+differences; LLM mini-diff on the 4 changed 09:20 days all PASS with zero DOL-related
+rejections (08-05 inverted-falsifier caveat flagged to L2). L2 hand-off table filled with
+exact prices + 9 extra non-09:20 changed-boundary rows. Suites: agent 166 passed, bench 55
+identical, `tests/` 1379P/2F/16E baseline unchanged — 0 new failures. code-review PASSED
+(zero changeset issues); acceptance ACCEPTED 7/7.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/18-dol-floor-raise.md`
+- Detailed implementation summary
+- Divergences (66→61 boundary estimate; 08-05 model-falsifier artifact)
+- Test results, sweep/mini-diff validation, L2 hand-off status
+
+---
+
+## Feature: L1 Facts-Completeness Fixes — Plan 17
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/17.l1-facts-completeness-fixes.md`
+
+Three additive S8/S9-scoped fixes to `agent/derive_facts.py`: (1) time-gate `(prev1)`
+sub-session liquidity levels by the ET clock, (2) curate the S9 FVG-fill (P5) block to a
+`FVG_LOOKBACK_DAYS=3` window with held/violated/too-recent verdicts (S6 raw list unchanged),
+(3) HTF-close verdict for `daily_mid`/`weekly_mid` as synthetic per-asset levels fed through
+`_htf_close_status` (plus a bare `daily_mid =` line). Hashed S0–S7 core untouched; golden fixture
+regenerated with only the 49 prev1 line deletions. 9 new tests over real boundaries; full plan
+suite 224 passed. code-review (1 MEDIUM + 1 LOW fixed) and acceptance-criteria-validate (17/17)
+both passed. `FVG_LOOKBACK_DAYS=3` confirmed adequate (7 curated zones at 07-20, 13 at 07-27).
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/17.l1-facts-completeness-fixes.md`
+- Detailed implementation summary (3 fixes)
+- Divergences and resolutions (Fix 3 side rule; 07-22 MNQ immature)
+- Test results and metrics
+
+---
+
+## Feature: L1 thesis evidence-ledger improvements — Plan 15
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/15.l1-thesis-evidence-ledger-improvements.md`
+**Execution Report**: `.agents/execution-reports/15.l1-thesis-evidence-ledger-improvements.md`
+
+All 9 tasks implemented (Task 8 resolved to the cheaper validator-message lever per the Task-1b
+spike, not the scratch-tally field). **Task 1** — depth-of-history levels (`prev3-7_day`,
+`prev2-3_week`) via a single reused `_long_horizon_extremes` scan (S5b render byte-identical);
+thesis.md §2.1b clarified so same-asset nesting pruning never suppresses cross-asset P2 candidacy;
+the concrete 2026-07-14 01:00 `prev3_day_low` SMT (MNQ swept 29395.0, MES never within 15.5 pts of
+7516.25, MNQ 1h/4h close 29425.0 REJECTED) is now an automated regression test. **Task 2** — P2
+HIGH/LOW polarity prompt reinforcement. **Task 1b** — arithmetic-bug spike →
+`.agents/plans/15-arithmetic-bug-spike-findings.md` (verdict: DEFER scratch-tally, do the cheaper
+lever). **Task 4** — FVG-fill as scored `P5` (`bundle.fvg_zones`, `_fvg_side`, S9 candidates,
+schema/enum wiring). **Task 5** — tier-relative `suggested_exhausted` on SMT candidates
+(`SMT_SHELF_LIFE` session 2×/day 4×/week 8×) + a model-overridable `exhausted` field that zeroes
+scoring. **Task 6** — partial P3 (`_mid_side`) and P4 (`_evidence_side` via `_high`/`_low` synthetic
+mids) code-derivation. **Task 7** — optional `pending_resolution` on immature items + a code-computed
+S9 next-HTF-close line + an audit-only (never-rejecting) `resolves_at > now` warning. **Task 8** —
+targeted `ARI_THESIS_BIAS` retry message telling the model to keep its ledger and relabel bias.
+Every new value follows "model judges, code computes." Scoped suite: **136 passed, 1 failed** — the
+lone failure is the PRE-EXISTING stale burned-cut `test_facts_parity_with_prepare_cuts` (its S0–S7
+hash shifts because Task 1's new levels flow through S2/S3 on the hist path, per the plan's Contract
+1; the no-hist golden stays byte-identical). +20 new tests, no NEW failures vs. the 116+1 baseline.
+All changes UNSTAGED; nothing committed/pushed.
+
+## Feature: L1 thesis — stretch / session-maturity / magnitude — Plan 14
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/14.l1-thesis-stretch-session-magnitude.md`
+**Execution Report**: `.agents/execution-reports/14.l1-thesis-stretch-session-magnitude.md`
+
+All 8 tasks implemented exactly per plan, additively on top of plan 13, closing the L1
+thesis-model gaps for young sessions and far-from-structure runs: session-anchored recall
+(`next_subsession` `clock_after` menu), session-maturity soft prior (`session_elapsed_frac` +
+`mature_evidence_count`), clearance-magnitude scaling (`_MAG_BUCKETS` on `score_thesis_evidence`,
+None → ×1.0 byte-identical), stretch discount + nearest-level distance (S9 STRETCH block on
+`avg_range_1h`/`day_hi`/`day_lo`), and audit-only cross-family confluence (`historical_extremes` +
+`_confluence_notes`). Every new value is a code-computed `FactsBundle` field / S9 render line / S8
+menu entry / scoring multiplier — never a model self-report. S0–S7 byte-identity held (golden
+passes; hash unchanged `4e78271928…`). Scoped suite IDENTICAL before/after (116 passed, 1 failed —
+the 1 failure is a PRE-EXISTING stale burned-cut fixture `test_facts_parity_with_prepare_cuts`,
+byte-stable across the change). NO new tests (explicit user override). Manual early/late smoke
+(2026-06-25 00:30 vs 15:30 ET): stretch 0.51x→2.17x, elapsed_frac 0.283 early, magnitude count
+18→56 — early-vs-late differentiation confirmed. code-review PASS + acceptance ACCEPTED, no fixes.
++383/−27 across 5 code + 1 doc file. All changes UNSTAGED; nothing committed/pushed.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/14.l1-thesis-stretch-session-magnitude.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics
+
+## Feature: L1 mechanical fixes — default low-conf TTL + wrong-side DOL — Plan 12
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/12.l1-mechanical-fixes.md`
+**Execution Report**: `.agents/execution-reports/12.l1-mechanical-fixes.md`
+
+Two correctness/structure fixes surfaced by the 07-02 diag bench run, deliberately free of
+strategy content. **Fix 1 — code-enforced default recall TTL** for ALL non-standing (valid
+low-conf / NEUTRAL / waiting) theses, not just failsafes: constant
+`DEFAULT_LOWCONF_RECALL_MAX_AGE_MIN=60` + pure helper `effective_recall_max_age` in
+`schemas.py` (`min(declared, 60)` when declared>0, else 60 — smaller respected, missing/0/large
+clamped to the cap). The 07-02 `th_04` (NEUTRAL/LOW, `max_age=0`, no events) had waited **20.5h**
+to session end. Executor clamps in `_maybe_recall_l1` only (standing-thesis TTL `_ttl_expired`
+untouched); bench bakes the clamp into the logged thesis in `make_live_provider` — DELIBERATELY at
+generation time, NOT in `_run_waiting`, so `rescore` of prior runs stays byte-stable (a clamp in
+the replayed engine would retroactively rewrite logged lifecycles; the fix manifests only in NEW
+runs). **Fix 2 — wrong-side/race DOL.** Root cause of the th_02 bogus 2-min "completion": a
+FRESHNESS RACE, not a menu or validator bug — the DOL (`prev1_day_low`) was a correct-side unswept
+below-pool only **0.75 pts** below price at facts build (menu + validator both correct), and price
+crossed it during the 90 s call latency before the thesis stood, so the arrival-bar DOL-touch
+fired instantly. Three layers: menu proximity guard (`DOL_MIN_DRAW_DISTANCE_PTS=5.0` in
+`_dol_menu` — the layer that removes th_02's D1); validator `SEM_DOL_WRONG_SIDE` (DOL must be on
+the bias side of facts price); scoring `suspect_completion` flag + count (additive — signed
+draw-distance ≤0 at arrival AND completed within 5 min; `completion_rate` untouched for rescore
+value-stability).
+
+Verification ($0): root-cause regression feeds the verbatim logged th_02 levels through the menu
+builder → `prev1_day_low` no longer offered as a DOWN DOL while the genuine farther `prev2_day_low`
+(74.75 pts) still is. Rescore of `test_0702_run2_diag` — `th_04` stays `session_end` (Fix-1 fidelity),
+`th_02` now flags `suspect_completion=True` with cause/boundaries unchanged; per-record diff shows
+ONLY the additive field, and `run1d_standdir` (4 dates) rescore matches its plan-11 reference
+exactly. Stub 2-date run deterministic; valid low-conf theses now re-call at 60 min. Gates:
+`pytest agent/` = **264 passed** (251 + 13 new; run under system py312 — the repo `.venv` lacks
+`jsonschema`); `pytest tests/` = **2F/1379P/10S/16E — baseline unchanged**. Total real-API spend
+**$0.00** (validation is unit tests + stub + rescore only). Review pipeline: code-review
+**PASSED** (2 LOW doc nits fixed), acceptance-criteria **ACCEPTED 13/13** (independently re-ran the
+rescore fidelity check + sanctioned the generation-time clamp placement as the correct
+replay-fidelity reading). All changes UNSTAGED; nothing committed/pushed.
+
+## Feature: L1 predicate vocabulary — schema + menus + failsafe recall — Plan 11
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/11.l1-vocab-schema-menus.md`
+**Execution Report**: `.agents/execution-reports/11.l1-vocab-schema-menus.md`
+
+The first L1-INTERNALS slice on top of the plan-10 bench. Three layers: (1) **Syntax → JSON
+schema** — every `*_if`/`recall.events` field is a strict `anyOf` of the six predicate atoms
+(type const + exact params) + depth-1 `all_of`/`any_of`, via `$defs`/`$ref` (the `$ref` and the
+dropped numeric-bound keywords were both FORCED by the Anthropic structured-output backend:
+inlined union → "grammar too large", `minimum` on integers unsupported — bounds moved to the
+deterministic predicate validator, spec §5). An unknown predicate type is now un-generatable,
+killing the `SYN_BAD_PREDICATE → failsafe` class. (2) **Grounding → menus** — `derive_facts` S8:
+a DOL menu (eligible draws per direction: in-facts, unswept/undepleted, correct side) + a
+config-driven predicate menu (F/X/R families, no hardcoded level names); rendered into the
+model prompt + the bench validator_dict; `validate_contracts.classify_predicates` tags each
+predicate menu-hit/escape-hatch (pure telemetry). CRITICAL: the shared `facts_to_validator_dict`
++ `render_facts_text` (S0–S7) stay byte-identical (shadow engine hashes them) — menus are a
+bench/L1 overlay only. (3) **Failsafe recall** — `failsafe_thesis()` gains `recall.max_age_min=60`
+so a failsafe schedules its own retry (bench + TradeDirector already honor max_age). Plus a
+**bench-only `--gate calibrated|self|stand-directional`** diagnostic override, stamped in every
+scorecard/aggregate header; production gate behaviour unchanged.
+
+Measurement (real API, OpenRouter Haiku 4.5, <$6 budget → **$1.73** total): structured-output
+sanity ✓ (clean UP thesis, 0 retries, 4/4 menu-hit — SYN_BAD_PREDICATE gone). **Run #1**
+(calibrated, 4 dates): failsafe **66.7–100% → 4.2%**, menu-hit **0.989**, coverage 0% (placeholder
+calibration still gates LOW — expected). **Run #1d** (stand-directional, 4 dates): 23 directional
+standing, completion **0.348** (trend 0.80 / reversal 0.0 / chop+07-02 0.333), **0 false-kills**,
+median late-kill 20.5 pts, coverage 23.4%, menu-hit 0.946. NB: `--churn-cap 6` (budget) truncates
+each ~23h session to its first 2.7–9.1h (overnight/Asia–London, not NY) — the rapid re-calls are
+real recall/TTL/falsification churn, but full-day metrics need an uncapped run next iteration.
+
+Gates: flag-OFF 1s byte-identity 05-19/05-18 **PASS** (events+trades identical to pre-change HEAD);
+full `pytest tests/` = **2F/1379P/10S/16E — baseline unchanged** (0 new failures); `pytest agent/`
+= **251 passed** (220 + 31 new). Review pipeline: acceptance **ACCEPTED 25/25**; code-review fixed
+1 MEDIUM (rescore now stamps the logged gate source, not the CLI default) + 1 LOW (`_effective_gate`
+self-branch failsafe guard) with regression tests. All changes UNSTAGED; nothing committed/pushed.
+
+## Feature: L1 lifecycle bench — Plan 10
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/10.l1-lifecycle-bench.md`
+**Execution Report**: `.agents/execution-reports/10.l1-lifecycle-bench.md`
+
+The measurement instrument for the coming L1-internals effort. NEW code only, entirely under
+`agent/bench/` (+ one `.gitignore` line for `agent/bench/runs/`); NO production module
+touched — it reuses `eval_predicate`/`MarketView` (contracts), the confidence gate,
+`decide_thesis`/`make_backend` (run_agent), and `compute_facts` (derive_facts). It replays
+full days through the L1 thesis lifecycle (call → standing thesis → code-evaluated predicates
+per bar → death by falsification/exhaustion/safety-net/TTL/churn → re-call) and scores
+lifecycle quality, so every internals iteration shows up as metric deltas on the same days.
+Shipped: **`lifecycle.py`** (the L1-subset state machine — arrival gating, per-bar predicate
+eval, code-injected safety nets [ttl / acceptance_flip / opposite_extreme], confidence-tiered
+TTL, churn cap, MFE/MAE + distance-to-DOL); **`facts.py`** (offline 17-day-1s facts builder,
+byte-parity with `calibration/prepare_cuts.py` proven on a burned cut; degraded snapshots →
+failsafe, no lookahead); **`run_bench.py`** (stub/real/rescore modes + CLI + provider +
+decisions.jsonl logging + $0 byte-stable replay); **`score.py`/`report.py`** (false_kill H=4h
++ late_kill_adverse enrichment, per-day scorecard, aggregate + per-regime split).
+
+Validations: facts byte-parity ✓; stub determinism ✓ (0% coverage); real-API smoke 2026-06-25
+**$0.1123** (one failsafe lifecycle, full decisions.jsonl reconstruction, arrival=trigger+90s);
+rescore byte-identical at $0; **run-#0 baseline** 2026-06-25/05-19/05-18 real-API **$0.2604**,
+0% coverage every regime, 66.7% failsafe (the EXPECTED skeleton-prompt anchor — L1 either
+fails the closed-vocab validator or is gated LOW by the placeholder calibration table). Total
+real spend $0.3727 (< $4). `pytest agent/bench/` = 27 passed; full `pytest tests/` =
+**2F/1379P/10S/16E — baseline unchanged** (0 new failures); `pytest agent/` green (220 = 193 + 27 bench).
+Code review: no high/critical; 2 MEDIUM (stub decisions.jsonl latency-determinism; real-mode
+shell-key spend guardrail) + 3 LOW (enriched lifecycles.jsonl rewrite; lookahead-truncation flag;
+CLI cosmetic) all fixed + tested; acceptance-criteria validation ACCEPTED 22/22.
+Divergence: engine file named `lifecycle.py` (not `engine.py`) to avoid shadowing the
+production `agent/decisions/engine.py` bare module name (scope guard forbids touching it).
+All UNSTAGED; nothing committed/pushed; `agent/bench/runs/` gitignored.
+
+## Feature: AI Trader v2 Structure (thesis / trade-plan / executor) — Plan 9
+### Status: ✅ Complete (unstaged)
+**Plan File**: `.agents/plans/9.ai-trader-v2-structure.md`
+**Spec**: `agent-optimizations.md` (v2 structure specification)
+
+Flag-gated (`ACT_AI_MODE=off` default; off = byte-identical) v2 trader STRUCTURE: a
+deterministic sandwich where code computes facts, the AI judges a standing thesis (L1) +
+trade plan (L2), and a deterministic executor validates/gates/executes. Level internals
+(KB/prompt content, predicate-vocab tuning, mechanism params, calibration values) are
+deferred by design — every AI call runs on the offline StubBackend by default. Shipped:
+**Contracts** (`agent/contracts/`) thesis/trade_plan schemas + closed predicate language
+(`eval_predicate`) + validator (syntactic incl. mandatory `on_dol_falsified`, semantic
+level-in-facts, cross-level stop/target-vs-thesis); **Executor** (`agent/executor/`)
+`TradeDirector` spec-§5 state machine + attempt counter + `RiskGate` (§9) + `DecisionBus`
+atomic thesis.json/trade_plan.json + `DecisionService` async provider (per-level coalescing,
+supersede-in-flight staleness, latency-gated delivery) + `MechanismAdapter` (§7 enum→code
+path) + `PrimaryRunner`; **Plumbing** `run_agent.decide_thesis/decide_plan`, `records.py` v2
+audit builders; **Flag** `ACT_AI_MODE=off|shadow|primary` in `decisions_config.py` (legacy
+`ACT_AI_DECISIONS=1` → shadow), primary wired in `session_pipeline.py` (bypasses legacy
+hypothesis execution — one-brain), `backtest_smt.py`, `automation/main.py` (live, user-gated,
+disconnected-safe); **Confidence** (`agent/confidence.py`) features→calibration-table→gate,
+bootstrap table from 569 labelled batch triggers (`agent/calibration_table.json`).
+
+Validations: full `pytest tests/` = 2 failed / 1379 passed / 16 errors = **baseline unchanged**
+(0 new failures; those are pre-existing `test_smt_fill_plot`/`test_smt_decouple_active`); new
+tests under `agent/` (222 passed). **Flag-OFF byte-identity PASS** — 1s events+trades
+byte-identical to pre-change HEAD on 2026-05-19 / 2026-05-18 / 2026-06-25 / 2026-05-01 (verified
+before AND after the code-review fixes). **Primary+stub determinism PASS** (2026-05-19 /
+2026-05-01, 0 trades). **Primary+real-API** 2026-05-19 1m: 1 L1 call, $0.096, 3 attempts →
+NEUTRAL failsafe (model predicates outside the closed vocab → validator rejected — constraints
+in code, not prompts). Code-review: 7 findings, 6 fixed (2 MEDIUM threaded-race + backtest
+latency-parity, 4 LOW/NIT) + tests; 1 documented limitation (see report). Acceptance: 24/25 PASS.
+
+Known limitation (POC scope): the runtime cannot reach `IN_POSITION` yet — armed mechanisms
+are not wired to fills, so `on_fill/on_stop_out/on_profitable_exit` + `RiskGate.record_exit`
+(placeholder `-1.0`) are unit-tested only and the daily-loss dollar cap is inert until fills
+land. First internals task: L1/L2 KB content teaching the closed predicate/mechanism vocab.
+
+### Reports Generated
+**Execution Report:** `.agents/execution-reports/9.ai-trader-v2-structure.md`
+
+All changes UNSTAGED; nothing committed/pushed. `agent-optimizations.md` and worktree meta docs untracked.
+
+---
+
+
+
+## Feature: GIL-44 — AI Shadow-Decisions Module (Phase 3, step 1)
+### Status: ✅ Complete (unstaged)
+**Started**: 2026-07-07
+**Plan File**: `.agents/plans/7.ai-shadow-decisions.md`
+**Linear**: GIL-44
+
+Flag-gated (`AI_SHADOW_ENABLED=False` default) AI decision module that runs a two-call daily-trend→next-move mini-orchestrator ALONGSIDE the hypothesis engine at the same triggers, logs paired records (hypothesis said X, AI said Y, price did Z), and changes NOTHING about trades/P&L. Phase 1 refactored `agent/derive_facts.py` into importable `compute_facts`/`render_facts_text`/`facts_to_validator_dict` (main() byte-identical) + `agent/run_agent.py` `decide()` cores and an offline StubBackend; Phase 2 built the `agent/shadow/` package (facts_adapter, guard, cache, records, ShadowEngine); Phase 3 wired an optional `shadow=None` pipeline hook (byte-identical when None) + latency-arrival bookkeeping; Phase 4 annotation/comparison/consistency; Phase 5 live worker-thread wrapper (smoke deferred behind D4 gate). Trades byte-identical by construction. All four mandated validations PASS: flag-OFF 1s A/B byte-identical on 2026-05-19 (trend) + 2026-05-18 (chop); flag-ON trades + non-AI events unchanged; real-API day 2026-05-01 (20 cycles, mean 21.2 s, ≈$0.81 < $2 cap). Code-review 6 findings, all fixed (top: vectorised `derive_facts.session_frame` 25s→0.68s, byte-identical). 51 new tests; final agent+shadow+integration suite 96 passed. `SHADOW_DECISION_LATENCY_SEC=79` (measured rounded mean). All changes UNSTAGED.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/7.ai-shadow-decisions.md`
+- Detailed implementation summary
+- Divergences and resolutions
+- Test results and metrics
+
+---
 
 ## Feature: Gap-Fill Retry Loop
 ### Status: ✅ Complete (unstaged)

@@ -253,10 +253,49 @@ class SessionPipeline:
         hist_mnq_1m: pd.DataFrame,
         hist_mes_1m: pd.DataFrame,
         emit_fn: Callable[[dict], None],
+        ai_decisions=None,
+        trade_primary=None,
+        trader=None,
+        trader_only=False,
     ) -> None:
         self._hist_mnq_1m = hist_mnq_1m
         self._hist_mes_1m = hist_mes_1m
-        self._emit = emit_fn
+        # Cycle-1 Analyzer/Planner/Executor graft (flag-gated, default None). ADDITIVE:
+        # unlike trade_primary below, this hook does NOT early-return, so the legacy
+        # engine keeps running and emitting exactly as before. When None the pipeline
+        # does ZERO extra work and touches ZERO state → byte-identical by construction.
+        self._trader = trader
+        # TRADER-ONLY (cycle 2): run the Analyzer/Planner/Executor and NOTHING else — the
+        # legacy trend/detection/liquidity/hypothesis/strategy path below is skipped
+        # wholesale. The replay uses this so a session exercises only the new chain; live
+        # inherits the identical code path (cycle 4 verifies it there).
+        #
+        # DEFAULT False. That is load-bearing: with it False this flag costs one boolean
+        # test per bar and the legacy path is byte-identical, which is what acceptance
+        # gate 7 (regression.py against locked baselines) proves.
+        #
+        # Safe to skip because the trader reads NOTHING the skipped code produces: its
+        # inputs are `now`, `today_mnq`, `today_mes` (arguments) and `self._hist_mnq_1m` /
+        # `self._hist_mes_1m`, which are assigned in __init__ and never reassigned. The
+        # `_daily_triggered` guard above is satisfied by on_session_start, which still runs.
+        self._trader_only = bool(trader_only)
+        # AI-trader v2 PRIMARY runner (spec §3 `primary`, flag-gated, default None). When set
+        # the v2 loop owns entries/management and the legacy hypothesis execution is bypassed
+        # (one-brain, spec §4); None ⇒ zero extra work, byte-identical by construction.
+        self._trade_primary = trade_primary
+        self._primary_opened = False
+        # GIL-44 Phase-3 AI decisions engine, observation-only (flag-gated, default OFF).
+        # When None the pipeline does ZERO extra work and touches ZERO state → byte-
+        # identical by construction. When set, new-hypothesis emits and 1m checkpoints are
+        # mirrored to the engine, which NEVER mutates strategy state (trades unchanged).
+        self._ai_decisions = ai_decisions
+        if ai_decisions is None:
+            self._emit = emit_fn
+        else:
+            self._raw_emit = emit_fn
+            self._emit = self._emit_with_ai_decisions
+            self._ai_decisions_ctx: dict | None = None
+            self._ai_decisions_last_min: pd.Timestamp | None = None
         self._daily_triggered = False
         # GIL-27: per-bar Timestamp.floor() cache. The same `now` is floored to the same
         # freq at several call sites within one on_1m_bar pass (1min ×2, 5min ×2, 1h across
@@ -955,6 +994,69 @@ class SessionPipeline:
         except Exception:
             pass
 
+    # ------------------------------------------------------------------ #
+    # GIL-44 Phase-3 AI-decisions hooks (only reached when the engine is set) #
+    # ------------------------------------------------------------------ #
+    def _emit_with_ai_decisions(self, evt: dict) -> None:
+        """Emit as normal, then — for a new-hypothesis event fired DURING 1m-bar
+        processing — mirror the trigger to the AI decisions engine. The engine observes
+        only; it never changes `evt` or any strategy state. Any engine error is
+        swallowed so it can never affect trades (observation-only)."""
+        self._raw_emit(evt)
+        kind = evt.get("kind")
+        if kind not in ("new-hypothesis", "trend-broken"):
+            return
+        ctx = self._ai_decisions_ctx
+        if ctx is None:                       # emitted outside on_1m_bar (e.g. session
+            return                            # open force-reset) — no frame context yet
+        try:
+            if kind == "new-hypothesis":
+                # _build_ai_decisions_frames FREEZES today_* (copy) so the off-loop worker
+                # reads a stable snapshot (H1/H6); dict() additionally decouples the mapping
+                # from _ai_decisions_ctx being overwritten on the next bar (D-A).
+                frames = self._build_ai_decisions_frames(ctx["now"], ctx["today_mnq"],
+                                                   ctx["today_mes"])
+                self._ai_decisions.submit_hypothesis_trigger(
+                    ctx["now"], dict(frames), evt, "new-hypothesis")
+            else:                             # trend-broken supersedes the standing hypothesis
+                self._ai_decisions.note_hypothesis_superseded(None, now=ctx["now"])
+        except Exception:
+            pass
+
+    def _build_ai_decisions_frames(self, now, today_mnq, today_mes) -> dict:
+        ath_mnq = None
+        try:
+            from smt_state import load_global as _lg
+            ath_mnq = _lg().get("all_time_high")
+        except Exception:
+            ath_mnq = self._session_ath
+        # FREEZE the intra-session today_* frames at submit (determinism, H1/H6). The worker
+        # reads these off-loop AFTER replay/live advances; the backtest 1s loop hands out
+        # today_mnq DataFrames that SHARE a preallocated numpy buffer it mutates in place each
+        # second (backtest_smt.py partial-bar building), so a shared reference would let the
+        # worker see a moving frame → non-deterministic now_price/facts. Copy only the SMALL
+        # today_* frames (one session of 1m rows); hist_* are replaced-not-mutated → by ref.
+        return {
+            "mnq_today": today_mnq.copy() if today_mnq is not None else today_mnq,
+            "mes_today": today_mes.copy() if today_mes is not None else today_mes,
+            "hist_mnq": self._hist_mnq_1m, "hist_mes": self._hist_mes_1m,
+            "hist_1hr": self._hist_1hr, "hist_4hr": self._hist_4hr,
+            "ath_mnq": ath_mnq, "ath_mes": None, "now": now,
+        }
+
+    def _ai_decisions_on_bar(self, now, today_mnq, today_mes) -> None:
+        """Per-bar AI-decisions bookkeeping: stash the frame context for the
+        new-hypothesis hook and drive the checkpoint cadence once per new minute."""
+        self._ai_decisions_ctx = {"now": now, "today_mnq": today_mnq, "today_mes": today_mes}
+        _min = self._floor(now, "1min")
+        if _min != self._ai_decisions_last_min:
+            self._ai_decisions_last_min = _min
+            try:
+                frames = self._build_ai_decisions_frames(now, today_mnq, today_mes)
+                self._ai_decisions.submit_checkpoint(now, dict(frames))
+            except Exception:
+                pass
+
     def on_1m_bar(
         self,
         now: pd.Timestamp,
@@ -977,6 +1079,50 @@ class SessionPipeline:
         ORDER EXECUTION (trend / hypothesis / strategy below) is UNCHANGED — it runs on
         every call regardless of `bar_complete` (1s-cadence fidelity preserved)."""
         if not self._daily_triggered:
+            return []
+
+        # PRIMARY mode (spec §3): the v2 loop owns entries/management; the legacy
+        # hypothesis/strategy execution below is bypassed (one-brain). Facts are recomputed
+        # from frames by the runner, so this needs no pipeline level state. Any failure is
+        # swallowed — the primary runner must never crash the bar loop.
+        if self._trade_primary is not None:
+            try:
+                frames = self._build_ai_decisions_frames(now, today_mnq, today_mes)
+                if not self._primary_opened:
+                    self._primary_opened = True
+                    self._trade_primary.on_session_open(now, frames)
+                else:
+                    self._trade_primary.on_bar(now, frames)
+            except Exception:
+                pass
+            return []
+
+        if self._ai_decisions is not None:
+            self._ai_decisions_on_bar(now, today_mnq, today_mes)
+
+        # Cycle-1 trader graft (Analyzer → Planner → Executor). Additive and
+        # observation-only: it places no orders, writes only its own files, and never
+        # early-returns — the legacy engine below runs unchanged. Any failure is
+        # swallowed; the trader must never crash the bar loop.
+        if self._trader is not None:
+            try:
+                # The hist_* frames are passed for the same reason
+                # _build_ai_decisions_frames passes them: today_* is the CURRENT CME
+                # session only (~15 h), while the Analyzer's window is 17 days and the
+                # Executor's level window is 14. Without history the level universe is
+                # empty and the thesis is decided on nothing.
+                self._trader.on_bar(now, today_mnq, today_mes,
+                                    bar_complete=bar_complete,
+                                    hist_mnq=self._hist_mnq_1m,
+                                    hist_mes=self._hist_mes_1m)
+            except Exception:
+                pass
+
+        if self._trader_only:
+            # Everything below is the legacy engine. Skipping it here (rather than at each
+            # call site) keeps the boundary in ONE place and guarantees no legacy state is
+            # touched: no daily recompute, no trend, no SMT detection, no liquidity update,
+            # no hypothesis, no strategy, no bar_state write.
             return []
 
         # Re-run daily level computation at two transitions per CME session day.

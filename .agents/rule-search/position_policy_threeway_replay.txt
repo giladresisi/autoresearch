@@ -1,0 +1,83 @@
+filled production sessions considered : 66
+  survived (no stop touch in 5 min): 28
+  advanced (MFE >= 0.5 x avg_1h)      : 65
+  QUALIFYING (both)                     : 28
+
+MFE spread of the qualifying set (x avg_1h): min 0.97  median 2.83  max 7.62
+chosen at quintiles of MFE: 2026-06-08 (0.97x), 2026-07-02 (1.67x), 2026-06-12 (2.84x), 2026-08-06 (4.22x), 2026-08-13 (7.62x)
+
+====================================================================================================
+2026-06-08  DOWN  fill 29779.50 @ 09:33:09  stop 29804.50 (risk 25.00)  mech fvg_negation_reversal
+   gap MNQ 5min bull FVG 06-08 09:00 [29782.5, 29814.5]
+   avg_1h 160.10 | DOL 29265.75 | initial target 29615.45 (synthetic_85pct)
+   MFE +155.00 (0.97x avg_1h) @ 10:00:22 | move extreme 29624.5 @ 10:00 | extent 253.25
+   DOL reached by 13:00: False
+   B-loose (stop only)        exit 09:42:56 @ 29804.50 [stop]  P&L -25.00
+   B-loose+DOL (production)   exit 09:42:56 @ 29804.50 [stop]  P&L -25.00
+   C_no_breakeven             exit 09:42:56 @ 29804.50 [stop]  P&L -25.00
+                                (no stop move took effect before the exit)
+   D_pure_trail               exit 09:42:56 @ 29804.50 [stop]  P&L -25.00
+                                (no stop move took effect before the exit)
+
+====================================================================================================
+2026-07-02  UP  fill 30075.75 @ 09:30:56  stop 30050.75 (risk 25.00)  mech fvg_return_continuation
+   gap MNQ 5min bull FVG 07-02 08:00 [30053.5, 30072.75]
+   avg_1h 130.25 | DOL 30444.5 | initial target 30171.75 (TDO)
+   MFE +217.00 (1.67x avg_1h) @ 10:03:26 | move extreme 30293.0 @ 10:00 | extent 285.75
+   DOL reached by 13:00: False
+   B-loose (stop only)        exit 09:38:32 @ 30050.75 [stop]  P&L -25.00
+   B-loose+DOL (production)   exit 09:38:32 @ 30050.75 [stop]  P&L -25.00
+   C_no_breakeven             exit 09:38:32 @ 30050.75 [stop]  P&L -25.00
+                                (no stop move took effect before the exit)
+   D_pure_trail               exit 09:38:32 @ 30050.75 [stop]  P&L -25.00
+                                (no stop move took effect before the exit)
+
+====================================================================================================
+2026-06-12  UP  fill 29661.75 @ 09:35:09  stop 29644.75 (risk 17.00)  mech fvg_negation_reversal
+   gap MNQ 1min bear FVG 06-12 09:33 [29647.75, 29658.75]
+   avg_1h 137.38 | DOL 29959.75 | initial target 29736.25 (asia_low)
+   MFE +390.75 (2.84x avg_1h) @ 11:25:25 | move extreme 29920.75 @ 10:15 | extent 396.25
+   DOL reached by 13:00: True
+   B-loose (stop only)        exit 09:40:49 @ 29644.75 [stop]  P&L -17.00
+   B-loose+DOL (production)   exit 09:40:49 @ 29644.75 [stop]  P&L -17.00
+   C_no_breakeven             exit 09:40:49 @ 29644.75 [stop]  P&L -17.00
+                                (no stop move took effect before the exit)
+   D_pure_trail               exit 09:40:49 @ 29644.75 [stop]  P&L -17.00
+                                (no stop move took effect before the exit)
+
+====================================================================================================
+2026-08-06  UP  fill 29305.50 @ 09:34:33  stop 29280.50 (risk 25.00)  mech fvg_negation_reversal
+   gap MNQ 1min bear FVG 08-06 09:32 [29282.0, 29302.5]
+   avg_1h 90.22 | DOL 29600.5 | initial target 29427.6875 (synthetic_85pct)
+   MFE +380.75 (4.22x avg_1h) @ 11:10:39 | move extreme 29666.5 @ 10:20 | extent 425.5
+   DOL reached by 13:00: True
+   B-loose (stop only)        exit 13:00:00 @ 29563.25 [MARK]  P&L +257.75
+   B-loose+DOL (production)   exit 10:11:07 @ 29600.50 [dol_touch]  P&L +295.00
+   C_no_breakeven             exit 09:53:05 @ 29507.50 [stop]  P&L +202.00
+                                09:38:00  stop ->  29341.00  clause 5   previous FVG far edge 29344.0 -/+ 3.0
+                                09:42:00  stop ->  29372.25  clause 5   previous FVG far edge 29375.25 -/+ 3.0
+                                09:43:00  stop ->  29409.50  clause 7   opposite bar body 31.75 >= 3.0, wick 29412.5
+                                09:48:00  stop ->  29412.00  clause 5   previous FVG far edge 29415.0 -/+ 3.0
+                                09:49:00  stop ->  29479.00  clause 5   previous FVG far edge 29482.0 -/+ 3.0
+                                09:53:00  stop ->  29507.50  clause 7   opposite bar body 30.5 >= 3.0, wick 29510.5
+   D_pure_trail               exit 10:11:07 @ 29600.50 [dol_touch]  P&L +295.00
+                                09:38:00  stop ->  29341.00  clause 5   previous FVG far edge 29344.0 -/+ 3.0
+                                09:42:00  stop ->  29372.25  clause 5   previous FVG far edge 29375.25 -/+ 3.0
+                                09:48:00  stop ->  29412.00  clause 5   previous FVG far edge 29415.0 -/+ 3.0
+                                09:49:00  stop ->  29479.00  clause 5   previous FVG far edge 29482.0 -/+ 3.0
+                                10:08:00  stop ->  29489.25  clause 5   previous FVG far edge 29492.25 -/+ 3.0
+                                10:09:00  stop ->  29530.00  clause 5   previous FVG far edge 29533.0 -/+ 3.0
+
+====================================================================================================
+2026-08-13  UP  fill 29908.25 @ 09:33:26  stop 29883.25 (risk 25.00)  mech fvg_return_continuation
+   gap MNQ 5min bull FVG 08-13 09:00 [29881.5, 29905.25]
+   avg_1h 47.07 | DOL 30001.5 | initial target 29983.2625 (synthetic_85pct)
+   MFE +358.75 (7.62x avg_1h) @ 10:35:28 | move extreme 30267.0 @ 10:35 | extent 404.25
+   DOL reached by 13:00: True
+   B-loose (stop only)        exit 13:00:00 @ 30196.75 [MARK]  P&L +288.50
+   B-loose+DOL (production)   exit 09:36:43 @ 30001.50 [dol_touch]  P&L +93.25
+   C_no_breakeven             exit 09:36:43 @ 30001.50 [dol_touch]  P&L +93.25
+                                09:36:00  stop ->  29884.50  clause 5   previous FVG far edge 29887.5 -/+ 3.0
+   D_pure_trail               exit 09:36:43 @ 30001.50 [dol_touch]  P&L +93.25
+                                09:36:00  stop ->  29884.50  clause 5   previous FVG far edge 29887.5 -/+ 3.0
+

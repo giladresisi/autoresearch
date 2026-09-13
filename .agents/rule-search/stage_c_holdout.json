@@ -1,0 +1,42 @@
+{
+  "abstain_max_d0": 2.0,
+  "family": "B8g",
+  "per_ticker": {
+    "MES": {
+      "acted": {
+        "acc_given_labelled": 0.5385,
+        "act_accuracy": 0.5385,
+        "coverage": 0.7222,
+        "n_covered": 13,
+        "n_total": 18,
+        "p_labelled": 1.0
+      },
+      "everything": {
+        "acc_given_labelled": 0.5333,
+        "act_accuracy": 0.4444,
+        "coverage": 1.0,
+        "n_covered": 18,
+        "n_total": 18,
+        "p_labelled": 0.8333
+      }
+    },
+    "MNQ": {
+      "acted": {
+        "acc_given_labelled": 0.5,
+        "act_accuracy": 0.5,
+        "coverage": 0.5714,
+        "n_covered": 12,
+        "n_total": 21,
+        "p_labelled": 1.0
+      },
+      "everything": {
+        "acc_given_labelled": 0.5,
+        "act_accuracy": 0.381,
+        "coverage": 1.0,
+        "n_covered": 21,
+        "n_total": 21,
+        "p_labelled": 0.7619
+      }
+    }
+  }
+}

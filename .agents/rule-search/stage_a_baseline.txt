@@ -1,0 +1,136 @@
+==========================================================================
+CYCLE-4 PHASE 3 / STAGE A — BASELINES   (63 discovery sessions, primary segments)
+   holdout not read. 92 labelled instrument-sessions scoreable.
+==========================================================================
+
+--------------------------------------------------------------------------
+A1. Rank of the draw among eligible pools (0 = nearest ahead)
+--------------------------------------------------------------------------
+   MNQ  n=48   median rank=1.0   mean=1.21   median pools eligible=6.0
+      histogram   0:19  1:10  2:12  3:4  4:3
+   MES  n=44   median rank=1.0   mean=1.25   median pools eligible=6.5
+      histogram   0:21  1:12  2:3  3:4  5:2  6:1  8+:1
+
+--------------------------------------------------------------------------
+A1. Fixed-k baseline — "always name the k-th nearest eligible pool"
+--------------------------------------------------------------------------
+             k    correct   coverage      acc
+   MNQ       0         19         48    39.6%
+   MNQ       1         10         45    22.2%
+   MNQ       2         12         43    27.9%
+   MNQ       3          4         36    11.1%
+   MNQ       4          3         31     9.7%
+   MNQ       5          0         25     0.0%
+   MNQ       6          0         19     0.0%
+   MNQ       7          0         19     0.0%
+
+   MES       0         21         44    47.7%
+   MES       1         12         43    27.9%
+   MES       2          3         41     7.3%
+   MES       3          4         35    11.4%
+   MES       4          0         31     0.0%
+   MES       5          2         27     7.4%
+   MES       6          1         22     4.5%
+   MES       7          0         17     0.0%
+
+
+--------------------------------------------------------------------------
+A1. Reach-m baseline — "the furthest pool within m x avg_range_1h"
+--------------------------------------------------------------------------
+             m    correct   coverage    acc|cov      acc|all
+   MNQ     0.5          0          4       0.0%         0.0%
+   MNQ     1.0          4         13      30.8%         8.3%
+   MNQ     1.5         11         23      47.8%        22.9%
+   MNQ     2.0         18         34      52.9%        37.5%
+   MNQ     2.5         24         44      54.5%        50.0%
+   MNQ     3.0         27         46      58.7%        56.2%
+   MNQ     4.0         21         47      44.7%        43.8%
+   MNQ     5.0         21         48      43.8%        43.8%
+   MNQ     6.0         19         48      39.6%        39.6%
+   MNQ     8.0         12         48      25.0%        25.0%
+   MNQ    12.0         10         48      20.8%        20.8%
+
+   MES     0.5          6         14      42.9%        13.6%
+   MES     1.0         11         23      47.8%        25.0%
+   MES     1.5         17         32      53.1%        38.6%
+   MES     2.0         24         36      66.7%        54.5%
+   MES     2.5         24         42      57.1%        54.5%
+   MES     3.0         19         42      45.2%        43.2%
+   MES     4.0         11         44      25.0%        25.0%
+   MES     5.0         11         44      25.0%        25.0%
+   MES     6.0         10         44      22.7%        22.7%
+   MES     8.0          8         44      18.2%        18.2%
+   MES    12.0          5         44      11.4%        11.4%
+
+
+--------------------------------------------------------------------------
+A2. Class pull INSIDE distance buckets (G1) — 0 = nearest quarter
+--------------------------------------------------------------------------
+   MNQ
+      bucket 0  (30 draws / 99 eligible)
+         day_extreme      draws  20.0%  census  16.2%  delta   +3.8%  [-6.2%, +17.2%]
+         week_extreme     draws   6.7%  census   5.1%  delta   +1.6%  [-5.1%, +8.3%]
+         session_extreme  draws  36.7%  census  36.4%  delta   +0.3%  [-13.0%, +13.8%]
+         mid              draws   0.0%  census   2.0%  delta   -2.0%  [-2.0%, -2.0%]  <-- avoided
+         open_price       draws  36.7%  census  40.4%  delta   -3.7%  [-17.1%, +9.6%]
+      bucket 1  (11 draws / 72 eligible)
+         session_extreme  draws  36.4%  census  16.7%  delta  +19.7%  [+1.5%, +47.0%]  <-- PULL
+         open_price       draws  18.2%  census   6.9%  delta  +11.2%  [-6.9%, +29.4%]
+         week_extreme     draws   9.1%  census   9.7%  delta   -0.6%  [-9.7%, +17.5%]
+         day_extreme      draws  36.4%  census  66.7%  delta  -30.3%  [-57.6%, -3.0%]  <-- avoided
+      bucket 2  (5 draws / 86 eligible)
+         session_extreme  draws  20.0%  census   2.3%  delta  +17.7%  [-2.3%, +57.7%]
+         day_extreme      draws  60.0%  census  61.6%  delta   -1.6%  [-41.6%, +38.4%]
+         open_price       draws   0.0%  census   2.3%  delta   -2.3%  [-2.3%, -2.3%]  <-- avoided
+         week_extreme     draws  20.0%  census  33.7%  delta  -13.7%  [-33.7%, +26.3%]
+      bucket 3  (2 draws / 63 eligible)
+         week_extreme     draws 100.0%  census  84.1%  delta  +15.9%  [+15.9%, +15.9%]  <-- PULL
+         day_extreme      draws   0.0%  census  15.9%  delta  -15.9%  [-15.9%, -15.9%]  <-- avoided
+   MES
+      bucket 0  (32 draws / 95 eligible)
+         open_price       draws  46.9%  census  40.0%  delta   +6.9%  [-8.8%, +22.5%]
+         week_extreme     draws   3.1%  census   2.1%  delta   +1.0%  [-2.1%, +7.3%]
+         day_extreme      draws  18.8%  census  17.9%  delta   +0.9%  [-8.5%, +13.4%]
+         mid              draws   0.0%  census   2.1%  delta   -2.1%  [-2.1%, -2.1%]  <-- avoided
+         session_extreme  draws  31.2%  census  37.9%  delta   -6.6%  [-19.1%, +6.0%]
+      bucket 1  (6 draws / 75 eligible)
+         open_price       draws  33.3%  census  13.3%  delta  +20.0%  [-13.3%, +53.3%]
+         week_extreme     draws  16.7%  census  10.7%  delta   +6.0%  [-10.7%, +39.3%]
+         session_extreme  draws  16.7%  census  12.0%  delta   +4.7%  [-12.0%, +38.0%]
+         mid              draws   0.0%  census   2.7%  delta   -2.7%  [-2.7%, -2.7%]  <-- avoided
+         day_extreme      draws  33.3%  census  61.3%  delta  -28.0%  [-61.3%, +5.3%]
+      bucket 2  (3 draws / 85 eligible)
+         day_extreme      draws  66.7%  census  60.0%  delta   +6.7%  [-26.7%, +40.0%]
+         week_extreme     draws  33.3%  census  36.5%  delta   -3.1%  [-36.5%, +30.2%]
+         session_extreme  draws   0.0%  census   3.5%  delta   -3.5%  [-3.5%, -3.5%]  <-- avoided
+      bucket 3  (3 draws / 62 eligible)
+         day_extreme      draws  33.3%  census  22.6%  delta  +10.8%  [-22.6%, +44.1%]
+         week_extreme     draws  66.7%  census  77.4%  delta  -10.8%  [-44.1%, +22.6%]
+
+--------------------------------------------------------------------------
+A3. Null A, wide vs reached-only (G2)
+--------------------------------------------------------------------------
+   MNQ
+      wide          n=48  observed=56.375    null=217.375   beats=1.0
+      reached-only  n=29  observed=53.25     null=124.0     beats=1.0
+   MES
+      wide          n=44  observed=9.25      null=25.25     beats=1.0
+      reached-only  n=23  observed=7.0       null=16.25     beats=1.0
+
+--------------------------------------------------------------------------
+A4. Was the draw already taken by the time a fill could exist?
+--------------------------------------------------------------------------
+   MNQ  + 2min   already reached  6/46 (13%)   median rank among pools still open: 1.0 (n=40)
+   MNQ  + 5min   already reached  8/46 (17%)   median rank among pools still open: 1.0 (n=38)
+   MNQ  +10min   already reached 13/46 (28%)   median rank among pools still open: 1 (n=33)
+   MES  + 2min   already reached 13/43 (30%)   median rank among pools still open: 1.0 (n=30)
+   MES  + 5min   already reached 16/43 (37%)   median rank among pools still open: 1 (n=27)
+   MES  +10min   already reached 16/43 (37%)   median rank among pools still open: 1 (n=27)
+
+==========================================================================
+THE NUMBER TO BEAT
+==========================================================================
+   MNQ   reach-m=3.0     27/48 labelled segments  =  56.2%
+   MES   reach-m=2.0     24/44 labelled segments  =  54.5%
+   Stage B families are scored against exactly these, on these sessions.
+

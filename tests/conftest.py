@@ -8,6 +8,20 @@ import os
 
 import pytest
 
+# ── .env must not reach the test suite ──────────────────────────────────────────
+# `live_orders` calls `load_dotenv()` at IMPORT time, so any value in the developer's
+# `.env` silently becomes test configuration. `DISCONNECTED=true` (set for shadow-live
+# sessions) makes `live_orders` short-circuit the broker reconcile path, which is exactly
+# what `tests/test_reconcile_on_close.py` asserts on — two tests then fail for a reason
+# that has nothing to do with the code under test, inflating the failure baseline from
+# 2 to 4 and reading like a regression to whoever runs the suite next.
+#
+# Same family as the `_isolate_global_state` fixture below: ambient developer state
+# leaking into tests. Set at conftest MODULE level because conftest is imported before
+# any test module, and the read happens at `live_orders` import — an autouse fixture
+# would run too late to help.
+os.environ["DISCONNECTED"] = "false"
+
 
 @pytest.fixture(autouse=True)
 def _isolate_global_state(tmp_path, monkeypatch):
