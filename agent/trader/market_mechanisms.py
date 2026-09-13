@@ -38,6 +38,7 @@ from agent.trader.arbiter import Arbiter, Candidate
 from agent.trader.episode import Episode, evaluation_order
 from agent.trader.extreme_reject import ExtremeReject, choose_track
 from agent.trader.tmso_reject import TmsoReject, tmso_for
+from agent.trader.fvg_reject import FvgReject, zone_at_0700
 
 _SHORT = ("DOWN", "SHORT")
 
@@ -76,6 +77,9 @@ class MarketMechanisms:
         # CANDIDATE, not adopted — see `tmso_reject.py`. Built eagerly because it is
         # self-gating: it does nothing until a micro-session's Q2 has opened.
         self._tmso = TmsoReject(direction)
+        # CANDIDATE — see `fvg_reject.py`. Self-gating: inert until the 07:00 1h FVG
+        # exists and price makes a new post-09:30 extreme inside it.
+        self._fvg1h = FvgReject(direction)
 
     # -- inspection ------------------------------------------------------------ #
 
@@ -86,7 +90,8 @@ class MarketMechanisms:
     def state(self) -> dict:
         return {"sec7": self._sec7.state() if self._sec7 is not None else None,
                 "episodes": {k: e.state() for k, e in self._episodes.items()},
-                "tmso": self._tmso.state(), "seeded": self._seeded}
+                "tmso": self._tmso.state(), "fvg_1h": self._fvg1h.state(),
+                "seeded": self._seeded}
 
     # -- §7 -------------------------------------------------------------------- #
 
@@ -117,6 +122,9 @@ class MarketMechanisms:
     def tmso_on_bar_close(self, now, bar, mnq) -> "dict | None":
         level, _q2 = tmso_for(mnq, now)
         return self._tmso.on_bar_close(now, bar, level)
+
+    def fvg1h_on_bar_close(self, now, bar, mnq) -> "dict | None":
+        return self._fvg1h.on_bar_close(now, bar, zone_at_0700(mnq, now))
 
     # -- §6 -------------------------------------------------------------------- #
 
@@ -173,6 +181,7 @@ class MarketMechanisms:
         if self._episodes:
             out.append(Candidate("fvg_1m_post_extreme", "market"))
         out.append(Candidate("tmso_reject", "market"))
+        out.append(Candidate("fvg_1h_reject", "market"))
         return out
 
     def pick(self, fires) -> "dict | None":

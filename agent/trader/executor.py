@@ -1454,6 +1454,8 @@ class Executor:
             # already enter" condition it was specified with.
             fires.append(("tmso_reject",
                           self._market.tmso_on_bar_close(now, bar, mnq)))
+            fires.append(("fvg_1h_reject",
+                          self._market.fvg1h_on_bar_close(now, bar, mnq)))
         fire = self._market.pick(fires)
         if fire is None:
             return
