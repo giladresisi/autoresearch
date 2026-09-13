@@ -37,6 +37,7 @@ import pandas as pd
 from agent.trader.arbiter import Arbiter, Candidate
 from agent.trader.episode import Episode, evaluation_order
 from agent.trader.extreme_reject import ExtremeReject, choose_track
+from agent.trader.tmso_reject import TmsoReject, tmso_for
 
 _SHORT = ("DOWN", "SHORT")
 
@@ -72,6 +73,9 @@ class MarketMechanisms:
         self._sec7 = None
         self._episodes: dict = {}
         self._seeded = False
+        # CANDIDATE, not adopted — see `tmso_reject.py`. Built eagerly because it is
+        # self-gating: it does nothing until a micro-session's Q2 has opened.
+        self._tmso = TmsoReject(direction)
 
     # -- inspection ------------------------------------------------------------ #
 
@@ -82,7 +86,7 @@ class MarketMechanisms:
     def state(self) -> dict:
         return {"sec7": self._sec7.state() if self._sec7 is not None else None,
                 "episodes": {k: e.state() for k, e in self._episodes.items()},
-                "seeded": self._seeded}
+                "tmso": self._tmso.state(), "seeded": self._seeded}
 
     # -- §7 -------------------------------------------------------------------- #
 
@@ -107,6 +111,12 @@ class MarketMechanisms:
         if self._sec7 is None:
             return None
         return self._sec7.on_bar_close(now, bar)
+
+    # -- tmso_reject (CANDIDATE) ------------------------------------------------ #
+
+    def tmso_on_bar_close(self, now, bar, mnq) -> "dict | None":
+        level, _q2 = tmso_for(mnq, now)
+        return self._tmso.on_bar_close(now, bar, level)
 
     # -- §6 -------------------------------------------------------------------- #
 
@@ -162,6 +172,7 @@ class MarketMechanisms:
             out.append(Candidate("extreme_reject_close", "market"))
         if self._episodes:
             out.append(Candidate("fvg_1m_post_extreme", "market"))
+        out.append(Candidate("tmso_reject", "market"))
         return out
 
     def pick(self, fires) -> "dict | None":

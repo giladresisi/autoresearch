@@ -1449,6 +1449,11 @@ class Executor:
             fires.append(("fvg_1m_post_extreme",
                           self._market.sec6_on_bar_close(now, bar,
                                                          mid=self._market_price())))
+            # CANDIDATE mechanism, armed like any other market mechanism: it fires only
+            # when nothing is open and the budget allows, which is the "if we didn't
+            # already enter" condition it was specified with.
+            fires.append(("tmso_reject",
+                          self._market.tmso_on_bar_close(now, bar, mnq)))
         fire = self._market.pick(fires)
         if fire is None:
             return
