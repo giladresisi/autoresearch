@@ -56,6 +56,9 @@ from agent.trader.order_sim import OrderSim, RestingOrder
 from agent.trader.retrace import RetraceGate
 from agent.trader.takeover import deepest_penetrated, resolve_cooldown_end
 from agent.trader.records import DecisionRecorder
+from agent.trader.target import select_target
+from agent.trader.arbiter import Arbiter
+from agent.trader.market_mechanisms import MarketMechanisms
 
 # l2-mechanisms.md §9 starting values.
 SETTLE_UNTIL_SECONDS = 30            # settle window ends at 09:30:30
@@ -112,7 +115,30 @@ class Executor:
             store=store, requirement=requirement, ticker=ticker)
         self._rec = recorder if recorder is not None else DecisionRecorder(state_dir)
         # The simulated order lifecycle. A SIMULATION, never a broker call.
-        self._sim = OrderSim(dol=self._dol_price())
+        #
+        # NO TARGET AT CONSTRUCTION (plan 16). It used to be seeded with the plan's 09:20
+        # DOL; the take-profit is now the T2 pick, which does not exist until a fill
+        # gives it an instant to anchor on. `_target_for_fill` sets it there.
+        self._sim = OrderSim(dol=None)
+        # The bars handed to the CURRENT `on_bar` call, so a fill discovered inside
+        # `_drive_orders` can build its menu at that instant. Set per bar and never read
+        # outside one.
+        self._bars = None
+        # One-shot: `dol_reached` no longer kills the plan, and the condition stays true
+        # for the rest of the session once met.
+        self._dol_reached_recorded = False
+        # The plan's OBJECTIVE: the most recent T2 pick, and the instant it was picked.
+        # Reaching it kills the plan (`target_reached`) — the draw the plan existed to
+        # trade has been delivered, so there is nothing left for it to do.
+        self._target_price = None
+        self._target_level = None
+        self._target_since = None
+        # §6/§7, finally reachable. Built here rather than lazily so `state()` is
+        # inspectable from the first bar; §7's own machine is seeded on the first bar
+        # that can measure its anchor (see `MarketMechanisms.seed_sec7`).
+        self._market = MarketMechanisms(
+            self._plan.get("direction"), arm_ts,
+            max_attempts=int(self._plan.get("max_attempts") or MAX_ATTEMPTS))
         self._emitted: set = set()
         # One-shot: the falsifier is recorded the FIRST time it fires and never again.
         # It is not a state change, so re-recording it every bar would bury the session.
@@ -195,6 +221,9 @@ class Executor:
             return
         bar_complete = self.bar_closed(now, bar_complete)
         self._last_ts = now
+        # Held for `_set_target_on_fill`: a fill surfaces inside `_drive_orders`, which
+        # is handed only the MNQ frame, but the T2 menu needs BOTH tickers.
+        self._bars = bars
         if self._arm_ts is not None and now >= self._arm_ts:
             self._state["tracking"] = True
         self._state["in_settle"] = self._in_settle(now)
@@ -297,6 +326,14 @@ class Executor:
         except Exception as exc:
             self._state["retrace_error"] = f"{type(exc).__name__}: {exc}"
 
+        # 3c. §6's TICK path. Clause 1 makes intra-bar ordering load-bearing — the
+        # episode begins at the tick that first enters the gap and the runaway test runs
+        # only over ticks at or after it — so this cannot wait for the bar close.
+        try:
+            self._drive_market_mechanisms(now, mnq, bar=None)
+        except Exception as exc:
+            self._state["market_mech_error"] = f"{type(exc).__name__}: {exc}"
+
         if not bar_complete:
             return                                    # per-second path ends here
 
@@ -306,6 +343,15 @@ class Executor:
             self._rebind_and_guard(now)
         except Exception:
             pass
+
+        # 4b. §7 and §6's close verdict, AFTER the re-bind so `usable_5m_gaps` and the
+        # resting slot reflect this bar. §6 is disarmed whenever a usable 5m gap exists
+        # (`Arbiter.sec6_armed`), which is what keeps it from coexisting with a resting
+        # 5m stop-entry.
+        try:
+            self._drive_market_mechanisms(now, mnq, bar=self._completed_1m(mnq, now))
+        except Exception as exc:
+            self._state["market_mech_error"] = f"{type(exc).__name__}: {exc}"
 
     # -- internals -------------------------------------------------------------- #
 
@@ -334,6 +380,15 @@ class Executor:
                     now=now, plan_id=self._plan.get("plan_id"),
                     mechanism=self._state.get("mechanism"),
                     artifact_label=self._label_for(ev.get("artifact_id")), **ev)
+                if ev.get("kind") == "fill":
+                    # The target is chosen HERE, one bar-event late by construction:
+                    # `OrderSim.on_bar` fills and then tests the take-profit within the
+                    # same call, so a bar that both fills and reaches the target books
+                    # no take-profit. Accepted — the T2 pick is a menu row at least
+                    # `max(5pts, 1.0 x avg_1h)` away (`DOL_MIN_DRAW_RATIO`), so a
+                    # same-bar touch would mean a ~74 pt second, and resolving it the
+                    # other way would be the free-points error §11 warns about.
+                    self._set_target_on_fill(now)
                 if ev.get("kind") == "stop_out":
                     self._on_stop_out(ev)
         except Exception as exc:
@@ -496,14 +551,38 @@ class Executor:
         before the close — precisely the wick-based behaviour this cycle rejected, just
         arriving through the frame instead of through `High.max()`.
         """
+        # THE DOL NO LONGER KILLS THE PLAN (plan 16). It is recorded once and stepped
+        # over, on the same terms falsification already had below: the DOL stopped being
+        # the target when selection moved to the fill (`agent/trader/target.py`), so
+        # ending the session on it was both an effect on ENTRY — every later bind is
+        # blocked — and incoherent, since the level no longer has any role. The fire
+        # time alone reconstructs the counterfactual: everything the plan did afterwards
+        # is what dying there would have forgone.
         dol = self._dol_price()
-        if dol is not None and len(mnq):
+        if dol is not None and len(mnq) and not self._dol_reached_recorded:
             if self._is_short():
                 reached = float(mnq["Low"].min()) <= float(dol)
             else:
                 reached = float(mnq["High"].max()) >= float(dol)
             if reached:
-                return "dol_reached", {"dol": float(dol)}
+                self._dol_reached_recorded = True
+                self._rec.would_have_killed(
+                    now=now, plan_id=self._plan.get("plan_id"),
+                    reason="dol_reached", detail={"dol": float(dol)})
+
+        # THE T2 TARGET KILLS THE PLAN. It replaces the DOL in the role the DOL used to
+        # hold, and for the same reason: the plan exists to trade one draw, and once that
+        # draw completes there is nothing left to trade toward. Measured over bars at or
+        # after the PICK, never the whole frame — the target is a level price traded
+        # through freely before it was ever chosen.
+        tgt = self._target_price
+        if tgt is not None and self._target_since is not None and len(mnq):
+            since = mnq[mnq.index >= self._target_since]
+            if len(since):
+                hit = (float(since["Low"].min()) <= tgt if self._is_short()
+                       else float(since["High"].max()) >= tgt)
+                if hit:
+                    return "target_reached", {"target": tgt, "level": self._target_level}
 
         cap = self._plan.get("max_attempts")
         if cap is not None and int(self._plan.get("attempts_used") or 0) >= int(cap):
@@ -931,6 +1010,13 @@ class Executor:
         """
         self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
         self._plan.setdefault("max_attempts", MAX_ATTEMPTS)
+        # The SHARED per-plan budget, tallied per mechanism for the artifact only
+        # (`Arbiter.spent_by` is "RECORDED, never scored"). Spent at the same instant as
+        # the plan's own counter so the two can never disagree.
+        try:
+            self._market.arbiter.spend(self._state.get("mechanism"))
+        except Exception:
+            pass
 
         failed_id = event.get("artifact_id")
         if not failed_id:
@@ -1082,6 +1168,8 @@ class Executor:
                 now=now, plan_id=self._plan.get("plan_id"),
                 mechanism=self._state.get("mechanism"),
                 artifact_label=self._label_for(artifact_id), **ev)
+            # Same reason as the resting path: the target is anchored on the fill.
+            self._set_target_on_fill(now)
             return
         self._sim.place(RestingOrder(direction=self._plan.get("direction"),
                                      trigger=float(trigger), stop=float(stop),
@@ -1239,15 +1327,18 @@ class Executor:
                              "trigger": trigger, "price": price})
             return
 
+        # THE DOL FLOOR NO LONGER VETOES (plan 16) — computed, recorded, stepped over.
+        # It gated entries on room remaining to the 09:20 DOL, and that DOL is no longer
+        # the target, so the quantity it measured no longer exists. Recorded rather than
+        # deleted: the knob may come back against the T2 target instead.
         dol = self._dol_price()
         if dol is not None:
             remaining = (trigger - float(dol)) if self._is_short() else (float(dol) - trigger)
             if remaining < DOL_FLOOR_PTS:
-                self._veto_once(now, mechanism, gap, "dol_floor",
-                                {"remaining": round(remaining, 4),
-                                 "floor": DOL_FLOOR_PTS, "trigger": trigger,
-                                 "dol": float(dol)})
-                return
+                self._would_have_vetoed_once(
+                    now, mechanism, gap, "dol_floor",
+                    {"remaining": round(remaining, 4), "floor": DOL_FLOOR_PTS,
+                     "trigger": trigger, "dol": float(dol)})
 
         if self._state["in_settle"]:
             return                                     # tracked, never entered (l2 §2)
@@ -1313,6 +1404,115 @@ class Executor:
             else:
                 self._enter(now, trigger, stop, gap.id)
 
+    def _drive_market_mechanisms(self, now, mnq, *, bar) -> None:
+        """§6 and §7: drive, arbitrate, and enter by MARKET if one fires.
+
+        `bar=None` is the per-second path (§6's tick clauses only); a bar is the
+        bar-close path (§7's machine plus §6's close verdict).
+
+        Preconditions checked here rather than inside the machines, because they are the
+        Executor's knowledge: nothing fires while a position is open (one position at a
+        time), during the settle window, inside a stop-out cooldown (§6.1 clause 3, which
+        ALSO resets every gap cycle), or with the shared attempt budget spent.
+        """
+        if not self._state["plan_alive"] or self._sim.position is not None:
+            return
+        if self._state["in_settle"] or not len(mnq):
+            return
+        if self._in_cooldown(now):
+            # Clause 3: no cycle may complete while the cooldown is in force, and every
+            # gap cycle resets across it.
+            self._market.reset_cycles()
+            return
+        cap = self._plan.get("max_attempts")
+        if cap is not None and int(self._plan.get("attempts_used") or 0) >= int(cap):
+            return
+
+        price = self._state.get("now_price")
+        self._market.seed_sec7(self._since_arm(mnq))
+
+        # §6's arming is the arbitration form of its own precondition.
+        usable = self.usable_5m_gaps(now, price)
+        armed6 = Arbiter.sec6_armed(usable_5m_gaps=len(usable or ()))
+        self._market.sync_episodes(
+            self._gaps_on(FALLBACK_TF, now) if armed6 else (), armed=armed6)
+
+        fires = []
+        if bar is None:
+            fires.append(("fvg_1m_post_extreme",
+                          self._market.sec6_on_tick(now, price,
+                                                    bar_open=self._bar_open_of(mnq),
+                                                    mid=self._market_price())))
+        else:
+            fires.append(("extreme_reject_close",
+                          self._market.sec7_on_bar_close(now, bar)))
+            fires.append(("fvg_1m_post_extreme",
+                          self._market.sec6_on_bar_close(now, bar,
+                                                         mid=self._market_price())))
+            # CANDIDATE mechanism, armed like any other market mechanism: it fires only
+            # when nothing is open and the budget allows, which is the "if we didn't
+            # already enter" condition it was specified with.
+            fires.append(("tmso_reject",
+                          self._market.tmso_on_bar_close(now, bar, mnq)))
+        fire = self._market.pick(fires)
+        if fire is None:
+            return
+        self._enter_by_market(now, fire)
+
+    @staticmethod
+    def _completed_1m(mnq, now):
+        """The 1m bar that just COMPLETED, or None.
+
+        §6's close verdict and §7 are state machines over completed 1m bars — both
+        compare the bar's Close against its Open or against a level, and any later
+        bar-close mechanism will too. The driver hands this Executor 1s bars, and
+        the wiring's first cut passed
+        `self._last_row`, the last 1s row: on a one-second bar Open and Close are the same
+        print or one tick apart, so every colour test was noise and §7 could not fire at
+        all. Left-labelled, so the minute that just closed at `now` carries label
+        `now - 1min`.
+        """
+        try:
+            if mnq is None or not len(mnq):
+                return None
+            label = now.floor("1min") - pd.Timedelta(minutes=1)
+            seg = mnq[(mnq.index >= label) & (mnq.index < label + pd.Timedelta(minutes=1))]
+            if not len(seg):
+                return None
+            return pd.Series({"Open": float(seg.iloc[0]["Open"]),
+                              "High": float(seg["High"].max()),
+                              "Low": float(seg["Low"].min()),
+                              "Close": float(seg.iloc[-1]["Close"])}, name=label)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _bar_open_of(mnq):
+        """The in-progress minute's open — §6.1 clause 2's beyond-open condition."""
+        try:
+            return float(mnq.iloc[-1]["Open"])
+        except Exception:
+            return None
+
+    def _enter_by_market(self, now, fire: dict) -> None:
+        """A §6/§7 market entry. Same lifecycle as a resting fill: record, pick the
+        target at the fill, spend one attempt from the SHARED budget."""
+        mechanism = fire.get("mechanism")
+        self._state["mechanism"] = mechanism
+        ev = self._sim.fill_market(now, direction=fire.get("direction"),
+                                   price=float(fire["price"]),
+                                   stop=float(fire["stop"]),
+                                   artifact_id=fire.get("gap_id") or mechanism)
+        self._rec.order_event(now=now, plan_id=self._plan.get("plan_id"),
+                              mechanism=mechanism,
+                              artifact_label=self._label_for(ev.get("artifact_id")),
+                              **ev)
+        self._set_target_on_fill(now)
+        # NO attempt is spent HERE. The budget counts STOP-OUTS, not entries
+        # (`_on_stop_out`, and `order_sim`'s own "the attempt counter counts stop-outs"),
+        # so incrementing on the fill double-counted every §6/§7 trade that then stopped
+        # out — 09-03 read `attempts_used: 3` against two trades before this was fixed.
+
     def _entry_mechanism(self):
         for name in ("fvg_negation_reversal", "fvg_return_continuation"):
             if name in (self._plan.get("armed_classes") or ()):
@@ -1327,6 +1527,45 @@ class Executor:
         self._rec.veto(now=now, plan_id=self._plan.get("plan_id"), mechanism=mechanism,
                        reason=reason, detail=detail, artifact_id=gap.id,
                        artifact_label=gap.label)
+
+    def _would_have_vetoed_once(self, now, mechanism, gap, reason, detail) -> None:
+        """Same per-(mechanism, gap, reason) dedupe as `_veto_once`, but the caller
+        FALLS THROUGH. Shares `self._vetoed` so one observation cannot be recorded twice
+        under two kinds."""
+        key = (mechanism, gap.id, reason)
+        if key in self._vetoed:
+            return
+        self._vetoed.add(key)
+        self._rec.would_have_vetoed(
+            now=now, plan_id=self._plan.get("plan_id"), mechanism=mechanism,
+            reason=reason, detail=detail, artifact_id=gap.id, artifact_label=gap.label)
+
+    def _set_target_on_fill(self, now) -> None:
+        """Pick the T2 target at THIS fill and hand it to the simulated order book.
+
+        Called from both fill sites — the resting-order path in `_drive_orders` and the
+        crossed-trigger market path in `_enter`. Total: `select_target` swallows its own
+        failures and returns None, and a None pick is recorded rather than retried, so a
+        menu that cannot be built costs the target and nothing else.
+
+        NOT re-run on later bars. T2 is "the nearest eligible draw AT THE FILL"; asking
+        again every bar would be a different selector (continuous re-anchoring), which is
+        unmeasured — see plan 16's out-of-scope list.
+        """
+        pick = select_target(self._bars, now, self._plan.get("direction"), self._ticker)
+        self._sim.set_target((pick or {}).get("price"))
+        # Remembered BEYOND the position's life, unlike `OrderSim`'s copy: the target is
+        # the plan's objective, so reaching it ends the plan even if the attempt that
+        # chose it had already been stopped out. `_target_since` bounds the check to bars
+        # at or after the pick — the same discipline `_since_arm` applies to the plan.
+        price = (pick or {}).get("price")
+        if price is not None:
+            self._target_price = float(price)
+            self._target_level = (pick or {}).get("level")
+            self._target_since = now
+        self._rec.target_selected(
+            now=now, plan_id=self._plan.get("plan_id"),
+            mechanism=self._state.get("mechanism"), pick=pick)
 
     def _clear_binding(self) -> None:
         self._state.update({"bound_id": None, "bound_label": None, "mechanism": None,

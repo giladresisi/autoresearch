@@ -79,20 +79,21 @@ def test_max_distance_guard_blocks_a_far_trigger(tmp_path):
 
 
 def test_plan_death_is_evaluated_with_nothing_open(tmp_path):
-    """l2 §7 scope lesson: unscoped, it fires hours after the plan completed."""
-    ex = Executor(tmp_path, plan=PLAN, arm_ts=ARM)
-    hit = _bars(base=29533.0)
-    ex.on_bar(pd.Timestamp("2026-08-13 10:00", tz="America/New_York"),
-              {"MNQ": hit, "MES": hit})
+    """l2 §7 scope lesson: unscoped, it fires hours after the plan completed.
+
+    Driven by the ATTEMPT BUDGET since plan 16 made `dol_reached` record-only; the
+    property under test is that `_death` runs at all, not which condition triggers it.
+    """
+    ex = Executor(tmp_path, plan=dict(PLAN, attempts_used=3), arm_ts=ARM)
+    ex.on_bar(pd.Timestamp("2026-08-13 10:00", tz="America/New_York"), BARS)
     assert ex.bind_state()["plan_alive"] is False
 
 
 def test_executor_goes_dark_when_the_plan_dies(tmp_path):
-    ex = Executor(tmp_path, plan=PLAN, arm_ts=ARM)
-    hit = _bars(base=29533.0)
-    ex.on_bar(pd.Timestamp("2026-08-13 10:00", tz="America/New_York"), {"MNQ": hit, "MES": hit})
+    ex = Executor(tmp_path, plan=dict(PLAN, attempts_used=3), arm_ts=ARM)
+    ex.on_bar(pd.Timestamp("2026-08-13 10:00", tz="America/New_York"), BARS)
     before = ex.bind_state()
-    ex.on_bar(pd.Timestamp("2026-08-13 10:05", tz="America/New_York"), {"MNQ": hit, "MES": hit})
+    ex.on_bar(pd.Timestamp("2026-08-13 10:05", tz="America/New_York"), BARS)
     assert ex.bind_state()["plan_alive"] is False and before["plan_alive"] is False
 
 
@@ -188,15 +189,22 @@ def test_stop_is_capped_at_25_points_from_the_trigger(tmp_path):
             assert r["stop"] - r["trigger"] <= 25.0 + 1e-9
 
 
-def test_dol_floor_veto_fires_and_suppresses_the_entry(tmp_path):
-    """A DOL sitting right under price leaves < 60 pts and must veto every entry."""
+def test_dol_floor_is_recorded_but_no_longer_suppresses_the_entry(tmp_path):
+    """PLAN 16 INVERTED THIS TEST. It used to assert that a DOL sitting under price
+    vetoed every entry. The DOL is no longer the target, so the room-remaining quantity
+    the floor measured no longer exists: it is still COMPUTED and RECORDED — as
+    `would_have_vetoed`, so the counterfactual stays recoverable — and the entry runs.
+
+    The `veto` kind must stay clean: `report_replay_pnl.summarize` counts it, and an
+    inert observation landing there would read as a refusal that never happened."""
     near = dict(PLAN, dol={"level": "x", "price": 29700.0})
     _drive(tmp_path, near, last="09:45")
     recs = _recs(tmp_path)
-    vetoes = [r for r in recs if r.get("reason") == "dol_floor"]
-    assert vetoes, f"expected a dol_floor veto; got {[r['kind'] for r in recs]}"
-    assert "remaining" in vetoes[0]["detail"]
-    assert not [r for r in recs if r["kind"] == "intended_entry"]
+    observed = [r for r in recs if r.get("reason") == "dol_floor"]
+    assert observed, f"expected a dol_floor observation; got {[r['kind'] for r in recs]}"
+    assert {r["kind"] for r in observed} == {"would_have_vetoed"}
+    assert "remaining" in observed[0]["detail"]
+    assert [r for r in recs if r["kind"] == "intended_entry"],         "the floor must no longer suppress the entry"
 
 
 def test_no_entry_before_the_settle_window_ends_even_with_a_live_gap(tmp_path):
@@ -215,17 +223,14 @@ def test_settle_window_is_open_at_0930_and_closed_at_0931(tmp_path):
 
 
 def test_plan_death_is_recorded_exactly_once(tmp_path):
-    ex = Executor(tmp_path, plan=PLAN, arm_ts=ARM)
-    hit = _bars(base=29533.0)
+    ex = Executor(tmp_path, plan=dict(PLAN, attempts_used=3), arm_ts=ARM)
     for m in range(0, 10):
-        ex.on_bar(pd.Timestamp(f"2026-08-13 10:{m:02d}", tz="America/New_York"),
-                  {"MNQ": hit, "MES": hit})
+        ex.on_bar(pd.Timestamp(f"2026-08-13 10:{m:02d}", tz="America/New_York"), BARS)
     assert _kinds(tmp_path).count("plan_dead") == 1
 
 
 def test_a_dead_plan_emits_nothing_further(tmp_path):
-    ex = Executor(tmp_path, plan=dict(PLAN, dol={"level": "x", "price": 29799.0}),
-                  arm_ts=ARM)
+    ex = Executor(tmp_path, plan=dict(PLAN, attempts_used=3), arm_ts=ARM)
     for ts in GAPPY["MNQ"].index[:60]:
         ex.on_bar(ts, {tk: df[df.index <= ts] for tk, df in GAPPY.items()})
     assert "intended_entry" not in _kinds(tmp_path)
@@ -280,15 +285,25 @@ def test_pre_arm_dol_traversal_does_not_kill_the_plan(tmp_path):
     ex.on_bar(arm, {"MNQ": bars, "MES": bars})
     assert ex.bind_state()["plan_alive"] is True, (
         "pre-arm price touched the DOL; post-arm price never did")
+    # Since plan 16 `plan_alive` stays True either way, so the RECORD is what carries
+    # this test's meaning: a pre-arm-only traversal must not even be observed.
+    assert [r for r in _recs(tmp_path) if r["kind"] == "would_have_killed"] == []
 
 
-def test_post_arm_dol_touch_still_kills_the_plan(tmp_path):
-    """The counterpart: the arm slice must not make the death check blind."""
+def test_post_arm_dol_touch_is_recorded_and_the_plan_LIVES(tmp_path):
+    """The counterpart: the arm slice must not make the DOL check blind.
+
+    PLAN 16 INVERTED THE OUTCOME, not the property. A post-arm touch must still be
+    SEEN — otherwise `_since_arm` has silently blinded the check and the pre-arm test
+    above would pass for the wrong reason — but it is now recorded rather than acted on,
+    exactly like falsification."""
     hit = _bars(base=29533.0)
     ex = Executor(tmp_path, plan=PLAN, arm_ts=ARM)
     ex.on_bar(pd.Timestamp("2026-08-13 10:00", tz="America/New_York"),
               {"MNQ": hit, "MES": hit})
-    assert ex.bind_state()["plan_alive"] is False
+    assert ex.bind_state()["plan_alive"] is True
+    killed = [r for r in _recs(tmp_path) if r["kind"] == "would_have_killed"]
+    assert len(killed) == 1 and killed[0]["reason"] == "dol_reached"
 
 
 def test_bar_close_is_derived_from_a_minute_rollover(tmp_path):

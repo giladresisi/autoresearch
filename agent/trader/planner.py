@@ -29,11 +29,12 @@ MECHANISM_CLASSES = (
     "fvg_return_continuation",
     "fvg_1m_post_extreme",
     "extreme_reject_close",
+    "tmso_reject",
 )
 
 # §6/§7 verify their own preconditions on every bar, so there is nothing for the
 # Planner to decide about them.
-SELF_GATING_CLASSES = ("fvg_1m_post_extreme", "extreme_reject_close")
+SELF_GATING_CLASSES = ("fvg_1m_post_extreme", "extreme_reject_close", "tmso_reject")
 
 _BIAS_TO_LEG = {"DOWN": "down", "SHORT": "down", "UP": "up", "LONG": "up"}
 

@@ -1,8 +1,18 @@
 # l2-target-selection.md — target selection measured on production's own menu
 
-**Status: measurement output, not implemented.** Nothing here runs in production. It records
-what the three candidate selectors are worth when they are restricted to the menu production
-actually builds, and it closes one candidate outright.
+**Status: T2 SHIPPED (plan 16, 2026-09-13); T1 retired; T3 still closed.** This document
+began as measurement output with nothing in production. §3's result was then adopted:
+`agent/trader/target.py` runs T2 — `build_menus`'s nearest-first `D1`, re-anchored at the
+entry fill — and it is the take-profit. T1 (the 09:20 pick) is gone from that role, and the
+09:20 DOL is inert end to end (no take-profit, no entry floor, no plan death). T3/B8g remains
+CLOSED on §4's evidence and is still study-only.
+
+**What §3's +1,152 pts does and does not license.** It compares T1 against T2 — the SAME
+nearest-first rule at two instants — with total lookahead, no stop and no losing side (§2).
+It is therefore evidence for moving the instant, and NOT evidence that nearest-first beats a
+hand-picked level. `agent/trader/named_cases.py` carries documented figures whose DOL was
+chosen by hand from `l2-mechanisms.md`'s walks; those are a different selector, and the
+deltas against them are recorded per case rather than treated as regressions.
 
 **Sibling to `l2-targets.md`, and it must never be merged into it.** `l2-targets.md` is
 cycle 4's write-up, whose universe was *every named level measured from the move origin*.
