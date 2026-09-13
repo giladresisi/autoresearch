@@ -136,6 +136,50 @@ class DecisionRecorder:
         self._write({**self._base("would_have_falsified", now, plan_id, None),
                      "predicate": predicate, "detail": detail})
 
+    def target_selected(self, *, now, plan_id, mechanism, pick, **extra) -> None:
+        """The T2 target chosen at a fill — `build_menus`'s D1, re-anchored at that
+        instant (`agent/trader/target.py`).
+
+        Written on EVERY fill, including when the menu came back empty (`pick=None`).
+        That case is a real outcome, not an error — §5 of `l2-target-selection.md`
+        measures an empty direction menu on 6.0% of sessions — and a fill that silently
+        carried no target would otherwise be indistinguishable in the artifact from one
+        whose target simply never filled.
+        """
+        rec = self._base("target_selected", now, plan_id, mechanism)
+        rec.update({"pick": pick,
+                    "target": (pick or {}).get("price") if isinstance(pick, dict) else None,
+                    "level": (pick or {}).get("level") if isinstance(pick, dict) else None})
+        rec.update(extra)
+        self._write(rec)
+
+    def would_have_vetoed(self, *, now, plan_id, mechanism, reason, detail=None,
+                          artifact_id=None, artifact_label=None) -> None:
+        """A veto that no longer vetoes. Recorded, NOT acted on.
+
+        Same standing as `would_have_falsified`: plan 16 made the DOL inert, so
+        `dol_floor` keeps being COMPUTED and recorded — the counterfactual is only
+        recoverable if the fire time is on disk — while the entry proceeds. Kept
+        distinct from `veto` so nothing downstream (`report_replay_pnl.summarize` counts
+        `veto` records) reads an inert observation as a refusal.
+        """
+        rec = self._base("would_have_vetoed", now, plan_id, mechanism)
+        rec.update({"reason": reason, "detail": detail or {},
+                    "artifact_id": artifact_id, "artifact_label": artifact_label})
+        self._write(rec)
+
+    def would_have_killed(self, *, now, plan_id, reason, detail=None) -> None:
+        """A plan-death condition that no longer kills. Recorded, NOT acted on.
+
+        `dol_reached` used to end the session the moment price touched the 09:20 DOL.
+        Plan 16 removed that: the DOL is no longer the target, so dying on it was both
+        an entry effect and incoherent. Emitted ONCE per plan — the condition stays true
+        for the rest of the session, so re-recording it every bar would bury the file.
+        """
+        rec = self._base("would_have_killed", now, plan_id, None)
+        rec.update({"reason": reason, "detail": detail or {}})
+        self._write(rec)
+
     def plan_dead(self, *, now, plan_id, reason, detail=None) -> None:
         rec = self._base("plan_dead", now, plan_id, None)
         rec.update({"reason": reason, "detail": detail or {}})

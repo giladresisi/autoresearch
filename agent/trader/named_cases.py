@@ -26,6 +26,25 @@ Three things each record carries that prose cannot:
 BOUNDARY, held deliberately: this registry carries WHAT was measured. It must never
 carry HOW the Executor stores facts — implementation changes far faster than rules, and
 that is how a specification rots.
+
+**EVERY P&L FIGURE IN THIS REGISTRY PREDATES PLAN 16 (2026-09-13) AND WAS MEASURED WITH
+THE 09:20 DOL AS THE TAKE-PROFIT.** That level is now inert: the take-profit is the T2
+pick made at the entry fill, and it is also what kills the plan. The recorded numbers stay
+exactly as they are — this registry is the record of what the documented walks measured,
+and `doc_quotes` ties each one to `l2-mechanisms.md` — but under the `t2-target-20260913`
+era a documented P&L is NOT a target the engine should reproduce. Two distinct reasons,
+and a case can carry either or both:
+
+  * **a different target level.** T2 is nearest-first over `build_menus`'s rows; the
+    documented DOLs were hand-picked from the §10/§11 walks. 08-18 is the worked example:
+    T2 takes `prev4_day_low` 29625.0 for +138.25 where the documented walk took
+    `prev1_week_low` 29533.5 for +229.75. Neither is wrong — they are different selectors,
+    and `l2-target-selection.md` §3 measures the SELECTOR question (T1 vs T2), not this one.
+  * **a different death level.** The plan now ends on the T2 target rather than on the DOL,
+    so attempt counts after the first target touch are not comparable either.
+
+Do not "fix" a figure here to make a test pass. Either the test asserts the new behaviour
+explicitly (naming plan 16), or the case is re-measured and given a new era entry.
 """
 from __future__ import annotations
 
@@ -49,11 +68,16 @@ ERAS = {
     "age-anchor-20260826": ("2026-08-26",
                             "adopted-20260822 knobs plus §7's AGE-keyed stale-extreme "
                             "anchor and §5's FRESH-tick retrace"),
+    "t2-target-20260913": ("2026-09-13",
+                           "age-anchor knobs, but the TAKE-PROFIT is no longer the 09:20 "
+                           "DOL: plan 16 moved target selection to the entry fill (T2, "
+                           "`agent/trader/target.py`), made the DOL inert (no floor veto, "
+                           "no plan death) and made the T2 target the plan-death level"),
 }
 
 #: The knob adoption that supersedes every earlier P&L. Anything recorded before this
 #: needs an explained delta before it may be asserted as a target.
-CURRENT_ERA = "age-anchor-20260826"
+CURRENT_ERA = "t2-target-20260913"
 KNOB_ADOPTION_DATE = "2026-08-22"
 
 #: The one delta this cycle has already accounted for, kept as a named constant because

@@ -163,7 +163,15 @@ tuning; the rules are fixed.
   Known cost: 07-17 under the 1.0x floor (the +91.25 oracle day goes untraded); accepted —
   its only pool was consumed within 4 minutes of the open, exactly what §10.3 says such
   pools do. Quantified going forward by the §11 planless-day shadow ledger.
-- **DOL-floor veto (all mechanisms, every entry decision):** an entry is vetoed unless at
+- **DOL-floor veto (all mechanisms, every entry decision) — INERT since plan 16
+  (2026-09-13).** The rule below is preserved as the record of what was measured, but it no
+  longer refuses anything: the 09:20 DOL stopped being the target when selection moved to the
+  entry fill (`l2-target-selection.md`), so the room-remaining quantity this floor measured
+  no longer exists. `DOL_FLOOR_PTS` is still computed and every firing is written as
+  `would_have_vetoed`, so the counterfactual stays recoverable and the knob can be re-aimed
+  at the T2 target. Every figure below that credits the floor with suppressing a chase
+  (08-10, 07-17, §10.2's adverse-day bounds) describes the PRE-PLAN-16 engine.
+  an entry is vetoed unless at
   least ~60 pts remain between the entry/trigger price and the plan's DOL (the nearest un-hit
   DOL when the thesis names several; all mechanisms assume a DOL-bearing plan). Applies to
   resting-order placement, crossed-trigger market execution, episode fires, and post-stop

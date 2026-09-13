@@ -583,7 +583,8 @@ def build_report(facts, date: str, clock: str, direction: str, ticker: str = "MN
                     "ticker": ticker, "source": facts.source, "eval_end": eval_end,
                     "main_dir": facts.main_dir},
         "production_context": (
-            "There is NO target selection at entry in production: L1 picks one menu entry "
+            "SUPERSEDED (plan 16): T2 IS production now — `agent/trader/target.py` picks D1 at the entry fill and it is the take-profit. This report stays a MEASUREMENT harness "
+            "(it reads parquets; production builds from in-memory bars), and T1/T3 remain study-only. Historical note: L1 used to pick one menu entry "
             "at the 09:20 boundary, planner.derive_plan copies it verbatim, and nothing "
             "between 09:20 and the fill reconsiders it. T2 and T3 are measurements, not a "
             "production path."),

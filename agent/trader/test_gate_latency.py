@@ -62,7 +62,9 @@ def test_per_second_path_stays_within_budget_on_a_full_session_frame(tmp_path):
 
 def test_a_dead_plan_costs_almost_nothing(tmp_path):
     """Once the plan is dead the Executor must go dark, not keep doing cascade work."""
-    dead = dict(PLAN, dol={"level": "x", "price": 29799.0})
+    # Killed by the ATTEMPT BUDGET: plan 16 made `dol_reached` record-only, so a DOL
+    # under price no longer ends the plan. The property under test is unchanged.
+    dead = dict(PLAN, attempts_used=3)
     ex = Executor(tmp_path, plan=dead,
                   arm_ts=pd.Timestamp("2026-08-13 09:20", tz="America/New_York"))
     bars = {"MNQ": _bars(1380), "MES": _bars(1380)}

@@ -12,7 +12,8 @@ Fill conventions, pinned from §11's calibrated 1s replay (which reproduces ever
 recorded 5m binding's P&L exactly):
   - a resting stop-entry fills AT ITS TRIGGER PRICE when the tape reaches it;
   - a crossed-trigger market execution fills at the 1s mid at placement (caller-supplied);
-  - take-profit is the plan's DOL.
+  - take-profit is the TARGET, set by the caller at the fill (`set_target`). It was the
+    plan's 09:20 DOL until plan 16 made the DOL inert and moved selection to the fill.
 
 Same-bar ambiguity always resolves ADVERSELY: a bar that touches both the stop and the
 DOL books the stop, and a bar that both fills and stops books both. Booking the better
@@ -56,6 +57,22 @@ class OrderSim:
     def place(self, order: RestingOrder) -> None:
         """Replaces any existing resting order — only one exists at a time."""
         self.resting = order
+
+    def set_target(self, price) -> None:
+        """Set (or clear) the take-profit AFTER construction.
+
+        The target used to be the plan's 09:20 DOL, known at construction; it is now the
+        T2 pick, which does not exist until there is a fill to anchor it on (see
+        `agent/trader/target.py`). `None` clears it, and a cleared target is a real
+        state: the position is then managed by its stop and the window mark only.
+        """
+        self._dol = None if price is None else float(price)
+
+    @property
+    def target(self):
+        """The current take-profit, or None. Named `target` rather than `dol` because it
+        is no longer the L1 DOL — that field is now inert (plan 16)."""
+        return self._dol
 
     def cancel(self) -> None:
         self.resting = None
@@ -127,4 +144,18 @@ class OrderSim:
         if kind == "stop_out":
             self.last_stop_out = dict(ev)
         self.position = None
+        # THE TARGET BELONGS TO THE POSITION, and dies with it (plan 16).
+        #
+        # FOUND THE HARD WAY on the 08-18 named case. `on_bar` fills a resting order and
+        # then tests the take-profit IN THE SAME CALL, while the Executor can only set
+        # the new target after `on_bar` returns. A target left standing from the previous
+        # position is therefore live for exactly that window — and on 08-18 it fired: a
+        # DOWN position filled at 29564.5 booked a `take_profit` at 29625.0, the PRIOR
+        # position's target, 60.5 pts the wrong way and recorded as a win.
+        #
+        # Clearing here makes the stale value unreachable by construction rather than by
+        # timing. The cost is that a bar which both fills and reaches the FRESH target
+        # books no take-profit; that is the correct side to err on (§11's free-points
+        # rule) and the T2 pick is at least `max(5pts, 1.0 x avg_1h)` away anyway.
+        self._dol = None
         return ev

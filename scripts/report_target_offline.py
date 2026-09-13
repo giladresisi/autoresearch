@@ -8,8 +8,10 @@ target, then -- separately and explicitly marked -- where price actually went. R
 touches the parquets and the committed label corpus and writes nothing but the optional
 `--json`.
 
-**Nothing here is a production path.** Production picks its DOL once at 09:20 and never
-reconsiders it; T2 and T3 are measurements of what a later pick WOULD have said.
+**Nothing here is a production path** — but T2's RULE is now production (plan 16):
+`agent/trader/target.py` picks `build_menus`'s D1 at the entry fill and that is the
+take-profit. This script remains a measurement harness (it reads parquets; production builds
+from the in-memory bars the bar loop already carries), and T1/T3 stay study-only.
 """
 from __future__ import annotations
 
