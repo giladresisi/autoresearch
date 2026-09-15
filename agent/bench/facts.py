@@ -292,6 +292,12 @@ def bundle_to_l1_view(bundle) -> tuple:
     for (_asset, _level, _tf), _ratio in magnitude.items():
         vd["evidence_magnitude"].setdefault(_asset, {}).setdefault(
             _level, {})[_tf] = _ratio
+    # Plan 37: the deterministic direction override reads this from the SAME view the
+    # model would have been sent, so a firing override and a model call can never disagree
+    # about what the stretch was. Not rendered into `facts_text` — plan 35's D2 was
+    # reverted precisely because rendering re-keys `thesis_cache` (see plan 37's
+    # "Disposition of plan 35"), and `facts_text` is what the key hashes.
+    vd["session_stretch"] = getattr(bundle, "session_stretch", None) or {}
     return vd, menu_text, evidence_text, magnitude
 
 

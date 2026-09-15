@@ -38,6 +38,7 @@ import pandas as pd
 
 from agent.facts.assemble import assemble_facts
 from agent.facts.requirements import ANALYZER_REQUIREMENT
+from agent.stretch_override import stretch_override
 
 ARM_HOUR = 9
 ARM_MINUTE = 20
@@ -366,6 +367,29 @@ class Analyzer:
         try:
             facts_text, context_text, facts, magnitude = assemble_facts(None, bars, now)
             health = _view_provenance(facts, facts_text, now)
+
+            # PLAN 37: the deterministic direction override, BEFORE the model call.
+            #
+            # Placed here rather than in `derive_facts` (computing the stretch belongs
+            # there, DECIDING direction does not) and not in `decide_thesis` (that is the
+            # LLM adapter and must not carry strategy). This is the seam that owns "the
+            # thesis for this session", so it is the seam that may decide not to ask.
+            #
+            # FAIL-THROUGH, never fail-forward: `_override_thesis` returns None whenever it
+            # cannot produce a COMPLETE thesis -- no stretch, criteria unmet, or no DOL menu
+            # on the forced side -- and we then call the model exactly as before. A degraded
+            # snapshot must lose the override, never invent a direction from it.
+            forced = self._override_thesis(facts, now)
+            if forced is not None:
+                with self._lock:
+                    self._health = health
+                    self._thesis = forced
+                    # No latency, no usage, no retries, no model: `verdict` says which
+                    # path produced this so no artifact can read it as a call.
+                    self._meta = {"verdict": "stretch_override"}
+                    self._save()
+                return self._thesis
+
             result = self._backend(facts_text, context_text, facts,
                                    evidence_magnitude=magnitude)
             thesis, meta = _split_result(result)
@@ -380,6 +404,48 @@ class Analyzer:
                 self._thesis = None
                 self._meta = {}
                 self._save()
+            return None
+
+    def _override_thesis(self, facts: dict, now) -> "dict | None":
+        """A complete deterministic thesis, or None to fall through to the model.
+
+        Total by construction: every failure path returns None. The override is an
+        optimisation of last resort -- being wrong about direction is survivable, but
+        turning a degraded facts snapshot into a confident forced call is not.
+        """
+        try:
+            verdict = stretch_override((facts or {}).get("session_stretch"))
+            if not verdict.get("fires"):
+                return None
+            direction = verdict["direction"]
+
+            # The DOL is picked from `build_menus`' own nearest-first D1 for the FORCED
+            # side. Since plan 16 its VALUE is inert -- not the take-profit (T2 picks that
+            # at the fill), not an entry gate, not the death level -- but `analyzer.stands()`
+            # still requires one, so an empty menu on the forced side means this override
+            # cannot produce a standing thesis and must hand back to the model.
+            rows = (((facts or {}).get("menus") or {}).get("dol") or {}).get(direction) or ()
+            if not rows or rows[0].get("price") is None:
+                return None
+            d1 = rows[0]
+
+            return {
+                "bias": direction,
+                # Deliberately absent rather than fabricated: nothing in the trader path
+                # reads either, and leaving them None keeps an override thesis visibly
+                # distinct from a model one in every artifact.
+                "regime": None,
+                "confidence": None,
+                "dol": {"level": d1.get("level"), "price": float(d1["price"])},
+                # Recorded and never acted on (`Executor._death` records
+                # `would_have_falsified` and steps over it), so an empty list costs nothing.
+                "falsified_if": [],
+                "evidence": [],
+                "thesis_source": "stretch_override",
+                "override_reason": verdict.get("reason"),
+                "session_stretch": verdict.get("stretch"),
+            }
+        except Exception:
             return None
 
     def pending(self) -> bool:

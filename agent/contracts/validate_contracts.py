@@ -217,7 +217,23 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
                                     fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim,
                                     htf_reversal=htf_reversal, mid_position=mid_position,
                                     p1_stale_levels=p1_stale_levels)
-    if scoring["scored_evidence"]:
+    # PLAN 37: a deterministic-override thesis is EXEMPT from the bias/net-score check.
+    #
+    # It carries no declared evidence by construction -- the override exists to decide
+    # direction WITHOUT the ledger, the scoring or the weights -- so the check has nothing
+    # of its own to check, and the code-injected P3 mid reads it would be judged against
+    # are exactly what the override is overriding. 2026-09-01 is the worked case: its mid
+    # reads alone score -12.125 (expected DOWN), which is the read the override contradicts
+    # on purpose.
+    #
+    # Stated as an EXPLICIT exemption rather than relied on implicitly. Today `validate_thesis`
+    # is only ever reached through `decide_thesis`, which the override bypasses, so an
+    # override thesis is never validated anyway -- but that is an accident of where the call
+    # sits. A future refactor that validated inside the Analyzer would otherwise start
+    # rejecting every override silently.
+    if str((thesis or {}).get("thesis_source") or "") == "stretch_override":
+        pass
+    elif scoring["scored_evidence"]:
         if t.bias in BIASES and t.bias != scoring["expected_bias"]:
             # Near-tie NEUTRAL dead-band (2026-08-17, plan-18 mini-diff finding): a
             # razor-thin net (2026-07-15 09:20 ET: +0.75 from a single mid row) must not
@@ -976,6 +992,54 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                 _it = {**_it, "htf_reversal": "discount"}
             _reversed_evidence.append(_it)
         evidence = _reversed_evidence
+
+    # plan 35 D3 (2026-09-13): a P1 item's TIER is a FACT about its level, not a judgment
+    # call -- so code-derive it from `level_tiers` and overwrite whatever the model
+    # declared, the same "model judges WHICH item, code computes its weight" split already
+    # applied to sign (_item_side) and to P4's own tier (below). `level_tiers` is built in
+    # bench/facts.py from derive_facts' level map with the per-asset running-extreme
+    # promotion (thesis.md §2.1, 2026-08-15) already folded in.
+    #
+    # Why one pre-pass rather than a fix at the points formula: the declared tier is read
+    # in FOUR places (the two dominance pre-passes' daily/weekly mid_type split, the
+    # tf-dedup group key, and tier_mult), plus _is_week_confluent's day-tier precondition.
+    # Patching only the multiplier would leave the other four disagreeing with it.
+    # Normalising the list first makes every consumer, and the `scored_evidence` audit
+    # echo, see one tier.
+    #
+    # P2 IS DELIBERATELY EXCLUDED. A P2/SMT candidate's tier is NOT `level_tiers`' per-asset
+    # promotion: derive_facts promotes an SMT candidate only when the level is the running
+    # extreme for BOTH assets, and resolves a mixed day/week qualification CONSERVATIVELY to
+    # day (see the promotion loop in compute_facts). Overwriting that with the per-asset
+    # tier silently reverses a deliberate pair-wise rule -- measured on 2026-09-04, where it
+    # moved MNQ london(cur)_high day->week AND cascaded through P1/P2-dominates-P3 to zero
+    # two P3 mid rows, taking the day's net score from -1.5 to -5.0. That may or may not be
+    # an improvement; it is a different change from this one and needs its own measurement.
+    #
+    # What this is worth, stated honestly: on BOTH production call sites (here and
+    # run_agent._derive_thesis_arithmetic) `level_htf_close_status` is also supplied, which
+    # arms the 2026-08-02 auto-derivation above -- and that already DROPS every declared
+    # P1/P2 at a level in `level_tiers` and re-injects it with the code tier. So the
+    # model-declared-tier hole plan 35 set out to close is already shut on the live path,
+    # and this pre-pass is defence in depth for any caller that passes `level_tiers`
+    # WITHOUT `level_htf_close_status` (auto-derivation off). Verified inert in production:
+    # the 22 recorded boundaries in <global>/thesis_cache score identically with and
+    # without it.
+    #
+    # A level absent from `level_tiers` (synthetic mids, FVG zone ids, or no facts at all)
+    # keeps its declared tier -- byte-identical to before this existed.
+    if level_tiers:
+        _retiered = []
+        for _it in (evidence or []):
+            if not isinstance(_it, dict) or _it.get("criterion") != "P1":
+                _retiered.append(_it)
+                continue
+            _code_tier = ((level_tiers.get(_it.get("asset")) or {})
+                          .get(_it.get("level")) or {}).get("tier")
+            if _code_tier in _TIER_MULT and _code_tier != _it.get("tier"):
+                _it = {**_it, "tier": _code_tier, "tier_declared": _it.get("tier")}
+            _retiered.append(_it)
+        evidence = _retiered
 
     # thesis.md §6 extension: an HTF-confirmed P4 reclaim/failed-reclaim on ONE asset should
     # outweigh a contradicting P3 (static position) read on the OTHER asset at the SAME mid,

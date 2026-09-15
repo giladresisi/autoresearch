@@ -36,6 +36,7 @@ Engine-grounded conventions (v2 — aligned to the live engine after POC run 3):
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import sys
@@ -446,6 +447,75 @@ def _htf_reversal_tier(bar: dict, level_price: float, now_price: float) -> str:
 
 def age_min(ts, now):
     return (now - ts).total_seconds() / 60.0
+
+
+def _session_stretch(sess: pd.DataFrame, now, now_price) -> Optional[dict]:
+    """plan 35 D1 — the PRE-BOUNDARY SESSION STRETCH for one asset: the CME-session move
+    into the decision boundary, as DIRECTION context.
+
+    Take the session frame's high and low; whichever formed LAST defines the stretch's
+    direction, and how long before the boundary that extreme formed is `age_minutes`.
+
+    **The load-bearing number is WHEN, not how big.** Over 94 sessions (2026-05-01..09-11,
+    MNQ, full 09:20-13:00 coverage) an extreme formed <= 30 min before 09:20 preceded a
+    session that ran the OTHER way 15/22 (68%) against a 53% base rate; > 30 min gives
+    35/72 (49%). Conditioning on SIZE instead gives nothing and INVERTS at large sizes
+    (>= 450 pts unreversed-to-mid: 10/23, 43%), which is why an earlier "a big unreversed
+    stretch means a reversal is due" formulation was dropped — it points the wrong way.
+    n = 22 in the load-bearing bucket (roughly +/- 20 pp), so this is a lead with a
+    plausible mechanism, not a settled edge. `age_minutes` is therefore carried EXPLICITLY
+    rather than left for the model to infer from `extreme_ts`.
+
+    Deliberately NOT the same measurement as the S9 "STRETCH & DISTANCE" block, which is an
+    ATR-normalized distance from the opposite-side EXTENDED-window day extreme (thesis.md
+    §2.1c). This one is un-normalized and session-framed, and its subject is the clock.
+
+    `age_minutes` is the CEILING of the minutes from the extreme to `now` (the last bar
+    strictly before the boundary): an extreme that IS the last bar reads 0, and the
+    2026-09-01 MNQ case (low at 09:18:30, now 09:19:59, boundary 09:20) reads the
+    hand-checked 2. Flooring would read that case as 1 and flooring-to-the-minute would
+    read a monotone session as 1 instead of 0.
+
+    Returns None for a frame that cannot support the reading (empty, or a flat session with
+    no range) rather than raising — a degraded snapshot must lose this block, not the call.
+    """
+    if (sess is None or len(sess) == 0 or not isinstance(now_price, (int, float))
+            or not math.isfinite(float(now_price))):
+        return None      # isfinite: a NaN close must lose the block, not render "nan%"
+    hi, lo = float(sess["high"].max()), float(sess["low"].min())
+    size = round(hi - lo, 4)
+    if not size > 0:                      # flat/degenerate session — no stretch to read
+        return None
+    hi_ts, lo_ts = sess["high"].idxmax(), sess["low"].idxmin()
+    if hi_ts > lo_ts:
+        direction = "UP"
+    elif lo_ts > hi_ts:
+        direction = "DOWN"
+    else:
+        # Both extremes in the SAME bar: the move into the boundary is whatever that bar
+        # did, so break the tie on its own body rather than on iteration order.
+        bar = sess.loc[hi_ts]
+        if isinstance(bar, pd.DataFrame):          # duplicate index label
+            bar = bar.iloc[-1]
+        direction = "UP" if float(bar["close"]) >= float(bar["open"]) else "DOWN"
+    extreme_price, extreme_ts = (hi, hi_ts) if direction == "UP" else (lo, lo_ts)
+    origin_price, origin_ts = (lo, lo_ts) if direction == "UP" else (hi, hi_ts)
+    mid = round((hi + lo) / 2.0, 2)
+    return {
+        "direction": direction,
+        "size": size,
+        "extreme_ts": extreme_ts,
+        "extreme_price": extreme_price,
+        "origin_ts": origin_ts,
+        "origin_price": origin_price,
+        "age_minutes": int(math.ceil(max(0.0, age_min(extreme_ts, now)))),
+        "mid": mid,
+        # 0 at the extreme, 100 at the opposite (origin) end.
+        "retrace_pct": round(abs(float(now_price) - extreme_price) / size * 100.0, 1),
+        # Still past the mid on the stretch's OWN side. AT the mid is not past it.
+        "beyond_mid": (float(now_price) > mid if direction == "UP"
+                       else float(now_price) < mid),
+    }
 
 
 _PREV_LEVEL_RE = re.compile(r"^prev(\d+)_(day|week)_(high|low)$")
@@ -988,6 +1058,15 @@ class FactsBundle:
     # mid entries are additionally registered under both P4-promoted names (`{mid}_high`/
     # `{mid}_low`), same pattern as mid_price/build_evidence_magnitude.
     htf_reversal: dict = field(default_factory=dict)
+    # plan 35 D1: {tkr: {direction, size, extreme_ts, extreme_price, origin_ts,
+    # origin_price, age_minutes, mid, retrace_pct, beyond_mid}} — the pre-boundary session
+    # stretch, per asset (MES's is a separate reading; thesis.md §6 already governs what a
+    # two-asset disagreement means). See _session_stretch. Named `session_stretch`, NOT
+    # `stretch`: this module already uses "stretch" for the ATR-normalized day-extreme
+    # distance (avg_range_1h multiples, `stretch_mult` in _dol_menu) and for FVG
+    # `stretch_since_visit`, and the two must not be confused. Rendered in S9 as CONTEXT —
+    # it is not a scored criterion and has no EVIDENCE_CRITERIA entry.
+    session_stretch: dict = field(default_factory=dict)
 
 
 def render_facts_text(bundle: FactsBundle) -> str:
@@ -1793,6 +1872,8 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
                        else "")
             A(f"  {tkr} vs {mname} {p['price']}: last close {p['side'].upper()} "
               f"({p['dist_pts']} pts{ratio_s})")
+
+    # --- plan 35 D2: the pre-boundary session stretch, as DIRECTION context --- #
     A("\nSMT candidates (meaningful = day/week tier, eligible for thesis.md P2; "
       "swept_ticker = confirmed/pushed through (lagger); unswept_ticker = failed to "
       "confirm (leader)):")
@@ -2224,6 +2305,12 @@ def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
         if len(day_ext_frame):
             bundle.day_hi_ts[tkr] = day_ext_frame["high"].idxmax()
             bundle.day_lo_ts[tkr] = day_ext_frame["low"].idxmin()
+        # plan 35 D1: the pre-boundary session stretch, from the SAME session frame the
+        # S-sections already use (no new parquet read). Additive bundle field, no L(...) —
+        # S0-S7 text stays byte-identical; it is rendered in S9 (render_evidence_text).
+        _stretch = _session_stretch(sess_now, now, float(df["close"].iloc[-1]))
+        if _stretch is not None:
+            bundle.session_stretch[tkr] = _stretch
         for tf, win, dst in (("1h", 20, bundle.avg_range_1h), ("4h", 10, bundle.avg_range_4h)):
             bars = ohlc(df, tf).iloc[:-1]                 # completed bars only
             if len(bars) == 0:
