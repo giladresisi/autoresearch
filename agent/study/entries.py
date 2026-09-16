@@ -276,7 +276,10 @@ def build_plan(direction, dol, frame_at_arm, arm_ts) -> dict:
               "bias": str(direction).upper(),
               "dol": {"level": "study_dol", "price": float(dol)},
               "falsified_if": []}
-    return derive_plan(thesis, legs, arm_ts)
+    # `five_min=True`: this study measures the position policy ON TOP OF the 5m entry
+    # path (`_entry_class` knows only those two names), so it opts out of the production
+    # suspension explicitly rather than reporting NO_MECHANISM on every date.
+    return derive_plan(thesis, legs, arm_ts, five_min=True)
 
 
 def drive(plan, arm_ts, feed, *, date, track, dol=None) -> FeedResult:
