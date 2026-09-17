@@ -225,6 +225,12 @@ class IbRealtimeSource:
         self._mnq_partial_1m = None
         self._mes_partial_1m = None
         self._mnq_tick_bar   = None
+        # The last FINALIZED MNQ second (open/high/low/close/volume/second_ts), set just
+        # before the on_bar callback that carries the same second. The partial-1m row
+        # that callback receives is CUMULATIVE for the minute; a consumer that needs the
+        # raw per-second extremes (the agent stack's fill model) reads them here. An
+        # attribute, not a callback argument: no on_bar signature changes.
+        self.last_mnq_second = None
         self._mes_tick_bar        = None
         self._mnq_1s_df           = self._empty_bar_df()   # historical, loaded from MNQ_1s.parquet
         self._mes_1s_df           = self._empty_bar_df()   # historical, loaded from MES_1s.parquet
@@ -763,6 +769,7 @@ class IbRealtimeSource:
         )
         if finalized is not None and self._mnq_partial_1m is not None:
             bar_row = self._partial_1m_to_bar_row(self._mnq_partial_1m, finalized["second_ts"])
+            self.last_mnq_second = finalized
             self._on_bar(bar_row, self._mes_partial_1m)
         if finalized is not None:
             self._mnq_1s_pending.append(finalized)
@@ -789,6 +796,7 @@ class IbRealtimeSource:
             )
             if finalized is not None and self._mnq_partial_1m is not None:
                 bar_row = self._partial_1m_to_bar_row(self._mnq_partial_1m, finalized["second_ts"])
+                self.last_mnq_second = finalized
                 self._on_bar(bar_row, self._mes_partial_1m)
             if finalized is not None:
                 self._mnq_1s_pending.append(finalized)

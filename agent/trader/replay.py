@@ -44,14 +44,17 @@ from agent.trader.cached_backend import (                      # noqa: E402
 from agent.trader.fixed_backend import (                       # noqa: E402
     FixedThesisBackend, OracleThesisError, validate_oracle_thesis)
 from agent.trader.thesis_cache import ThesisCache              # noqa: E402
+# The window end has ONE source, and it is the Executor's: live has no replay window, so
+# the Executor enforces the same 13:00 in bar time (plan 38 F11). Re-exported here under
+# its old name because every caller reads `replay.WINDOW_END_ET`.
+from agent.trader.executor import WINDOW_END_ET                # noqa: E402,F401
 
 TZ = "America/New_York"
 _ET = ZoneInfo(TZ)
 WINDOW_START_ET = (9, 20)
 #: The policy's hard-close horizon (plan 33 clause 10). A CONSTANT, not a data-dependent
 #: stop -- see the module docstring. Overridable per run for the fidelity fixtures that
-#: were calibrated against the old 11:00 cut.
-WINDOW_END_ET = (13, 0)
+#: were calibrated against the old 11:00 cut. Defined in `agent/trader/executor.py`.
 ARM_ENV = "ACT_TRADER_ARM_HHMM"
 
 # Measured p50 of ten recorded 09:20 calls (range 16.3-103.9 s, driven almost entirely by

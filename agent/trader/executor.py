@@ -83,13 +83,23 @@ FALLBACK_TF = "1min"                 # §4's widened fallback, §6, §8
 RTH_OPEN_HOUR = 9                    # §4: creating bar at or after 09:30
 RTH_OPEN_MINUTE = 30
 
+# §8's TEMPORARY live-rollout spine gates (2026-09-17). Both are tested in BAR time
+# against the ARM's date, and each comes out by changing one line: `None` removes the
+# cutoff, `False` removes the positive-trade rule.
+ENTRY_CUTOFF_ET = (10, 30)           # no NEW entry at or after this; positions managed on
+NO_ENTRY_AFTER_POSITIVE = True       # a plan that closed a winner takes no further entry
+# §8's window end, and the ONE source of it: `replay.py` imports this constant. Replay's
+# last bar is 12:59:59, so the rule below is unreachable there; live runs the whole CME
+# session and needs it spelled out.
+WINDOW_END_ET = (13, 0)
+
 _SHORT = ("DOWN", "SHORT")
 
 
 class Executor:
     def __init__(self, state_dir, plan: dict, arm_ts: pd.Timestamp, *, recorder=None,
                  store=None, maintainer=None, requirement=EXECUTOR_REQUIREMENT,
-                 ticker: str = "MNQ") -> None:
+                 ticker: str = "MNQ", order_port=None) -> None:
         """`maintainer` is the session-scoped facts owner.
 
         OWNERSHIP RULE, and the reason it exists: whoever CREATED the maintainer drives
@@ -101,6 +111,11 @@ class Executor:
 
         `store=` is kept as the injection seam it always was: pass a bare FactStore and
         it is wrapped in a maintainer this Executor owns.
+
+        `order_port=` is the order book this Executor drives (`order_port.OrderPort`).
+        The default is a plain `OrderSim`, which is what every replay uses; the live
+        graft injects a port that mirrors the simulation's events outward. Either way
+        the simulation stays the position model — this class never learns which it got.
         """
         self.state_dir = str(state_dir)
         self._plan = dict(plan or {})
@@ -119,7 +134,11 @@ class Executor:
         # NO TARGET AT CONSTRUCTION (plan 16). It used to be seeded with the plan's 09:20
         # DOL; the take-profit is now the T2 pick, which does not exist until a fill
         # gives it an instant to anchor on. `_target_for_fill` sets it there.
-        self._sim = OrderSim(dol=None)
+        self._sim = order_port if order_port is not None else OrderSim(dol=None)
+        # §8's temporary spine gates and the window end. `_positive_close` latches on the
+        # first profitable close; `_window_ended` makes the window end fire exactly once.
+        self._positive_close = False
+        self._window_ended = False
         # The bars handed to the CURRENT `on_bar` call, so a fill discovered inside
         # `_drive_orders` can build its menu at that instant. Set per bar and never read
         # outside one.
@@ -265,8 +284,25 @@ class Executor:
         # over 1s bars: resolving fills and stop-outs only at the minute close would
         # mis-time the §2 cooldown by up to 59 s and lose intra-minute stop-outs
         # entirely — §10.2's own lesson that this tracking has to be tick-level.
+        #
+        # §8's temporary gates first: once entries are blocked, an order still resting
+        # UNFILLED is withdrawn BEFORE this bar's tape can fill it — otherwise a stop
+        # placed at 10:29 becomes a 10:31 entry. A position already open is untouched.
+        self._state["entry_block"] = self._entry_block(now)
+        if (self._state["entry_block"] is not None and self._sim.resting is not None
+                and self._sim.position is None):
+            self._sim.cancel()
         self._last_row = mnq.iloc[-1] if len(mnq) else None
         self._drive_orders(now, mnq)
+
+        # 2b. §8's WINDOW END, once, at the first bar at or after it — and whether or
+        # not the plan is still alive, because a position outlives its plan. After the
+        # stop/target test above, so a bar that reaches both books the adverse one. The
+        # position is MARKED, not exited (`order_sim.mark_open`); a mirroring port turns
+        # that mark into the window-end close.
+        if not self._window_ended and self._at_window_end(now):
+            self._window_ended = True
+            self.mark_open_position()
 
         # 3. Plan death — evaluated every bar, with nothing open. Over bars SINCE THE
         # ARM only: the frame reaches back to the 18:00 session open, and overnight /
@@ -274,21 +310,11 @@ class Executor:
         # Judging a plan by price action that predates it kills almost every plan on
         # its first bar.
         if self._state["plan_alive"]:
-            reason, detail = self._death(self._since_arm(mnq), now, bar_complete)
+            reason, detail = self._spine_death()
+            if reason is None:
+                reason, detail = self._death(self._since_arm(mnq), now, bar_complete)
             if reason is not None:
-                self._state["plan_alive"] = False
-                self._state["dead_reason"] = reason
-                self._state["bound_id"] = None
-                self._state["bound_label"] = None
-                self._state["mechanism"] = None
-                self._state["trigger"] = None
-                self._state["stop"] = None
-                self._rec.plan_dead(now=now, plan_id=self._plan.get("plan_id"),
-                                    reason=reason, detail=detail)
-                # An unfilled order belongs to the dead plan and is withdrawn. An OPEN
-                # position is not withdrawn — it keeps being managed by `_drive_orders`
-                # above until it stops out or reaches the DOL.
-                self._sim.cancel()
+                self._kill_plan(now, reason, detail)
         if not self._state["plan_alive"]:
             return                    # no more BINDING; facts above keep accumulating
 
@@ -391,6 +417,8 @@ class Executor:
                     self._set_target_on_fill(now)
                 if ev.get("kind") == "stop_out":
                     self._on_stop_out(ev)
+                if ev.get("kind") in ("stop_out", "take_profit"):
+                    self._note_close(ev)
         except Exception as exc:
             # Swallowed so an order-book bug cannot take the bar loop down — but NOT
             # silently. A raise here on every bar makes the whole lifecycle inert:
@@ -424,6 +452,91 @@ class Executor:
         except Exception as exc:
             self._state["order_error"] = f"{type(exc).__name__}: {exc}"
             return None
+
+    def _kill_plan(self, now, reason, detail) -> None:
+        self._state["plan_alive"] = False
+        self._state["dead_reason"] = reason
+        self._state["bound_id"] = None
+        self._state["bound_label"] = None
+        self._state["mechanism"] = None
+        self._state["trigger"] = None
+        self._state["stop"] = None
+        self._rec.plan_dead(now=now, plan_id=self._plan.get("plan_id"),
+                            reason=reason, detail=detail)
+        # An unfilled order belongs to the dead plan and is withdrawn. An OPEN
+        # position is not withdrawn — it keeps being managed by `_drive_orders`
+        # until it stops out, reaches its target or the window ends.
+        self._sim.cancel()
+
+    def kill_plan(self, now, reason, detail=None) -> None:
+        """Kill the plan FROM OUTSIDE the bar loop's own death rules. Idempotent.
+
+        The graft's `external_kill` calls this first, before anything else it does, so
+        that no re-entry is possible from the instant something outside this Executor
+        is known to have changed the position."""
+        if self._state["plan_alive"]:
+            self._kill_plan(now, reason, detail or {})
+
+    def void_position(self) -> None:
+        """Drop the modelled position with NO event and NO record of an exit: the
+        caller has established that it no longer exists. Not a close — nothing was
+        decided here — so no attempt is spent and no cooldown starts."""
+        void = getattr(self._sim, "void_position", None)
+        if callable(void):
+            void()
+            return
+        self._sim.position = None
+        self._sim.set_target(None)
+
+    def position(self) -> "dict | None":
+        pos = self._sim.position
+        return dict(pos) if pos else None
+
+    def order_context(self) -> dict:
+        """What a mirroring port stamps on every event it reports."""
+        return {"plan_id": self._plan.get("plan_id"),
+                "mechanism": self._state.get("mechanism")}
+
+    def _day_ts(self, now: pd.Timestamp, hm) -> pd.Timestamp:
+        """`hm` on the ARM's date, not on the date of `now`: the live bar loop runs the
+        whole CME session, and an evening bar is past 13:00 on its own calendar day."""
+        anchor = self._arm_ts if self._arm_ts is not None else now
+        return anchor.normalize() + pd.Timedelta(hours=hm[0], minutes=hm[1])
+
+    def _at_window_end(self, now: pd.Timestamp) -> bool:
+        return now >= self._day_ts(now, WINDOW_END_ET)
+
+    def _entry_block(self, now: pd.Timestamp):
+        """Why NO NEW ENTRY may be taken at `now`, or None. §8's spine gates: they say
+        nothing about a position already open, which keeps being managed."""
+        if getattr(self._sim, "external", None):
+            return "external_position_change"
+        if NO_ENTRY_AFTER_POSITIVE and self._positive_close:
+            return "after_positive_trade"
+        if ENTRY_CUTOFF_ET is not None and now >= self._day_ts(now, ENTRY_CUTOFF_ET):
+            return "entry_cutoff"
+        return None
+
+    def _spine_death(self):
+        """Deaths the plan's own rules cannot see: the order port reporting that the
+        position changed behind it, and the window ending."""
+        ext = getattr(self._sim, "external", None)
+        if ext:
+            return "external_position_change", dict(ext)
+        if self._window_ended:
+            return "window_end", {"window_end": "%02d:%02d" % WINDOW_END_ET}
+        return None, None
+
+    def _note_close(self, ev: dict) -> None:
+        """Latch the first PROFITABLE close. Today that is only ever a take-profit —
+        a stop is never trailed — and the target kills the plan on the same bar; the
+        latch is what keeps the rule true if either of those stops being so."""
+        entry, price = ev.get("entry"), ev.get("price")
+        if entry is None or price is None:
+            return
+        sign = -1.0 if str(ev.get("direction") or "").upper() in _SHORT else 1.0
+        if sign * (float(price) - float(entry)) > 0:
+            self._positive_close = True
 
     def _settle_end_ts(self, now: pd.Timestamp) -> pd.Timestamp:
         """The instant the settle window closes on `now`'s date: 09:30:30 ET.
@@ -1168,8 +1281,10 @@ class Executor:
                 now=now, plan_id=self._plan.get("plan_id"),
                 mechanism=self._state.get("mechanism"),
                 artifact_label=self._label_for(artifact_id), **ev)
-            # Same reason as the resting path: the target is anchored on the fill.
-            self._set_target_on_fill(now)
+            # Same reason as the resting path: the target is anchored on the fill. A
+            # fill the order port VOIDED is not one, and anchors nothing.
+            if ev.get("kind") == "fill":
+                self._set_target_on_fill(now)
             return
         self._sim.place(RestingOrder(direction=self._plan.get("direction"),
                                      trigger=float(trigger), stop=float(stop),
@@ -1342,6 +1457,8 @@ class Executor:
 
         if self._state["in_settle"]:
             return                                     # tracked, never entered (l2 §2)
+        if self._entry_block(now) is not None:
+            return                 # §8's temporary gates: bound and guarded, not entered
 
         # §5's two-phase binding: the order is placed only after a FRESH retrace INTO
         # the bound gap — a tick entering its range strictly after 09:30:30. Without
@@ -1419,6 +1536,8 @@ class Executor:
             return
         if self._state["in_settle"] or not len(mnq):
             return
+        if self._entry_block(now) is not None:
+            return                                     # §8's temporary spine gates
         if self._in_cooldown(now):
             # Clause 3: no cycle may complete while the cooldown is in force, and every
             # gap cycle resets across it.
@@ -1509,7 +1628,8 @@ class Executor:
                               mechanism=mechanism,
                               artifact_label=self._label_for(ev.get("artifact_id")),
                               **ev)
-        self._set_target_on_fill(now)
+        if ev.get("kind") == "fill":
+            self._set_target_on_fill(now)
         # NO attempt is spent HERE. The budget counts STOP-OUTS, not entries
         # (`_on_stop_out`, and `order_sim`'s own "the attempt counter counts stop-outs"),
         # so incrementing on the fill double-counted every §6/§7 trade that then stopped

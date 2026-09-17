@@ -679,6 +679,34 @@ chase entries the §2 DOL-floor veto now suppresses).
     under the plan-18 1.0x DOL floor the recorded L1 resolves 07-17 to no-liquidity
     NEUTRAL, so no live plan would have armed; see §10.1.) 07-21 unaffected (no 5m-bound
     attempts); 07-23 unaffected (no deeper-gap penetration in the stop window).
+- **TEMPORARY live-rollout spine gates (2026-09-17, plan 38 D15 — user decision, not a
+  study result).** Two gates on WHEN any mechanism may enter, in the same tier as the
+  attempt budget above — they change no mechanism's own rule, its trigger, its stop or its
+  target. Both are evaluated in BAR time, and both sit behind named Executor constants so
+  removing one is a one-line change:
+  - **No entry after a positive trade** (`NO_ENTRY_AFTER_POSITIVE`). Once a position of the
+    plan closes at a profit, the plan takes no further entry that session. Already true by
+    construction today — the only positive close is `take_profit`, and reaching the target
+    kills the plan on the same bar (`target_reached`); a stop is never trailed, so a
+    `stop_out` is always adverse — and written as an explicit guard so it stays true if
+    either of those facts changes.
+  - **No entry at or after 10:30:00 ET** (`ENTRY_CUTOFF_ET`). A 10:29:59 entry is allowed;
+    from 10:30:00 no resting order is placed, a resting order still unfilled is withdrawn,
+    and no market mechanism fires. A position ALREADY OPEN keeps being managed to its
+    stop, its target or the window end. Registry check: every ENTRY in
+    `agent/trader/named_cases.py` is before 10:30 (the 11:00 / 11:01 values there are
+    exits), so no documented figure moves.
+  - **Removal condition:** both gates are scaffolding for the FIRST live sessions, where
+    the agent stack owns the dispatcher at one contract. They come out — each on its own
+    evidence — once a live session has passed the post-session conformance run with every
+    delta explained (plan 38 D12) and a measured A/B over the replay set shows what the
+    gate costs. Until then neither is a tuning knob: do not move 10:30.
+- **Window end 13:00:00 ET (2026-09-17, plan 38 D8).** The replay window already ends at
+  13:00 (its last bar is 12:59:59); live has no such edge, because the bar loop runs the
+  whole CME session. At the first bar with bar time >= 13:00:00 the Executor marks any open
+  position at that bar's close (a MARK, recorded as such — the live side mirrors it as the
+  window-end market close) and the plan dies with reason `window_end`. Unreachable in
+  replay by construction, so every replayed stream is unchanged.
 - **Audit:** every bind / re-bind / disarm decision is logged (JSONL, extends the existing
   audit conventions) for post-session analysis.
 

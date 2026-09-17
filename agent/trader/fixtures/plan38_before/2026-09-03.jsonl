@@ -1,0 +1,5 @@
+{"kind": "fill", "time": "2026-09-03T09:38:00-04:00", "plan_id": "45a0830e2360", "mechanism": "tmso_reject", "artifact_label": null, "price": 29260.75, "direction": "UP", "artifact_id": "tmso_reject"}
+{"kind": "target_selected", "time": "2026-09-03T09:38:00-04:00", "plan_id": "45a0830e2360", "mechanism": "tmso_reject", "pick": {"id": "D1", "level": "projection_up", "price": 29367.0, "body": null, "tier": "projection", "side": "above", "dist_ratio": 1.4365, "band": "PROJECTION"}, "target": 29367.0, "level": "projection_up"}
+{"kind": "would_have_killed", "time": "2026-09-03T09:39:14-04:00", "plan_id": "45a0830e2360", "mechanism": null, "reason": "dol_reached", "detail": {"dol": 29293.0}}
+{"kind": "take_profit", "time": "2026-09-03T09:49:13-04:00", "plan_id": "45a0830e2360", "mechanism": "tmso_reject", "artifact_label": null, "price": 29367.0, "direction": "UP", "artifact_id": "tmso_reject", "entry": 29260.75}
+{"kind": "plan_dead", "time": "2026-09-03T09:49:13-04:00", "plan_id": "45a0830e2360", "mechanism": null, "reason": "target_reached", "detail": {"target": 29367.0, "level": "projection_up"}}

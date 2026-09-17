@@ -150,10 +150,13 @@ def test_place_stop_entry_far_stop_unchanged(_in_tmp, _mock_today):
 # Test 1b: STP->MKT downgrade fills immediately (records active, recomputes cautious)
 # ---------------------------------------------------------------------------
 
-def test_place_stop_entry_downgrade_fills_immediately(_in_tmp, _mock_today):
+def test_place_stop_entry_downgrade_fills_immediately(_in_tmp, _mock_today, monkeypatch):
     """When the executor downgrades STP->MKT (entry within 5pts of market), the broker
     fills immediately, so place_stop_entry must record an active position right away —
     not a pending stop_entry — and re-anchor the cautious ladder to the fill price."""
+    # Plan 38 D18: `contracts` is TRADING_CONTRACTS, no longer a literal 2. Pinned here
+    # so the developer's .env (loaded at import) cannot decide this assertion.
+    monkeypatch.setenv("TRADING_CONTRACTS", "2")
     empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
                  "conf_bar_entry": {}, "failed_entries": 0}
     mock_executor = MagicMock()
@@ -298,7 +301,8 @@ def test_place_stop_entry_downgrade_blocked_no_fill(_in_tmp, _mock_today):
 # Test 2: place_market_entry logs and syncs position.json
 # ---------------------------------------------------------------------------
 
-def test_place_market_entry_logs_and_syncs(_in_tmp, _mock_today):
+def test_place_market_entry_logs_and_syncs(_in_tmp, _mock_today, monkeypatch):
+    monkeypatch.setenv("TRADING_CONTRACTS", "2")     # plan 38 D18 — see test 1b
     empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
                  "conf_bar_entry": {}, "failed_entries": 0}
     mock_executor = MagicMock()

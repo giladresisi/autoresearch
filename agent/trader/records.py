@@ -184,3 +184,21 @@ class DecisionRecorder:
         rec = self._base("plan_dead", now, plan_id, None)
         rec.update({"reason": reason, "detail": detail or {}})
         self._write(rec)
+
+    def external_kill(self, *, now, plan_id, reason, void_position, detail=None) -> None:
+        """Something OUTSIDE the chain changed the position, and the chain stood down.
+
+        Live only. Written by `TraderGraft.external_kill` AFTER the plan is dead and the
+        modelled position voided, and attempted even if the void raised — the record is
+        the only evidence of why the rest of the session is empty."""
+        rec = self._base("external_kill", now, plan_id, None)
+        rec.update({"reason": reason, "void_position": bool(void_position),
+                    "detail": detail or {}})
+        self._write(rec)
+
+    def session_disarmed(self, *, now, reason, plan_id=None, detail=None) -> None:
+        """The chain will do nothing more this session. Live only: a restart that found
+        a plan already on disk, or a disarm ordered from outside after a trader error."""
+        rec = self._base("session_disarmed", now, plan_id, None)
+        rec.update({"reason": reason, "detail": detail or {}})
+        self._write(rec)

@@ -81,6 +81,16 @@ _pending_close_after: "pd.Timestamp | None" = None
 _MIN_FILL_STOP_DISTANCE = 10.0
 
 
+def _trading_contracts() -> int:
+    """The size position.json records for a new position: TRADING_CONTRACTS, the same
+    variable (and default) the executor above is sized from. Was a literal 2, which made
+    every close at any other size look like a broker-side resize to the reconcile."""
+    try:
+        return int(os.environ.get("TRADING_CONTRACTS", "2"))
+    except (TypeError, ValueError):
+        return 2
+
+
 def _floor_stop_distance(direction: str, entry_price: float, stop_price: float) -> float:
     """Widen `stop_price` so it is at least _MIN_FILL_STOP_DISTANCE from `entry_price`.
 
@@ -376,7 +386,7 @@ def _register_downgraded_fill(direction: str, entry_price: float, stop_price: fl
         "fill_price": fill,
         "direction": direction,
         "stop": stop_price,
-        "contracts": 2,
+        "contracts": _trading_contracts(),
         "cautious": "no",
         "source": source,
     }
@@ -550,7 +560,7 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float, *,
         "fill_price": fill_price,
         "stop": stop_price,
         "cautious": "no",
-        "contracts": 2,
+        "contracts": _trading_contracts(),
         "time": now,
         "source": source,
     }
@@ -809,8 +819,10 @@ def dispatch(sig: dict) -> None:
         _pending_close_after = None  # clear regardless after processing
         # GIL-42: reconcile the broker BEFORE the close. If the close was a phantom
         # (broker still holds / already flat), adopt or flat the state without sending an
-        # order and suppress the close-MKT entirely.
-        if _reconcile_on_close(sig):
+        # order and suppress the close-MKT entirely. A close carrying `skip_recon` (the
+        # agent stack's: it always sends a real flatten, so the two sides converge at
+        # every close and the exit must not wait on a broker login) goes straight out.
+        if not sig.get("skip_recon") and _reconcile_on_close(sig):
             _log(sig)
             return
         close_position(float(sig.get("price", 0.0)), sig.get("reason", "strategy"))

@@ -61,10 +61,25 @@ lists what must NOT be built.
 
 ## Runtime flags
 
-- `ACT_TRADER` is **ON by default**; `ACT_TRADER=0` (or `false`/`no`/`off`) is the kill
-  switch (`agent/trader/graft.py`).
+- `ACT_TRADER` is **ON by default**, and in the live process (`automation/main.py` ONLY)
+  it **selects the brain** (plan 38): on = the AGENT owns the dispatcher — real
+  `market-entry` / `market-close` orders through `automation/agent_dispatch.py` — and the
+  legacy engine is DARK (`trader_only=True`); `ACT_TRADER=0` (or `false`/`no`/`off`) =
+  LEGACY owns it, exactly as before. That is the rollback; there is no "agent observes"
+  mode any more. Whether an order reaches the broker is still `LIVE_TRADING` /
+  `DISCONNECTED`. `SessionPipeline`'s default, `signal_smt.py`, `backtest_smt.py`,
+  `regression.py` and `run_replay` are unaffected.
+- A live agent start is **REFUSED** — one `[AGENT-LIVE] REFUSED: <reason>` line, then NO
+  brain trades, never a fallback to legacy — when `SMT_PIPELINE != v2`,
+  `FORCE_RESET=true`, `ACT_AI_MODE=primary`, or the trader fails to build.
+- `ACT_TRADER_BACKEND` unset = auto-select by key (`OPENROUTER_API_KEY` preferred, else
+  `ANTHROPIC_API_KEY`), no longer a hard-coded `openrouter`. Leave it and
+  `ACT_TRADER_MODEL` unset in live.
+- `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.
+  Never set it in live: the arm is an exact-minute test, so a process started after 09:20
+  ET is a dark day, and a live restart that finds `plans.json` stays dark too.
 - `ACT_THESIS_CACHE_DIR` redirects the thesis cache. Point it at a tmp dir for any test
   that would otherwise deposit a synthetic recording into `<global>/thesis_cache`, which
   every worktree reads.

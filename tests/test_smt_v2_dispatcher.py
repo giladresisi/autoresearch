@@ -47,6 +47,10 @@ def _isolate_state(tmp_path, monkeypatch):
 @pytest.fixture(params=["signal_smt", "automation.main"])
 def DispatcherCls(request, monkeypatch):
     """Parameterised fixture returning SmtV2Dispatcher from each live module."""
+    # Plan 38 D25: in automation.main, ACT_TRADER on (the default) means the AGENT owns
+    # the dispatcher and the legacy engine is dark. Everything in this file pins the
+    # LEGACY-owned dispatcher, which is now spelled ACT_TRADER=0.
+    monkeypatch.setenv("ACT_TRADER", "0")
     # Stub out modules that call external services at import time
     if request.param == "signal_smt":
         import signal_smt
