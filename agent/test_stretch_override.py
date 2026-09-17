@@ -9,7 +9,8 @@ _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-from agent.stretch_override import (AGE_MAX_MIN, SIZE_FLOOR_PTS, stretch_override)
+from agent.stretch_override import (AGE_MAX_MIN, RETRACE_MAX_PCT, SIZE_FLOOR_PTS,
+                                    stretch_override)
 
 TZ = "America/New_York"
 
@@ -31,25 +32,42 @@ def test_1_a_fresh_stretch_fires_and_returns_the_opposite_direction():
     assert v["fires"] is True and v["direction"] == "DOWN"
 
 
-def test_2_a_halted_stretch_never_fires_however_little_it_retraced():
-    """THE RETRACE ARM IS GONE, and this is the test that keeps it gone.
+def test_2_a_halted_but_unretraced_stretch_fires_however_old_it_is():
+    """Arm 2, restored 2026-09-17 by user decision AGAINST the D0 measurement (the arm
+    alone scored 25% / 22% / 44% at retrace <= 5 / 10 / 25 over n = 4 / 9 / 25; the reasons
+    it came back anyway are on `RETRACE_MAX_PCT`). NO upper bound on the age: a high made
+    2.5 hours before the boundary fires exactly like one made 46 minutes before it."""
+    for age in (AGE_MAX_MIN + 1, 46.0, 150.0, 600.0):
+        for retrace in (0.0, 5.0, RETRACE_MAX_PCT):
+            v = stretch_override(_st("UP", age=age, retrace=retrace))
+            assert v["fires"] is True, f"age={age} retrace={retrace}"
+            assert v["direction"] == "DOWN"
+            assert "halted but unretraced" in v["reason"]
 
-    The first cut fired on "still extending OR halted-but-barely-retraced". D0 over 94
-    sessions says a stale stretch that has NOT retraced CONTINUES: the arm alone scores
-    25% / 22% / 44% at retrace <= 5 / 10 / 25, against a 53% base rate, and including it
-    dropped the whole rule from 68% (22 days) to 55% (47 days). It is an anti-signal, not
-    a weak one."""
-    for retrace in (0.0, 1.0, 5.0, 24.0):
+
+def test_3_a_halted_and_retraced_stretch_does_not_fire():
+    """The other side of arm 2's threshold: old AND given back -> nothing to fade."""
+    for retrace in (RETRACE_MAX_PCT + 0.1, 25.0, 80.0):
         v = stretch_override(_st(age=AGE_MAX_MIN + 120, retrace=retrace))
-        assert v["fires"] is False, f"retrace={retrace} must not resurrect the arm"
-        assert "already halted" in v["reason"]
+        assert v["fires"] is False, f"retrace={retrace}"
+        assert v["direction"] is None
+        assert "halted AND retraced" in v["reason"]
 
 
-def test_3_a_stale_stretch_does_not_fire():
-    v = stretch_override(_st(age=AGE_MAX_MIN + 120, retrace=80.0))
-    assert v["fires"] is False
-    assert v["direction"] is None
-    assert "age" in v["reason"]
+def test_3b_the_two_arms_are_independent():
+    """Arm 1 has NO retrace test and arm 2 has NO clock, so neither contains the other.
+    This is why the clock was not simply widened instead: a wide clock would admit a
+    stretch that HAS meaningfully retraced."""
+    fresh_but_retraced = stretch_override(_st(age=AGE_MAX_MIN - 5, retrace=40.0))
+    assert fresh_but_retraced["fires"] is True
+    assert "still extending" in fresh_but_retraced["reason"]
+
+    stale_unretraced = stretch_override(_st(age=AGE_MAX_MIN + 60, retrace=3.0))
+    assert stale_unretraced["fires"] is True
+    assert "halted but unretraced" in stale_unretraced["reason"]
+
+    # A fresh AND unretraced stretch is arm 1's: the reason names the stronger claim.
+    assert "still extending" in stretch_override(_st(age=2.0, retrace=3.0))["reason"]
 
 
 def test_4_a_stretch_below_the_size_floor_does_not_fire_however_fresh():
@@ -142,3 +160,48 @@ def test_the_l1_view_carries_session_stretch_for_both_assets(facts_0901):
     assert set(ss) == {"MNQ", "MES"}
     assert ss["MES"]["size"] == 66.5          # an order of magnitude below MNQ's 488.25
     assert ss["MES"]["age_minutes"] == 15
+
+
+# --------------------------------------------------------------------------- #
+# the real 2026-09-17 tape — the day arm 2 came back on                        #
+# --------------------------------------------------------------------------- #
+
+def _facts_at_0920(day):
+    now = pd.Timestamp(f"{day} 09:20", tz=TZ)
+    mid = _main_dir_for_date(day)
+    bars = {}
+    for tk in ("MNQ", "MES"):
+        s1 = pd.read_parquet(mid / f"{tk}_1s.parquet")
+        m1 = pd.read_parquet(mid / f"{tk}_1m.parquet")
+        today = s1.loc[pd.Timestamp(f"{day} 00:00", tz=TZ):now]
+        hist = m1[(m1.index >= now - EXECUTOR_HISTORY) & (m1.index < today.index[0])]
+        bars[tk] = pd.concat([hist, today])
+    _ft, _ct, facts, _mag = assemble_facts(None, bars, now)
+    return facts
+
+
+def _has_0917():
+    try:
+        mid = _main_dir_for_date("2026-09-17")
+        idx = pd.read_parquet(mid / "MNQ_1s.parquet", columns=[]).index
+        return bool(len(idx)) and idx[-1] >= pd.Timestamp("2026-09-17 09:20", tz=TZ)
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _MAIN or not _has_0917(),
+                    reason="machine-local 2026-09-17 tape not available")
+@pytest.mark.timeout(300)
+def test_8_the_real_2026_09_17_stretch_fires_on_arm_2_and_forces_down():
+    """MNQ: UP 505.75 pts from 29247.50 (18:04 the evening before) to 29753.25 at 08:34:34 —
+    46 minutes old at 09:20, 5.0% retraced. Arm 1 alone reported "stretch already halted"."""
+    st = _facts_at_0920("2026-09-17")["session_stretch"]["MNQ"]
+    assert st["direction"] == "UP"
+    assert st["size"] == 505.75
+    assert st["age_minutes"] == 46
+    assert st["retrace_pct"] == 5.0
+
+    v = stretch_override({"MNQ": st})
+    assert v["fires"] is True
+    assert v["direction"] == "DOWN"
+    assert "halted but unretraced" in v["reason"]
