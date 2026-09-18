@@ -1043,7 +1043,7 @@ class SmtV2Dispatcher:
             "ACT_TRADER", "1").strip().lower() in ("0", "false", "no", "off")
 
     @staticmethod
-    def _build_trader(out_dir, sink=None):
+    def _build_trader(out_dir, sink=None, date=None):
         """Build the Analyzer/Planner/Executor graft, wired to `sink` (plan 38).
 
         Returns None ONLY when ACT_TRADER is switched OFF — legacy then owns the
@@ -1065,11 +1065,17 @@ class SmtV2Dispatcher:
         if _repo not in sys.path:
             sys.path.insert(0, _repo)
         from agent.trader.graft import TraderGraft
-        from agent.trader.analyzer import thesis_via_decide_thesis
-        from agent.run_agent import make_backend
-        backend = thesis_via_decide_thesis(make_backend(
-            os.environ.get("ACT_TRADER_BACKEND") or None,
-            os.environ.get("ACT_TRADER_MODEL") or None))
+        from agent.trader.cached_backend import (cached_thesis_backend,
+                                                 real_thesis_backend)
+        # The SAME recording backend the replay builds (`agent/trader/replay.py`): the
+        # 09:20 call is recorded in <global>/thesis_cache under a key over the session
+        # date, facts_text, both prompt halves, the schema and the RESOLVED model — so a
+        # warm replay of this date serves the LIVE thesis instead of re-calling the model,
+        # and a KB/prompt/model change invalidates it identically on both paths. Backend
+        # auto-selection (ACT_TRADER_BACKEND unset -> by key) is unchanged, and a
+        # construction failure still RAISES: the caller turns it into a REFUSED start.
+        backend = cached_thesis_backend(date, inner=real_thesis_backend(),
+                                        allow_calls=True)
         return TraderGraft(out_dir, backend, order_sink=sink)
 
     def _build_agent(self, out_dir) -> None:
@@ -1094,7 +1100,9 @@ class SmtV2Dispatcher:
                 self._emit, recorder_path=Path(out_dir) / RECORD_FILE)
             reason = refusal_reason(pipeline=_smtv2_pipeline)
             if reason is None:
-                self._trader = self._build_trader(out_dir, sink=self._agent_port.sink)
+                self._trader = self._build_trader(
+                    out_dir, sink=self._agent_port.sink,
+                    date=session_date_str())
                 if self._trader is None:
                     reason = "the trader was not built"
         except Exception as exc:
