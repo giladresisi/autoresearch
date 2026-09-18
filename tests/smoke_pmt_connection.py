@@ -11,12 +11,11 @@
 #   update_stop_loss replaces the placeholder with the real SL, then closes.
 #
 # test_pmt_stop_entry_via_strategy_pipeline
-#   Runs SessionPipeline with synthetic bars crafted to produce a new-stop-entry
-#   (SELL STOP far below current market → safe pending order), then market-closes.
-#   The emit_fn mirrors SmtV2Dispatcher._emit() exactly, including the conf_bar_entry
-#   state read, to verify the full strategy → emit → PMT dispatch path end-to-end.
-#   Use this test to diagnose why stop-entry signals appear in events.jsonl but do
-#   not reach the PMT executor.
+#   Drives the REAL strategy through SessionPipeline (pause->resume force-eval, as in
+#   tests/test_session_pipeline_resume_entry.py) to a new-stop-entry that is a SELL STOP
+#   far below the live market (safe, pending only), then market-closes. The emit_fn
+#   builds the same pmt_signal live_orders.place_stop_entry builds, so the full
+#   strategy -> emit -> PMT dispatch path is exercised end-to-end.
 #
 # STP order geometry:
 #   SELL STOP must be placed BELOW current market (triggers when price falls to it).
@@ -25,7 +24,7 @@
 #
 # Usage:
 #   python -m pytest tests/smoke_pmt_connection.py -v -s
-#   (the -s flag is required — the tests prompt for user input)
+#   (the -s flag is required - the tests prompt for user input)
 #
 # Prerequisites: PMT_WEBHOOK_URL, PMT_API_KEY, TRADING_ACCOUNT_ID in .env or shell.
 # The tests will NOT run unless SMOKE_PMT=1 is also set, to prevent accidental execution.
@@ -42,6 +41,7 @@ load_dotenv()
 SMOKE_GUARD = "SMOKE_PMT"
 LIMIT_OFFSET_PTS = 500.0    # place sell stop this many points below current price
 LIMIT_MOVE_PTS   = 100.0    # move the stop by this many additional points for the modify step
+SMOKE_PIPELINE_MAX_PRICE = 25000.0  # pipeline test: never dispatch an entry above this (must sit far below live MNQ)
 
 
 def _requires_smoke_env():
@@ -77,7 +77,7 @@ def _fake_bar(limit_price: float):
     )
 
 
-# ── Tests ─────────────────────────────────────────────────────────────────────
+# -- Tests ---------------------------------------------------------------------
 
 def test_pmt_limit_order_place_and_cancel(capsys):
     """
@@ -96,11 +96,11 @@ def test_pmt_limit_order_place_and_cancel(capsys):
     if limit_price_env:
         limit_price = float(limit_price_env)
     else:
-        # Default: 500 pts below a conservative floor — this will never fill in normal conditions
+        # Default: 500 pts below a conservative floor - this will never fill in normal conditions
         limit_price = 15000.0
 
     # direction="short": SELL STOP at limit_price (below market) is a valid pending order.
-    # A BUY STOP must be placed ABOVE market — never below — so long would be rejected here.
+    # A BUY STOP must be placed ABOVE market - never below - so long would be rejected here.
     signal = {
         "direction": "short",
         "entry_price": limit_price,
@@ -137,7 +137,7 @@ def test_pmt_limit_order_place_and_cancel(capsys):
 
     with capsys.disabled():
         print()
-        print(f"[SMOKE] Moving stop entry from {limit_price:.2f} → {moved_price:.2f} via modify_stop_entry...")
+        print(f"[SMOKE] Moving stop entry from {limit_price:.2f} -> {moved_price:.2f} via modify_stop_entry...")
 
     ex.modify_stop_entry(signal, new_signal, bar)
     time.sleep(3)  # close is synchronous; give pool time to dispatch the re-place
@@ -178,7 +178,7 @@ def test_pmt_limit_order_place_and_cancel(capsys):
     # Market order step: buy 1 contract at market with a stop 100 pts below.
     # SMOKE_MARKET_PRICE can be set to the current MNQ price for an accurate stop;
     # if omitted, we use limit_price + LIMIT_OFFSET_PTS as a rough estimate.
-    # The 'price' field on MKT orders is informational — actual fill is at market.
+    # The 'price' field on MKT orders is informational - actual fill is at market.
     market_price_env = os.environ.get("SMOKE_MARKET_PRICE")
     market_price = float(market_price_env) if market_price_env else limit_price + LIMIT_OFFSET_PTS
 
@@ -187,7 +187,7 @@ def test_pmt_limit_order_place_and_cancel(capsys):
         "entry_price": market_price,
         "stop_price": market_price - 100.0,
         "take_profit": market_price + 200.0,
-        # no limit_fill_bars → market order
+        # no limit_fill_bars -> market order
     }
 
     with capsys.disabled():
@@ -233,8 +233,8 @@ def test_pmt_update_sl_after_stop_fill(capsys):
         with the real SL price.
 
     Flow:
-      1. MKT SELL with initial_sl — opens a short position.
-      2. update_stop_loss with updated_sl (different value) — Tradovate should show the change.
+      1. MKT SELL with initial_sl - opens a short position.
+      2. update_stop_loss with updated_sl (different value) - Tradovate should show the change.
       3. MKT close.
 
     Requires SMOKE_PMT=1 and SMOKE_SL_PRICE set to an SL price above current MNQ
@@ -247,18 +247,18 @@ def test_pmt_update_sl_after_stop_fill(capsys):
     if not sl_price_env:
         pytest.skip("Set SMOKE_SL_PRICE to an SL price above current MNQ (e.g. current + 100) to run this test")
     initial_sl = float(sl_price_env)
-    updated_sl = initial_sl - 50.0   # tighter stop — visually distinct from initial_sl
+    updated_sl = initial_sl - 50.0   # tighter stop - visually distinct from initial_sl
     bar = _fake_bar(initial_sl)
 
     ex = _make_executor()
     ex.start()
 
-    # Step 1: MKT SELL with initial_sl — creates the stop-order anchor Tradovate needs
+    # Step 1: MKT SELL with initial_sl - creates the stop-order anchor Tradovate needs
     mkt_signal = {
         "direction":   "short",
         "entry_price": 0.0,      # ignored by PMT for MKT orders
         "stop_price":  initial_sl,
-        # no stop_fill_bars → MKT order
+        # no stop_fill_bars -> MKT order
     }
 
     with capsys.disabled():
@@ -267,14 +267,14 @@ def test_pmt_update_sl_after_stop_fill(capsys):
     ex.place_entry(mkt_signal, bar)
     time.sleep(1)   # let entry HTTP request clear before updating SL
 
-    # Step 2: replace initial_sl with updated_sl — expect Tradovate to show the change
+    # Step 2: replace initial_sl with updated_sl - expect Tradovate to show the change
     with capsys.disabled():
         print(f"[SMOKE] Calling update_stop_loss with updated_sl={updated_sl:.2f} (was {initial_sl:.2f})...")
 
     status, body = ex.update_stop_loss({"direction": "short", "stop_price": updated_sl}, bar)
 
     with capsys.disabled():
-        print(f"[SMOKE] PMT response: HTTP {status} — {body[:300]}")
+        print(f"[SMOKE] PMT response: HTTP {status} - {body[:300]}")
 
     time.sleep(1)   # let SL update settle before closing
 
@@ -289,7 +289,7 @@ def test_pmt_update_sl_after_stop_fill(capsys):
         print("[SMOKE] All three orders dispatched.")
         print()
         print(">>> CHECK YOUR TRADOVATE ACCOUNT NOW <<<")
-        print(f"    SL should have changed from {initial_sl:.2f} → {updated_sl:.2f} while open.")
+        print(f"    SL should have changed from {initial_sl:.2f} -> {updated_sl:.2f} while open.")
         print("    ENTER = SL change visible (pass)  |  'fail' = SL missing or unchanged  |  'skip' = skip check")
         resp = input("    > ").strip().lower()
 
@@ -307,59 +307,53 @@ def test_pmt_update_sl_after_stop_fill(capsys):
 
 def test_pmt_stop_entry_via_strategy_pipeline(tmp_path, monkeypatch, capsys):
     """
-    E2E smoke: run SessionPipeline with synthetic bars that produce new-stop-entry
-    (SELL STP far below current market — safe, pending only), then market-close.
+    E2E smoke: drive the REAL strategy through SessionPipeline to a new-stop-entry
+    (SELL STP far below the live market - safe, pending only), then market-close.
 
-    Mirrors the exact dispatch path used in live trading:
-      strategy.run_strategy → emit_fn reads conf_bar_entry from smt_state
-      → place_entry sends SELL STP to PMT → place_close cancels it.
+    Live path mirrored:
+      strategy.run_strategy -> pipeline emit -> live_orders.dispatch -> place_stop_entry
+      -> PickMyTradeExecutor.place_entry (SELL STP); place_close then cancels it.
 
-    Use this test to diagnose why stop-entry signals appear in events.jsonl but
-    do not reach the PMT executor (the emit_fn here is a faithful copy of
-    SmtV2Dispatcher._emit() in automation/main.py).
+    Harness (short-side mirror of tests/test_session_pipeline_resume_entry.py): the
+    pipeline starts paused, a DOWN hypothesis is hand-set flat, a small bullish 5m window
+    [09:45, 09:50) is the opposite-direction confirmation bar, and the pause->resume
+    transition arms a force-eval so the strategy evaluates on the very next bar.
 
-    Bar sequence (direction="down", all prices ~21000, far below live MNQ ~29000+):
-      09:20-09:24  neutral bars — strategy blocked before 9:30
-      09:25-09:29  bullish 5m window: o=21000→c=21020, body=20pts ≤ 25pt limit
-                   → confirmation bar for short; SL = min(high, body_high+15) = 21025
-      09:30        5m boundary: open=21018, approach=18≥15 → SELL STP at 21000
-
-    The SELL STP at 21000 is ~8000+ pts below live market and cannot fill.
+    Bar geometry (all ~21000, far below live MNQ ~29000+):
+      window 09:45..09:49: first open 20990 -> last close 21000 (bullish, body 10 <= 25)
+      resume bar 09:50:    open 20998, low 20992 (> entry -> resting STP, not market),
+                           close 20993 -> short CPR (21000-20993)/(21000-20992) = 0.875 >= 0.40
+      entry = min(body_low 20990, open - MIN_APPROACH_PTS 10 = 20988) = 20988 (SELL STP)
     """
     _requires_smoke_env()
 
     import copy
+    import paths as _paths
     import smt_state as _ss
-    import hypothesis as _hyp_mod
-    import trend as _trend_mod
     import daily as _daily_mod
+    import trend as _trend_mod
+    import hypothesis as _hyp_mod
+    from session_pipeline import SessionPipeline
 
-    # Redirect smt_state paths to tmp_path so we don't corrupt the live session state
-    monkeypatch.setattr(_ss, "DATA_DIR",        tmp_path)
-    monkeypatch.setattr(_ss, "GLOBAL_PATH",     tmp_path / "global.json")
-    monkeypatch.setattr(_ss, "DAILY_PATH",      tmp_path / "daily.json")
-    monkeypatch.setattr(_ss, "HYPOTHESIS_PATH", tmp_path / "hypothesis.json")
-    monkeypatch.setattr(_ss, "POSITION_PATH",   tmp_path / "position.json")
+    # Isolate ALL state (incl. the pause sentinel under general_live_dir()) in tmp_path.
+    monkeypatch.setattr(_paths, "_STATE_DIR", tmp_path)
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
+    monkeypatch.setattr(_ss, "_IN_MEMORY", False)
 
-    # Seed initial state: direction=down, no pending position, high ATH floor
-    _ss.save_global({
-        **_ss.DEFAULT_GLOBAL,
-        "session_ath":   30000.0,
-        "all_time_high": 30000.0,
-        "confidence":    "medium",
-    })
-    _ss.save_daily({**_ss.DEFAULT_DAILY, "formed_at": "2025-11-14T09:20:00-05:00", "estimated_dir": "down"})
-    _ss.save_hypothesis({
-        **_ss.DEFAULT_HYPOTHESIS,
-        "direction":  "down",
-        "formed_at":  "2025-11-14T09:10:00-05:00",
-    })
-    _ss.save_position(copy.deepcopy(_ss.DEFAULT_POSITION))
+    # No-op the passes that would overwrite the hand-set state; run_strategy runs FOR REAL.
+    monkeypatch.setattr(_daily_mod, "run_daily_fixed", lambda *a, **kw: None)
+    monkeypatch.setattr(_trend_mod, "run_trend", lambda *a, **kw: None)
+    monkeypatch.setattr(_hyp_mod, "run_hypothesis", lambda *a, **kw: None)
 
-    # Suppress hypothesis, trend, daily to isolate the strategy → emit → PMT path
-    monkeypatch.setattr(_hyp_mod,   "run_hypothesis", lambda *a, **kw: [])
-    monkeypatch.setattr(_trend_mod, "run_trend",      lambda *a, **kw: None)
-    monkeypatch.setattr(_daily_mod, "run_daily",      lambda *a, **kw: None)
+    tz = "America/New_York"
+
+    def _bars(start, o, h, lo, c):
+        idx = pd.date_range(start, periods=len(o), freq="1min", tz=tz)
+        return pd.DataFrame({"Open": o, "High": h, "Low": lo, "Close": c,
+                             "Volume": [100.0] * len(o)}, index=idx)
+
+    def _flat(start, n, base):
+        return _bars(start, [base] * n, [base + 10.0] * n, [base - 10.0] * n, [base + 2.0] * n)
 
     ex = _make_executor()
     ex.start()
@@ -367,86 +361,61 @@ def test_pmt_stop_entry_via_strategy_pipeline(tmp_path, monkeypatch, capsys):
     emitted: list[dict] = []
 
     def emit_fn(sig: dict) -> None:
-        """Faithful copy of SmtV2Dispatcher._emit() for the new-stop-entry path."""
+        """Same mapping as live_orders.dispatch -> place_stop_entry for new-stop-entry."""
         emitted.append(copy.copy(sig))
         if sig.get("kind") != "new-stop-entry":
             return
         direction_v2 = sig.get("direction", "none")
-        if direction_v2 == "none":
-            print(f"[SMOKE-EMIT] skipped: direction=none", flush=True)
-            return
         stop = sig.get("stop")
-        if stop is None:
-            print(f"[SMOKE-EMIT] skipped: signal missing stop field", flush=True)
+        if direction_v2 == "none" or stop is None:
+            print(f"[SMOKE-EMIT] skipped: direction={direction_v2} stop={stop}", flush=True)
             return
         direction = "long" if direction_v2 == "up" else "short"
+        price = float(sig["price"])
+        # Safety: only a SELL STP far below the live market may reach the broker. A BUY STP
+        # below market (or anything near market) would fill immediately.
+        if direction != "short" or price > SMOKE_PIPELINE_MAX_PRICE:
+            pytest.fail(f"refusing to dispatch unsafe entry: {direction} @ {price:.2f}")
         pmt_signal = {
             "direction":      direction,
-            "entry_price":    float(sig["price"]),
+            "entry_price":    price,
             "stop_price":     float(stop),
             "stop_fill_bars": 1,
         }
-        print(f"[SMOKE-EMIT] new-stop-entry → place_entry({pmt_signal})", flush=True)
-        ex.place_entry(pmt_signal, _fake_bar(float(sig["price"])))
+        print(f"[SMOKE-EMIT] new-stop-entry -> place_entry({pmt_signal})", flush=True)
+        ex.place_entry(pmt_signal, _fake_bar(price))
 
-    from session_pipeline import SessionPipeline
-    empty_1m = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-    pipeline = SessionPipeline(empty_1m, empty_1m, emit_fn)
-    pipeline._daily_triggered = True  # bypass on_session_start (daily, global, ATH seeding)
+    pipeline = SessionPipeline(_flat("2025-11-13 09:20", 5, 21000.0),
+                               _flat("2025-11-13 09:20", 5, 3000.0), emit_fn)
+    monkeypatch.setattr(pipeline, "_run_smt_v2_detection", lambda *a, **kw: [])
 
-    tz = "America/New_York"
-    date_str = "2025-11-14"
+    # Start paused (no late-start arm), then hand-set a DOWN hypothesis, flat, high ATH.
+    _ss.pause_path().write_text("paused")
+    pipeline.on_session_start(pd.Timestamp("2025-11-14 09:20", tz=tz),
+                              _flat("2025-11-14 09:20", 1, 21000.0))
+    _ss.save_hypothesis({**_ss.DEFAULT_HYPOTHESIS, "direction": "down"})
+    _ss.save_position(copy.deepcopy(_ss.DEFAULT_POSITION))
+    _ss.save_global({**_ss.DEFAULT_GLOBAL, "all_time_high": 30000.0})
 
-    # (time_str, open, high, low, close)
-    raw_bars = [
-        # 09:20-09:24: neutral — run_strategy blocked before 09:30
-        (f"{date_str} 09:20", 21015, 21020, 21010, 21015),
-        (f"{date_str} 09:21", 21015, 21020, 21010, 21015),
-        (f"{date_str} 09:22", 21015, 21020, 21010, 21015),
-        (f"{date_str} 09:23", 21015, 21020, 21010, 21015),
-        (f"{date_str} 09:24", 21015, 21020, 21010, 21015),
-        # 09:25-09:29: bullish 5m window (direction=down → _find_last_bar looks for bullish opp bar)
-        #   window[09:25, 09:30): first_open=21000, last_close=21020 → bullish (c > o) ✓
-        #   body_high=21020, body_low=21000, high=21025, low=20995
-        #   body size = 20 pts ≤ 25 pt MAX_CONFIRMATION_BODY_PTS ✓
-        #   SL = min(21025, 21020+15) = 21025
-        (f"{date_str} 09:25", 21000, 21010, 20995, 21004),
-        (f"{date_str} 09:26", 21004, 21010, 21000, 21008),
-        (f"{date_str} 09:27", 21008, 21015, 21005, 21012),
-        (f"{date_str} 09:28", 21012, 21020, 21008, 21016),
-        (f"{date_str} 09:29", 21016, 21025, 21014, 21020),
-        # 09:30: 5m boundary, triggers run_strategy with fill_check_only=False
-        #   approach = bar_open - body_low = 21018 - 21000 = 18 ≥ 15 (stop, not market) ✓
-        #   bar_mid = (21022+21010)/2 = 21016; SL-bar_mid = 21025-21016 = 9 ≥ 5 ✓
-        #   CPR (short) = (high-close)/(high-low) = 7/12 = 0.58 ≥ 0.40 ✓
-        #   → new-stop-entry at price=21000 (SELL STP ~8000 pts below live market)
-        (f"{date_str} 09:30", 21018, 21022, 21010, 21015),
-    ]
+    today_mnq = _bars("2025-11-14 09:45",
+                      o=[20990, 20994, 20995, 20996, 20997, 20998],
+                      h=[20996, 20998, 20999, 21000, 21002, 21000],
+                      lo=[20988, 20990, 20991, 20992, 20993, 20992],
+                      c=[20992, 20994, 20995, 20997, 21000, 20993])
+    today_mes = _flat("2025-11-14 09:45", 6, 3000.0)
+    mnq_bar = pd.Series({"Open": 20998.0, "High": 21000.0, "Low": 20992.0, "Close": 20993.0})
+    mes_bar = pd.Series({"Open": 3000.0, "High": 3008.0, "Low": 2998.0, "Close": 3005.0})
 
-    today_rows = [
-        {
-            "ts":     pd.Timestamp(f"{ts_str}:00", tz=tz),
-            "Open":   float(o), "High": float(h),
-            "Low":    float(l), "Close": float(c),
-            "Volume": 100.0,
-        }
-        for ts_str, o, h, l, c in raw_bars
-    ]
-    today_df = (
-        pd.DataFrame(today_rows)
-        .set_index("ts")
-        .rename_axis(None)
-    )
+    # 09:48, still paused: entry work suppressed (_prev_paused -> True).
+    pipeline.on_1m_bar(pd.Timestamp("2025-11-14 09:48", tz=tz), mnq_bar, mes_bar,
+                       today_mnq.iloc[:4], today_mes.iloc[:4])
+    assert pipeline._prev_paused is True
+    # Resume: remove the sentinel; the next bar force-evaluates the last 5m window.
+    _ss.pause_path().unlink()
+    pipeline.on_1m_bar(pd.Timestamp("2025-11-14 09:50", tz=tz), mnq_bar, mes_bar,
+                       today_mnq, today_mes)
 
-    for ts_str, o, h, l, c in raw_bars:
-        ts = pd.Timestamp(f"{ts_str}:00", tz=tz)
-        bar_row = pd.Series(
-            {"Open": float(o), "High": float(h), "Low": float(l), "Close": float(c), "Volume": 100.0},
-            name=ts,
-        )
-        pipeline.on_1m_bar(ts, bar_row, bar_row, today_df, today_df)
-
-    time.sleep(3)
+    time.sleep(3)  # give the pool thread time to dispatch the HTTP request
 
     stop_signals = [s for s in emitted if s.get("kind") == "new-stop-entry"]
 
@@ -457,9 +426,9 @@ def test_pmt_stop_entry_via_strategy_pipeline(tmp_path, monkeypatch, capsys):
                 f"All emitted: {emitted}\n"
                 f"position.json: {_ss.load_position()}"
             )
-        entry_price = stop_signals[0]["price"]
+        entry_price = float(stop_signals[0]["price"])
         print(f"\n[SMOKE] SessionPipeline emitted new-stop-entry @ {entry_price:.2f} (SELL STP)")
-        print(f"[SMOKE] This is ~8000 pts below live market — order is pending only, cannot fill")
+        print("[SMOKE] This is far below the live market - order is pending only, cannot fill")
         print()
         print(">>> CHECK YOUR TRADOVATE ACCOUNT NOW <<<")
         print(f"    You should see a pending STP SELL order at {entry_price:.2f}.")
@@ -494,4 +463,4 @@ def test_pmt_stop_entry_via_strategy_pipeline(tmp_path, monkeypatch, capsys):
 
     with capsys.disabled():
         print()
-        print("[SMOKE] Test complete. Strategy → emit → PMT dispatch path verified.")
+        print("[SMOKE] Test complete. Strategy -> emit -> PMT dispatch path verified.")
