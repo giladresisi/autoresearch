@@ -35,8 +35,9 @@ entry comes from the trader graft (`agent/trader`: L1 Analyzer at 09:20 ET, Plan
 Executor; market-only mechanisms `fvg_1m_post_extreme`, `extreme_reject_close`,
 `tmso_reject`; no entries at/after 10:30 ET; open position flattened at 13:00 ET). The
 graft's simulated orders are mirrored into the legacy signal vocabulary
-(`market-entry` / `market-close` / `stopped-out` with `"source": "trader"`) and dispatched to
-PMT through `live_orders`, so `events.jsonl`, `signals.log`, `position.json` and the
+(`market-entry` / `market-close` with `"source": "agent"`) and dispatched to PMT through
+`live_orders` by `automation/agent_dispatch.py`, which also writes its own per-event record
+to `<session>/agent_dispatch.jsonl`, so `events.jsonl`, `signals.log`, `position.json` and the
 broker reports keep their legacy shapes. The deterministic counterpart is therefore the
 **trader replay** (`scripts/replay_session.py`), not `regression.py`.
 
@@ -226,10 +227,11 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
 
 1. <SESSION>\events.jsonl
    JSONL file — one JSON object per line. Each has "kind", "time", and kind-specific fields.
-   Trader-era order kinds (dispatched to the broker): market-entry {direction up/down,
-   price, stop, source "trader", mechanism}, market-close {price, reason: "target" |
-   "hard-close-13:00" | "user-requested" | "session-end", source}, stopped-out {price,
-   direction}. Session-start seeding still writes legacy informational kinds
+   Agent-era order kinds (dispatched to the broker): market-entry {direction up/down,
+   price, stop, source "agent", mechanism}, market-close {price, reason: "stop_out" |
+   "take_profit" | "window_end" | "user-requested" | "session-end", source}. EVERY exit is
+   a market-close carrying `skip_recon` — there is no `stopped-out` order kind on this
+   path; a stop-out is a market-close with reason "stop_out". Session-start seeding still writes legacy informational kinds
    (new-hypothesis at startup, smt-div with source "v2-warmup", liquidity/levels) — they
    place nothing. Any legacy ENTRY kind (new-stop-entry, stop-entry-filled, move-stop-entry,
    new-stop-exit, move-stop-exit, stop-exit) appearing here is a [CRITICAL] discrepancy:
@@ -312,7 +314,15 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
     scripts/report_replay_pnl.py (Step 2.5.3) — `realised` vs `marked` (a mark is the
     position open at the 13:00 window end, not an exit).
 
-13. <SESSION>\comments.md  (MUST read; may not exist)
+13. <SESSION>gent_dispatch.jsonl   (the agent's own order record, plan 38)
+    One JSON line per simulated order event the port reported: the signal built from it,
+    the ack (read back off position.json), `dispatch_ms`, and whether it was suppressed or
+    deduped on `(plan_id, seq)`. This is where an order that the brain decided but the
+    broker never took shows up. Cross-reference against the [PMT] lines in signals.log:
+    an event here with no PMT line, or an ack that is not ok, is a D-class finding. Also
+    carries the watchdog's `external_kill` / `session_disarmed` records.
+
+14. <SESSION>\comments.md  (MUST read; may not exist)
     Operator notes written during or after the session, plus the "Running commit" line the
     run-orchestrator skill adds at startup. Contains explanations for known anomalies
     (manual interventions, `trade.py close`, broker issues) that would otherwise appear as
@@ -325,7 +335,7 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
     grounding the estimated impact in this session's tape — even when the data alone
     would not have surfaced it.
 
-14. Git commits made during the session window
+15. Git commits made during the session window
     Run this command to list commits that landed while the session was live
     (18:00 ET the calendar day before DATE through 17:00 ET on DATE):
 
@@ -436,7 +446,7 @@ Known acceptable differences between live and replay (do NOT flag these):
 ### C. Commit context — connecting after-run commits to divergences
 
 This section reconciles the divergences found in section B against the commits
-collected in data source #14.  Run it AFTER completing section B.
+collected in data source #15.  Run it AFTER completing section B.
 
 **Step C1 — Match divergences to commits**
 
@@ -444,7 +454,8 @@ For each live↔replay divergence found in section B:
   a. Read every commit message (and changed files) that landed AFTER the "Running commit"
      recorded in comments.md.
   b. Ask: could this commit have caused or explained the divergence? Indicators: it touches
-     agent/trader (executor, mechanisms, target, planner, order_sim, broker_mirror) or
+     agent/trader (executor, mechanisms, target, planner, order_sim, order_port,
+     initial_target) or automation/agent_dispatch.py or
      live_orders / the PMT executor, or its message names the scenario.
   c. If a match is found, annotate the divergence with:
      `Explained by commit <short-hash>: "<commit subject>"` and one sentence why.
@@ -512,7 +523,7 @@ Classify severity in the title: use "[CRITICAL]" if the bug could cause unlimite
 or unintended risk (a legacy entry kind, a wrong armed_classes set, an entry after 10:30,
 a position not flattened at 13:00, a stop not embedded at the broker), "[MINOR]" if it's
 cosmetic or small-impact.
-The "After-Run Commits" section is required whenever data source #14 returns at least one
+The "After-Run Commits" section is required whenever data source #15 returns at least one
 commit after the running commit.  If there are none, omit the section entirely.
 
 ### File 2: <SESSION>\optimizations.md
