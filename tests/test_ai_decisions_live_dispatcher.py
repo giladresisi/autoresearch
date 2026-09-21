@@ -238,7 +238,7 @@ def test_trader_unset_attaches_the_graft_by_default(monkeypatch, _agent_precondi
     and since plan 38 (D25) the chain OWNS the dispatcher, with the legacy engine dark."""
     sentinel = object()
     monkeypatch.setattr(main.SmtV2Dispatcher, "_build_trader",
-                        staticmethod(lambda out_dir, sink=None: sentinel))
+                        staticmethod(lambda out_dir, sink=None, date=None: sentinel))
     d = main.SmtV2Dispatcher()
     d.on_session_start(_now(), _hist(), _hist())
     assert _FakePipeline.last["trader"] is sentinel
@@ -250,7 +250,7 @@ def test_trader_flag_on_attaches_the_graft(monkeypatch, tmp_path, _agent_precond
     sentinel = object()
     captured = {}
 
-    def _fake_build_trader(out_dir, sink=None):
+    def _fake_build_trader(out_dir, sink=None, date=None):
         captured["out_dir"] = out_dir
         captured["sink"] = sink
         return sentinel
@@ -271,7 +271,7 @@ def test_trader_build_failure_is_a_refused_start_not_a_fallback(
     never hand the dispatcher back to legacy either: REFUSED, nobody owns, legacy dark.
     (Was `..._degrades_to_none`: a silent None was harmless only while the trader merely
     observed.)"""
-    def _boom(out_dir, sink=None):
+    def _boom(out_dir, sink=None, date=None):
         raise RuntimeError("trader build failed")
 
     monkeypatch.setattr(main.SmtV2Dispatcher, "_build_trader", staticmethod(_boom))
