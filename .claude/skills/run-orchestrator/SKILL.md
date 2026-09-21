@@ -32,6 +32,7 @@ files left over by a previous run on the same calendar day.
 | daily.py complete | `[EMIT] daily complete` | Printed by automation.main after run_daily |
 | First directed hypothesis | `"kind": "new-hypothesis"` + `"direction": "up\|down"` | JSON line emitted by automation.main |
 | Startup fatal | `FATAL` | IB unreachable or other hard failure; monitor exits immediately |
+| Agent REFUSED the dispatcher | `[AGENT-LIVE] REFUSED` | A config precondition failed (`FORCE_RESET`, `SMT_PIPELINE` != v2, `ACT_AI_MODE=primary`, or the trader could not be built). **NOTHING will trade all session** and there is no fallback — push immediately and stop |
 | IB zombie suspected | `[ib-watchdog] No data for` | Bar feed silent; 30s recovery window open. **Suppressed after `[ORCH] Session ended`** — expected during the maintenance break |
 | IB watchdog killed | `[ib-watchdog] No recovery after` | Watchdog killed connection as zombie. **Suppressed after session end** — expected during maintenance |
 | Maintenance break started | `Pre-session IB connection ended`, OR orchestrator exit after `[ORCH] Session ended` | Clean shutdown for the CME 17:00–18:00 ET break — NOT a crash. Triggers the post-session cycle (Step 4); monitor exits |
@@ -47,20 +48,28 @@ stdout/stderr captured to the log files, and confirms the PID.
 **Default to resumed mode (automatic entries enabled).** Start with `--resume` unless the
 user explicitly asks to start paused — only then use `--pause` instead. `--resume` lifts the
 manual entry pause so automatic entries fire; `--pause` suppresses new automatic entries
-(exits stay active). `--force` restarts without a prompt and resets hypothesis/position state
+(exits stay active). **NEVER pass `--force` while the agent brain owns the dispatcher (the default).** It sets
+`FORCE_RESET`, which wipes `position.json` at session start — harmless for the legacy brain,
+but plan 38's agent uses that file as its single witness: it ACKs every order by reading it and
+a per-bar watchdog treats any change it did not cause as a reason to stop. So the agent REFUSES
+the dispatcher when `FORCE_RESET` is set, and the session runs with NOTHING trading. `trade.py`
+now refuses the combination up front (exit 1), so this is a wrong command rather than a dark
+day — but do not reach for `--force` as a habit. It is valid only with `ACT_TRADER=0`.
+
+`--force` restarts without a prompt and resets hypothesis/position state
 at session start.
 
 Choose flags based on the user's request:
 
 | User intent | Command |
 |---|---|
-| Default start (resumed — automatic entries enabled) | `uv run python trade.py start --force --resume` |
-| Start PAUSED (only when explicitly requested) | `uv run python trade.py start --force --pause` |
-| Keep position/hypothesis state (no reset) | omit `--force` |
+| Default start (resumed — automatic entries enabled) | `uv run python trade.py start --resume` |
+| Start PAUSED (only when explicitly requested) | `uv run python trade.py start --pause` |
+| Force-reset state (LEGACY brain only, `ACT_TRADER=0`) | add `--force` |
 | Enable LLM session summary | add `--summary` |
 
 ```powershell
-uv run python trade.py start --force --resume   # default: resumed. Use --pause only if explicitly requested.
+uv run python trade.py start --resume   # default: resumed. Use --pause only if explicitly requested.
 ```
 
 ### Record the running commit (once, at session start)
@@ -213,6 +222,13 @@ if cur | grep -q "FATAL"; then
     exit 0
 fi
 
+# The agent refused the dispatcher: no brain trades this session and it never falls back
+# to legacy. One log line is not enough — surface it and stop.
+if cur | grep -q "\[AGENT-LIVE\] REFUSED"; then
+    echo "[KEEPALIVE] AGENT REFUSED THE DISPATCHER: $(cur | grep '\[AGENT-LIVE\] REFUSED' | head -1)"
+    exit 0
+fi
+
 if cur | grep -q "\[ib-watchdog\] No data for" && ! session_is_over; then
     ib_zombie_suspected=true
     echo "[MONITOR] IB watchdog: zombie suspected — no bar data received"
@@ -268,6 +284,10 @@ while true; do
         if cur | grep -q "FATAL"; then
             fatal_msg=$(cur | grep "FATAL" | head -1)
             echo "[KEEPALIVE] Orchestrator startup FATAL: $fatal_msg"
+            exit 0
+        fi
+        if cur | grep -q "\[AGENT-LIVE\] REFUSED"; then
+            echo "[KEEPALIVE] AGENT REFUSED THE DISPATCHER: $(cur | grep '\[AGENT-LIVE\] REFUSED' | head -1)"
             exit 0
         fi
         if cur | grep -q "IB 1m gap fill complete"; then
@@ -372,6 +392,7 @@ As each line arrives from the Monitor, call `PushNotification` for EVERY milesto
 | `[MONITOR] IB watchdog: zombie suspected …` | `WARNING: IB zombie suspected — no bar data; 30s recovery window open` |
 | `[KEEPALIVE] IB watchdog: connection killed …` | `WARNING: IB watchdog killed zombie connection — orchestrator restarting` |
 | `[KEEPALIVE] Orchestrator startup FATAL: …` | `CRITICAL: Orchestrator failed at startup — <first line of FATAL message>` |
+| `[KEEPALIVE] AGENT REFUSED THE DISPATCHER: …` | `CRITICAL: agent refused the dispatcher — NOTHING trades this session. <reason>` |
 | `[KEEPALIVE] Orchestrator … died before session start …` | `CRITICAL: Orchestrator died before session start — check stdout log` |
 | `[KEEPALIVE] Orchestrator … has DIED` | `CRITICAL: Orchestrator died during session` |
 | `[KEEPALIVE] automation.main … has DIED` | `WARNING: automation.main died — orchestrator should restart it` |
@@ -434,7 +455,7 @@ exit 0
 ```
 
 **3. On `[REOPEN] IB realtime data confirmed`:** restart the orchestrator for the next
-session by repeating **Step 1** (`uv run python trade.py start --force --resume`, record
+session by repeating **Step 1** (`uv run python trade.py start --resume`, record
 the running-commit note, report the session window) and **re-arm the Step-2 keepalive
 Monitor**. The full cycle then repeats automatically each trading day:
 

@@ -42,6 +42,17 @@ from __future__ import annotations
 import sys
 
 
+def _agent_switched_off() -> bool:
+    """True when ACT_TRADER=0/false/no/off, i.e. the LEGACY brain owns the dispatcher.
+
+    Mirrors `automation.main.SmtV2Dispatcher._trader_switched_off` — a raw env read, and
+    deliberately not an import: this runs in the CLI process, which must not pull the
+    agent's import graph in just to parse a flag.
+    """
+    import os as _os
+    return _os.environ.get("ACT_TRADER", "1").strip().lower() in ("0", "false", "no", "off")
+
+
 def _resolve_direction(pos_dir: str, extra_arg: str | None) -> str | None:
     """Return 'long'/'short' from an explicit arg or a stored direction string, else None."""
     src = extra_arg or pos_dir
@@ -338,6 +349,25 @@ def main() -> None:
         from pathlib import Path
 
         summary = "--summary" in raw_args
+
+        # --force sets FORCE_RESET, which wipes position.json at session start. That is
+        # harmless for the LEGACY brain (it is only its own bookkeeping) but plan 38's agent
+        # uses position.json as its single witness: it ACKs every order by reading the file
+        # and a per-bar watchdog treats any change it did not cause as a reason to stop. So
+        # `agent_dispatch.refusal_reason` refuses the dispatcher outright when FORCE_RESET is
+        # set — the session then runs with NO brain trading and says so in one log line
+        # nobody is watching at 03:00. Refuse HERE instead, where a human is reading.
+        if force and not _agent_switched_off():
+            print("ERROR: --force sets FORCE_RESET, and the agent brain REFUSES to own the\n"
+                  "       dispatcher when it is set (it wipes position.json, the watchdog's\n"
+                  "       only witness). The session would run with NOTHING trading.\n"
+                  "\n"
+                  "       Start without --force. It only resets hypothesis/position state,\n"
+                  "       which a clean start does not need.\n"
+                  "       To force-reset anyway, hand the session to the legacy brain with\n"
+                  "       ACT_TRADER=0 — then --force means what it always meant.")
+            sys.exit(1)
+
 
         # Optional pause/resume of automatic entries from the moment the orchestrator
         # starts. Independent of --force (different concern). The start proceeds either
