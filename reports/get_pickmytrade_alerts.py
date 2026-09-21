@@ -18,6 +18,22 @@ import paths
 _ALERTS_URL = "https://app.pickmytrade.trade/#/dashboard/home?tab=alerts"
 
 
+def _profile_dir() -> Path:
+    """Persistent Chromium profile for PickMyTrade: <global>/general/browser_profiles/pickmytrade.
+
+    PMT's login page now shows a reCAPTCHA (2026-09-18), which a headless run cannot solve.
+    A persistent profile keeps the logged-in session (cookies / local storage) across runs, so
+    the captcha is solved ONCE in a headed run and every later headless run lands directly on
+    the alerts tab. Lives in the machine-global folder, never the worktree."""
+    d = paths.global_root() / "general" / "browser_profiles" / "pickmytrade"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+class PmtLoginRequiresHuman(RuntimeError):
+    """Login needs a captcha solved in a headed browser; see the message."""
+
+
 def _sessions_dir() -> Path:
     """Session root: the machine-global live sessions root (paths.sessions_dir()).
 
@@ -45,9 +61,11 @@ def run(session_date: datetime.date, *, headed: bool = False, count: int = 100) 
     out_path = out_dir / "pickmytrade_alerts.csv"
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not headed)
-        ctx  = browser.new_context(accept_downloads=True)
-        page = ctx.new_page()
+        # Persistent context (profile on disk) instead of a throwaway browser: keeps PMT's
+        # logged-in session so the captcha is a one-time, headed event.
+        ctx = p.chromium.launch_persistent_context(
+            str(_profile_dir()), headless=not headed, accept_downloads=True)
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.set_default_timeout(30_000)
 
         try:
@@ -66,13 +84,26 @@ def run(session_date: datetime.date, *, headed: bool = False, count: int = 100) 
             print(f"[pmt] needs_login={needs_login}", file=sys.stderr)
 
             if needs_login:
+                captcha = page.locator(
+                    "iframe[src*='recaptcha'], iframe[title*='reCAPTCHA' i], .g-recaptcha").count() > 0
+                if captcha and not headed:
+                    raise PmtLoginRequiresHuman(
+                        "PickMyTrade login shows a reCAPTCHA and the saved browser profile is "
+                        "not logged in. Run ONCE with --headed, log in and solve the captcha in "
+                        "the window; the profile at "
+                        f"{_profile_dir()} keeps the session for later headless runs.")
                 page.locator(email_sel).first.fill(pmt_email)
                 page.locator("input[type='password']").first.fill(pmt_pw)
-                page.get_by_role("button", name="Login").click()
+                if captcha:
+                    print("[pmt] reCAPTCHA present — solve it in the browser window, then the "
+                          "script continues (waits up to 3 minutes).", file=sys.stderr)
+                else:
+                    page.get_by_role("button", name="Login").click()
                 # Wait for the app to redirect to the dashboard before navigating
-                # further — the goto below would kill the login POST otherwise.
+                # further — the goto below would kill the login POST otherwise. With a
+                # captcha the human clicks Login; give them time.
                 try:
-                    page.wait_for_url("*#/dashboard*", timeout=15_000)
+                    page.wait_for_url("*#/dashboard*", timeout=180_000 if captcha else 15_000)
                 except Exception:
                     page.wait_for_load_state("domcontentloaded")
                 page.goto(_ALERTS_URL)
@@ -169,14 +200,16 @@ def run(session_date: datetime.date, *, headed: bool = False, count: int = 100) 
             page.screenshot(path=str(out_dir / "pickmytrade_error.png"))
             raise
         finally:
-            browser.close()
+            ctx.close()   # flushes the profile (cookies / storage) to disk
 
     return out_path
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--headed", action="store_true", help="Show browser window (useful for debugging selectors)")
+    ap.add_argument("--headed", action="store_true",
+                    help="Show the browser window. Required ONCE to log in and solve PMT's "
+                         "reCAPTCHA; the persistent profile keeps the session afterwards.")
     ap.add_argument("--date", help="Session date YYYY-MM-DD (default: yesterday)")
     ap.add_argument("--count", type=int, default=100, help="Alerts count to export (default: 100)")
     args = ap.parse_args()
