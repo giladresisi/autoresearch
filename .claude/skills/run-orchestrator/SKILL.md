@@ -30,7 +30,11 @@ files left over by a previous run on the same calendar day.
 | Gap-fill complete | `IB 1m gap fill complete` | Printed before session channels exist |
 | Session started | `automation.main started` | Printed by orchestrator when it spawns the session process |
 | daily.py complete | `[EMIT] daily complete` | Printed by automation.main after run_daily |
-| First directed hypothesis | `"kind": "new-hypothesis"` + `"direction": "up\|down"` | JSON line emitted by automation.main |
+| **Gap-fill NOT done by 09:15 ET** | clock check, not a log line | **CRITICAL.** The 09:20 arm is an EXACT-MINUTE test (`analyzer._arm`: `now.hour != 9 or now.minute != 20` → return). The gap-fill BLOCKS the bar feed (`IbRealtimeSource.start`), so if it is still running at 09:20 no bar ever carries that minute, the Analyzer never arms, and the day is DARK. Push and tell the user immediately — they can still decide to accept a dark day or intervene |
+| Agent owns the dispatcher | `[AGENT-LIVE] OK` | Positive confirmation that the agent took the dispatcher and the legacy engine is dark. Its ABSENCE is not proof of failure (it prints once, early) but its presence is proof of success |
+| L1 thesis armed | `thesis_state.json` appears in `<global>/sessions/<date>/` | The 09:20 model call landed (16–104 s, median ~40 s). A DARK day writes no such file — report which |
+| Plan derived | `plans.json` appears in the same folder | The Planner turned the thesis into a plan; entries become possible after 09:30:30 |
+| First agent order | `"source": "agent"` in a signal line, then `[PMT] Order … sent OK` | The first real order of the session. Push it — this is the one the user wants to see |
 | Startup fatal | `FATAL` | IB unreachable or other hard failure; monitor exits immediately |
 | Agent REFUSED the dispatcher | `[AGENT-LIVE] REFUSED` | A config precondition failed (`FORCE_RESET`, `SMT_PIPELINE` != v2, `ACT_AI_MODE=primary`, or the trader could not be built). **NOTHING will trade all session** and there is no fallback — push immediately and stop |
 | IB zombie suspected | `[ib-watchdog] No data for` | Bar feed silent; 30s recovery window open. **Suppressed after `[ORCH] Session ended`** — expected during the maintenance break |
@@ -44,6 +48,13 @@ files left over by a previous run on the same calendar day.
 `trade.py start` handles everything: kills any existing orchestrator and automation.main,
 appends the `=== RESTART` marker to `orchestrator_stdout.log`, launches the process with
 stdout/stderr captured to the log files, and confirms the PID.
+
+**Start at ~09:00 ET (the operator's routine since 2026-09-21).** That leaves ~20 minutes
+for the blocking IB gap-fill before the 09:20 arm. The arm is an EXACT-MINUTE test, so the
+bar feed MUST be live before 09:20 or the Analyzer never arms and the session is dark. A
+weekend or multi-day gap needs several IB pacing rounds ~11 minutes apart — on a Monday, or
+after any long outage, start earlier or run `trade.py gap-fill` beforehand so the
+orchestrator's own fill has little left to do.
 
 **Default to resumed mode (automatic entries enabled).** Start with `--resume` unless the
 user explicitly asks to start paused — only then use `--pause` instead. `--resume` lifts the
@@ -141,13 +152,21 @@ STARTUP_LOG="$BASE/orchestrator_stdout.log"
 # alongside global.json / the pause sentinel — resolve it via paths.py.
 PID_FILE="$(uv run python -c "import paths; print(paths.general_live_dir() / 'orchestrator.pid')" 2>/dev/null)"
 
+# The session folder the agent writes its thesis and plan into.
+SESSION="$(uv run python -c "import paths; from session_times import session_date_str; print(paths.sessions_dir() / session_date_str())" 2>/dev/null)"
+
 gap_fill_done=false
+gap_deadline_reported=false
+agent_ok=false
+agent_refused=false
+thesis_done=false
+plan_done=false
+order_done=false
 fill_incomplete_reported=false
 gap_check_reported=false
 session_started=false
 session_ended=false
 daily_done=false
-hyp_done=false
 ib_zombie_suspected=false
 ib_watchdog_killed=false
 maint_done=false
@@ -229,6 +248,11 @@ if cur | grep -q "\[AGENT-LIVE\] REFUSED"; then
     exit 0
 fi
 
+if cur | grep -q "\[AGENT-LIVE\] OK"; then
+    agent_ok=true
+    echo "[MONITOR] Agent owns the dispatcher — legacy dark, arm 09:20 ET"
+fi
+
 if cur | grep -q "\[ib-watchdog\] No data for" && ! session_is_over; then
     ib_zombie_suspected=true
     echo "[MONITOR] IB watchdog: zombie suspected — no bar data received"
@@ -255,12 +279,7 @@ if [ "$session_started" = true ]; then
         echo "[MONITOR] daily.py complete"
     fi
 
-    hyp_line=$(cur | grep '"kind": "new-hypothesis"' | grep -E '"direction": "(up|down)"' | head -1)
-    if [ -n "$hyp_line" ]; then
-        hyp_done=true
-        dir_val=$(echo "$hyp_line" | grep -oE '"direction": "[^"]+"')
-        echo "[MONITOR] First directed hypothesis: $dir_val"
-    fi
+    :
 fi
 
 while true; do
@@ -277,6 +296,27 @@ while true; do
     if [ "$ib_watchdog_killed" = false ] && cur | grep -q "\[ib-watchdog\] No recovery after" && ! session_is_over; then
         ib_watchdog_killed=true
         echo "[KEEPALIVE] IB watchdog: connection killed as zombie — orchestrator restarting"
+    fi
+
+    if [ "$agent_ok" = false ] && cur | grep -q "\[AGENT-LIVE\] OK"; then
+        agent_ok=true
+        echo "[MONITOR] Agent owns the dispatcher — legacy dark, arm 09:20 ET"
+    fi
+    if [ "$agent_refused" = false ] && cur | grep -q "\[AGENT-LIVE\] REFUSED"; then
+        agent_refused=true
+        echo "[KEEPALIVE] AGENT REFUSED THE DISPATCHER: $(cur | grep '\[AGENT-LIVE\] REFUSED' | head -1)"
+        exit 0
+    fi
+
+    # THE 09:00-START DEADLINE. The gap-fill blocks the bar feed and the 09:20 arm is an
+    # exact-minute test, so a fill still running at 09:20 costs the whole day. Warn at 09:15
+    # while there is still a minute to decide something.
+    if [ "$gap_fill_done" = false ] && [ "$gap_deadline_reported" = false ]; then
+        et=$(uv run python -c "import datetime,zoneinfo;n=datetime.datetime.now(tz=zoneinfo.ZoneInfo('America/New_York'));print(n.hour*60+n.minute)" 2>/dev/null)
+        if [ -n "$et" ] && [ "$et" -ge 555 ] && [ "$et" -lt 560 ]; then
+            gap_deadline_reported=true
+            echo "[KEEPALIVE] GAP-FILL STILL RUNNING AT 09:15 ET — the 09:20 arm is an exact-minute test; if the feed is not live by then the Analyzer never arms and the day is DARK"
+        fi
     fi
 
     # Gap-fill and FATAL — both detected from stdout with offset
@@ -364,13 +404,20 @@ while true; do
             fi
         fi
 
-        if [ "$hyp_done" = false ]; then
-            hyp_line=$(cur | grep '"kind": "new-hypothesis"' | grep -E '"direction": "(up|down)"' | head -1)
-            if [ -n "$hyp_line" ]; then
-                hyp_done=true
-                dir_val=$(echo "$hyp_line" | grep -oE '"direction": "[^"]+"')
-                echo "[MONITOR] First directed hypothesis: $dir_val"
-            fi
+        # --- the agent's own milestones (files, not log lines: the thesis and the plan
+        # --- are written to the session folder, they are never [TRADER] records)
+        if [ "$thesis_done" = false ] && [ -f "$SESSION/thesis_state.json" ]; then
+            thesis_done=true
+            bias=$(grep -oE '"bias"[[:space:]]*:[[:space:]]*"[A-Z]+"' "$SESSION/thesis_state.json" | head -1)
+            echo "[MONITOR] L1 thesis armed: $bias"
+        fi
+        if [ "$plan_done" = false ] && [ -f "$SESSION/plans.json" ]; then
+            plan_done=true
+            echo "[MONITOR] Plan derived — entries possible from 09:30:30, cutoff 10:30"
+        fi
+        if [ "$order_done" = false ]; then
+            o=$(cur | grep -F '"source": "agent"' | head -1)
+            if [ -n "$o" ]; then order_done=true; echo "[MONITOR] First agent order: $o"; fi
         fi
     fi
 done
@@ -387,7 +434,11 @@ As each line arrives from the Monitor, call `PushNotification` for EVERY milesto
 | `[MONITOR] Parquet gap detected: …` | `WARNING: Parquet gap(s) found — <details from message>` |
 | `[MONITOR] Session started …` | `Session started — automation.main running` |
 | `[MONITOR] daily.py complete` | `daily.py complete — liquidities computed` |
-| `[MONITOR] First directed hypothesis: …` | `First hypothesis: <direction> — strategy is live` |
+| `[MONITOR] Agent owns the dispatcher …` | `Agent owns the dispatcher — legacy dark, arm 09:20 ET` |
+| `[MONITOR] L1 thesis armed: …` | `L1 thesis armed: <bias> — plan next, entries from 09:30:30` |
+| `[MONITOR] Plan derived …` | `Plan derived — entries possible 09:30:30–10:30` |
+| `[MONITOR] First agent order: …` | `FIRST ORDER: <direction> @ <price> — check Tradovate` |
+| `[KEEPALIVE] GAP-FILL STILL RUNNING AT 09:15 ET …` | `CRITICAL: gap-fill still running at 09:15 — the 09:20 thesis will be missed and the day goes dark` |
 | `[MONITOR] automation.main restarted by orchestrator …` | `automation.main restarted (pid=…) — session resuming` |
 | `[MONITOR] IB watchdog: zombie suspected …` | `WARNING: IB zombie suspected — no bar data; 30s recovery window open` |
 | `[KEEPALIVE] IB watchdog: connection killed …` | `WARNING: IB watchdog killed zombie connection — orchestrator restarting` |

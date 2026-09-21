@@ -1131,6 +1131,12 @@ class SmtV2Dispatcher:
         except Exception as exc:
             self._trader = None
             reason = "trader build failed: %s: %s" % (type(exc).__name__, exc)
+        if reason is None:
+            # The positive counterpart of the REFUSED line. Without it "the agent owns the
+            # dispatcher" is only inferable from the ABSENCE of a refusal, which is a weak
+            # thing to trade a session on and unwatchable from a log tail.
+            print("[AGENT-LIVE] OK: the agent owns the dispatcher "
+                  "(legacy dark; arm 09:20 ET)", flush=True)
         if reason is not None:
             self._agent_refused = reason
             print(refused_line(reason), flush=True)
