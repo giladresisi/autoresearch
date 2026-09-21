@@ -90,6 +90,15 @@ def _replayed(tmp_path_factory):
                    lambda d, window_end=None: (day + pd.Timedelta(hours=10, minutes=39),
                                                day + pd.Timedelta(hours=11, minutes=0)))
     monkey.setenv("ACT_THESIS_CACHE_DIR", str(tmp_path_factory.mktemp("fidelity_cache")))
+    # ERA NOTE (2026-09-16). The 5m-FVG mechanisms are suspended in production
+    # (`planner.five_min_armed`), and the 08-25 live run bound `fvg_return_continuation`.
+    # This gate asks whether the REPLAY PATH reproduces the LIVE PATH's decisions; it is
+    # not a test of the current arming policy. Holding a cycle-1 fixture against a policy
+    # that postdates it would make the gate fail for a reason that has nothing to do with
+    # fidelity — the same trap the two era notes below describe. So the replay runs with
+    # the fixture's own arming in force. If the suspension is ever made permanent by
+    # DELETING §4/§5, this gate needs a new fixture, not a new flag.
+    monkey.setenv("ACT_TRADER_5M", "1")
     try:
         res = run_replay([DATE], allow_calls=True, arrival_latency_sec=40.0,
                          arm_hhmm="10:40")

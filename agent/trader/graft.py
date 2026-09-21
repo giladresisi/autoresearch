@@ -46,8 +46,11 @@ from agent.facts.requirements import EXECUTOR_REQUIREMENT
 from agent.facts.store import ensure_coverage
 from agent.trader.analyzer import Analyzer
 from agent.trader.executor import Executor
+from agent.trader.order_port import MirroringOrderPort
+from agent.trader.order_sim import OrderSim
 from agent.trader.plan_store import PlanStore
 from agent.trader.planner import derive_plan
+from agent.trader.records import DecisionRecorder
 
 TRADER_ENV_FLAG = "ACT_TRADER"
 
@@ -83,11 +86,18 @@ def trader_enabled() -> bool:
 
 class TraderGraft:
     def __init__(self, state_dir, backend, *, requirement=EXECUTOR_REQUIREMENT,
-                 threaded: bool = True, arrival_latency_sec: float = 0.0) -> None:
+                 threaded: bool = True, arrival_latency_sec: float = 0.0,
+                 order_sink=None) -> None:
         """`arrival_latency_sec` withholds the thesis until `armed_at + latency` in BAR
         time. 0.0 (the default, and what live constructs) is cycle-1 behaviour exactly;
         cycle-2 replay sets it to reproduce, deterministically, the wall-clock delay live
-        gets for free from running the call on a thread."""
+        gets for free from running the call on a thread.
+
+        `order_sink` is what makes a session LIVE. With one, the Executor is built on a
+        `MirroringOrderPort` that reports every simulated order event to it, and a
+        restart is refused (see `_disarmed`). Without one — every replay, and every
+        caller that predates plan 38 — nothing below changes: the Executor gets its
+        default `OrderSim` and no plan on disk can stop the chain arming."""
         self.state_dir = str(state_dir)
         self._req = requirement
         self._journal = Journal(state_dir)
@@ -104,16 +114,38 @@ class TraderGraft:
         self._plan = None
         self._last_minute = None
         self._hist: dict = {}
+        self._order_sink = order_sink
+        self._rec = DecisionRecorder(state_dir)
+        # The last finalized RAW second, handed over by the live driver just before the
+        # bar it belongs to (see `set_raw_second`). Consumed once.
+        self._raw_second = None
+        # What an outside supervisor polls. `on_bar` swallows every exception and the
+        # Executor swallows order-book failures into its own state, so without this a
+        # broken chain is indistinguishable from a quiet one.
+        self._health = {"last_error": None, "last_bar": None}
+        # Why this session will never (again) act, or None. A LIVE restart is the case
+        # that sets it at construction: the Analyzer restores its thesis from disk and a
+        # plan id hashes its own arm instant, so the next bar close would silently derive
+        # a SECOND plan with a fresh attempt budget and no memory of any position the
+        # first one opened. A plan already on disk is the evidence that one existed.
+        self._disarmed = None
+        self._disarm_recorded = False
+        if order_sink is not None and self._plans.all():
+            self._disarmed = "restart"
 
     # -- the hook ------------------------------------------------------------- #
 
     def on_bar(self, now, today_mnq, today_mes, bar_complete=None,
                hist_mnq=None, hist_mes=None) -> None:
-        """Never raises. The bar loop's own try/except is a backstop, not the guard."""
+        """Never raises. The bar loop's own try/except is a backstop, not the guard.
+
+        What it swallows is kept in `health()` — nothing outside this method can see it
+        any other way."""
         try:
+            self._health["last_bar"] = now
             self._run(now, today_mnq, today_mes, bar_complete, hist_mnq, hist_mes)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._health["last_error"] = f"{type(exc).__name__}: {exc}"
 
     # -- internals ------------------------------------------------------------ #
 
@@ -125,9 +157,31 @@ class TraderGraft:
         self._last_minute = minute
         return bool(bar_complete) or rolled
 
-    def _frames(self, now, today_mnq, today_mes, hist_mnq, hist_mes) -> dict:
+    def set_raw_second(self, row) -> None:
+        """Hand over the last finalized RAW second of the plan ticker, for the NEXT
+        `on_bar` only. A mapping with `high` / `low` and, when known, `second_ts`.
+
+        The live driver's partial-minute row is CUMULATIVE for the minute; replay's
+        carries the raw per-second High/Low, and that is the basis the fill model, the
+        stop test and the market-fill mid were calibrated against. See `_frames`."""
+        self._raw_second = row
+
+    def _frames(self, now, today_mnq, today_mes, hist_mnq, hist_mes,
+                raw_mnq=None) -> dict:
         """today_* spliced onto the pipeline's history, bounded to what the Executor
-        needs. The history slice is cached — it does not change within a session."""
+        needs. The history slice is cached — it does not change within a session.
+
+        `raw_mnq` overlays the LAST plan-ticker row's High/Low with one raw second's, so
+        a live frame has replay's shape. No-op when absent, and when it names a second
+        other than `now` — a stale second must never repaint a later bar."""
+        out = self._spliced(now, today_mnq, today_mes, hist_mnq, hist_mes)
+        if raw_mnq is not None:
+            frame = _overlay_last_row(out.get(PLAN_TICKER), raw_mnq, now)
+            if frame is not None:
+                out[PLAN_TICKER] = frame
+        return out
+
+    def _spliced(self, now, today_mnq, today_mes, hist_mnq, hist_mes) -> dict:
         out = {}
         for tk, today, hist in (("MNQ", today_mnq, hist_mnq),
                                 ("MES", today_mes, hist_mes)):
@@ -145,10 +199,20 @@ class TraderGraft:
         return out
 
     def _run(self, now, today_mnq, today_mes, bar_complete, hist_mnq, hist_mes) -> None:
+        raw, self._raw_second = self._raw_second, None
         if now is None or self._analyzer is None:
             return
         closed = self._bar_closed(now, bar_complete)
-        bars = self._frames(now, today_mnq, today_mes, hist_mnq, hist_mes)
+        if self._disarmed is not None:
+            # Recorded on the first bar rather than at construction, so the record
+            # carries BAR time like every other one.
+            if not self._disarm_recorded:
+                self._disarm_recorded = True
+                self._rec.session_disarmed(
+                    now=now, reason=self._disarmed,
+                    plan_id=(self._plan or {}).get("plan_id"))
+            return
+        bars = self._frames(now, today_mnq, today_mes, hist_mnq, hist_mes, raw_mnq=raw)
 
         self._analyzer.maybe_run(now, bars)
 
@@ -172,7 +236,8 @@ class TraderGraft:
                 return
             self._plans.put(self._plan)
             self._executor = Executor(self.state_dir, self._plan, arm_ts=now,
-                                      maintainer=self._maint, requirement=self._req)
+                                      maintainer=self._maint, requirement=self._req,
+                                      order_port=self._order_port())
             # The arming bar itself must still get one maintenance pass: under the
             # default switch the block above ran before the Executor existed, so this
             # bar would otherwise be skipped entirely.
@@ -220,6 +285,75 @@ class TraderGraft:
                             now, PLAN_TICKER)
         return derive_plan(thesis, legs, now)
 
+    def _order_port(self):
+        """None without a sink — the Executor then builds its own `OrderSim`, which is
+        every replay. With one, the simulation is wrapped so each event it returns is
+        reported outward. The context is read lazily: the Executor does not exist yet."""
+        if self._order_sink is None:
+            return None
+        return MirroringOrderPort(
+            OrderSim(dol=None), self._order_sink,
+            context=lambda: (self._executor.order_context()
+                             if self._executor is not None
+                             else {"plan_id": (self._plan or {}).get("plan_id")}))
+
+    # -- the outside supervisor's surface (live only) ------------------------- #
+
+    def health(self) -> dict:
+        """`last_error`: what `on_bar` last swallowed. `order_error`: what the Executor's
+        order book last swallowed. `last_bar`: the last bar handed in. Sticky — a fault
+        that cleared itself is still a fault the supervisor has to hear about."""
+        order_error = None
+        if self._executor is not None:
+            order_error = (self._executor.bind_state() or {}).get("order_error")
+        return {"last_error": self._health["last_error"], "order_error": order_error,
+                "last_bar": self._health["last_bar"]}
+
+    def position_view(self) -> "dict | None":
+        """The modelled position, or None. A copy: the supervisor reads, never writes."""
+        return self._executor.position() if self._executor is not None else None
+
+    def plan_alive(self) -> bool:
+        return (self._executor is not None
+                and bool((self._executor.bind_state() or {}).get("plan_alive")))
+
+    def disarmed(self):
+        return self._disarmed
+
+    def external_kill(self, now, reason, void_position: bool = False) -> None:
+        """The position changed and this chain did not change it. Stand down.
+
+        Three pieces of state, in an order that matters: the PLAN DIES FIRST, so nothing
+        can re-enter from this instant whatever happens next; then the modelled position
+        is voided when the caller has established it is gone; then the record. The record
+        is in a `finally` — if the void raises, why the session went quiet must still
+        reach the disk. Never raises."""
+        plan_id = (self._plan or {}).get("plan_id")
+        failure = None
+        try:
+            if self._executor is not None:
+                self._executor.kill_plan(now, "external_position_change",
+                                         {"reason": reason})
+                if void_position:
+                    self._executor.void_position()
+        except Exception as exc:
+            failure = f"{type(exc).__name__}: {exc}"
+            self._health["last_error"] = failure
+        finally:
+            self._rec.external_kill(now=now, plan_id=plan_id, reason=reason,
+                                    void_position=void_position,
+                                    detail={"error": failure} if failure else None)
+
+    def disarm(self, now, reason) -> None:
+        """Stop for the session: no further Analyzer, facts or Executor work. The
+        caller has already dealt with any open position — nothing here manages one."""
+        if self._disarmed is not None:
+            return
+        self._disarmed = str(reason)
+        self._disarm_recorded = True
+        self._rec.session_disarmed(now=now, reason=self._disarmed,
+                                   plan_id=(self._plan or {}).get("plan_id"))
+
     # -- introspection (tests / the comparison artifact) ---------------------- #
 
     def plan(self):
@@ -265,6 +399,29 @@ class TraderGraft:
 
 def _as_frame(df):
     return df if df is not None else pd.DataFrame()
+
+
+def _overlay_last_row(frame, raw, now):
+    """A COPY of `frame` with its last row's High/Low replaced by `raw`'s, or None for a
+    no-op. Always a copy: the frame may be the caller's, or the cached history slice."""
+    try:
+        if frame is None or not len(frame):
+            return None
+        second = raw.get("second_ts")
+        if second is not None and pd.Timestamp(second) != now:
+            return None
+        hi, lo = raw.get("high"), raw.get("low")
+        if hi is None or lo is None:
+            return None
+        cols = {str(c).lower(): i for i, c in enumerate(frame.columns)}
+        if "high" not in cols or "low" not in cols:
+            return None
+        frame = frame.copy()
+        frame.iloc[-1, cols["high"]] = float(hi)
+        frame.iloc[-1, cols["low"]] = float(lo)
+        return frame
+    except Exception:
+        return None
 
 
 def _last_close(df) -> float:

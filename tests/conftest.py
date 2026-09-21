@@ -21,6 +21,15 @@ import pytest
 # any test module, and the read happens at `live_orders` import — an autouse fixture
 # would run too late to help.
 os.environ["DISCONNECTED"] = "false"
+# Same leak, one more variable (plan 38). `ACT_AI_DECISIONS=1` in `.env` switches on the
+# v1 decisions worker, and `decisions_config` reads it ONCE at import — so whichever test
+# module imports `live_orders` first decides it for the whole run.
+# `tests/test_agent_dispatch.py` sorts first and moved that import ahead of
+# `decisions_config`'s, which hung `test_smt_regression` on the worker's queue join.
+# NOT done here, deliberately: forcing `LIVE_TRADING`. It leaks the same way, but
+# `orchestrator.main._pre_session_init` runs a REAL IB gap-fill when it is false, and at
+# least one test reaches that function relying on the leaked `true`.
+os.environ["ACT_AI_DECISIONS"] = "0"
 
 
 @pytest.fixture(autouse=True)

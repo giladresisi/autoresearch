@@ -34,9 +34,181 @@ import pandas as pd
 
 from agent.derive_facts import build_menus, facts_to_validator_dict
 from agent.facts.assemble import build_bundle
+from agent.facts.detectors._common import normalize
 
 #: `build_menus` keys its DOL menus by the plan's own direction words.
 _DIRECTIONS = ("UP", "DOWN")
+
+#: One-slot memo of the last bundle built. `select_target` and `level_universe` are
+#: called back to back at the SAME fill instant on the SAME bars dict (plan 35), and
+#: `build_bundle` is the ~1.5 s cost the module docstring warns about: building it twice
+#: inside the live tick callback would double that for no new information. The slot
+#: holds a STRONG reference to the bars dict and matches on identity (`is`) plus `now`:
+#: a key built from `id(bars)` would be reused by CPython for a later, different dict
+#: freed in between, and hand a second Executor the first one's bundle.
+_LAST_BUNDLE: dict = {"bars": None, "now": None, "bundle": None, "vd": None}
+
+
+def _bundle_for(bars: dict, now: pd.Timestamp):
+    slot = _LAST_BUNDLE
+    if slot["bars"] is bars and slot["bars"] is not None and slot["now"] == now:
+        return slot["bundle"]
+    bundle = build_bundle(bars, now)
+    slot.update(bars=bars, now=now, bundle=bundle, vd=None)
+    return bundle
+
+
+def _validator_dict_for(bars: dict, now: pd.Timestamp, bundle) -> dict:
+    """`facts_to_validator_dict(bundle)`, memoised next to the bundle it came from."""
+    slot = _LAST_BUNDLE
+    if slot["bundle"] is bundle and slot["vd"] is not None:
+        return slot["vd"]
+    vd = facts_to_validator_dict(bundle) or {}
+    if slot["bundle"] is bundle:
+        slot["vd"] = vd
+    return vd
+
+
+#: 6h blocks by the ET hour they START, mirroring `derive_facts.sub_blocks`. The bundle
+#: closes ny_evening at 17:00 (CME maintenance follows until 18:00); here 17:xx still
+#: maps to ny_evening so a stray maintenance-hour bar cannot open a phantom block.
+_BLOCK_STARTS = (("asia", 18), ("london", 0), ("ny_morning", 6), ("ny_evening", 12))
+
+
+def _running_block(frame, now):
+    """Running high/low of the 6h block `now` sits in, named as the bundle will name it
+    once it closes. The bundle only lists CLOSED blocks; the legacy universe carried the
+    in-progress one too (2026-09-18 09:41: ny_morning_low 29764.0 was the live block)."""
+    out = []
+    try:
+        h = int(now.hour)
+        name, start_h = next((n, s) for n, s in _BLOCK_STARTS
+                             if (s <= h < s + 6) or (s == 18 and h >= 18))
+        start = now.normalize() + pd.Timedelta(hours=start_h)
+        seg = frame[(frame.index >= start) & (frame.index <= now)]
+        if len(seg):
+            out.append({"name": f"{name}(cur)_high", "price": float(seg["High"].max()),
+                        "swept": False, "depleted": False, "running": True})
+            out.append({"name": f"{name}(cur)_low", "price": float(seg["Low"].min()),
+                        "swept": False, "depleted": False, "running": True})
+    except Exception:
+        return []
+    return out
+
+
+#: Plan 35 v2 families. RTH opens 09:30 ET; the NY-morning 6h block runs 06:00-12:00.
+_RTH_OPEN = pd.Timedelta(hours=9, minutes=30)
+_NY_MORNING = (pd.Timedelta(hours=6), pd.Timedelta(hours=12))
+RTH_HIGH, RTH_LOW, NY_MORNING_MID = "rth(cur)_high", "rth(cur)_low", "ny_morning(cur)_mid"
+
+
+def _rth_running(frame, now):
+    """`rth(cur)_high` / `rth(cur)_low`: the running post-09:30 extreme over COMPLETED
+    1m bars strictly before `now` — from the 09:30 bar through the last MINUTE that has
+    closed (on 1s frames the completed seconds inside the current minute are excluded
+    too, so live 1s and the study's 1m frames agree). The minute `now` sits in (the entry
+    bar at a fill) is excluded, so the universe never hands the selector the fill's own
+    print as a level. Empty before 09:31 (no completed RTH bar yet, e.g. a 09:30 fill).
+    Deliberately asymmetric with `_running_block` / `_ny_morning_mid`, which include the
+    bar at `now` (the 6h block's extreme IS the running print)."""
+    out = []
+    try:
+        start = now.normalize() + _RTH_OPEN
+        end = now.floor("1min")                       # bars labelled before this are complete
+        if end <= start:
+            return out
+        seg = frame[(frame.index >= start) & (frame.index < end)]
+        if len(seg):
+            out.append({"name": RTH_HIGH, "price": float(seg["High"].max()),
+                        "swept": False, "depleted": False, "suppressed": False,
+                        "running": True})
+            out.append({"name": RTH_LOW, "price": float(seg["Low"].min()),
+                        "swept": False, "depleted": False, "suppressed": False,
+                        "running": True})
+    except Exception:
+        return []
+    return out
+
+
+def _ny_morning_mid(frame, now):
+    """`ny_morning(cur)_mid`: (high + low) / 2 of the running NY-morning block (06:00 ->
+    `now`, the bar at `now` included like `_running_block`; frozen at 12:00 once the block
+    has closed). Empty before 06:00."""
+    out = []
+    try:
+        start = now.normalize() + _NY_MORNING[0]
+        if now < start:
+            return out
+        seg = frame[(frame.index >= start) & (frame.index <= now)
+                    & (frame.index < now.normalize() + _NY_MORNING[1])]
+        if len(seg):
+            mid = (float(seg["High"].max()) + float(seg["Low"].min())) / 2.0
+            out.append({"name": NY_MORNING_MID, "price": mid, "swept": False,
+                        "depleted": False, "suppressed": False, "running": True})
+    except Exception:
+        return []
+    return out
+
+
+def level_universe(bars: dict, now: pd.Timestamp, ticker: str = "MNQ") -> list:
+    """The named-level universe behind the T2 menu, as
+    [{name, price, swept, depleted, suppressed}].
+
+    Same `bundle.levels[ticker]` map `build_menus` reads, exposed unfiltered but
+    FLAGGED (the selector applies the DOL menu's eligibility itself): `swept` /
+    `depleted` from the validator dict, `suppressed` = the name is in the bundle's
+    `suppressed_p1_levels[ticker]` nested/duplicate set that `derive_facts._dol_menu`
+    excludes. Plus the families the legacy universe also carried and the bundle keeps
+    elsewhere: the running day high/low/mid, the week high/low/mid, the IN-PROGRESS 6h
+    block's extremes, and (plan 35 v2) the post-09:30 running extremes `rth(cur)_high` /
+    `rth(cur)_low` over completed bars before `now` and the NY-morning block's midpoint
+    `ny_morning(cur)_mid`. Empty on degraded input; never raises. FVG edges are not
+    included: `bundle.fvg_zones` has no equivalent of the legacy `keep` flag.
+    """
+    out: list = []
+    try:
+        bundle = _bundle_for(bars, now)
+        if bundle is None:
+            return out
+        vlevels = _validator_dict_for(bars, now, bundle).get("levels") or {}
+        suppressed = set((getattr(bundle, "suppressed_p1_levels", None) or {})
+                         .get(ticker) or ())
+        for name, tup in ((bundle.levels or {}).get(ticker) or {}).items():
+            try:
+                price = tup[0]
+            except (TypeError, IndexError):
+                continue
+            if not isinstance(price, (int, float)) or isinstance(price, bool):
+                continue
+            flags = vlevels.get(name) or {}
+            out.append({"name": str(name), "price": float(price),
+                        "swept": bool(flags.get("swept")),
+                        "depleted": bool(flags.get("depleted")),
+                        "suppressed": name in suppressed})
+
+        def _num(v):
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+        extra = (("day_high", (getattr(bundle, "day_hi", None) or {}).get(ticker)),
+                 ("day_low", (getattr(bundle, "day_lo", None) or {}).get(ticker)),
+                 ("day_mid", getattr(bundle, "day_mid", None)),
+                 ("week_high", (getattr(bundle, "week_hi", None) or {}).get(ticker)),
+                 ("week_low", (getattr(bundle, "week_lo", None) or {}).get(ticker)),
+                 ("week_mid", getattr(bundle, "weekly_mid", None)))
+        for name, price in extra:
+            if _num(price):
+                out.append({"name": name, "price": float(price),
+                            "swept": False, "depleted": False, "suppressed": False})
+        frame = normalize((bars or {}).get(ticker))
+        have = {lv["name"] for lv in out}
+        for lv in _running_block(frame, now) + _rth_running(frame, now) + _ny_morning_mid(frame, now):
+            if lv["name"] not in have:
+                lv.setdefault("suppressed", False)
+                out.append(lv)
+                have.add(lv["name"])
+    except Exception:
+        return []
+    return out
 
 
 def select_target(bars: dict, now: pd.Timestamp, direction: str,
@@ -52,10 +224,10 @@ def select_target(bars: dict, now: pd.Timestamp, direction: str,
     if want not in _DIRECTIONS:
         return None
     try:
-        bundle = build_bundle(bars, now)
+        bundle = _bundle_for(bars, now)
         if bundle is None:
             return None
-        menus = build_menus(bundle, facts_to_validator_dict(bundle))
+        menus = build_menus(bundle, _validator_dict_for(bars, now, bundle))
         rows = (menus.get("dol") or {}).get(want) or ()
         if not rows:
             return None

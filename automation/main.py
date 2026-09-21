@@ -144,6 +144,10 @@ _move_stop_bar_counter: int  = 0
 # ── v2 pipeline env gate (set in main()) ─────────────────────────────────────
 _smtv2_pipeline: str = "v1"
 _smtv2_dispatcher: "SmtV2Dispatcher | None" = None
+# Plan 38: ACT_TRADER on + SMT_PIPELINE != v2 is a REFUSED start. The agent cannot run on
+# the v1 path and a refusal never falls back to legacy, so the v1 brain stays dark too.
+# None (the default, and always under ACT_TRADER=0) leaves the v1 path exactly as it was.
+_agent_refused_v1: "str | None" = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -157,7 +161,8 @@ def _on_bar(bar, mes_partial) -> None:
     global _mes_partial_1m
     _mes_partial_1m = mes_partial
     if _smtv2_pipeline != "v2":
-        _process(bar)
+        if _agent_refused_v1 is None:
+            _process(bar)
         return
 
     # V2: call session_pipeline at 1s resolution so fill checks and entry detection
@@ -165,6 +170,7 @@ def _on_bar(bar, mes_partial) -> None:
     if _smtv2_dispatcher is None:
         return
     _bar_ts = _bar_timestamp(bar)
+    _write_last_tick(_bar_ts, getattr(bar, "Close", None))
     if SESSION_CLOSE <= _bar_ts.time() < SESSION_OPEN:
         import live_orders as _lo_sc
         if _lo_sc.has_pending_entry():
@@ -239,11 +245,43 @@ def _on_bar(bar, mes_partial) -> None:
         mes_bar_row = pd.Series(dtype=float)
         today_mes = _today_mes_base
 
+    # Plan 38 (F1): the partial-minute row above is CUMULATIVE, while replay hands the
+    # agent stack RAW per-second extremes. Forward the last finalized MNQ second to the
+    # trader hook only — the legacy pipeline's inputs are untouched.
+    _smtv2_dispatcher.forward_raw_second(_ib_source)
+
     # R3: the live IB callback fires per-second on the intra-minute partial bar. SMT
     # DETECTION must run only on completed 1m bars (bar_complete=False → detect on minute
     # rollover, using the just-completed bar); ORDER EXECUTION still runs every second.
-    _smtv2_dispatcher._pipeline.on_1m_bar(
-        _bar_ts, mnq_bar_row, mes_bar_row, today_mnq, today_mes, bar_complete=False)
+    try:
+        _smtv2_dispatcher._pipeline.on_1m_bar(
+            _bar_ts, mnq_bar_row, mes_bar_row, today_mnq, today_mes, bar_complete=False)
+    finally:
+        # The agent's fail-closed watchdog, once per live bar. HERE, not in the
+        # dispatcher's own on_1m_bar wrapper: the per-second path bypasses that wrapper.
+        _smtv2_dispatcher.supervise(_bar_ts)
+
+
+def _write_last_tick(ts, close) -> None:
+    """Per-second last-price sidecar for OUT-OF-PROCESS readers (`trade.py close` and the
+    other CLI ops): `{time, price}` at general_live_dir()/last_tick.json, rewritten every
+    second. `live_orders._current_price` reads it FIRST while fresh (<= 10 s), replacing
+    the up-to-60-s-stale 1m close a manual close used to be booked at (2026-09-18: the
+    ledger recorded 29777.0, the 09:57 1m close, against a real fill of 29786.5).
+    Best-effort: never raises."""
+    try:
+        if close is None:
+            return
+        import json as _json
+        import os as _os
+        import paths as _paths
+        p = _paths.general_live_dir() / "last_tick.json"
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(_json.dumps({"time": pd.Timestamp(ts).isoformat(),
+                                    "price": float(close)}), encoding="utf-8")
+        _os.replace(tmp, p)
+    except Exception:
+        pass
 
 
 def _bar_timestamp(bar) -> pd.Timestamp:
@@ -962,6 +1000,14 @@ def _process_managing(bar, bar_ts: pd.Timestamp, bar_time) -> None:
 
 from live_emit import emit_v2_signal as _emit_v2_signal
 
+# Every signal kind the order module ACTS on (an order, or a position.json write). While
+# the agent owns the dispatcher only the agent may send one (plan 38 D9).
+_AGENT_OWNED_KINDS = frozenset({
+    "new-stop-entry", "move-stop-entry", "stop-entry-filled", "market-entry",
+    "market-close", "stop-exit", "new-stop-exit", "move-stop-exit",
+    "cancel-stop-entry", "stop-entry-cancelled", "stopped-out",
+})
+
 
 class SmtV2Dispatcher:
     """Thin wrapper: wires IB bar callbacks into SessionPipeline.
@@ -984,6 +1030,13 @@ class SmtV2Dispatcher:
         # Default OFF ⇒ never constructed ⇒ byte-identical live.
         self._primary = None
         self._session_closed = False
+        # Plan 38. `_agent_owns`: ACT_TRADER is on, so the AGENT owns this dispatcher and
+        # the legacy brain is dark — including after a REFUSED start, which never falls
+        # back. False (ACT_TRADER=0) is today's flag-off process, byte-identical.
+        self._trader = None
+        self._agent_port = None
+        self._agent_owns = False
+        self._agent_refused = None
 
     @staticmethod
     def _build_primary(out_dir, date):
@@ -1006,32 +1059,81 @@ class SmtV2Dispatcher:
             return None
 
     @staticmethod
-    def _build_trader(out_dir):
-        """Build the cycle-1 Analyzer/Planner/Executor graft. Returns None unless
-        ACT_TRADER is set, so with the flag off the live process's import state is
-        completely untouched and the pipeline is byte-identical by construction.
+    def _trader_switched_off() -> bool:
+        """ACT_TRADER=0 (or false/no/off). A raw env read and nothing else: flag OFF must
+        leave the live process's import state completely untouched."""
+        return os.environ.get(
+            "ACT_TRADER", "1").strip().lower() in ("0", "false", "no", "off")
 
-        Cycle 1 places NO orders — the chain stops at `trader_decisions.jsonl`. Any
-        construction failure degrades to None; the live session is never aborted by it.
+    @staticmethod
+    def _build_trader(out_dir, sink=None, date=None):
+        """Build the Analyzer/Planner/Executor graft, wired to `sink` (plan 38).
+
+        Returns None ONLY when ACT_TRADER is switched OFF — legacy then owns the
+        dispatcher, and with the flag off the live process's import state is completely
+        untouched. A construction FAILURE is a different thing and RAISES: with the
+        legacy brain dark, swallowing it into None was a silent no-trade day. The caller
+        turns the exception into a REFUSED start with the reason printed.
+
+        `ACT_TRADER_BACKEND` unset means AUTO-SELECT by whichever key exists
+        (OPENROUTER_API_KEY preferred, else ANTHROPIC_API_KEY) — not a hard-coded
+        backend whose key may be the one that is missing.
         """
-        try:
-            # Raw env pre-check BEFORE any sys.path mutation/import: flag OFF must
-            # leave the live process's import state completely untouched.
-            if os.environ.get(
-                    "ACT_TRADER", "1").strip().lower() in ("0", "false", "no", "off"):
-                return None
-            _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            if _repo not in sys.path:
-                sys.path.insert(0, _repo)
-            from agent.trader.graft import TraderGraft
-            from agent.trader.analyzer import thesis_via_decide_thesis
-            from agent.run_agent import make_backend
-            backend = thesis_via_decide_thesis(make_backend(
-                os.environ.get("ACT_TRADER_BACKEND", "openrouter"),
-                os.environ.get("ACT_TRADER_MODEL") or None))
-            return TraderGraft(out_dir, backend)
-        except Exception:
+        # Raw env pre-check BEFORE any sys.path mutation/import: flag OFF must
+        # leave the live process's import state completely untouched.
+        if os.environ.get(
+                "ACT_TRADER", "1").strip().lower() in ("0", "false", "no", "off"):
             return None
+        _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if _repo not in sys.path:
+            sys.path.insert(0, _repo)
+        from agent.trader.graft import TraderGraft
+        from agent.trader.cached_backend import (cached_thesis_backend,
+                                                 real_thesis_backend)
+        # The SAME recording backend the replay builds (`agent/trader/replay.py`): the
+        # 09:20 call is recorded in <global>/thesis_cache under a key over the session
+        # date, facts_text, both prompt halves, the schema and the RESOLVED model — so a
+        # warm replay of this date serves the LIVE thesis instead of re-calling the model,
+        # and a KB/prompt/model change invalidates it identically on both paths. Backend
+        # auto-selection (ACT_TRADER_BACKEND unset -> by key) is unchanged, and a
+        # construction failure still RAISES: the caller turns it into a REFUSED start.
+        backend = cached_thesis_backend(date, inner=real_thesis_backend(),
+                                        allow_calls=True)
+        return TraderGraft(out_dir, backend, order_sink=sink)
+
+    def _build_agent(self, out_dir) -> None:
+        """Decide who owns the dispatcher this session (plan 38 D25 — no new flag).
+
+        ACT_TRADER off  -> nothing here runs; legacy owns, exactly as before.
+        ACT_TRADER on   -> the agent owns. Either the trader is built on the dispatch
+                           port's sink, or the start is REFUSED: one ASCII line, NO brain
+                           emitting, legacy still dark. Never a fallback to legacy.
+        """
+        self._trader = None
+        self._agent_port = None
+        self._agent_refused = None
+        self._agent_owns = not self._trader_switched_off()
+        if not self._agent_owns:
+            return
+        from automation.agent_dispatch import (AgentDispatchPort, RECORD_FILE,
+                                               refusal_reason, refused_line)
+        reason = None
+        try:
+            self._agent_port = AgentDispatchPort(
+                self._emit, recorder_path=Path(out_dir) / RECORD_FILE)
+            reason = refusal_reason(pipeline=_smtv2_pipeline)
+            if reason is None:
+                self._trader = self._build_trader(
+                    out_dir, sink=self._agent_port.sink,
+                    date=session_date_str())
+                if self._trader is None:
+                    reason = "the trader was not built"
+        except Exception as exc:
+            self._trader = None
+            reason = "trader build failed: %s: %s" % (type(exc).__name__, exc)
+        if reason is not None:
+            self._agent_refused = reason
+            print(refused_line(reason), flush=True)
 
     @staticmethod
     def _build_worker(out_dir):
@@ -1073,6 +1175,7 @@ class SmtV2Dispatcher:
         self._worker = None
         self._primary = None
         self._trader = None
+        self._agent_port = None
         try:
             self._worker = self._build_worker(SESSIONS_DIR / str(today))
             self._primary = self._build_primary(SESSIONS_DIR / str(today), today)
@@ -1083,9 +1186,13 @@ class SmtV2Dispatcher:
         # trader failure discard an already-constructed DecisionWorker without closing
         # it, leaking the polling daemon thread the retry comment below guards against.
         try:
-            self._trader = self._build_trader(SESSIONS_DIR / str(today))
+            self._build_agent(SESSIONS_DIR / str(today))
         except Exception:
             self._trader = None
+        # With the agent owning the dispatcher the legacy engine is DARK: `trader_only`
+        # returns right after the trader hook. Passed only then, so the ACT_TRADER=0
+        # construction below is today's call, argument for argument.
+        _agent_kwargs = {"trader_only": True} if self._agent_owns else {}
         # If pipeline init raises, the exception propagates to the tick callback and this
         # method retries every second — close the just-built worker first, or each retry
         # leaks one polling daemon thread (review finding: worker-thread churn).
@@ -1093,7 +1200,7 @@ class SmtV2Dispatcher:
             self._pipeline = SessionPipeline(mnq_1m_df, mes_1m_df, self._emit,
                                              ai_decisions=self._worker,
                                              trade_primary=self._primary,
-                                             trader=self._trader)
+                                             trader=self._trader, **_agent_kwargs)
             _cme_start = pd.Timestamp(cme_session_start(now))
             today_at_open = mnq_1m_df[
                 (mnq_1m_df.index >= _cme_start) & (mnq_1m_df.index <= now)
@@ -1178,8 +1285,35 @@ class SmtV2Dispatcher:
         self._pipeline.on_1m_bar(now, mnq_bar_row, mes_bar_row, today_mnq, today_mes,
                                  bar_complete=bar_complete)
 
+    def forward_raw_second(self, ib_source) -> None:
+        """Hand the trader the last finalized RAW MNQ second (plan 38 F1). A no-op
+        without a trader that takes one, so ACT_TRADER=0 does nothing here."""
+        setter = getattr(self._trader, "set_raw_second", None)
+        if setter is None or ib_source is None:
+            return
+        try:
+            setter(getattr(ib_source, "last_mnq_second", None))
+        except Exception:
+            pass
+
+    def supervise(self, now: pd.Timestamp) -> None:
+        """The agent's per-bar watchdog. A no-op unless the agent owns AND was built."""
+        if self._agent_port is None or self._trader is None:
+            return
+        self._agent_port.supervise(now, self._trader)
+
     def _emit(self, sig: dict) -> None:
-        """Print signal to stdout (relay captures it to signals.log), then dispatch to live_orders."""
+        """Print signal to stdout (relay captures it to signals.log), then dispatch to live_orders.
+
+        SINGLE BRAIN (plan 38 D9): while the agent owns the dispatcher, an order kind
+        that does not carry `source="agent"` is DROPPED and recorded — it can only have
+        come from the legacy engine, which is supposed to be dark. Log-only kinds
+        (hypothesis-level signals from session start) pass through untouched."""
+        if (self._agent_owns and sig.get("kind") in _AGENT_OWNED_KINDS
+                and sig.get("source") != "agent"):
+            if self._agent_port is not None:
+                self._agent_port.record_dropped(sig)
+            return
         import live_orders as _lo
         _emit_v2_signal(sig)
         _lo.dispatch(sig)
@@ -1193,7 +1327,7 @@ def main() -> None:
     global _mes_partial_1m
     global _hypothesis_manager, _hypothesis_generated
     global _hist_daily_df
-    global _smtv2_pipeline, _smtv2_dispatcher
+    global _smtv2_pipeline, _smtv2_dispatcher, _agent_refused_v1
 
     if not MNQ_CONID or not MES_CONID:
         raise RuntimeError("MNQ_CONID and MES_CONID must be set in .env")
@@ -1258,6 +1392,12 @@ def main() -> None:
     _executor = _live_orders._executor
     if _smtv2_pipeline == "v2":
         _smtv2_dispatcher = SmtV2Dispatcher()
+    elif not SmtV2Dispatcher._trader_switched_off():
+        # Plan 38 D16/D20: the agent owns the dispatcher whenever ACT_TRADER is on, and it
+        # cannot run on the v1 path. REFUSED — and never a fallback to the v1 brain.
+        from automation.agent_dispatch import refusal_reason, refused_line
+        _agent_refused_v1 = refusal_reason(pipeline=_smtv2_pipeline)
+        print(refused_line(_agent_refused_v1), flush=True)
 
     def _on_bar_1m_complete(bars) -> None:
         """Called by IbRealtimeSource after each completed 1m bar.

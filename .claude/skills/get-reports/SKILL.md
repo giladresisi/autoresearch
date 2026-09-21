@@ -65,6 +65,13 @@ uv run python -m reports.get_tradovate_orders --date <date> --headed
 uv run python -m reports.get_pickmytrade_alerts --date <date> --headed
 ```
 
+**PickMyTrade login + reCAPTCHA (since 2026-09-18).** The PMT extractor uses a PERSISTENT
+browser profile (`<global>/general/browser_profiles/pickmytrade`) so the logged-in session
+survives between runs. If a headless run prints `PmtLoginRequiresHuman`, the profile is not
+logged in (first run, or the session expired): tell the user to run it ONCE with `--headed`,
+log in and solve the captcha in the window (the script waits up to 3 minutes and then
+continues on its own). Every later headless run skips the login. Do NOT loop on retries.
+
 A screenshot is also saved alongside the CSV on failure (e.g. `tradovate_error.png`).
 
 ## Required env vars

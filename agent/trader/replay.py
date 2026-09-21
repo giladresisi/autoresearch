@@ -44,14 +44,17 @@ from agent.trader.cached_backend import (                      # noqa: E402
 from agent.trader.fixed_backend import (                       # noqa: E402
     FixedThesisBackend, OracleThesisError, validate_oracle_thesis)
 from agent.trader.thesis_cache import ThesisCache              # noqa: E402
+# The window end has ONE source, and it is the Executor's: live has no replay window, so
+# the Executor enforces the same 13:00 in bar time (plan 38 F11). Re-exported here under
+# its old name because every caller reads `replay.WINDOW_END_ET`.
+from agent.trader.executor import WINDOW_END_ET                # noqa: E402,F401
 
 TZ = "America/New_York"
 _ET = ZoneInfo(TZ)
 WINDOW_START_ET = (9, 20)
 #: The policy's hard-close horizon (plan 33 clause 10). A CONSTANT, not a data-dependent
 #: stop -- see the module docstring. Overridable per run for the fidelity fixtures that
-#: were calibrated against the old 11:00 cut.
-WINDOW_END_ET = (13, 0)
+#: were calibrated against the old 11:00 cut. Defined in `agent/trader/executor.py`.
 ARM_ENV = "ACT_TRADER_ARM_HHMM"
 
 # Measured p50 of ten recorded 09:20 calls (range 16.3-103.9 s, driven almost entirely by
@@ -68,48 +71,18 @@ def replay_window_for(date: str, window_end=None):
             day + pd.Timedelta(hours=end[0], minutes=end[1]))
 
 
-def _backend_name() -> str:
-    return os.environ.get("ACT_TRADER_BACKEND", "openrouter")
-
-
-def _real_backend():
-    """The live thesis backend, imported lazily so a warm-cache replay never touches
-    `run_agent` (and therefore never needs an API key).
-
-    Constructed exactly the way `automation/main.py` builds the LIVE trader's backend
-    (same env vars, same defaults), so a seeding run records what live would have called.
-    """
-    from agent.run_agent import make_backend
-    from agent.trader.analyzer import thesis_via_decide_thesis
-    return thesis_via_decide_thesis(
-        make_backend(_backend_name(), os.environ.get("ACT_TRADER_MODEL") or None))
+# The backend helpers moved to `agent/trader/cached_backend.py` so live
+# (`automation/main.py`) and replay build the SAME recording backend. Re-exported under
+# the old names: `build_replay_trader` looks `_real_backend` up here at call time, which
+# is what the fidelity gate tests monkeypatch.
+from agent.trader.cached_backend import (                      # noqa: E402
+    backend_name as _backend_name, cached_thesis_backend,
+    prompt_parts as _prompt_parts_shared, real_thesis_backend as _real_backend)
 
 
 def _prompt_parts():
-    """(system_prompt_fn, task_prompt, schema_fn, model_id) for the cache key.
-
-    `build_system_prompt` (the concatenated KB) and `_TASK_THESIS` are the two prompt
-    halves `decide_thesis` assembles, so hashing them makes a doc edit or a task-prompt
-    edit invalidate every recording.
-
-    `model_id` is `<backend>:<resolved model>` rather than the whole `DEFAULT_MODELS`
-    dict: the dict cannot distinguish two backends that happen to share a default, and
-    the resolved pair is what actually determines the answer.
-
-    `schema_fn` returns `{}` DELIBERATELY. The real schema is built inside `decide_thesis`
-    from `facts["levels"]`, `facts["fvg_zones"]` and the DOL menu -- all of which are
-    already rendered into `facts_text`, which IS keyed. Rebuilding the schema here would
-    duplicate `decide_thesis`'s derivation in a second place, which is exactly the
-    drift this design set out to avoid. See the gap noted in the execution report.
-    """
-    from agent import run_agent as ra
-    backend = _backend_name()
-    # Direct attribute access, NOT getattr-with-a-default: a `getattr(ra, "_TASK_THESIS",
-    # "")` would silently drop the task prompt out of the key if it were ever renamed,
-    # quietly weakening every recording's invalidation instead of failing.
-    model = os.environ.get("ACT_TRADER_MODEL") or ra.DEFAULT_MODELS.get(backend, "")
-    return (ra.build_system_prompt, ra._TASK_THESIS,
-            (lambda facts: {}), "%s:%s" % (backend, model))
+    """Shared with live — see `agent.trader.cached_backend.prompt_parts`."""
+    return _prompt_parts_shared()
 
 
 def build_replay_trader(date, run_dir, *, allow_calls, arrival_latency_sec,
@@ -121,13 +94,8 @@ def build_replay_trader(date, run_dir, *, allow_calls, arrival_latency_sec,
         # the prompt, so an injected entry is unauthorable and self-invalidating.
         backend = FixedThesisBackend(thesis)
     else:
-        sys_fn, task, schema_fn, model_id = _prompt_parts()
         inner = _real_backend() if allow_calls else None
-        backend = CachedThesisBackend(
-            inner, cache=ThesisCache(), model_id=model_id,
-            system_prompt_fn=sys_fn, task_prompt=task, schema_fn=schema_fn,
-            allow_calls=allow_calls, boundary_hint=str(date),
-        )
+        backend = cached_thesis_backend(date, inner=inner, allow_calls=allow_calls)
     if arm_hhmm:
         # Scoped and restored by `run_replay` -- see `_arm_env`.
         os.environ[ARM_ENV] = arm_hhmm

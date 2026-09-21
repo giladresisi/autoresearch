@@ -30,9 +30,12 @@ class _FakePipeline:
     last = {}
 
     def __init__(self, mnq, mes, emit, ai_decisions=None, trade_primary=None,
-                 trader=None):
+                 trader=None, **kwargs):
+        # `trader_only` arrives ONLY when the agent owns the dispatcher (plan 38 D25);
+        # under ACT_TRADER=0 the construction is today's call, argument for argument.
         _FakePipeline.last = {"ai_decisions": ai_decisions,
-                              "trade_primary": trade_primary, "trader": trader}
+                              "trade_primary": trade_primary, "trader": trader,
+                              "kwargs": dict(kwargs)}
         self.ai_decisions = ai_decisions
         self.trade_primary = trade_primary
         self.trader = trader
@@ -215,27 +218,41 @@ def test_trader_flag_off_builds_no_trader(monkeypatch, tmp_path, _fake_pipeline)
     d.on_session_start(_now(), _hist(), _hist())
     assert d._trader is None
     assert _FakePipeline.last["trader"] is None
+    # Legacy owns: no `trader_only`, no port — the flag-off construction is unchanged.
+    assert _FakePipeline.last["kwargs"] == {} and d._agent_port is None
 
 
-def test_trader_unset_attaches_the_graft_by_default(monkeypatch, tmp_path, _fake_pipeline):
-    """Unset ⇒ ON. Nothing to configure: every orchestrator session runs the chain."""
+@pytest.fixture()
+def _agent_preconditions(monkeypatch, tmp_path):
+    """Plan 38 D16: what a non-refused agent start needs. Everything else about these
+    tests is the wiring, so the real trader build is always replaced."""
     monkeypatch.setattr(main, "SESSIONS_DIR", tmp_path)
-    monkeypatch.delenv("ACT_TRADER", raising=False)
+    monkeypatch.setattr(main, "_smtv2_pipeline", "v2")
+    for var in ("ACT_TRADER", "ACT_AI_MODE", "FORCE_RESET"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_trader_unset_attaches_the_graft_by_default(monkeypatch, _agent_preconditions,
+                                                    _fake_pipeline):
+    """Unset ⇒ ON. Nothing to configure: every orchestrator session runs the chain —
+    and since plan 38 (D25) the chain OWNS the dispatcher, with the legacy engine dark."""
     sentinel = object()
     monkeypatch.setattr(main.SmtV2Dispatcher, "_build_trader",
-                        staticmethod(lambda out_dir: sentinel))
+                        staticmethod(lambda out_dir, sink=None, date=None: sentinel))
     d = main.SmtV2Dispatcher()
     d.on_session_start(_now(), _hist(), _hist())
     assert _FakePipeline.last["trader"] is sentinel
+    assert _FakePipeline.last["kwargs"] == {"trader_only": True}
 
 
-def test_trader_flag_on_attaches_the_graft(monkeypatch, tmp_path, _fake_pipeline):
-    monkeypatch.setattr(main, "SESSIONS_DIR", tmp_path)
+def test_trader_flag_on_attaches_the_graft(monkeypatch, tmp_path, _agent_preconditions,
+                                           _fake_pipeline):
     sentinel = object()
     captured = {}
 
-    def _fake_build_trader(out_dir):
+    def _fake_build_trader(out_dir, sink=None, date=None):
         captured["out_dir"] = out_dir
+        captured["sink"] = sink
         return sentinel
 
     monkeypatch.setattr(main.SmtV2Dispatcher, "_build_trader",
@@ -245,13 +262,16 @@ def test_trader_flag_on_attaches_the_graft(monkeypatch, tmp_path, _fake_pipeline
     d.on_session_start(now, _hist(), _hist())
     assert _FakePipeline.last["trader"] is sentinel
     assert captured["out_dir"] == tmp_path / str(main.cme_session_date(now))
+    assert captured["sink"] == d._agent_port.sink, "the trader is built ON the port's sink"
 
 
-def test_trader_build_failure_degrades_to_none(monkeypatch, tmp_path, _fake_pipeline):
-    """A broken trader must never abort the live session."""
-    monkeypatch.setattr(main, "SESSIONS_DIR", tmp_path)
-
-    def _boom(out_dir):
+def test_trader_build_failure_is_a_refused_start_not_a_fallback(
+        monkeypatch, _agent_preconditions, _fake_pipeline, capsys):
+    """A broken trader must never abort the live session — and, since plan 38 (D20), must
+    never hand the dispatcher back to legacy either: REFUSED, nobody owns, legacy dark.
+    (Was `..._degrades_to_none`: a silent None was harmless only while the trader merely
+    observed.)"""
+    def _boom(out_dir, sink=None, date=None):
         raise RuntimeError("trader build failed")
 
     monkeypatch.setattr(main.SmtV2Dispatcher, "_build_trader", staticmethod(_boom))
@@ -259,6 +279,9 @@ def test_trader_build_failure_degrades_to_none(monkeypatch, tmp_path, _fake_pipe
     d.on_session_start(_now(), _hist(), _hist())     # must NOT raise
     assert d._trader is None
     assert _FakePipeline.last["trader"] is None
+    assert _FakePipeline.last["kwargs"] == {"trader_only": True}
+    out = capsys.readouterr().out
+    assert "[AGENT-LIVE] REFUSED: trader build failed: RuntimeError" in out
 
 
 def test_trader_env_flag_never_imports_the_package_when_off(monkeypatch):

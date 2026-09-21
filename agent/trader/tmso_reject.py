@@ -30,10 +30,37 @@ the bar loop already carries. It never enters `derive_facts`, `build_menus`, the
 or the KB — which matters because `thesis_cache` keys on the KB bytes, so touching them
 re-seeds every recorded thesis. It is a level to reject at, never a level to draw toward.
 
-**Two-bar signature, deliberately.** The sweep bar alone fires far too often: on 09-03's
-09:00 micro-session seven bars touch TMSO and close back above it. Requiring the NEXT bar
-to close with the thesis cuts that to one (09:36->09:37). The full signature fired 4x on
-09-03 across three micro-sessions; 2 of the 4 preceded real legs.
+**The confirmation is a close WITH THE THESIS — on the sweep bar itself, or on the next
+bar (2026-09-17).** The sweep bar alone fires far too often: on 09-03's 09:00
+micro-session seven bars touch TMSO and close back above it. So a sweep is never enough;
+what enters is the FIRST bar that closes with the thesis against its own open:
+
+    sweep bar closes back across TMSO AND with the thesis  -> enter at ITS close
+    sweep bar closes back across TMSO but AGAINST it       -> armed; the NEXT bar must
+                                                              close with the thesis
+
+The second line is the original two-bar signature, unchanged (09-03: 09:36 sweeps and
+closes RED under an UP thesis, 09:37 confirms). The first line is `SWEEP_BAR_MAY_CONFIRM`,
+and it is the same reading §7 was given in plan 36 D3 — "the first with-thesis close
+enters, the same bar or the one after" — so the two rejection mechanisms say one thing.
+
+Motivating day 2026-09-17, DOWN thesis: the 09:30 bar trades to 29737.75 over TMSO and
+closes 29717.50, under it and RED by a tick. One-bar enters 09:31:00 @ 29717.50; the
+two-bar form waited for 09:31 to close and entered 09:32:00 @ 29674.75, 42.75 pts later
+in a move that was already running.
+
+Measured SIGNAL-LEVEL over the 32 stretch-override sessions since 2026-05-01 (direction =
+the override's, no oracle; stop capped 15, held 45 min): two-bar 23 fires / 3 survive /
+-119.50 pts; with the sweep bar allowed to confirm 24 fires / 6 survive / +564.75. ONE
+extra fire, because the per-micro-session latch still caps it — the docstring's original
+worry does not return. Three trades carry the gain (08-06 +278.25, 08-19 +249.25, 08-12
++69.00), so treat the size of the edge as unproven and its sign as a lead.
+
+**No opening-bar exclusion here**, unlike `fvg_1h_reject`. That exclusion exists because on
+the 09:30 bar every extreme is "a new post-09:30 extreme" by construction. TMSO is a level
+fixed at 09:22:30, before the bar opens, so a 09:30 bar that sweeps it and closes back is
+real information. The five 09:31:00 entries in the sample: 2 held (+69.00, +86.75), 3
+stopped at the cap — net +110.75. Thin, positive, and not the bulk of the gain.
 
 **UNTUNED, and stated as such.** `SL_CAP_PTS` is borrowed from §7 and has been fitted to
 nothing. No A/B exists. This is a candidate under
@@ -50,6 +77,10 @@ QUARTER_FRACTION = 0.25
 GRID_START_HHMM = (9, 0)
 #: Borrowed from §7 (`extreme_reject.SL_CAP_PTS`). NOT fitted for this mechanism.
 SL_CAP_PTS = 15.0
+#: A sweep bar that ALSO closes with the thesis enters at its own close instead of waiting
+#: for the next bar. False restores the strict two-bar signature — one line, so the A/B
+#: the docstring asks for is cheap.
+SWEEP_BAR_MAY_CONFIRM = True
 
 _SHORT = ("DOWN", "SHORT")
 
@@ -86,7 +117,8 @@ def tmso_for(mnq, now: pd.Timestamp):
 
 
 class TmsoReject:
-    """Sweep of TMSO that closes back across it, confirmed by the next bar.
+    """Sweep of TMSO that closes back across it, confirmed by the first with-thesis close
+    — the sweep bar's own, or the next bar's.
 
     Driven one COMPLETED 1m bar at a time. `on_bar_close` returns a fire dict or None.
     One fire per micro-session: the level is the same all session, so an unlatched
@@ -131,10 +163,16 @@ class TmsoReject:
         closed_back = (float(bar["Close"]) < tmso) if self._short \
             else (float(bar["Close"]) > tmso)
         if swept and closed_back:
-            self._armed_bar = now
             self._armed_level = float(tmso)
             self._armed_extreme = (float(bar["High"]) if self._short
                                    else float(bar["Low"]))
+            if SWEEP_BAR_MAY_CONFIRM and self._closes_with_thesis(bar):
+                # One bar did both jobs. Same fire, same stop rule (this bar's own swept
+                # extreme, capped), same one-per-micro-session latch.
+                self._armed_bar = None
+                self._fired_sessions.add(session)
+                return self._fire(now, bar)
+            self._armed_bar = now
         return None
 
     # -- internals ------------------------------------------------------------- #

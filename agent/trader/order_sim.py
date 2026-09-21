@@ -109,6 +109,35 @@ class OrderSim:
                 events.append(self._close(now, "take_profit", self._dol))
         return events
 
+    def move_stop(self, now, price, *, level_name=None) -> "dict | None":
+        """Move the open position's protective stop to `price`. Returns a `stop_moved`
+        event carrying the previous stop, or None when nothing is open. `level_name`
+        is the broker mirror's concern (its signal names the level); ignored here.
+
+        The only writer of `position["stop"]` after the fill (plan 35's action A). It
+        is a plain field, so the next `on_bar` tests the new level with the same
+        adverse-first rule as the original; nothing else changes.
+        """
+        if self.position is None:
+            return None
+        p = self.position
+        prev = p["stop"]
+        p["stop"] = float(price)
+        # A moved stop sits on the PROFIT side of the entry (plan 35 action A). Its
+        # touch must book a distinct kind: `stop_out` is what §8's attempt budget and
+        # §2's cooldown count, and a profitable exit is neither.
+        p["stop_moved"] = True
+        return {"kind": "stop_moved", "time": now, "price": float(price),
+                "prev_stop": prev, "direction": p.get("direction"),
+                "artifact_id": p.get("artifact_id"), "entry": p.get("entry")}
+
+    def flatten(self, now, price, kind: str = "hard_close") -> "dict | None":
+        """Close an open position at `price` with an explicit exit `kind` (the 13:00
+        hard close in live). Unlike `mark_open` this IS an exit: the position is gone."""
+        if self.position is None:
+            return None
+        return self._close(now, kind, price)
+
     def mark_open(self, now, price) -> "dict | None":
         """Book a still-open position at the tape's last print. A MARK, NOT an exit.
 
@@ -138,6 +167,8 @@ class OrderSim:
 
     def _close(self, now, kind, price) -> dict:
         p = self.position or {}
+        if kind == "stop_out" and p.get("stop_moved"):
+            kind = "stop_out_initial"          # see `move_stop`; not a failed attempt
         ev = {"kind": kind, "time": now, "price": float(price),
               "direction": p.get("direction"), "artifact_id": p.get("artifact_id"),
               "entry": p.get("entry")}

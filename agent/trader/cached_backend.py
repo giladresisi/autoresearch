@@ -115,3 +115,82 @@ class CachedThesisBackend:
         meta["cached"] = False
         meta["key"] = key
         return thesis, meta
+
+
+# -- the shared factory (live AND replay) --------------------------------------------- #
+#
+# Live and replay must build the recording backend the same way, or a live 09:20 call is
+# never recorded and a replay of that date has to be re-seeded with a fresh model call
+# (a different thesis). These helpers were the replay's private ones; `automation/main.py`
+# now builds the live trader through the same factory, so the cache key (boundary,
+# facts_text, prompts, schema, model) and the invalidation rules are identical on both
+# paths by construction. `agent/trader/replay.py` re-exports them under its old names so
+# the gate tests that monkeypatch `replay._real_backend` keep working.
+
+import os as _os
+
+
+def backend_name() -> str:
+    """The backend that will actually answer, RESOLVED the way `run_agent.make_backend`
+    resolves it (run_agent.py:511-520): an explicit `ACT_TRADER_BACKEND` wins, otherwise
+    OPENROUTER_API_KEY, otherwise ANTHROPIC_API_KEY.
+
+    It must be the RESOLVED name, not a hard-coded default, because it goes into the
+    thesis-cache key. Live leaves the variable unset (see .env.example) and auto-selects;
+    a warm replay builds no backend at all and has only the environment to go on. If the
+    two disagreed the replay would miss every live recording and silently re-call the
+    model — which is exactly what happened when live ran OpenRouter while the recordings
+    had been made through Anthropic. Keys, not clients: nothing here constructs a backend.
+    """
+    explicit = (_os.environ.get("ACT_TRADER_BACKEND") or "").strip()
+    if explicit:
+        return explicit
+    if _os.environ.get("OPENROUTER_API_KEY"):
+        return "openrouter"
+    if _os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    return ""
+
+
+def real_thesis_backend():
+    """The model-calling thesis backend, imported lazily so a warm-cache replay never
+    touches `run_agent` (and therefore never needs an API key). Same env vars and
+    defaults in live and replay."""
+    from agent.run_agent import make_backend
+    from agent.trader.analyzer import thesis_via_decide_thesis
+    # `None`, not `backend_name()`: let make_backend do its own auto-selection so an
+    # absent key raises ITS error (the caller turns that into a REFUSED start). The
+    # resolved name is recomputed for the cache key by `prompt_parts`.
+    return thesis_via_decide_thesis(
+        make_backend(_os.environ.get("ACT_TRADER_BACKEND") or None,
+                     _os.environ.get("ACT_TRADER_MODEL") or None))
+
+
+def prompt_parts():
+    """(system_prompt_fn, task_prompt, schema_fn, model_id) for the cache key.
+
+    `build_system_prompt` (the concatenated KB) and `_TASK_THESIS` are the two prompt
+    halves `decide_thesis` assembles, so hashing them makes a doc edit or a task-prompt
+    edit invalidate every recording. `model_id` is `<backend>:<resolved model>`.
+    `schema_fn` returns `{}` DELIBERATELY: the real schema is derived from facts that
+    are already rendered into `facts_text`, which IS keyed (see replay.py history).
+    """
+    from agent import run_agent as ra
+    backend = backend_name()
+    # Direct attribute access, NOT getattr-with-a-default: a renamed task prompt must
+    # fail loudly rather than silently weaken every recording's invalidation.
+    model = _os.environ.get("ACT_TRADER_MODEL") or ra.DEFAULT_MODELS.get(backend, "")
+    return (ra.build_system_prompt, ra._TASK_THESIS,
+            (lambda facts: {}), "%s:%s" % (backend, model))
+
+
+def cached_thesis_backend(date, *, inner=None, allow_calls=True, cache=None):
+    """The recording backend for session `date` (the boundary hint). Live passes
+    `inner=real_thesis_backend()` and `allow_calls=True` (record on miss, serve on hit);
+    a warm replay passes `inner=None, allow_calls=False` (refuse on miss)."""
+    sys_fn, task, schema_fn, model_id = prompt_parts()
+    return CachedThesisBackend(
+        inner, cache=cache if cache is not None else ThesisCache(), model_id=model_id,
+        system_prompt_fn=sys_fn, task_prompt=task, schema_fn=schema_fn,
+        allow_calls=allow_calls, boundary_hint=str(date),
+    )

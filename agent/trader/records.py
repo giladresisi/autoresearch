@@ -153,6 +153,31 @@ class DecisionRecorder:
         rec.update(extra)
         self._write(rec)
 
+    def initial_target_selected(self, *, now, plan_id, mechanism, price, level, secondary,
+                                anchor, tier=None, variant=None, **extra) -> None:
+        """Plan 35: the initial target chosen at a fill (`agent/trader/initial_target.py`).
+
+        Written on EVERY fill, like `target_selected`: `price=None` means the position
+        has no initial stage (no T2, or T2 too close for one), and that is a result the
+        study needs to see, not a missing line. `tier` (v2: 1 session extreme, 2
+        mid/open, 3 prevN level, 0 synthetic) and `variant` (the EXTREME_MIN /
+        MID_PREFERENCE knobs in force) say WHICH rule produced the pick.
+        """
+        rec = self._base("initial_target_selected", now, plan_id, mechanism)
+        rec.update({"price": price, "level": level, "secondary": secondary,
+                    "anchor": anchor, "tier": tier, "variant": variant})
+        rec.update(extra)
+        self._write(rec)
+
+    def initial_target_reached(self, *, now, plan_id, mechanism, bar, price, level=None,
+                               **extra) -> None:
+        """Plan 35: the one-way flip — a completed 1m bar touched AND closed beyond the
+        initial. `bar` is the completed bar's label, `price` the initial. Once per fill."""
+        rec = self._base("initial_target_reached", now, plan_id, mechanism)
+        rec.update({"bar": _iso(bar), "price": price, "level": level})
+        rec.update(extra)
+        self._write(rec)
+
     def would_have_vetoed(self, *, now, plan_id, mechanism, reason, detail=None,
                           artifact_id=None, artifact_label=None) -> None:
         """A veto that no longer vetoes. Recorded, NOT acted on.
@@ -182,5 +207,23 @@ class DecisionRecorder:
 
     def plan_dead(self, *, now, plan_id, reason, detail=None) -> None:
         rec = self._base("plan_dead", now, plan_id, None)
+        rec.update({"reason": reason, "detail": detail or {}})
+        self._write(rec)
+
+    def external_kill(self, *, now, plan_id, reason, void_position, detail=None) -> None:
+        """Something OUTSIDE the chain changed the position, and the chain stood down.
+
+        Live only. Written by `TraderGraft.external_kill` AFTER the plan is dead and the
+        modelled position voided, and attempted even if the void raised — the record is
+        the only evidence of why the rest of the session is empty."""
+        rec = self._base("external_kill", now, plan_id, None)
+        rec.update({"reason": reason, "void_position": bool(void_position),
+                    "detail": detail or {}})
+        self._write(rec)
+
+    def session_disarmed(self, *, now, reason, plan_id=None, detail=None) -> None:
+        """The chain will do nothing more this session. Live only: a restart that found
+        a plan already on disk, or a disarm ordered from outside after a trader error."""
+        rec = self._base("session_disarmed", now, plan_id, None)
         rec.update({"reason": reason, "detail": detail or {}})
         self._write(rec)
