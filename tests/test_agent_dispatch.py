@@ -619,8 +619,15 @@ def test_a_paused_entry_is_voided_the_plan_lives_and_a_close_still_goes_out(
     live_orders.resume()
 
 
-def test_a_process_whose_first_bar_is_0921_never_arms(tmp_path, monkeypatch):
-    """Case 40f: the arm is an EXACT-MINUTE test. A late start is a dark day, by design."""
+def test_a_process_whose_first_bar_is_past_the_grace_window_never_arms(
+        tmp_path, monkeypatch):
+    """Case 40f, as amended 2026-09-21. The arm was an EXACT-MINUTE test and a late start
+    was a dark day by design. That is right when the feed has been up since the evening, and
+    wrong for the 09:00-start routine, where the blocking IB gap-fill can overrun 09:20 and
+    no bar ever carries that minute. `analyzer.LATE_ARM_GRACE_MIN` now allows the arm for 7
+    minutes after it — bounded by what follows: the plan derives on the NEXT bar close and
+    entries are legal from 09:30:30, so 09:27 still leaves 90 s of margin at the worst
+    recorded call latency (103.9 s). PAST the window the old rule stands: a dark day."""
     monkeypatch.delenv("ACT_TRADER_ARM_HHMM", raising=False)
     monkeypatch.setattr(analyzer_mod, "assemble_facts",
                         lambda store, bars, now: ("facts", "ctx", {}, None))
@@ -632,11 +639,20 @@ def test_a_process_whose_first_bar_is_0921_never_arms(tmp_path, monkeypatch):
 
     g = TraderGraft(tmp_path / "trader", _backend, threaded=False,
                     order_sink=lambda ev: seen.append(ev) or None)
-    for hms in ("09:21:00", "09:22:00", "09:31:00", "10:00:00", "12:59:59"):
+    for hms in ("09:28:00", "09:31:00", "10:00:00", "12:59:59"):
         now = _ts(hms)
         frame = _live_frame(now, 29250.0, 29250.0, 29250.0)
         g.on_bar(now, frame, frame.copy())
     assert calls == [] and g.plan() is None and seen == []
+
+    # ...but INSIDE the window a first bar at 09:23 does arm, which is the whole point.
+    g_late = TraderGraft(tmp_path / "trader_late", _backend, threaded=False,
+                         order_sink=lambda ev: None)
+    now = _ts("09:23:00")
+    frame = _live_frame(now, 29250.0, 29250.0, 29250.0)
+    g_late.on_bar(now, frame, frame.copy())
+    assert calls == [1], "a gap-fill that overran 09:20 must not cost the day"
+    calls.clear()
 
     # Control: the same graft shape DOES arm when it sees the 09:20 minute.
     g2 = TraderGraft(tmp_path / "trader2", _backend, threaded=False,

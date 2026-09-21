@@ -42,6 +42,23 @@ from agent.stretch_override import stretch_override
 
 ARM_HOUR = 9
 ARM_MINUTE = 20
+
+#: How late, in minutes after the arm minute, the thesis may still be taken.
+#:
+#: The arm used to be an EXACT-MINUTE test, which is correct when the bar feed has been up
+#: since the evening: the 09:20 bar always arrives. It is wrong for the 09:00-start routine
+#: (2026-09-21), where `IbRealtimeSource.start` BLOCKS on the IB gap-fill before it
+#: subscribes — so a fill that overruns 09:20 means no bar ever carries that minute, the
+#: Analyzer never arms, and the whole day is dark with nothing to show for it.
+#:
+#: 7 minutes is bounded by what comes AFTER the call, not by taste. The chain is
+#: arm -> model call -> thesis -> the NEXT bar close derives the plan -> entries are legal
+#: from 09:30:30 (`executor.SETTLE_*`). Ten recorded 09:20 calls ran 16.3-103.9 s
+#: (p50 ~40 s, driven almost entirely by retry count), so at the worst observed latency an
+#: arm at 09:27 lands the thesis by 09:28:44 and the plan at the 09:29:00 close — 90 s
+#: before the first legal entry. Arming at 09:28 still just works; past 09:28:15 the worst
+#: case misses 09:30:00 and the settle window closes on a plan that does not exist yet.
+LATE_ARM_GRACE_MIN = 7
 THESIS_FILE = "thesis_state.json"
 
 # thesis.md §3a — near-maturity WAIT.
@@ -266,8 +283,19 @@ class Analyzer:
                     return self._arm(now, bars)
 
             arm_h, arm_m = arm_time()
-            if now.hour != arm_h or now.minute != arm_m:
+            # The arm minute, or any bar within the grace window after it. The window only
+            # ever comes into play when the arm minute produced no bar at all (a gap-fill
+            # that overran it): with a live feed the first call lands exactly on the arm
+            # minute, which is what every replay and fixture does. `_armed_date` still makes
+            # this once per session, and a deferral in flight has already returned above, so
+            # a near-maturity WAIT can never be short-circuited by the window.
+            arm_ts = now.normalize() + pd.Timedelta(hours=arm_h, minutes=arm_m)
+            if now < arm_ts or now >= arm_ts + pd.Timedelta(minutes=LATE_ARM_GRACE_MIN):
                 return None
+            if now >= arm_ts + pd.Timedelta(minutes=1):
+                print("[AGENT-LIVE] LATE ARM: no bar carried %02d:%02d (gap-fill overran it); "
+                      "taking the thesis at %s instead" % (arm_h, arm_m, now.strftime("%H:%M:%S")),
+                      flush=True)
 
             wait_until = self._near_maturity_wait(now, bars)
             if wait_until is not None:

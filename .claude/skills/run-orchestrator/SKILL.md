@@ -30,7 +30,8 @@ files left over by a previous run on the same calendar day.
 | Gap-fill complete | `IB 1m gap fill complete` | Printed before session channels exist |
 | Session started | `automation.main started` | Printed by orchestrator when it spawns the session process |
 | daily.py complete | `[EMIT] daily complete` | Printed by automation.main after run_daily |
-| **Gap-fill NOT done by 09:15 ET** | clock check, not a log line | **CRITICAL.** The 09:20 arm is an EXACT-MINUTE test (`analyzer._arm`: `now.hour != 9 or now.minute != 20` → return). The gap-fill BLOCKS the bar feed (`IbRealtimeSource.start`), so if it is still running at 09:20 no bar ever carries that minute, the Analyzer never arms, and the day is DARK. Push and tell the user immediately — they can still decide to accept a dark day or intervene |
+| **Gap-fill NOT done by 09:15 ET** | clock check, not a log line | **WARNING.** The gap-fill BLOCKS the bar feed (`IbRealtimeSource.start`). Since 2026-09-21 the arm has a 7-minute grace window (`analyzer.LATE_ARM_GRACE_MIN`), so a fill finishing by **09:27** still takes the thesis — 09:27 is the last minute that leaves the plan time to derive on the next bar close before entries open at 09:30:30, at the worst recorded call latency. A fill still running at 09:27 IS a dark day: push CRITICAL then |
+| **Late arm taken** | `[AGENT-LIVE] LATE ARM` | The gap-fill overran 09:20 and the thesis was taken inside the grace window instead. Not an error — but it means the fill is running close to the wire; tell the user to start earlier tomorrow |
 | Agent owns the dispatcher | `[AGENT-LIVE] OK` | Positive confirmation that the agent took the dispatcher and the legacy engine is dark. Its ABSENCE is not proof of failure (it prints once, early) but its presence is proof of success |
 | L1 thesis armed | `thesis_state.json` appears in `<global>/sessions/<date>/` | The 09:20 model call landed (16–104 s, median ~40 s). A DARK day writes no such file — report which |
 | Plan derived | `plans.json` appears in the same folder | The Planner turned the thesis into a plan; entries become possible after 09:30:30 |
@@ -159,6 +160,7 @@ gap_fill_done=false
 gap_deadline_reported=false
 agent_ok=false
 agent_refused=false
+late_arm=false
 thesis_done=false
 plan_done=false
 order_done=false
@@ -298,6 +300,10 @@ while true; do
         echo "[KEEPALIVE] IB watchdog: connection killed as zombie — orchestrator restarting"
     fi
 
+    if [ "$late_arm" = false ] && cur | grep -q "\[AGENT-LIVE\] LATE ARM"; then
+        late_arm=true
+        echo "[MONITOR] Late arm taken: $(cur | grep '\[AGENT-LIVE\] LATE ARM' | head -1)"
+    fi
     if [ "$agent_ok" = false ] && cur | grep -q "\[AGENT-LIVE\] OK"; then
         agent_ok=true
         echo "[MONITOR] Agent owns the dispatcher — legacy dark, arm 09:20 ET"
@@ -315,7 +321,7 @@ while true; do
         et=$(uv run python -c "import datetime,zoneinfo;n=datetime.datetime.now(tz=zoneinfo.ZoneInfo('America/New_York'));print(n.hour*60+n.minute)" 2>/dev/null)
         if [ -n "$et" ] && [ "$et" -ge 555 ] && [ "$et" -lt 560 ]; then
             gap_deadline_reported=true
-            echo "[KEEPALIVE] GAP-FILL STILL RUNNING AT 09:15 ET — the 09:20 arm is an exact-minute test; if the feed is not live by then the Analyzer never arms and the day is DARK"
+            echo "[KEEPALIVE] GAP-FILL STILL RUNNING AT 09:15 ET — the thesis can still be taken until 09:27 (grace window); after that the day is DARK"
         fi
     fi
 
@@ -438,7 +444,8 @@ As each line arrives from the Monitor, call `PushNotification` for EVERY milesto
 | `[MONITOR] L1 thesis armed: …` | `L1 thesis armed: <bias> — plan next, entries from 09:30:30` |
 | `[MONITOR] Plan derived …` | `Plan derived — entries possible 09:30:30–10:30` |
 | `[MONITOR] First agent order: …` | `FIRST ORDER: <direction> @ <price> — check Tradovate` |
-| `[KEEPALIVE] GAP-FILL STILL RUNNING AT 09:15 ET …` | `CRITICAL: gap-fill still running at 09:15 — the 09:20 thesis will be missed and the day goes dark` |
+| `[KEEPALIVE] GAP-FILL STILL RUNNING AT 09:15 ET …` | `WARNING: gap-fill still running at 09:15 — the thesis can still be taken until 09:27, dark day after that` |
+| `[MONITOR] Late arm taken …` | `Late arm: thesis taken after 09:20 — gap-fill ran close to the wire` |
 | `[MONITOR] automation.main restarted by orchestrator …` | `automation.main restarted (pid=…) — session resuming` |
 | `[MONITOR] IB watchdog: zombie suspected …` | `WARNING: IB zombie suspected — no bar data; 30s recovery window open` |
 | `[KEEPALIVE] IB watchdog: connection killed …` | `WARNING: IB watchdog killed zombie connection — orchestrator restarting` |

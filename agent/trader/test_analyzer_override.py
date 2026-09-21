@@ -137,3 +137,68 @@ def test_the_override_thesis_is_exempt_from_the_bias_vs_net_score_check():
     # and the exemption is narrow: without the stamp the same thesis is still judged
     plain = validate_thesis(dict(base), facts)
     assert "ARI_THESIS_BIAS" in plain.codes()
+
+
+# ---------------------------------------------------------------------------------------
+# LATE ARM (2026-09-21): the 09:00-start routine means a gap-fill can overrun 09:20 and no
+# bar ever carries that minute. Arming inside a bounded grace window saves the day; the
+# window must not change anything when the feed is live, and must not outlive its purpose.
+# ---------------------------------------------------------------------------------------
+
+def _late_analyzer(tmp_path, calls):
+    from agent.trader.analyzer import Analyzer
+
+    def _backend(facts_text, context_text, facts, *, evidence_magnitude=None):
+        calls.append(facts.get("boundary"))
+        return {"bias": "DOWN", "dol": {"level": "TDO", "price": 1.0},
+                "falsified_if": [], "evidence": []}, {}
+
+    return Analyzer(str(tmp_path), _backend, threaded=False)
+
+
+def _late_bars():
+    import pandas as pd
+    idx = pd.date_range("2026-09-21 09:00", periods=40, freq="1min",
+                        tz="America/New_York")
+    return {"MNQ": pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0,
+                                 "Volume": 1.0}, index=idx)}
+
+
+def _late_t(hhmm, sec=0):
+    import pandas as pd
+    return pd.Timestamp(f"2026-09-21 {hhmm}:{sec:02d}", tz="America/New_York")
+
+
+def test_a_live_feed_still_arms_exactly_on_the_arm_minute(tmp_path, monkeypatch):
+    monkeypatch.delenv("ACT_TRADER_ARM_HHMM", raising=False)
+    calls = []
+    a = _late_analyzer(tmp_path, calls)
+    assert a.maybe_run(_late_t("09:19", 59), _late_bars()) is None      # before the arm: nothing
+    assert a.maybe_run(_late_t("09:20"), _late_bars()) is not None      # the arm minute fires
+    assert len(calls) == 1
+    assert a.maybe_run(_late_t("09:21"), _late_bars()) is None          # once per session
+
+
+def test_a_gap_fill_that_overran_the_arm_minute_still_arms_inside_the_window(
+        tmp_path, monkeypatch, capsys):
+    """No bar carried 09:20 at all — the first bar of the session is 09:23."""
+    monkeypatch.delenv("ACT_TRADER_ARM_HHMM", raising=False)
+    calls = []
+    a = _late_analyzer(tmp_path, calls)
+    assert a.maybe_run(_late_t("09:23"), _late_bars()) is not None
+    assert len(calls) == 1
+    assert "LATE ARM" in capsys.readouterr().out
+    assert a.maybe_run(_late_t("09:24"), _late_bars()) is None          # still once per session
+
+
+def test_the_window_closes_and_a_later_bar_leaves_the_day_dark(tmp_path, monkeypatch):
+    """09:27 is the last minute that leaves the plan time to derive before 09:30:30."""
+    monkeypatch.delenv("ACT_TRADER_ARM_HHMM", raising=False)
+    calls = []
+    a = _late_analyzer(tmp_path, calls)
+    assert a.maybe_run(_late_t("09:26", 59), _late_bars()) is not None  # inside
+    calls.clear()
+    b = _late_analyzer(tmp_path / "b", calls)
+    assert b.maybe_run(_late_t("09:27"), _late_bars()) is None          # the window has closed
+    assert b.maybe_run(_late_t("09:40"), _late_bars()) is None
+    assert calls == []
