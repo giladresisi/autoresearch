@@ -1346,3 +1346,48 @@ def test_trend_broken_releases_manual_lock(_in_tmp, _mock_today):
 
     assert saved_hyp["direction"] == "none"
     assert saved_hyp["manual"] is False
+
+
+# ---------------------------------------------------------------------------
+# Lot size: position.json must carry TRADING_CONTRACTS, never a hardcode
+# ---------------------------------------------------------------------------
+
+def test_position_contracts_follow_trading_contracts_env(_in_tmp, _mock_today, monkeypatch):
+    """Both paths that create `active` (market entry, STP->MKT downgrade fill) must record
+    the env lot size. A hardcoded value there diverges from what the executor sent to the
+    broker, and the close/resize reconcile then compares against the wrong size."""
+    monkeypatch.setenv("TRADING_CONTRACTS", "3")
+    assert live_orders.trading_contracts() == 3
+
+    empty_pos = {"active": {}, "stop_entry": "", "stop_direction": "",
+                 "conf_bar_entry": {}, "failed_entries": 0}
+
+    # Market entry.
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", MagicMock()), \
+         patch("smt_state.load_position", return_value=dict(empty_pos)), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
+        live_orders.place_market_entry("short", 19950.0, 19980.0)
+    assert saved["active"]["contracts"] == 3
+
+    # STP->MKT downgrade: the executor reports a market fill, active is written immediately.
+    mock_executor = MagicMock()
+    mock_executor.place_entry.return_value = SimpleNamespace(order_type="market")
+    mock_executor._entry_is_live = True
+    saved = {}
+    with patch.object(live_orders, "_executor", mock_executor), \
+         patch("smt_state.load_position", return_value=dict(empty_pos)), \
+         patch("smt_state.save_position", side_effect=lambda p: saved.update(p)), \
+         patch("smt_state.load_hypothesis", return_value={"direction": "up"}), \
+         patch("smt_state.load_daily", return_value={"liquidities": []}), \
+         patch("smt_state.load_global", return_value={"all_time_high": 21000.0}), \
+         patch("smt_state.save_hypothesis"), \
+         patch("hypothesis.recompute_cautious_for_fill"):
+        live_orders.place_stop_entry("long", 19850.0, 19820.0)
+    assert saved["active"]["contracts"] == 3
+
+    # Unset / garbage -> the historical default, not a crash.
+    monkeypatch.delenv("TRADING_CONTRACTS")
+    assert live_orders.trading_contracts() == 2
+    monkeypatch.setenv("TRADING_CONTRACTS", "two")
+    assert live_orders.trading_contracts() == 2
