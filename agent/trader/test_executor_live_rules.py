@@ -176,7 +176,8 @@ def test_no_entry_at_or_after_1030_but_an_open_position_is_still_managed(tmp_pat
     assert ex.bind_state()["entry_block"] == "entry_cutoff"
     _step(ex, "10:45:00", 29240.0, lo=29230.0)                 # the stop is still live
     assert ex.position() is None
-    assert _kinds(tmp_path) == ["fill", "target_selected", "stop_out"]
+    assert _kinds(tmp_path) == ["fill", "target_selected", "initial_target_selected",
+                                "stop_out"]
 
     asked = ex._market.asked
     _step(ex, "10:46:00", 29250.0, fire=True)
@@ -234,7 +235,9 @@ def test_no_entry_after_a_positive_close_with_target_death_disabled(tmp_path,
     _step(ex, "09:40:00", 29250.0, fire=True)
     ex._target_price = None                       # `target_reached` can no longer fire
     _step(ex, "09:50:00", 29295.0, hi=29301.0)
-    assert _kinds(tmp_path)[-1] == "take_profit"
+    _ORDER_KINDS = ("fill", "fill_voided", "stop_out", "take_profit", "mark",
+                   "initial_opp_close")
+    assert [k for k in _kinds(tmp_path) if k in _ORDER_KINDS][-1] == "take_profit"
     assert ex.bind_state()["plan_alive"] is True
 
     asked = ex._market.asked
@@ -311,7 +314,7 @@ def test_a_window_ending_at_125959_never_reaches_the_rule(tmp_path, monkeypatch)
     ex = make_executor(tmp_path, monkeypatch)
     _step(ex, "10:20:00", 29250.0, fire=True)
     _step(ex, "12:59:59", 29270.0)
-    assert _kinds(tmp_path) == ["fill", "target_selected"]
+    assert _kinds(tmp_path) == ["fill", "target_selected", "initial_target_selected"]
     assert ex.bind_state()["plan_alive"] is True
     ev = ex.mark_open_position()                   # what `run_replay` does after the loop
     assert ev["kind"] == "mark" and _kinds(tmp_path)[-1] == "mark"
@@ -354,7 +357,8 @@ def test_a_voided_entry_keeps_the_plan_and_spends_no_attempt(tmp_path, monkeypat
     assert ex.bind_state()["plan_alive"] is True
     assert ex._plan["attempts_used"] == 0 and ex._target_price is None
     _step(ex, "09:45:00", 29260.0, fire=True)                   # and it can enter again
-    assert _kinds(tmp_path) == ["fill_voided", "fill", "target_selected"]
+    assert _kinds(tmp_path) == ["fill_voided", "fill", "target_selected",
+                                "initial_target_selected"]
 
 
 def test_kill_plan_and_void_position_from_outside(tmp_path, monkeypatch):

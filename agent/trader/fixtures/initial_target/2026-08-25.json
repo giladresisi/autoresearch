@@ -1,0 +1,269 @@
+{
+ "date": "2026-08-25",
+ "direction": "DOWN",
+ "entry_time": "09:49",
+ "anchor": 29416.0,
+ "secondary": 29164.0,
+ "t2_level": "TDO",
+ "levels": [
+  {
+   "name": "TDO",
+   "price": 29164.0,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "TWO",
+   "price": 29140.0,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev1_day_high",
+   "price": 29480.5,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev1_day_low",
+   "price": 28947.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev2_day_high",
+   "price": 29539.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev2_day_low",
+   "price": 29220.25,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev1_week_high",
+   "price": 30339.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev1_week_low",
+   "price": 29202.5,
+   "swept": true,
+   "depleted": true,
+   "suppressed": false
+  },
+  {
+   "name": "prev3_day_high",
+   "price": 29688.5,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev3_day_low",
+   "price": 29202.5,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev4_day_high",
+   "price": 29759.0,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev4_day_low",
+   "price": 29375.75,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev5_day_high",
+   "price": 30124.25,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev5_day_low",
+   "price": 29514.0,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev6_day_high",
+   "price": 30339.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev6_day_low",
+   "price": 30053.25,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev7_day_high",
+   "price": 30287.25,
+   "swept": false,
+   "depleted": false,
+   "suppressed": true
+  },
+  {
+   "name": "prev7_day_low",
+   "price": 30025.0,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev2_week_high",
+   "price": 30287.25,
+   "swept": false,
+   "depleted": false,
+   "suppressed": true
+  },
+  {
+   "name": "prev2_week_low",
+   "price": 29533.5,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev3_week_high",
+   "price": 29867.25,
+   "swept": false,
+   "depleted": false,
+   "suppressed": true
+  },
+  {
+   "name": "prev3_week_low",
+   "price": 29241.0,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "asia(cur)_high",
+   "price": 29190.0,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "asia(cur)_low",
+   "price": 29016.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "london(cur)_high",
+   "price": 29420.0,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "london(cur)_low",
+   "price": 29157.5,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "day_high",
+   "price": 29420.0,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "day_low",
+   "price": 29016.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "day_mid",
+   "price": 29218.38,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "week_high",
+   "price": 29539.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "week_low",
+   "price": 28947.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "week_mid",
+   "price": 29243.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "ny_morning(cur)_high",
+   "price": 29416.0,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "ny_morning(cur)_low",
+   "price": 29279.25,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "rth(cur)_high",
+   "price": 29411.25,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "rth(cur)_low",
+   "price": 29279.25,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "ny_morning(cur)_mid",
+   "price": 29347.625,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  }
+ ]
+}

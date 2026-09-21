@@ -51,6 +51,7 @@ def _session(tmp_path, monkeypatch):
 def _live(monkeypatch):
     """Force live mode for the duration of a test (the close-reconcile is live-only)."""
     monkeypatch.setattr(live_orders, "_LIVE", True)
+    monkeypatch.setattr(live_orders, "_RECONCILE_ON_CLOSE", True)
     yield
 
 
@@ -388,4 +389,23 @@ def test_offline_inert(monkeypatch):
     fetch = MagicMock()
     monkeypatch.setattr(broker_state, "fetch_broker_state", fetch)
     assert live_orders._reconcile_on_close({"kind": "market-close"}) is False
+    fetch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------------------------
+# BROKER_RECONCILE_ON_CLOSE kill switch: OFF (the default) -> no broker read, close never
+# suppressed, regardless of what the blotter would have said.
+# ---------------------------------------------------------------------------------------------
+
+def test_reconcile_on_close_flag_off_is_noop(monkeypatch):
+    monkeypatch.setattr(live_orders, "_LIVE", True)
+    monkeypatch.setattr(live_orders, "_DISCONNECTED", False)
+    monkeypatch.setattr(live_orders, "_RECONCILE_ON_CLOSE", False)
+    fetch = MagicMock(return_value={"net_position": 0, "avg_entry": 0.0,
+                                    "stop_price": None, "direction": "flat"})
+    with patch("broker_recon.broker_state.fetch_broker_state", fetch), \
+         patch.object(live_orders, "_load_pos",
+                      return_value={"active": {"direction": "long", "contracts": 1}}):
+        suppressed = live_orders._reconcile_on_close({"kind": "market-close"})
+    assert suppressed is False
     fetch.assert_not_called()

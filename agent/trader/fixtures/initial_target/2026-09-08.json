@@ -1,0 +1,255 @@
+{
+ "date": "2026-09-08",
+ "direction": "DOWN",
+ "entry_time": "09:30",
+ "anchor": 29686.75,
+ "secondary": 29478.5,
+ "t2_level": "london(cur)_low",
+ "levels": [
+  {
+   "name": "TDO",
+   "price": 29742.5,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "TWO",
+   "price": 29610.25,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev1_day_high",
+   "price": 29683.75,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev1_day_low",
+   "price": 29530.25,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev2_day_high",
+   "price": 29720.0,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev2_day_low",
+   "price": 29468.25,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev1_week_high",
+   "price": 29720.0,
+   "swept": true,
+   "depleted": false,
+   "suppressed": true
+  },
+  {
+   "name": "prev1_week_low",
+   "price": 28927.25,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev3_day_high",
+   "price": 29585.0,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev3_day_low",
+   "price": 29075.0,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev4_day_high",
+   "price": 29212.5,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev4_day_low",
+   "price": 28927.25,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev5_day_high",
+   "price": 29571.0,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev5_day_low",
+   "price": 29001.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": true
+  },
+  {
+   "name": "prev6_day_high",
+   "price": 29543.5,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "prev6_day_low",
+   "price": 29273.5,
+   "swept": false,
+   "depleted": false,
+   "suppressed": true
+  },
+  {
+   "name": "prev7_day_high",
+   "price": 29811.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev7_day_low",
+   "price": 29437.0,
+   "swept": false,
+   "depleted": false,
+   "suppressed": true
+  },
+  {
+   "name": "prev2_week_high",
+   "price": 29811.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "prev2_week_low",
+   "price": 28947.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": true
+  },
+  {
+   "name": "prev3_week_high",
+   "price": 29688.5,
+   "swept": true,
+   "depleted": false,
+   "suppressed": true
+  },
+  {
+   "name": "prev3_week_low",
+   "price": 29202.5,
+   "swept": false,
+   "depleted": false,
+   "suppressed": true
+  },
+  {
+   "name": "asia(cur)_high",
+   "price": 29748.25,
+   "swept": true,
+   "depleted": false,
+   "suppressed": true
+  },
+  {
+   "name": "asia(cur)_low",
+   "price": 29521.75,
+   "swept": true,
+   "depleted": true,
+   "suppressed": true
+  },
+  {
+   "name": "london(cur)_high",
+   "price": 29764.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "london(cur)_low",
+   "price": 29478.5,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "day_high",
+   "price": 29764.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "day_low",
+   "price": 29478.5,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "day_mid",
+   "price": 29621.62,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "week_high",
+   "price": 29764.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "week_low",
+   "price": 29468.25,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "week_mid",
+   "price": 29616.5,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "ny_morning(cur)_high",
+   "price": 29686.75,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "ny_morning(cur)_low",
+   "price": 29534.0,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  },
+  {
+   "name": "ny_morning(cur)_mid",
+   "price": 29610.375,
+   "swept": false,
+   "depleted": false,
+   "suppressed": false
+  }
+ ]
+}

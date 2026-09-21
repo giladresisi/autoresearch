@@ -27,7 +27,8 @@ NEW_MODULES = ("agent.trader.retrace", "agent.trader.extreme_reject",
                "agent.trader.named_cases", "agent.trader.tape",
                # Plan 38: the seam a real order leaves through. It must stay unable to
                # name, import or reach anything on the far side of its sink.
-               "agent.trader.order_port")
+               "agent.trader.order_port",
+               "agent.trader.initial_target")
 
 FORBIDDEN_IMPORTS = ("live_orders", "smt_state", "paths")
 FORBIDDEN_CALLS = ("set_state_dir", "get_et_now")

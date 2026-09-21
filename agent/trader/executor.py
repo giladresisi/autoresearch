@@ -56,7 +56,9 @@ from agent.trader.order_sim import OrderSim, RestingOrder
 from agent.trader.retrace import RetraceGate
 from agent.trader.takeover import deepest_penetrated, resolve_cooldown_end
 from agent.trader.records import DecisionRecorder
-from agent.trader.target import select_target
+from agent.trader.target import select_target, level_universe
+from agent.trader.initial_target import (InitialTargetTracker, select_initial_target,
+                                         minute_of, variant_label)
 from agent.trader.arbiter import Arbiter
 from agent.trader.market_mechanisms import MarketMechanisms
 
@@ -92,6 +94,16 @@ NO_ENTRY_AFTER_POSITIVE = True       # a plan that closed a winner takes no furt
 # last bar is 12:59:59, so the rule below is unreachable there; live runs the whole CME
 # session and needs it spelled out.
 WINDOW_END_ET = (13, 0)
+# Plan 35 §2.5: what happens once the initial target is REACHED (a completed 1m bar
+# touched and closed beyond it). "record" (option C, the shipped default) changes no
+# order: the flip and what A / B would have done are recorded so the 66-session rig can
+# choose. "be_structure" (A) moves the stop to the initial price, once. "opp_close" (B)
+# market-closes on the first opposite 1m close after the flip. A and B are unmeasured
+# against cycle-5's stop-only control and must not be enabled without that study.
+INITIAL_TARGET_ACTION = "record"
+INITIAL_TARGET_ACTIONS = ("record", "be_structure", "opp_close")
+if INITIAL_TARGET_ACTION not in INITIAL_TARGET_ACTIONS:      # a typo must not run as "record"
+    raise ValueError(f"INITIAL_TARGET_ACTION={INITIAL_TARGET_ACTION!r} not in {INITIAL_TARGET_ACTIONS}")
 
 _SHORT = ("DOWN", "SHORT")
 
@@ -152,6 +164,15 @@ class Executor:
         self._target_price = None
         self._target_level = None
         self._target_since = None
+        # Plan 35: the initial-target stage of the CURRENT position, or None. Armed at
+        # the fill (`_arm_initial_target`), driven on completed 1m bars
+        # (`_drive_initial_target`), dropped once the bar containing the exit has been
+        # judged. Holds the tracker plus the fill / exit minutes it needs.
+        self._it = None
+        # The OUTGOING stage whose exit bar has not been judged yet when a new fill
+        # arrives inside the same minute (exit + re-fill): parked here so its flip /
+        # counterfactuals are still recorded once, then dropped.
+        self._it_pending = None
         # §6/§7, finally reachable. Built here rather than lazily so `state()` is
         # inspectable from the first bar; §7's own machine is seeded on the first bar
         # that can measure its anchor (see `MarketMechanisms.seed_sec7`).
@@ -204,6 +225,8 @@ class Executor:
             "cooldown_resolution": None,
             "takeover_id": None,
             "takeover_label": None,
+            "initial_target": None,
+            "initial_target_error": None,
         }
 
     # -- public ---------------------------------------------------------------- #
@@ -303,6 +326,12 @@ class Executor:
         if not self._window_ended and self._at_window_end(now):
             self._window_ended = True
             self.mark_open_position()
+        # 2b. Plan 35: the initial-target stage, on the COMPLETED 1m bar only and
+        # BEFORE the plan-death check, for the same reason the lifecycle above is: a
+        # position is not plan state, and a plan that dies with a position open must
+        # not blind its management. The order events of this call are already booked,
+        # so a same-bar stop-out is visible here and wins (§2.4).
+        self._drive_initial_target(now, mnq, bar_complete)
 
         # 3. Plan death — evaluated every bar, with nothing open. Over bars SINCE THE
         # ARM only: the frame reaches back to the 18:00 session open, and overnight /
@@ -415,6 +444,8 @@ class Executor:
                     # same-bar touch would mean a ~74 pt second, and resolving it the
                     # other way would be the free-points error §11 warns about.
                     self._set_target_on_fill(now)
+                if ev.get("kind") in ("stop_out", "take_profit", "stop_out_initial"):
+                    self._note_exit(ev)
                 if ev.get("kind") == "stop_out":
                     self._on_stop_out(ev)
                 if ev.get("kind") in ("stop_out", "take_profit"):
@@ -1271,6 +1302,8 @@ class Executor:
         would leave a trigger the bar traded through — but did not close through —
         resting, reintroducing the same free-points error one bar smaller.
         """
+        if self._entry_block(now) is not None:
+            return
         if self._crossed(trigger, self._crossing_price()):
             ev = self._sim.fill_market(now, direction=self._plan.get("direction"),
                                        price=self._market_price(), stop=stop,
@@ -1688,6 +1721,202 @@ class Executor:
         self._rec.target_selected(
             now=now, plan_id=self._plan.get("plan_id"),
             mechanism=self._state.get("mechanism"), pick=pick)
+        self._arm_initial_target(now, pick)
+
+    # -- plan 35: the initial-target stage ---------------------------------------- #
+
+    def _arm_initial_target(self, now, pick) -> None:
+        """Select the initial target for the position just filled and start tracking it.
+
+        Anchor = the fill; secondary = THIS fill's T2 pick (not a target remembered from
+        an earlier attempt — a stage anchored to a stale objective is wrong by
+        construction). Candidates = the named-level universe the T2 menu was built from
+        (`target.level_universe`). Recorded on every fill, `price=None` when there is no
+        stage. Total: a failure here costs the stage and nothing else.
+        """
+        if self._it is not None and self._it.get("exit_minute") is not None:
+            self._it_pending = self._it          # its exit bar is still to be judged
+        self._it = None
+        self._state["initial_target"] = None
+        self._state["initial_target_error"] = None
+        try:
+            pos = self._sim.position
+            secondary = (pick or {}).get("price") if isinstance(pick, dict) else None
+            sel = None
+            if pos is not None and secondary is not None:
+                # The universe carries the DOL menu's eligibility marks (swept /
+                # depleted / suppressed-nested) per level; the v2 selector applies them
+                # itself, the same way `derive_facts._dol_menu` does for T2.
+                levels = level_universe(self._bars, now, self._ticker)
+                sel = select_initial_target(
+                    self._plan.get("direction"), pos.get("entry"), secondary, levels,
+                    attempts_used=self._plan.get("attempts_used"))
+            self._rec.initial_target_selected(
+                now=now, plan_id=self._plan.get("plan_id"),
+                mechanism=self._state.get("mechanism"),
+                price=(sel or {}).get("price"), level=(sel or {}).get("level"),
+                secondary=(None if secondary is None else float(secondary)),
+                anchor=(None if pos is None else pos.get("entry")),
+                level_price=(sel or {}).get("level_price"),
+                tier=(sel or {}).get("tier"),
+                band=(sel or {}).get("band"),
+                n_candidates=(sel or {}).get("n_candidates"),
+                variant=(sel or {}).get("variant") or variant_label(),
+                attempts_used=int(self._plan.get("attempts_used") or 0),
+                action=INITIAL_TARGET_ACTION)
+            if sel is None:
+                return
+            tracker = InitialTargetTracker(self._plan.get("direction"), sel["price"],
+                                           level=sel.get("level"))
+            self._it = {"tracker": tracker, "fill_minute": minute_of(now),
+                        "opened_at": pos.get("opened_at"), "exit_minute": None,
+                        "exit_kind": None, "stop_moved": False,
+                        # Captured HERE: plan death clears `_state["mechanism"]`, and a
+                        # flip judged on the exit bar would otherwise record None.
+                        "mechanism": self._state.get("mechanism")}
+            self._state["initial_target"] = tracker.state()
+        except Exception as exc:
+            self._it = None
+            self._state["initial_target_error"] = f"{type(exc).__name__}: {exc}"
+
+    def _note_exit(self, ev: dict) -> None:
+        """Remember the minute and kind of the position's exit, so the completed bar
+        that CONTAINS the exit is still judged once (the 10:01 bar on 09-18 both closed
+        beyond the initial and swept the target) and every bar after it is not."""
+        it = self._it
+        if it is None or it.get("exit_minute") is not None:
+            return
+        it["exit_minute"] = minute_of(ev.get("time"))
+        it["exit_kind"] = ev.get("kind")
+
+    def _drive_initial_target(self, now, mnq, bar_complete) -> None:
+        """Plan 35 §2.4 on the completed 1m bar; §2.5's action when it flips.
+
+        Which bars are judged: every completed bar from the fill's minute through the
+        bar containing the exit, inclusive. A bar before the exit minute was traded
+        with the position open for its whole length even if the position is gone by
+        the time the bar can be read (the exit came on a later tick). The exit bar
+        itself is judged unless the exit was a STOP-OUT — the stop wins the bar (§2.4).
+        Actions only ever touch an OPEN position; on a bar judged after the fact the
+        flip is recorded and nothing else happens. A stage parked by a same-minute
+        re-fill (`_it_pending`) is judged first, closed-position rules only.
+        """
+        if not bar_complete or (self._it is None and self._it_pending is None):
+            return
+        try:
+            bar = self._completed_1m(mnq, now)
+            if bar is None:
+                return
+            if self._it_pending is not None:
+                if self._judge_initial_bar(now, bar, self._it_pending, open_=False):
+                    self._it_pending = None
+            if self._it is not None:
+                pos = self._sim.position
+                open_ = (pos is not None
+                         and pos.get("opened_at") == self._it.get("opened_at"))
+                if self._judge_initial_bar(now, bar, self._it, open_=open_, pos=pos):
+                    self._it = None
+        except Exception as exc:
+            self._state["initial_target_error"] = f"{type(exc).__name__}: {exc}"
+
+    def _judge_initial_bar(self, now, bar, it: dict, *, open_: bool, pos=None) -> bool:
+        """One completed bar for one stage. Returns True when the stage is finished."""
+        label = bar.name
+        fill_minute = it.get("fill_minute")
+        if fill_minute is not None and label < fill_minute:
+            return False
+        exit_minute = it.get("exit_minute")
+        exit_bar = False
+        if not open_:
+            if exit_minute is None or label > exit_minute:
+                return True                          # nothing left to judge
+            exit_bar = label == exit_minute
+            if exit_bar and it.get("exit_kind") == "stop_out":
+                return True                          # the stop wins the bar
+        tracker = it["tracker"]
+        if not tracker.reached:
+            ev = tracker.on_bar_close(bar, stop=(pos.get("stop") if open_ else None))
+            if ev is not None:
+                self._rec.initial_target_reached(
+                    now=now, plan_id=self._plan.get("plan_id"),
+                    mechanism=it.get("mechanism"), bar=label,
+                    price=ev["price"], level=ev.get("level"), close=ev.get("close"),
+                    position_open=open_, action=INITIAL_TARGET_ACTION)
+                if open_:
+                    self._apply_initial_action(now, it, pos)
+        else:
+            for cf in tracker.post_flip(bar):
+                self._rec.order_event(
+                    now=now, plan_id=self._plan.get("plan_id"),
+                    mechanism=it.get("mechanism"),
+                    kind=f"initial_target_{cf['kind']}", bar=label,
+                    price=cf["price"], position_open=open_)
+                if (open_ and cf["kind"] == "cf_opp_close"
+                        and INITIAL_TARGET_ACTION == "opp_close"):
+                    self._initial_opp_close(now, it)
+                    open_ = False
+        if it is self._it:
+            self._state["initial_target"] = tracker.state()
+        return exit_bar
+
+    def _initial_action_is_wired(self) -> bool:
+        """True only when the order book is the bare simulation.
+
+        Actions A and B were built on the `live` branch against a mirror that turned a
+        stop move / an opposite-close into a legacy signal. Plan 38's port speaks market
+        entries and market closes ONLY (`automation/agent_dispatch`), so neither action
+        has a live representation here. Rather than move a SIMULATED stop while the
+        broker keeps the original — a silent divergence nobody would see until the stop
+        filled at the wrong price — they refuse and say so. The shipped default is
+        "record", so this never fires in production; it fires if someone enables A or B
+        on a live port before the study (plan 35 §2.5) has chosen one and wired it.
+        """
+        return isinstance(self._sim, OrderSim)
+
+    def _apply_initial_action(self, now, it: dict, pos: dict) -> None:
+        """§2.5 at the flip, position open. "record" does nothing. "be_structure" moves
+        the stop to the initial price exactly once, and only if that tightens it.
+        "opp_close" arms nothing here — its exit is the FIRST opposite close AFTER the
+        flip bar, judged by `post_flip` on later bars."""
+        if INITIAL_TARGET_ACTION != "be_structure" or it.get("stop_moved"):
+            return
+        if not self._initial_action_is_wired():
+            self._state["initial_action_unwired"] = INITIAL_TARGET_ACTION
+            return
+        tracker = it["tracker"]
+        new_stop = float(tracker.initial)
+        cur = float(pos.get("stop"))
+        tighter = (new_stop < cur) if self._is_short() else (new_stop > cur)
+        if not tighter:
+            return
+        it["stop_moved"] = True
+        mover = getattr(self._sim, "move_stop", None)
+        if mover is None:
+            return
+        ev = mover(now, new_stop, level_name=tracker.level)
+        if ev is not None:
+            self._rec.order_event(
+                now=now, plan_id=self._plan.get("plan_id"),
+                mechanism=self._state.get("mechanism"),
+                artifact_label=self._label_for(ev.get("artifact_id")),
+                reason="initial_target", level=tracker.level, **ev)
+
+    def _initial_opp_close(self, now, it: dict) -> None:
+        """§2.5 B: market-close at the current price, recorded like every other exit."""
+        if not self._initial_action_is_wired():
+            self._state["initial_action_unwired"] = INITIAL_TARGET_ACTION
+            return
+        price = self._market_price() if self._state.get("now_price") is not None else None
+        if price is None:
+            return
+        ev = self._sim.flatten(now, float(price), kind="initial_opp_close")
+        if ev is None:
+            return
+        self._rec.order_event(
+            now=now, plan_id=self._plan.get("plan_id"),
+            mechanism=self._state.get("mechanism"),
+            artifact_label=self._label_for(ev.get("artifact_id")), **ev)
+        self._note_exit(ev)
 
     def _clear_binding(self) -> None:
         self._state.update({"bound_id": None, "bound_label": None, "mechanism": None,

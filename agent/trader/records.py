@@ -153,6 +153,31 @@ class DecisionRecorder:
         rec.update(extra)
         self._write(rec)
 
+    def initial_target_selected(self, *, now, plan_id, mechanism, price, level, secondary,
+                                anchor, tier=None, variant=None, **extra) -> None:
+        """Plan 35: the initial target chosen at a fill (`agent/trader/initial_target.py`).
+
+        Written on EVERY fill, like `target_selected`: `price=None` means the position
+        has no initial stage (no T2, or T2 too close for one), and that is a result the
+        study needs to see, not a missing line. `tier` (v2: 1 session extreme, 2
+        mid/open, 3 prevN level, 0 synthetic) and `variant` (the EXTREME_MIN /
+        MID_PREFERENCE knobs in force) say WHICH rule produced the pick.
+        """
+        rec = self._base("initial_target_selected", now, plan_id, mechanism)
+        rec.update({"price": price, "level": level, "secondary": secondary,
+                    "anchor": anchor, "tier": tier, "variant": variant})
+        rec.update(extra)
+        self._write(rec)
+
+    def initial_target_reached(self, *, now, plan_id, mechanism, bar, price, level=None,
+                               **extra) -> None:
+        """Plan 35: the one-way flip — a completed 1m bar touched AND closed beyond the
+        initial. `bar` is the completed bar's label, `price` the initial. Once per fill."""
+        rec = self._base("initial_target_reached", now, plan_id, mechanism)
+        rec.update({"bar": _iso(bar), "price": price, "level": level})
+        rec.update(extra)
+        self._write(rec)
+
     def would_have_vetoed(self, *, now, plan_id, mechanism, reason, detail=None,
                           artifact_id=None, artifact_label=None) -> None:
         """A veto that no longer vetoes. Recorded, NOT acted on.

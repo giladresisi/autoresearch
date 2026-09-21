@@ -613,7 +613,8 @@ def test_a_paused_entry_is_voided_the_plan_lives_and_a_close_still_goes_out(
     assert executor.place_close.call_count == 1 and _active() == {}
     assert g.position_view() is None
     assert [r["kind"] for r in _decisions(tmp_path)] == [
-        "fill_voided", "fill", "target_selected", "stop_out"]
+        "fill_voided", "fill", "target_selected",
+                       "initial_target_selected", "stop_out"]
     assert g._executor._plan["attempts_used"] == 1
     live_orders.resume()
 
@@ -736,7 +737,7 @@ def test_the_agent_owns_the_dispatcher_by_default_and_a_legacy_order_is_dropped(
         tmp_path, monkeypatch, _wired):
     """Cases 37 + 40b — the default-on consequence of D25, pinned."""
     sentinel = FakeGraft()
-    d = _start(monkeypatch, lambda out_dir, sink=None: sentinel)
+    d = _start(monkeypatch, lambda out_dir, sink=None, date=None: sentinel)
     assert _FakePipeline.last["kwargs"] == {"trader_only": True}
     assert _FakePipeline.last["trader"] is sentinel and d._agent_port is not None
     assert d._agent_refused is None
@@ -754,7 +755,7 @@ def test_the_agent_owns_the_dispatcher_by_default_and_a_legacy_order_is_dropped(
 def test_the_sink_is_the_ports_and_reaches_the_dispatcher(monkeypatch, _wired):
     captured = {}
 
-    def _build(out_dir, sink=None):
+    def _build(out_dir, sink=None, date=None):
         captured["sink"] = sink
         return FakeGraft()
 
@@ -769,7 +770,7 @@ def test_supervise_and_the_raw_second_reach_the_trader(monkeypatch, _wired):
     graft = FakeGraft(position=HELD)
     graft.raw = []
     graft.set_raw_second = graft.raw.append
-    d = _start(monkeypatch, lambda out_dir, sink=None: graft)
+    d = _start(monkeypatch, lambda out_dir, sink=None, date=None: graft)
     d._agent_port._read_active = lambda: {}
     d.forward_raw_second(SimpleNamespace(last_mnq_second={"high": 2.0, "low": 1.0}))
     d.supervise(_ts("09:50:00"))
@@ -798,7 +799,7 @@ def test_a_config_refusal_prints_one_line_installs_no_sink_and_emits_nothing(
     for key, val in env.items():
         monkeypatch.setenv(key, val)
     built = []
-    d = _start(monkeypatch, lambda out_dir, sink=None: built.append(1) or FakeGraft())
+    d = _start(monkeypatch, lambda out_dir, sink=None, date=None: built.append(1) or FakeGraft())
     out = capsys.readouterr().out
     lines = [l for l in out.splitlines() if l.startswith("[AGENT-LIVE]")]
     assert len(lines) == 1 and lines[0].startswith("[AGENT-LIVE] REFUSED: ")
@@ -815,7 +816,7 @@ def test_a_config_refusal_prints_one_line_installs_no_sink_and_emits_nothing(
 def test_smt_pipeline_v1_is_a_refusal(monkeypatch, _wired, capsys):
     """Case 39."""
     monkeypatch.setattr(main, "_smtv2_pipeline", "v1")
-    d = _start(monkeypatch, lambda out_dir, sink=None: FakeGraft())
+    d = _start(monkeypatch, lambda out_dir, sink=None, date=None: FakeGraft())
     assert "SMT_PIPELINE is not v2" in capsys.readouterr().out
     assert d._trader is None
     assert _FakePipeline.last["kwargs"] == {"trader_only": True}
@@ -836,7 +837,7 @@ def test_under_v1_a_refused_process_keeps_the_v1_brain_dark(monkeypatch):
 def test_a_trader_that_fails_to_build_or_is_not_built_is_a_refusal(monkeypatch, _wired,
                                                                    capsys):
     """Case 39 — FAILED is not OFF: the reason is printed, legacy stays dark."""
-    def _boom(out_dir, sink=None):
+    def _boom(out_dir, sink=None, date=None):
         raise RuntimeError("No API key found")
 
     d = _start(monkeypatch, _boom)
@@ -845,7 +846,7 @@ def test_a_trader_that_fails_to_build_or_is_not_built_is_a_refusal(monkeypatch, 
     assert d._trader is None and d._agent_owns is True
     assert _FakePipeline.last["kwargs"] == {"trader_only": True}
 
-    d = _start(monkeypatch, lambda out_dir, sink=None: None)
+    d = _start(monkeypatch, lambda out_dir, sink=None, date=None: None)
     assert "REFUSED: the trader was not built" in capsys.readouterr().out
     assert _FakePipeline.last["kwargs"] == {"trader_only": True}
 
@@ -856,7 +857,7 @@ def test_a_manual_market_entry_still_reaches_the_broker_after_a_refusal(
     directly. A refused agent start must leave that path, and the pause file, alone."""
     monkeypatch.setenv("FORCE_RESET", "true")
     monkeypatch.setenv("TRADING_CONTRACTS", "1")
-    d = _start(monkeypatch, lambda out_dir, sink=None: FakeGraft())
+    d = _start(monkeypatch, lambda out_dir, sink=None, date=None: FakeGraft())
     assert d._agent_refused is not None
     assert live_orders.is_paused() is False, "a refusal must not engage the pause"
     live_orders.place_market_entry("long", 29250.0, 29235.0, source="manual")
@@ -896,12 +897,14 @@ def test_backend_unset_auto_selects_by_whichever_key_exists(tmp_path, monkeypatc
     seen = _real_build(monkeypatch)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "placeholder-not-a-key")
-    graft = main.SmtV2Dispatcher._build_trader(tmp_path / "t", sink=lambda ev: None)
+    graft = main.SmtV2Dispatcher._build_trader(tmp_path / "t", sink=lambda ev: None,
+                                               date="2026-09-03")
     assert seen == [("anthropic", None)] and isinstance(graft, TraderGraft)
     assert graft._order_sink is not None
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "placeholder-not-a-key")
-    main.SmtV2Dispatcher._build_trader(tmp_path / "t2", sink=lambda ev: None)
+    main.SmtV2Dispatcher._build_trader(tmp_path / "t2", sink=lambda ev: None,
+                                      date="2026-09-03")
     assert seen[-1] == ("openrouter", None), "with both keys, OpenRouter is preferred"
 
 
