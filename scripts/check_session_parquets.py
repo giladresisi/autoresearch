@@ -26,6 +26,7 @@ MNQ_CONID = int(os.environ.get("MNQ_CONID", "0"))
 MES_CONID = int(os.environ.get("MES_CONID", "0"))
 
 CHUNK_S          = 1800        # IB hard limit: seconds per request for 1s bars
+MIN_REQUEST_S    = 30          # IB rejects shorter 1s-bar requests (error 321)
 PACING_SLEEP_S   = 660         # 11 min sleep on Error 162
 IB_CLIENT_ID     = 17
 
@@ -162,7 +163,7 @@ def fetch_range(ib, contract, start_dt: pd.Timestamp, end_dt: pd.Timestamp) -> p
                 continue
 
             chunk_start = max(start_dt, chunk_end - pd.Timedelta(seconds=CHUNK_S))
-            actual_s    = max(1, int((chunk_end - chunk_start).total_seconds()))
+            actual_s    = max(MIN_REQUEST_S, int((chunk_end - chunk_start).total_seconds()))
 
             pacing_hit = False
             bars = ib.reqHistoricalData(
@@ -216,7 +217,9 @@ def fetch_range(ib, contract, start_dt: pd.Timestamp, end_dt: pd.Timestamp) -> p
         df.index = df.index.tz_convert("America/New_York")
 
     df = df[["Open", "High", "Low", "Close", "Volume"]].sort_index()
-    return df[~df.index.duplicated(keep="last")]
+    df = df[~df.index.duplicated(keep="last")]
+    # A short final chunk is widened to MIN_REQUEST_S; keep only the requested range.
+    return df[(df.index >= start_dt) & (df.index <= end_dt)]
 
 
 def validate_session_df(df, price_lo: float, price_hi: float, expected_session_start=None) -> dict:

@@ -6,6 +6,9 @@ from __future__ import annotations
 
 # IB max duration per reqHistoricalData call for 1s bars (seconds)
 _IB_1S_CHUNK_SECONDS = 1800
+# IB min duration for 1s bars: shorter requests are rejected (error 321, "duration is
+# invalid") and come back empty, which reads as a data boundary.
+_IB_1S_MIN_REQUEST_SECONDS = 30
 # Earliest timestamp for 1s gap-fill — prevents requesting unbounded historical data
 _1S_EARLIEST = "2026-05-01"
 # 1s gap-fill pacing: IB throttles historical requests (~60 / 10 min). A small delay
@@ -434,7 +437,7 @@ class IbRealtimeSource:
                 states.append({
                     "instrument": instrument, "df_attr": df_attr, "parquet_name": parquet_name,
                     "contract": _IBContract(conId=int(conid), exchange="CME"),
-                    "chunk_start": start_dt, "all_bars": [],
+                    "chunk_start": start_dt, "fill_from": start_dt, "all_bars": [],
                     "consecutive_skips": 0, "pacing_retries": 0,
                     "requested_any": False, "active": True,
                 })
@@ -460,7 +463,8 @@ class IbRealtimeSource:
                         continue
 
                     chunk_end = min(st["chunk_start"] + pd.Timedelta(seconds=_IB_1S_CHUNK_SECONDS), now)
-                    chunk_s = max(1, int((chunk_end - st["chunk_start"]).total_seconds()))
+                    chunk_s = max(_IB_1S_MIN_REQUEST_SECONDS,
+                                  int((chunk_end - st["chunk_start"]).total_seconds()))
                     st["requested_any"] = True
                     # One chunk per turn; pacing-violation retries of the same chunk stay
                     # inline — the budget is shared, so yielding the turn wouldn't help.
@@ -566,6 +570,9 @@ class IbRealtimeSource:
                         new_df.index = new_df.index.tz_localize("America/New_York")
                     else:
                         new_df.index = new_df.index.tz_convert("America/New_York")
+                    # A short chunk is widened backwards to the IB minimum; never let
+                    # that overlap overwrite bars from before the fill window.
+                    new_df = new_df[new_df.index >= st["fill_from"]]
                     df = getattr(self, st["df_attr"])
                     combined = pd.concat([df, new_df[["Open", "High", "Low", "Close", "Volume"]]]).sort_index()
                     combined = combined[~combined.index.duplicated(keep="last")]

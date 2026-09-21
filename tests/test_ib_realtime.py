@@ -697,6 +697,46 @@ def test_gap_fill_1s_ib_interleaves_instruments(tmp_path, monkeypatch):
         f"requests must alternate MNQ/MES while both instruments are filling, got {order}"
 
 
+def test_gap_fill_1s_ib_short_final_chunk_requests_ib_minimum(tmp_path, monkeypatch):
+    """A final chunk shorter than 30 s must still be requested as >= 30 S: IB rejects
+    shorter 1s-bar requests (error 321) and the empty reply reads as a data boundary.
+    The widened request reaches back before the fill window, and those bars must not
+    overwrite what is already held."""
+    from data import ib_realtime as _ib_mod
+    from ib_insync import BarData
+    src = _make_source(tmp_path)
+    old_ts = (pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(seconds=1815)).floor("s")
+    for attr in ("_mnq_1s_df", "_mes_1s_df"):
+        setattr(src, attr, pd.DataFrame(
+            {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0]},
+            index=pd.DatetimeIndex([old_ts]),
+        ))
+    monkeypatch.setattr(_ib_mod, "_next_trading_open", lambda ts: ts)
+
+    durations = []
+
+    def _req(contract, *a, **k):
+        durations.append(int(k["durationStr"].replace(" S", "")))
+        return [
+            BarData(date=(old_ts - pd.Timedelta(seconds=5)).tz_convert("UTC"),
+                    open=9.0, high=9.0, low=9.0, close=9.0, volume=1.0, average=9.0, barCount=1),
+            BarData(date=(old_ts + pd.Timedelta(seconds=5)).tz_convert("UTC"),
+                    open=2.0, high=2.0, low=2.0, close=2.0, volume=1.0, average=2.0, barCount=1),
+        ]
+
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+    mock_ib.reqHistoricalData.side_effect = _req
+
+    with patch("ib_insync.IB", return_value=mock_ib), patch("ib_insync.Contract"):
+        src._gap_fill_1s_ib()
+
+    assert len(durations) >= 4, f"expected a full and a short chunk per instrument, got {durations}"
+    assert min(durations) >= _ib_mod._IB_1S_MIN_REQUEST_SECONDS, durations
+    assert src._mnq_1s_df.index.min() == old_ts, "bars before the fill window leaked in"
+    assert src._mnq_1s_df.loc[old_ts, "Open"] == 1.0
+
+
 def test_gap_fill_1s_ib_pacing_exhaustion_does_not_advance_cursor(tmp_path, monkeypatch):
     """When every request is throttled (error 162) and the per-chunk retries run out,
     the round must END for that instrument with the cursor unadvanced — skip-advancing

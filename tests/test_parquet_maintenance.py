@@ -489,6 +489,78 @@ class TestFetchGapChunked:
         assert success is True
         assert df.empty
 
+    def test_short_gap_requests_ib_minimum_and_clips_to_gap(self):
+        """A 13 s restart seam (2026-09-21) must be requested as >= 30 S — IB rejects
+        shorter 1s-bar requests with error 321 — and only the bars inside the gap kept."""
+        from data.parquet_maintenance import _fetch_gap_chunked, _GAP_FILL_MIN_S
+
+        gap_start = pd.Timestamp("2026-09-21 09:32:59", tz="America/New_York")
+        gap_end   = pd.Timestamp("2026-09-21 09:33:12", tz="America/New_York")
+
+        event = FakeErrorEvent()
+        ib    = MagicMock()
+        ib.errorEvent = event
+        # What IB returns for "30 S" ending at 09:33:12: 09:32:42 .. 09:33:11
+        ib.reqHistoricalData.return_value = _make_mock_bars(30, "2026-09-21 09:32:42")
+        contract = MagicMock()
+
+        with patch("ib_insync.util.df", _mock_util_df):
+            df, success = _fetch_gap_chunked(ib, contract, gap_start, gap_end)
+
+        assert success is True
+        assert ib.reqHistoricalData.call_args.kwargs["durationStr"] == f"{_GAP_FILL_MIN_S} S"
+        assert df.index.min() == gap_start
+        assert df.index.max() == pd.Timestamp("2026-09-21 09:33:11", tz="America/New_York")
+        assert len(df) == 13
+
+    def test_rejected_request_is_reported_not_silent(self, capsys):
+        """A non-pacing IB error (e.g. 321) leaves the seam unfilled; it must be reported
+        on stderr instead of passing as a closed window with 0 bars."""
+        from data.parquet_maintenance import _fetch_gap_chunked
+
+        base      = pd.Timestamp("2026-05-20 10:00:00", tz="America/New_York")
+        gap_start = base
+        gap_end   = base + pd.Timedelta(seconds=300)
+
+        event = FakeErrorEvent()
+
+        def req_historical(*args, **kwargs):
+            event.fire(3, 321, "Error validating request: Historical data requested duration is invalid", None)
+            return []
+
+        ib = MagicMock()
+        ib.errorEvent = event
+        ib.reqHistoricalData = Mock(side_effect=req_historical)
+        contract = MagicMock()
+
+        df, success = _fetch_gap_chunked(ib, contract, gap_start, gap_end)
+
+        assert success is True  # a rejection does not abort the merge ...
+        assert df.empty
+        err = capsys.readouterr().err
+        assert "WARNING" in err and "321" in err  # ... but it is never silent
+
+    def test_connection_notices_are_not_reported(self, capsys):
+        """IB's 2xxx farm-status notices (reqId -1) and 162 "no data" are not rejections."""
+        from data.parquet_maintenance import _fetch_gap_chunked
+
+        base      = pd.Timestamp("2026-05-20 10:00:00", tz="America/New_York")
+        event = FakeErrorEvent()
+
+        def req_historical(*args, **kwargs):
+            event.fire(-1, 2106, "HMDS data farm connection is OK", None)
+            event.fire(4, 162, "Historical Market Data Service error message:HMDS query returned no data", None)
+            return []
+
+        ib = MagicMock()
+        ib.errorEvent = event
+        ib.reqHistoricalData = Mock(side_effect=req_historical)
+
+        df, success = _fetch_gap_chunked(ib, MagicMock(), base, base + pd.Timedelta(seconds=300))
+
+        assert success is True and df.empty
+        assert "WARNING" not in capsys.readouterr().err
+
     def test_merge_skipped_on_gap_fill_failure(self, bar_dir):
         from data.parquet_maintenance import merge_session_1s_parquets
 

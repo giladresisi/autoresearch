@@ -32,6 +32,7 @@ PORT      = int(os.environ.get("IB_PORT", "4002"))
 MNQ_CONID = int(os.environ.get("MNQ_CONID", "0"))
 
 CHUNK_S   = 1800
+MIN_REQUEST_S = 30   # IB rejects shorter 1s-bar requests (error 321)
 DATA_DIR  = Path(__file__).parent.parent / "data"
 MAIN_FILE = DATA_DIR / "MNQ_1s.parquet"
 PREVIEW   = DATA_DIR / "MNQ_1s_gaps_preview.parquet"
@@ -80,7 +81,7 @@ def fetch_gap(ib, contract, start_dt: pd.Timestamp, end_dt: pd.Timestamp) -> pd.
 
     while chunk_end > start_dt:
         chunk_start = max(start_dt, chunk_end - pd.Timedelta(seconds=CHUNK_S))
-        actual_s    = max(1, int((chunk_end - chunk_start).total_seconds()))
+        actual_s    = max(MIN_REQUEST_S, int((chunk_end - chunk_start).total_seconds()))
         bars = ib.reqHistoricalData(
             contract,
             endDateTime=chunk_end.tz_convert("UTC").strftime("%Y%m%d-%H:%M:%S"),
@@ -111,7 +112,9 @@ def fetch_gap(ib, contract, start_dt: pd.Timestamp, end_dt: pd.Timestamp) -> pd.
         df.index = df.index.tz_convert("America/New_York")
 
     df = df[["Open", "High", "Low", "Close", "Volume"]].sort_index()
-    return df[~df.index.duplicated(keep="last")]
+    df = df[~df.index.duplicated(keep="last")]
+    # A short final chunk is widened to MIN_REQUEST_S; keep only the requested range.
+    return df[(df.index >= start_dt) & (df.index <= end_dt)]
 
 
 def validate(df: pd.DataFrame, label: str) -> bool:

@@ -13,6 +13,7 @@ MNQ_TICKER = "MNQ.v.0"
 MES_TICKER  = "MES.v.0"
 
 _GAP_FILL_CHUNK_S      = 1800   # IB hard limit: 1800 S per request for 1s bars
+_GAP_FILL_MIN_S        = 30     # IB rejects shorter 1s-bar requests (error 321, "duration is invalid")
 _GAP_FILL_PACING_SLEEP = 660    # 11 min — safe margin above IB's 10-min window
 _GAP_FILL_MAX_RETRIES  = 3      # consecutive pacing failures before aborting
 
@@ -176,6 +177,11 @@ def _fetch_gap_chunked(
 
     Returns (gap_df, success). success=False if pacing retries exhausted.
     success=True even if 0 bars returned (valid for market-closed windows).
+
+    Each request asks for at least _GAP_FILL_MIN_S seconds (a restart seam is often a
+    few seconds wide, which IB rejects), so the result is clipped back to the gap.
+    A rejected request (any request-level IB error other than 162) is not a closed
+    window: it is reported on stderr so an unfilled seam never passes silently.
     """
     import time as _time
     from ib_insync import util as _util
@@ -184,11 +190,16 @@ def _fetch_gap_chunked(
     chunk_end = gap_end
     consecutive_pacing = 0
     pacing_hit = False
+    rejected: list[str] = []
 
     def _on_error(reqId, errorCode, errorString, contract):
         nonlocal pacing_hit
         if errorCode == 162 and "pacing" in errorString.lower():
             pacing_hit = True
+        elif errorCode != 162 and errorCode < 2000 and reqId is not None and reqId >= 0:
+            # 162 without "pacing" is IB's "no data" (closed window); 2xxx are
+            # connection-status notices, and reqId -1 is not tied to a request.
+            rejected.append(f"{errorCode} {errorString}")
 
     ib.errorEvent += _on_error
     try:
@@ -199,7 +210,7 @@ def _fetch_gap_chunked(
                 continue
 
             chunk_start = max(gap_start, chunk_end - pd.Timedelta(seconds=_GAP_FILL_CHUNK_S))
-            chunk_s = max(1, int((chunk_end - chunk_start).total_seconds()))
+            chunk_s = max(_GAP_FILL_MIN_S, int((chunk_end - chunk_start).total_seconds()))
 
             pacing_hit = False
             bars = ib.reqHistoricalData(
@@ -251,6 +262,14 @@ def _fetch_gap_chunked(
     finally:
         ib.errorEvent -= _on_error
 
+    if rejected:
+        print(
+            f"[merge_session_1s] WARNING — IB rejected {len(rejected)} gap-fill request(s) for "
+            f"{gap_start.strftime('%m-%d %H:%M:%S')} → {gap_end.strftime('%m-%d %H:%M:%S')}; "
+            f"that part of the seam is NOT filled: {rejected[0]}",
+            file=sys.stderr, flush=True,
+        )
+
     if not all_bars:
         return pd.DataFrame(), True
 
@@ -264,7 +283,7 @@ def _fetch_gap_chunked(
         df.index = df.index.tz_convert("America/New_York")
     df = df[["Open", "High", "Low", "Close", "Volume"]].sort_index()
     df = df[~df.index.duplicated(keep="last")]
-    return df, True
+    return df[(df.index >= gap_start) & (df.index <= gap_end)], True
 
 
 def _warn_on_seam(prev_last: pd.Timestamp, new_first: pd.Timestamp, label: str = "") -> None:

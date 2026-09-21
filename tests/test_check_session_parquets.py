@@ -1159,3 +1159,31 @@ class TestCheck1mIncremental:
 
         assert "validation_scope" in result
         assert "validated_through" in result
+
+
+# ---------------------------------------------------------------------------
+# TestFetchRange
+# ---------------------------------------------------------------------------
+
+class TestFetchRange:
+    def test_short_range_requests_ib_minimum_and_clips(self):
+        """A range under 30 s must be requested as >= 30 S (IB error 321 otherwise) and
+        the result clipped back to the requested range."""
+        from scripts.check_session_parquets import MIN_REQUEST_S, fetch_range
+
+        start = pd.Timestamp("2026-09-21 09:32:59", tz="America/New_York")
+        end   = pd.Timestamp("2026-09-21 09:33:12", tz="America/New_York")
+        bars = [
+            {"date": pd.Timestamp("2026-09-21 09:32:42", tz="America/New_York") + pd.Timedelta(seconds=i),
+             "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0}
+            for i in range(30)
+        ]
+        ib = _make_ib_mock(bars)
+
+        with patch("ib_insync.util.df", lambda b: pd.DataFrame(b)):
+            df = fetch_range(ib, MagicMock(), start, end)
+
+        assert ib.reqHistoricalData.call_args.kwargs["durationStr"] == f"{MIN_REQUEST_S} S"
+        assert df.index.min() == start
+        assert df.index.max() <= end
+        assert len(df) == 13
