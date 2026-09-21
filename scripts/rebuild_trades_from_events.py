@@ -37,6 +37,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import paths  # noqa: E402
+from dotenv import load_dotenv  # noqa: E402
+
+# TRADING_CONTRACTS lives in .env; without loading it this script sized every ledger row
+# at the historical default (2) while live traded 1 (2026-09-18). Shell vars still win.
+load_dotenv()
 
 # Kept in sync with orchestrator/relay.py (the live trades.tsv writer) so the reconstructed
 # ledger is directly comparable.

@@ -28,6 +28,13 @@ _LIVE = os.getenv("LIVE_TRADING", "false").lower() == "true"
 # retrospective compare vs the regression. Read once at import → fixed for the orchestrator's
 # lifetime (toggling .env mid-run has no effect until the next restart).
 _DISCONNECTED = os.getenv("DISCONNECTED", "false").strip().lower() in ("1", "true", "yes", "on")
+# Broker reconcile, BOTH stages, default OFF (2026-09-20 user decision: no reconcile at any
+# stage of a trade for now). ON_CLOSE gates the synchronous pre-close broker read; ON_FILL
+# gates the GIL-36 post-fill S/L verify and its reader thread. The reader also fails to start
+# inside the live asyncio loop ("Playwright Sync API inside the asyncio loop", 2026-09-18
+# 09:41), so with it off that startup noise goes too. Read once at import.
+_RECONCILE_ON_CLOSE = os.getenv("BROKER_RECONCILE_ON_CLOSE", "false").strip().lower() in ("1", "true", "yes", "on")
+_RECONCILE_ON_FILL = os.getenv("BROKER_RECONCILE_ON_FILL", "false").strip().lower() in ("1", "true", "yes", "on")
 
 if _LIVE:
     from execution.pickmytrade import PickMyTradeExecutor
@@ -81,7 +88,7 @@ _pending_close_after: "pd.Timestamp | None" = None
 _MIN_FILL_STOP_DISTANCE = 10.0
 
 
-def _trading_contracts() -> int:
+def trading_contracts() -> int:
     """The size position.json records for a new position: TRADING_CONTRACTS, the same
     variable (and default) the executor above is sized from. Was a literal 2, which made
     every close at any other size look like a broker-side resize to the reconcile."""
@@ -119,7 +126,7 @@ _recon_reader_started = False
 def _get_recon_reader():
     """Lazily start the shared read-only reader (live mode only). Returns None on any failure."""
     global _recon_reader, _recon_reader_started
-    if not _LIVE or _DISCONNECTED:
+    if not _LIVE or _DISCONNECTED or not _RECONCILE_ON_FILL:
         # DISCONNECTED: broker is silent (no orders sent) → nothing to read/reconcile.
         return None
     if _recon_reader_started:
@@ -142,7 +149,7 @@ def _spawn_reconcile(direction: str, intended_entry: float, intended_stop: float
 
     Never raises into the caller; a no-op outside live mode or when the reader is unavailable.
     """
-    if not _LIVE or _DISCONNECTED:
+    if not _LIVE or _DISCONNECTED or not _RECONCILE_ON_FILL:
         # DISCONNECTED: no order was sent to the broker → nothing to reconcile against.
         return
     try:
@@ -178,7 +185,7 @@ def _spawn_reconcile(direction: str, intended_entry: float, intended_stop: float
 def _reconcile_on_close(close_event: dict) -> bool:
     """Live-only synchronous close reconcile. Returns True iff the pending broker
     close must be SUPPRESSED. No-op (returns False) outside live mode or on any failure."""
-    if not _LIVE or _DISCONNECTED:
+    if not _LIVE or _DISCONNECTED or not _RECONCILE_ON_CLOSE:
         # DISCONNECTED: no close was sent to the broker and the broker holds no position we
         # placed → there is nothing to reconcile; let the strategy's intended close stand.
         return False
@@ -386,7 +393,7 @@ def _register_downgraded_fill(direction: str, entry_price: float, stop_price: fl
         "fill_price": fill,
         "direction": direction,
         "stop": stop_price,
-        "contracts": _trading_contracts(),
+        "contracts": trading_contracts(),
         "cautious": "no",
         "source": source,
     }
@@ -452,6 +459,20 @@ def _current_price() -> float:
     """
     _now = pd.Timestamp.now(tz=_ET)
     _fresh_cutoff = _now - pd.Timedelta(minutes=3)
+    # 0. The orchestrator's per-second last-tick sidecar (automation.main._write_last_tick):
+    #    the only sub-minute source a SEPARATE process (trade.py) can read. Fresh = <= 10 s.
+    try:
+        import json as _json
+        _lt = paths.general_live_dir() / "last_tick.json"
+        if _lt.exists():
+            _d = _json.loads(_lt.read_text(encoding="utf-8"))
+            _ts = pd.Timestamp(_d["time"])
+            if _ts.tzinfo is None:
+                _ts = _ts.tz_localize(_ET)
+            if _ts >= _now - pd.Timedelta(seconds=10):
+                return float(_d["price"])
+    except Exception:
+        pass
 
     # 1) In-process live bars (orchestrator process only; empty elsewhere). The freshness
     # guard also keeps leftover backtest frames or a stale restart from leaking in.
@@ -560,7 +581,7 @@ def place_market_entry(direction: str, entry_price: float, stop_price: float, *,
         "fill_price": fill_price,
         "stop": stop_price,
         "cautious": "no",
-        "contracts": _trading_contracts(),
+        "contracts": trading_contracts(),
         "time": now,
         "source": source,
     }

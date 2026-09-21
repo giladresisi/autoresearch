@@ -170,6 +170,7 @@ def _on_bar(bar, mes_partial) -> None:
     if _smtv2_dispatcher is None:
         return
     _bar_ts = _bar_timestamp(bar)
+    _write_last_tick(_bar_ts, getattr(bar, "Close", None))
     if SESSION_CLOSE <= _bar_ts.time() < SESSION_OPEN:
         import live_orders as _lo_sc
         if _lo_sc.has_pending_entry():
@@ -259,6 +260,28 @@ def _on_bar(bar, mes_partial) -> None:
         # The agent's fail-closed watchdog, once per live bar. HERE, not in the
         # dispatcher's own on_1m_bar wrapper: the per-second path bypasses that wrapper.
         _smtv2_dispatcher.supervise(_bar_ts)
+
+
+def _write_last_tick(ts, close) -> None:
+    """Per-second last-price sidecar for OUT-OF-PROCESS readers (`trade.py close` and the
+    other CLI ops): `{time, price}` at general_live_dir()/last_tick.json, rewritten every
+    second. `live_orders._current_price` reads it FIRST while fresh (<= 10 s), replacing
+    the up-to-60-s-stale 1m close a manual close used to be booked at (2026-09-18: the
+    ledger recorded 29777.0, the 09:57 1m close, against a real fill of 29786.5).
+    Best-effort: never raises."""
+    try:
+        if close is None:
+            return
+        import json as _json
+        import os as _os
+        import paths as _paths
+        p = _paths.general_live_dir() / "last_tick.json"
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(_json.dumps({"time": pd.Timestamp(ts).isoformat(),
+                                    "price": float(close)}), encoding="utf-8")
+        _os.replace(tmp, p)
+    except Exception:
+        pass
 
 
 def _bar_timestamp(bar) -> pd.Timestamp:
