@@ -1173,6 +1173,12 @@ DOL_PROJECTION_RATIO = 1.0
 # projections observed at <= 3.35x (08-10 projection_down fired AGAINST the weekly
 # extension at +2.7x above the mid — allowed by direction-awareness). v1 seed 4.0.
 DOL_PROJECTION_WEEKLY_STRETCH_MAX = 4.0
+# 2026-09-22 (operator decision, session 2026-09-21 O8): both stretch gates on the
+# projection draw above -- the day-stretch gate (stretch_mult > DOL_BAND_MAX_RATIO) and the
+# weekly-extension gate -- are DISARMED, not deleted. On 09-21 (a +355-pt continuation
+# UP) they left the UP menu empty (stretch_mult 5.89, weekly-mid extension 8.21), so
+# every UP fill had no target. Set True to re-arm; the thresholds stay for re-tuning.
+DOL_PROJECTION_STRETCH_GATES_ARMED = False
 
 # Predicate-menu generation config: families × level-classes × param variants. Adding a
 # family / level-class / variant here changes the menu WITHOUT touching the generator, and
@@ -1280,7 +1286,8 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None
     # deterministic, unswept by construction, a real L2 take-profit. Gated on stretch: a
     # market already > DOL_BAND_MAX_RATIO from its opposite-side day extreme gets no fresh
     # trend-extension target (08-14: stood NEUTRAL correctly and must keep doing so).
-    if ar is not None and not (isinstance(stretch_mult, (int, float))
+    if ar is not None and not (DOL_PROJECTION_STRETCH_GATES_ARMED
+                               and isinstance(stretch_mult, (int, float))
                                and stretch_mult > DOL_BAND_MAX_RATIO):
         # Direction-aware weekly-extension gate (see DOL_PROJECTION_WEEKLY_STRETCH_MAX):
         # signed distance of price from the weekly mid in avg-1h units — positive = above.
@@ -1291,7 +1298,7 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None
                 ("DOWN", day_lo, "below", "projection_down")):
             if not isinstance(extreme, (int, float)):
                 continue
-            if wk_ext is not None and (
+            if DOL_PROJECTION_STRETCH_GATES_ARMED and wk_ext is not None and (
                     (direction == "UP" and wk_ext >= DOL_PROJECTION_WEEKLY_STRETCH_MAX)
                     or (direction == "DOWN" and wk_ext <= -DOL_PROJECTION_WEEKLY_STRETCH_MAX)):
                 continue          # already multi-day-extended toward this direction
