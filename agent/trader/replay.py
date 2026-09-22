@@ -44,6 +44,8 @@ from agent.trader.cached_backend import (                      # noqa: E402
 from agent.trader.fixed_backend import (                       # noqa: E402
     FixedThesisBackend, OracleThesisError, validate_oracle_thesis)
 from agent.trader.thesis_cache import ThesisCache              # noqa: E402
+from agent.facts.htf_source import (                           # noqa: E402
+    ARTIFACT as HTF_ARTIFACT, load_session_extremes, write_error_artifact)
 # The window end has ONE source, and it is the Executor's: live has no replay window, so
 # the Executor enforces the same 13:00 in bar time (plan 38 F11). Re-exported here under
 # its old name because every caller reads `replay.WINDOW_END_ET`.
@@ -104,10 +106,24 @@ def build_replay_trader(date, run_dir, *, allow_calls, arrival_latency_sec,
     # thesis from being visible at the arm instant. Explicit, not inherited.
     latency = arrival_latency_sec if gate_arrival else 0.0
 
+    # Plan 40: the unnested weekly/monthly extremes, from the SAME 1m file family live
+    # reads (the per-contract main era for this date), as of the session open. A failure
+    # is recorded in the run folder and the run proceeds without them -- exactly the
+    # pre-plan-40 selection -- rather than turning an unrelated replay into a crash.
+    htf = None
+    try:
+        htf = load_session_extremes(date, source="replay")
+    except Exception as exc:
+        try:
+            write_error_artifact(run_dir, date, "replay", f"{type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+
     # `arrival_latency_sec` goes through the constructor rather than by overwriting
     # `graft._analyzer` afterwards (the plan's shape), which built and threw away a whole
     # Analyzer -- including its state-file load -- on every replayed date.
-    return TraderGraft(run_dir, backend, threaded=False, arrival_latency_sec=latency)
+    return TraderGraft(run_dir, backend, threaded=False, arrival_latency_sec=latency,
+                       htf_extremes=htf)
 
 
 class _arm_env:
@@ -140,7 +156,8 @@ class _arm_env:
 
 #: Artifacts whose presence means another run already owns this directory.
 #: `thesis_state.json` is the dangerous one -- see `_refuse_a_dirty_run_dir`.
-_RUN_DIR_ARTIFACTS = ("trader_decisions.jsonl", "thesis_state.json", "plans.json")
+_RUN_DIR_ARTIFACTS = ("trader_decisions.jsonl", "thesis_state.json", "plans.json",
+                      HTF_ARTIFACT)
 
 
 #: How many one-second bumps `_fresh_started` will try before giving up. A collision
@@ -371,6 +388,10 @@ def run_replay(dates, *, allow_calls=False,
 
         out[date] = {"run_dir": run_dir, "legacy": legacy, "cache": stats,
                      "coverage": cov, "mark": mark,
+                     # Plan 40: False when the HTF list failed to load (the reason is
+                     # in the run folder's htf_extremes.json) -- an A/B must not score
+                     # such a date as "flag on, no change".
+                     "htf_loaded": bool(graft is not None and graft.htf_loaded()),
                      "last_bar": (graft.last_bar_minute()
                                   if graft is not None else None)}
     return out

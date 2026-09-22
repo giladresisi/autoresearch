@@ -1415,3 +1415,9 @@ deleting it loses the knowledge that it was considered and why it failed.
 **Boundary held:** this table says WHAT was measured and WHICH test enforces it. It does
 not say HOW the Executor stores facts — implementation changes far faster than rules, and
 that is how a specification rots.
+
+### 11.2 Pointer — unnested weekly/monthly extremes as T2 targets (plan 40, 2026-09-22)
+
+A TARGET rule, not an entry mechanism, so its text lives in `l2-target-selection.md` §7a.
+Status: implemented, flag ON by operator decision 2026-09-22 (`target.HTF_EXTREMES_IN_T2`). It changes which level the
+Executor takes profit at — and therefore where the plan dies — and nothing in §§2–8.

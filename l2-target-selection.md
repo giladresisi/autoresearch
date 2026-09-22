@@ -183,6 +183,91 @@ three theses with two different DOLs.
 
 ---
 
+## 7a. Unnested weekly / monthly extremes as T2 pools — RULE, flag ON (plan 40)
+
+**Status: implemented; `agent/trader/target.HTF_EXTREMES_IN_T2 = True` by operator
+decision (2026-09-22), taken without the full pre-registered adoption rule (see
+"Adoption rule") and without the Wave-4 registry era. Q1–Q5 were pinned by the operator
+the same day, so this is a rule rather than a CANDIDATE. `False` restores the previous
+T2 exactly. Code:
+`agent/facts/htf_extremes.py` (pure), `agent/facts/htf_source.py` (disk),
+`derive_facts._dol_menu(extra_pools=)`, `target.select_target(htf=)`.
+
+**Motivating case — 2026-09-21, oracle UP.** L1's DOL was `week_high` 30277.25; at the
+09:35:01 / 09:37:00 fills the menu held no BAND pool, so T2 was `projection_up` 30338.25,
+reached 09:44:59 (+74.50), after which the plan was dead. The day ran to the August high
+30639.50 (touched 11:50:49). With the rule on, both fills target that high.
+
+**The rule.**
+- **Levels.** For every COMPLETED ISO week and calendar month since the per-asset start
+  (MNQ 2026-06-16, MES 2026-06-11 — trade dates), the period's high and low, from the
+  1m parquet (both paths read the same file family: live `general/live`, replay the
+  per-contract main era). Trade date = ts + 7h; week = ISO week of the trade date; month =
+  calendar month of the trade date. Maintenance bars (16:55–18:00) are dropped. Computed
+  once, as of the session open; nothing at or after it is read.
+- **Unnested.** A level is dropped once any later bar trades STRICTLY beyond it (an equal
+  print does not). Intraday, bars in [open, fill) prune the same way.
+- **Running week and month (Q5).** Their high and low at the fill = max/min of the part
+  before the open (1m parquet) and today's bars up to the fill. They pass the same filters,
+  so an extreme price is still making sits inside the draw floor and is filtered out.
+- **Dedupe (Q3).** Equal prices on one side are one row: month over week, then most
+  recent; the others are aliases. A row equal to a named `bundle.levels` price on the same
+  side is dropped — the named level's swept/suppressed treatment governs that price.
+- **Eligibility.** Exactly the menu's: correct side, draw floor max(5, 1.0 x avg_1h),
+  BAND/FAR tag, nearest-first. Names `htf_week_high_YYYYMMDD` (trade date of the extreme
+  bar), `htf_month_high_YYYYMM`, `htf_week_running_high`, `htf_month_running_high`.
+- **Projection precedence (Q1 = P1, refined).** The projection draw is offered only when
+  a direction has no BAND named pool AND no HTF row on that side that PASSED THE DRAW
+  FLOOR. Consequence, measured on 07-31: once the projection is suppressed, D1 is the
+  nearest remaining row, which may be a FAR named pool rather than the HTF row.
+- **Scope (Q4).** Executor T2 at the fill only. L1's menu, predicates, P1 evidence, S1
+  text and the thesis-cache key are unchanged. The initial target (`level_universe`)
+  carries the rows flagged `htf: True`, but the selector draws from none of their
+  families, so on 09-21 it stays `synthetic_85pct` (30581.30 / 30583.14, record only).
+- **Failure.** A list that cannot be loaded (missing or stale 1m file) is non-fatal: the
+  run folder's `htf_extremes.json` records why and T2 selects exactly as before.
+
+**Verified during execution.** The existing `week_high` / `week_low` are NOT DOL-menu
+pools: they are `bundle.week_hi` / `week_lo`, outside `bundle.levels`, so `_dol_menu`
+could never pick them; only `level_universe` lists them. The running week rows are
+therefore new T2 candidates, not duplicates of an existing one.
+
+**The 09-21 list (MNQ, as of the 2026-09-20 18:00 open, 2026-12 era).** Highs 31273.75
+(June month, alias the Jun 16 week), 31267.50, 30899.75, 30855.50 (July month, formed
+Jun 30 20:00 = trade date Jul 1), 30639.50 (August month, alias the Aug 17 week),
+30111.50, 30064.50, 29993.50; lows 27499.75 (July month), 28612.75 (August month),
+29052.75. The three highs under 30277.25 are pruned by 09-21's own overnight bars before
+the first fill. Pinned in `named_cases.HTF_0921_MNQ` / `HTF_0921_MES`.
+
+**Measured (2026-09-22 A/B, 13:00 window; A = flag off, B1 = flag on + P1).**
+- 09-21 oracle UP: **+61.50 -> +362.75 (+301.25)**; T2 `projection_up` 30338.25 ->
+  `htf_month_high_202608` 30639.50 at both fills; same fills, same stop-out, 1 attempt.
+- Oracle theses (`named_cases.ORACLE_THESES`, 18 cases): Δ 0.00 on every case. One pick
+  changed without a P&L change: `sec8-0731-deepest`'s 2nd/3rd fills took
+  `prev6_day_high` 29283.0 instead of `projection_up` (suppressed by FAR HTF highs); all
+  three attempts stopped out within six minutes either way.
+- Real-L1 cached theses: 14 warm dates since 2026-05-18, Δ 0.00 on all, picks identical.
+  15 dates had stale caches (not re-seeded: no model calls).
+- §10.2 inverted stress (4 cases): identical in both arms (−21.75, +69.00, −23.25,
+  +38.50); the 0..−70 band holds.
+- Every delta traces to a changed pick; zero unexplained.
+
+**Adoption rule (pre-registered) and verdict.** Adopt only if summed Δ >= 0 on the real-L1
+dates AND on the oracle dates, the §10.2 band holds, zero unexplained deltas, and `-m slow`
+is green. On the A/B above the first three hold (real Δ 0.00, oracle Δ +301.25). `-m slow`
+is NOT green at HEAD `e65e4fa` itself (24 failed / 13 errors on an untouched export of
+HEAD — pre-existing, not caused by this change), and the post-change slow run was stopped
+by operator instruction before it finished. The operator then flipped the flag ON
+directly; the Wave-4 registry era and named-case pins were NOT added. The A/B figures
+are from runs completed before those instructions and are not re-verified.
+
+**Counter-evidence on file.** §6 found that every family added to the menu lowered
+nearest-first capture. HTF unnested extremes were not among them and are sparse (≤ 8 per
+side here), which is why they were measured rather than rejected on §6's prior; the
+offline corpus measurement (`target_offline.htf_extra_pools`) has not been run.
+
+---
+
 ## 8. Two corrections to earlier readings in this line of work
 
 Both came from an 11-date hand-picked sample and did not survive the 84-date sweep:

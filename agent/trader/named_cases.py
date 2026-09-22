@@ -656,3 +656,69 @@ def thesis_for(key: str) -> "dict | None":
 
 def inverted_thesis_for(key: str) -> "dict | None":
     return INVERTED_THESES.get(key)
+
+
+# ---------------------------------------------------------------------------- #
+# Plan 40 — unnested weekly/monthly extremes (`l2-target-selection.md` §7a)
+# ---------------------------------------------------------------------------- #
+#
+# The flag is ON by operator decision (2026-09-22) but the Wave-4 adoption edits were
+# skipped: there is no new ERA and no CASES entry; these are the measured figures that
+# adoption would assert.
+#
+# The completed-period list as of the 2026-09-21 session open (2026-09-20 18:00 ET),
+# computed from the 2026-12-era 1m parquet with the per-asset starts (MNQ 2026-06-16,
+# MES 2026-06-11). name -> (price, aliases). Pinned by
+# agent/facts/test_htf_extremes_real.py::test_0921_list_as_of_session_open.
+#
+# Three MNQ highs (30111.5, 30064.5, 29993.5) are unnested AT THE OPEN and are pruned
+# by 09-21's own overnight bars before the first fill; at the 09:35:01 fill the nearest
+# floor-passing UP row is the August month high 30639.50 (plan 40 insight 3). Its NAME
+# is the month's, not the week's: Q3 dedupe keeps the month and records the week as an
+# alias.
+HTF_0921_AS_OF = "2026-09-20T18:00:00-04:00"
+HTF_0921_MNQ = {
+    "htf_month_high_202606": (31273.75, ("htf_week_high_20260616",)),
+    "htf_week_high_20260622": (31267.5, ()),
+    "htf_week_high_20260630": (30899.75, ()),
+    "htf_month_high_202607": (30855.5, ()),
+    "htf_month_high_202608": (30639.5, ("htf_week_high_20260817",)),
+    "htf_week_high_20260828": (30111.5, ()),
+    "htf_week_high_20260908": (30064.5, ()),
+    "htf_week_high_20260918": (29993.5, ()),
+    "htf_month_low_202607": (27499.75, ("htf_week_low_20260729",)),
+    "htf_month_low_202608": (28612.75, ("htf_week_low_20260803",)),
+    "htf_week_low_20260916": (29052.75, ()),
+}
+HTF_0921_MES = {
+    "htf_month_high_202608": (7906.25, ("htf_week_high_20260813",)),
+    "htf_week_high_20260817": (7892.5, ()),
+    "htf_week_high_20260828": (7850.25, ()),
+    "htf_week_high_20260903": (7834.0, ()),
+    "htf_week_high_20260907": (7796.25, ()),
+    "htf_week_high_20260918": (7739.0, ()),
+    "htf_month_low_202606": (7362.75, ("htf_week_low_20260611",)),
+    "htf_month_low_202607": (7391.0, ("htf_week_low_20260729",)),
+    "htf_week_low_20260916": (7575.25, ()),
+}
+
+#: The 2026-09-21 oracle UP thesis, exactly as the live-worktree run
+#: regression/sessions/2026-09-21/22-17-55 injected it. `exhausted_if` is NOT added,
+#: although plan 40 asked for it: `fixed_backend.validate_oracle_thesis` rejects the
+#: field (removed 2026-08-29 -- reaching the DOL is the exhaustion).
+ORACLE_0921_UP = {
+    "bias": "UP", "regime": "HYBRID", "confidence": "LOW",
+    "dol": {"level": "week_high", "price": 30277.25},
+    "falsified_if": [{"type": "price_beyond", "price": 29903.5, "side": "below"}],
+}
+
+#: Its replay, per arm (13:00 window, oracle, gate_arrival). Fills 09:35:01 @30251.50
+#: (stopped 09:35:38 @30238.50, -13.00) and 09:37:00 @30263.75, both arms.
+#:   flag OFF: T2 projection_up 30338.25, reached 09:44:59 -> +74.50; day +61.50.
+#:   flag ON : T2 htf_month_high_202608 30639.50 (FAR), reached 11:50:49 -> +375.75;
+#:             day +362.75. Initial synthetic_85pct 30581.30 / 30583.1375 (record only).
+HTF_0921_UP_FILLS = (("2026-09-21T09:35:01-04:00", 30251.5),
+                     ("2026-09-21T09:37:00-04:00", 30263.75))
+HTF_0921_UP_T2 = ("htf_month_high_202608", 30639.5)
+HTF_0921_UP_INITIAL = (30581.3, 30583.1375)
+HTF_0921_UP_DAY_PTS = {"off": 61.5, "on": 362.75}

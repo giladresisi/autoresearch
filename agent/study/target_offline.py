@@ -165,21 +165,40 @@ class Track:
                 "extra": dict(self.extra)}
 
 
-def menu_at(facts, boundary: pd.Timestamp, direction: str, ticker: str = "MNQ") -> dict:
+def menu_at(facts, boundary: pd.Timestamp, direction: str, ticker: str = "MNQ",
+            *, extra_pools=None) -> dict:
     """`build_menus` at `boundary`, unchanged, plus the anchor it was built on.
 
     The bundle is sliced strictly BEFORE `boundary`, so `now_price` is the last close
     before the requested time -- at 09:30:00 that is the last pre-open print. Correct and
     lookahead-free, and reported so a reader can see what the menu was anchored on.
+
+    `extra_pools` (plan 40) is handed to `build_menus` verbatim -- build it with
+    `htf_extra_pools` for the unnested weekly/monthly extremes measurement.
     """
     if ticker not in SUPPORTED_TICKERS:
         raise NotImplementedError(_MES_MSG)
     bundle = facts.bundle_at(boundary)
-    menus = build_menus(bundle, facts_to_validator_dict(bundle))
+    menus = build_menus(bundle, facts_to_validator_dict(bundle), extra_pools=extra_pools)
     return {"bundle": bundle, "boundary": boundary, "now_ts": bundle.now,
             "now_price": bundle.now_price,
             "avg_range_1h": (bundle.avg_range_1h or {}).get(ticker),
             "rows": tuple(menus["dol"].get(direction) or ())}
+
+
+def htf_extra_pools(frame_1m, date: str, boundary: pd.Timestamp,
+                    ticker: str = "MNQ") -> list:
+    """Plan 40's T2 rows at `boundary`, from the SAME pure functions the Executor uses:
+    the completed list and the running-period seed as of `date`'s session open (from
+    `frame_1m`, the per-contract 1m parquet), pruned and combined with the bars in
+    [open, boundary). Reads nothing at or after `boundary`."""
+    from agent.facts.htf_extremes import (compute_unnested_extremes, menu_rows, pools_at,
+                                          running_period_seed, session_as_of)
+    as_of = session_as_of(date)
+    ctx = {"as_of": as_of,
+           "extremes": compute_unnested_extremes(frame_1m, as_of, ticker=ticker),
+           "seed": running_period_seed(frame_1m, as_of, ticker=ticker)}
+    return menu_rows(pools_at(ctx, frame_1m, boundary))
 
 
 def _nearest_first_pick(rows):
@@ -258,7 +277,8 @@ def b8g_pick(rows, fit: dict):
 
 def select_target(facts, date: str, clock: str, direction: str, ticker: str = "MNQ",
                   *, selector: str = "nearest", labels=None, cands=None,
-                  corpus_dir: str = CORPUS_DIR, b8g_fit: "dict | None" = None) -> dict:
+                  corpus_dir: str = CORPUS_DIR, b8g_fit: "dict | None" = None,
+                  extra_pools=None) -> dict:
     """The target `selector` names at `clock` -- the module's standalone decision path.
 
     This is the whole target-selection module, runnable offline on any date without the
@@ -275,7 +295,7 @@ def select_target(facts, date: str, clock: str, direction: str, ticker: str = "M
     if ticker not in SUPPORTED_TICKERS:
         raise NotImplementedError(_MES_MSG)
     boundary = instant_ts(date, clock)
-    m = menu_at(facts, boundary, direction, ticker)
+    m = menu_at(facts, boundary, direction, ticker, extra_pools=extra_pools)
     out = {"selector": selector, "date": date, "time": clock, "direction": direction,
            "ticker": ticker, "source": facts.source, "boundary": boundary,
            "now_ts": m["now_ts"], "now_price": m["now_price"],

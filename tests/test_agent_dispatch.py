@@ -901,6 +901,12 @@ def _real_build(monkeypatch):
     monkeypatch.setattr(ra, "load_env_file", lambda path: None)
     monkeypatch.setattr(ra, "OpenRouterBackend", lambda key, model: ("openrouter", model))
     monkeypatch.setattr(ra, "AnthropicBackend", lambda key, model: ("anthropic", model))
+    # Plan 40: the real build would otherwise read the machine-global live 1m parquets.
+    import agent.facts.htf_source as hs
+
+    def _no_global_read(*a, **k):
+        raise FileNotFoundError("test: the live 1m parquet is not read here")
+    monkeypatch.setattr(hs, "load_session_extremes", _no_global_read)
     seen = []
     monkeypatch.setattr(analyzer_mod, "thesis_via_decide_thesis",
                         lambda backend, **k: seen.append(backend) or (lambda *a, **kw: None))
@@ -922,6 +928,29 @@ def test_backend_unset_auto_selects_by_whichever_key_exists(tmp_path, monkeypatc
     main.SmtV2Dispatcher._build_trader(tmp_path / "t2", sink=lambda ev: None,
                                       date="2026-09-03")
     assert seen[-1] == ("openrouter", None), "with both keys, OpenRouter is preferred"
+
+
+def test_live_build_trader_survives_an_extremes_failure(tmp_path, monkeypatch, _wired,
+                                                       capsys):
+    """Plan 40: the HTF-extremes load is NON-FATAL. A failure prints one line and the
+    trader is still built (T2 then selects exactly as before) -- never a REFUSED start."""
+    _real_build(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "placeholder-not-a-key")
+    import agent.facts.htf_source as hs
+
+    def _boom(*a, **k):
+        raise hs.HtfSourceStale("live 1m ends last week")
+    monkeypatch.setattr(hs, "load_session_extremes", _boom)
+    graft = main.SmtV2Dispatcher._build_trader(tmp_path / "t", sink=lambda ev: None,
+                                               date="2026-09-03")
+    assert isinstance(graft, TraderGraft) and graft._htf_ctx is None
+    out = capsys.readouterr().out
+    assert ("[AGENT-LIVE] htf-extremes: unavailable "
+            "(HtfSourceStale: live 1m ends last week)") in out
+    assert "REFUSED" not in out
+    art = json.loads((tmp_path / "t" / hs.ARTIFACT).read_text(encoding="utf-8"))
+    assert art["meta"]["error"].startswith("HtfSourceStale")
+    assert hs.read_artifact(tmp_path / "t") is None
 
 
 def test_no_model_key_at_all_is_a_refusal_with_the_reason(monkeypatch, _wired, capsys):

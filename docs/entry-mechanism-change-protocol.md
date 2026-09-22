@@ -171,8 +171,11 @@ reason. A gap nobody wrote down becomes a claim nobody checked.
 
 ## Known limits of the current harness
 
-- `replay.py`'s window is **09:20 → 11:00** by construction. 08-18's documented DOL touch
-  is at 11:01:26 and therefore cannot be booked; its ENTRY is asserted instead.
+- `replay.py`'s window is **09:20 → 13:00** (`executor.WINDOW_END_ET`, moved from 11:00 on
+  2026-09-09). 08-18's documented DOL touch at 11:01:26 is now inside it.
+- **`exhausted_if` is rejected by the oracle validator** (removed 2026-08-29 — reaching the
+  DOL is the exhaustion; `fixed_backend.validate_oracle_thesis`). The step-3 example above
+  predates that; give `falsified_if` only.
 - §6, §7 and §8's episode-mode re-entry are implemented and tested as modules
   (`episode.py`, `extreme_reject.py`, `takeover.py`) and validated against the named cases
   over real tape, but are **not wired into the Executor's entry path**. Only §8's

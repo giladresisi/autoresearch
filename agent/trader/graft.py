@@ -87,7 +87,7 @@ def trader_enabled() -> bool:
 class TraderGraft:
     def __init__(self, state_dir, backend, *, requirement=EXECUTOR_REQUIREMENT,
                  threaded: bool = True, arrival_latency_sec: float = 0.0,
-                 order_sink=None) -> None:
+                 order_sink=None, htf_extremes=None) -> None:
         """`arrival_latency_sec` withholds the thesis until `armed_at + latency` in BAR
         time. 0.0 (the default, and what live constructs) is cycle-1 behaviour exactly;
         cycle-2 replay sets it to reproduce, deterministically, the wall-clock delay live
@@ -97,8 +97,26 @@ class TraderGraft:
         `MirroringOrderPort` that reports every simulated order event to it, and a
         restart is refused (see `_disarmed`). Without one — every replay, and every
         caller that predates plan 38 — nothing below changes: the Executor gets its
-        default `OrderSim` and no plan on disk can stop the chain arming."""
+        default `OrderSim` and no plan on disk can stop the chain arming.
+
+        `htf_extremes` (plan 40) is `htf_source.load_session_extremes`'s result, computed
+        by the caller from the 1m parquet at the session open. It is written to the run
+        folder once, here, and the plan ticker's part is handed to every Executor."""
         self.state_dir = str(state_dir)
+        self._htf_ctx = None
+        if htf_extremes is not None:
+            from agent.facts.htf_source import executor_context, write_artifact
+            # Neither may cost the session its trader (a live REFUSED start): the
+            # artifact is a record, and a context that cannot be built means T2 selects
+            # exactly as it did before plan 40.
+            try:
+                write_artifact(state_dir, htf_extremes)
+            except Exception:
+                pass
+            try:
+                self._htf_ctx = executor_context(htf_extremes, PLAN_TICKER)
+            except Exception:
+                self._htf_ctx = None
         self._req = requirement
         self._journal = Journal(state_dir)
         self._analyzer = (Analyzer(state_dir, backend, threaded=threaded,
@@ -237,7 +255,8 @@ class TraderGraft:
             self._plans.put(self._plan)
             self._executor = Executor(self.state_dir, self._plan, arm_ts=now,
                                       maintainer=self._maint, requirement=self._req,
-                                      order_port=self._order_port())
+                                      order_port=self._order_port(),
+                                      htf_extremes=self._htf_ctx)
             # The arming bar itself must still get one maintenance pass: under the
             # default switch the block above ran before the Executor existed, so this
             # bar would otherwise be skipped entirely.
@@ -391,6 +410,10 @@ class TraderGraft:
     def store(self):
         """The session store — readable before a plan arms, which is the point."""
         return self._maint.store
+
+    def htf_loaded(self) -> bool:
+        """Plan 40: whether this session's Executors get the HTF extremes."""
+        return self._htf_ctx is not None
 
     @property
     def maintainer(self) -> FactsMaintainer:

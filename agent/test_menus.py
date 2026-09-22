@@ -496,3 +496,82 @@ def test_dol_menu_still_excludes_a_generic_sideless_level():
     m = build_menus(_bundle_with_tdo(115.0), _vd_with_tdo(115.0))
     assert "sideless" not in {e["level"] for e in m["dol"]["UP"]}
     assert "sideless" not in {e["level"] for e in m["dol"]["DOWN"]}
+
+
+# --------------------------------------------------------------------------- #
+# Plan 40: unnested HTF extremes as `extra_pools` (T2 only)                     #
+# --------------------------------------------------------------------------- #
+
+def _htf(name, price, side="above", tier="htf_week"):
+    return (name, price, None, tier, side)
+
+
+def test_build_menus_without_extra_pools_is_byte_identical():
+    levels = {"up_far": (190.0, 189.0, "above", "week", None),
+              "down_band": (70.0, 70.5, "below", "day", None)}
+    for extra in (None, []):
+        a = build_menus(_refit_bundle(levels=levels), _refit_vd(levels))
+        b = build_menus(_refit_bundle(levels=levels), _refit_vd(levels),
+                        extra_pools=extra)
+        assert json.dumps(a, sort_keys=True, default=str) == \
+            json.dumps(b, sort_keys=True, default=str)
+    b1, b2 = _bundle_with_menus(), _bundle_with_menus()
+    assert render_menus_text(b1) == render_menus_text(b2)
+
+
+def test_extra_pool_joins_menu_nearest_first_with_band_tag():
+    levels = {"up_far": (190.0, 189.0, "above", "week", None)}
+    m = build_menus(_refit_bundle(levels=levels), _refit_vd(levels),
+                    extra_pools=[_htf("htf_week_high_x", 170.0),
+                                 _htf("htf_month_high_y", 130.0, tier="htf_month"),
+                                 _htf("htf_week_low_z", 40.0, side="below")])
+    up = m["dol"]["UP"]
+    assert [e["level"] for e in up] == ["htf_month_high_y", "htf_week_high_x", "up_far"]
+    assert up[0]["id"] == "D1" and up[0]["band"] == "BAND" and up[0]["dist_ratio"] == 1.5
+    assert up[1]["band"] == "FAR" and up[1]["tier"] == "htf_week"
+    assert [e["level"] for e in m["dol"]["DOWN"]][0] == "htf_week_low_z"
+
+
+def test_extra_pool_inside_draw_floor_excluded():
+    m = build_menus(_refit_bundle(), _refit_vd({}),
+                    extra_pools=[_htf("htf_week_high_near", 115.0)])   # 15 < floor 20
+    assert "htf_week_high_near" not in {e["level"] for e in m["dol"]["UP"]}
+
+
+def test_extra_pool_equal_to_named_level_is_deduped():
+    levels = {"prev1_week_high": (150.0, 149.0, "above", "week", None)}
+    m = build_menus(_refit_bundle(levels=levels), _refit_vd(levels),
+                    extra_pools=[_htf("htf_week_high_dup", 150.0),
+                                 _htf("htf_week_low_other_side", 150.0, side="below")])
+    up = [e["level"] for e in m["dol"]["UP"]]
+    assert "prev1_week_high" in up and "htf_week_high_dup" not in up
+    # a swept named level at that price keeps the price OUT, the HTF row cannot revive it
+    vd = _refit_vd(levels)
+    vd["levels"]["prev1_week_high"]["swept"] = True
+    m2 = build_menus(_refit_bundle(levels=levels), vd,
+                     extra_pools=[_htf("htf_week_high_dup", 150.0)])
+    assert 150.0 not in {e["price"] for e in m2["dol"]["UP"]}
+
+
+def test_projection_suppressed_by_htf_pool():
+    # Q1 = P1: a FAR htf row (9x) suppresses the projection a FAR named pool would not.
+    m = build_menus(_refit_bundle(), _refit_vd({}),
+                    extra_pools=[_htf("htf_month_high_far", 280.0, tier="htf_month")])
+    up = m["dol"]["UP"]
+    assert [e["level"] for e in up] == ["htf_month_high_far"]
+    assert up[0]["band"] == "FAR"
+
+
+def test_htf_row_inside_the_draw_floor_does_not_suppress_the_projection():
+    m = build_menus(_refit_bundle(), _refit_vd({}),
+                    extra_pools=[_htf("htf_week_running_high", 102.0,
+                                      tier="htf_week_running")])
+    assert [e["level"] for e in m["dol"]["UP"]] == ["projection_up"]
+
+
+def test_projection_kept_when_suppression_off(monkeypatch):
+    import derive_facts as df_mod
+    monkeypatch.setattr(df_mod, "DOL_HTF_SUPPRESSES_PROJECTION", False)
+    m = build_menus(_refit_bundle(), _refit_vd({}),
+                    extra_pools=[_htf("htf_month_high_far", 280.0, tier="htf_month")])
+    assert [e["level"] for e in m["dol"]["UP"]] == ["projection_up", "htf_month_high_far"]

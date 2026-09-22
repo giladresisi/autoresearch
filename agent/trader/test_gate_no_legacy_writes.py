@@ -98,6 +98,17 @@ def test_the_scan_actually_covers_the_new_packages():
     assert any(p.endswith(os.path.join("trader", "executor.py")) for p in mods)
     assert any(p.endswith(os.path.join("facts", "batch.py")) for p in mods)
     assert len(mods) >= 15
+    # Plan 40: the HTF-extremes modules, including the one that writes htf_extremes.json.
+    assert any(p.endswith(os.path.join("facts", "htf_extremes.py")) for p in mods)
+    assert any(p.endswith(os.path.join("facts", "htf_source.py")) for p in mods)
+
+
+def test_the_htf_artifact_is_not_a_legacy_state_file():
+    """Plan 40's run-folder artifact is scanned by the gates above like every other
+    literal under agent/facts; this pins that its NAME is not a legacy file's."""
+    from agent.facts.htf_source import ARTIFACT
+    assert ARTIFACT == "htf_extremes.json"
+    assert ARTIFACT not in FORBIDDEN_FILENAMES
 
 
 def test_session_pipeline_trader_hook_is_additive_not_a_bypass():

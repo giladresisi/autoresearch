@@ -1099,7 +1099,34 @@ class SmtV2Dispatcher:
         # construction failure still RAISES: the caller turns it into a REFUSED start.
         backend = cached_thesis_backend(date, inner=real_thesis_backend(),
                                         allow_calls=True)
-        return TraderGraft(out_dir, backend, order_sink=sink)
+        return TraderGraft(out_dir, backend, order_sink=sink,
+                           htf_extremes=SmtV2Dispatcher._load_htf_extremes(date, out_dir))
+
+    @staticmethod
+    def _load_htf_extremes(date, out_dir=None):
+        """Plan 40: the unnested weekly/monthly extremes from the LIVE 1m parquet, as of
+        the session open (so a restart recomputes the identical list). NON-FATAL: any
+        failure prints one line and returns None, and the Executor then selects T2
+        exactly as it did before plan 40 -- never a REFUSED start."""
+        try:
+            from agent.facts.htf_source import load_session_extremes
+            ext = load_session_extremes(date, source="live")
+        except Exception as exc:
+            print("[AGENT-LIVE] htf-extremes: unavailable (%s: %s)"
+                  % (type(exc).__name__, exc), flush=True)
+            try:
+                from agent.facts.htf_source import write_error_artifact
+                if out_dir is not None:
+                    write_error_artifact(out_dir, date, "live",
+                                         "%s: %s" % (type(exc).__name__, exc))
+            except Exception:
+                pass
+            return None
+        meta = ext.get("meta") or {}
+        print("[AGENT-LIVE] htf-extremes: MNQ %d, MES %d as of %s"
+              % (len(ext.get("MNQ") or ()), len(ext.get("MES") or ()),
+                 meta.get("as_of")), flush=True)
+        return ext
 
     def _build_agent(self, out_dir) -> None:
         """Decide who owns the dispatcher this session (plan 38 D25 — no new flag).

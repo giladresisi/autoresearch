@@ -35,9 +35,23 @@ import pandas as pd
 from agent.derive_facts import build_menus, facts_to_validator_dict
 from agent.facts.assemble import build_bundle
 from agent.facts.detectors._common import normalize
+from agent.facts.htf_extremes import menu_rows, pools_at
 
 #: `build_menus` keys its DOL menus by the plan's own direction words.
 _DIRECTIONS = ("UP", "DOWN")
+
+#: Plan 40 (`l2-target-selection.md` §7a): the unnested weekly/monthly extremes join the
+#: T2 menu at the fill. ON by operator decision (2026-09-22) ahead of the full Wave-3
+#: adoption rule; set False to restore pre-plan-40 T2 exactly (`htf=` is then ignored).
+HTF_EXTREMES_IN_T2 = True
+
+
+def _htf_pools(htf, bars, now, ticker):
+    """The HTF rows usable at `now`, or [] (flag off / no context). May raise; callers
+    decide what a failure costs."""
+    if not HTF_EXTREMES_IN_T2 or not htf:
+        return []
+    return pools_at(htf, (bars or {}).get(ticker), now)
 
 #: One-slot memo of the last bundle built. `select_target` and `level_universe` are
 #: called back to back at the SAME fill instant on the SAME bars dict (plan 35), and
@@ -150,7 +164,8 @@ def _ny_morning_mid(frame, now):
     return out
 
 
-def level_universe(bars: dict, now: pd.Timestamp, ticker: str = "MNQ") -> list:
+def level_universe(bars: dict, now: pd.Timestamp, ticker: str = "MNQ",
+                   htf=None) -> list:
     """The named-level universe behind the T2 menu, as
     [{name, price, swept, depleted, suppressed}].
 
@@ -164,6 +179,10 @@ def level_universe(bars: dict, now: pd.Timestamp, ticker: str = "MNQ") -> list:
     `rth(cur)_low` over completed bars before `now` and the NY-morning block's midpoint
     `ny_morning(cur)_mid`. Empty on degraded input; never raises. FVG edges are not
     included: `bundle.fvg_zones` has no equivalent of the legacy `keep` flag.
+
+    Plan 40: with `HTF_EXTREMES_IN_T2` on and `htf` given, the HTF rows T2 could use are
+    appended flagged `htf: True` (a price already in the universe is not repeated). The
+    initial-target selector draws from none of their families, so they are audit rows.
     """
     out: list = []
     try:
@@ -206,19 +225,34 @@ def level_universe(bars: dict, now: pd.Timestamp, ticker: str = "MNQ") -> list:
                 lv.setdefault("suppressed", False)
                 out.append(lv)
                 have.add(lv["name"])
+        try:
+            prices = {lv["price"] for lv in out}
+            for e in _htf_pools(htf, bars, now, ticker):
+                if e.name in have or float(e.price) in prices:
+                    continue
+                out.append({"name": e.name, "price": float(e.price), "swept": False,
+                            "depleted": False, "suppressed": False, "htf": True})
+                have.add(e.name)
+        except Exception:
+            pass                  # audit rows only: never cost the rest of the universe
     except Exception:
         return []
     return out
 
 
 def select_target(bars: dict, now: pd.Timestamp, direction: str,
-                  ticker: str = "MNQ") -> "dict | None":
+                  ticker: str = "MNQ", htf=None) -> "dict | None":
     """The D1 menu row for `direction` as of strictly before `now`, or None.
 
     `None` is a REAL outcome, not an error: `l2-target-selection.md` §5 measures the
     direction's menu as empty on 6.0% of sessions at 09:20, and an empty menu at the fill
     is the same condition read later. The caller must treat it as "no target", never as
     a reason to skip the fill that already happened.
+
+    `htf` (plan 40) = {"as_of", "extremes", "seed"}: with `HTF_EXTREMES_IN_T2` on, the
+    unnested weekly/monthly extremes still standing at `now` join the menu as
+    `extra_pools` (and suppress the projection, Q1 = P1). A failure computing them costs
+    the HTF rows only -- the menu is built without them and the row carries `htf_error`.
     """
     want = str(direction or "").upper()
     if want not in _DIRECTIONS:
@@ -227,13 +261,21 @@ def select_target(bars: dict, now: pd.Timestamp, direction: str,
         bundle = _bundle_for(bars, now)
         if bundle is None:
             return None
-        menus = build_menus(bundle, _validator_dict_for(bars, now, bundle))
+        extra, htf_error = None, None
+        try:
+            extra = menu_rows(_htf_pools(htf, bars, now, ticker)) or None
+        except Exception as exc:
+            htf_error = f"{type(exc).__name__}: {exc}"
+        menus = build_menus(bundle, _validator_dict_for(bars, now, bundle),
+                            extra_pools=extra)
         rows = (menus.get("dol") or {}).get(want) or ()
         if not rows:
             return None
         # Nearest-first D1 — `build_menus` already emits the rows in that order, which is
         # the same thing `study.target_offline._nearest_first_pick` relies on.
         row = dict(rows[0])
+        if htf_error is not None:
+            row["htf_error"] = htf_error
         return row if row.get("price") is not None else None
     except Exception:
         # Swallowed deliberately; see the module docstring. The Executor records the

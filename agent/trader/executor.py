@@ -111,7 +111,7 @@ _SHORT = ("DOWN", "SHORT")
 class Executor:
     def __init__(self, state_dir, plan: dict, arm_ts: pd.Timestamp, *, recorder=None,
                  store=None, maintainer=None, requirement=EXECUTOR_REQUIREMENT,
-                 ticker: str = "MNQ", order_port=None) -> None:
+                 ticker: str = "MNQ", order_port=None, htf_extremes=None) -> None:
         """`maintainer` is the session-scoped facts owner.
 
         OWNERSHIP RULE, and the reason it exists: whoever CREATED the maintainer drives
@@ -128,8 +128,15 @@ class Executor:
         The default is a plain `OrderSim`, which is what every replay uses; the live
         graft injects a port that mirrors the simulation's events outward. Either way
         the simulation stays the position model — this class never learns which it got.
+
+        `htf_extremes=` (plan 40) is the session's unnested weekly/monthly extremes for
+        THIS ticker, {"as_of", "extremes", "seed"}, computed once at the session open.
+        Forwarded to both fill sites' target selection; `target.HTF_EXTREMES_IN_T2`
+        decides whether it is used. None (every replay before plan 40, every direct-
+        construction test) changes nothing.
         """
         self.state_dir = str(state_dir)
+        self._htf = htf_extremes
         self._plan = dict(plan or {})
         # §8's attempt budget, defaulted AT THE ARM. `derive_plan` does not emit the
         # key, so without this the cap is None and the budget is never enforced.
@@ -1707,7 +1714,8 @@ class Executor:
         again every bar would be a different selector (continuous re-anchoring), which is
         unmeasured — see plan 16's out-of-scope list.
         """
-        pick = select_target(self._bars, now, self._plan.get("direction"), self._ticker)
+        pick = select_target(self._bars, now, self._plan.get("direction"), self._ticker,
+                             **self._htf_kw())
         self._sim.set_target((pick or {}).get("price"))
         # Remembered BEYOND the position's life, unlike `OrderSim`'s copy: the target is
         # the plan's objective, so reaching it ends the plan even if the attempt that
@@ -1722,6 +1730,11 @@ class Executor:
             now=now, plan_id=self._plan.get("plan_id"),
             mechanism=self._state.get("mechanism"), pick=pick)
         self._arm_initial_target(now, pick)
+
+    def _htf_kw(self) -> dict:
+        """`htf=` for the target selectors, passed only when there is one so a stub with
+        the pre-plan-40 signature keeps working."""
+        return {"htf": self._htf} if self._htf is not None else {}
 
     # -- plan 35: the initial-target stage ---------------------------------------- #
 
@@ -1747,7 +1760,8 @@ class Executor:
                 # The universe carries the DOL menu's eligibility marks (swept /
                 # depleted / suppressed-nested) per level; the v2 selector applies them
                 # itself, the same way `derive_facts._dol_menu` does for T2.
-                levels = level_universe(self._bars, now, self._ticker)
+                levels = level_universe(self._bars, now, self._ticker,
+                                        **self._htf_kw())
                 sel = select_initial_target(
                     self._plan.get("direction"), pos.get("entry"), secondary, levels,
                     attempts_used=self._plan.get("attempts_used"))

@@ -308,3 +308,136 @@ def test_no_target_means_no_target_death(tmp_path, monkeypatch):
     ex._set_target_on_fill(now)
     far = _frame([("09:40", 29900.0)])
     assert ex._death(far, pd.Timestamp(f"{DATE} 09:40", tz=TZ), True)[0] is None
+
+
+# --------------------------------------------------------------------------- #
+# Plan 40: unnested HTF extremes at the fill (flag-gated)                       #
+# --------------------------------------------------------------------------- #
+
+from agent.facts.htf_extremes import HtfExtreme, session_as_of        # noqa: E402
+from agent.trader import target as target_mod                         # noqa: E402
+from agent.trader.initial_target import select_initial_target         # noqa: E402
+from agent.trader.target import level_universe                        # noqa: E402
+
+
+def _hx(name, price, side="above", tier="htf_week"):
+    return HtfExtreme(name=name, ticker="MNQ", price=price, side=side, tier=tier,
+                      period="2026-W30", ts=pd.Timestamp("2026-07-20 10:00", tz=TZ))
+
+
+def _htf_ctx(*rows):
+    return {"as_of": session_as_of(DATE), "extremes": list(rows), "seed": None}
+
+
+def test_select_target_ignores_htf_when_flag_off(session_bars, monkeypatch):
+    monkeypatch.setattr(target_mod, "HTF_EXTREMES_IN_T2", False)
+    ctx = _htf_ctx(_hx("htf_week_high_far", 29500.0))
+    assert select_target(session_bars, FILL_TS, "UP", htf=ctx) == \
+        select_target(session_bars, FILL_TS, "UP")
+    names = {lv["name"] for lv in level_universe(session_bars, FILL_TS, htf=ctx)}
+    assert "htf_week_high_far" not in names
+
+
+def test_select_target_uses_htf_and_suppresses_the_projection_when_flag_on(
+        session_bars, monkeypatch):
+    """09-03 09:32:11 UP: D1 is projection_up 29367.0 (no BAND pool). A FAR (3.5x) HTF
+    high suppresses it under Q1 = P1 and becomes D1."""
+    monkeypatch.setattr(target_mod, "HTF_EXTREMES_IN_T2", True)
+    pick = select_target(session_bars, FILL_TS, "UP",
+                         htf=_htf_ctx(_hx("htf_week_high_far", 29500.0)))
+    assert pick["level"] == "htf_week_high_far" and pick["price"] == 29500.0
+    assert pick["band"] == "FAR" and pick["tier"] == "htf_week"
+
+
+def test_select_target_prunes_htf_traded_beyond_since_as_of(session_bars, monkeypatch):
+    """Since the 18:00 open the day's low is 29075.0: a 29100 low was traded beyond
+    (pruned), a 28990 low was not."""
+    monkeypatch.setattr(target_mod, "HTF_EXTREMES_IN_T2", True)
+    ctx = _htf_ctx(_hx("htf_week_low_pruned", 29100.0, side="below"),
+                   _hx("htf_week_low_kept", 28990.0, side="below"))
+    pick = select_target(session_bars, FILL_TS, "DOWN", htf=ctx)
+    base = select_target(session_bars, FILL_TS, "DOWN")
+    assert pick["level"] != "htf_week_low_pruned"
+    # the kept low is the nearest draw unless a named pool sits between it and price
+    if base is None or base["price"] < 28990.0:
+        assert pick["level"] == "htf_week_low_kept"
+    else:
+        assert pick == base
+
+
+def test_select_target_survives_an_htf_failure(session_bars, monkeypatch):
+    monkeypatch.setattr(target_mod, "HTF_EXTREMES_IN_T2", True)
+
+    def _boom(*a, **k):
+        raise RuntimeError("bad htf")
+    monkeypatch.setattr(target_mod, "pools_at", _boom)
+    pick = select_target(session_bars, FILL_TS, "UP", htf=_htf_ctx())
+    base_level = "projection_up"
+    assert pick["level"] == base_level and pick["htf_error"] == "RuntimeError: bad htf"
+
+
+def test_level_universe_carries_htf_rows_and_initial_selector_ignores_them(
+        session_bars, monkeypatch):
+    monkeypatch.setattr(target_mod, "HTF_EXTREMES_IN_T2", True)
+    ctx = _htf_ctx(_hx("htf_week_high_mid", 29400.0))
+    levels = level_universe(session_bars, FILL_TS, htf=ctx)
+    rows = [lv for lv in levels if lv.get("htf")]
+    assert [lv["name"] for lv in rows] == ["htf_week_high_mid"]
+    # The HTF row sits strictly between the fill and the secondary, inside the band,
+    # yet the selector does not draw from its family: identical selection without it.
+    fill, secondary = 29239.75, 29500.0
+    with_htf = select_initial_target("UP", fill, secondary, levels)
+    without = select_initial_target("UP", fill, secondary,
+                                    [lv for lv in levels if not lv.get("htf")])
+    assert with_htf == without
+    assert (with_htf or {}).get("level") != "htf_week_high_mid"
+
+
+def test_executor_forwards_htf_to_both_fill_sites(tmp_path, monkeypatch):
+    ctx = _htf_ctx(_hx("htf_week_high_far", 29500.0))
+    plan = {"plan_id": "p40", "thesis_id": "t", "direction": "UP",
+            "dol": {"level": "x", "price": 29293.0}, "valid_while": [],
+            "armed_classes": ["fvg_return_continuation"], "attempts_used": 0,
+            "blacklist": [], "cooldown_until": None}
+    ex = Executor(tmp_path, plan=plan, arm_ts=pd.Timestamp(f"{DATE} 09:21", tz=TZ),
+                  htf_extremes=ctx)
+    seen = {}
+
+    def _sel(bars, now, direction, ticker="MNQ", htf=None):
+        seen["select_target"] = htf
+        return {"id": "D1", "level": "htf_week_high_far", "price": 29500.0}
+
+    def _uni(bars, now, ticker="MNQ", htf=None):
+        seen["level_universe"] = htf
+        return []
+    monkeypatch.setattr("agent.trader.executor.select_target", _sel)
+    monkeypatch.setattr("agent.trader.executor.level_universe", _uni)
+    ex._bars = {"MNQ": None, "MES": None}
+    now = pd.Timestamp(f"{DATE} 09:33", tz=TZ)
+    ex._sim.fill_market(now, direction="UP", price=29250.0, stop=29225.0,
+                        artifact_id="gapH")
+    ex._set_target_on_fill(now)
+    assert seen["select_target"] is ctx and seen["level_universe"] is ctx
+    assert ex._sim.target == pytest.approx(29500.0)
+
+
+def test_executor_forwards_htf_on_the_resting_fill_path_too(tmp_path, monkeypatch):
+    ctx = _htf_ctx(_hx("htf_week_high_far", 29500.0))
+    plan = {"plan_id": "p40r", "thesis_id": "t", "direction": "UP",
+            "dol": {"level": "x", "price": 29293.0}, "valid_while": [],
+            "armed_classes": ["fvg_return_continuation"], "attempts_used": 0,
+            "blacklist": [], "cooldown_until": None}
+    ex = Executor(tmp_path, plan=plan, arm_ts=pd.Timestamp(f"{DATE} 09:21", tz=TZ),
+                  htf_extremes=ctx)
+    seen = []
+    monkeypatch.setattr("agent.trader.executor.select_target",
+                        lambda *a, **k: seen.append(k.get("htf")) or
+                        {"id": "D1", "level": "htf_week_high_far", "price": 29500.0})
+    ex._bars = {"MNQ": None, "MES": None}
+    ex._sim.place(RestingOrder("UP", 29241.0, 29216.0, "gapR",
+                               pd.Timestamp(f"{DATE} 09:31", tz=TZ)))
+    frame = pd.DataFrame([_bar(29245.0, lo=29238.0, hi=29247.0)],
+                         index=[pd.Timestamp(f"{DATE} 09:32:11", tz=TZ)])
+    ex._drive_orders(pd.Timestamp(f"{DATE} 09:32:11", tz=TZ), frame)
+    assert seen == [ctx]
+    assert ex._sim.target == pytest.approx(29500.0)

@@ -28,7 +28,10 @@ NEW_MODULES = ("agent.trader.retrace", "agent.trader.extreme_reject",
                # Plan 38: the seam a real order leaves through. It must stay unable to
                # name, import or reach anything on the far side of its sink.
                "agent.trader.order_port",
-               "agent.trader.initial_target")
+               "agent.trader.initial_target",
+               # Plan 40: pure by contract -- its disk loader is htf_source, which may
+               # import `paths` precisely because this one may not.
+               "agent.facts.htf_extremes")
 
 FORBIDDEN_IMPORTS = ("live_orders", "smt_state", "paths")
 FORBIDDEN_CALLS = ("set_state_dir", "get_et_now")

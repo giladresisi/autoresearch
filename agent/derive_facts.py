@@ -1180,6 +1180,15 @@ DOL_PROJECTION_WEEKLY_STRETCH_MAX = 4.0
 # every UP fill had no target. Set True to re-arm; the thresholds stay for re-tuning.
 DOL_PROJECTION_STRETCH_GATES_ARMED = False
 
+# Plan 40 (l2-target-selection.md §7a), Q1 = P1: an unnested weekly/monthly extreme
+# (`extra_pools` row, tier "htf_*") on a direction's side that PASSED THE DRAW FLOOR
+# suppresses the projection draw exactly like a BAND named pool does -- "price discovery"
+# means price is beyond every unnested HTF extreme in that direction. Only floor-passing
+# rows count (operator refinement): a running week high right at price is itself
+# ineligible and must not leave the side with no target. Inert unless `extra_pools` is
+# passed, which only the Executor's T2 selection does.
+DOL_HTF_SUPPRESSES_PROJECTION = True
+
 # Predicate-menu generation config: families × level-classes × param variants. Adding a
 # family / level-class / variant here changes the menu WITHOUT touching the generator, and
 # nothing here names a specific level — level names are resolved from the facts at build
@@ -1217,7 +1226,7 @@ def _thesis_side(direction: str) -> str:
 
 def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None, *,
               avg_range_1h=None, day_hi=None, day_lo=None, stretch_mult=None,
-              weekly_mid=None) -> dict:
+              weekly_mid=None, extra_pools=None) -> dict:
     """Eligible target pools per direction: in-facts, unswept AND undepleted, on the
     correct side of current price, AND at least DOL_MIN_DRAW_DISTANCE_PTS away. UP draws sit
     above price (nearest first); DOWN below.
@@ -1245,7 +1254,13 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None
     max(5pts, DOL_MIN_DRAW_RATIO x avg_1h),
     (2) per-entry `dist_ratio` + BAND/FAR tags, and (3) the stretch-gated
     `projection_up`/`projection_down` synthetic price-discovery draw appended when a
-    direction has no named pool inside the band."""
+    direction has no named pool inside the band.
+
+    Plan 40: `extra_pools` is a list of `(name, price, body, tier, side)` rows (the
+    unnested HTF extremes, tier "htf_*") that join the SAME eligibility path -- side, draw
+    floor, band tag, nearest-first. A row whose (side, price) equals a named level's is
+    dropped: the named level's own swept/suppressed treatment governs that price. None
+    (every L1 caller) leaves this function byte-identical."""
     out = {"UP": [], "DOWN": []}
     if not isinstance(now_price, (int, float)):
         return out
@@ -1253,7 +1268,19 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None
     floor = (DOL_MIN_DRAW_DISTANCE_PTS if ar is None
              else max(DOL_MIN_DRAW_DISTANCE_PTS, DOL_MIN_DRAW_RATIO * ar))
     suppressed = suppressed or ()
-    for name, tup in mnq_levels.items():
+    items = list(mnq_levels.items())
+    if extra_pools:
+        named = set()
+        for tup in mnq_levels.values():
+            if isinstance(tup[0], (int, float)) and not isinstance(tup[0], bool):
+                # An open price (side None) draws either way, so it matches both sides.
+                for sd in ((tup[2],) if tup[2] is not None else ("above", "below")):
+                    named.add((sd, float(tup[0])))
+        for (x_name, x_price, x_body, x_tier, x_side) in extra_pools:
+            if (x_side, float(x_price)) in named:
+                continue
+            items.append((x_name, (float(x_price), x_body, x_side, x_tier, None)))
+    for name, tup in items:
         if name in suppressed:
             continue
         price, body, side, tier, _active = tup
@@ -1306,6 +1333,12 @@ def _dol_menu(mnq_levels: dict, vlevels: dict, now_price: float, suppressed=None
                 abs(price - now_price) / ar <= DOL_BAND_MAX_RATIO
                 for (_n, price, _b, _t, _s) in out[direction])
             if has_band_pool:
+                continue
+            # Plan 40 Q1 = P1: out[direction] is already floor-filtered, so this counts
+            # only HTF rows that passed the draw floor (the operator's refinement).
+            if extra_pools and DOL_HTF_SUPPRESSES_PROJECTION and any(
+                    isinstance(_t, str) and _t.startswith("htf_")
+                    for (_n, _p, _b, _t, _s) in out[direction]):
                 continue
             proj = (extreme + DOL_PROJECTION_RATIO * ar if direction == "UP"
                     else extreme - DOL_PROJECTION_RATIO * ar)
@@ -1510,12 +1543,15 @@ def _predicate_menu(mnq_levels: dict, vlevels: dict, now_price: float, day_mid,
     return out
 
 
-def build_menus(bundle: FactsBundle, vd: dict) -> dict:
+def build_menus(bundle: FactsBundle, vd: dict, *, extra_pools=None) -> dict:
     """The S8 menu object: {now_price, dol{UP,DOWN}, predicates{UP,DOWN}} — the structured
     menu shared by the rendered facts text (render_menus_text) and the validator's
     menu-membership check. Deterministic given the same facts. DOL remains MNQ-only (MNQ
     is the decision/executed ticker) — only the PREDICATE menu gains MES/weekly_mid/
-    swept-level/SMT-candidate families (decisions/thesis.md P1-P4 both-asset requirement)."""
+    swept-level/SMT-candidate families (decisions/thesis.md P1-P4 both-asset requirement).
+
+    `extra_pools` (plan 40) is passed to `_dol_menu` and nowhere else; only the Executor's
+    T2 selection supplies it, so L1's menus are unchanged."""
     mnq_levels = (bundle.levels or {}).get("MNQ", {})
     mes_levels = (bundle.levels or {}).get("MES", {})
     vlevels = vd.get("levels", {}) if isinstance(vd, dict) else {}
@@ -1534,7 +1570,7 @@ def build_menus(bundle: FactsBundle, vd: dict) -> dict:
         _stretch = round(max(abs(now_price - _dhi), abs(now_price - _dlo)) / _ar, 4)
     dol = _dol_menu(mnq_levels, vlevels, now_price, suppressed=mnq_suppressed,
                     avg_range_1h=_ar, day_hi=_dhi, day_lo=_dlo, stretch_mult=_stretch,
-                    weekly_mid=bundle.weekly_mid)
+                    weekly_mid=bundle.weekly_mid, extra_pools=extra_pools)
     mnq_swept_at = (bundle.swept_at or {}).get("MNQ", {})
     mes_swept_at = (bundle.swept_at or {}).get("MES", {})
     preds = _predicate_menu(mnq_levels, vlevels, now_price, bundle.day_mid, dol,
