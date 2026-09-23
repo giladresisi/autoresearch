@@ -14,6 +14,12 @@ Usage:
   python trade.py hypothesis             # Force a fresh hypothesis evaluation right now (releases any manual lock)
   python trade.py set-direction down     # Force hypothesis direction + cautious ladder and LOCK it (alias: flip)
   python trade.py unlock                 # Release the manual direction lock (direction kept; auto resets resume)
+  python trade.py agent-direction up     # AGENT brain: kill the plan, re-derive it UP (remaining attempts carry over)
+  python trade.py agent-direction up --reset-attempts   # ... and start from a full attempt budget
+  python trade.py agent-target --list    # AGENT brain: show the current target menu (* = bound, default marked)
+  python trade.py agent-target D2        # Set the bound target to menu row D2 (or a level name)
+  python trade.py agent-target --reset   # Back to the target this fill selected
+  python trade.py agent-target --price 30640 --explicit-price   # A raw price (not a menu row)
   python trade.py pause                  # Suppress new automatic entries (exits stay active)
   python trade.py resume                 # Re-enable automatic entries
   python trade.py start                  # Start orchestrator (keeps position.json; resumes & reconciles any open position)
@@ -209,6 +215,126 @@ def _warn_if_rollover_due() -> None:
         print(banner)
 
 
+def _agent_session_dir():
+    """The RUNNING session's folder — where the graft reads its control file (plan 41)."""
+    import paths
+    from session_times import session_date_str
+    return paths.sessions_dir() / session_date_str()
+
+
+def _agent_menu(state_dir) -> dict:
+    import json
+    try:
+        with open(state_dir / "target_menu.json", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _agent_override(cmd: str, rest: list, *, force: bool) -> None:
+    """`agent-direction` / `agent-target`: queue a command for the running agent.
+
+    Writes ONE record to `<session>/operator_control.jsonl`; the graft applies it on the
+    next bar close and records the verdict in `trader_decisions.jsonl`. This command
+    NEVER touches the broker and never edits the thesis — nothing here places, moves or
+    cancels an order.
+    """
+    from agent.trader.operator_control import (KIND_RESET_TARGET, KIND_SET_DIRECTION,
+                                               KIND_SET_TARGET, OperatorControl)
+    state_dir = _agent_session_dir()
+    ctl = OperatorControl(state_dir)
+    flags = [a for a in rest if a.startswith("--")]
+    pos_args = [a for a in rest if not a.startswith("--")]
+
+    if cmd == "agent-direction":
+        if not pos_args or pos_args[0].lower() not in ("up", "down"):
+            print("ERROR: agent-direction requires up|down "
+                  "(e.g. python trade.py agent-direction up [--reset-attempts])")
+            sys.exit(1)
+        direction = pos_args[0].upper()
+        # A direction change is refused with a position open, by the graft and here.
+        # Checked in BOTH places deliberately: the file is the authority the operator can
+        # see right now, the graft's own check is the one that cannot be raced.
+        import live_orders
+        if not force and (live_orders.get_position() or {}).get("active"):
+            print("ERROR: a position is open — close it first "
+                  "(trade.py close), then set the direction. --force queues it anyway.")
+            sys.exit(1)
+        rec = ctl.append({"kind": KIND_SET_DIRECTION, "direction": direction,
+                          "reset_attempts": "--reset-attempts" in flags,
+                          "created_at": _now_iso()})
+        print(f"Queued: set direction {direction}"
+              + (" (attempts reset)" if rec.get("reset_attempts") else " (attempts carried)")
+              + f" -> {ctl.path}")
+        print("The agent applies it on the next bar close; watch trader_decisions.jsonl "
+              "for the `operator_override` record.")
+        return
+
+    menu = _agent_menu(state_dir)
+    if "--list" in flags:
+        rows = menu.get("rows") or []
+        if not rows:
+            print(f"No target menu recorded yet ({state_dir / 'target_menu.json'}). "
+                  "It is written at each fill.")
+            return
+        active, default = menu.get("active") or {}, menu.get("default") or {}
+        print(f"Menu at {menu.get('time')} | plan {menu.get('plan_id')} "
+              f"| direction {menu.get('direction')} "
+              f"| position {'open' if menu.get('position') else 'none'}")
+        for r in rows:
+            mark = "*" if r.get("price") == active.get("price") else " "
+            dflt = " (default)" if r.get("price") == default.get("price") else ""
+            print(f" {mark} {r.get('id'):>3}  {str(r.get('level')):32s} "
+                  f"{r.get('price')}  {r.get('band')}  {r.get('dist_ratio')}x{dflt}")
+        print(" * = currently bound target")
+        return
+
+    if "--reset" in flags:
+        ctl.append({"kind": KIND_RESET_TARGET, "created_at": _now_iso()})
+        print("Queued: reset the target to this fill's default pick")
+        return
+
+    if not pos_args and "--price" not in flags:
+        print("ERROR: agent-target needs a menu row (e.g. D2 or a level name), "
+              "--price <P> --explicit-price, --reset, or --list")
+        sys.exit(1)
+
+    if "--price" in flags:
+        try:
+            price = float(rest[rest.index("--price") + 1])
+        except (IndexError, ValueError):
+            print("ERROR: --price needs a number")
+            sys.exit(1)
+        if "--explicit-price" not in flags:
+            print("ERROR: a raw price needs --explicit-price as well. Prefer a menu row "
+                  "(trade.py agent-target --list) so the price comes from the level.")
+            sys.exit(1)
+        ctl.append({"kind": KIND_SET_TARGET, "price": price, "created_at": _now_iso()})
+        print(f"Queued: set target {price} (explicit price)")
+        return
+
+    level = pos_args[0]
+    rows = menu.get("rows") or []
+    known = [r for r in rows
+             if str(r.get("id")) == level or str(r.get("level")) == level]
+    if rows and not known and not force:
+        print(f"ERROR: {level!r} is not in the recorded menu "
+              f"({', '.join(str(r.get('id')) + '=' + str(r.get('level')) for r in rows)}). "
+              "The agent re-prices the menu when it applies the command; --force queues "
+              "it anyway.")
+        sys.exit(1)
+    ctl.append({"kind": KIND_SET_TARGET, "level": level, "created_at": _now_iso()})
+    print(f"Queued: set target -> {level}"
+          + (f" ({known[0].get('price')})" if known else ""))
+
+
+def _now_iso() -> str:
+    """Wall clock, legitimately: this is the CLI, outside the bar loop. The graft stamps
+    the BAR instant it applied the record at."""
+    import datetime
+    return datetime.datetime.now().astimezone().isoformat()
+
+
 def main() -> None:
     raw_args = sys.argv[1:]
     if not raw_args:
@@ -340,6 +466,9 @@ def main() -> None:
 
     elif cmd == "unlock":
         live_orders.unlock_direction()
+
+    elif cmd in ("agent-direction", "agent-target"):
+        _agent_override(cmd, args[1:], force=force)
 
     elif cmd == "start":
         import os

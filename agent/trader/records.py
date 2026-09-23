@@ -221,6 +221,18 @@ class DecisionRecorder:
                     "detail": detail or {}})
         self._write(rec)
 
+    def operator_override(self, *, now, plan_id, command, accepted, reason=None,
+                          detail=None, seq=None) -> None:
+        """An operator command drained from `operator_control.jsonl` (plan 41).
+
+        REJECTIONS ARE RECORDED TOO. A refused command is the operator believing the
+        session is in a state it is not; a silent drop would leave them waiting for a
+        direction change that never happened."""
+        rec = self._base("operator_override", now, plan_id, None)
+        rec.update({"command": command, "accepted": bool(accepted),
+                    "reason": reason, "detail": detail or {}, "seq": seq})
+        self._write(rec)
+
     def session_disarmed(self, *, now, reason, plan_id=None, detail=None) -> None:
         """The chain will do nothing more this session. Live only: a restart that found
         a plan already on disk, or a disarm ordered from outside after a trader error."""

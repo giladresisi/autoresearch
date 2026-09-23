@@ -240,6 +240,36 @@ def level_universe(bars: dict, now: pd.Timestamp, ticker: str = "MNQ",
     return out
 
 
+def target_menu(bars: dict, now: pd.Timestamp, direction: str,
+                ticker: str = "MNQ", htf=None) -> list:
+    """The WHOLE ranked menu for `direction` (nearest first), not just D1.
+
+    Plan 41: `select_target` answers "what does the Executor bind", which is row D1. The
+    operator's `trade.py agent-target --list` needs the rows D1 is chosen from, so the
+    override can name one instead of typing a price. Same builder, same eligibility, same
+    order — this is the menu, and `select_target` is its head. Never raises; an empty
+    list is a real outcome (see `select_target`).
+    """
+    want = str(direction or "").upper()
+    if want not in _DIRECTIONS:
+        return []
+    try:
+        bundle = _bundle_for(bars, now)
+        if bundle is None:
+            return []
+        extra = None
+        try:
+            extra = menu_rows(_htf_pools(htf, bars, now, ticker)) or None
+        except Exception:
+            extra = None
+        menus = build_menus(bundle, _validator_dict_for(bars, now, bundle),
+                            extra_pools=extra)
+        rows = (menus.get("dol") or {}).get(want) or ()
+        return [dict(r) for r in rows if r.get("price") is not None]
+    except Exception:
+        return []
+
+
 def select_target(bars: dict, now: pd.Timestamp, direction: str,
                   ticker: str = "MNQ", htf=None) -> "dict | None":
     """The D1 menu row for `direction` as of strictly before `now`, or None.

@@ -42,6 +42,7 @@ class reads through `_store` / `_avg_range_1h`.
 from __future__ import annotations
 
 import math
+import os
 
 import pandas as pd
 
@@ -56,7 +57,7 @@ from agent.trader.order_sim import OrderSim, RestingOrder
 from agent.trader.retrace import RetraceGate
 from agent.trader.takeover import deepest_penetrated, resolve_cooldown_end
 from agent.trader.records import DecisionRecorder
-from agent.trader.target import select_target, level_universe
+from agent.trader.target import select_target, level_universe, target_menu
 from agent.trader.initial_target import (InitialTargetTracker, select_initial_target,
                                          minute_of, variant_label)
 from agent.trader.arbiter import Arbiter
@@ -171,6 +172,12 @@ class Executor:
         self._target_price = None
         self._target_level = None
         self._target_since = None
+        # Plan 41: the DEFAULT pick of the current fill (what `_set_target_on_fill`
+        # chose), kept so `reset_target` can restore it after an operator override, and
+        # the menu that pick came from, so `trade.py agent-target --list` can show the
+        # operator the rows to choose between.
+        self._default_pick = None
+        self._menu_rows = None
         # Plan 35: the initial-target stage of the CURRENT position, or None. Armed at
         # the fill (`_arm_initial_target`), driven on completed 1m bars
         # (`_drive_initial_target`), dropped once the bar containing the exit has been
@@ -1716,6 +1723,13 @@ class Executor:
         """
         pick = select_target(self._bars, now, self._plan.get("direction"), self._ticker,
                              **self._htf_kw())
+        # Plan 41: the rows D1 was chosen from, and D1 itself, kept for the operator's
+        # `agent-target` command (`--list` reads the file, `--reset` restores the pick).
+        # Both are records of THIS fill, so they are replaced at every fill.
+        self._default_pick = dict(pick) if isinstance(pick, dict) else None
+        self._menu_rows = target_menu(self._bars, now, self._plan.get("direction"),
+                                      self._ticker, **self._htf_kw())
+        self._write_menu(now)
         self._sim.set_target((pick or {}).get("price"))
         # Remembered BEYOND the position's life, unlike `OrderSim`'s copy: the target is
         # the plan's objective, so reaching it ends the plan even if the attempt that
@@ -1730,6 +1744,105 @@ class Executor:
             now=now, plan_id=self._plan.get("plan_id"),
             mechanism=self._state.get("mechanism"), pick=pick)
         self._arm_initial_target(now, pick)
+
+    # -- plan 41: the operator's target controls ---------------------------------- #
+
+    MENU_FILE = "target_menu.json"
+
+    def _write_menu(self, now) -> None:
+        """The current menu, the bound target and the fill's default, on disk for
+        `trade.py agent-target --list`. Best-effort: an artifact, never a guard."""
+        try:
+            import json as _json
+            payload = {
+                "time": str(now), "plan_id": self._plan.get("plan_id"),
+                "direction": self._plan.get("direction"),
+                "position": bool(self._sim.position),
+                "default": self._default_pick,
+                "active": {"price": self._target_price, "level": self._target_level},
+                "rows": self._menu_rows or [],
+            }
+            os.makedirs(self.state_dir, exist_ok=True)
+            with open(os.path.join(self.state_dir, self.MENU_FILE), "w",
+                      encoding="utf-8") as fh:
+                _json.dump(payload, fh, default=str, indent=1)
+        except Exception:
+            pass
+
+    def refresh_menu(self, now) -> list:
+        """Re-price the menu at THIS bar and rewrite the file. The rows a fill chose from
+        age: distances change, a level can be swept or fall inside the draw floor. The
+        operator is choosing now, so they see now."""
+        self._menu_rows = target_menu(self._bars, now, self._plan.get("direction"),
+                                      self._ticker, **self._htf_kw())
+        self._write_menu(now)
+        return self._menu_rows
+
+    def target_state(self) -> dict:
+        return {"active_price": self._target_price, "active_level": self._target_level,
+                "default": self._default_pick, "rows": self._menu_rows or [],
+                "has_position": bool(self._sim.position)}
+
+    def set_target_override(self, now, price: float, level=None) -> dict:
+        """Replace the bound target and re-derive the initial stage from it.
+
+        Refused — with the reason, never silently — when there is no position, when the
+        fill selected no default (there is nothing to override or reset to), or when the
+        price sits on the wrong side of the entry: a target behind the entry would be hit
+        immediately, which is an exit dressed as a target.
+        """
+        pos = self._sim.position
+        if pos is None:
+            return {"accepted": False, "reason": "no_position"}
+        if self._default_pick is None:
+            return {"accepted": False, "reason": "no_default_target"}
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            return {"accepted": False, "reason": "bad_price"}
+        entry = pos.get("entry")
+        if entry is not None:
+            ahead = (price > float(entry)) if not self._is_short() else (price < float(entry))
+            if not ahead:
+                return {"accepted": False, "reason": "wrong_side_of_entry",
+                        "detail": {"entry": entry, "price": price}}
+        pick = {"level": level or "operator", "price": price, "operator": True}
+        self._sim.set_target(price)
+        self._target_price = price
+        self._target_level = pick["level"]
+        self._target_since = now
+        self._rec.target_selected(now=now, plan_id=self._plan.get("plan_id"),
+                                  mechanism=self._state.get("mechanism"), pick=pick)
+        self._arm_initial_target(now, pick)
+        self._write_menu(now)
+        return {"accepted": True, "detail": {"price": price, "level": pick["level"]}}
+
+    def reset_target(self, now) -> dict:
+        """Back to the pick this fill made. Same guards as an override."""
+        if self._sim.position is None:
+            return {"accepted": False, "reason": "no_position"}
+        if self._default_pick is None:
+            return {"accepted": False, "reason": "no_default_target"}
+        price = self._default_pick.get("price")
+        if price is None:
+            return {"accepted": False, "reason": "no_default_target"}
+        self._sim.set_target(float(price))
+        self._target_price = float(price)
+        self._target_level = self._default_pick.get("level")
+        self._target_since = now
+        self._rec.target_selected(now=now, plan_id=self._plan.get("plan_id"),
+                                  mechanism=self._state.get("mechanism"),
+                                  pick=dict(self._default_pick))
+        self._arm_initial_target(now, dict(self._default_pick))
+        self._write_menu(now)
+        return {"accepted": True, "detail": {"price": float(price),
+                                             "level": self._target_level}}
+
+    def has_position(self) -> bool:
+        return self._sim.position is not None
+
+    def attempts_used(self) -> int:
+        return int(self._plan.get("attempts_used") or 0)
 
     def _htf_kw(self) -> dict:
         """`htf=` for the target selectors, passed only when there is one so a stub with
