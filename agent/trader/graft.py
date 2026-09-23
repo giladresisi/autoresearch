@@ -46,6 +46,8 @@ from agent.facts.requirements import EXECUTOR_REQUIREMENT
 from agent.facts.store import ensure_coverage
 from agent.trader.analyzer import Analyzer
 from agent.trader.executor import Executor
+from agent.trader.operator_control import (KIND_RESET_TARGET, KIND_SET_DIRECTION,
+                                           KIND_SET_TARGET, OperatorControl)
 from agent.trader.order_port import MirroringOrderPort
 from agent.trader.order_sim import OrderSim
 from agent.trader.plan_store import PlanStore
@@ -148,6 +150,11 @@ class TraderGraft:
         # first one opened. A plan already on disk is the evidence that one existed.
         self._disarmed = None
         self._disarm_recorded = False
+        # Plan 41: the operator's control channel. `_control_seq` is the last record
+        # applied, so a re-read cannot apply one twice and a command written while the
+        # loop was busy is picked up on the next bar close rather than lost.
+        self._control = OperatorControl(state_dir)
+        self._control_seq = 0
         if order_sink is not None and self._plans.all():
             self._disarmed = "restart"
 
@@ -263,6 +270,12 @@ class TraderGraft:
             if not FACTS_ALL_SESSION:
                 self._maint.on_bar(now, bars, closed)
 
+        # Plan 41: the operator's commands are applied HERE — after the plan exists and
+        # before the Executor runs, so a direction change takes effect on this bar rather
+        # than one bar late, and only on a bar close (no wall clock, and never mid-bar).
+        if closed:
+            self._drain_operator(now, bars, thesis)
+
         if self._executor is not None:
             self._executor.on_bar(now, bars, bar_complete=closed)
 
@@ -271,6 +284,118 @@ class TraderGraft:
         # there would skip the very bar the plan armed on.
         if FACTS_ALL_SESSION or self._executor is not None:
             self._maybe_snapshot(now, closed)
+
+    # -- plan 41: operator overrides ------------------------------------------ #
+
+    def _drain_operator(self, now, bars, thesis) -> None:
+        """Apply every control record written since the last drain. Never raises.
+
+        Each record is recorded with BAR time and its verdict, accepted or not: a refused
+        command is the operator believing the session is in a state it is not, and they
+        have to be able to see that in the artifact (and in the log line the recorder
+        announces) rather than wait for a change that never came."""
+        try:
+            pending = self._control.pending(self._control_seq)
+        except Exception:
+            return
+        for rec in pending:
+            # NOT YET DUE: a record carries the wall instant the CLI wrote it, and it is
+            # applied on the first bar at or after that instant. Live this is a no-op
+            # (bar time tracks the clock, so the next bar close is due immediately); in a
+            # REPLAY of the recorded file it is the whole point — without it every
+            # override would land on the replay's first bar close instead of the bar it
+            # was issued on, and the replay would not reproduce the session. Records are
+            # in seq order, which is time order, so the first undue one stops the drain
+            # and leaves itself and its successors pending.
+            if not _due(rec, now):
+                break
+            seq = int(rec.get("seq") or 0)
+            self._control_seq = max(self._control_seq, seq)
+            kind = str(rec.get("kind") or "")
+            try:
+                if kind == KIND_SET_DIRECTION:
+                    res = self._apply_direction(now, bars, thesis, rec)
+                elif kind == KIND_SET_TARGET:
+                    res = self._apply_target(now, rec)
+                elif kind == KIND_RESET_TARGET:
+                    res = (self._executor.reset_target(now)
+                           if self._executor is not None
+                           else {"accepted": False, "reason": "no_plan"})
+                else:
+                    res = {"accepted": False, "reason": f"unknown_command:{kind}"}
+            except Exception as exc:
+                res = {"accepted": False, "reason": f"{type(exc).__name__}: {exc}"}
+            self._rec.operator_override(
+                now=now, plan_id=(self._plan or {}).get("plan_id"), command=kind,
+                accepted=bool(res.get("accepted")), reason=res.get("reason"),
+                detail={**(res.get("detail") or {}),
+                        **{k: v for k, v in rec.items() if k not in ("kind", "seq")}},
+                seq=seq)
+
+    def _apply_direction(self, now, bars, thesis, rec) -> dict:
+        """Kill the standing plan and derive a new one in the requested direction.
+
+        A NEW plan, not a mutated one: the plan id hashes its arm instant, `valid_while`
+        and `armed_classes` are derived from the thesis direction, and the Executor binds
+        against the plan it was constructed with. Mutating the dict in place would leave
+        an Executor whose state (bindings, cooldown, blacklist) belongs to the other side.
+
+        ATTEMPTS CARRY OVER by default (operator's call): a wrong-way morning must not be
+        able to turn into six stop-outs. `reset_attempts` asks for a fresh budget.
+        """
+        want = str(rec.get("direction") or "").upper()
+        if want not in ("UP", "DOWN"):
+            return {"accepted": False, "reason": "bad_direction"}
+        if thesis is None or self._plan is None:
+            return {"accepted": False, "reason": "no_plan"}
+        if self._executor is not None and self._executor.has_position():
+            return {"accepted": False, "reason": "open_position"}
+        if str(self._plan.get("direction") or "").upper() == want:
+            return {"accepted": False, "reason": "already_that_direction"}
+
+        used = 0 if rec.get("reset_attempts") else (
+            self._executor.attempts_used() if self._executor is not None
+            else int(self._plan.get("attempts_used") or 0))
+        old_id = self._plan.get("plan_id")
+        if self._executor is not None:
+            self._executor.kill_plan(now, "operator_direction_change",
+                                     {"to": want, "seq": rec.get("seq")})
+        plan = self._derive({**dict(thesis), "bias": want}, bars, now)
+        if plan is None:
+            return {"accepted": False, "reason": "derive_failed"}
+        plan["attempts_used"] = int(used)
+        plan["operator_direction"] = want
+        plan["replaces_plan_id"] = old_id
+        self._plan = plan
+        self._plans.put(plan)
+        self._executor = Executor(self.state_dir, plan, arm_ts=now,
+                                  maintainer=self._maint, requirement=self._req,
+                                  order_port=self._order_port(),
+                                  htf_extremes=self._htf_ctx)
+        return {"accepted": True,
+                "detail": {"direction": want, "plan_id": plan.get("plan_id"),
+                           "replaces_plan_id": old_id, "attempts_used": int(used)}}
+
+    def _apply_target(self, now, rec) -> dict:
+        """Set the bound target. `level` names a row of the CURRENT menu (re-priced at
+        this bar); `price` is the explicit-price path the CLI gates behind a flag."""
+        if self._executor is None:
+            return {"accepted": False, "reason": "no_plan"}
+        price = rec.get("price")
+        level = rec.get("level")
+        if price is None and level:
+            rows = self._executor.refresh_menu(now)
+            match = next((r for r in rows
+                          if str(r.get("id")) == str(level)
+                          or str(r.get("level")) == str(level)), None)
+            if match is None:
+                return {"accepted": False, "reason": "level_not_in_menu",
+                        "detail": {"level": level,
+                                   "menu": [r.get("level") for r in rows]}}
+            price, level = match.get("price"), match.get("level")
+        if price is None:
+            return {"accepted": False, "reason": "no_price"}
+        return self._executor.set_target_override(now, price, level=level)
 
     def _maybe_snapshot(self, now, closed) -> None:
         """One store snapshot per session date, on a bar close.
@@ -418,6 +543,24 @@ class TraderGraft:
     @property
     def maintainer(self) -> FactsMaintainer:
         return self._maint
+
+
+def _due(rec: dict, now) -> bool:
+    """Is this control record due at bar instant `now`?
+
+    A record with no (or an unparseable) `created_at` is due immediately: the stamp is a
+    replay-fidelity aid, and a missing one must never strand an operator's command in a
+    live session."""
+    raw = rec.get("created_at")
+    if not raw:
+        return True
+    try:
+        ts = pd.Timestamp(raw)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(now.tz)
+        return ts <= now
+    except Exception:
+        return True
 
 
 def _as_frame(df):

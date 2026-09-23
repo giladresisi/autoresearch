@@ -88,8 +88,23 @@ def _prompt_parts():
 
 
 def build_replay_trader(date, run_dir, *, allow_calls, arrival_latency_sec,
-                        arm_hhmm=None, thesis=None, gate_arrival=True):
+                        arm_hhmm=None, thesis=None, gate_arrival=True,
+                        operator_control=None):
     from agent.trader.graft import TraderGraft
+
+    # Plan 41: reproduce a session's OPERATOR OVERRIDES. The graft drains its control
+    # file from its own state dir, so a recorded file is COPIED into the run folder
+    # before construction -- never read in place, because a replay must not be able to
+    # write anything into a live session's directory.
+    if operator_control:
+        try:
+            import shutil
+            from agent.trader.operator_control import CONTROL_FILE
+            os.makedirs(run_dir, exist_ok=True)
+            shutil.copyfile(str(operator_control), os.path.join(run_dir, CONTROL_FILE))
+        except Exception as exc:
+            raise RuntimeError(f"could not stage the operator control file "
+                               f"{operator_control}: {type(exc).__name__}: {exc}")
 
     if thesis is not None:
         # The oracle path never constructs a cache: the recorder's content key hashes
@@ -238,7 +253,8 @@ def _refuse_a_dirty_run_dir(run_dir: str) -> None:
 
 def run_replay(dates, *, allow_calls=False,
                arrival_latency_sec=DEFAULT_ARRIVAL_LATENCY_SEC, arm_hhmm=None,
-               thesis=None, gate_arrival=True, window_end=None):
+               thesis=None, gate_arrival=True, window_end=None,
+               operator_control=None):
     """Replay each date's trading session.
 
     Returns `{date: {"run_dir", "cache", "last_bar", "legacy"}}`:
@@ -306,7 +322,8 @@ def run_replay(dates, *, allow_calls=False,
             graft = build_replay_trader(d, run_dir, allow_calls=allow_calls,
                                         arrival_latency_sec=arrival_latency_sec,
                                         arm_hhmm=arm_hhmm, thesis=thesis,
-                                        gate_arrival=gate_arrival)
+                                        gate_arrival=gate_arrival,
+                                        operator_control=operator_control)
             _c["backend"] = graft._analyzer._backend
             _c["graft"] = graft
             return graft

@@ -42,6 +42,10 @@ def main() -> int:
                     help="path to a JSON oracle thesis")
     ap.add_argument("--no-arrival-gate", action="store_true",
                     help="oracle runs only: make the thesis visible at the arm instant")
+    ap.add_argument("--operator-control", default=None, metavar="FILE",
+                    help="a recorded operator_control.jsonl to replay (plan 41): the "
+                         "session's direction/target overrides are applied at the same "
+                         "bars they were applied live")
     ap.add_argument("--window-end", default=None, metavar="HH:MM",
                     help="override the window end (default 13:00; the fidelity "
                          "fixtures were calibrated at 11:00)")
@@ -86,7 +90,8 @@ def main() -> int:
     res = run_replay(dates, allow_calls=args.seed,
                      arrival_latency_sec=args.arrival_latency_sec,
                      arm_hhmm=args.arm_hhmm, thesis=oracle,
-                     gate_arrival=not args.no_arrival_gate, window_end=window_end)
+                     gate_arrival=not args.no_arrival_gate, window_end=window_end,
+                     operator_control=args.operator_control)
 
     # The P&L, printed per date and then totalled. Best-effort per date: a report that
     # cannot be built must not hide the run that succeeded, but it must say so rather
