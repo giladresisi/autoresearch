@@ -286,7 +286,8 @@ def _agent_override(cmd: str, rest: list, *, force: bool) -> None:
             dflt = " (default)" if r.get("price") == default.get("price") else ""
             print(f" {mark} {r.get('id'):>3}  {str(r.get('level')):32s} "
                   f"{r.get('price')}  {r.get('band')}  {r.get('dist_ratio')}x{dflt}")
-        print(" * = currently bound target")
+        print(" * = currently bound target | R rows = running day/week/6h-block levels "
+              "(display only, bindable by id)")
         return
 
     if "--reset" in flags:
@@ -328,6 +329,51 @@ def _agent_override(cmd: str, rest: list, *, force: bool) -> None:
           + (f" ({known[0].get('price')})" if known else ""))
 
 
+#: Order commands whose broker-result lines are mirrored into the session's signals.log.
+_ORDER_CMDS = ("up", "down", "cancel", "move", "update-sl", "close")
+_BROKER_LINE_PREFIXES = ("[PMT]", "[FILL-WARN]")
+
+
+class _BrokerLineTee:
+    """stdout pass-through that also appends the broker-result lines to the session's
+    `signals.log`. The orchestrator's relay only captures ITS process's stdout, so an
+    order sent from this CLI (2026-09-23: the manual close) otherwise left no `[PMT]`
+    trace in the session record. Best-effort: a failed append never fails the order."""
+
+    def __init__(self, stream, log_path, cmd: str) -> None:
+        self._stream, self._path, self._cmd, self._buf = stream, log_path, cmd, ""
+
+    def write(self, text):
+        n = self._stream.write(text)
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.startswith(_BROKER_LINE_PREFIXES):
+                try:
+                    from orchestrator.output import TimestampedFileSink
+                    TimestampedFileSink(self._path).write(
+                        f"{line} (trade.py {self._cmd})\n")
+                except Exception:
+                    pass
+        return n
+
+    def flush(self):
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _mirror_broker_lines(cmd: str) -> None:
+    """Install `_BrokerLineTee` when today's session folder exists (never creates it)."""
+    try:
+        session_dir = _agent_session_dir()
+        if session_dir.is_dir():
+            sys.stdout = _BrokerLineTee(sys.stdout, session_dir / "signals.log", cmd)
+    except Exception:
+        pass
+
+
 def _now_iso() -> str:
     """Wall clock, legitimately: this is the CLI, outside the bar loop. The graft stamps
     the BAR instant it applied the record at."""
@@ -347,6 +393,9 @@ def main() -> None:
 
     import live_orders
     import smt_state
+
+    if cmd in _ORDER_CMDS:
+        _mirror_broker_lines(cmd)
 
     if cmd in ("up", "down"):
         direction = "long" if cmd == "up" else "short"

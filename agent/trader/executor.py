@@ -57,7 +57,7 @@ from agent.trader.order_sim import OrderSim, RestingOrder
 from agent.trader.retrace import RetraceGate
 from agent.trader.takeover import deepest_penetrated, resolve_cooldown_end
 from agent.trader.records import DecisionRecorder
-from agent.trader.target import select_target, level_universe, target_menu
+from agent.trader.target import select_target, level_universe, target_menu, running_rows
 from agent.trader.initial_target import (InitialTargetTracker, select_initial_target,
                                          minute_of, variant_label)
 from agent.trader.arbiter import Arbiter
@@ -1727,9 +1727,7 @@ class Executor:
         # `agent-target` command (`--list` reads the file, `--reset` restores the pick).
         # Both are records of THIS fill, so they are replaced at every fill.
         self._default_pick = dict(pick) if isinstance(pick, dict) else None
-        self._menu_rows = target_menu(self._bars, now, self._plan.get("direction"),
-                                      self._ticker, **self._htf_kw())
-        self._write_menu(now)
+        self._menu_rows = self._build_menu_rows(now)
         self._sim.set_target((pick or {}).get("price"))
         # Remembered BEYOND the position's life, unlike `OrderSim`'s copy: the target is
         # the plan's objective, so reaching it ends the plan even if the attempt that
@@ -1740,6 +1738,8 @@ class Executor:
             self._target_price = float(price)
             self._target_level = (pick or {}).get("level")
             self._target_since = now
+        # After the bound target is assigned, so `active` names it (2026-09-23 D2).
+        self._write_menu(now)
         self._rec.target_selected(
             now=now, plan_id=self._plan.get("plan_id"),
             mechanism=self._state.get("mechanism"), pick=pick)
@@ -1773,10 +1773,18 @@ class Executor:
         """Re-price the menu at THIS bar and rewrite the file. The rows a fill chose from
         age: distances change, a level can be swept or fall inside the draw floor. The
         operator is choosing now, so they see now."""
-        self._menu_rows = target_menu(self._bars, now, self._plan.get("direction"),
-                                      self._ticker, **self._htf_kw())
+        self._menu_rows = self._build_menu_rows(now)
         self._write_menu(now)
         return self._menu_rows
+
+    def _build_menu_rows(self, now) -> list:
+        """The DOL menu (D rows, what the fill chose from) plus the running day / week /
+        6h-block levels as display-only R rows, bindable by id through `agent-target`.
+        The R rows never reach `select_target`."""
+        direction = self._plan.get("direction")
+        rows = target_menu(self._bars, now, direction, self._ticker, **self._htf_kw())
+        return rows + running_rows(self._bars, now, direction, self._ticker,
+                                   exclude_prices=[r.get("price") for r in rows])
 
     def target_state(self) -> dict:
         return {"active_price": self._target_price, "active_level": self._target_level,

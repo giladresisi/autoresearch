@@ -270,6 +270,61 @@ def target_menu(bars: dict, now: pd.Timestamp, direction: str,
         return []
 
 
+#: The running families `running_rows` shows: the day and week extremes/mids plus every
+#: `level_universe` row flagged `running` (the in-progress 6h block, rth(cur), the
+#: NY-morning mid).
+_RUNNING_NAMES = ("day_high", "day_low", "day_mid", "week_high", "week_low", "week_mid")
+
+
+def running_rows(bars: dict, now: pd.Timestamp, direction: str,
+                 ticker: str = "MNQ", exclude_prices=()) -> list:
+    """DISPLAY rows for `trade.py agent-target --list` (2026-09-23 operator comment): the
+    running day / week / 6h-block levels ahead of price in `direction`, nearest first,
+    ids R1..Rn, `band` "RUNNING".
+
+    They are appended to the printed menu only, so an operator can bind one by id. They
+    never enter `build_menus` and `select_target` never sees them: the automatic T2 is
+    unchanged. No draw floor is applied -- the operator is choosing, and the Executor's
+    override guard still refuses a price behind the entry. A price already on the DOL menu
+    (`exclude_prices`) is not repeated. Never raises."""
+    want = str(direction or "").upper()
+    if want not in _DIRECTIONS:
+        return []
+    try:
+        bundle = _bundle_for(bars, now)
+        if bundle is None:
+            return []
+        vd = _validator_dict_for(bars, now, bundle)
+        now_price = vd.get("now_price")
+        if not isinstance(now_price, (int, float)):
+            now_price = bundle.now_price
+        if not isinstance(now_price, (int, float)):
+            return []
+        ar = (bundle.avg_range_1h or {}).get(ticker)
+        ar = ar if isinstance(ar, (int, float)) and ar > 0 else None
+        seen = {float(p) for p in exclude_prices if isinstance(p, (int, float))}
+        picked = []
+        for lv in level_universe(bars, now, ticker):
+            if lv["name"] not in _RUNNING_NAMES and not lv.get("running"):
+                continue
+            price = float(lv["price"])
+            ahead = price < now_price if want == "DOWN" else price > now_price
+            if not ahead or price in seen:
+                continue
+            seen.add(price)
+            picked.append((lv["name"], price))
+        picked.sort(key=lambda e: -e[1] if want == "DOWN" else e[1])
+        side = "below" if want == "DOWN" else "above"
+        return [{"id": f"R{i + 1}", "level": name, "price": price, "body": None,
+                 "tier": "running", "side": side,
+                 "dist_ratio": (round(abs(price - now_price) / ar, 4)
+                                if ar is not None else None),
+                 "band": "RUNNING"}
+                for i, (name, price) in enumerate(picked)]
+    except Exception:
+        return []
+
+
 def select_target(bars: dict, now: pd.Timestamp, direction: str,
                   ticker: str = "MNQ", htf=None) -> "dict | None":
     """The D1 menu row for `direction` as of strictly before `now`, or None.
