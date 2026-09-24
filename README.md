@@ -56,12 +56,37 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 2. Install dependencies
 uv sync
 
+# 2b. Install the Chromium build Playwright drives (the pip package does not include it;
+#     needed by reports/ — Tradovate / PickMyTrade report downloads)
+uv run playwright install chromium
+# PickMyTrade's login has a reCAPTCHA: log in ONCE per machine with a visible browser;
+# the saved profile (<global>/general/browser_profiles/pickmytrade) keeps later runs headless
+uv run reports/get_pickmytrade_alerts.py --headed
+
 # 3. Download and cache ticker data (one-time, takes a few minutes)
 uv run prepare.py
 
 # 4. Run a single backtest manually to verify setup
 uv run train.py
 ```
+
+### Prerequisite for unattended session analysis: one headed PickMyTrade login
+
+The `session-analysis` skill (through `get-reports`) downloads the PickMyTrade alerts CSV
+with a HEADLESS browser. PickMyTrade's login page shows a reCAPTCHA, which a headless
+browser cannot solve. So on every new machine, and again whenever the saved login expires,
+do one headed login **with the user present**, before relying on session-analysis:
+
+```bash
+uv run reports/get_pickmytrade_alerts.py --headed
+```
+
+A browser window opens. The user logs in and solves the reCAPTCHA, and the script then
+exports the CSV and exits. The login is kept in the persistent profile
+`<global>/general/browser_profiles/pickmytrade`, so later headless runs (`needs_login=False`)
+complete without the user. If a headless run instead reports that the saved profile is not
+logged in, the session has expired: repeat the headed login. Always use the project's `uv` /
+`.venv` Python, since the system Python does not have playwright.
 
 ### Troubleshooting: `import ssl` fails / `_ssl.pyd` blocked
 
