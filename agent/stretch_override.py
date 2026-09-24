@@ -23,6 +23,9 @@ session that ran the OTHER way 15/22 (68%) against a 53% base rate; > 30 min giv
 reverses 10/23 (43%) and >= 400 pts 14/34 (41%). `SIZE_FLOOR` is therefore a weak floor that
 keeps noise out, and must never become the discriminating term.
 
+**ARM 2 IS OFF since 2026-09-24** (`HALTED_ARM_ENABLED`): only arm 1 fires; a stale
+stretch falls through to the model. The two-arm description below is kept for the switch.
+
 **TWO ARMS since 2026-09-17.** (1) STILL EXTENDING: the extreme is <= `AGE_MAX_MIN` old,
 whatever the retrace. (2) HALTED BUT UNRETRACED: the extreme is older than that — with NO
 upper bound, 2.5 hours is fine — and price has given back <= `RETRACE_MAX_PCT` of the
@@ -74,6 +77,15 @@ AGE_MAX_MIN = 30.0
 #: to noise. NOT FITTED — nothing here can distinguish 5 from 10 from 15.
 RETRACE_MAX_PCT = 10.0
 
+#: Arm 2 switch. **OFF since 2026-09-24 by user decision**, after the 692-session study
+#: (`<global>/studies/premove_last_moment_direction/`, 2024-01..2026-09) found the days
+#: this arm fires on ALONE continued 27/41 (66%) on c10 and 63% on fe13, in every window
+#: (recent 12/18, older 15/23, D0 5/8) — it forced the wrong direction ~2 times in 3. The
+#: mid-retrace study (`<global>/studies/premove_mid_retrace/`) found no retrace edge on
+#: stale legs either. OFF means those days fall through to the L1 model like any other
+#: day; nothing is forced the other way. Set True to restore the 2026-09-17 behaviour.
+HALTED_ARM_ENABLED = False
+
 #: A noise floor only, and it must stay one. D0 measured every size gate as HARMFUL:
 #: `age<=30 AND size>=300` gives 61% and `>=450` gives 50%, against 68% for age alone —
 #: the same inversion the >=450/>=400 buckets showed (43%/41%). 2026-09-01 reads 488.25 on
@@ -121,6 +133,8 @@ def stretch_override(session_stretch, ticker: str = DECIDING_TICKER) -> dict:
     # has NO clock — see the module docstring for why neither is a special case of the other.
     if age <= AGE_MAX_MIN:
         how = "still extending"
+    elif not HALTED_ARM_ENABLED:
+        return _no(f"age {age}m > {AGE_MAX_MIN}m (stretch halted; arm 2 disabled)", st)
     elif retr <= RETRACE_MAX_PCT:
         how = "halted but unretraced"
     else:
