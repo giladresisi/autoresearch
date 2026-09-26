@@ -478,9 +478,11 @@ class StubBackend(Backend):
 # --------------------------------------------------------------------------- #
 # .env loading — shell-set vars WIN (setdefault semantics), key never logged.  #
 # --------------------------------------------------------------------------- #
-def load_env_file(path: str) -> None:
+def read_env_file(path: str) -> dict:
+    """The KEY=value pairs of a .env file, without touching os.environ ({} if absent)."""
+    out: dict = {}
     if not os.path.exists(path):
-        return
+        return out
     with open(path, encoding="utf-8") as fh:
         for raw in fh:
             line = raw.strip()
@@ -493,7 +495,13 @@ def load_env_file(path: str) -> None:
             if len(val) >= 2 and val[0] in "\"'" and val[-1] == val[0]:
                 val = val[1:-1]
             if key:
-                os.environ.setdefault(key, val)  # shell-set value takes precedence
+                out[key] = val
+    return out
+
+
+def load_env_file(path: str) -> None:
+    for key, val in read_env_file(path).items():
+        os.environ.setdefault(key, val)  # shell-set value takes precedence
 
 
 def make_backend(backend: Optional[str] = None, model: Optional[str] = None,

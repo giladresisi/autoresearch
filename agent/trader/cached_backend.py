@@ -143,15 +143,29 @@ def backend_name() -> str:
     two disagreed the replay would miss every live recording and silently re-call the
     model — which is exactly what happened when live ran OpenRouter while the recordings
     had been made through Anthropic. Keys, not clients: nothing here constructs a backend.
+
+    Reads through `_env`, i.e. the worktree .env as well: `make_backend` loads that file
+    before resolving, so a `--seed` recording is keyed with it, and a warm replay that
+    read only the shell keyed ":" and missed every recording (found 2026-09-26).
     """
-    explicit = (_os.environ.get("ACT_TRADER_BACKEND") or "").strip()
+    explicit = _env("ACT_TRADER_BACKEND").strip()
     if explicit:
         return explicit
-    if _os.environ.get("OPENROUTER_API_KEY"):
+    if _env("OPENROUTER_API_KEY"):
         return "openrouter"
-    if _os.environ.get("ANTHROPIC_API_KEY"):
+    if _env("ANTHROPIC_API_KEY"):
         return "anthropic"
     return ""
+
+
+def _env(name: str) -> str:
+    """`name` as `make_backend` would see it: the shell's value when set (even empty —
+    `load_env_file` is setdefault), else the worktree .env's, else "". Never mutates
+    os.environ, so resolving a cache key cannot leak the file's keys into the process."""
+    if name in _os.environ:
+        return _os.environ[name] or ""
+    from agent.run_agent import REPO_ROOT, read_env_file
+    return read_env_file(_os.path.join(REPO_ROOT, ".env")).get(name) or ""
 
 
 def real_thesis_backend():
@@ -181,7 +195,7 @@ def prompt_parts():
     backend = backend_name()
     # Direct attribute access, NOT getattr-with-a-default: a renamed task prompt must
     # fail loudly rather than silently weaken every recording's invalidation.
-    model = _os.environ.get("ACT_TRADER_MODEL") or ra.DEFAULT_MODELS.get(backend, "")
+    model = _env("ACT_TRADER_MODEL") or ra.DEFAULT_MODELS.get(backend, "")
     return (ra.build_system_prompt, ra._TASK_THESIS,
             (lambda facts: {}), "%s:%s" % (backend, model))
 
