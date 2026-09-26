@@ -79,6 +79,9 @@ lists what must NOT be built.
   every retry becomes a code-built `ledger_fallback` thesis (verdict and `thesis_source`
   say so; never written to the thesis cache) instead of the NEUTRAL failsafe. `true`
   restores the failsafe. A clean model NEUTRAL is unaffected.
+- `ACT_THESIS_TIEBREAK` is **ON by default**: the Analyzer turns a NEUTRAL thesis into a
+  direction (`agent/trader/tiebreak.py`, applied AFTER the thesis cache; `thesis_source:
+  "tiebreak"` + `tiebreak_rule`). `0` keeps NEUTRAL days dark.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.

@@ -228,7 +228,11 @@ def bundle_to_l1_view(bundle) -> tuple:
     vd["smt_candidates"] = [
         {"level": c.get("level"), "tier": c.get("tier"),
          "swept_ticker": c.get("swept_ticker"), "unswept_ticker": c.get("unswept_ticker"),
-         "meaningful": bool(c.get("meaningful"))}
+         "meaningful": bool(c.get("meaningful")),
+         # NEUTRAL tie-break inputs (agent/trader/tiebreak.py) -- not read by scoring.
+         "side": c.get("side"), "promoted_from": c.get("promoted_from"),
+         "swept_at": str(c["swept_at"]) if c.get("swept_at") is not None else None,
+         "suggested_exhausted": bool(c.get("suggested_exhausted"))}
         for c in (bundle.smt_candidates or [])
     ]
     # 2026-08-02 thesis.md §2.1e promotion: the CURRENT week's own high/low, for the

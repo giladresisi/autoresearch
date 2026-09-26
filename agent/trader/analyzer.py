@@ -421,6 +421,9 @@ class Analyzer:
             result = self._backend(facts_text, context_text, facts,
                                    evidence_magnitude=magnitude)
             thesis, meta = _split_result(result)
+            tied = self._tiebreak(thesis, meta, facts, magnitude, health)
+            if tied is not None:
+                thesis, meta = tied, {**meta, "tiebreak": tied["tiebreak_rule"]}
             with self._lock:
                 self._health = health
                 self._thesis = thesis if isinstance(thesis, dict) else None
@@ -432,6 +435,26 @@ class Analyzer:
                 self._thesis = None
                 self._meta = {}
                 self._save()
+            return None
+
+    def _tiebreak(self, thesis, meta, facts, magnitude, health) -> "dict | None":
+        """The NEUTRAL tie-break (agent/trader/tiebreak.py), or None to keep `thesis`.
+
+        Skipped on a degraded view (never invent a direction from a broken snapshot) and
+        on a failsafe the operator asked for (`ACT_THESIS_FAILSAFE=true`): that flag means
+        "a failed call is a dark day". With the flag off a failsafe only arises when the
+        ledger fallback could not build, and the tie-break may still find a side.
+        Total: any error keeps the thesis as it came."""
+        try:
+            from agent.trader.tiebreak import tiebreak_enabled, tiebreak_thesis
+            if not tiebreak_enabled() or stands(thesis) or (health or {}).get("degraded"):
+                return None
+            if str((meta or {}).get("verdict") or "").lower() == "failsafe":
+                from agent.run_agent import thesis_failsafe_enabled
+                if thesis_failsafe_enabled():
+                    return None
+            return tiebreak_thesis(thesis, facts, magnitude)
+        except Exception:
             return None
 
     def _override_thesis(self, facts: dict, now) -> "dict | None":
