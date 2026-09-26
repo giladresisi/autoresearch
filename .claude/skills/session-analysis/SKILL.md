@@ -296,7 +296,10 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
 10. <SESSION>\plans.json   (LIVE plan(s) derived from the thesis)
     {plan_id: {direction, dol, valid_while (falsifiers), armed_classes, attempts_used,
     cooldown_until, created_at, last_trend}}. armed_classes MUST be exactly the market set
-    [fvg_1m_post_extreme, extreme_reject_close, tmso_reject]; anything else is [CRITICAL].
+    [fvg_1m_post_extreme, extreme_reject_close, tmso_reject, fvg_1h_reject, micro_smt_reject]
+    (updated 2026-09-26: `fvg_1h_reject` was already unconditionally armed and this line had
+    fallen behind; `micro_smt_reject` (O3) joined it at adoption, both flag-gated ON by
+    default — see `l2-mechanisms.md` §7a); anything else is [CRITICAL].
 
 11. <SESSION>\trader_decisions.jsonl   (LIVE Executor decision log — the graft's own truth)
     JSONL. Kinds: fill {mechanism, price, direction, artifact_id}, target_selected {pick
@@ -304,7 +307,10 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
     cancel_entry_cutoff, plan_dead {reason: target_reached | hard_close | falsified |
     attempts_exhausted | ..., detail}, would_have_falsified (falsifier met, NOT acted on —
     plans no longer die on falsification), would_have_killed (dol_reached, recorded only),
-    veto / no-move-zone notes. This is the primary record of WHY each entry/exit happened.
+    veto / no-move-zone notes — including `reason: micro_smt_exit_unwired` (O4 would have
+    market-closed the position but the live order port has no `flatten`; replay-only, one
+    deduped record per position — see `l2-mechanisms.md` §7b). This is the primary record
+    of WHY each entry/exit happened.
 
 12. <REPLAY>\trader_decisions.jsonl, <REPLAY>\plans.json, <REPLAY>\thesis_state.json
     (may not exist if the replay failed / dark day)

@@ -41,7 +41,8 @@ MNQ_PNL_PER_POINT = 2.0
 #: trade closed by any of them used to read as UNCLOSED here. Order matters nowhere —
 #: membership does.
 CLOSING = ("stop_out", "take_profit", "mark", "hard_close", "user_close",
-           "initial_opp_close", "stop_out_initial")
+           "initial_opp_close", "stop_out_initial",
+           "micro_smt_exit")           # O4, ADOPTED (`agent/trader/micro_smt.py`), flag-gated ON
 _LONG = ("UP", "LONG")
 #: Plan 35: the per-trade observations the Executor records between a fill and its
 #: exit. `cf_*` are what actions A / B WOULD have done, observed under any action.

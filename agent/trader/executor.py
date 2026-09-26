@@ -62,6 +62,7 @@ from agent.trader.initial_target import (InitialTargetTracker, select_initial_ta
                                          minute_of, variant_label)
 from agent.trader.arbiter import Arbiter
 from agent.trader.market_mechanisms import MarketMechanisms
+import agent.trader.micro_smt as micro_smt
 
 # l2-mechanisms.md §9 starting values.
 SETTLE_UNTIL_SECONDS = 30            # settle window ends at 09:30:30
@@ -197,6 +198,10 @@ class Executor:
         # One-shot: the falsifier is recorded the FIRST time it fires and never again.
         # It is not a state change, so re-recording it every bar would bury the session.
         self._falsify_recorded = False
+        # O4 (`micro_smt_exit`): one refusal record per POSITION, not per bar — reset at
+        # every fill (`_set_target_on_fill`), so a live session shows each time O4 would
+        # have exited a DIFFERENT position, not the same observation repeated all day.
+        self._micro_smt_exit_unwired_recorded = False
         self._vetoed: set = set()
         self._last_minute = None
         # The last bar instant this Executor was handed. BAR time, never a wall clock
@@ -346,6 +351,15 @@ class Executor:
         # not blind its management. The order events of this call are already booked,
         # so a same-bar stop-out is visible here and wins (§2.4).
         self._drive_initial_target(now, mnq, bar_complete)
+
+        # 2c. O4 (`micro_smt_exit`, ADOPTED, flag-gated ON by default): a counter-thesis
+        # micro-SMT market-closes an OPEN position, T2 or no T2, regardless of plan life — same
+        # reasoning as 2b, an open position is not plan state. Total for the same reason
+        # `_drive_orders` is: a bug here must not take the bar loop down.
+        try:
+            self._drive_micro_smt_exit(now, mnq, bar_complete)
+        except Exception as exc:
+            self._state["market_mech_error"] = f"{type(exc).__name__}: {exc}"
 
         # 3. Plan death — evaluated every bar, with nothing open. Over bars SINCE THE
         # ARM only: the frame reaches back to the 18:00 session open, and overnight /
@@ -562,6 +576,31 @@ class Executor:
             return "entry_cutoff"
         return None
 
+    def _micro_smt_entry_block(self, now: pd.Timestamp):
+        """Why `micro_smt_reject` (O3) specifically may NOT enter at `now`, or None.
+
+        O3 is an explicit operator EXEMPTION from `ENTRY_CUTOFF_ET` (2026-09-24) — it
+        carries its own WINDOW instead of the shared cutoff (operator, 2026-09-26):
+        `MICRO_SMT_ENTRY_WINDOW_ET` = 10:30 <= now < 11:00 ET, both ends read live off the
+        module so a rollback or an A/B can move them between runs in one process. Every
+        other block reason still applies to it exactly as it does to every other
+        mechanism, and this is the ONLY gate consulted before O3's own detector runs — a
+        `now` outside the window must never reach `micro_smt_entry_on_bar_close` at all.
+        """
+        if getattr(self._sim, "external", None):
+            return "external_position_change"
+        if NO_ENTRY_AFTER_POSITIVE and self._positive_close:
+            return "after_positive_trade"
+        window = micro_smt.MICRO_SMT_ENTRY_WINDOW_ET
+        if window is None:
+            return "micro_smt_entry_window_closed"
+        start, end = window
+        if now < self._day_ts(now, start):
+            return "micro_smt_entry_before_window"
+        if now >= self._day_ts(now, end):
+            return "micro_smt_entry_after_window"
+        return None
+
     def _spine_death(self):
         """Deaths the plan's own rules cannot see: the order port reporting that the
         position changed behind it, and the window ending."""
@@ -572,15 +611,20 @@ class Executor:
             return "window_end", {"window_end": "%02d:%02d" % WINDOW_END_ET}
         return None, None
 
-    def _note_close(self, ev: dict) -> None:
-        """Latch the first PROFITABLE close. Today that is only ever a take-profit —
-        a stop is never trailed — and the target kills the plan on the same bar; the
-        latch is what keeps the rule true if either of those stops being so."""
+    @staticmethod
+    def _is_profitable(ev: dict) -> bool:
         entry, price = ev.get("entry"), ev.get("price")
         if entry is None or price is None:
-            return
+            return False
         sign = -1.0 if str(ev.get("direction") or "").upper() in _SHORT else 1.0
-        if sign * (float(price) - float(entry)) > 0:
+        return sign * (float(price) - float(entry)) > 0
+
+    def _note_close(self, ev: dict) -> None:
+        """Latch the first PROFITABLE close. Today that is a take-profit or a profitable
+        `micro_smt_exit` (O4, operator decision) — a stop is never trailed, and the
+        target kills the plan on the same bar; the latch is what keeps the rule true if
+        either of those stops being so."""
+        if self._is_profitable(ev):
             self._positive_close = True
 
     def _settle_end_ts(self, now: pd.Timestamp) -> pd.Timestamp:
@@ -1583,8 +1627,10 @@ class Executor:
             return
         if self._state["in_settle"] or not len(mnq):
             return
-        if self._entry_block(now) is not None:
-            return                                     # §8's temporary spine gates
+        block = self._entry_block(now)                 # §8's temporary spine gates
+        micro_smt_only = block == "entry_cutoff" and micro_smt.MICRO_SMT_ENTRY_ENABLED
+        if block is not None and not micro_smt_only:
+            return
         if self._in_cooldown(now):
             # Clause 3: no cycle may complete while the cooldown is in force, and every
             # gap cycle resets across it.
@@ -1605,23 +1651,40 @@ class Executor:
 
         fires = []
         if bar is None:
+            # The tick path is §6 only, so it runs only when no spine gate blocked at
+            # all: the `micro_smt_only` exemption is O3's alone (2026-09-03 A/B: without
+            # this, §6 entered at 11:11 past the 10:30 cutoff whenever O3 was enabled).
+            if block is not None:
+                return
             fires.append(("fvg_1m_post_extreme",
                           self._market.sec6_on_tick(now, price,
                                                     bar_open=self._bar_open_of(mnq),
                                                     mid=self._market_price())))
         else:
-            fires.append(("extreme_reject_close",
-                          self._market.sec7_on_bar_close(now, bar)))
-            fires.append(("fvg_1m_post_extreme",
-                          self._market.sec6_on_bar_close(now, bar,
-                                                         mid=self._market_price())))
-            # CANDIDATE mechanism, armed like any other market mechanism: it fires only
-            # when nothing is open and the budget allows, which is the "if we didn't
-            # already enter" condition it was specified with.
-            fires.append(("tmso_reject",
-                          self._market.tmso_on_bar_close(now, bar, mnq)))
-            fires.append(("fvg_1h_reject",
-                          self._market.fvg1h_on_bar_close(now, bar, mnq)))
+            # `block is None` here means every ordinary spine gate passed (the
+            # `micro_smt_only` branch above only lets O3 through the entry cutoff, and
+            # every other mechanism must still respect it, so they run ONLY when there
+            # was no block at all).
+            if block is None:
+                fires.append(("extreme_reject_close",
+                              self._market.sec7_on_bar_close(now, bar)))
+                fires.append(("fvg_1m_post_extreme",
+                              self._market.sec6_on_bar_close(now, bar,
+                                                             mid=self._market_price())))
+                # CANDIDATE mechanism, armed like any other market mechanism: it fires
+                # only when nothing is open and the budget allows, which is the "if we
+                # didn't already enter" condition it was specified with.
+                fires.append(("tmso_reject",
+                              self._market.tmso_on_bar_close(now, bar, mnq)))
+                fires.append(("fvg_1h_reject",
+                              self._market.fvg1h_on_bar_close(now, bar, mnq)))
+            if micro_smt.MICRO_SMT_ENTRY_ENABLED and self._micro_smt_entry_block(now) is None:
+                mes = truncate(normalize((self._bars or {}).get("MES")), now)
+                mes_bar = self._completed_1m(mes, now) if len(mes) else None
+                if mes_bar is not None:
+                    fires.append(("micro_smt_reject",
+                                  self._market.micro_smt_entry_on_bar_close(
+                                      now, bar, mes_bar, mnq, mes)))
         fire = self._market.pick(fires)
         if fire is None:
             return
@@ -1721,6 +1784,9 @@ class Executor:
         again every bar would be a different selector (continuous re-anchoring), which is
         unmeasured — see plan 16's out-of-scope list.
         """
+        # A new fill is a new position: O4's unwired-refusal record is per-position, so
+        # the next position that hits the same live-port gap is recorded again.
+        self._micro_smt_exit_unwired_recorded = False
         pick = select_target(self._bars, now, self._plan.get("direction"), self._ticker,
                              **self._htf_kw())
         # Plan 41: the rows D1 was chosen from, and D1 itself, kept for the operator's
@@ -2052,6 +2118,79 @@ class Executor:
             mechanism=self._state.get("mechanism"),
             artifact_label=self._label_for(ev.get("artifact_id")), **ev)
         self._note_exit(ev)
+
+    def _drive_micro_smt_exit(self, now: pd.Timestamp, mnq: pd.DataFrame,
+                              bar_complete: bool) -> None:
+        """O4 (`micro_smt_exit`, flag-gated, default ON — adopted 2026-09-26, REPLAY-ONLY):
+        a counter-thesis micro-SMT confirmed on BOTH assets market-closes an OPEN
+        position, whatever mechanism opened it, whether or not T2 has been reached.
+
+        1m-bar-close only, like every other market mechanism's bar-close path. `T2 not
+        reached` is implicit rather than checked: `_drive_orders` above already closed
+        the position on a same-bar stop or take-profit touch, so `self._sim.position`
+        is already None by the time this runs and there is nothing left to override.
+
+        Operator decisions (2026-09-24, `l2-mechanisms.md` §7b):
+          - A PROFITABLE O4 exit latches `NO_ENTRY_AFTER_POSITIVE` exactly like a T2
+            touch (`_note_close`, unconditional — it is itself a no-op on a loser).
+          - A LOSING O4 exit spends the shared attempt budget exactly as `_on_stop_out`
+            does — same two lines, no more: there is no gap artifact behind a
+            `micro_smt_exit`, so `_on_stop_out`'s takeover scan does not apply and is
+            deliberately not called here.
+
+        The detector runs BEFORE the live-wiring check (below), not after: only a real
+        fire is worth recording as "O4 would have exited here" — the live port being
+        unwired is true on every bar of every position, and recording that on its own
+        would say nothing.
+        """
+        if not micro_smt.MICRO_SMT_EXIT_ENABLED:
+            return
+        if not bar_complete or self._sim.position is None:
+            return
+        bar = self._completed_1m(mnq, now)
+        if bar is None:
+            return
+        mes = truncate(normalize((self._bars or {}).get("MES")), now)
+        mes_bar = self._completed_1m(mes, now) if len(mes) else None
+        if mes_bar is None:
+            return
+        fire = self._market.micro_smt_exit_on_bar_close(now, bar, mes_bar, mnq, mes)
+        if fire is None:
+            return
+        if not self._initial_action_is_wired():
+            # `MirroringOrderPort` (the live port) has no `flatten` — only `OrderSim`
+            # does. `_initial_opp_close` (plan 35 action B) hits the exact same gap and
+            # refuses rather than calling a method the live port does not have; this
+            # reuses that same check rather than crashing into a swallowed
+            # `market_mech_error` (or, worse, silently doing nothing every bar).
+            # REFUSES IN LIVE until `MirroringOrderPort.flatten` exists — replay-only
+            # for now. Recorded ONCE per position (`_set_target_on_fill` resets the
+            # latch at every fill) so a live session shows exactly when O4 WOULD have
+            # exited, without repeating the same observation every later bar.
+            self._state["micro_smt_exit_unwired"] = True
+            if not self._micro_smt_exit_unwired_recorded:
+                self._micro_smt_exit_unwired_recorded = True
+                self._rec.veto(now=now, plan_id=self._plan.get("plan_id"),
+                               mechanism=self._state.get("mechanism"),
+                               reason="micro_smt_exit_unwired",
+                               detail={"price": fire.get("price")})
+            return
+        ev = self._sim.flatten(now, float(fire["price"]), kind="micro_smt_exit")
+        if ev is None:
+            return
+        self._rec.order_event(
+            now=now, plan_id=self._plan.get("plan_id"),
+            mechanism=self._state.get("mechanism"),
+            artifact_label=self._label_for(ev.get("artifact_id")), **ev)
+        self._note_exit(ev)
+        self._note_close(ev)
+        if not self._is_profitable(ev):
+            self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
+            self._plan.setdefault("max_attempts", MAX_ATTEMPTS)
+            try:
+                self._market.arbiter.spend(self._state.get("mechanism"))
+            except Exception:
+                pass
 
     def _clear_binding(self) -> None:
         self._state.update({"bound_id": None, "bound_label": None, "mechanism": None,

@@ -599,6 +599,83 @@ chase entries the §2 DOL-floor veto now suppresses).
   short 30002.5 off the 09:40 red new-high bar; the 09:45 push to 30073.25 stops it −15;
   §6's +237.5 winner follows — accepted cost, bounded by the SL cap.
 
+## 7a. Mechanism: `micro_smt_reject` (O3, entry) — ADOPTED 2026-09-26
+
+Promoted from the §11 CANDIDATE entry (2026-09-24) after the 30-day A/B in
+`autoresearch/micro-smt-o3o4` (results in that branch's PR description). A divergence between MNQ and MES at a
+completed 90-minute micro-session's extreme (the same grid `tmso_reject` uses, 09:00 ET
+anchored — inherited open question, not re-litigated here), confirmed by a 1m close.
+
+- **The grid and the definition.** The micro-session grid is `tmso_reject.micro_session_start`
+  (90 min, 09:00 ET anchor). "Previous micro-session extreme" = each asset's High (bearish) /
+  Low (bullish) over the immediately preceding, COMPLETED micro-session — the first
+  micro-session of the day (09:00-10:30) has none, so the mechanism is structurally inert
+  before 10:30 regardless of the entry window below.
+- **Bearish signature:** within the CURRENT micro-session, one asset's High trades strictly
+  above its own previous-micro-session high while the other asset's High has NOT (yet)
+  exceeded its own. Bullish mirrors at the Lows. **Pinned as a LIVE STATE**, not a one-bar
+  coincidence: the divergence stays armed for as long as exactly one side is broken, and is
+  CANCELLED the instant the second side also breaks (not merely "fails to arm a new one").
+  Not discriminated by any date in the 30-day A/B — flag if a future date needs the weaker
+  one-bar reading.
+- **Confirmation:** a 1m bar — the sweep bar itself, or any later bar within the same
+  micro-session while the divergence still holds — closes WITH the signal on BOTH assets
+  (bearish: Close < Open on MNQ AND MES; bullish: Close > Open on both). Fires on that bar's
+  CLOSE, booked at the bar's completion instant (left-labelled convention).
+- **Entry:** market, at the confirmation bar's close.
+- **Stop-loss:** MNQ's own running extreme this micro-session (the traded instrument,
+  regardless of which asset diverged) + 2 pts (`SL_BUFFER_PTS`, the operator's own worked
+  number — every other reject mechanism in this document uses 3, UNTUNED here), capped at 15
+  pts from entry (the nearer of the two, `reject_core.capped_stop`).
+- **Entry window (operator, 2026-09-26): `10:30 <= entry < 11:00 ET` only.** O3 is exempt from
+  the shared `ENTRY_CUTOFF_ET` (10:30) — every other mechanism keeps that cutoff unchanged —
+  but is NOT given the unbounded run to the 13:00 flatten the A/B measured it with (10:30 up
+  to 12:30). **Consequence, checked against the A/B evidence AND re-run:** all three A/B
+  entries fired AFTER 11:00 (11:08 on 08-17, 11:16 on 09-24, 12:02 on 09-17) — none falls
+  inside the shipped window. Re-running those 4 differing dates under the shipped window
+  (`.agents/ab_micro_smt_window.jsonl`) CONFIRMS this: **O3 contributes ZERO trades on all 4
+  dates** — 08-17/09-17/09-24 arm B become byte-identical to arm A; only 09-10's O4 exit
+  survives (O4 carries no window). **Revised 30-day Δ under the shipped window: +28.50 pts
+  (+$57.00)**, not the A/B's +54.50 — see the adoption PR's description for the full table.
+- **Scope:** shares the plan's attempt budget, stop-out cooldown, and `NO_ENTRY_AFTER_POSITIVE`
+  exactly like every other market mechanism. One fire per micro-session (latched), matching
+  `tmso_reject`'s own convention.
+- **Evidence (30-day A/B, lookahead-oracle theses, adoption PR description):** summed Δ(B−A) +54.50 pts
+  over 30 dates (63→66 trades) at the A/B's WIDER window, every non-zero per-date Δ traced to
+  an O3 entry or an O4 exit, no unexplained knock-on. 3 O3 entries total (1 winner +51.50 on
+  08-17 whose exit was O4's, 2 losers −10.50 on 09-17 and −15.00 on 09-24) — **NONE of which
+  survive the shipped window** (all 3 fired after 11:00). At the shipped window the 30-day
+  figure is +28.50 pts, entirely O4's, with **zero winning O3 trades in-sample**.
+- **Caveat carried from the CANDIDATE entry, unresolved:** the lookahead-oracle thesis always
+  trades WITH the (assumed-correct) direction; a real L1 thesis is sometimes wrong-direction,
+  so O3's real hit rate is necessarily lower than the oracle A/B suggests.
+
+## 7b. Mechanism: `micro_smt_exit` (O4, exit) — ADOPTED 2026-09-26, REPLAY-ONLY
+
+The counter-thesis mirror of §7a's signature market-closes an OPEN position — whatever
+mechanism opened it, T2 or no T2 — the instant it confirms.
+
+- **Signal:** identical machinery to §7a, run on the OPPOSITE side (bullish detector for a
+  DOWN plan's exit, bearish for an UP plan's exit). No entry window of its own — it acts on
+  any bar-close confirmation while a position is open, at any time of day past 10:30 (before
+  10:30 there is no previous micro-session to diverge from, same as O3).
+- **A PROFITABLE O4 exit latches `NO_ENTRY_AFTER_POSITIVE`** exactly like a T2 touch — an
+  explicit operator decision (`comments.md` 2026-09-24 11:29).
+- **A LOSING O4 exit spends the shared 3-attempt budget** exactly as a stop-out does
+  (increment `attempts_used`, `arbiter.spend`) — but does NOT run the stop-out's gap-takeover
+  scan, since a `micro_smt_exit` has no gap artifact behind it. This is a new rule for a
+  non-price exit kind; every other non-stop exit (`initial_opp_close`, `mark`) spends nothing.
+- **REPLAY-ONLY.** The live order port (`MirroringOrderPort`) has no `flatten` method — only
+  the bare simulation (`OrderSim`) does. In live, O4 REFUSES rather than acting (the same gap
+  `_initial_opp_close`, plan 35 action B, already refuses on), and records a single deduped
+  `micro_smt_exit_unwired` note per position in `trader_decisions.jsonl` so a live session
+  shows exactly when O4 WOULD have exited. Wiring `MirroringOrderPort.flatten` is a separate,
+  later task — not done here, and not attempted without a live/orchestrator test to verify it.
+- **Evidence:** 2 exits in the 30-day A/B, both profitable — +51.50 pts on the 08-17 O3 trade,
+  and +28.50 pts vs a held-to-close mark on 09-10 (+158.50 realised vs +130.00 marked). Neither
+  date's O3/O4 activity falls inside §7a's shipped window question — O4 itself carries no
+  window, so both exits are unaffected by the O3 window narrowing.
+
 ## 8. L3 binding & order lifecycle
 
 - **Binding preference:** the most recently created eligible FVG. When a newer eligible FVG
@@ -1359,6 +1436,89 @@ if it would alter BEHAVIOUR, it is in scope and specified above.
     with no baseline. The matched null for that same cell is 34%, with an identical R≥3 rate.
     Compute the null at the same time as the metric, or do not quote the metric.
 
+- **CANDIDATE (2026-09-24) — `micro_smt_reject` (O3, entry) and `micro_smt_exit` (O4,
+  exit). ADOPTED 2026-09-26 — see §7a and §7b for the rule text, the 30-day A/B
+  (adoption PR description), and the operator's narrowed entry window. This entry is kept, not
+  deleted, per the standing "never delete an invalidated case" rule (this one was not
+  invalidated — it was promoted; kept so the CANDIDATE-stage reasoning stays visible).**
+  Originally: NOT rules; recorded with their evidence and open questions per
+  `docs/entry-mechanism-change-protocol.md` step 0. Implemented in a separate worktree
+  (`autoresearch/micro-smt-o3o4`) behind two flags, both default False, for an A/B —
+  neither wired into `armed_classes` on master at the time this paragraph was written.**
+
+  **The setup.** A divergence between MNQ and MES at a completed 90-minute micro-session's
+  extreme (the same grid `tmso_reject` uses, 09:00 ET anchored — that anchor is itself
+  still open, inherited unchanged): one asset trades strictly beyond its own PREVIOUS
+  micro-session's extreme while the other does not, then a 1m bar closes with the signal
+  on BOTH assets. O3 enters on it (thesis-aligned); O4 exits an open position on the
+  COUNTER-thesis form of the same signature, T2 or no T2.
+
+  **Motivating day 2026-09-24** (`comments.md` 11:29, operator). MNQ/MES micro-session
+  highs 09:00-10:30: MNQ 30638.00 (10:27), MES 7758.25 (10:08). The bar labelled 10:35
+  takes MNQ to 30643.00 while MES reaches only 7754.50 and closes GREEN (armed, not
+  confirmed); the bar labelled 10:36 closes RED on both — MNQ 30638.00→30613.25, MES
+  7754.75→7752.25. **O3, as implemented, fires at that bar's completion, 10:37:00, market
+  short @30613.25**, stop = MNQ's own running micro-session high (30643.00) + 2 pts,
+  capped at 15 from entry → **30628.25** (the 15-pt cap binds), never touched (next-later
+  high 30621.00 at 10:37). Mirrored at the lows: MNQ/MES lows 09:00-10:30 were 30485.00
+  (09:05) / 7730.00 (09:31); MES undercuts to 7727.75 at 11:13 while MNQ holds; the bar
+  labelled 11:15 closes UP on both. **O4 fires at 11:16:00 @30520.00** — against the
+  hypothetical short, +93.25 pts, banked before a T2 (`london(cur)_low` 30370.75) that sat
+  133 pts further away. Both figures are reproduced exactly by the implementation against
+  the real 1m tape (`agent/trader/test_micro_smt.py`); this is the day's ONLY motivating
+  example — **n=1**.
+
+  **Why this could not have fired live that day regardless:** the 10:37 entry is 7 minutes
+  past `ENTRY_CUTOFF_ET` (10:30). O3 is therefore given its OWN, later cutoff instead of
+  none — 12:30 ET, 30 min before the 13:00 flatten — an explicit operator decision to
+  exempt this one mechanism rather than move the shared cutoff.
+
+  **Pinned rule-level decisions this implementation had to make** (no discriminating
+  example distinguishes them from the alternative on 09-24; flag if a future date does):
+  1. **A live-state divergence, not a one-bar coincidence.** The divergence stays armed
+     for as long as exactly one asset has broken its own previous-session level, and is
+     CANCELLED the instant the second one also breaks its own level — it does not merely
+     fail to arm a new one. 09-24 never exercises the cancellation path (MES never broke
+     7758.25 before the 10:36 confirmation), so a weaker one-bar reading is equally
+     consistent with the recorded evidence.
+  2. **The stop is read off MNQ specifically** (the traded instrument's own running
+     extreme this micro-session), regardless of which asset — MNQ or MES — is the one
+     that actually diverged. `SL_BUFFER_PTS = 2.0` (the operator's own worked number,
+     unlike the 3.0 every other reject mechanism uses) + `SL_CAP_PTS = 15.0` (borrowed
+     from §7 and `tmso_reject`, UNTUNED here).
+  3. **A profitable O4 exit latches `NO_ENTRY_AFTER_POSITIVE`** exactly like a T2 touch —
+     an explicit operator decision (comments.md 11:29's own "it interacts with
+     `NO_ENTRY_AFTER_POSITIVE`... decide that explicitly", `optimizations.md` O4).
+  4. **A losing O4 exit spends the shared 3-attempt budget** exactly as a stop-out does
+     (same two lines: increment `attempts_used`, `arbiter.spend`) — but does NOT run
+     `_on_stop_out`'s takeover scan, since there is no gap artifact behind a
+     `micro_smt_exit` for a deeper gap to take over. This is a NEW rule for a non-price
+     exit kind; every existing non-stop exit (`initial_opp_close`, `mark`) spends nothing.
+  5. **One fire per micro-session** (latched), for both O3 and O4, matching
+     `tmso_reject`'s own convention.
+
+  **Open questions AT THE TIME OF THIS CANDIDATE ENTRY, since resolved or carried forward
+  into §7a/§7b at adoption (2026-09-26):**
+  - Is the divergence-cancellation rule (decision 1) right, or does a one-bar-coincidence
+    reading fire more (or worse) on other days? STILL OPEN — not discriminated by any of
+    the 30 A/B dates either; carried into §7a unchanged.
+  - Whether the 2 pt buffer (vs the 3 pt every other candidate uses) survives a wider
+    sample, or was simply read off the one worked number available. STILL OPEN — the 30-day
+    A/B did not vary this knob; carried into §7a UNTUNED.
+  - The 09:00 micro-session grid anchor is `tmso_reject`'s own open question, not
+    re-litigated here, and this candidate inherits it unchanged — still true in §7a.
+  - O4's "tighten the stop" variant (comments.md 11:29 also proposed this as an
+    alternative to a hard exit) is NOT implemented — only the hard market-close is. Not
+    revisited at adoption.
+  - **RESOLVED:** the session-set A/B ran (adoption PR description): summed Δ(B−A)
+    +54.50 pts over 30 dates, every non-zero Δ traced to an O3 entry or an O4 exit, no
+    unexplained knock-on, flag-off byte-identical, default suite green. Passes the
+    pre-registered adoption rule.
+  - **NEW at adoption, not present in the A/B:** the operator narrowed O3's entry window
+    from the A/B's 10:30-12:30 to **10:30-11:00** — none of the A/B's 3 O3 entries fall
+    inside the narrower window. RE-RUN and confirmed: O3 fires zero times across all 4
+    differing dates under the shipped window; the revised 30-day figure is +28.50 pts, all
+    of it O4's, with zero winning O3 trades in-sample. See §7a.
 
 ### 11.1 Named-case registry — era stamps and pinning tests (added 2026-08-29, ADDITIVE)
 
