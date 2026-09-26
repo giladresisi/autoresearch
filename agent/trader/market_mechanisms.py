@@ -37,7 +37,7 @@ import pandas as pd
 from agent.trader.arbiter import Arbiter, Candidate
 from agent.trader.episode import Episode, evaluation_order
 from agent.trader.extreme_reject import ExtremeReject, choose_track
-from agent.trader.tmso_reject import TmsoReject, tmso_for
+from agent.trader.tmso_reject import TmsoReject, prior_adverse_excursion, tmso_for
 from agent.trader.fvg_reject import FvgReject, zone_at_0700
 from agent.trader.micro_smt import MicroSmt, micro_smt_entry_armed, previous_micro_extremes
 
@@ -133,8 +133,11 @@ class MarketMechanisms:
     # -- tmso_reject (CANDIDATE) ------------------------------------------------ #
 
     def tmso_on_bar_close(self, now, bar, mnq) -> "dict | None":
-        level, _q2 = tmso_for(mnq, now)
-        return self._tmso.on_bar_close(now, bar, level)
+        level, q2 = tmso_for(mnq, now)
+        label = getattr(bar, "name", None)
+        before = label if isinstance(label, pd.Timestamp) else now - pd.Timedelta(minutes=1)
+        excursion = prior_adverse_excursion(mnq, level, q2, before, short=self._tmso.short)
+        return self._tmso.on_bar_close(now, bar, level, prior_excursion=excursion)
 
     def fvg1h_on_bar_close(self, now, bar, mnq) -> "dict | None":
         return self._fvg1h.on_bar_close(now, bar, zone_at_0700(mnq, now))

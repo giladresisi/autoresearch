@@ -114,3 +114,68 @@ def test_9_the_constant_restores_the_strict_two_bar_signature(monkeypatch):
     assert m.state()["armed"] is True
     fire = m.on_bar_close(_ts("09:32"), BAR_0931, TMSO)
     assert fire is not None and fire["price"] == 29674.75
+
+
+# -- the far-excursion veto (2026-09-26) ------------------------------------------------ #
+
+TMSO_0925 = 30865.25
+SWEEP_0939 = _bar(30868.50, 30871.75, 30838.50, 30868.50)   # dips under, closes back, flat
+CONFIRM_0940 = _bar(30868.00, 30877.75, 30859.50, 30877.00)  # GREEN
+
+
+def _ts25(hhmm):
+    return pd.Timestamp(f"2026-09-25 {hhmm}", tz=TZ)
+
+
+def test_10_a_far_prior_excursion_vetoes_the_sweep():
+    """2026-09-25: the flush reached 30767.25 (98 pts under TMSO) before the 09:39 poke."""
+    m = TmsoReject("UP")
+    assert m.on_bar_close(_ts25("09:40"), SWEEP_0939, TMSO_0925, prior_excursion=98.0) is None
+    assert m.state()["armed"] is False
+    assert m.on_bar_close(_ts25("09:41"), CONFIRM_0940, TMSO_0925, prior_excursion=98.0) is None
+
+
+def test_11_the_same_day_without_the_excursion_fires_as_before():
+    m = TmsoReject("UP")
+    assert m.on_bar_close(_ts25("09:40"), SWEEP_0939, TMSO_0925, prior_excursion=20.0) is None
+    fire = m.on_bar_close(_ts25("09:41"), CONFIRM_0940, TMSO_0925, prior_excursion=98.0)
+    # The confirmation bar is never vetoed: the excursion is judged at the SWEEP.
+    assert fire is not None and fire["price"] == 30877.00
+    assert fire["stop"] == 30877.00 - SL_CAP_PTS
+
+
+def test_12_the_sweep_bars_own_depth_never_vetoes():
+    m = TmsoReject("UP")
+    deep = _bar(30870.00, 30875.00, 30700.00, 30880.00)     # 165 under, closes back GREEN
+    assert m.on_bar_close(_ts25("09:40"), deep, TMSO_0925, prior_excursion=0.0) is not None
+
+
+def test_13_the_veto_threshold_is_exclusive_and_can_be_disabled(monkeypatch):
+    at = TmsoReject("UP")
+    assert at.on_bar_close(_ts25("09:40"), SWEEP_0939, TMSO_0925,
+                           prior_excursion=tr.VETO_EXCURSION_PTS) is None
+    assert at.state()["armed"] is True                       # == threshold: not vetoed
+    monkeypatch.setattr(tr, "VETO_EXCURSION_PTS", None)
+    off = TmsoReject("UP")
+    off.on_bar_close(_ts25("09:40"), SWEEP_0939, TMSO_0925, prior_excursion=500.0)
+    assert off.state()["armed"] is True
+
+
+def _tape(rows):
+    idx = pd.DatetimeIndex([_ts25(t) for t, *_ in rows])
+    return pd.DataFrame([dict(zip(("Open", "High", "Low", "Close"), r[1:])) for r in rows],
+                        index=idx)
+
+
+def test_14_prior_excursion_reads_only_bars_from_tmso_up_to_the_sweep_bar():
+    mnq = _tape([
+        ("09:20:00", 30860.0, 30862.0, 30600.0, 30861.0),    # before TMSO: ignored
+        ("09:22:30", 30865.25, 30866.0, 30864.0, 30865.0),
+        ("09:31:00", 30819.5, 30822.0, 30767.25, 30804.25),  # the flush
+        ("09:39:00", 30868.5, 30871.75, 30700.0, 30868.5),   # the sweep bar itself: ignored
+    ])
+    q2 = _ts25("09:22:30")
+    before = _ts25("09:39:00")
+    assert tr.prior_adverse_excursion(mnq, TMSO_0925, q2, before, short=False) == 98.0
+    assert tr.prior_adverse_excursion(mnq, TMSO_0925, q2, before, short=True) == 0.75
+    assert tr.prior_adverse_excursion(mnq, None, q2, before, short=False) is None

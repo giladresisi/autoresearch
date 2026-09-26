@@ -62,6 +62,25 @@ fixed at 09:22:30, before the bar opens, so a 09:30 bar that sweeps it and close
 real information. The five 09:31:00 entries in the sample: 2 held (+69.00, +86.75), 3
 stopped at the cap — net +110.75. Thin, positive, and not the bulk of the gain.
 
+**The far-excursion veto (2026-09-26).** TMSO is a level to be SWEPT: a stop-run a few
+points through it that snaps back. Once price has already traveled far through it against
+the thesis, the level has been broken with displacement, not swept, and a later poke that
+closes back across it is a retest, not the manipulation completing. So a sweep does not arm
+or fire when the adverse excursion beyond TMSO, measured over the micro-session's bars
+from TMSO's own timestamp up to (NOT including) the sweep bar, exceeds
+`VETO_EXCURSION_PTS`. The sweep bar's own depth never vetoes: a single bar that runs far
+through and closes back is still the signature. Being monotonic, the excursion kills the
+setup for the rest of that micro-session once it is exceeded.
+
+Motivating day 2026-09-25, UP thesis, TMSO 30865.25: the 09:30-09:32 flush reached 30767.25
+(98 pts under); the 09:39 bar dipped to 30838.50 and closed back over, 09:40 confirmed ->
+long 30877.00, stopped 30862.00 at 09:42:13 (-15.00). Signal-level study (every 09:30-10:30
+fire, both directions, 2026-01-02..09-25, 15-pt cap, 45-min hold, 1m bars): 313 fires /
++1521.00; excursion <= 50: 190 fires / +2301.50; > 50: 123 fires, 6 winners, -780.50.
+Removing them helps both halves (Jan-Apr -561.75, May-Sep -218.75) at every threshold
+40-75. The price: it also removes 08-06's +278.25 (excursion 109.25), one of the three
+trades the study above credits.
+
 **UNTUNED, and stated as such.** `SL_CAP_PTS` is borrowed from §7 and has been fitted to
 nothing. No A/B exists. This is a candidate under
 `docs/entry-mechanism-change-protocol.md`, not an adopted mechanism.
@@ -81,6 +100,9 @@ SL_CAP_PTS = 15.0
 #: for the next bar. False restores the strict two-bar signature — one line, so the A/B
 #: the docstring asks for is cheap.
 SWEEP_BAR_MAY_CONFIRM = True
+#: The far-excursion veto (see the docstring). Points beyond TMSO, adverse to the thesis,
+#: reached BEFORE the sweep bar. None disables the veto.
+VETO_EXCURSION_PTS = 50.0
 
 _SHORT = ("DOWN", "SHORT")
 
@@ -116,6 +138,20 @@ def tmso_for(mnq, now: pd.Timestamp):
     return float(seg.iloc[0]["Open"]), q2
 
 
+def prior_adverse_excursion(mnq, tmso, q2, before, *, short: bool) -> "float | None":
+    """Points price traveled beyond `tmso` against the thesis over bars stamped at or
+    after `q2` and strictly before `before` (the sweep bar's label), floored at 0. None
+    when there is no TMSO; 0.0 when no bar is in range."""
+    if tmso is None or q2 is None or mnq is None or not len(mnq):
+        return None
+    seg = mnq[(mnq.index >= q2) & (mnq.index < before)]
+    if not len(seg):
+        return 0.0
+    if short:
+        return max(0.0, float(seg["High"].max()) - float(tmso))
+    return max(0.0, float(tmso) - float(seg["Low"].min()))
+
+
 class TmsoReject:
     """Sweep of TMSO that closes back across it, confirmed by the first with-thesis close
     — the sweep bar's own, or the next bar's.
@@ -132,6 +168,10 @@ class TmsoReject:
         self._armed_extreme = None
         self._fired_sessions: set = set()
 
+    @property
+    def short(self) -> bool:
+        return self._short
+
     def state(self) -> dict:
         return {"armed": self._armed_bar is not None, "level": self._armed_level,
                 "extreme": self._armed_extreme, "short": self._short,
@@ -139,9 +179,10 @@ class TmsoReject:
 
     # -- the tape -------------------------------------------------------------- #
 
-    def on_bar_close(self, now, bar, tmso) -> "dict | None":
-        """`tmso` is the current micro-session's true open (the caller computes it, so
-        this stays a pure state machine over bars)."""
+    def on_bar_close(self, now, bar, tmso, prior_excursion=None) -> "dict | None":
+        """`tmso` is the current micro-session's true open and `prior_excursion` the
+        adverse travel beyond it before this bar (`prior_adverse_excursion`); the caller
+        computes both, so this stays a pure state machine over bars."""
         if tmso is None:
             self._armed_bar = None
             return None
@@ -162,7 +203,9 @@ class TmsoReject:
         swept = (float(bar["High"]) >= tmso) if self._short else (float(bar["Low"]) <= tmso)
         closed_back = (float(bar["Close"]) < tmso) if self._short \
             else (float(bar["Close"]) > tmso)
-        if swept and closed_back:
+        vetoed = (VETO_EXCURSION_PTS is not None and prior_excursion is not None
+                  and prior_excursion > VETO_EXCURSION_PTS)
+        if swept and closed_back and not vetoed:
             self._armed_level = float(tmso)
             self._armed_extreme = (float(bar["High"]) if self._short
                                    else float(bar["Low"]))
