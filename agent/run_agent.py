@@ -755,14 +755,17 @@ def _sum_usage(attempts: list) -> dict:
 
 def _run_call(backend: Backend, system: str, base_user: str, schema: dict,
               validate_block, failsafe_block: dict,
-              max_retries: int = MAX_RETRIES, derive_block=None) -> CallOutcome:
+              max_retries: int = MAX_RETRIES, derive_block=None,
+              fallback_block=None) -> CallOutcome:
     """One decision call with a bounded correction loop.
 
     derive_block(parsed) -> (parsed, override_notes) runs FIRST (code-derived
     arithmetic overriding the model's self-check numbers). validate_block(parsed_block)
     -> ValidationResult scoped to THIS call. On a validation failure we echo the
     model's own (invalid) JSON back and quote the exact violations; after max_retries
-    failures we fall back to the NEUTRAL/LOW scripts baseline and record it.
+    failures we fall back to the NEUTRAL/LOW scripts baseline and record it — unless
+    fallback_block(attempts) -> dict | None returns a block, which is then used instead
+    under verdict "ledger_fallback" (None still means the failsafe).
     """
     messages = [{"role": "user", "content": base_user}]
     attempts: list = []
@@ -817,6 +820,14 @@ def _run_call(backend: Backend, system: str, base_user: str, schema: dict,
             messages.append({"role": "assistant", "content": resp.raw_text})
             messages.append({"role": "user", "content": _retry_prompt(result.messages())})
 
+    forced = fallback_block(attempts) if fallback_block is not None else None
+    if isinstance(forced, dict):
+        return CallOutcome(
+            block=forced, reasoning=reasoning, retries=retries, fallback=True,
+            verdict="ledger_fallback", attempts=attempts,
+            latency_total=round(sum(a["latency_sec"] for a in attempts), 3),
+            usage_total=_sum_usage(attempts),
+        )
     return CallOutcome(
         block=dict(failsafe_block), reasoning=reasoning, retries=retries, fallback=True,
         verdict="failsafe", attempts=attempts,
@@ -1139,18 +1150,69 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
     htf_reversal = facts.get("htf_reversal")
     mid_position = facts.get("mid_position")
     p1_stale_levels = facts.get("p1_stale_levels")
+    score_kw = dict(
+        magnitude=evidence_magnitude, dol_available=dol_available,
+        suppressed_p1_levels=suppressed_p1_levels, suppressed_p2_sites=suppressed_p2_sites,
+        level_htf_close_status=level_htf_close_status, level_tiers=level_tiers,
+        smt_candidates=smt_candidates, week_extremes=week_extremes, now_price=now_price,
+        fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim, htf_reversal=htf_reversal,
+        mid_position=mid_position, p1_stale_levels=p1_stale_levels)
+    fallback = None
+    if not thesis_failsafe_enabled():
+        fallback = lambda attempts: _ledger_fallback_thesis(attempts, menus, score_kw)  # noqa: E731
     return _run_call(
         backend, system, user, schema,
         validate_block=lambda d: validate_thesis(d, facts),
         failsafe_block=failsafe_thesis(),
-        derive_block=lambda d: _derive_thesis_arithmetic(
-            d, magnitude=evidence_magnitude, dol_available=dol_available,
-            suppressed_p1_levels=suppressed_p1_levels, suppressed_p2_sites=suppressed_p2_sites,
-            level_htf_close_status=level_htf_close_status, level_tiers=level_tiers,
-            smt_candidates=smt_candidates, week_extremes=week_extremes, now_price=now_price,
-            fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim, htf_reversal=htf_reversal,
-            mid_position=mid_position, p1_stale_levels=p1_stale_levels),
+        derive_block=lambda d: _derive_thesis_arithmetic(d, **score_kw),
+        fallback_block=fallback,
     )
+
+
+def thesis_failsafe_enabled() -> bool:
+    """`ACT_THESIS_FAILSAFE` (default OFF): when on, a thesis call that exhausts its
+    retries degrades to the NEUTRAL failsafe (a dark day). When off, it degrades to
+    `_ledger_fallback_thesis` so the day still trades and its trades can be studied."""
+    return os.environ.get("ACT_THESIS_FAILSAFE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _ledger_fallback_thesis(attempts: list, menus, score_kw: dict):
+    """A deterministic standing thesis built from the LAST attempt's evidence ledger, or
+    None (-> the failsafe) when one cannot be built.
+
+    Bias is the sign of code's net score over that ledger (the same number the validator
+    judged the model against); an exact tie falls back to the model's own last directional
+    bias. The DOL is the menu's D1 on that side and the falsifier its RECOMMENDED F-row —
+    valid by construction, the same picks the stretch override makes. A NEUTRAL the model
+    returned CLEANLY never reaches here: this only replaces a validation failure."""
+    from validate_contracts import score_thesis_evidence
+    if not attempts or not isinstance(menus, dict):
+        return None
+    last = attempts[-1]
+    scoring = score_thesis_evidence(last.get("evidence") or [], **score_kw)
+    direction = scoring["expected_bias"]
+    if direction not in ("UP", "DOWN") and not scoring["no_liquidity"]:
+        direction = str(last.get("bias") or "").upper()
+    if direction not in ("UP", "DOWN"):
+        return None
+    rows = (menus.get("dol") or {}).get(direction) or []
+    if not rows or rows[0].get("price") is None:
+        return None
+    falsifier = next((e["predicate"] for e in (menus.get("predicates") or {}).get(direction) or []
+                      if e.get("family") == "falsification" and e.get("recommended")), None)
+    return {
+        "bias": direction, "regime": last.get("regime"), "confidence": "LOW",
+        "dol": {"level": rows[0].get("level"), "price": float(rows[0]["price"])},
+        "dol_rationale": "ledger fallback: menu D1 on the net-score side",
+        "falsified_if": [falsifier] if falsifier else [],
+        "falsified_if_rationale": "ledger fallback: the menu's RECOMMENDED falsifier",
+        "recall": last.get("recall") or {"events": [], "max_age_min": 60},
+        "evidence": scoring["scored_evidence"],
+        "reasoning": (f"ledger fallback after {len(attempts)} invalid attempts: "
+                      f"net_score {scoring['net_score']} -> {direction}"),
+        "thesis_source": "ledger_fallback",
+        "fallback_net_score": scoring["net_score"],
+    }
 
 
 def decide_plan(facts_text: str, context_text: str, facts: dict, standing_thesis: dict,

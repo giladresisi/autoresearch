@@ -107,8 +107,10 @@ class CachedThesisBackend:
         # None-guard never fires on the real path and the actual failure mode was the
         # one getting cached (observed on the 2026-08-12 seeding run: retries=2,
         # verdict=failsafe, bias=NEUTRAL, recorded permanently). A failsafe is a call
-        # failure, not a judgment, so it is refused the same way.
-        failsafe = str(meta.get("verdict") or "").lower() == "failsafe"
+        # failure, not a judgment, so it is refused the same way. A `ledger_fallback`
+        # (ACT_THESIS_FAILSAFE off) is the same call failure given a tradeable thesis;
+        # it is not recorded either, so a later --seed run can still get a model answer.
+        failsafe = str(meta.get("verdict") or "").lower() in ("failsafe", "ledger_fallback")
         if isinstance(thesis, dict) and not failsafe:
             self._cache.put(key, thesis, meta=meta, boundary=self._boundary(facts))
         meta = dict(meta)

@@ -75,6 +75,10 @@ lists what must NOT be built.
 - `ACT_TRADER_BACKEND` unset = auto-select by key (`OPENROUTER_API_KEY` preferred, else
   `ANTHROPIC_API_KEY`), no longer a hard-coded `openrouter`. Leave it and
   `ACT_TRADER_MODEL` unset in live.
+- `ACT_THESIS_FAILSAFE` is **OFF by default**: a thesis call that fails validation on
+  every retry becomes a code-built `ledger_fallback` thesis (verdict and `thesis_source`
+  say so; never written to the thesis cache) instead of the NEUTRAL failsafe. `true`
+  restores the failsafe. A clean model NEUTRAL is unaffected.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.
