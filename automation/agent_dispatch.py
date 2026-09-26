@@ -46,15 +46,16 @@ RECORD_FILE = "agent_dispatch.jsonl"
 #: Simulated close kinds -> the reason the market close carries.
 CLOSE_REASONS = {"stop_out": "stop_out", "take_profit": "take_profit",
                  "mark": "window_end",
-                 # O4 (`agent/trader/micro_smt.py`), ADOPTED 2026-09-26, flag-gated ON
-                 # by default but REPLAY-ONLY: the live `MirroringOrderPort` has no
-                 # `flatten`, so `_drive_micro_smt_exit` refuses before this mapping is
-                 # ever exercised in live. Kept here so the mapping is ready the day
-                 # that live wiring lands. Without this entry `_signal` returns None for
-                 # it and `_sink` acks `untranslatable_event` — the simulation closes
-                 # the position but no close order ever reaches the broker. Found, not
-                 # assumed: checked by reading this module while implementing O4.
-                 "micro_smt_exit": "micro_smt_exit"}
+                 # O4 (`agent/trader/micro_smt.py`), ADOPTED 2026-09-26, flag-gated ON by
+                 # default, wired live the same day: `MirroringOrderPort.flatten` forwards
+                 # `_drive_micro_smt_exit`'s close through this mapping. Without this entry
+                 # `_signal` returns None for it and `_sink` acks `untranslatable_event` —
+                 # the simulation closes the position but no close order ever reaches the
+                 # broker.
+                 "micro_smt_exit": "micro_smt_exit",
+                 # Plan 35 action B (`agent/trader/executor.py::_initial_opp_close`), wired
+                 # live alongside O4 — same `flatten` call, same mapping requirement.
+                 "initial_opp_close": "initial_opp_close"}
 _DIRECTIONS = {"UP": "up", "LONG": "up", "DOWN": "down", "SHORT": "down"}
 
 

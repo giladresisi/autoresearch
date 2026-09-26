@@ -308,9 +308,10 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
     attempts_exhausted | ..., detail}, would_have_falsified (falsifier met, NOT acted on —
     plans no longer die on falsification), would_have_killed (dol_reached, recorded only),
     veto / no-move-zone notes — including `reason: micro_smt_exit_unwired` (O4 would have
-    market-closed the position but the live order port has no `flatten`; replay-only, one
-    deduped record per position — see `l2-mechanisms.md` §7b). This is the primary record
-    of WHY each entry/exit happened.
+    market-closed the position but the live order port in use does not implement `flatten`;
+    the live `MirroringOrderPort` DOES since 2026-09-26, so this should not appear in a
+    normal session — one deduped record per position if it ever does — see
+    `l2-mechanisms.md` §7b). This is the primary record of WHY each entry/exit happened.
 
 12. <REPLAY>\trader_decisions.jsonl, <REPLAY>\plans.json, <REPLAY>\thesis_state.json
     (may not exist if the replay failed / dark day)

@@ -650,7 +650,7 @@ anchored — inherited open question, not re-litigated here), confirmed by a 1m 
   trades WITH the (assumed-correct) direction; a real L1 thesis is sometimes wrong-direction,
   so O3's real hit rate is necessarily lower than the oracle A/B suggests.
 
-## 7b. Mechanism: `micro_smt_exit` (O4, exit) — ADOPTED 2026-09-26, REPLAY-ONLY
+## 7b. Mechanism: `micro_smt_exit` (O4, exit) — ADOPTED 2026-09-26, wired live 2026-09-26
 
 The counter-thesis mirror of §7a's signature market-closes an OPEN position — whatever
 mechanism opened it, T2 or no T2 — the instant it confirms.
@@ -665,12 +665,14 @@ mechanism opened it, T2 or no T2 — the instant it confirms.
   (increment `attempts_used`, `arbiter.spend`) — but does NOT run the stop-out's gap-takeover
   scan, since a `micro_smt_exit` has no gap artifact behind it. This is a new rule for a
   non-price exit kind; every other non-stop exit (`initial_opp_close`, `mark`) spends nothing.
-- **REPLAY-ONLY.** The live order port (`MirroringOrderPort`) has no `flatten` method — only
-  the bare simulation (`OrderSim`) does. In live, O4 REFUSES rather than acting (the same gap
-  `_initial_opp_close`, plan 35 action B, already refuses on), and records a single deduped
-  `micro_smt_exit_unwired` note per position in `trader_decisions.jsonl` so a live session
-  shows exactly when O4 WOULD have exited. Wiring `MirroringOrderPort.flatten` is a separate,
-  later task — not done here, and not attempted without a live/orchestrator test to verify it.
+- **Wired live.** `MirroringOrderPort.flatten` (feat/live-flatten-exits, 2026-09-26) forwards
+  the close through `automation/agent_dispatch` exactly like a stop-out or take-profit: one
+  market close, `skip_recon=True`, reason `micro_smt_exit`. Plan 35 action B
+  (`initial_opp_close`) is wired the same way; plan 35 action A (`be_structure`, a stop MOVE)
+  is deliberately NOT — the dispatcher is market-only and there is no market order that moves
+  a resting stop, so action A still refuses on a live port. A port that implements `flatten`
+  is checked per-operation (`Executor._port_supports`), not by `isinstance(OrderSim)`, so the
+  `micro_smt_exit_unwired` veto note only appears if some FUTURE port lacks `flatten`.
 - **Evidence:** 2 exits in the 30-day A/B, both profitable — +51.50 pts on the 08-17 O3 trade,
   and +28.50 pts vs a held-to-close mark on 09-10 (+158.50 realised vs +130.00 marked). Neither
   date's O3/O4 activity falls inside §7a's shipped window question — O4 itself carries no

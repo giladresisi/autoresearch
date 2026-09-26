@@ -2060,19 +2060,23 @@ class Executor:
             self._state["initial_target"] = tracker.state()
         return exit_bar
 
-    def _initial_action_is_wired(self) -> bool:
-        """True only when the order book is the bare simulation.
+    def _port_supports(self, op: str) -> bool:
+        """True when the current order port implements `op`. A per-operation check, not
+        a blanket "is this the bare simulation": `OrderSim` implements both `flatten` and
+        `move_stop`, so a replay is unaffected either way, but `MirroringOrderPort` (the
+        live port, plan 38) implements `flatten` — it forwards to a market close via
+        `automation/agent_dispatch` — while deliberately NOT implementing `move_stop`.
 
-        Actions A and B were built on the `live` branch against a mirror that turned a
-        stop move / an opposite-close into a legacy signal. Plan 38's port speaks market
-        entries and market closes ONLY (`automation/agent_dispatch`), so neither action
-        has a live representation here. Rather than move a SIMULATED stop while the
-        broker keeps the original — a silent divergence nobody would see until the stop
-        filled at the wrong price — they refuse and say so. The shipped default is
-        "record", so this never fires in production; it fires if someone enables A or B
-        on a live port before the study (plan 35 §2.5) has chosen one and wired it.
+        Plan 35 action A (`be_structure`) was built on the `live` branch against a mirror
+        that turned a stop move into a legacy signal; plan 38's port speaks market entries
+        and market closes ONLY, and there is no market order that moves a resting stop.
+        Rather than move a SIMULATED stop while the broker keeps the original — a silent
+        divergence nobody would see until the stop filled at the wrong price — action A
+        refuses and says so; it stays refused on `MirroringOrderPort` until a stop-modify
+        path exists. Action B (`opp_close`) and O4 (`micro_smt_exit`) both close outright,
+        which the live port CAN do, so they are wired.
         """
-        return isinstance(self._sim, OrderSim)
+        return hasattr(self._sim, op)
 
     def _apply_initial_action(self, now, it: dict, pos: dict) -> None:
         """§2.5 at the flip, position open. "record" does nothing. "be_structure" moves
@@ -2081,7 +2085,7 @@ class Executor:
         flip bar, judged by `post_flip` on later bars."""
         if INITIAL_TARGET_ACTION != "be_structure" or it.get("stop_moved"):
             return
-        if not self._initial_action_is_wired():
+        if not self._port_supports("move_stop"):
             self._state["initial_action_unwired"] = INITIAL_TARGET_ACTION
             return
         tracker = it["tracker"]
@@ -2104,7 +2108,7 @@ class Executor:
 
     def _initial_opp_close(self, now, it: dict) -> None:
         """§2.5 B: market-close at the current price, recorded like every other exit."""
-        if not self._initial_action_is_wired():
+        if not self._port_supports("flatten"):
             self._state["initial_action_unwired"] = INITIAL_TARGET_ACTION
             return
         price = self._market_price() if self._state.get("now_price") is not None else None
@@ -2121,9 +2125,9 @@ class Executor:
 
     def _drive_micro_smt_exit(self, now: pd.Timestamp, mnq: pd.DataFrame,
                               bar_complete: bool) -> None:
-        """O4 (`micro_smt_exit`, flag-gated, default ON — adopted 2026-09-26, REPLAY-ONLY):
-        a counter-thesis micro-SMT confirmed on BOTH assets market-closes an OPEN
-        position, whatever mechanism opened it, whether or not T2 has been reached.
+        """O4 (`micro_smt_exit`, flag-gated, default ON — adopted 2026-09-26, wired live
+        2026-09-26): a counter-thesis micro-SMT confirmed on BOTH assets market-closes an
+        OPEN position, whatever mechanism opened it, whether or not T2 has been reached.
 
         1m-bar-close only, like every other market mechanism's bar-close path. `T2 not
         reached` is implicit rather than checked: `_drive_orders` above already closed
@@ -2157,16 +2161,15 @@ class Executor:
         fire = self._market.micro_smt_exit_on_bar_close(now, bar, mes_bar, mnq, mes)
         if fire is None:
             return
-        if not self._initial_action_is_wired():
-            # `MirroringOrderPort` (the live port) has no `flatten` — only `OrderSim`
-            # does. `_initial_opp_close` (plan 35 action B) hits the exact same gap and
-            # refuses rather than calling a method the live port does not have; this
-            # reuses that same check rather than crashing into a swallowed
-            # `market_mech_error` (or, worse, silently doing nothing every bar).
-            # REFUSES IN LIVE until `MirroringOrderPort.flatten` exists — replay-only
-            # for now. Recorded ONCE per position (`_set_target_on_fill` resets the
-            # latch at every fill) so a live session shows exactly when O4 WOULD have
-            # exited, without repeating the same observation every later bar.
+        if not self._port_supports("flatten"):
+            # `MirroringOrderPort` now HAS `flatten` (wired 2026-09-26), so this no
+            # longer fires against it — it is dead code for today's live port, kept for
+            # any FUTURE port that does not implement `flatten`, so the gap is still
+            # visible rather than crashing into a swallowed `market_mech_error` (or,
+            # worse, silently doing nothing every bar). Recorded ONCE per position
+            # (`_set_target_on_fill` resets the latch at every fill) so a live session
+            # shows exactly when O4 WOULD have exited, without repeating the same
+            # observation every later bar.
             self._state["micro_smt_exit_unwired"] = True
             if not self._micro_smt_exit_unwired_recorded:
                 self._micro_smt_exit_unwired_recorded = True
