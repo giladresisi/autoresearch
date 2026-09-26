@@ -39,6 +39,7 @@ from agent.trader.episode import Episode, evaluation_order
 from agent.trader.extreme_reject import ExtremeReject, choose_track
 from agent.trader.tmso_reject import TmsoReject, tmso_for
 from agent.trader.fvg_reject import FvgReject, zone_at_0700
+from agent.trader.micro_smt import MicroSmt, micro_smt_entry_armed, previous_micro_extremes
 
 _SHORT = ("DOWN", "SHORT")
 
@@ -80,6 +81,16 @@ class MarketMechanisms:
         # CANDIDATE — see `fvg_reject.py`. Self-gating: inert until the 07:00 1h FVG
         # exists and price makes a new post-09:30 extreme inside it.
         self._fvg1h = FvgReject(direction)
+        # O3/O4, ADOPTED 2026-09-26 (`l2-mechanisms.md` §7a/§7b) — see `micro_smt.py`.
+        # Both flag-gated, both default ON, and built eagerly regardless: cheap, and
+        # self-gating until a previous micro-session exists. `_micro_smt_entry` watches
+        # the THESIS side (bearish for a DOWN plan);
+        # `_micro_smt_exit` watches the OPPOSITE side, for exiting a position this plan
+        # opened (every mechanism here fires in the plan's own direction, so the position
+        # direction never differs from `direction`).
+        short = str(direction or "").upper() in _SHORT
+        self._micro_smt_entry = MicroSmt("bearish" if short else "bullish")
+        self._micro_smt_exit = MicroSmt("bullish" if short else "bearish")
 
     # -- inspection ------------------------------------------------------------ #
 
@@ -91,6 +102,8 @@ class MarketMechanisms:
         return {"sec7": self._sec7.state() if self._sec7 is not None else None,
                 "episodes": {k: e.state() for k, e in self._episodes.items()},
                 "tmso": self._tmso.state(), "fvg_1h": self._fvg1h.state(),
+                "micro_smt_entry": self._micro_smt_entry.state(),
+                "micro_smt_exit": self._micro_smt_exit.state(),
                 "seeded": self._seeded}
 
     # -- §7 -------------------------------------------------------------------- #
@@ -125,6 +138,21 @@ class MarketMechanisms:
 
     def fvg1h_on_bar_close(self, now, bar, mnq) -> "dict | None":
         return self._fvg1h.on_bar_close(now, bar, zone_at_0700(mnq, now))
+
+    # -- micro_smt_reject / micro_smt_exit (O3/O4, ADOPTED §7a/§7b) -------------- #
+
+    def micro_smt_entry_on_bar_close(self, now, mnq_bar, mes_bar, mnq, mes) -> "dict | None":
+        fire = self._micro_smt_entry.on_bar_close(
+            now, mnq_bar, mes_bar, previous_micro_extremes(mnq, mes, now))
+        if fire is None:
+            return None
+        fire = dict(fire)
+        fire["mechanism"] = "micro_smt_reject"
+        return fire
+
+    def micro_smt_exit_on_bar_close(self, now, mnq_bar, mes_bar, mnq, mes) -> "dict | None":
+        return self._micro_smt_exit.on_bar_close(
+            now, mnq_bar, mes_bar, previous_micro_extremes(mnq, mes, now))
 
     # -- §6 -------------------------------------------------------------------- #
 
@@ -182,6 +210,8 @@ class MarketMechanisms:
             out.append(Candidate("fvg_1m_post_extreme", "market"))
         out.append(Candidate("tmso_reject", "market"))
         out.append(Candidate("fvg_1h_reject", "market"))
+        if micro_smt_entry_armed():
+            out.append(Candidate("micro_smt_reject", "market"))
         return out
 
     def pick(self, fires) -> "dict | None":

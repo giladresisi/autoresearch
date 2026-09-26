@@ -11,7 +11,8 @@ if _REPO not in sys.path:
 
 from agent.facts.detectors.legs import segment_legs
 from agent.trader.planner import (FIVE_MIN_CLASSES, FIVE_MIN_ENV_FLAG,
-                                  SELF_GATING_CLASSES, derive_plan, five_min_armed)
+                                  SELF_GATING_CLASSES, derive_plan, five_min_armed,
+                                  micro_smt_entry_armed)
 
 TZ = "America/New_York"
 
@@ -36,11 +37,25 @@ def _plan(tape, bias, **kw):
 
 def test_neither_5m_class_is_armed_by_default(tape, monkeypatch):
     monkeypatch.delenv(FIVE_MIN_ENV_FLAG, raising=False)
+    # `micro_smt_reject` (O3) is ON by default since its 2026-09-26 adoption -- this
+    # test is about the UNRELATED §4/§5 5m suspension, so it is pinned OFF here rather
+    # than baking today's O3 default into an assertion about a different mechanism.
+    monkeypatch.setattr("agent.trader.planner.micro_smt_entry_armed", lambda: False)
     for bias in ("DOWN", "UP"):
         armed = _plan(tape, bias)["armed_classes"]
         assert not [c for c in armed if c in FIVE_MIN_CLASSES], armed
         # The suspension must not disturb the self-gating four.
         assert list(armed) == list(SELF_GATING_CLASSES)
+
+
+def test_micro_smt_reject_is_armed_by_default_alongside_the_self_gating_four(tape,
+                                                                              monkeypatch):
+    """O3's actual default (2026-09-26 adoption): armed classes are the self-gating four
+    PLUS `micro_smt_reject`, unlike the still-suspended 5m pair."""
+    monkeypatch.delenv(FIVE_MIN_ENV_FLAG, raising=False)
+    assert micro_smt_entry_armed() is True
+    armed = _plan(tape, "DOWN")["armed_classes"]
+    assert list(armed) == list(SELF_GATING_CLASSES) + ["micro_smt_reject"]
 
 
 def test_last_trend_is_still_recorded_while_suspended(tape, monkeypatch):

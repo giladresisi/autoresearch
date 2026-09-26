@@ -20,6 +20,11 @@ Step-8b's near-secondary veto (`hypothesis.py:2129-2138`) is deliberately NOT ca
 default and `ACT_TRADER_5M=1` restores them. The rule above is otherwise untouched and the
 mechanisms are untouched; this is a suspension pending plan 36's D2/D3, not a removal. The
 measurement and the known counterexample are on `five_min_armed`.
+
+**`micro_smt_reject` (O3, ADOPTED 2026-09-26, `l2-mechanisms.md` §7a) is armed only when
+`micro_smt.MICRO_SMT_ENTRY_ENABLED` is True** — ON by default since adoption, but still a
+CONDITIONAL arm (unlike the unconditional self-gating classes above) so a rollback
+(`MICRO_SMT_ENTRY_ENABLED = False`) byte-matches pre-adoption plans. See `micro_smt.py`.
 """
 from __future__ import annotations
 
@@ -29,6 +34,7 @@ import os
 import pandas as pd
 
 from agent.facts.detectors.legs import last_trend
+from agent.trader.micro_smt import micro_smt_entry_armed
 
 MECHANISM_CLASSES = (
     "fvg_negation_reversal",
@@ -37,6 +43,7 @@ MECHANISM_CLASSES = (
     "extreme_reject_close",
     "tmso_reject",
     "fvg_1h_reject",
+    "micro_smt_reject",
 )
 
 # §6/§7 verify their own preconditions on every bar, so there is nothing for the
@@ -115,6 +122,12 @@ def derive_plan(thesis: dict, legs, now: pd.Timestamp,
     want_leg = _BIAS_TO_LEG.get(bias)
 
     armed = list(SELF_GATING_CLASSES)
+    if micro_smt_entry_armed():
+        # O3, ADOPTED (`l2-mechanisms.md` §7a), flag-gated ON by default — see
+        # `micro_smt.py`. Unlike the unconditional self-gating classes above, this one
+        # is not armed at all when its flag is False, so a rollback byte-matches
+        # pre-adoption plans.
+        armed.append("micro_smt_reject")
     trend = last_trend(list(legs or ()), now)
     trend_dir = (trend.extra.get("direction") if trend is not None else None)
     # `last_trend` is still computed and still reported in the plan when the 5m classes are

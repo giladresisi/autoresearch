@@ -45,7 +45,16 @@ RECORD_FILE = "agent_dispatch.jsonl"
 
 #: Simulated close kinds -> the reason the market close carries.
 CLOSE_REASONS = {"stop_out": "stop_out", "take_profit": "take_profit",
-                 "mark": "window_end"}
+                 "mark": "window_end",
+                 # O4 (`agent/trader/micro_smt.py`), ADOPTED 2026-09-26, flag-gated ON
+                 # by default but REPLAY-ONLY: the live `MirroringOrderPort` has no
+                 # `flatten`, so `_drive_micro_smt_exit` refuses before this mapping is
+                 # ever exercised in live. Kept here so the mapping is ready the day
+                 # that live wiring lands. Without this entry `_signal` returns None for
+                 # it and `_sink` acks `untranslatable_event` — the simulation closes
+                 # the position but no close order ever reaches the broker. Found, not
+                 # assumed: checked by reading this module while implementing O4.
+                 "micro_smt_exit": "micro_smt_exit"}
 _DIRECTIONS = {"UP": "up", "LONG": "up", "DOWN": "down", "SHORT": "down"}
 
 
