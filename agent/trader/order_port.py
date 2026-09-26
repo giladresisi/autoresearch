@@ -6,14 +6,15 @@ stays the brain's position model (plan 38 D2) — it adds a second party that ha
 TOLD what the model just did. That is all this module is.
 
 `OrderPort` is exactly the surface the Executor uses, read off its call sites and nothing
-more: five attributes and six methods. `OrderSim` satisfies it unchanged, which is what
+more: five attributes and seven methods. `OrderSim` satisfies it unchanged, which is what
 keeps a replay byte-identical — the default port IS the simulation.
 
 `MirroringOrderPort` wraps a simulation and, after every event the simulation RETURNS
-(`fill`, `stop_out`, `take_profit`, `mark`), calls `sink(event)` once. The sink is
-injected; this module does not know what is on the other side of it, imports nothing
-outside the standard library, and names no order-routing module anywhere — docstrings
-included, because the structural gates grep the whole source.
+(`fill`, `stop_out`, `take_profit`, `mark`, `flatten`'s explicit-kind close), calls
+`sink(event)` once. The sink is injected; this module does not know what is on the other
+side of it, imports nothing outside the standard library, and names no order-routing
+module anywhere — docstrings included, because the structural gates grep the whole
+source.
 
 Three rules the mirror owns, because nobody else can:
 
@@ -67,6 +68,8 @@ class OrderPort(Protocol):
     def on_bar(self, now, bar) -> list: ...
 
     def mark_open(self, now, price): ...
+
+    def flatten(self, now, price, kind: str = "hard_close"): ...
 
 
 def _ack_ok(ack) -> bool:
@@ -168,6 +171,17 @@ class MirroringOrderPort:
 
     def mark_open(self, now, price):
         ev = self._inner.mark_open(now, price)
+        if ev is not None:
+            self._mirror_close(ev)
+        return ev
+
+    def flatten(self, now, price, kind: str = "hard_close"):
+        """An Executor-initiated close (O4 `micro_smt_exit`, plan-35 B `initial_opp_close`,
+        the 13:00 hard close) — same mirroring as a stop-out or take-profit: the inner
+        simulation closes first, then the event is reported through `_mirror_close`, so a
+        not-ok ack leaves the model closed and sets `external` exactly as it does there.
+        `None` when nothing is open; nothing is sent in that case."""
+        ev = self._inner.flatten(now, price, kind=kind)
         if ev is not None:
             self._mirror_close(ev)
         return ev

@@ -699,6 +699,42 @@ def test_action_b_closes_on_the_first_opposite_close_after_the_flip_and_not_befo
                    for r in recs)
 
 
+def test_action_b_exits_live_through_the_mirroring_port(tmp_path, monkeypatch):
+    """feat/live-flatten-exits: action B now closes for real when the order port is the
+    live mirror, not just the bare simulation — `MirroringOrderPort.flatten` forwards the
+    same `initial_opp_close` the bare-sim test above records, through to the sink."""
+    from agent.trader.order_port import MirroringOrderPort
+    sunk = []
+    port = MirroringOrderPort(OrderSim(dol=None), lambda ev: sunk.append(ev) or None)
+    ex = _executor(tmp_path, monkeypatch, action="opp_close", order_port=port)
+    port._context = ex.order_context
+    _run(ex, _frame())
+    closes = [r for r in _recs(tmp_path) if r["kind"] == "initial_opp_close"]
+    assert len(closes) == 1
+    assert ex._sim.position is None
+    assert [e["kind"] for e in sunk] == ["fill", "initial_opp_close"]
+    assert ex.bind_state().get("initial_action_unwired") is None
+
+
+def test_action_a_still_refuses_on_the_mirroring_port(tmp_path, monkeypatch):
+    """`move_stop` is deliberately NOT on `MirroringOrderPort` — the dispatcher speaks
+    market entries/closes only, and there is no market order that moves a resting stop.
+    Action A must keep refusing exactly as before `flatten` was wired, on the exact same
+    port that now lets O4 and action B exit live."""
+    from agent.trader.order_port import MirroringOrderPort
+    sunk = []
+    port = MirroringOrderPort(OrderSim(dol=None), lambda ev: sunk.append(ev) or None)
+    ex = _executor(tmp_path, monkeypatch, action="be_structure", order_port=port)
+    port._context = ex.order_context
+    _run(ex, _frame())
+    kinds = _kinds(tmp_path)
+    assert "stop_moved" not in kinds and "stop_out_initial" not in kinds
+    assert ex.bind_state().get("initial_action_unwired") == "be_structure"
+    assert ex._sim.position is not None
+    assert ex._sim.position["stop"] == pytest.approx(STOP), "the stop was never moved"
+    assert [e["kind"] for e in sunk] == ["fill"]
+
+
 def test_same_bar_stop_out_wins_over_the_flip(tmp_path, monkeypatch):
     """The 10:01 bar closes beyond the initial AND trades through the stop: the
     simulator books the stop on that bar, and the stage records no flip."""

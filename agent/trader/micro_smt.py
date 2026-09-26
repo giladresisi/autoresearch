@@ -27,8 +27,8 @@ CANDIDATE entry after the 30-day A/B (adoption PR description, branch autoresear
 no unexplained knock-on. The operator then narrowed O3's window from the A/B's 10:30-12:30
 to **10:30 ≤ entry < 11:00 ET**; none of the 3 A/B entries (11:08, 11:16, 12:02) fall
 inside that narrower window, so the +54.50 figure is NOT reproduced by the shipped window
-— see §7a for the re-run under the narrower window. O4 stays REPLAY-ONLY (the live
-`MirroringOrderPort` has no `flatten`) until that live wiring is built, tracked separately.
+— see §7a for the re-run under the narrower window. O4 is wired live (`MirroringOrderPort`
+now has `flatten`, plan feat/live-flatten-exits, 2026-09-26).
 
 **Both flags default True.** `MICRO_SMT_ENTRY_ENABLED` gates O3 (a market-entry mechanism,
 `micro_smt_reject`); `MICRO_SMT_EXIT_ENABLED` gates O4 (a market-close exit trigger,
@@ -87,8 +87,8 @@ from agent.trader.tmso_reject import MICRO_SESSION_MINUTES, micro_session_start
 #: 2026-09-26 -- see `l2-mechanisms.md` §7a).
 MICRO_SMT_ENTRY_ENABLED = True
 #: O4: a market-close exit trigger, `micro_smt_exit`, on any open position. ON by default
-#: (operator adoption, 2026-09-26 -- see `l2-mechanisms.md` §7a). REPLAY-ONLY: refuses on
-#: a live `MirroringOrderPort`, which has no `flatten` -- see `executor._drive_micro_smt_exit`.
+#: (operator adoption, 2026-09-26 -- see `l2-mechanisms.md` §7a). Wired live the same day
+#: via `MirroringOrderPort.flatten` -- see `executor._drive_micro_smt_exit`.
 MICRO_SMT_EXIT_ENABLED = True
 #: O3 is EXEMPT from the shared `executor.ENTRY_CUTOFF_ET` (10:30) -- an explicit operator
 #: decision (2026-09-24) -- and instead carries its OWN window, pinned by the operator

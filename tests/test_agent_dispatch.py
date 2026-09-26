@@ -181,7 +181,9 @@ def test_a_fill_becomes_one_json_safe_ascii_market_entry(tmp_path, direction, ex
 
 @pytest.mark.parametrize("kind,reason", [("stop_out", "stop_out"),
                                          ("take_profit", "take_profit"),
-                                         ("mark", "window_end")])
+                                         ("mark", "window_end"),
+                                         ("micro_smt_exit", "micro_smt_exit"),
+                                         ("initial_opp_close", "initial_opp_close")])
 def test_every_close_becomes_a_market_close_with_its_reason(tmp_path, kind, reason):
     """Case 26."""
     book = FakeBook()

@@ -101,6 +101,43 @@ def test_each_close_reaches_the_sink_once_with_the_entry(kind):
     assert port.position is None
 
 
+def test_a_flatten_reaches_the_sink_once_with_the_entry_and_its_kind():
+    """`flatten` (O4 `micro_smt_exit`, plan 35 B `initial_opp_close`, the 13:00 hard
+    close) is mirrored exactly like a stop-out or take-profit -- same `_mirror_close`."""
+    sink = _Sink()
+    port, ctx = _port(sink)
+    port.fill_market(_ts("09:40:00"), direction="UP", price=29250.0, stop=29235.0,
+                     artifact_id="x")
+    ctx["mechanism"] = None
+    ev = port.flatten(_ts("10:33:00"), 29300.0, kind="micro_smt_exit")
+    assert ev["kind"] == "micro_smt_exit" and ev["price"] == 29300.0
+    assert [e["kind"] for e in sink.events] == ["fill", "micro_smt_exit"]
+    close = sink.events[1]
+    assert close["entry"] == 29250.0 and close["seq"] == 2
+    assert close["mechanism"] == "extreme_reject_close" and close["plan_id"] == "p38"
+    assert port.position is None
+
+
+def test_a_flatten_with_nothing_open_returns_none_and_sends_nothing():
+    sink = _Sink()
+    port, _ = _port(sink)
+    assert port.flatten(_ts("10:00:00"), 29300.0, kind="micro_smt_exit") is None
+    assert sink.events == []
+
+
+def test_a_failed_flatten_ack_does_not_resurrect_the_position():
+    """The close-failure policy is identical to stop_out/take_profit: the model stays
+    closed and `external` is set with the flatten's own kind."""
+    sink = _Sink(acks=[None, {"ok": False, "reason": "close_not_confirmed"}])
+    port, _ = _port(sink)
+    port.fill_market(_ts("09:40:00"), direction="UP", price=29250.0, stop=29235.0,
+                     artifact_id="x")
+    ev = port.flatten(_ts("10:33:00"), 29300.0, kind="micro_smt_exit")
+    assert ev["kind"] == "micro_smt_exit"
+    assert port.position is None
+    assert port.external == {"reason": "close_not_confirmed", "kind": "micro_smt_exit"}
+
+
 def test_two_fills_sharing_one_artifact_id_both_reach_the_sink():
     """Case 3 (F7): a market mechanism with no gap reuses its own name as the id."""
     sink = _Sink()

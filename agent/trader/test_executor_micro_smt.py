@@ -304,10 +304,12 @@ def test_flag_on_losing_micro_smt_exit_spends_the_shared_attempt(tmp_path, monke
     assert ex._positive_close is False, "a loser does not latch NO_ENTRY_AFTER_POSITIVE"
 
 
-def test_flag_on_micro_smt_exit_refuses_on_a_live_mirroring_port(tmp_path, monkeypatch):
-    """`MirroringOrderPort` has no `flatten` (only `OrderSim` does) -- the same gap
-    `_initial_opp_close` (plan 35 action B) already refuses on. O4 must refuse the same
-    way, not raise into a swallowed `market_mech_error` or silently no-op forever."""
+def test_flag_on_micro_smt_exit_closes_live_through_the_mirroring_port(tmp_path,
+                                                                        monkeypatch):
+    """feat/live-flatten-exits: `MirroringOrderPort.flatten` now exists, so O4 exits for
+    real on a live port -- the sink receives a `micro_smt_exit` close, and no
+    `micro_smt_exit_unwired` veto is recorded (that path is for a port WITHOUT
+    `flatten`, exercised separately below)."""
     sunk = []
     port = MirroringOrderPort(OrderSim(dol=None), lambda ev: sunk.append(ev) or
                               {"ok": True, "reason": ""})
@@ -321,9 +323,44 @@ def test_flag_on_micro_smt_exit_refuses_on_a_live_mirroring_port(tmp_path, monke
     assert ex.position() is not None
     ex._market.exit_fire = {"price": 30500.0, "time": _ts("10:33:00")}
     _step(ex, "10:33:00", 30550.0)
+    assert ex.position() is None, "O4 closes for real on a live port now"
+    assert [e.get("kind") for e in sunk] == ["fill", "micro_smt_exit"]
+    assert ex.bind_state().get("micro_smt_exit_unwired") is None
+    assert "micro_smt_exit" in _kinds(tmp_path)
+    vetoes = [r for r in _records(tmp_path) if r.get("reason") == "micro_smt_exit_unwired"]
+    assert vetoes == []
+
+
+class _StubPortWithoutFlatten:
+    """A minimal port with everything `OrderSim` has EXCEPT `flatten` -- proves the
+    `micro_smt_exit_unwired` veto path still exists for a FUTURE port that, unlike
+    `MirroringOrderPort`, does not implement `flatten`."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        if name == "flatten":
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+
+def test_micro_smt_exit_still_refuses_on_a_port_without_flatten(tmp_path, monkeypatch):
+    """`Executor._port_supports` is per-operation (hasattr), so a port that genuinely
+    lacks `flatten` still gets the refuse-and-record behaviour O4 always had."""
+    port = _StubPortWithoutFlatten(OrderSim(dol=None))
+    ex = make_executor(tmp_path, monkeypatch, order_port=port)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_ENTRY_ENABLED", True)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_EXIT_ENABLED", True)
+    _seed(ex, "10:30:00", 30600.0)
+    ex._market.entry_fire = {"mechanism": "micro_smt_reject", "direction": "DOWN",
+                             "price": 30600.0, "stop": 30700.0, "time": _ts("10:31:00")}
+    _step(ex, "10:31:00", 30600.0)
+    assert ex.position() is not None
+    ex._market.exit_fire = {"price": 30500.0, "time": _ts("10:33:00")}
+    _step(ex, "10:33:00", 30550.0)
     assert ex.position() is not None, "refused, not crashed and not silently closed"
     assert ex.bind_state().get("micro_smt_exit_unwired") is True
-    assert "micro_smt_exit" not in [e.get("kind") for e in sunk]
     vetoes = [r for r in _records(tmp_path) if r.get("reason") == "micro_smt_exit_unwired"]
     assert len(vetoes) == 1, "the refusal must be VISIBLE in trader_decisions.jsonl " \
         "so a live session shows when O4 would have exited"
@@ -339,9 +376,7 @@ def test_flag_on_micro_smt_exit_refuses_on_a_live_mirroring_port(tmp_path, monke
 def test_micro_smt_exit_unwired_record_resets_per_position(tmp_path, monkeypatch):
     """A NEW position that hits the same live-port gap is recorded again -- the latch is
     per-position (reset at every fill), not a one-shot for the whole plan."""
-    sunk = []
-    port = MirroringOrderPort(OrderSim(dol=None), lambda ev: sunk.append(ev) or
-                              {"ok": True, "reason": ""})
+    port = _StubPortWithoutFlatten(OrderSim(dol=None))
     ex = make_executor(tmp_path, monkeypatch, order_port=port)
     monkeypatch.setattr(micro_smt, "MICRO_SMT_ENTRY_ENABLED", True)
     monkeypatch.setattr(micro_smt, "MICRO_SMT_EXIT_ENABLED", True)
