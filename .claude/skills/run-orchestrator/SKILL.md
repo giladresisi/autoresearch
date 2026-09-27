@@ -79,6 +79,23 @@ Choose flags based on the user's request:
 | Start PAUSED (only when explicitly requested) | `uv run python trade.py start --pause` |
 | Force-reset state (LEGACY brain only, `ACT_TRADER=0`) | add `--force` |
 | Enable LLM session summary | add `--summary` |
+| Profile the run ("with profiling", "profile memory") | add `--profile` |
+
+**Profiling.** `--profile` is passed on the command line to the orchestrator, which forwards
+it to `automation.main` (`automation/profiling.py`). Both processes sample RSS / commit /
+CPU every 30s all session, and trace allocations: a BASELINE tracemalloc snapshot at
+09:15:30 ET, then a FINAL one (with per-line growth since the baseline) at 13:05:30 ET or when
+`trade.py terminate` / `start` stops the processes, whichever is first — never both; tracing
+then stops. `trade.py` asks for that final snapshot and waits for it (up to 2 min, usually
+seconds) before its normal graceful stop, so ALWAYS stop a profiled run with
+`trade.py terminate`, never by killing processes. A start inside 09:15-13:05 ET never
+traces (samples only). Output: `<sessions>/<date>/profile/` (`mem_automation_<pid>.tsv`,
+`tracemalloc_automation_<pid>_0915.txt` / `_final.txt`) and `<global>/profile/` for the
+orchestrator. The logs show `[orchestrator] profiling ON ->` and `[automation] profiling ON ->`
+(or `FAILED to start`). Cost: tracing makes the process ~2x slower from start to the final
+snapshot (no freezes); each snapshot freezes it ~5s, and none falls inside the window except
+the terminate one. Add it only when the user asks for profiling. When they did, keep `--profile` on the auto-restart in Step 4.3 only if they
+asked for more than one session (default: that session only).
 
 ```powershell
 uv run python trade.py start --resume   # default: resumed. Use --pause only if explicitly requested.
@@ -513,7 +530,8 @@ exit 0
 ```
 
 **3. On `[REOPEN] IB realtime data confirmed`:** restart the orchestrator for the next
-session by repeating **Step 1** (`uv run python trade.py start --resume`, record
+session by repeating **Step 1** (`uv run python trade.py start --resume`, plus `--profile`
+only if profiling is still requested for the next session — see Step 1, record
 the running-commit note, report the session window) and **re-arm the Step-2 keepalive
 Monitor**. The full cycle then repeats automatically each trading day:
 

@@ -1365,6 +1365,12 @@ def main() -> None:
     if not MNQ_CONID or not MES_CONID:
         raise RuntimeError("MNQ_CONID and MES_CONID must be set in .env")
 
+    if "--profile" in sys.argv:
+        from automation.profiling import start as _profile_start
+        _profile_dir = _profile_start("automation", paths.state_dir())
+        print(f"[automation] profiling {'ON -> ' + str(_profile_dir) if _profile_dir else 'FAILED to start'}",
+              flush=True)
+
     BAR_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # Parse session window into time objects used by callbacks

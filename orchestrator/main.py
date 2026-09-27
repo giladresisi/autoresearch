@@ -462,9 +462,16 @@ def _kill_automation_main() -> None:
         print(f"[ORCH] Terminated orphaned automation.main subprocess(es): {killed}", flush=True)
 
 
-def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_reset: bool = False) -> None:
-    """Main daemon loop. Ctrl+C exits cleanly; subprocess is terminated if active."""
+def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_reset: bool = False,
+        profile: bool = False) -> None:
+    """Main daemon loop. Ctrl+C exits cleanly; subprocess is terminated if active.
+    `profile` profiles this process and forwards `--profile` to automation.main."""
     _kill_stale_orchestrator()
+    if profile:
+        from automation.profiling import start as _profile_start
+        _profile_dir = _profile_start("orchestrator", paths.global_root())
+        print(f"[orchestrator] profiling {'ON -> ' + str(_profile_dir) if _profile_dir else 'FAILED to start'}",
+              flush=True)
     if not skip_summary and summarizer is None:
         summarizer = Summarizer()
     bar_data_dir = paths.general_live_dir()
@@ -557,6 +564,8 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
                 # paused after the orchestrator crashed (incident 2026-06-12, D2). sys.executable
                 # is the active venv interpreter, so the orchestrator holds the real PID.
                 signal_cmd = [sys.executable, "-m", "automation.main"]
+                if profile:
+                    signal_cmd.append("--profile")
             else:
                 signal_cmd = _SIGNAL_SMT
             print(f"[orchestrator] mode={'LIVE_TRADING' if LIVE_TRADING else 'signal'}", flush=True)
@@ -649,4 +658,5 @@ if __name__ == "__main__":
     elif "--create-empty-parquets" in sys.argv:
         _cli_create_empty_parquets()
     else:
-        run(skip_summary="--summary" not in sys.argv, force_reset="--force" in sys.argv)
+        run(skip_summary="--summary" not in sys.argv, force_reset="--force" in sys.argv,
+            profile="--profile" in sys.argv)

@@ -87,6 +87,10 @@ lists what must NOT be built.
   restores it after a run; leaving it set re-arms every later run in the same process.
   Never set it in live: the arm is an exact-minute test, so a process started after 09:20
   ET is a dark day, and a live restart that finds `plans.json` stays dark too.
+- `trade.py start --profile` (a flag, not an env var; forwarded orchestrator ->
+  automation.main) profiles both processes (`automation/profiling.py`): RSS every 30s;
+  tracemalloc (~2x slower) snapshots at 09:15:30 ET and 13:05:30 ET or at `trade.py
+  terminate` (~5s freeze each), none otherwise inside the trading window.
 - `ACT_THESIS_CACHE_DIR` redirects the thesis cache. Point it at a tmp dir for any test
   that would otherwise deposit a synthetic recording into `<global>/thesis_cache`, which
   every worktree reads.

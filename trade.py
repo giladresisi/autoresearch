@@ -27,6 +27,7 @@ Usage:
   python trade.py start --force          # Reset hypothesis direction and position state (start fresh)
   python trade.py start --pause          # Start with automatic entries paused (creates data/paused; start continues regardless)
   python trade.py start --resume         # Start with automatic entries enabled (clears data/paused; start continues regardless)
+  python trade.py start --profile        # + memory profiling -> <session>/profile/ (RSS every 30s; allocation snapshots 09:15:30 + 13:05:30 ET or at terminate)
   python trade.py terminate              # Kill orchestrator and automation.main
   python trade.py gap-fill               # IB-backfill main 1s+1m parquets up to now (orchestrator must NOT be running)
   python trade.py promote                # Copy live parquets over main (prior main backed up to .bak) — run after gap-fill
@@ -103,6 +104,47 @@ def _proc_in_worktree(proc, root) -> bool:
         return False
 
 
+def _request_profile_snapshots(worktree_root, timeout: float = 120.0) -> None:
+    """Before stopping `--profile` processes, ask each for its final memory snapshot and
+    wait for it (automation/profiling.py's handshake). No-op when nothing is profiled."""
+    import time
+    import psutil
+    from automation.profiling import REQUEST_FILE, done_file
+
+    labels = set()
+    for proc in psutil.process_iter(["name", "cmdline"]):
+        try:
+            if proc.info.get("name", "").lower() not in ("python.exe", "python"):
+                continue
+            cmdline = proc.info.get("cmdline") or []
+            if "--profile" not in cmdline or not _proc_in_worktree(proc, worktree_root):
+                continue
+            if any("orchestrator.main" in a for a in cmdline):
+                labels.add("orchestrator")
+            elif any("automation.main" in a for a in cmdline):
+                labels.add("automation")
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    if not labels:
+        return
+    for label in labels:
+        done_file(label).unlink(missing_ok=True)
+    print(f"Requesting final profiling snapshot from {', '.join(sorted(labels))} ...")
+    REQUEST_FILE.write_text("snapshot", encoding="utf-8")
+    try:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if all(done_file(label).exists() for label in labels):
+                print("Profiling snapshots written")
+                return
+            time.sleep(0.5)
+        print(f"WARNING: no snapshot confirmation within {timeout:.0f}s — stopping anyway")
+    finally:
+        REQUEST_FILE.unlink(missing_ok=True)
+        for label in labels:
+            done_file(label).unlink(missing_ok=True)
+
+
 def _terminate_all() -> list[str]:
     """Gracefully stop orchestrator (cancelMktData + IB disconnect + parquet flush), then kill
     automation.main — **scoped to THIS worktree**. Returns list of killed/stopped descriptions."""
@@ -112,6 +154,10 @@ def _terminate_all() -> list[str]:
 
     killed = []
     worktree_root = Path(__file__).resolve().parent
+    try:
+        _request_profile_snapshots(worktree_root)
+    except Exception as exc:
+        print(f"WARNING: profiling snapshot request failed ({exc}) — stopping anyway")
 
     # PID file lives in the shared general live folder (one canonical live orchestrator).
     pid_file = paths.general_live_dir() / "orchestrator.pid"
@@ -594,6 +640,11 @@ def main() -> None:
         orch_cmd = ["uv", "run", "python", "-m", "orchestrator.main"]
         if summary:
             orch_cmd.append("--summary")
+        # Memory profiling (automation/profiling.py); the orchestrator forwards it to
+        # automation.main.
+        profile = "--profile" in raw_args
+        if profile:
+            orch_cmd.append("--profile")
 
         CREATE_NO_WINDOW = 0x08000000
         _popen_env = {**os.environ, "FORCE_RESET": "true"} if force else None
@@ -614,6 +665,8 @@ def main() -> None:
             print(f"Orchestrator started pid={new_pid}")
             if summary:
                 print("LLM summary enabled")
+            if profile:
+                print("Profiling enabled")
         else:
             print("WARNING: orchestrator.pid not written — check orchestrator_stdout.log for errors")
 
