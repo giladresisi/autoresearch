@@ -134,6 +134,7 @@ class TraderGraft:
         self._plan = None
         self._last_minute = None
         self._hist: dict = {}
+        self._hist_before: dict = {}      # tk -> (hist slice, today's first ts, trimmed)
         self._order_sink = order_sink
         self._rec = DecisionRecorder(state_dir)
         # The last finalized RAW second, handed over by the live driver just before the
@@ -219,8 +220,14 @@ class TraderGraft:
             if today is None or not len(today):
                 out[tk] = h
                 continue
-            merged = pd.concat([h[h.index < today.index[0]], today])
-            out[tk] = merged
+            # The trim below depends only on today's first stamp, fixed within a
+            # session: cache it instead of re-masking ~17 days of bars every second.
+            first = today.index[0]
+            cached = self._hist_before.get(tk)
+            if cached is None or cached[0] is not h or cached[1] != first:
+                cached = (h, first, h[h.index < first])
+                self._hist_before[tk] = cached
+            out[tk] = pd.concat([cached[2], today])
         return out
 
     def _run(self, now, today_mnq, today_mes, bar_complete, hist_mnq, hist_mes) -> None:

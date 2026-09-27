@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime
 
+import numpy as np
 import pandas as pd
 
 SESSION_OPEN_HOUR = 18
@@ -49,9 +50,13 @@ def _source_step(idx: pd.DatetimeIndex) -> pd.Timedelta:
     """Bar width of the SOURCE frame, inferred from the smallest positive gap."""
     if len(idx) < 2:
         return _DEFAULT_STEP
-    diffs = pd.Series(idx).diff().dropna()
-    diffs = diffs[diffs > pd.Timedelta(0)]
-    return pd.Timedelta(diffs.min()) if len(diffs) else _DEFAULT_STEP
+    if idx.hasnans:
+        diffs = pd.Series(idx).diff().dropna()
+        diffs = diffs[diffs > pd.Timedelta(0)]
+        return pd.Timedelta(diffs.min()) if len(diffs) else _DEFAULT_STEP
+    d = np.diff(idx.asi8)
+    d = d[d > 0]
+    return pd.Timedelta(int(d.min()), unit="ns") if len(d) else _DEFAULT_STEP
 
 
 def resample(df: pd.DataFrame, tf: str, *, session_anchored: bool = True) -> pd.DataFrame:
@@ -80,7 +85,12 @@ def resample(df: pd.DataFrame, tf: str, *, session_anchored: bool = True) -> pd.
         kwargs = {"label": "left", "closed": "left"}
         if session_anchored:
             kwargs["origin"] = origin
-        out = seg.resample(tf, **kwargs).agg(_AGG).dropna(how="all")
+        r = seg.resample(tf, **kwargs)
+        # Per-column reductions, not `.agg(_AGG)`: same values (the same groupby
+        # kernels), without the dict-agg dispatch that dominated this function's cost.
+        # A frame missing a column still raises KeyError, as `.agg` did.
+        out = pd.DataFrame({c: getattr(r[c], fn)() for c, fn in _AGG.items()}
+                           ).dropna(how="all")
         if not len(out):
             continue
         first_covered = seg.index[0]

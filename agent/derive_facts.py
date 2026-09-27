@@ -40,6 +40,7 @@ import math
 import os
 import re
 import sys
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -156,7 +157,27 @@ def _day_start_ts(now: pd.Timestamp) -> pd.Timestamp:
     return pd.Timestamp(datetime.datetime(d.year, d.month, d.day, hr, 0), tz=TZ)
 
 
+#: Per-thread memo for `ohlc`, active only inside `compute_facts`: one bundle resamples
+#: the same frames to the same rules ~350 times (every swept level's 1h/4h close status),
+#: which made a single build ~2-3 s -- paid at the fill instant, where `select_target`
+#: builds one. Keyed by the frame's identity, with a strong reference so a recycled id()
+#: can never hit; every caller only reads the result.
+_OHLC_MEMO = threading.local()
+
+
 def ohlc(df, rule, offset=pd.Timedelta(hours=18)):
+    memo = getattr(_OHLC_MEMO, "d", None)
+    if memo is not None:
+        hit = memo.get((id(df), rule, offset))
+        if hit is not None and hit[0] is df:
+            return hit[1]
+    out = _ohlc_uncached(df, rule, offset)
+    if memo is not None:
+        memo[(id(df), rule, offset)] = (df, out)
+    return out
+
+
+def _ohlc_uncached(df, rule, offset):
     """Resample to `rule`-length bars anchored to the 18:00 ET session open (CME/
     TradingView convention), not the midnight/epoch grid pandas defaults to. For a "4h"
     rule this gives 18:00/22:00/02:00/06:00/10:00/14:00 ET boundaries, with the final
@@ -2139,7 +2160,18 @@ def build_evidence_magnitude(bundle: FactsBundle) -> dict:
     return out
 
 
-def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
+def compute_facts(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, **kw) -> "FactsBundle":
+    """`_compute_facts_impl` with the `ohlc` memo on for the duration of the call."""
+    if getattr(_OHLC_MEMO, "d", None) is not None:          # nested: reuse the outer memo
+        return _compute_facts_impl(mnq_df, mes_df, **kw)
+    _OHLC_MEMO.d = {}
+    try:
+        return _compute_facts_impl(mnq_df, mes_df, **kw)
+    finally:
+        _OHLC_MEMO.d = None
+
+
+def _compute_facts_impl(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
                   ath_mnq: Optional[float] = None, ath_mes: Optional[float] = None,
                   hist_mnq: Optional[pd.DataFrame] = None,
                   hist_mes: Optional[pd.DataFrame] = None,

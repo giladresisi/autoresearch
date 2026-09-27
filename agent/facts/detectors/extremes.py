@@ -7,6 +7,7 @@ the counter-thesis extreme measured from the arm, not from midnight.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from agent.facts.detectors._common import normalize
@@ -58,16 +59,23 @@ def running_extremes(bars: pd.DataFrame, since: pd.Timestamp, ticker: str,
     df = normalize(bars)
     if len(df) == 0 or since is None:
         return []
-    win = df[df.index >= since]
-    if len(win) == 0:
+    # Per-second hot path (x2 tickers x2 tracks): numpy over one slice instead of a
+    # boolean-mask copy plus six pandas reductions. `normalize` guarantees a sorted
+    # index, so searchsorted selects exactly `index >= since`; nanarg* pick the FIRST
+    # extreme and skip NaN, as pandas' idxmax/idxmin do.
+    start = int(df.index.searchsorted(since, side="left"))
+    if start >= len(df):
         return []
+    index = df.index
+    close = df["Close"].to_numpy(dtype=float)[start:]
 
     out: list[Fact] = []
     for kind, col, agg in (("day_high", "High", "max"), ("day_low", "Low", "min")):
-        series = win[col]
-        ts = series.idxmax() if agg == "max" else series.idxmin()
-        price = float(series.max() if agg == "max" else series.min())
-        body = float(win["Close"].max() if agg == "max" else win["Close"].min())
+        vals = df[col].to_numpy(dtype=float)[start:]
+        i = int(np.nanargmax(vals) if agg == "max" else np.nanargmin(vals))
+        ts = index[start + i]
+        price = float(vals[i])
+        body = float(np.nanmax(close) if agg == "max" else np.nanmin(close))
         fid = fact_id(FactClass.EXTREME, ticker, kind=kind, since=since, price=price,
                       at=ts, track=track)
         f = Fact(
