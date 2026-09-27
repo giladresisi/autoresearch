@@ -2,6 +2,7 @@
 import pandas as pd
 import pytest
 
+from agent.trader import tape
 from agent.trader.fvg_reject import FvgReject, SKIP_OPENING_BAR, zone_at_0700
 from agent.trader.reject_core import capped_stop, closes_with_thesis
 
@@ -21,8 +22,7 @@ def _close(hhmm):
 # -- the zone, from the real tape ------------------------------------------------ #
 
 def test_zone_at_0700_matches_the_hand_checked_0902_values():
-    from backtest_smt import _main_dir_for_date
-    mnq = pd.read_parquet(_main_dir_for_date(DATE) / "MNQ_1s.parquet")
+    mnq = tape.tape_1s(DATE)
     z = zone_at_0700(mnq, pd.Timestamp(f"{DATE} 09:20", tz=TZ))
     assert z is not None
     assert z["kind"] == "bull"
@@ -33,8 +33,7 @@ def test_zone_at_0700_matches_the_hand_checked_0902_values():
 def test_zone_is_not_visible_before_its_third_bar_completes():
     """§2's convention: IDENTITY is the middle bar, EXISTENCE is third-bar completion.
     The 07:00 gap's third bar is 08:00, which completes at 09:00."""
-    from backtest_smt import _main_dir_for_date
-    mnq = pd.read_parquet(_main_dir_for_date(DATE) / "MNQ_1s.parquet")
+    mnq = tape.tape_1s(DATE)
     assert zone_at_0700(mnq, pd.Timestamp(f"{DATE} 08:30", tz=TZ)) is None
     assert zone_at_0700(mnq, pd.Timestamp(f"{DATE} 09:00", tz=TZ)) is not None
 

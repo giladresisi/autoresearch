@@ -24,7 +24,7 @@ import pandas as pd
 
 import paths
 from agent.bench.facts import main_dir_for_date
-from agent.facts.htf_extremes import (EXTREMES_START, TZ, HtfExtreme,
+from agent.facts.htf_extremes import (EXTREMES_START, TZ, HtfExtreme, _start_bound,
                                       compute_unnested_extremes, running_period_seed,
                                       seed_from_json, seed_to_json, session_as_of)
 
@@ -70,7 +70,25 @@ def prior_session_close(as_of: pd.Timestamp) -> pd.Timestamp:
     return pd.Timestamp(datetime.datetime.combine(d, datetime.time(17, 0)), tz=TZ)
 
 
-def _read(path: str, as_of: pd.Timestamp) -> pd.DataFrame:
+def _read(path: str, as_of: pd.Timestamp, lo: pd.Timestamp) -> "tuple[pd.DataFrame, int, object]":
+    """(rows with lo <= ts < as_of, count of ALL rows < as_of, last ts < as_of or None).
+
+    With a tz-aware index the range is pushed into pyarrow, so the multi-year file never
+    becomes a full pandas frame; `lo` is the earliest row either consumer reads."""
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+    schema = pq.read_schema(path)
+    idx_cols = (schema.pandas_metadata or {}).get("index_columns") or []
+    col = idx_cols[0] if idx_cols and isinstance(idx_cols[0], str) else None
+    ftype = schema.field(col).type if col else None
+    if ftype is not None and getattr(ftype, "tz", None):
+        df = pd.read_parquet(path, filters=[(col, ">=", lo), (col, "<", as_of)])
+        before = pq.read_table(path, columns=[col], filters=[(col, "<", as_of)]).column(0)
+        last = pd.Timestamp(pc.max(before).as_py()).tz_convert(TZ) if len(before) else None
+        df = df.set_axis(df.index.tz_convert(TZ))
+        if not df.index.is_monotonic_increasing:
+            df = df.sort_index()
+        return df, len(before), last
     df = pd.read_parquet(path)
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError(f"{path}: index is not a DatetimeIndex")
@@ -78,7 +96,8 @@ def _read(path: str, as_of: pd.Timestamp) -> pd.DataFrame:
     df = df.set_axis(idx)
     if not df.index.is_monotonic_increasing:
         df = df.sort_index()
-    return df[df.index < as_of]
+    df = df[df.index < as_of]
+    return df[df.index >= lo], len(df), (df.index[-1] if len(df) else None)
 
 
 def load_session_extremes(trade_date, *, source: str, tolerance=STALE_TOLERANCE) -> dict:
@@ -95,8 +114,7 @@ def load_session_extremes(trade_date, *, source: str, tolerance=STALE_TOLERANCE)
                                       "kind": source, "tickers": {}}}
     for tk in TICKERS:
         path = source_path(trade_date, tk, source)
-        df = _read(path, as_of)
-        last = df.index[-1] if len(df) else None
+        df, n_before, last = _read(path, as_of, _start_bound(EXTREMES_START[tk]))
         if last is None or last < need:
             raise HtfSourceStale(
                 f"{tk} {path}: last bar before the open {as_of} is {last}, "
@@ -107,7 +125,7 @@ def load_session_extremes(trade_date, *, source: str, tolerance=STALE_TOLERANCE)
         out["seed"][tk] = seed
         out["meta"]["tickers"][tk] = {
             "path": path, "start": EXTREMES_START[tk].isoformat(),
-            "n_rows": int(len(df)), "last_ts": last.isoformat(),
+            "n_rows": int(n_before), "last_ts": last.isoformat(),
             "n_extremes": len(ext)}
     out["meta"]["sha"] = fingerprint(out)
     return out

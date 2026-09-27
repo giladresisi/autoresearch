@@ -36,18 +36,23 @@ _CACHE: "dict" = {}
 
 
 def tape_1s(date: str) -> "pd.DataFrame | None":
-    """The date's contract-routed 1s MNQ parquet, or None when absent.
+    """The date's contract-routed 1s MNQ bars, or None when the parquet is absent.
 
     Routing goes through `backtest_smt._main_dir_for_date`, the same resolver the replay
     uses — the June->September rollover sends July/August dates to `2026-09/`, and a
     hard-coded path silently reads the wrong contract.
+
+    Only `[session_open(date), date+1 00:00)` is read — every accessor here stays inside
+    it. Caching the whole contract file per date held ~400 MB per entry.
     """
     if date not in _CACHE:
-        from backtest_smt import _main_dir_for_date
+        from backtest_smt import _main_dir_for_date, _read_1s_range
         path = _main_dir_for_date(date) / "MNQ_1s.parquet"
         while len(_CACHE) >= _CACHE_MAX:
             _CACHE.pop(next(iter(_CACHE)))
-        _CACHE[date] = pd.read_parquet(path) if path.exists() else None
+        _CACHE[date] = (_read_1s_range(path, session_open(date),
+                                       _ts(date, "00:00") + pd.DateOffset(days=1))
+                        if path.exists() else None)
     return _CACHE[date]
 
 

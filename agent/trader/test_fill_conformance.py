@@ -54,14 +54,13 @@ def _tape(date: str) -> pd.DataFrame:
     """The date's 1s MNQ bars, 09:30:00 -> 12:00, via the same contract routing
     `run_backtest_v2` uses (rollover sends July/August dates to `2026-09/`)."""
     if date not in _TAPE:
-        from backtest_smt import _main_dir_for_date
+        from backtest_smt import _main_dir_for_date, _read_1s_range
         path = _main_dir_for_date(date) / "MNQ_1s.parquet"
         if not path.exists():
             pytest.skip(f"no 1s tape for {date}")
-        df = pd.read_parquet(path)
         day = pd.Timestamp(date, tz=TZ).normalize()
-        _TAPE[date] = df[(df.index >= day + pd.Timedelta(hours=9, minutes=30))
-                         & (df.index < day + pd.Timedelta(hours=12))]
+        _TAPE[date] = _read_1s_range(path, day + pd.Timedelta(hours=9, minutes=30),
+                                     day + pd.Timedelta(hours=12))
     return _TAPE[date]
 
 

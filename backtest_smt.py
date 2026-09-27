@@ -1218,6 +1218,21 @@ def _ath_as_of(frame, end_pos: int) -> float:
     return _m if _m == _m else 0.0  # NaN guard (NaN != NaN)
 
 
+def _read_1s_range(path, lo, hi) -> pd.DataFrame:
+    """1s bars with `lo <= ts < hi`. The filter is pushed into pyarrow, so row groups outside
+    the range are never decoded: peak memory scales with the range, not the whole contract."""
+    import pyarrow.parquet as _pq
+    _idx = _pq.read_schema(path).pandas_metadata["index_columns"][0]
+    return pd.read_parquet(path, filters=[(_idx, ">=", lo), (_idx, "<", hi)])
+
+
+def _ath_frame_1m(path) -> pd.DataFrame:
+    """Per-minute max `High` over the WHOLE 1s file, for `_ath_as_of`. Same max as the full
+    1m aggregate it replaces, at a fraction of the memory (one column, 1m rows)."""
+    _high = pd.read_parquet(path, columns=["High"])["High"]
+    return _high.resample("1min", label="left").max().dropna().to_frame()
+
+
 def replay_slice(bars_1s, hist_1m, *, window_start, window_end):
     """Narrow a session's 1s bars to a replay window and EXTEND the 1m history to meet it.
 
@@ -1393,8 +1408,17 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
             raise FileNotFoundError(
                 "Missing 1s parquets: data/MNQ_1s.parquet and data/MES_1s.parquet required for mode='1s'."
             )
-        mnq_all = pd.read_parquet(_mnq_1s_p)
-        mes_all = pd.read_parquet(_mes_1s_p)
+        # Only what the per-date slices below can reach: the 60-day hist lookback before the
+        # first session open, through the last session close. The ATH seed alone needs the
+        # full history, and gets it from a High-only per-minute frame.
+        _load_lo = pd.Timestamp(
+            f"{pd.Timestamp(start_date).date() - datetime.timedelta(days=1)} {_SESSION_OPEN_V2}",
+            tz="America/New_York") - pd.Timedelta(days=60)
+        _load_hi = pd.Timestamp(f"{pd.Timestamp(end_date).date()} {_SESSION_CLOSE_V2}",
+                                tz="America/New_York")
+        _mnq_ath_1m = _ath_frame_1m(_mnq_1s_p)
+        mnq_all = _read_1s_range(_mnq_1s_p, _load_lo, _load_hi)
+        mes_all = _read_1s_range(_mes_1s_p, _load_lo, _load_hi)
         # Pre-aggregate to 1m once for hist/FVG/session-level computations in run_daily.
         _1m_agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
         _mnq_1m_agg = mnq_all.resample("1min", label="left").agg(_1m_agg).dropna(subset=["Open"])
@@ -1543,7 +1567,8 @@ def run_backtest_v2(start_date: str, end_date: str, *, write_events: bool = True
         # guard, which would nuke a legitimately-higher value as ">3x the window max", can't run
         # on it); take the max so we never lower what the pipeline already computed.
         _ath_seed = (
-            _ath_as_of(_mnq_1m_agg, _mnq_hist_end) if mode == "1s"
+            _ath_as_of(_mnq_ath_1m, _mnq_ath_1m.index.searchsorted(session_start_ts, side="left"))
+            if mode == "1s"
             else _ath_as_of(mnq_all, _mnq_pos_sess)
         )
         if _ath_seed > 0:
