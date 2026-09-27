@@ -106,6 +106,19 @@ def test_the_0821_fill_row_is_registered_as_EXCLUDED_with_its_reason():
     assert case.expect == "flat", "08-21's correct verdict under the strict reading"
 
 
+def test_every_superseded_case_names_its_current_era_replacement():
+    """Plan 42 (2026-09-27): a record whose day the current rules trade differently is
+    KEPT and marked, never deleted — and the mark must name a real replacement recorded in
+    the current era, so the history and the live expectation stay linked."""
+    superseded = [c for c in nc.CASES if c.excluded and "SUPERSEDED" in c.excluded]
+    assert superseded, "plan 42 superseded five records; none are marked"
+    for case in superseded:
+        repl_key = case.excluded.split(" by ", 1)[1].split(":", 1)[0].strip()
+        repl = nc.by_key(repl_key)                    # raises if it names no real case
+        assert repl.era == nc.CURRENT_ERA, (case.key, repl_key, repl.era)
+        assert repl.date == case.date, (case.key, repl_key)
+
+
 def test_the_accepted_tolerances_are_registered_and_not_chased():
     """Two tolerances are pre-accepted by the document and must NOT be chased: §6.2's
     +/-1 cycle on 08-06 and 07-21's unexplained extra cycle."""

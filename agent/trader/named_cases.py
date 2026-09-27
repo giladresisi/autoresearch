@@ -45,6 +45,10 @@ and a case can carry either or both:
 
 Do not "fix" a figure here to make a test pass. Either the test asserts the new behaviour
 explicitly (naming plan 16), or the case is re-measured and given a new era entry.
+
+Plan 42 (2026-09-27) did the latter for the §5/§10 named days: the `current-20260927`
+records (keys `cur-*`, `sec5-0818-5m-t2`) are the live expectations, each with the chain of
+commits that moved it; the records they replace are kept and marked SUPERSEDED.
 """
 from __future__ import annotations
 
@@ -73,11 +77,18 @@ ERAS = {
                            "DOL: plan 16 moved target selection to the entry fill (T2, "
                            "`agent/trader/target.py`), made the DOL inert (no floor veto, "
                            "no plan death) and made the T2 target the plan-death level"),
+    "current-20260927": ("2026-09-27",
+                         "t2-target plus §6/§7 wired to the bar loop (d349a05), "
+                         "`tmso_reject` (de59b3b, f73c20f, 8b90ee7), the 5m-FVG entry "
+                         "mechanisms suspended by default (879032b, ACT_TRADER_5M=1 "
+                         "re-arms), HTF extremes as T2 candidates (2da4d0b) and "
+                         "micro-session SMT O3/O4 (5f71acc). Plan 42 re-measured the "
+                         "named days under it (l2-mechanisms.md §11.3)"),
 }
 
 #: The knob adoption that supersedes every earlier P&L. Anything recorded before this
 #: needs an explained delta before it may be asserted as a target.
-CURRENT_ERA = "t2-target-20260913"
+CURRENT_ERA = "current-20260927"
 KNOB_ADOPTION_DATE = "2026-08-22"
 
 #: The one delta this cycle has already accounted for, kept as a named constant because
@@ -124,8 +135,9 @@ CASES: "tuple[NamedCase, ...]" = (
         key="sec5-0821-flat", date="2026-08-21", mechanism="fvg_return_continuation",
         doc_section="§11 §5 pre-arm penetration", era="age-anchor-20260826",
         expect="flat",
-        pinned_by=("agent/trader/test_named_sec5.py::"
-                   "test_0821_is_flat_prior_penetration_only",),
+        pinned_by=("agent/trader/test_named_cases.py::"
+                   "test_every_superseded_case_names_its_current_era_replacement",),
+        excluded="SUPERSEDED 2026-09-27 by cur-0821: the day now trades (tmso_reject 09:31:00, +73.00); §11.3 attributes each step",
         note="The gap [29472.25, 29485.00] is penetrated BEFORE the window ends and "
              "never re-entered fresh. LITERAL fills 29442.50 for +169.00; FRESH takes "
              "nothing. FLAT is correct.",
@@ -135,8 +147,9 @@ CASES: "tuple[NamedCase, ...]" = (
     NamedCase(
         key="sec5-0811-flat", date="2026-08-11", mechanism="fvg_return_continuation",
         doc_section="§10 / §11 §5", era="age-anchor-20260826", expect="flat",
-        pinned_by=("agent/trader/test_named_sec5.py::"
-                   "test_0811_is_flat_the_documented_accepted_skip",),
+        pinned_by=("agent/trader/test_named_cases.py::"
+                   "test_every_superseded_case_names_its_current_era_replacement",),
+        excluded="SUPERSEDED 2026-09-27 by cur-0811: the day now trades (tmso_reject 09:31:00, +112.75); §11.3 attributes each step",
         note="§10's own accepted skip: the correct binding [29835.00, 29855.25] was "
              "only ever entered at or before the L1 arm.",
         doc_quotes=("**08-11 must be FLAT** (the §10 accepted skip)",),
@@ -157,8 +170,11 @@ CASES: "tuple[NamedCase, ...]" = (
                         "NOT reproducible while `replay.py` ended at 11:00 and the DOL "
                         "is touched at 11:01:26. Since the window moved to 13:00 "
                         "(2026-09-09) the replay books it: take_profit 29533.5 at "
-                        "11:01:26 for +229.75, to the cent. Entry, exit and P&L are all "
-                        "exact.",
+                        "11:01:26 for +229.75, to the cent. Entry, exit and P&L were all "
+                        "exact until plan 16 (000dfb7): the ENTRY still reproduces to the "
+                        "second under ACT_TRADER_5M=1 (the §5 mechanism is suspended by "
+                        "default since 879032b), but the exit is now the T2 pick — see "
+                        "`sec5-0818-5m-t2`.",
         doc_quotes=("**08-18 must enter 09:40:58 at 29763.25**",
                     "09:40:58 fill 29763.25 TP **+229.75**"),
     ),
@@ -330,8 +346,9 @@ CASES: "tuple[NamedCase, ...]" = (
     NamedCase(
         key="sec10-0811-no-entry", date="2026-08-11", mechanism="multi",
         doc_section="§10", era="buffer7-h35", expect="flat",
-        pinned_by=("agent/trader/test_arbiter_forward.py::"
-                   "test_0811_is_a_no_entry_day_with_every_mechanism_armed",),
+        pinned_by=("agent/trader/test_named_cases.py::"
+                   "test_every_superseded_case_names_its_current_era_replacement",),
+        excluded="SUPERSEDED 2026-09-27 by cur-0811: the day now trades (tmso_reject 09:31:00, +112.75); §11.3 attributes each step",
         explained_delta="Recorded under the max-height-35 / buffer-7 era. The verdict "
                         "(no entry) is era-invariant: no adverse day extreme printed, "
                         "so §6/§7 cannot arm, and §5's binding was only entered at or "
@@ -342,9 +359,9 @@ CASES: "tuple[NamedCase, ...]" = (
     NamedCase(
         key="sec10-0812", date="2026-08-12", mechanism="multi",
         doc_section="§10", era="buffer7-h35", pnl=46.75, attempts_used=2,
-        pinned_by=("agent/trader/test_arbiter_forward.py::"
-                   "test_0812_spends_two_attempts_and_the_dol_floor_vetoes_the_first_"
-                   "fallback_candidate",),
+        pinned_by=("agent/trader/test_named_cases.py::"
+                   "test_every_superseded_case_names_its_current_era_replacement",),
+        excluded="SUPERSEDED 2026-09-27 by cur-0812: tmso_reject confirms on its sweep bar at 09:31:00 (f73c20f) and pre-empts the §4 negation fill at 09:31:16 even with ACT_TRADER_5M=1; the §4 shape is unreachable in this era",
         explained_delta="Recorded at buffer 7. Expect an entry-price difference of the "
                         "4.00-pt buffer trim on each of the two attempts; the SHAPE "
                         "(negation stop-out, then the widened 1m fallback with its "
@@ -371,12 +388,108 @@ CASES: "tuple[NamedCase, ...]" = (
     NamedCase(
         key="sec10-0814", date="2026-08-14", mechanism="multi",
         doc_section="§10", era="age-anchor-20260826", pnl=99.50, attempts_used=3,
-        pinned_by=("agent/trader/test_arbiter_forward.py::"
-                   "test_0814_reaches_its_dol_on_a_documented_second_but_NOT_the_"
-                   "documented_shape",),
+        pinned_by=("agent/trader/test_named_cases.py::"
+                   "test_every_superseded_case_names_its_current_era_replacement",),
+        excluded="SUPERSEDED 2026-09-27 by cur-0814: tmso_reject takes attempt 1 and §6 the winner (+38.50, 2 att); §11.3",
         note="1s-verified under the §8 takeover with crossed-trigger precedence. The "
              "shared 3-attempt counter is spent across DIFFERENT mechanisms here.",
         doc_quotes=("- **08-14 (down, DOL 30124.25 = overnight low): +99.50**",),
+    ),
+
+    # ---- §11.3 current-era re-measurement (plan 42, 2026-09-27) ---------------- #
+    # Default configuration (5m-FVG mechanisms suspended), oracle theses, cb083e2.
+    NamedCase(
+        key="cur-0811", date="2026-08-11", mechanism="tmso_reject",
+        doc_section="§11.3", era="current-20260927",
+        entry_time="09:31:00", entry_price=29778.75,
+        exit_time="09:46:01", exit_price=29666.0, pnl=112.75, attempts_used=1,
+        pinned_by=("agent/trader/test_named_sec5.py::"
+                   "test_0811_current_era_takes_tmso_reject",
+                   "agent/trader/test_arbiter_forward.py::test_0811_current_era_shape"),
+        explained_delta="Documented FLAT. 000dfb7 +99.25 (DOL inert: the day no longer "
+                        "ends at its touch) -> d349a05 -59.50 (§6 wired) -> de59b3b "
+                        "+101.00 (tmso_reject) -> f73c20f +112.75 (sweep bar confirms).",
+        doc_quotes=("08-11 current: `tmso_reject` DOWN 09:31:00 @ 29778.75, TP 09:46:01, "
+                    "**+112.75**, 1 att",),
+    ),
+    NamedCase(
+        key="cur-0812", date="2026-08-12", mechanism="tmso_reject",
+        doc_section="§11.3", era="current-20260927",
+        entry_time="09:31:00", entry_price=29974.5, pnl=69.00, attempts_used=1,
+        pinned_by=("agent/trader/test_arbiter_forward.py::test_0812_current_era_shape",),
+        explained_delta="Documented +46.75 on two §4 attempts. 000dfb7 -6.00 (T2 exit, "
+                        "the winner is marked) -> 879032b -52.50 (5m suspended) -> "
+                        "f73c20f +69.00: tmso_reject enters 09:31:00 and is MARKED at "
+                        "12:59:59 (no T2 touch in the window).",
+        doc_quotes=("08-12 current: `tmso_reject` DOWN 09:31:00 @ 29974.5, marked "
+                    "12:59:59, **+69.00**, 1 att",),
+    ),
+    NamedCase(
+        key="cur-0813", date="2026-08-13", mechanism="tmso_reject",
+        doc_section="§11.3", era="current-20260927",
+        entry_time="09:35:00", entry_price=29945.75,
+        exit_time="09:36:43", exit_price=30001.5, pnl=55.75, attempts_used=1,
+        pinned_by=("agent/trader/test_arbiter_forward.py::test_0813_current_era_shape",),
+        explained_delta="Documented +89.25 (= +93.25 at buffer 3) via the 5m continuation "
+                        "09:33:26, which 879032b suspends (+93.50 via tmso_reject 09:36); "
+                        "f73c20f's sweep-bar confirmation enters 09:35:00 at a worse "
+                        "price to the SAME target 30001.5 at the same 09:36:43: +55.75.",
+        doc_quotes=("08-13 current: `tmso_reject` UP 09:35:00 @ 29945.75, TP 09:36:43, "
+                    "**+55.75**, 1 att",),
+    ),
+    NamedCase(
+        key="cur-0814", date="2026-08-14", mechanism="multi",
+        doc_section="§11.3", era="current-20260927", pnl=38.50, attempts_used=2,
+        pinned_by=("agent/trader/test_arbiter_forward.py::test_0814_current_era_shape",),
+        explained_delta="Documented +99.50 on 3 attempts (a shape that never reproduced, "
+                        "see sec10-0814). 000dfb7 +68.50 -> de59b3b +62.50 -> 879032b "
+                        "+38.50: tmso_reject 09:32:00 stops -15.00, then "
+                        "fvg_1m_post_extreme 10:22:00 @ 30181.5 takes T2 at 10:59:23 "
+                        "+53.50.",
+        doc_quotes=("08-14 current: `tmso_reject` -15.00 then `fvg_1m_post_extreme` "
+                    "10:22:00 @ 30181.5, TP 10:59:23, **+38.50**, 2 att",),
+    ),
+    NamedCase(
+        key="cur-0818", date="2026-08-18", mechanism="extreme_reject_close",
+        doc_section="§11.3", era="current-20260927",
+        entry_time="09:42:00", entry_price=29760.25,
+        exit_time="09:55:08", exit_price=29631.0, pnl=129.25, attempts_used=1,
+        pinned_by=("agent/trader/test_named_sec7.py::test_0818_current_era_day_is_this_entry",),
+        explained_delta="Documented §5 09:40:58 +229.75. With 5m suspended (879032b) the "
+                        "day's entry is §7's own 09:42:00 @ 29760.25 (sec7-0818's entry, "
+                        "to the second); its exit is the T2 pick (000dfb7), since plan 40 "
+                        "(2da4d0b) htf_week_running_low 29631.0. 8b90ee7's "
+                        "veto removes an earlier losing tmso_reject attempt (5f71acc "
+                        "+114.25 -> +129.25).",
+        doc_quotes=("08-18 current: `extreme_reject_close` DOWN 09:42:00 @ 29760.25, TP "
+                    "09:55:08, **+129.25**, 1 att",),
+    ),
+    NamedCase(
+        key="sec5-0818-5m-t2", date="2026-08-18", mechanism="fvg_return_continuation",
+        doc_section="§11.3", era="current-20260927",
+        entry_time="09:40:58", entry_price=29763.25,
+        exit_time="09:55:08", exit_price=29631.0, pnl=132.25, attempts_used=1,
+        pinned_by=("agent/trader/test_named_sec5.py::"
+                   "test_0818s_exit_is_the_t2_pick_under_plan_16",),
+        explained_delta="The §5 mechanism under ACT_TRADER_5M=1: the documented entry to "
+                        "the second. Exit: the DOL at 11:01:26 (+229.75) -> the T2 pick "
+                        "prev4_day_low 29625.0 (plan 16, 000dfb7, +138.25) -> plan 40's "
+                        "nearer htf_week_running_low 29631.0 at 09:55:08 (2da4d0b, "
+                        "+132.25).",
+        doc_quotes=("now exiting at the T2 pick `htf_week_running_low` 29631.0 at 09:55:08 "
+                    "for +132.25",),
+    ),
+    NamedCase(
+        key="cur-0821", date="2026-08-21", mechanism="tmso_reject",
+        doc_section="§11.3", era="current-20260927",
+        entry_time="09:31:00", entry_price=29425.75,
+        exit_time="09:35:13", exit_price=29352.75, pnl=73.00, attempts_used=1,
+        pinned_by=("agent/trader/test_named_sec5.py::"
+                   "test_0821_current_era_takes_tmso_reject",),
+        explained_delta="Documented FLAT. 000dfb7 +19.25 -> d349a05 +87.00 (§6) -> "
+                        "de59b3b +80.25 (tmso_reject) -> f73c20f +73.00.",
+        doc_quotes=("08-21 current: `tmso_reject` DOWN 09:31:00 @ 29425.75, TP 09:35:13, "
+                    "**+73.00**, 1 att",),
     ),
 
     # ---- §11's calibrated fill rows (the ten documented 5m bindings) ------------ #
@@ -393,9 +506,7 @@ CASES: "tuple[NamedCase, ...]" = (
                  "29373.25 bottom). NOT DELETED — kept with its reason, so a future "
                  "agent cannot re-derive it.",
         pinned_by=("agent/trader/test_named_cases.py::"
-                   "test_the_0821_fill_row_is_registered_as_EXCLUDED_with_its_reason",
-                   "agent/trader/test_named_sec5.py::"
-                   "test_0821_is_flat_prior_penetration_only"),
+                   "test_the_0821_fill_row_is_registered_as_EXCLUDED_with_its_reason",),
         doc_quotes=("the 08-21 row above is LOOK-AHEAD CONTAMINATED and its\n  +92.75 "
                     "is not attainable.",),
     ),
@@ -576,6 +687,9 @@ DOCUMENTED_ATTEMPTS = {
     "sec6-0806-current": 1,          # "one entry, +125.12"
     "sec7-0825": 1,                  # "+174.37 — the day's ONLY entry"
     "sec10-0813": 1,                 # §10: one clean §5 entry to the DOL
+    # §11.3, current-20260927 (plan 42)
+    "cur-0811": 1, "cur-0812": 1, "cur-0813": 1, "cur-0814": 2, "cur-0818": 1,
+    "cur-0821": 1, "sec5-0818-5m-t2": 1,
 }
 
 #: Which of those counts this cycle can check END TO END, and which it cannot.

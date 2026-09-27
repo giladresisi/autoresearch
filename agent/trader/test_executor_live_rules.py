@@ -404,8 +404,14 @@ def test_the_import_ban_gates_cover_the_new_module():
 @pytest.mark.parametrize("date", BEFORE_DATES)
 def test_the_five_before_dates_replay_byte_identical(date, monkeypatch):
     """Case 8. `fixtures/plan38_before/<date>.jsonl` is that session's
-    `trader_decisions.jsonl` replayed at 879032b, BEFORE the order port existed, against
-    the warm thesis cache (`ACT_TRADER_BACKEND=anthropic`, no model call).
+    `trader_decisions.jsonl` replayed against the warm thesis cache
+    (`ACT_TRADER_BACKEND=anthropic`, no model call). First captured at 879032b, BEFORE the
+    order port existed; RE-CAPTURED 2026-09-27 at cb083e2 (plan 42). The first commit that
+    moves them is f73c20f (`tmso_reject`: the sweep bar may confirm itself, bisected);
+    later deliberate commits in 879032b..cb083e2 (e.g. 8b90ee7's far-excursion veto) are
+    in range but were not bisected individually. Moves: 08-31 -53.25 -> -38.25, 09-03
+    +106.25 -> -32.50, 09-01/09-02 same totals with earlier `tmso_reject` entries, 09-04
+    re-seeded 2026-09-27 (+65.75).
 
     A DELIBERATE mechanism change moves these streams; re-capture them then, exactly as
     the change protocol's step 3 says. A cold cache skips — it proves nothing either way.

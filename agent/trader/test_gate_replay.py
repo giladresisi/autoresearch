@@ -159,16 +159,27 @@ def test_gate6_the_arm_is_inside_the_window(_run_a):
     assert w0 <= pd.Timestamp(blob["armed_at"]) < w1
 
 
+def _dol_touches(run_dir):
+    """Plan 16 (2026-09-13): the 09:20 DOL is inert. Its touch is RECORDED once as
+    `would_have_killed`/`dol_reached` and stepped over; the plan dies on its T2 target or
+    its attempt budget instead. The gate's claim — the touch is timestamped and the run
+    continues past it — is unchanged; only the record kind moved."""
+    return [x for x in _decisions(run_dir)
+            if x.get("kind") == "would_have_killed" and x.get("reason") == "dol_reached"]
+
+
 def test_gate6_a_dol_touch_is_recorded_with_its_timestamp(_run_a):
-    dead = [x for x in _decisions(_run_a["run_dir"])
-            if x.get("kind") == "plan_dead" and x.get("reason") == "dol_reached"]
+    touched = _dol_touches(_run_a["run_dir"])
     # 2026-08-13 was chosen precisely so this is NOT skippable: its seeded thesis is UP
     # with DOL prev1_day_high 30001.5, which the window reaches at 09:36:43. A date whose
     # DOL sits outside the window (as 2026-08-12's 30073.25 did) can only skip here, which
     # is why it was rejected as the validation date.
-    assert dead, ("no DOL touch recorded -- this date's thesis must name a DOL the "
-                  "09:20-11:00 window actually reaches, or the gate proves nothing")
-    assert dead[0].get("time")
+    assert touched, ("no DOL touch recorded -- this date's thesis must name a DOL the "
+                     "09:20-13:00 window actually reaches, or the gate proves nothing")
+    assert touched[0].get("time")
+    assert not [x for x in _decisions(_run_a["run_dir"])
+                if x.get("kind") == "plan_dead" and x.get("reason") == "dol_reached"], \
+        "plan 16: the DOL must no longer kill the plan"
 
 
 # -- gate 6, forced deterministically ---------------------------------------- #
@@ -186,48 +197,52 @@ def _forced_dol(tmp_path_factory):
     # (date x code version), so `glob(...)[0]` picks an arbitrary date's thesis whose key
     # cannot match this date's facts -- the replay then misses and, with calls disallowed,
     # raises NetworkCallRefused instead of running.
-    src = [f for f in ThesisCache().root.glob("*.json")
-           if str((json.loads(f.read_text(encoding="utf-8")) or {}).get("boundary") or
-                  "").startswith(DATE)]
+    # NEWEST first: once DATE has been re-seeded the cache also holds its stale
+    # recordings (one per earlier code version), and only the current one can match.
+    src = sorted((f for f in ThesisCache().root.glob("*.json")
+                  if str((json.loads(f.read_text(encoding="utf-8")) or {}).get("boundary")
+                         or "").startswith(DATE)),
+                 key=lambda f: f.stat().st_mtime, reverse=True)
     if not src:
         pytest.skip(f"thesis cache not seeded for {DATE}")
-    blob = json.loads(src[0].read_text(encoding="utf-8"))
-    thesis = blob.get("thesis") or {}
-    if str(thesis.get("bias") or "").upper() != "UP":
-        pytest.skip("forced-DOL fixture assumes an UP thesis")
 
-    root = tmp_path_factory.mktemp("forced_cache")
-    # 29990 is above the 09:20 price (~29896) and below the window high (30001.5), so it
-    # is reached inside the window but not on the arming bar.
-    thesis["dol"] = dict(thesis.get("dol") or {}, price=29990.0)
-    blob["thesis"] = thesis
-    (root / src[0].name).write_text(json.dumps(blob), encoding="utf-8")
+    last_miss = None
+    for rec in src:
+        blob = json.loads(rec.read_text(encoding="utf-8"))
+        thesis = blob.get("thesis") or {}
+        if str(thesis.get("bias") or "").upper() != "UP":
+            pytest.skip("forced-DOL fixture assumes an UP thesis")
 
-    prev = os.environ.get("ACT_THESIS_CACHE_DIR")
-    os.environ["ACT_THESIS_CACHE_DIR"] = str(root)
-    try:
-        res = run_replay([DATE], allow_calls=False)[DATE]
-    except NetworkCallRefused as exc:
-        # A recording for DATE exists but its key no longer matches what the replay
-        # computes -- the cache holds one entry per (date x CODE VERSION), so any change
-        # under `agent/` re-keys it. That is the same "not seeded for this date"
-        # precondition the glob above skips on, reached one step later; it is not a
-        # defect in gate 6. Re-seed with `--seed` to actually exercise these three.
-        pytest.skip(f"thesis cache stale for {DATE} at this code version: {exc}")
-    finally:
-        if prev is None:
-            os.environ.pop("ACT_THESIS_CACHE_DIR", None)
-        else:
-            os.environ["ACT_THESIS_CACHE_DIR"] = prev
-    return res
+        root = tmp_path_factory.mktemp("forced_cache")
+        # 29990 is above the 09:20 price (~29896) and below the window high (30001.5), so
+        # it is reached inside the window but not on the arming bar.
+        thesis["dol"] = dict(thesis.get("dol") or {}, price=29990.0)
+        blob["thesis"] = thesis
+        (root / rec.name).write_text(json.dumps(blob), encoding="utf-8")
+
+        prev = os.environ.get("ACT_THESIS_CACHE_DIR")
+        os.environ["ACT_THESIS_CACHE_DIR"] = str(root)
+        try:
+            return run_replay([DATE], allow_calls=False)[DATE]
+        except NetworkCallRefused as exc:
+            last_miss = exc                 # a stale recording: try the next-newest
+        finally:
+            if prev is None:
+                os.environ.pop("ACT_THESIS_CACHE_DIR", None)
+            else:
+                os.environ["ACT_THESIS_CACHE_DIR"] = prev
+    # Every recording for DATE is keyed to an older code version -- the cache holds one
+    # entry per (date x CODE VERSION), so any change under `agent/` re-keys it. That is
+    # the same "not seeded for this date" precondition the glob above skips on; it is not
+    # a defect in gate 6. Re-seed with `--seed` to actually exercise these three.
+    pytest.skip(f"thesis cache stale for {DATE} at this code version: {last_miss}")
 
 
-def test_gate6_forced_dol_is_recorded_as_plan_dead_with_a_timestamp(_forced_dol):
-    dead = [x for x in _decisions(_forced_dol["run_dir"])
-            if x.get("kind") == "plan_dead" and x.get("reason") == "dol_reached"]
-    assert dead, "a DOL inside the window must produce plan_dead/dol_reached"
-    assert dead[0].get("time")
-    assert dead[0]["detail"]["dol"] == 29990.0
+def test_gate6_forced_dol_is_recorded_with_a_timestamp(_forced_dol):
+    touched = _dol_touches(_forced_dol["run_dir"])
+    assert touched, "a DOL inside the window must produce would_have_killed/dol_reached"
+    assert touched[0].get("time")
+    assert touched[0]["detail"]["dol"] == 29990.0
 
 
 def test_gate6_the_run_does_not_stop_at_the_dol_touch(_forced_dol):
@@ -248,16 +263,15 @@ def test_gate6_the_run_does_not_stop_at_the_dol_touch(_forced_dol):
     distinguishes "stopped binding" from "stopped running", which is the claim.
     """
     import pandas as pd
-    dead = [x for x in _decisions(_forced_dol["run_dir"])
-            if x.get("kind") == "plan_dead" and x.get("reason") == "dol_reached"][0]
+    touch = _dol_touches(_forced_dol["run_dir"])[0]
     _, w1 = replay_window_for(DATE)
-    dead_ts = pd.Timestamp(dead["time"])
-    assert dead_ts < w1 - pd.Timedelta(minutes=30), \
-        "the DOL must die well before the window end for this test to mean anything"
+    touch_ts = pd.Timestamp(touch["time"])
+    assert touch_ts < w1 - pd.Timedelta(minutes=30), \
+        "the DOL must be touched well before the window end for this test to mean anything"
     last_bar = _forced_dol["last_bar"]
     assert last_bar is not None
-    assert last_bar > dead_ts, \
-        f"the loop stopped at the DOL touch ({dead_ts}); last bar was {last_bar}"
+    assert last_bar > touch_ts, \
+        f"the loop stopped at the DOL touch ({touch_ts}); last bar was {last_bar}"
 
 
 def test_gate6_the_forced_run_still_covers_the_whole_window(_forced_dol):

@@ -40,24 +40,33 @@ lists what must NOT be built.
 
 ## Test baselines
 
-- `python -m pytest tests/ -q` → **2 failed / 1391 passed / 10 skipped / 16 errors.**
-  All two failures and all sixteen errors are PRE-EXISTING. Anything else is a regression.
+(Measured 2026-09-27, plan 42.)
+
+- `python -m pytest tests/ -q` → **2 failed / 1578 passed / 4 skipped / 16 errors.**
+  The two failures (`test_smt_fill_plot`) and sixteen errors (`test_smt_decouple_active`)
+  are PRE-EXISTING. Anything else is a regression.
 - `python -m pytest agent/facts agent/trader agent/test_kb_cutover.py
-  tests/test_session_pipeline_graft.py -q` → **499 passed / 59 deselected in ~47s.**
-  This is the DEFAULT suite and it is meant to stay under a minute; if it creeps over,
+  tests/test_session_pipeline_graft.py -q` → **868 passed / 64 deselected in ~63s.**
+  This is the DEFAULT suite and it is meant to stay near a minute; if it creeps over,
   find the new slow test rather than raising the bar.
-- `… -m slow` → **59 tests, ~20 minutes, 100 passed / 3 skipped.** `addopts` in
-  `pyproject.toml` deselects them by default (same mechanism as `integration`). They are
-  not optional extras: they are the tests that make the NUMBERS trustworthy — replay
-  determinism (gate 1), replay-reproduces-live (gate 2), KB-edit-invalidates-the-
-  recording (gate 4), plan-death-does-not-shorten-the-window (gate 6), and facts
-  no-lookahead. **Run `-m slow` before believing any A/B verdict, and after any change to
-  the replay, thesis-cache or facts path.** The 3 skips are a stale thesis cache for
-  2026-08-13 (the cache is keyed per date x code version); re-seed with `--seed` to
-  actually exercise gate 6's forced-DOL trio.
-- Locked 1s regression baselines, run INDIVIDUALLY:
-  `python regression.py --dates 2026-05-18 --mode 1s` → `pnl=1572.00`
-  `python regression.py --dates 2026-05-19 --mode 1s` → `pnl=-367.00`
+- `… -m slow` → **64 tests, ~21 minutes, all passing.** `addopts` in `pyproject.toml`
+  deselects them by default, which is how 36 of them silently broke between 2026-09-13
+  and 2026-09-27 (plan 42). They are not optional extras: they are the tests that make
+  the NUMBERS trustworthy — replay determinism (gate 1), replay-reproduces-live (gate 2),
+  KB-edit-invalidates-the-recording (gate 4), plan-death-does-not-shorten-the-window
+  (gate 6), facts no-lookahead, and the named cases. **Run `-m slow` before believing any
+  A/B verdict, and after ANY change to an entry mechanism, the replay, thesis-cache or
+  facts path.** A behaviour change moves named-case figures: re-measure them per
+  `docs/entry-mechanism-change-protocol.md` (precedent: `l2-mechanisms.md` §11.3).
+  Thesis recordings are keyed per date x code version; when a gate skips or raises
+  `NetworkCallRefused`, re-seed that date with `--seed` (one model call; 08-13 and 09-04
+  were re-seeded 2026-09-27, 09-04 with `ACT_TRADER_BACKEND=anthropic`).
+- Locked 1s regression baselines, run INDIVIDUALLY; the criterion is
+  `events=PASS trades=PASS` (line-for-line against the locked recordings):
+  `python regression.py --dates 2026-05-18 --mode 1s` → PASS (prints `pnl=1422.00`; was 1572.00)
+  `python regression.py --dates 2026-05-19 --mode 1s` → PASS (prints `pnl=-1337.00`; was -367.00)
+  The printed pnl moved while every trade still matches the locked recording; that
+  reporting difference is not yet traced.
 
 ## Runtime flags
 

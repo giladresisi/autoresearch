@@ -165,3 +165,33 @@ def test_every_registered_sec7_case_is_exercised_here():
         if case.mechanism != "extreme_reject_close":
             continue
         assert case.key in src, f"{case.key} is registered but never driven here"
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(900)
+def test_0818_current_era_day_is_this_entry():
+    """`cur-0818` (plan 42, l2-mechanisms.md §11.3): with the 5m mechanisms suspended by
+    default (879032b), 08-18's ENTRY on a real replay is this §7 fire — sec7-0818's
+    09:42:00 @ 29760.25 to the second — exiting at the T2 pick (plan 16; since plan 40,
+    htf_week_running_low 29631.0) instead of the documented DOL."""
+    import json
+    import os
+    from agent.trader.replay import run_replay
+    from scripts.report_replay_pnl import summarize
+
+    case = nc.by_key("cur-0818")
+    os.environ.pop("ACT_TRADER_5M", None)
+    res = run_replay([case.date], allow_calls=False,
+                     thesis=nc.thesis_for("sec5-0818-fresh-entry"))[case.date]
+    rows = [json.loads(line) for line in open(
+        os.path.join(res["run_dir"], "trader_decisions.jsonl"), encoding="utf-8")
+        if line.strip()]
+    fills = [r for r in rows if r.get("kind") == "fill"]
+    assert len(fills) == case.attempts_used, [f["time"] for f in fills]
+    assert fills[0]["mechanism"] == case.mechanism
+    assert fills[0]["time"].endswith(f"{case.entry_time}-04:00")
+    assert fills[0]["price"] == case.entry_price == nc.by_key("sec7-0818").entry_price
+    tps = [r for r in rows if r.get("kind") == "take_profit"]
+    assert tps and tps[-1]["time"].endswith(f"{case.exit_time}-04:00")
+    assert tps[-1]["price"] == case.exit_price
+    assert round(summarize(res["run_dir"])["total_pts"], 2) == case.pnl

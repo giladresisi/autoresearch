@@ -47,15 +47,25 @@ def test_the_inverted_plan_is_bounded_by_attempts_and_records_the_falsifier(_inv
     veto, early sweeps completing plans flat, the §6/§7/§8 gates), so removing it from
     the death path cannot weaken that section's claim.
 
-    Measured on this run: fill 09:31:34 -> stop 09:33:24, falsifier records 09:36:00,
-    then two further attempts (09:52:21 and 10:17:15) that acting on the falsifier would
-    have prevented. That two-stop-out difference is the counterfactual the record exists
-    to produce, and it is why the record is a TIMESTAMP rather than a flag.
+    Re-measured 2026-09-27 (current era, plan 42): `tmso_reject` fills 09:31:00 -> stop
+    09:33:26, the falsifier records 09:36:00, then `extreme_reject_close` fills 10:14:00
+    -> stop 10:16:36: two attempts, -23.25 pts. The plan no longer reaches its third
+    attempt, so it never dies — and it need not: the claim is that the bleed is BOUNDED,
+    and the bound is the attempt cap plus §10.2's adverse band, asserted directly here.
+    (Before 2026-09-13 the same stress spent all three attempts and died
+    `attempts_exhausted`; the 5m mechanisms that took them are suspended since 879032b.)
     """
-    deaths = [d for d in _decisions(_inv["run_dir"]) if d["kind"] == "plan_dead"]
-    assert deaths, "the inverted plan must still die — an unbounded wrong plan is the risk"
-    assert deaths[0]["reason"] == "attempts_exhausted"
-    assert deaths[0]["detail"]["attempts_used"] == 3
+    from agent.trader.named_cases import ADVERSE_BAND_PTS
+    from scripts.report_replay_pnl import summarize
+
+    recs = _decisions(_inv["run_dir"])
+    fills = [d for d in recs if d["kind"] == "fill"]
+    assert 1 <= len(fills) <= 3, "the attempt cap (3) bounds a wrong plan"
+    lo, hi = ADVERSE_BAND_PTS
+    total = summarize(_inv["run_dir"])["total_pts"]
+    assert lo <= total <= hi, f"§10.2 adverse band {ADVERSE_BAND_PTS} breached: {total}"
+    for d in (x for x in recs if x["kind"] == "plan_dead"):
+        assert d["reason"] in ("attempts_exhausted", "target_reached")
 
     fired = [d for d in _decisions(_inv["run_dir"]) if d["kind"] == "would_have_falsified"]
     assert len(fired) == 1, "recorded exactly once — a standing falsifier must not repeat"
@@ -68,11 +78,18 @@ def test_the_inverted_plan_is_bounded_by_attempts_and_records_the_falsifier(_inv
     assert after, "if nothing follows the falsifier, the record cannot measure anything"
 
 
-def test_the_plan_dies_before_the_window_end(_inv):
+def test_the_wrong_plan_stops_binding_before_the_window_end(_inv):
+    """No entry after 11:00: whether the plan dies or merely runs out of setups, a wrong
+    plan must not keep taking risk into the afternoon. Backed by `ENTRY_CUTOFF_ET` (10:30)
+    and O3's micro-SMT exemption, which ends at 11:00 (§7a)."""
     import pandas as pd
-    deaths = [d for d in _decisions(_inv["run_dir"]) if d["kind"] == "plan_dead"]
-    assert pd.Timestamp(deaths[0]["time"]) < pd.Timestamp(
-        f"{DATE} 11:00", tz="America/New_York")
+    late = [d for d in _decisions(_inv["run_dir"]) if d["kind"] == "fill"
+            and pd.Timestamp(d["time"]) >= pd.Timestamp(f"{DATE} 11:00",
+                                                      tz="America/New_York")]
+    assert not late, f"entries after 11:00: {[d['time'] for d in late]}"
+    for d in (x for x in _decisions(_inv["run_dir"]) if x["kind"] == "plan_dead"):
+        assert pd.Timestamp(d["time"]) < pd.Timestamp(f"{DATE} 11:00",
+                                                      tz="America/New_York")
 
 
 def test_the_run_still_covers_the_whole_window_after_the_death(_inv):

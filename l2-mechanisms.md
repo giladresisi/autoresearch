@@ -1583,3 +1583,55 @@ that is how a specification rots.
 A TARGET rule, not an entry mechanism, so its text lives in `l2-target-selection.md` §7a.
 Status: implemented, flag ON by operator decision 2026-09-22 (`target.HTF_EXTREMES_IN_T2`). It changes which level the
 Executor takes profit at — and therefore where the plan dies — and nothing in §§2–8.
+
+
+### 11.3 Current-era re-measurement of the named days (plan 42, 2026-09-27)
+
+Operator decision 2026-09-27: the behaviour below is INTENDED. Every figure in §10/§11 was
+measured before the rule changes listed here; `-m slow` (deselected by default) was not
+re-run when they landed, so the named-case tests kept asserting the older era. This
+section re-measures each day on current code (cb083e2, default configuration: 5m-FVG
+mechanisms suspended, `ACT_TRADER_5M` unset), oracle theses from `named_cases.ORACLE_THESES`,
+today's tape. The earlier records are kept and marked superseded — never deleted.
+
+**Era `current-20260927`.** `t2-target-20260913` plus: §6/§7 and the arbiter wired to the
+bar loop (d349a05); `tmso_reject` added (de59b3b), its sweep bar allowed to confirm itself
+(f73c20f) and its far-excursion veto (8b90ee7); the two 5m-FVG entry mechanisms suspended
+(879032b, `ACT_TRADER_5M=1` re-arms them); HTF extremes as T2 candidates (2da4d0b);
+micro-session SMT O3/O4 (5f71acc).
+
+| Day | Documented | Current (current-20260927) | Moved by (each step replayed) |
+|---|---|---|---|
+| 08-11 | FLAT | 08-11 current: `tmso_reject` DOWN 09:31:00 @ 29778.75, TP 09:46:01, **+112.75**, 1 att | 000dfb7 +99.25 → d349a05 -59.50 → de59b3b +101.00 → f73c20f +112.75 |
+| 08-12 | +46.75, 2 att | 08-12 current: `tmso_reject` DOWN 09:31:00 @ 29974.5, marked 12:59:59, **+69.00**, 1 att | 000dfb7 -6.00 → 879032b -52.50 → f73c20f +69.00 |
+| 08-13 | +89.25, 1 att | 08-13 current: `tmso_reject` UP 09:35:00 @ 29945.75, TP 09:36:43, **+55.75**, 1 att | 879032b +93.50 → f73c20f +55.75 |
+| 08-14 | +99.50, 3 att | 08-14 current: `tmso_reject` -15.00 then `fvg_1m_post_extreme` 10:22:00 @ 30181.5, TP 10:59:23, **+38.50**, 2 att | 000dfb7 +68.50 → de59b3b +62.50 → 879032b +38.50 |
+| 08-18 | 09:40:58 @ 29763.25, +229.75 | 08-18 current: `extreme_reject_close` DOWN 09:42:00 @ 29760.25, TP 09:55:08, **+129.25**, 1 att | 000dfb7 +138.25 → de59b3b +124.25 → 879032b +120.25 → f73c20f -24.75 → 5f71acc +114.25 → 8b90ee7 +129.25 |
+| 08-21 | FLAT | 08-21 current: `tmso_reject` DOWN 09:31:00 @ 29425.75, TP 09:35:13, **+73.00**, 1 att | 000dfb7 +19.25 → d349a05 +87.00 → de59b3b +80.25 → f73c20f +73.00 |
+
+**Why each move, in one line each.** 000dfb7 (plan 16): the take-profit and the plan-death
+level became the T2 pick at the fill, so exits are nearer (08-18 prev4_day_low 29625.0
+instead of prev1_week_low 29533.5; since plan 40, 2da4d0b, the nearer `htf_week_running_low`
+29631.0) and a DOL touch no longer ends the day — the documented
+flat days trade. d349a05: §6 `fvg_1m_post_extreme` and §7 `extreme_reject_close` began to
+bind in the Executor. de59b3b / f73c20f: `tmso_reject` fires in the first micro-session
+(09:31-09:35) and, confirming on the sweep bar itself, takes the day's first attempt before
+§4/§5 (08-12's documented negation fill at 09:31:16 is pre-empted by 16 s even with
+`ACT_TRADER_5M=1`). 879032b: the 5m continuation/negation no longer arm by default.
+8b90ee7: the far-excursion veto removes 08-18's early losing `tmso_reject` attempt.
+
+**The suspended mechanisms stay covered.** With `ACT_TRADER_5M=1` the §5 cases still
+reproduce their documented ENTRIES: 08-13's continuation 09:33:26 @ 29908.25 (+93.25 =
++89.25 plus the 4.00 buffer trim, TP 09:36:43) and 08-18's fresh tick 09:40:58 @ 29763.25,
+now exiting at the T2 pick `htf_week_running_low` 29631.0 at 09:55:08 for +132.25 (plan 16
+moved the exit to T2: +138.25 at prev4_day_low 29625.0; plan 40's weekly running low, 2da4d0b,
+is nearer: +132.25). Their tests run with that flag.
+08-12's §4 shape cannot be reached end to end in this era (`tmso_reject` pre-empts it and
+has no switch); the day is recorded as a divergence, like 08-14 before it.
+
+**Gates restated, not weakened.** Gate 6 asserts the DOL touch as
+`would_have_killed`/`dol_reached` with its timestamp (plan 16 made it non-lethal). The
+§10.2 inverted stress now spends two attempts for -23.25 (inside the 0..-70 band) and never
+reaches its third, so it asserts the bound directly (attempts <= 3, band, falsifier once,
+no entry after 11:00) instead of requiring `attempts_exhausted`. The plan-38 golden
+streams (08-31..09-04) were re-captured at cb083e2; 08-13 and 09-04 were re-seeded.
