@@ -163,30 +163,16 @@ def place_protective_stop(direction: str, corrective: float,
                           reason: str = "reconcile-rejected-sl") -> None:
     """SEAM: place/repair the protective stop at `corrective` for an open position.
 
-    DEFAULT implementation — the PMT update_sl path: live_orders.update_stop_loss dispatches
-    a PMT `update_sl=True` alert (execution/pickmytrade.update_stop_loss) and sets
-    position.json active.stop = corrective.
+    FALLBACK implementation — a FRESH standalone protective STP (a sell-STP for a long at
+    `corrective`) via live_orders.place_fresh_protective_stop, which also sets position.json
+    active.stop = corrective.
 
-    OPEN QUESTION (resolved by scripts/smoke_sl_reconcile.py): PMT's `update_sl=True` is
-    built to *replace* an existing SL; when the original SL was *rejected*, none rests, so
-    update_sl may have nothing to modify and may not CREATE one. If the smoke test shows it
-    does not create an SL, switch this seam to the FALLBACK below (a fresh standalone
-    protective stop, e.g. a sell-STP for a long at `corrective`) — a new PMT order path plus
-    a live_orders wrapper. The reconcile logic above is unchanged either way; only this call
-    swaps.
+    The original default, PMT `update_sl=True` (live_orders.update_stop_loss), was ruled
+    out by scripts/smoke_sl_reconcile.py on 2026-09-28: when the entry's SL leg was
+    rejected, update_sl was acknowledged (200) but created no order at the broker.
     """
     import live_orders
-    live_orders.update_stop_loss(corrective, reason=reason, direction=direction)
-
-    # ----------------------------------------------------------------------------
-    # FALLBACK (DO NOT enable until the smoke test selects it): place a FRESH standalone
-    # protective stop instead of update_sl. Requires a new PickMyTradeExecutor method
-    # (e.g. place_protective_stop_order) + a live_orders wrapper. Left here as a clearly
-    # marked seam so wiring it in is a one-line swap.
-    #
-    #   import live_orders
-    #   live_orders.place_fresh_protective_stop(direction, corrective, reason=reason)
-    # ----------------------------------------------------------------------------
+    live_orders.place_fresh_protective_stop(direction, corrective, reason=reason)
 
 
 # ── comments.md note helper ─────────────────────────────────────────────────────

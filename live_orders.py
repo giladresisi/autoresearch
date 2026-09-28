@@ -756,6 +756,21 @@ def update_stop_loss(stop_price: float, reason: str = "user-requested", directio
     _log({"kind": "update-stop-loss", "time": now, "reason": reason, "stop_price": stop_price})
 
 
+def place_fresh_protective_stop(direction: str, stop_price: float, reason: str = "reconcile-rejected-sl") -> None:
+    """Place a standalone protective STP for the open position and record it as active.stop.
+
+    For when no SL rests at the broker (entry's SL leg rejected): update_sl cannot create one.
+    """
+    now = _now_et()
+    _executor.place_protective_stop_order(direction, stop_price)
+    pos = _load_pos()
+    if pos.get("active"):
+        pos["active"]["stop"] = stop_price
+        _save_pos(pos)
+    _log({"kind": "place-protective-stop", "time": now, "direction": direction,
+          "reason": reason, "stop_price": stop_price})
+
+
 # ---------------------------------------------------------------------------
 # Pipeline dispatch — single entry point for all automatic signals
 # ---------------------------------------------------------------------------

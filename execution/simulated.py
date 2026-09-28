@@ -133,3 +133,6 @@ class SimulatedBrokerExecutor:
 
     def update_stop_loss(self, position: dict, bar) -> None:
         pass
+
+    def place_protective_stop_order(self, direction: str, stop_price: float) -> None:
+        pass

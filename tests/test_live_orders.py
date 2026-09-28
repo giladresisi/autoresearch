@@ -773,6 +773,28 @@ def test_update_stop_loss_dispatches_update_sl(_in_tmp, _mock_today):
     assert events[0]["stop_price"] == pytest.approx(19835.0)
 
 
+def test_place_fresh_protective_stop_sends_stp_and_updates_active_stop(_in_tmp, _mock_today):
+    pos = {
+        "active": {"direction": "long", "fill_price": 19850.0, "stop": 19860.0,
+                   "contracts": 1, "cautious": "no"},
+        "stop_entry": "", "stop_direction": "", "conf_bar_entry": {},
+        "failed_entries": 0,
+    }
+    mock_executor = MagicMock()
+    saved: dict = {}
+    with patch.object(live_orders, "_executor", mock_executor),          patch("smt_state.load_position", return_value=pos),          patch("smt_state.save_position", side_effect=lambda p: saved.update(p)):
+        live_orders.place_fresh_protective_stop("long", 19830.0, reason="reconcile-rejected-sl")
+
+    mock_executor.place_protective_stop_order.assert_called_once_with("long", 19830.0)
+    mock_executor.update_stop_loss.assert_not_called()
+    assert saved["active"]["stop"] == pytest.approx(19830.0)
+
+    events = _read_events(_in_tmp / "sessions", _FIXED_DATE)
+    assert len(events) == 1
+    assert events[0]["kind"] == "place-protective-stop"
+    assert events[0]["stop_price"] == pytest.approx(19830.0)
+
+
 # ---------------------------------------------------------------------------
 # Test 9: _log appends, not overwrites
 # ---------------------------------------------------------------------------
