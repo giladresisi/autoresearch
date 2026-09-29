@@ -1,0 +1,1476 @@
+{
+ "date": "2026-09-28",
+ "source": "<global>/studies/l1_ledger_variants/cache/2026-09-28.pkl (tiebreak._score_kwargs of the 09:20 bench view)",
+ "kw": {
+  "suppressed_p1_levels": {
+   "MNQ": [
+    "asia(cur)_low",
+    "london(cur)_high",
+    "prev1_day_low",
+    "prev2_day_high",
+    "prev2_week_high",
+    "prev3_day_low",
+    "prev3_week_high",
+    "prev3_week_low",
+    "prev4_day_high",
+    "prev4_day_low",
+    "prev5_day_high",
+    "prev6_day_high",
+    "prev7_day_high"
+   ],
+   "MES": [
+    "asia(cur)_low",
+    "london(cur)_low",
+    "prev2_day_high",
+    "prev2_week_high",
+    "prev3_day_low",
+    "prev3_week_high",
+    "prev3_week_low",
+    "prev4_day_low",
+    "prev5_day_high",
+    "prev5_day_low",
+    "prev6_day_high",
+    "prev7_day_high"
+   ]
+  },
+  "suppressed_p2_sites": {
+   "MNQ": [
+    "prev1_day_low",
+    "prev3_day_low",
+    "prev3_week_high",
+    "prev5_day_high"
+   ],
+   "MES": []
+  },
+  "level_htf_close_status": {
+   "MNQ": {
+    "prev1_day_high": {
+     "1h": null,
+     "4h": null
+    },
+    "prev1_day_low": {
+     "1h": false,
+     "4h": true
+    },
+    "prev2_day_high": {
+     "1h": false,
+     "4h": false
+    },
+    "prev2_day_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev1_week_high": {
+     "1h": null,
+     "4h": null
+    },
+    "prev1_week_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev3_day_high": {
+     "1h": null,
+     "4h": null
+    },
+    "prev3_day_low": {
+     "1h": false,
+     "4h": true
+    },
+    "prev4_day_high": {
+     "1h": null,
+     "4h": null
+    },
+    "prev4_day_low": {
+     "1h": false,
+     "4h": true
+    },
+    "prev5_day_high": {
+     "1h": false,
+     "4h": false
+    },
+    "prev5_day_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev6_day_high": {
+     "1h": true,
+     "4h": true
+    },
+    "prev6_day_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev7_day_high": {
+     "1h": true,
+     "4h": true
+    },
+    "prev7_day_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev2_week_high": {
+     "1h": true,
+     "4h": true
+    },
+    "prev2_week_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev3_week_high": {
+     "1h": true,
+     "4h": true
+    },
+    "prev3_week_low": {
+     "1h": null,
+     "4h": null
+    },
+    "asia(cur)_high": {
+     "1h": null,
+     "4h": null
+    },
+    "asia(cur)_low": {
+     "1h": false,
+     "4h": true
+    },
+    "london(cur)_high": {
+     "1h": true,
+     "4h": null
+    },
+    "london(cur)_low": {
+     "1h": null,
+     "4h": null
+    },
+    "daily_mid": {
+     "1h": true,
+     "4h": false
+    },
+    "weekly_mid": {
+     "1h": true,
+     "4h": false
+    }
+   },
+   "MES": {
+    "prev1_day_high": {
+     "1h": null,
+     "4h": null
+    },
+    "prev1_day_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev2_day_high": {
+     "1h": false,
+     "4h": false
+    },
+    "prev2_day_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev1_week_high": {
+     "1h": null,
+     "4h": null
+    },
+    "prev1_week_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev3_day_high": {
+     "1h": null,
+     "4h": null
+    },
+    "prev3_day_low": {
+     "1h": false,
+     "4h": null
+    },
+    "prev4_day_high": {
+     "1h": null,
+     "4h": null
+    },
+    "prev4_day_low": {
+     "1h": true,
+     "4h": true
+    },
+    "prev5_day_high": {
+     "1h": null,
+     "4h": null
+    },
+    "prev5_day_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev6_day_high": {
+     "1h": true,
+     "4h": true
+    },
+    "prev6_day_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev7_day_high": {
+     "1h": true,
+     "4h": true
+    },
+    "prev7_day_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev2_week_high": {
+     "1h": true,
+     "4h": true
+    },
+    "prev2_week_low": {
+     "1h": null,
+     "4h": null
+    },
+    "prev3_week_high": {
+     "1h": false,
+     "4h": false
+    },
+    "prev3_week_low": {
+     "1h": null,
+     "4h": null
+    },
+    "asia(cur)_high": {
+     "1h": null,
+     "4h": null
+    },
+    "asia(cur)_low": {
+     "1h": false,
+     "4h": true
+    },
+    "london(cur)_high": {
+     "1h": null,
+     "4h": null
+    },
+    "london(cur)_low": {
+     "1h": false,
+     "4h": null
+    },
+    "daily_mid": {
+     "1h": true,
+     "4h": false
+    },
+    "weekly_mid": {
+     "1h": true,
+     "4h": true
+    }
+   }
+  },
+  "level_tiers": {
+   "MNQ": {
+    "prev1_day_high": {
+     "tier": "day",
+     "price": 30998.5
+    },
+    "prev1_day_low": {
+     "tier": "day",
+     "price": 30680.0
+    },
+    "prev2_day_high": {
+     "tier": "day",
+     "price": 30827.5
+    },
+    "prev2_day_low": {
+     "tier": "day",
+     "price": 30370.75
+    },
+    "prev1_week_high": {
+     "tier": "week",
+     "price": 31094.75
+    },
+    "prev1_week_low": {
+     "tier": "week",
+     "price": 29903.5
+    },
+    "prev3_day_high": {
+     "tier": "day",
+     "price": 31094.75
+    },
+    "prev3_day_low": {
+     "tier": "day",
+     "price": 30640.25
+    },
+    "prev4_day_high": {
+     "tier": "day",
+     "price": 31066.0
+    },
+    "prev4_day_low": {
+     "tier": "day",
+     "price": 30671.0
+    },
+    "prev5_day_high": {
+     "tier": "day",
+     "price": 30863.0
+    },
+    "prev5_day_low": {
+     "tier": "day",
+     "price": 29903.5
+    },
+    "prev6_day_high": {
+     "tier": "day",
+     "price": 29993.5
+    },
+    "prev6_day_low": {
+     "tier": "day",
+     "price": 29647.5
+    },
+    "prev7_day_high": {
+     "tier": "day",
+     "price": 29793.25
+    },
+    "prev7_day_low": {
+     "tier": "day",
+     "price": 29247.5
+    },
+    "prev2_week_high": {
+     "tier": "week",
+     "price": 29993.5
+    },
+    "prev2_week_low": {
+     "tier": "week",
+     "price": 29052.75
+    },
+    "prev3_week_high": {
+     "tier": "week",
+     "price": 30064.5
+    },
+    "prev3_week_low": {
+     "tier": "week",
+     "price": 29337.75
+    },
+    "asia(cur)_high": {
+     "tier": "day",
+     "price": 30920.75
+    },
+    "asia(cur)_low": {
+     "tier": "day",
+     "price": 30640.5
+    },
+    "london(cur)_high": {
+     "tier": "session",
+     "price": 30705.5
+    },
+    "london(cur)_low": {
+     "tier": "day",
+     "price": 30535.0
+    }
+   },
+   "MES": {
+    "prev1_day_high": {
+     "tier": "day",
+     "price": 7814.75
+    },
+    "prev1_day_low": {
+     "tier": "day",
+     "price": 7747.75
+    },
+    "prev2_day_high": {
+     "tier": "day",
+     "price": 7783.5
+    },
+    "prev2_day_low": {
+     "tier": "day",
+     "price": 7710.0
+    },
+    "prev1_week_high": {
+     "tier": "week",
+     "price": 7848.25
+    },
+    "prev1_week_low": {
+     "tier": "week",
+     "price": 7710.0
+    },
+    "prev3_day_high": {
+     "tier": "day",
+     "price": 7843.25
+    },
+    "prev3_day_low": {
+     "tier": "day",
+     "price": 7759.0
+    },
+    "prev4_day_high": {
+     "tier": "day",
+     "price": 7848.25
+    },
+    "prev4_day_low": {
+     "tier": "day",
+     "price": 7810.5
+    },
+    "prev5_day_high": {
+     "tier": "day",
+     "price": 7847.25
+    },
+    "prev5_day_low": {
+     "tier": "day",
+     "price": 7713.75
+    },
+    "prev6_day_high": {
+     "tier": "day",
+     "price": 7739.0
+    },
+    "prev6_day_low": {
+     "tier": "day",
+     "price": 7675.0
+    },
+    "prev7_day_high": {
+     "tier": "day",
+     "price": 7722.25
+    },
+    "prev7_day_low": {
+     "tier": "day",
+     "price": 7617.5
+    },
+    "prev2_week_high": {
+     "tier": "week",
+     "price": 7739.0
+    },
+    "prev2_week_low": {
+     "tier": "week",
+     "price": 7575.25
+    },
+    "prev3_week_high": {
+     "tier": "week",
+     "price": 7796.25
+    },
+    "prev3_week_low": {
+     "tier": "week",
+     "price": 7653.25
+    },
+    "asia(cur)_high": {
+     "tier": "day",
+     "price": 7803.25
+    },
+    "asia(cur)_low": {
+     "tier": "day",
+     "price": 7771.5
+    },
+    "london(cur)_high": {
+     "tier": "session",
+     "price": 7783.5
+    },
+    "london(cur)_low": {
+     "tier": "day",
+     "price": 7759.75
+    }
+   }
+  },
+  "smt_candidates": [
+   {
+    "level": "london(cur)_high",
+    "tier": "session",
+    "swept_ticker": "MNQ",
+    "unswept_ticker": "MES",
+    "meaningful": false,
+    "side": "above",
+    "promoted_from": null,
+    "swept_at": "2026-09-28 08:06:00-04:00",
+    "suggested_exhausted": false
+   },
+   {
+    "level": "london(cur)_high",
+    "tier": "session",
+    "swept_ticker": "MNQ",
+    "unswept_ticker": "MES",
+    "meaningful": false,
+    "side": "above",
+    "promoted_from": null,
+    "swept_at": "2026-09-28 08:30:00-04:00",
+    "suggested_exhausted": false
+   },
+   {
+    "level": "london(cur)_low",
+    "tier": "day",
+    "swept_ticker": "MES",
+    "unswept_ticker": "MNQ",
+    "meaningful": true,
+    "side": "below",
+    "promoted_from": "session",
+    "swept_at": "2026-09-28 06:11:00-04:00",
+    "suggested_exhausted": false
+   },
+   {
+    "level": "prev1_day_low",
+    "tier": "day",
+    "swept_ticker": "MNQ",
+    "unswept_ticker": "MES",
+    "meaningful": true,
+    "side": "below",
+    "promoted_from": null,
+    "swept_at": "2026-09-27 22:55:00-04:00",
+    "suggested_exhausted": false
+   },
+   {
+    "level": "prev1_day_low",
+    "tier": "day",
+    "swept_ticker": "MNQ",
+    "unswept_ticker": "MES",
+    "meaningful": true,
+    "side": "below",
+    "promoted_from": null,
+    "swept_at": "2026-09-27 23:00:00-04:00",
+    "suggested_exhausted": false
+   },
+   {
+    "level": "prev3_day_low",
+    "tier": "day",
+    "swept_ticker": "MNQ",
+    "unswept_ticker": "MES",
+    "meaningful": true,
+    "side": "below",
+    "promoted_from": null,
+    "swept_at": "2026-09-28 02:00:00-04:00",
+    "suggested_exhausted": false
+   },
+   {
+    "level": "prev3_week_high",
+    "tier": "week",
+    "swept_ticker": "MNQ",
+    "unswept_ticker": "MES",
+    "meaningful": true,
+    "side": "above",
+    "promoted_from": null,
+    "swept_at": "2026-09-27 18:00:00-04:00",
+    "suggested_exhausted": false
+   },
+   {
+    "level": "prev5_day_high",
+    "tier": "day",
+    "swept_ticker": "MNQ",
+    "unswept_ticker": "MES",
+    "meaningful": true,
+    "side": "above",
+    "promoted_from": null,
+    "swept_at": "2026-09-27 18:00:00-04:00",
+    "suggested_exhausted": false
+   },
+   {
+    "level": "prev5_day_high",
+    "tier": "day",
+    "swept_ticker": "MNQ",
+    "unswept_ticker": "MES",
+    "meaningful": true,
+    "side": "above",
+    "promoted_from": null,
+    "swept_at": "2026-09-27 20:00:00-04:00",
+    "suggested_exhausted": false
+   }
+  ],
+  "week_extremes": {
+   "MNQ": {
+    "hi": 30998.5,
+    "lo": 30370.75
+   },
+   "MES": {
+    "hi": 7814.75,
+    "lo": 7710.0
+   }
+  },
+  "now_price": 30699.25,
+  "fvg_zone_meta": {
+   "MNQ 1hr 2026-09-18 13:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-18 13:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-18 14:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-18 14:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-18 15:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-18 15:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-20 18:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-20 18:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-20 20:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-20 20:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-21 02:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 02:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-21 03:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 03:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-21 04:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 04:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-21 09:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 09:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-21 10:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 10:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-21 11:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 11:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-21 12:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 12:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-21 13:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 13:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-21 14:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 14:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-21 18:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 18:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-21 19:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 19:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-21 20:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 20:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-22 00:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-22 00:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-22 05:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-22 05:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-22 07:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-22 07:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-22 09:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-22 09:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-22 13:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-22 13:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-22 18:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-22 18:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-23 07:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-23 07:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-23 09:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-23 09:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-23 10:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-23 10:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-23 19:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-23 19:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-23 23:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-23 23:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-24 01:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-24 01:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-24 04:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-24 04:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-24 09:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-24 09:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-24 12:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-24 12:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-24 21:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-24 21:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-25 01:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-25 01:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-25 04:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-25 04:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-25 12:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-25 12:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-27 18:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-27 18:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-27 21:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-27 21:00:00-04:00"
+   },
+   "MNQ 1hr 2026-09-27 22:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-27 22:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-18 14:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-18 14:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-20 18:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-20 18:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-21 02:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-21 02:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-21 06:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-21 06:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-21 10:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-21 10:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-21 14:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-21 14:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-22 06:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-22 06:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-22 10:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-22 10:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-22 14:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-22 14:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-23 06:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bear",
+    "ts": "2026-09-23 06:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-23 10:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bear",
+    "ts": "2026-09-23 10:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-23 22:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bear",
+    "ts": "2026-09-23 22:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-24 22:00:00-04:00 bull": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-24 22:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-27 18:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bear",
+    "ts": "2026-09-27 18:00:00-04:00"
+   },
+   "MNQ 4hr 2026-09-27 22:00:00-04:00 bear": {
+    "asset": "MNQ",
+    "tf": "4h",
+    "kind": "bear",
+    "ts": "2026-09-27 22:00:00-04:00"
+   },
+   "MES 1hr 2026-09-18 13:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-18 13:00:00-04:00"
+   },
+   "MES 1hr 2026-09-18 14:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-18 14:00:00-04:00"
+   },
+   "MES 1hr 2026-09-20 18:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-20 18:00:00-04:00"
+   },
+   "MES 1hr 2026-09-20 20:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-20 20:00:00-04:00"
+   },
+   "MES 1hr 2026-09-21 02:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 02:00:00-04:00"
+   },
+   "MES 1hr 2026-09-21 03:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 03:00:00-04:00"
+   },
+   "MES 1hr 2026-09-21 04:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 04:00:00-04:00"
+   },
+   "MES 1hr 2026-09-21 10:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 10:00:00-04:00"
+   },
+   "MES 1hr 2026-09-21 11:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 11:00:00-04:00"
+   },
+   "MES 1hr 2026-09-21 12:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 12:00:00-04:00"
+   },
+   "MES 1hr 2026-09-21 13:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 13:00:00-04:00"
+   },
+   "MES 1hr 2026-09-21 14:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-21 14:00:00-04:00"
+   },
+   "MES 1hr 2026-09-22 23:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-22 23:00:00-04:00"
+   },
+   "MES 1hr 2026-09-23 07:00:00-04:00 bear": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-23 07:00:00-04:00"
+   },
+   "MES 1hr 2026-09-23 09:00:00-04:00 bear": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-23 09:00:00-04:00"
+   },
+   "MES 1hr 2026-09-23 10:00:00-04:00 bear": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-23 10:00:00-04:00"
+   },
+   "MES 1hr 2026-09-23 19:00:00-04:00 bear": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-23 19:00:00-04:00"
+   },
+   "MES 1hr 2026-09-24 04:00:00-04:00 bear": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-24 04:00:00-04:00"
+   },
+   "MES 1hr 2026-09-24 12:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-24 12:00:00-04:00"
+   },
+   "MES 1hr 2026-09-25 01:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-25 01:00:00-04:00"
+   },
+   "MES 1hr 2026-09-25 04:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-25 04:00:00-04:00"
+   },
+   "MES 1hr 2026-09-25 11:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-25 11:00:00-04:00"
+   },
+   "MES 1hr 2026-09-25 12:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bull",
+    "ts": "2026-09-25 12:00:00-04:00"
+   },
+   "MES 1hr 2026-09-27 18:00:00-04:00 bear": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-27 18:00:00-04:00"
+   },
+   "MES 1hr 2026-09-27 22:00:00-04:00 bear": {
+    "asset": "MES",
+    "tf": "1h",
+    "kind": "bear",
+    "ts": "2026-09-27 22:00:00-04:00"
+   },
+   "MES 4hr 2026-09-18 14:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-18 14:00:00-04:00"
+   },
+   "MES 4hr 2026-09-20 18:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-20 18:00:00-04:00"
+   },
+   "MES 4hr 2026-09-20 22:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-20 22:00:00-04:00"
+   },
+   "MES 4hr 2026-09-21 02:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-21 02:00:00-04:00"
+   },
+   "MES 4hr 2026-09-21 06:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-21 06:00:00-04:00"
+   },
+   "MES 4hr 2026-09-21 10:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-21 10:00:00-04:00"
+   },
+   "MES 4hr 2026-09-23 06:00:00-04:00 bear": {
+    "asset": "MES",
+    "tf": "4h",
+    "kind": "bear",
+    "ts": "2026-09-23 06:00:00-04:00"
+   },
+   "MES 4hr 2026-09-23 10:00:00-04:00 bear": {
+    "asset": "MES",
+    "tf": "4h",
+    "kind": "bear",
+    "ts": "2026-09-23 10:00:00-04:00"
+   },
+   "MES 4hr 2026-09-23 22:00:00-04:00 bear": {
+    "asset": "MES",
+    "tf": "4h",
+    "kind": "bear",
+    "ts": "2026-09-23 22:00:00-04:00"
+   },
+   "MES 4hr 2026-09-24 22:00:00-04:00 bull": {
+    "asset": "MES",
+    "tf": "4h",
+    "kind": "bull",
+    "ts": "2026-09-24 22:00:00-04:00"
+   },
+   "MES 4hr 2026-09-27 18:00:00-04:00 bear": {
+    "asset": "MES",
+    "tf": "4h",
+    "kind": "bear",
+    "ts": "2026-09-27 18:00:00-04:00"
+   }
+  },
+  "mid_reclaim": {
+   "MNQ": {
+    "daily_mid": {
+     "1h": {
+      "fresh": true,
+      "cross_dir": "up"
+     },
+     "4h": {
+      "fresh": false,
+      "cross_dir": "down"
+     }
+    },
+    "weekly_mid": {
+     "1h": {
+      "fresh": true,
+      "cross_dir": "up"
+     },
+     "4h": {
+      "fresh": true,
+      "cross_dir": "down"
+     }
+    }
+   },
+   "MES": {
+    "daily_mid": {
+     "1h": {
+      "fresh": true,
+      "cross_dir": "up"
+     },
+     "4h": {
+      "fresh": false,
+      "cross_dir": "down"
+     }
+    },
+    "weekly_mid": {
+     "1h": {
+      "fresh": true,
+      "cross_dir": "up"
+     },
+     "4h": {
+      "fresh": false,
+      "cross_dir": "up"
+     }
+    }
+   }
+  },
+  "htf_reversal": {
+   "MNQ": {
+    "prev1_day_low": {
+     "1h": "none",
+     "4h": "reverse"
+    },
+    "prev2_day_high": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "prev3_day_low": {
+     "1h": "none",
+     "4h": "reverse"
+    },
+    "prev4_day_low": {
+     "1h": "none",
+     "4h": "reverse"
+    },
+    "prev5_day_high": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "prev6_day_high": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "prev7_day_high": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "prev2_week_high": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "prev3_week_high": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "asia(cur)_low": {
+     "1h": "none",
+     "4h": "reverse"
+    },
+    "london(cur)_high": {
+     "1h": "discount"
+    },
+    "daily_mid": {
+     "1h": "discount",
+     "4h": "none"
+    },
+    "daily_mid_high": {
+     "1h": "discount",
+     "4h": "none"
+    },
+    "daily_mid_low": {
+     "1h": "discount",
+     "4h": "none"
+    },
+    "weekly_mid": {
+     "1h": "none",
+     "4h": "reverse"
+    },
+    "weekly_mid_high": {
+     "1h": "none",
+     "4h": "reverse"
+    },
+    "weekly_mid_low": {
+     "1h": "none",
+     "4h": "reverse"
+    }
+   },
+   "MES": {
+    "prev2_day_high": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "prev3_day_low": {
+     "1h": "none"
+    },
+    "prev4_day_low": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "prev6_day_high": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "prev7_day_high": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "prev2_week_high": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "prev3_week_high": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "asia(cur)_low": {
+     "1h": "none",
+     "4h": "discount"
+    },
+    "london(cur)_low": {
+     "1h": "none"
+    },
+    "daily_mid": {
+     "1h": "discount",
+     "4h": "none"
+    },
+    "daily_mid_high": {
+     "1h": "discount",
+     "4h": "none"
+    },
+    "daily_mid_low": {
+     "1h": "discount",
+     "4h": "none"
+    },
+    "weekly_mid": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "weekly_mid_high": {
+     "1h": "none",
+     "4h": "none"
+    },
+    "weekly_mid_low": {
+     "1h": "none",
+     "4h": "none"
+    }
+   }
+  },
+  "mid_position": {
+   "MNQ": {
+    "daily_mid": {
+     "price": 30727.88,
+     "side": "below",
+     "dist_pts": 28.63,
+     "dist_ratio": 0.3472
+    },
+    "weekly_mid": {
+     "price": 30684.62,
+     "side": "above",
+     "dist_pts": 14.63,
+     "dist_ratio": 0.1774
+    }
+   },
+   "MES": {
+    "daily_mid": {
+     "price": 7780.12,
+     "side": "below",
+     "dist_pts": 5.37,
+     "dist_ratio": 0.4447
+    },
+    "weekly_mid": {
+     "price": 7762.38,
+     "side": "above",
+     "dist_pts": 12.37,
+     "dist_ratio": 1.0244
+    }
+   }
+  },
+  "p1_stale_levels": {
+   "MNQ": [
+    "prev1_day_low",
+    "prev2_day_high",
+    "prev2_week_high",
+    "prev3_day_low",
+    "prev3_week_high",
+    "prev4_day_low",
+    "prev5_day_high",
+    "prev6_day_high",
+    "prev7_day_high"
+   ],
+   "MES": [
+    "prev2_day_high",
+    "prev2_week_high",
+    "prev3_day_low",
+    "prev3_week_high",
+    "prev4_day_low",
+    "prev6_day_high",
+    "prev7_day_high"
+   ]
+  },
+  "dol_available": {
+   "UP": true,
+   "DOWN": true
+  },
+  "magnitude": {
+   "MNQ": {
+    "prev1_day_low": {
+     "1h": 0.7186,
+     "4h": 0.5578
+    },
+    "prev2_day_high": {
+     "1h": 1.0703,
+     "4h": 1.4929
+    },
+    "prev3_day_low": {
+     "1h": 1.2007,
+     "4h": 0.3059
+    },
+    "prev4_day_low": {
+     "1h": 0.8278,
+     "4h": 0.5008
+    },
+    "prev5_day_high": {
+     "1h": 1.5009,
+     "4h": 1.7179
+    },
+    "prev6_day_high": {
+     "1h": 9.0449,
+     "4h": 3.794
+    },
+    "prev7_day_high": {
+     "1h": 11.4736,
+     "4h": 5.0634
+    },
+    "prev2_week_high": {
+     "1h": 9.0449,
+     "4h": 3.794
+    },
+    "prev3_week_high": {
+     "1h": 8.1837,
+     "4h": 3.3439
+    },
+    "asia(cur)_low": {
+     "1h": 1.1977,
+     "4h": 0.3074
+    },
+    "london(cur)_high": {
+     "1h": 0.4093
+    },
+    "daily_mid": {
+     "1h": 0.1379,
+     "4h": 0.8614
+    },
+    "daily_mid_high": {
+     "1h": 0.1379,
+     "4h": 0.8614
+    },
+    "daily_mid_low": {
+     "1h": 0.1379,
+     "4h": 0.8614
+    },
+    "weekly_mid": {
+     "1h": 0.6626,
+     "4h": 0.5871
+    },
+    "weekly_mid_high": {
+     "1h": 0.6626,
+     "4h": 0.5871
+    },
+    "weekly_mid_low": {
+     "1h": 0.6626,
+     "4h": 0.5871
+    }
+   },
+   "MES": {
+    "prev2_day_high": {
+     "1h": 0.2484,
+     "4h": 0.7274
+    },
+    "prev3_day_low": {
+     "1h": 1.7805
+    },
+    "prev4_day_low": {
+     "1h": 2.4845,
+     "4h": 1.775
+    },
+    "prev6_day_high": {
+     "1h": 3.4369,
+     "4h": 0.999
+    },
+    "prev7_day_high": {
+     "1h": 4.824,
+     "4h": 1.6489
+    },
+    "prev2_week_high": {
+     "1h": 3.4369,
+     "4h": 0.999
+    },
+    "prev3_week_high": {
+     "1h": 1.3043,
+     "4h": 1.2221
+    },
+    "asia(cur)_low": {
+     "1h": 0.7453,
+     "4h": 0.2619
+    },
+    "london(cur)_low": {
+     "1h": 1.7184
+    },
+    "daily_mid": {
+     "1h": 0.0315,
+     "4h": 0.5963
+    },
+    "daily_mid_high": {
+     "1h": 0.0315,
+     "4h": 0.5963
+    },
+    "daily_mid_low": {
+     "1h": 0.0315,
+     "4h": 0.5963
+    },
+    "weekly_mid": {
+     "1h": 1.5006,
+     "4h": 0.0919
+    },
+    "weekly_mid_high": {
+     "1h": 1.5006,
+     "4h": 0.0919
+    },
+    "weekly_mid_low": {
+     "1h": 1.5006,
+     "4h": 0.0919
+    }
+   }
+  }
+ }
+}
