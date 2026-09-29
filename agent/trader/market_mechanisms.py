@@ -39,7 +39,9 @@ from agent.trader.episode import Episode, evaluation_order
 from agent.trader.extreme_reject import ExtremeReject, choose_track
 from agent.trader.tmso_reject import TmsoReject, prior_adverse_excursion, tmso_for
 from agent.trader.fvg_reject import FvgReject, zone_at_0700
-from agent.trader.micro_smt import MicroSmt, micro_smt_entry_armed, previous_micro_extremes
+from agent.trader.micro_smt import (MicroSmt, entry_latch_from,
+                                    entry_previous_micro_extremes, micro_smt_entry_armed,
+                                    previous_micro_extremes)
 
 _SHORT = ("DOWN", "SHORT")
 
@@ -83,7 +85,8 @@ class MarketMechanisms:
         self._fvg1h = FvgReject(direction)
         # O3/O4, ADOPTED 2026-09-26 (`l2-mechanisms.md` §7a/§7b) — see `micro_smt.py`.
         # Both flag-gated, both default ON, and built eagerly regardless: cheap, and
-        # self-gating until a previous micro-session exists. `_micro_smt_entry` watches
+        # self-gating until a previous micro-session exists (for the entry, from 09:00
+        # under §7a.1's pre-open pair; for the exit, from 10:30). `_micro_smt_entry` watches
         # the THESIS side (bearish for a DOWN plan);
         # `_micro_smt_exit` watches the OPPOSITE side, for exiting a position this plan
         # opened (every mechanism here fires in the plan's own direction, so the position
@@ -145,8 +148,13 @@ class MarketMechanisms:
     # -- micro_smt_reject / micro_smt_exit (O3/O4, ADOPTED §7a/§7b) -------------- #
 
     def micro_smt_entry_on_bar_close(self, now, mnq_bar, mes_bar, mnq, mes) -> "dict | None":
+        # §7a.1: the entry reads the pre-open pair for the 09:00 micro-session, and the
+        # frames double as the whole-session history (breaks on bars never asked about;
+        # the first in-window confirmation among them consumes the session's fire).
+        prev = entry_previous_micro_extremes(mnq, mes, now)
+        latch = None if prev is None else entry_latch_from(prev["session_start"])
         fire = self._micro_smt_entry.on_bar_close(
-            now, mnq_bar, mes_bar, previous_micro_extremes(mnq, mes, now))
+            now, mnq_bar, mes_bar, prev, mnq_hist=mnq, mes_hist=mes, latch_from=latch)
         if fire is None:
             return None
         fire = dict(fire)
