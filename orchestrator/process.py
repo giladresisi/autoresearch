@@ -13,6 +13,7 @@ import psutil
 
 from orchestrator.output import OutputChannel
 from orchestrator.relay import SessionRelay
+from orchestrator import stop_request as _stop_request
 
 from session_times import SESSION_CLOSE as _SESSION_GRACE_END
 
@@ -40,7 +41,9 @@ class ProcessManager:
         the session opened after 18:00 ET today).  If None, falls back to time-only comparison
         against SESSION_CLOSE — which is wrong for evening sessions but kept for safety.
 
-        Returns "ib_disconnected" if automation exited with code 2; None otherwise.
+        Returns "ib_disconnected" if automation exited with code 2; "stop_requested" when
+        `trade.py terminate` asked for a stop mid-session (the subprocess has been stopped);
+        None otherwise.
         """
         name = self._process_name()
         _kill_existing_signal_smt(self._script, self._log)
@@ -60,6 +63,10 @@ class ProcessManager:
                         f"[ORCH] *** IB Gateway disconnected (exit code 2) — not restarting ***"
                     )
                     return "ib_disconnected"
+                if exit_reason == "stop_requested":
+                    self._log.writeln(f"[ORCH] Stop requested — asking {name} to shut down")
+                    self._request_stop(proc)
+                    return "stop_requested"
                 # Unexpected exit
                 if not restarted:
                     self._log.writeln(
@@ -70,7 +77,8 @@ class ProcessManager:
                     self._log.writeln(
                         f"[ORCH] *** {name} exited again (code={proc.returncode}) — NOT restarting; waiting for session end ***"
                     )
-                    self._wait_until_grace_end(grace_end_dt=grace_end_dt)
+                    if self._wait_until_grace_end(grace_end_dt=grace_end_dt) == "stop_requested":
+                        return "stop_requested"
                     return None
         except KeyboardInterrupt:
             if proc is not None and proc.poll() is None:
@@ -108,7 +116,9 @@ class ProcessManager:
     def _monitor(self, proc: subprocess.Popen, grace_end_dt: datetime.datetime | None = None) -> str:
         """Read stdout in a thread; poll for exit or session end in main thread.
 
-        Returns "scheduled_stop", "ib_disconnected" (exit code 2), or "unexpected_exit".
+        Returns "scheduled_stop", "ib_disconnected" (exit code 2), "unexpected_exit", or
+        "stop_requested" (trade.py terminate wrote the stop file; the subprocess is still
+        running and is the caller's to stop).
         """
         reader = threading.Thread(target=self._read_stdout, args=(proc,), daemon=True)
         reader.start()
@@ -121,6 +131,8 @@ class ProcessManager:
                 if proc.returncode == 2:
                     return "ib_disconnected"
                 return "unexpected_exit"
+            if self._stop_requested():
+                return "stop_requested"
             now = datetime.datetime.now(tz=_ET)
             if grace_end_dt is not None:
                 if now >= grace_end_dt:
@@ -132,6 +144,37 @@ class ProcessManager:
     def _read_stdout(self, proc: subprocess.Popen) -> None:
         for line in proc.stdout:
             self._relay.emit(line.rstrip("\n"))
+
+    def _stop_requested(self) -> bool:
+        """True once, when the stop-request file exists (it is consumed here)."""
+        if not _stop_request.ORCH_STOP_FILE.exists():
+            return False
+        _stop_request.clear(_stop_request.ORCH_STOP_FILE)
+        return True
+
+    def _honours_stop_request(self) -> bool:
+        """Only automation.main polls the stop file; signal_smt.py is just terminated."""
+        return isinstance(self._script, list) and any(
+            "automation.main" in str(arg) for arg in self._script)
+
+    def _request_stop(self, proc: subprocess.Popen) -> None:
+        """Ask the subprocess to stop by itself, so its `finally` runs (IB disconnect,
+        parquet flush, executor stop) — proc.terminate() is a hard kill on Windows and
+        skips all of it. Falls back to _terminate after AUTOMATION_STOP_WAIT_S."""
+        if not self._honours_stop_request():
+            self._terminate(proc)
+            return
+        stop_file = _stop_request.AUTOMATION_STOP_FILE
+        try:
+            stop_file.write_text("stop")
+            proc.wait(timeout=_stop_request.AUTOMATION_STOP_WAIT_S)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            _stop_request.clear(stop_file)
+        if proc.poll() is None:
+            self._log.writeln("[ORCH] Stop request not honoured in time — terminating")
+            self._terminate(proc)
 
     def _terminate(self, proc: subprocess.Popen) -> None:
         """Terminate proc AND all of its descendants.
@@ -175,15 +218,19 @@ class ProcessManager:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
-    def _wait_until_grace_end(self, grace_end_dt: datetime.datetime | None = None) -> None:
+    def _wait_until_grace_end(self, grace_end_dt: datetime.datetime | None = None) -> str | None:
+        """Returns "stop_requested" when trade.py terminate asked for a stop; None at grace end."""
         while True:
+            if self._stop_requested():
+                return "stop_requested"
             now = datetime.datetime.now(tz=_ET)
             if grace_end_dt is not None:
                 if now >= grace_end_dt:
                     break
             elif now.time() >= _SESSION_GRACE_END:
                 break
-            time.sleep(30)
+            time.sleep(_POLL_INTERVAL_S)
+        return None
 
 
 def _kill_existing_signal_smt(script_path: Path | list, log: OutputChannel) -> None:
