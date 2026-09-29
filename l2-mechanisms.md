@@ -609,8 +609,10 @@ anchored — inherited open question, not re-litigated here), confirmed by a 1m 
 - **The grid and the definition.** The micro-session grid is `tmso_reject.micro_session_start`
   (90 min, 09:00 ET anchor). "Previous micro-session extreme" = each asset's High (bearish) /
   Low (bullish) over the immediately preceding, COMPLETED micro-session — the first
-  micro-session of the day (09:00-10:30) has none, so the mechanism is structurally inert
-  before 10:30 regardless of the entry window below.
+  micro-session of the day (09:00-10:30) has none on the grid, so the ordinary pair is
+  structurally inert before 10:30 regardless of the entry window below. **Superseded for
+  the ENTRY by §7a.1 (2026-09-28):** the 09:00-10:30 micro-session's entry reads 07:30-09:00
+  as its predecessor; O4 still has none before 10:30.
 - **Bearish signature:** within the CURRENT micro-session, one asset's High trades strictly
   above its own previous-micro-session high while the other asset's High has NOT (yet)
   exceeded its own. Bullish mirrors at the Lows. **Pinned as a LIVE STATE**, not a one-bar
@@ -649,6 +651,55 @@ anchored — inherited open question, not re-litigated here), confirmed by a 1m 
 - **Caveat carried from the CANDIDATE entry, unresolved:** the lookahead-oracle thesis always
   trades WITH the (assumed-correct) direction; a real L1 thesis is sometimes wrong-direction,
   so O3's real hit rate is necessarily lower than the oracle A/B suggests.
+
+### 7a.1 The pre-open pair: 07:30-09:00 -> 09:00-10:30 (operator, 2026-09-28)
+
+Extends O3's ENTRY — not O4's exit — to the day's first micro-session.
+
+- **The pair.** For the 09:00-10:30 micro-session ONLY, "previous micro-session" is
+  07:30-09:00: the same 90-minute grid one step back, each asset's own High (bearish) / Low
+  (bullish) over it. Signature, confirmation, entry and stop are §7a's, unchanged. Every
+  later micro-session keeps its ordinary predecessor. O4 (§7b) does NOT use this pair and
+  stays inert before 10:30.
+- **Entry window for this pair: `09:30 <= entry < 10:30 ET`** — RTH open to the shared
+  `ENTRY_CUTOFF_ET`. §7a's `10:30 <= entry < 11:00` window for the ordinary pair is unchanged.
+- **The divergence is a live state over the WHOLE micro-session (pinned 2026-09-28, both
+  pairs).** Every break since the micro-session opened counts toward "exactly one asset has
+  broken", including breaks on bars the Executor did not ask the detector about (before the
+  entry window, while a position was open, during a cooldown). So a 09:10 MES break followed
+  by a 09:32 MNQ break is "both broken" — cancelled — even though the window opened at
+  09:30. A confirmation still fires only inside the window; a pre-window confirmation does
+  not latch the session. The stop's "MNQ running extreme" is likewise read from the
+  micro-session's open. This replaces the earlier implementation, which only accumulated
+  breaks on the bars it was asked about.
+- **The FIRST in-window confirmation consumes the micro-session (operator, 2026-09-29).**
+  Whether or not O3 was asked on that bar — a position open, a cooldown, the attempt
+  budget, any block — the first 1m bar completing inside the entry window that confirms a
+  live divergence (closes with the signal on BOTH assets) latches the micro-session's one
+  fire. An unasked confirmation therefore spends the fire without an entry; a later bar
+  never re-fires the same divergence. Pre-window confirmations still do not latch. Worked
+  example 2026-08-14 (thesis DOWN): 07:30-09:00 highs MNQ 30280.25, MES 7832.00; MNQ breaks
+  at 09:05 (30287.25), MES never; the first in-window confirmation is bar 09:32 (booked
+  09:33:00) while `tmso_reject`'s 09:32 short is open -> the session is consumed, and the
+  09:47:00 short (-15.00) the unlatched reading took does not happen: the day stays
+  +38.50 on 2 attempts (`cur-0814`).
+- **Flag:** `MICRO_SMT_PREOPEN_PAIR_ENABLED` (default True); off restores §7a exactly as
+  above except for the whole-session reading.
+- **Motivating day — 2026-09-28 (operator comment 10:19, `sessions/2026-09-28/comments.md`).**
+  07:30-09:00 highs: MNQ 30753.50 (08:57), MES 7781.50 (08:26); neither broken 09:00-09:29
+  (MNQ 30740.00, MES 7780.25). Bar 09:32 takes MNQ to 30759.00 while MES reaches 7775.25;
+  it closes UP on both (no confirmation). Bar 09:33 closes DOWN on both (MNQ 30738.00 ->
+  30707.75, MES 7771.50 -> 7766.50) -> fires at 09:34:00, short @ 30707.75, stop
+  min(30759.00 + 2, 30707.75 + 15) = 30722.75, never touched (highest later print 30710.50).
+  Under a DOWN thesis (09:20 DOWN-menu D1 london(cur)_low 30535.00) T2 = 30535.00, reached
+  10:11:14: **+172.75 pts, the day's only trade.** The live thesis was UP, so this bearish
+  fire is not taken live (O3 trades only with the plan's direction) — but the pair's
+  BULLISH mirror does fire under it: MES undercuts its 07:30-09:00 low 7762.75 at 09:35
+  (7760.25) while MNQ holds above 30610.50 (09:36 low 30618.00); bar 09:36 closes up on
+  both -> long 09:37:00 @ 30658.0, stop 30643.0 (cap), stopped 09:38:00 for -15.00. It
+  spends attempt 2, so the 09:58 `fvg_1m_post_extreme` long (-28.75) never gets an
+  attempt: the replayed UP day moves -58.75 -> -45.00 (plan 43). Evidence: one day,
+  counterfactual thesis — see the 10-day oracle A/B in §11.4.
 
 ## 7b. Mechanism: `micro_smt_exit` (O4, exit) — ADOPTED 2026-09-26, wired live 2026-09-26
 
@@ -1635,3 +1686,22 @@ has no switch); the day is recorded as a divergence, like 08-14 before it.
 reaches its third, so it asserts the bound directly (attempts <= 3, band, falsifier once,
 no entry after 11:00) instead of requiring `attempts_exhausted`. The plan-38 golden
 streams (08-31..09-04) were re-captured at cb083e2; 08-13 and 09-04 were re-seeded.
+
+
+### 11.4 Pointer — O3's pre-open micro-SMT pair (plan 43, 2026-09-28/29)
+
+An ENTRY rule; its text is §7a.1. Status: implemented, flag ON
+(`micro_smt.MICRO_SMT_PREOPEN_PAIR_ENABLED`), with the whole-session live state and the
+first-in-window-confirmation latch (operator, 2026-09-29). Registry: `sec7a1-0928`. It moves
+none of §11.3's current-era figures; without the latch, `cur-0814` moved -15.00 (an O3
+short 09:47:00 @ 30241.5, stopped), which is why the latch was pinned.
+
+**10-day oracle A/B (2026-09-15..09-28, `scripts/ab_micro_smt.py --preopen --last-n 10`,
+O3/O4 on in both arms): pair off +889.25, pair on +1099.00, Δ +209.75 pts** — all of it
+2026-09-28 (O3 09:34:00 @ 30707.75 -> T2 10:11:14, +172.75, replacing two `fvg_1m` losers
+for -37.00). Two more pre-open fires (09-16 09:31:00 -15.00, 09-23 09:31:00 +292.75) tie
+with `tmso_reject` on the same bar at the same price; `Arbiter.first_trigger` breaks the
+tie by name, so they relabel an identical fill and move nothing. A third arm with the
+detector blind to un-asked bars (the pre-§7a.1 reading) matched pair-off on all ten dates.
+Oracle theses are look-ahead (bars fallback after 08-31); one day carries the whole
+delta, so this is thin evidence, not a validation.

@@ -2,8 +2,8 @@
 
 Mirrors `test_executor_live_rules.py`'s style: the market mechanisms are stubbed so a
 fire can be ordered up at an exact second, and what is under test is the Executor's OWN
-gating around them (the flags, O3's own 12:30 cutoff exempting it from the shared 10:30
-one, the shared attempt budget and cooldown, and O4's positive-close / attempt-spend
+gating around them (the flags, O3's own windows -- 10:30-11:00, exempt from the shared
+10:30 cutoff, and §7a.1's pre-open 09:30-10:30 -- the shared attempt budget and cooldown, and O4's positive-close / attempt-spend
 rules). The detector's own logic (the divergence, the confirmation, no-lookahead, the
 real 2026-09-24 reproduction) is `test_micro_smt.py`'s job.
 
@@ -119,6 +119,9 @@ def make_executor(tmp_path, monkeypatch, *, pick=None, order_port=None):
                         lambda *a, **k: (dict(pick) if pick else None))
     monkeypatch.setattr(micro_smt, "MICRO_SMT_ENTRY_ENABLED", False)
     monkeypatch.setattr(micro_smt, "MICRO_SMT_EXIT_ENABLED", False)
+    # §7a.1's pre-open pair at its production value: it only matters once a test turns
+    # O3 itself on, and every such test before 10:30 states which way it wants it.
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", True)
     return ex
 
 
@@ -165,10 +168,13 @@ def test_flag_on_micro_smt_entry_fires_past_the_shared_1030_cutoff(tmp_path, mon
 
 
 def test_flag_on_micro_smt_entry_blocked_before_the_window_opens(tmp_path, monkeypatch):
-    """No O3 entry before 10:30 -- the window's own lower bound, not just the shared
-    cutoff exemption. `_micro_smt_entry_block` must gate BEFORE the detector runs."""
+    """With §7a.1's pre-open pair OFF, no O3 entry before 10:30 -- the ordinary window's
+    own lower bound, not just the shared cutoff exemption. `_micro_smt_entry_block` must
+    gate BEFORE the detector runs. (With the pair ON, 10:29 is inside the 09:30-10:30
+    pre-open window and IS asked -- see the §7a.1 tests below.)"""
     ex = make_executor(tmp_path, monkeypatch)
     monkeypatch.setattr(micro_smt, "MICRO_SMT_ENTRY_ENABLED", True)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", False)
     _seed(ex, "10:28:00", 30600.0)
     ex._market.entry_fire = {"mechanism": "micro_smt_reject", "direction": "DOWN",
                              "price": 30600.0, "stop": 30615.0, "time": _ts("10:29:00")}
@@ -199,6 +205,89 @@ def test_flag_on_micro_smt_entry_allowed_one_second_before_the_window_closes(tmp
                              "price": 30600.0, "stop": 30615.0, "time": _ts("10:59:59")}
     _step(ex, "10:59:59", 30600.0)
     assert ex.position() is not None
+
+
+# --------------------------------------------------------------------------- #
+# §7a.1: the pre-open pair's window, 09:30 <= entry < 10:30 ET                 #
+# --------------------------------------------------------------------------- #
+
+def _o3_fire(hms):
+    return {"mechanism": "micro_smt_reject", "direction": "DOWN", "price": 30600.0,
+            "stop": 30615.0, "time": _ts(hms)}
+
+
+def test_preopen_pair_on_o3_enters_at_the_first_post_settle_bar_close(tmp_path,
+                                                                        monkeypatch):
+    """09:31:00 is the first bar close O3 can act on: the window opens at 09:30:00, but
+    the Executor's settle (arm -> 09:30:30) blocks every market mechanism until then."""
+    ex = make_executor(tmp_path, monkeypatch)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_ENTRY_ENABLED", True)
+    _seed(ex, "09:30:00", 30600.0)
+    ex._market.entry_fire = _o3_fire("09:31:00")
+    _step(ex, "09:31:00", 30600.0)
+    assert ex._market.entry_calls == 1
+    assert ex.position() is not None
+    assert ex.position()["direction"] == "DOWN"
+
+
+def test_preopen_pair_on_o3_enters_one_second_before_1030(tmp_path, monkeypatch):
+    ex = make_executor(tmp_path, monkeypatch)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_ENTRY_ENABLED", True)
+    _seed(ex, "10:28:00", 30600.0)
+    ex._market.entry_fire = _o3_fire("10:29:59")
+    _step(ex, "10:29:59", 30600.0)
+    assert ex._market.entry_calls == 1
+    assert ex.position() is not None
+
+
+def test_preopen_window_bounds(tmp_path, monkeypatch):
+    """The gate itself, independent of settle: 09:29:59 before, 09:30:00 in, 10:29:59 in,
+    and 10:30:00 in only because the ORDINARY window opens there."""
+    ex = make_executor(tmp_path, monkeypatch)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_ENTRY_ENABLED", True)
+    assert ex._micro_smt_entry_block(_ts("09:29:59")) == "micro_smt_entry_before_window"
+    assert ex._micro_smt_entry_block(_ts("09:30:00")) is None
+    assert ex._micro_smt_entry_block(_ts("10:29:59")) is None
+    assert ex._micro_smt_entry_block(_ts("10:30:00")) is None
+    assert ex._micro_smt_entry_block(_ts("11:00:00")) == "micro_smt_entry_after_window"
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", False)
+    assert ex._micro_smt_entry_block(_ts("09:30:00")) == "micro_smt_entry_before_window"
+    assert ex._micro_smt_entry_block(_ts("10:29:59")) == "micro_smt_entry_before_window"
+    assert ex._micro_smt_entry_block(_ts("10:30:00")) is None
+
+
+def test_preopen_pair_on_o3_not_asked_before_0930(tmp_path, monkeypatch):
+    ex = make_executor(tmp_path, monkeypatch)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_ENTRY_ENABLED", True)
+    _seed(ex, "09:28:00", 30600.0)
+    ex._market.entry_fire = _o3_fire("09:29:00")
+    _step(ex, "09:29:00", 30600.0)
+    assert ex._market.entry_calls == 0
+    assert ex.position() is None
+
+
+def test_preopen_pair_off_o3_never_asked_before_1030(tmp_path, monkeypatch):
+    ex = make_executor(tmp_path, monkeypatch)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_ENTRY_ENABLED", True)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", False)
+    _seed(ex, "09:30:00", 30600.0)
+    ex._market.entry_fire = _o3_fire("09:31:00")
+    _step(ex, "09:31:00", 30600.0)
+    assert ex._market.entry_calls == 0
+    assert ex.position() is None
+
+
+def test_preopen_pair_leaves_the_other_mechanisms_on_their_own_gates(tmp_path, monkeypatch):
+    """Inside 09:30-10:30 every other market mechanism is asked exactly as before (no
+    block), and O3 is asked beside them; past 10:30 they stay blocked (test above)."""
+    ex = make_executor(tmp_path, monkeypatch)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_ENTRY_ENABLED", True)
+    calls = []
+    ex._market.tmso_on_bar_close = lambda *a, **k: (calls.append(1), None)[1]
+    _seed(ex, "09:40:00", 30600.0)
+    _step(ex, "09:41:00", 30600.0)
+    assert calls == [1]
+    assert ex._market.entry_calls == 1
 
 
 def test_the_other_four_mechanisms_are_still_blocked_past_1030_when_O3_is_on(tmp_path,

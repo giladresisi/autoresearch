@@ -6,7 +6,10 @@ See `micro_smt.py`'s docstring and `l2-mechanisms.md` §11 for the CANDIDATE's e
 import pandas as pd
 import pytest
 
-from agent.trader.micro_smt import MicroSmt, SL_BUFFER_PTS, SL_CAP_PTS, previous_micro_extremes
+import agent.trader.micro_smt as micro_smt
+from agent.trader import named_cases as nc
+from agent.trader.micro_smt import (MicroSmt, SL_BUFFER_PTS, SL_CAP_PTS,
+                                    entry_previous_micro_extremes, previous_micro_extremes)
 from agent.trader.reject_core import capped_stop
 
 TZ = "America/New_York"
@@ -209,3 +212,336 @@ def test_0924_end_to_end_entry_and_exit_reproduce_the_operator_walk():
     assert exit_fire["price"] == pytest.approx(30520.00)
     # The hypothetical short's P&L at the O4 exit: entry - exit for a DOWN position.
     assert entry_fire["price"] - exit_fire["price"] == pytest.approx(93.25)
+
+
+# -- §7a.1: the pre-open pair (07:30-09:00 -> 09:00-10:30) and whole-session state -- #
+
+PRE_DATE = "2026-09-28"
+
+
+def _pts(hhmm):
+    return pd.Timestamp(f"{PRE_DATE} {hhmm}", tz=TZ)
+
+
+def _frame(rows):
+    """{hhmm: (o, h, l, c)} -> a left-labelled 1m OHLC frame on PRE_DATE."""
+    return pd.DataFrame([{"Open": o, "High": h, "Low": l, "Close": c, "Volume": 1.0}
+                         for o, h, l, c in rows.values()],
+                        index=[_pts(k) for k in rows]).sort_index()
+
+
+def _preopen_frames():
+    """07:30-09:00 highs MNQ 30753.50 / MES 7781.50 (09-28's), lows 30600 / 7750. A
+    07:29 bar and a 09:05 bar sit just outside the window and must NOT be read."""
+    mnq = _frame({"07:29": (30790.0, 30800.0, 30500.0, 30790.0),
+                  "07:45": (30700.0, 30753.5, 30600.0, 30700.0),
+                  "08:59": (30700.0, 30720.0, 30650.0, 30700.0),
+                  "09:05": (30700.0, 30790.0, 30550.0, 30700.0)})
+    mes = _frame({"07:29": (7790.0, 7795.0, 7740.0, 7790.0),
+                  "07:45": (7770.0, 7781.5, 7750.0, 7770.0),
+                  "08:59": (7770.0, 7775.0, 7760.0, 7770.0),
+                  "09:05": (7770.0, 7790.0, 7745.0, 7770.0)})
+    return mnq, mes
+
+
+def test_entry_pair_for_the_first_micro_session_is_0730_0900_when_on(monkeypatch):
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", True)
+    mnq, mes = _preopen_frames()
+    prev = entry_previous_micro_extremes(mnq, mes, _pts("09:31"))
+    assert prev == {"mnq_high": 30753.5, "mnq_low": 30600.0, "mes_high": 7781.5,
+                    "mes_low": 7750.0, "session_start": _pts("09:00")}
+
+
+def test_entry_pair_for_the_first_micro_session_is_none_when_off(monkeypatch):
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", False)
+    mnq, mes = _preopen_frames()
+    assert entry_previous_micro_extremes(mnq, mes, _pts("09:31")) is None
+
+
+def test_entry_pair_is_the_ordinary_pair_after_1030(monkeypatch):
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", True)
+    mnq, mes = _preopen_frames()
+    now = _pts("10:35")
+    got = entry_previous_micro_extremes(mnq, mes, now)
+    assert got == previous_micro_extremes(mnq, mes, now)
+    assert got["session_start"] == _pts("10:30")
+
+
+def test_the_exit_reader_stays_inert_before_1030_with_the_pair_on(monkeypatch):
+    """§7a.1 extends O3's ENTRY only: O4 reads `previous_micro_extremes`, still None."""
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", True)
+    mnq, mes = _preopen_frames()
+    assert previous_micro_extremes(mnq, mes, _pts("09:31")) is None
+
+
+def test_entry_pair_is_none_before_the_0900_grid(monkeypatch):
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", True)
+    mnq, mes = _preopen_frames()
+    assert entry_previous_micro_extremes(mnq, mes, _pts("08:59")) is None
+
+
+PRE_PREV = {"mnq_high": 30753.5, "mnq_low": 30600.0, "mes_high": 7781.5, "mes_low": 7750.0,
+            "session_start": _pts("09:00")}
+Q_MNQ = (30700.0, 30705.0, 30695.0, 30700.0)       # breaks nothing
+Q_MES = (7770.0, 7771.0, 7769.0, 7770.0)
+POKE_MES = (7775.0, 7790.0, 7770.0, 7773.0)        # above 7781.50
+
+
+def test_a_pre_window_mes_break_cancels_an_in_window_mnq_break():
+    """The whole-session live state: MES broke 7781.50 at 09:10, before O3 was ever
+    asked. At 09:33 MNQ breaks too -> BOTH broken -> cancelled, even though the bar
+    closes red on both. Without the history the same bar fires (the old behaviour)."""
+    mnq_hist = _frame({"09:05": Q_MNQ, "09:10": Q_MNQ, "09:20": Q_MNQ})
+    mes_hist = _frame({"09:05": Q_MES, "09:10": (7775.0, 7783.0, 7774.0, 7776.0),
+                       "09:20": Q_MES})
+    mnq_bar = _bar(30750.0, 30759.0, 30700.0, 30707.75)
+    mes_bar = _bar(7775.0, 7778.0, 7765.0, 7766.5)
+    now = _pts("09:34")
+    assert MicroSmt("bearish").on_bar_close(now, mnq_bar, mes_bar, PRE_PREV) is not None
+    m = MicroSmt("bearish")
+    assert m.on_bar_close(now, mnq_bar, mes_bar, PRE_PREV,
+                          mnq_hist=mnq_hist, mes_hist=mes_hist) is None
+    assert m.state()["mnq_broken"] and m.state()["mes_broken"]
+
+
+def test_a_pre_window_single_break_fires_on_an_in_window_confirmation():
+    """MNQ broke 30753.50 at 09:10 (to 30760.00) while MES held. The first bar O3 is asked
+    about breaks nothing but closes red on both -> fires. The stop reads MNQ's running
+    high from 09:00, 30760.00, not this bar's own 30758.00."""
+    mnq_hist = _frame({"09:05": Q_MNQ, "09:10": (30750.0, 30760.0, 30745.0, 30748.0),
+                       "09:20": Q_MNQ})
+    mes_hist = _frame({"09:05": Q_MES, "09:10": Q_MES, "09:20": Q_MES})
+    fire = MicroSmt("bearish").on_bar_close(
+        _pts("09:32"), _bar(30757.0, 30758.0, 30750.0, 30752.0),
+        _bar(7775.0, 7776.0, 7772.0, 7773.0), PRE_PREV,
+        mnq_hist=mnq_hist, mes_hist=mes_hist)
+    assert fire is not None
+    assert fire["swept_by"] == "MNQ"
+    assert fire["prev_extreme"] == pytest.approx(30753.5)
+    assert fire["stop"] == pytest.approx(30762.0)          # 30760.00 + 2, cap not binding
+    assert fire["stop"] == pytest.approx(
+        capped_stop(30752.0, 30760.0, buffer_pts=SL_BUFFER_PTS, cap_pts=SL_CAP_PTS,
+                    short=True))
+
+
+def test_catch_up_reads_no_bar_at_or_after_the_current_bars_label():
+    """No lookahead: history rows labelled at or after the current bar's label (the bar
+    itself, and the in-progress minute) belong to the caller's `mnq_bar`/`mes_bar` or to
+    the future -- a MES break there must not cancel the fire."""
+    mnq_hist = _frame({"09:10": (30750.0, 30760.0, 30745.0, 30748.0), "09:31": Q_MNQ,
+                       "09:32": Q_MNQ})
+    mes_hist = _frame({"09:10": Q_MES, "09:31": POKE_MES, "09:32": POKE_MES})
+    fire = MicroSmt("bearish").on_bar_close(
+        _pts("09:32"), _bar(30757.0, 30758.0, 30750.0, 30752.0),
+        _bar(7775.0, 7776.0, 7772.0, 7773.0), PRE_PREV, mnq_hist=mnq_hist,
+        mes_hist=mes_hist)
+    assert fire is not None
+
+
+def test_catch_up_ignores_bars_before_the_micro_session_opened():
+    """An 08:59 MES poke above 7781.50 belongs to the PREVIOUS micro-session; it is not
+    a break of the current one."""
+    mnq_hist = _frame({"08:59": Q_MNQ, "09:10": (30750.0, 30760.0, 30745.0, 30748.0)})
+    mes_hist = _frame({"08:59": POKE_MES, "09:10": Q_MES})
+    fire = MicroSmt("bearish").on_bar_close(
+        _pts("09:32"), _bar(30757.0, 30758.0, 30750.0, 30752.0),
+        _bar(7775.0, 7776.0, 7772.0, 7773.0), PRE_PREV, mnq_hist=mnq_hist,
+        mes_hist=mes_hist)
+    assert fire is not None
+
+
+@pytest.mark.parametrize("mes_poke, fires", [(False, True), (True, False)])
+def test_market_mechanisms_entry_reads_the_preopen_pair_and_the_session_history(
+        monkeypatch, mes_poke, fires):
+    """The seam: `micro_smt_entry_on_bar_close` reads 07:30-09:00 as the predecessor and
+    hands the frames over as history, so a 09:10 MES poke it was never asked about still
+    cancels the 09:33 MNQ break."""
+    from agent.trader.market_mechanisms import MarketMechanisms
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", True)
+    mnq = _frame({"07:45": (30700.0, 30753.5, 30600.0, 30700.0), "09:10": Q_MNQ,
+                  "09:33": (30750.0, 30759.0, 30700.0, 30707.75)})
+    mes = _frame({"07:45": (7770.0, 7781.5, 7750.0, 7770.0),
+                  "09:10": POKE_MES if mes_poke else Q_MES,
+                  "09:33": (7775.0, 7778.0, 7765.0, 7766.5)})
+    mm = MarketMechanisms("DOWN", _pts("09:20"))
+    fire = mm.micro_smt_entry_on_bar_close(_pts("09:34"), mnq.loc[_pts("09:33")],
+                                           mes.loc[_pts("09:33")], mnq, mes)
+    assert (fire is not None) is fires
+    if fires:
+        assert fire["mechanism"] == "micro_smt_reject"
+        assert fire["time"] == _pts("09:34")
+    # O4 is untouched by §7a.1: no predecessor before 10:30, so it cannot fire.
+    assert mm.micro_smt_exit_on_bar_close(_pts("09:34"), mnq.loc[_pts("09:33")],
+                                          mes.loc[_pts("09:33")], mnq, mes) is None
+
+
+RED_MNQ = (30750.0, 30752.0, 30740.0, 30742.0)    # closes down, breaks nothing
+RED_MES = (7775.0, 7776.0, 7771.0, 7772.0)
+BREAK_MNQ = (30750.0, 30760.0, 30745.0, 30748.0)   # MNQ above 30753.50
+LATCH_0930 = _pts("09:30")
+
+
+def test_an_unasked_in_window_confirmation_consumes_the_session():
+    """Operator 2026-09-29: MNQ broke at 09:10; bar 09:33 (completing 09:34, in the
+    window) closes red on BOTH while O3 was not asked (a position open). That spends the
+    session's fire: the 09:47 red bar O3 IS asked about must not fire."""
+    mnq_hist = _frame({"09:10": BREAK_MNQ, "09:33": RED_MNQ, "09:40": Q_MNQ})
+    mes_hist = _frame({"09:10": Q_MES, "09:33": RED_MES, "09:40": Q_MES})
+    m = MicroSmt("bearish")
+    assert m.on_bar_close(_pts("09:48"), _bar(*RED_MNQ), _bar(*RED_MES), PRE_PREV,
+                          mnq_hist=mnq_hist, mes_hist=mes_hist,
+                          latch_from=LATCH_0930) is None
+    assert m.state()["fired_sessions"] == [str(_pts("09:00"))]
+
+
+def test_a_pre_window_confirmation_does_not_consume_the_session():
+    """The same shape with the confirming bar at 09:20 (completing 09:21, before the
+    09:30 window) does NOT latch: the first asked in-window confirmation fires."""
+    mnq_hist = _frame({"09:10": BREAK_MNQ, "09:20": RED_MNQ, "09:40": Q_MNQ})
+    mes_hist = _frame({"09:10": Q_MES, "09:20": RED_MES, "09:40": Q_MES})
+    fire = MicroSmt("bearish").on_bar_close(
+        _pts("09:48"), _bar(*RED_MNQ), _bar(*RED_MES), PRE_PREV,
+        mnq_hist=mnq_hist, mes_hist=mes_hist, latch_from=LATCH_0930)
+    assert fire is not None and fire["time"] == _pts("09:48")
+
+
+def test_a_confirmation_on_the_boundary_bar_0929_is_in_window():
+    """Bar 09:29 completes at 09:30:00, the window's first instant -> it latches."""
+    mnq_hist = _frame({"09:10": BREAK_MNQ, "09:29": RED_MNQ})
+    mes_hist = _frame({"09:10": Q_MES, "09:29": RED_MES})
+    assert MicroSmt("bearish").on_bar_close(
+        _pts("09:48"), _bar(*RED_MNQ), _bar(*RED_MES), PRE_PREV,
+        mnq_hist=mnq_hist, mes_hist=mes_hist, latch_from=LATCH_0930) is None
+
+
+def test_the_unasked_confirmation_is_read_from_1s_history_as_completed_1m_bars():
+    """1s history: the 09:33 minute is resampled into one left-labelled 1m bar (first
+    Open, last Close). Its individual seconds alternate colour; only the MINUTE's
+    close-vs-open counts, and it is red on both -> latched."""
+    def secs(hhmm, o, c, hi, lo):
+        start = _pts(hhmm)
+        idx = pd.date_range(start, start + pd.Timedelta(seconds=59), freq="1s")
+        px = [o + (c - o) * i / 59 + (1.0 if i % 2 else -1.0) for i in range(60)]
+        px[0], px[-1] = o, c
+        return pd.DataFrame({"Open": px, "High": [max(p, hi) if i == 30 else p + 0.25
+                                                  for i, p in enumerate(px)],
+                             "Low": [min(p, lo) if i == 30 else p - 0.25
+                                     for i, p in enumerate(px)],
+                             "Close": px, "Volume": 1.0}, index=idx)
+    mnq_hist = pd.concat([secs("09:10", 30750.0, 30748.0, 30760.0, 30745.0),
+                          secs("09:33", 30750.0, 30742.0, 30752.0, 30740.0)])
+    mes_hist = pd.concat([secs("09:10", 7770.0, 7770.0, 7771.0, 7769.0),
+                          secs("09:33", 7775.0, 7772.0, 7776.0, 7771.0)])
+    m = MicroSmt("bearish")
+    assert m.on_bar_close(_pts("09:48"), _bar(*RED_MNQ), _bar(*RED_MES), PRE_PREV,
+                          mnq_hist=mnq_hist, mes_hist=mes_hist,
+                          latch_from=LATCH_0930) is None
+    assert m.state()["fired_sessions"] == [str(_pts("09:00"))]
+
+
+def test_the_latch_ignores_the_current_bar_and_later_history():
+    """No lookahead: a confirming bar in the history AT the current bar's label (or
+    after) is not catch-up material -- the current bar is judged, and fires, normally."""
+    mnq_hist = _frame({"09:10": BREAK_MNQ, "09:47": RED_MNQ, "09:48": RED_MNQ})
+    mes_hist = _frame({"09:10": Q_MES, "09:47": RED_MES, "09:48": RED_MES})
+    fire = MicroSmt("bearish").on_bar_close(
+        _pts("09:48"), _bar(*RED_MNQ), _bar(*RED_MES), PRE_PREV,
+        mnq_hist=mnq_hist, mes_hist=mes_hist, latch_from=LATCH_0930)
+    assert fire is not None
+
+
+def test_entry_latch_from_is_the_window_open_of_the_sessions_own_pair(monkeypatch):
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", True)
+    assert micro_smt.entry_latch_from(_pts("09:00")) == _pts("09:30")
+    assert micro_smt.entry_latch_from(_pts("10:30")) == _pts("10:30")
+    assert micro_smt.entry_latch_from(_pts("12:00")) == _pts("12:00")
+
+
+def test_market_mechanisms_entry_latches_on_an_unasked_confirmation(monkeypatch):
+    """The seam passes the pair's window open, so the executor-level behaviour holds."""
+    from agent.trader.market_mechanisms import MarketMechanisms
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", True)
+    mnq = _frame({"07:45": (30700.0, 30753.5, 30600.0, 30700.0), "09:10": BREAK_MNQ,
+                  "09:33": RED_MNQ, "09:47": RED_MNQ})
+    mes = _frame({"07:45": (7770.0, 7781.5, 7750.0, 7770.0), "09:10": Q_MES,
+                  "09:33": RED_MES, "09:47": RED_MES})
+    mm = MarketMechanisms("DOWN", _pts("09:20"))
+    assert mm.micro_smt_entry_on_bar_close(_pts("09:48"), mnq.loc[_pts("09:47")],
+                                           mes.loc[_pts("09:47")], mnq, mes) is None
+
+
+def test_0928_real_tape_preopen_pair_fires_at_0934(monkeypatch):
+    """§7a.1's motivating day, over the real 1m tape: 07:30-09:00 highs MNQ 30753.50
+    (08:57), MES 7781.50 (08:26); bar 09:32 takes MNQ to 30759.00 (MES 7775.25) and
+    closes up; bar 09:33 closes down on both -> fires 09:34:00 @ 30707.75, stop
+    min(30761.00, 30722.75) = 30722.75. Figures read from registry key `sec7a1-0928`."""
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", True)
+    case = nc.by_key("sec7a1-0928")
+    try:
+        from backtest_smt import _main_dir_for_date
+        d = _main_dir_for_date(PRE_DATE)
+        mnq = pd.read_parquet(d / "MNQ_1m.parquet").loc[PRE_DATE]
+        mes = pd.read_parquet(d / "MES_1m.parquet").loc[PRE_DATE]
+    except Exception:
+        pytest.skip("2026-09-28 main 1m parquet not available in this environment")
+    for df in (mnq, mes):
+        if not len(df) or df.index.min() > _pts("07:30") or df.index.max() < _pts("09:40"):
+            pytest.skip("2026-09-28 1m bars do not cover 07:30-09:40 in this environment")
+
+    pre = entry_previous_micro_extremes(mnq, mes, _pts("09:31"))
+    assert pre["mnq_high"] == pytest.approx(30753.50)
+    assert pre["mes_high"] == pytest.approx(7781.50)
+
+    m = MicroSmt("bearish")
+    fire = None
+    for label, mnq_row in mnq.between_time("09:30", "10:28").iterrows():
+        if label not in mes.index:
+            continue
+        now = label + pd.Timedelta(minutes=1)
+        fire = m.on_bar_close(now, mnq_row, mes.loc[label],
+                              entry_previous_micro_extremes(mnq, mes, now),
+                              mnq_hist=mnq[mnq.index < now], mes_hist=mes[mes.index < now])
+        if fire is not None:
+            break
+    assert fire is not None
+    assert fire["time"] == _pts(case.entry_time)
+    assert fire["price"] == pytest.approx(case.entry_price)
+    assert fire["stop"] == pytest.approx(case.stop)
+    assert fire["swept_by"] == "MNQ"
+    assert fire["prev_extreme"] == pytest.approx(30753.50)
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(900)
+def test_0928_counterfactual_down_replay_is_this_one_trade(tmp_path, monkeypatch):
+    """`sec7a1-0928` end to end: a real replay of 2026-09-28 under the operator's
+    COUNTERFACTUAL DOWN thesis takes exactly one trade, O3 on the pre-open pair at
+    09:34:00, to T2 london(cur)_low 30535.0 at 10:11:14."""
+    import json
+    import os
+    from agent.trader.replay import run_replay
+    from scripts.report_replay_pnl import summarize
+
+    case = nc.by_key("sec7a1-0928")
+    monkeypatch.setenv("ACT_THESIS_CACHE_DIR", str(tmp_path / "thesis_cache"))
+    monkeypatch.delenv("ACT_TRADER_5M", raising=False)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_ENTRY_ENABLED", True)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_EXIT_ENABLED", True)
+    monkeypatch.setattr(micro_smt, "MICRO_SMT_PREOPEN_PAIR_ENABLED", True)
+    try:
+        res = run_replay([case.date], allow_calls=False,
+                         thesis=nc.thesis_for(case.key))[case.date]
+    except Exception as exc:                        # no 09-28 tape in this environment
+        pytest.skip(f"2026-09-28 replay unavailable: {type(exc).__name__}: {exc}")
+    rows = [json.loads(line) for line in open(
+        os.path.join(res["run_dir"], "trader_decisions.jsonl"), encoding="utf-8")
+        if line.strip()]
+    fills = [r for r in rows if r.get("kind") == "fill"]
+    assert len(fills) == case.attempts_used, [(f["time"], f["mechanism"]) for f in fills]
+    assert fills[0]["mechanism"] == case.mechanism
+    assert fills[0]["time"].endswith(f"{case.entry_time}-04:00")
+    assert fills[0]["price"] == case.entry_price
+    tps = [r for r in rows if r.get("kind") == "take_profit"]
+    assert tps and tps[-1]["time"].endswith(f"{case.exit_time}-04:00")
+    assert tps[-1]["price"] == case.exit_price
+    assert round(summarize(res["run_dir"])["total_pts"], 2) == case.pnl

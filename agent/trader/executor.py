@@ -581,25 +581,34 @@ class Executor:
 
         O3 is an explicit operator EXEMPTION from `ENTRY_CUTOFF_ET` (2026-09-24) — it
         carries its own WINDOW instead of the shared cutoff (operator, 2026-09-26):
-        `MICRO_SMT_ENTRY_WINDOW_ET` = 10:30 <= now < 11:00 ET, both ends read live off the
-        module so a rollback or an A/B can move them between runs in one process. Every
-        other block reason still applies to it exactly as it does to every other
+        `MICRO_SMT_ENTRY_WINDOW_ET` = 10:30 <= now < 11:00 ET, plus — while
+        `MICRO_SMT_PREOPEN_PAIR_ENABLED` (§7a.1, operator 2026-09-28) — the pre-open
+        pair's `MICRO_SMT_PREOPEN_WINDOW_ET` = 09:30 <= now < 10:30 ET. All read live off
+        the module so a rollback or an A/B can move them between runs in one process.
+        Every other block reason still applies to it exactly as it does to every other
         mechanism, and this is the ONLY gate consulted before O3's own detector runs — a
-        `now` outside the window must never reach `micro_smt_entry_on_bar_close` at all.
+        `now` outside every window must never reach `micro_smt_entry_on_bar_close` at all.
+        (Breaks outside the windows still COUNT: the detector folds them in from the
+        session history the next time it is asked.)
         """
         if getattr(self._sim, "external", None):
             return "external_position_change"
         if NO_ENTRY_AFTER_POSITIVE and self._positive_close:
             return "after_positive_trade"
-        window = micro_smt.MICRO_SMT_ENTRY_WINDOW_ET
-        if window is None:
+        windows = [micro_smt.MICRO_SMT_ENTRY_WINDOW_ET]
+        if micro_smt.MICRO_SMT_PREOPEN_PAIR_ENABLED:
+            windows.append(micro_smt.MICRO_SMT_PREOPEN_WINDOW_ET)
+        spans = [(self._day_ts(now, start), self._day_ts(now, end))
+                 for start, end in (w for w in windows if w is not None)]
+        if not spans:
             return "micro_smt_entry_window_closed"
-        start, end = window
-        if now < self._day_ts(now, start):
+        if any(start <= now < end for start, end in spans):
+            return None
+        if now < min(start for start, _ in spans):
             return "micro_smt_entry_before_window"
-        if now >= self._day_ts(now, end):
+        if now >= max(end for _, end in spans):
             return "micro_smt_entry_after_window"
-        return None
+        return "micro_smt_entry_between_windows"
 
     def _spine_death(self):
         """Deaths the plan's own rules cannot see: the order port reporting that the

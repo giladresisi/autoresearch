@@ -492,6 +492,30 @@ CASES: "tuple[NamedCase, ...]" = (
                     "**+73.00**, 1 att",),
     ),
 
+    # ---- §7a.1 the pre-open micro-SMT pair (operator, 2026-09-28) --------------- #
+    NamedCase(
+        key="sec7a1-0928", date="2026-09-28", mechanism="micro_smt_reject",
+        doc_section="§7a.1", era="current-20260927",
+        entry_time="09:34:00", entry_price=30707.75, stop=30722.75,
+        exit_time="10:11:14", exit_price=30535.0, pnl=172.75, attempts_used=1,
+        pinned_by=("agent/trader/test_micro_smt.py::"
+                   "test_0928_real_tape_preopen_pair_fires_at_0934",
+                   "agent/trader/test_micro_smt.py::"
+                   "test_0928_counterfactual_down_replay_is_this_one_trade"),
+        note="The fire (entry/stop) is thesis-independent and pinned over the real 1m "
+             "tape. The exit and P&L come from a COUNTERFACTUAL DOWN thesis (the 09:20 "
+             "DOWN-menu D1 london(cur)_low 30535.0, falsifier F1). Under the live UP thesis "
+             "this bearish fire is not taken, but the bullish mirror fires 09:37:00 @ "
+             "30658.0 (-15.00) and the replayed day moves -58.75 -> -45.00 (§7a.1). "
+             "Recorded in the current era: under the first-in-window-confirmation latch "
+             "(operator, 2026-09-29) §7a.1 moves none of plan 42's current-era figures "
+             "(plan 43's named-case check; without the latch cur-0814 moved -15.00).",
+        doc_quotes=("fires at 09:34:00, short @ 30707.75, stop",
+                    "min(30759.00 + 2, 30707.75 + 15) = 30722.75",
+                    "T2 = 30535.00, reached",
+                    "10:11:14: **+172.75 pts, the day's only trade.**"),
+    ),
+
     # ---- §11's calibrated fill rows (the ten documented 5m bindings) ------------ #
     NamedCase(
         key="calib-0821-EXCLUDED", date="2026-08-21",
@@ -649,6 +673,18 @@ ORACLE_THESES = {
     "sec10-0812": _thesis("DOWN", "prev_rth_high", 29842.75, falsify_at=30100.0),
     "sec10-0813": _thesis("UP", "prev_rth_high", 30001.5, falsify_at=29700.0),
     "sec10-0814": _thesis("DOWN", "overnight_low", 30124.25, falsify_at=30450.0),
+
+    # -- §7a.1 --------------------------------------------------------------- #
+    # NOT an oracle in the usual sense: the operator's COUNTERFACTUAL for 2026-09-28 (the
+    # live thesis was UP). DOL and falsifier are the 09:20 DOWN menu's D1 and F1 exactly;
+    # a far `price_beyond` falsifier would NOT be equivalent here -- MNQ prints 30759.00
+    # at 09:32, above F1's price, and only F1's two-5m-close form survives it.
+    "sec7a1-0928": {
+        "bias": "DOWN", "regime": "HYBRID", "confidence": "MEDIUM",
+        "dol": {"level": "london(cur)_low", "price": 30535.0},
+        "falsified_if": [{"type": "n_closes_beyond", "price": 30727.88, "side": "above",
+                          "tf": "5m", "n": 2}],
+    },
 }
 
 #: Cases the document does NOT give enough input to replay. Recorded rather than
@@ -690,6 +726,7 @@ DOCUMENTED_ATTEMPTS = {
     # §11.3, current-20260927 (plan 42)
     "cur-0811": 1, "cur-0812": 1, "cur-0813": 1, "cur-0814": 2, "cur-0818": 1,
     "cur-0821": 1, "sec5-0818-5m-t2": 1,
+    "sec7a1-0928": 1,                # §7a.1: "the day's only trade"
 }
 
 #: Which of those counts this cycle can check END TO END, and which it cannot.
