@@ -190,6 +190,9 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     # staleness hard gate — absent keys (older facts dicts) leave scoring unchanged.
     mid_position = (facts or {}).get("mid_position")
     p1_stale_levels = (facts or {}).get("p1_stale_levels")
+    # plan 44: the per-tf restoration layer (absent when ACT_PER_TF_LEVEL_STATUS is off).
+    # Must reach this re-check too, or it scores a different ledger from the real path.
+    level_tf_status = (facts or {}).get("level_tf_status")
     # 2026-08-05 fix: this re-check MUST use the SAME clearance-magnitude weighting the
     # real scoring path (_derive_thesis_arithmetic) applies -- an unweighted x1.0 re-check
     # can disagree with the true, magnitude-weighted net score closely enough to flip which
@@ -216,7 +219,8 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
                                     week_extremes=week_extremes, now_price=now_price,
                                     fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim,
                                     htf_reversal=htf_reversal, mid_position=mid_position,
-                                    p1_stale_levels=p1_stale_levels)
+                                    p1_stale_levels=p1_stale_levels,
+                                    level_tf_status=level_tf_status)
     # PLAN 37: a deterministic-override thesis is EXEMPT from the bias/net-score check.
     #
     # It carries no declared evidence by construction -- the override exists to decide
@@ -594,6 +598,110 @@ def _item_side(item: dict) -> Optional[str]:
     return _evidence_side(item)
 
 
+# Local copy of derive_facts._TIER_RANK (week > day > session): this module must not import
+# derive_facts. Used only for the per-tf restoration tie-break below.
+_RESTORE_TIER_RANK = {"session": 1, "day": 2, "week": 3}
+
+
+def _pick_restored_level(cands: list, side: str, tiers_a: dict) -> str:
+    """WHICH suppressed level of one (asset, side) stack gets its standing 4h read back
+    (plan 44 §1 step 4, operator decision D2). The ONE place the choice lives, so it can be
+    switched without touching the rest of `per_tf_level_status`.
+
+    Current rule: the MOST EXTREME price (max for a high, min for a low); ties go to the
+    higher tier (post-promotion), then to the first name in `level_tiers` insertion order
+    (= bundle.levels order). A total order, so the pick never depends on set iteration
+    order / PYTHONHASHSEED. `cands` is non-empty and every member has a price in
+    `tiers_a`. A "most recent" rule would need each level's sweep time, which the score
+    kwargs do not carry today."""
+    order = {n: i for i, n in enumerate(tiers_a)}
+    sign = 1.0 if side == "high" else -1.0
+    return max(cands, key=lambda n: (
+        sign * tiers_a[n]["price"],
+        _RESTORE_TIER_RANK.get(tiers_a[n].get("tier"), 0),
+        -order.get(n, len(order))))
+
+
+def per_tf_level_status(suppressed_p1_levels, p1_stale_levels, suppressed_p2_sites,
+                        level_htf_close_status, level_tiers, smt_candidates,
+                        p1_reasons=None) -> dict:
+    """One standing 4h read per suppressed stack (plan 44 "V1d", thesis.md §2.1g draft).
+
+    §2.1b nesting / shadowing, §2.1d duplicates, §2.1c staleness and P2-site suppression
+    exist so ONE displacement is not scored once per stacked level; applied level-wide on
+    every tf they can also score it ZERO times. Per asset, this restores exactly one
+    suppressed level per side:
+
+      1. U = suppressed_p1_levels | p1_stale_levels | suppressed_p2_sites, minus every live
+         P2 site (a meaningful SMT candidate on that asset whose level is not in
+         suppressed_p2_sites -- it already scores and is left exactly as it is);
+      2. per side, read from the level NAME (`*_high` / `*_low`; mids and suffix-less names
+         never qualify), the candidates are members with a mature 4h verdict and a price;
+      3. `_pick_restored_level` keeps one.
+
+    Returns the SPARSE map {asset: {level: {"1h": "retired", "4h": "live", "side": ...,
+    "was": [...]}}} -- restored levels only. `score_thesis_evidence(level_tf_status=...)`
+    lifts the three sets for a listed level and scores nothing on a "retired" tf. `was` is
+    audit-only (why it was suppressed; from `p1_reasons` {asset: {name: [reason]}} when
+    given) and is never read by scoring. Pure and total: None / missing inputs give {}."""
+    sets = {"suppressed_p1_levels": suppressed_p1_levels or {},
+            "p1_stale_levels": p1_stale_levels or {},
+            "suppressed_p2_sites": suppressed_p2_sites or {}}
+    status = level_htf_close_status or {}
+    tiers = level_tiers or {}
+    p2_sites = sets["suppressed_p2_sites"]
+    live_p2 = {(c.get("swept_ticker"), c.get("level")) for c in (smt_candidates or [])
+               if isinstance(c, dict) and c.get("meaningful")
+               and c.get("level") not in (p2_sites.get(c.get("swept_ticker")) or ())}
+    out: dict = {}
+    assets = sorted({a for d in sets.values() for a in d})
+    for a in assets:
+        union = set()
+        for d in sets.values():
+            union.update(d.get(a) or ())
+        tiers_a = tiers.get(a) or {}
+        status_a = status.get(a) or {}
+        names = {n for n in union if isinstance(n, str) and (a, n) not in live_p2
+                 and not n.startswith(("daily_mid", "weekly_mid"))}
+        for side in ("high", "low"):
+            cands = [n for n in names if n.endswith("_" + side)
+                     and (status_a.get(n) or {}).get("4h") is not None
+                     and (tiers_a.get(n) or {}).get("price") is not None]
+            if not cands:
+                continue
+            name = _pick_restored_level(cands, side, tiers_a)
+            reasons = ((p1_reasons or {}).get(a) or {}).get(name)
+            in_p1 = name in (sets["suppressed_p1_levels"].get(a) or ())
+            was = sorted(set(reasons)) if reasons else (["suppressed_p1"] if in_p1 else [])
+            if name in (sets["p1_stale_levels"].get(a) or ()):
+                was.append("stale")
+            if name in (p2_sites.get(a) or ()):
+                was.append("p2_site")
+            out.setdefault(a, {})[name] = {"1h": "retired", "4h": "live", "side": side,
+                                           "was": was}
+    return out
+
+
+def _apply_level_tf_status(level_tf_status, suppressed_p1_levels, p1_stale_levels,
+                           suppressed_p2_sites) -> tuple:
+    """LOCAL copies of the three suppression sets with every listed (asset, level) lifted,
+    plus the {(asset, level, tf)} retired set. Never mutates the caller's dicts (the facts
+    dict is shared by the four scoring call sites)."""
+    listed = {(a, n) for a, lv in (level_tf_status or {}).items() for n in (lv or {})}
+    retired = {(a, n, tf) for a, lv in (level_tf_status or {}).items()
+               for n, tfs in (lv or {}).items() for tf in ("1h", "4h")
+               if (tfs or {}).get(tf) == "retired"}
+
+    def _lift(d):
+        if d is None:
+            return None
+        return {a: [n for n in (names or ()) if (a, n) not in listed]
+                for a, names in d.items()}
+
+    return (_lift(suppressed_p1_levels), _lift(p1_stale_levels), _lift(suppressed_p2_sites),
+            retired)
+
+
 def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                            suppressed_p1_levels=None, suppressed_p2_sites=None,
                            level_htf_close_status=None, level_tiers=None,
@@ -601,7 +709,8 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                            now_price=None, fvg_zone_meta=None,
                            mid_reclaim=None, htf_reversal=None,
                            mid_position=None, p1_stale_levels=None,
-                           recross_distance=None, p2_discount_fire_ratio=None) -> dict:
+                           recross_distance=None, p2_discount_fire_ratio=None,
+                           level_tf_status=None) -> dict:
     """Pure computation over the model-declared P1/P2 evidence ledger: per-item points
     (tier x tf x magnitude multiplier, zeroed if immature — enforcing the §3 maturity gate
     in code, not trust), the net score, the expected bias sign, and the §6 cross-asset
@@ -790,7 +899,21 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
     when the recross is distance-safe: `recross_distance` ({asset: {level: ratio}},
     derive_facts.FactsBundle.recross_distance — |now_price − level| / avg_range_1h) must
     be >= the threshold. No production call site sets the ratio; it exists for the offline
-    A/B that decides whether (and at what threshold) this rung ships."""
+    A/B that decides whether (and at what threshold) this rung ships.
+
+    Per-timeframe level status (plan 44, flag ACT_PER_TF_LEVEL_STATUS, default OFF):
+    `level_tf_status` is `per_tf_level_status`'s sparse {asset: {level: {tf: "live"|
+    "retired", ...}}} override layer on top of the three suppression sets. A listed
+    (asset, level) is lifted out of `suppressed_p1_levels` / `p1_stale_levels` /
+    `suppressed_p2_sites` (local copies -- the caller's dicts are never mutated), and
+    nothing scores for it on a "retired" tf; its "live" tf scores through the ordinary
+    P1/P2 dispatch, the §10 ladder, magnitude, tiers, dedup and dominance. `None` or `{}`
+    is exactly the legacy behaviour."""
+    _retired_tfs: set = set()
+    if level_tf_status:
+        (suppressed_p1_levels, p1_stale_levels, suppressed_p2_sites,
+         _retired_tfs) = _apply_level_tf_status(level_tf_status, suppressed_p1_levels,
+                                                p1_stale_levels, suppressed_p2_sites)
     if level_htf_close_status is not None:
         evidence = [
             it for it in (evidence or [])
@@ -922,7 +1045,7 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
                 # criterion/direction), so no separate "prefer 4h" logic is needed here.
                 for _tf3 in ("1h", "4h"):
                     _val3 = _tf_map2.get(_tf3)
-                    if _val3 is None:
+                    if _val3 is None or (_asset2, _name2, _tf3) in _retired_tfs:
                         continue
                     # Stage 1 (2026-08-15): the P1<->P2 dispatch reads the EFFECTIVE
                     # (post-partial-bar-reversal) verdict, not the raw completed-bar close
@@ -1282,8 +1405,14 @@ def score_thesis_evidence(evidence: list, magnitude=None, dol_available=None,
             p3_dominated = dom_side is not None and this_side is not None and dom_side != this_side
         tf_deduped = id(item) in _tf_dedup_zero
         p5_deduped = id(item) in _p5_dedup_zero
+        # plan 44: a retired tf of a per-tf-restored level scores nothing (defence in depth
+        # -- the auto-injection above already skips it, and declared P1/P2 items at
+        # level_tiers pairs are dropped before that).
+        tf_retired = bool(
+            _retired_tfs and item.get("criterion") in ("P1", "P2")
+            and (item.get("asset"), item.get("level"), item.get("tf")) in _retired_tfs)
         suppressed = (p1_suppressed or p1_stale or p2_suppressed or p3_dominated
-                      or tf_deduped or p5_deduped)
+                      or tf_deduped or p5_deduped or tf_retired)
         scored_mature = mature and not exhausted and not suppressed
         # thesis.md §10 (2026-08-05): a 'discount' partial-bar reversal (see the pre-pass
         # above) halves the item's points -- a partial recross of the level, not yet a

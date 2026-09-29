@@ -121,7 +121,8 @@ def _score_kwargs(facts: dict, magnitude) -> dict:
     kw = {k: facts.get(k) for k in (
         "suppressed_p1_levels", "suppressed_p2_sites", "level_htf_close_status",
         "level_tiers", "smt_candidates", "week_extremes", "now_price", "fvg_zone_meta",
-        "mid_reclaim", "htf_reversal", "mid_position", "p1_stale_levels")}
+        "mid_reclaim", "htf_reversal", "mid_position", "p1_stale_levels",
+        "level_tf_status")}
     kw["magnitude"] = magnitude
     kw["dol_available"] = {"UP": bool(dol.get("UP")), "DOWN": bool(dol.get("DOWN"))}
     return kw
