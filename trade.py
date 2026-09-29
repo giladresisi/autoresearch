@@ -28,7 +28,8 @@ Usage:
   python trade.py start --pause          # Start with automatic entries paused (creates data/paused; start continues regardless)
   python trade.py start --resume         # Start with automatic entries enabled (clears data/paused; start continues regardless)
   python trade.py start --profile        # + memory profiling -> <session>/profile/ (RSS every 30s; allocation snapshots 09:15:30 + 13:05:30 ET or at terminate)
-  python trade.py terminate              # Kill orchestrator and automation.main
+  python trade.py terminate              # Stop orchestrator and automation.main (refused with a position/order open)
+  python trade.py terminate --force      # ... even with a position/order open (left at the broker, unmanaged)
   python trade.py gap-fill               # IB-backfill main 1s+1m parquets up to now (orchestrator must NOT be running)
   python trade.py promote                # Copy live parquets over main (prior main backed up to .bak) — run after gap-fill
   python trade.py rollover-prep          # Quarterly contract roll — run ONLY after gap-fill + promote (see --dry-run)
@@ -145,12 +146,53 @@ def _request_profile_snapshots(worktree_root, timeout: float = 120.0) -> None:
             done_file(label).unlink(missing_ok=True)
 
 
+#: How long `terminate` waits for the orchestrator to exit by itself before killing it.
+#: Its in-session stop path is bounded by: the 0.5s stop-file poll, up to 15s for
+#: automation.main to honour its own stop request, then the kill fallback (10s wait + 10s
+#: descendant reap), then the process scan in its `finally` — ~40s worst case. Between
+#: sessions it is a 5s poll plus a 15s accumulator join.
+_ORCH_STOP_TIMEOUT_S = 60
+
+
+def _remove_stale_pidfile(pid_file, pid: int) -> None:
+    """Remove orchestrator.pid when it still names `pid` (a process that is gone and so
+    never ran its own cleanup). Never touches a pid file a newer orchestrator rewrote."""
+    try:
+        if pid_file.read_text().strip() == str(pid):
+            pid_file.unlink()
+    except (OSError, ValueError):
+        pass
+
+
+def _stop_automation_main(proc) -> None:
+    """Stop one automation.main: ask first (its `finally` disconnects IB and stops the
+    executor), then terminate/kill — a hard kill on Windows — as the fallback."""
+    import psutil
+    from orchestrator import stop_request
+    stop_file = stop_request.AUTOMATION_STOP_FILE
+    try:
+        stop_file.write_text("stop")
+        proc.wait(timeout=stop_request.AUTOMATION_STOP_WAIT_S)
+    except (OSError, psutil.TimeoutExpired):
+        pass
+    finally:
+        stop_request.clear(stop_file)
+    if not proc.is_running():
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except psutil.TimeoutExpired:
+        proc.kill()
+
+
 def _terminate_all() -> list[str]:
     """Gracefully stop orchestrator (cancelMktData + IB disconnect + parquet flush), then kill
     automation.main — **scoped to THIS worktree**. Returns list of killed/stopped descriptions."""
     import psutil
     import paths
     from pathlib import Path
+    from orchestrator import stop_request
 
     killed = []
     worktree_root = Path(__file__).resolve().parent
@@ -161,7 +203,8 @@ def _terminate_all() -> list[str]:
 
     # PID file lives in the shared general live folder (one canonical live orchestrator).
     pid_file = paths.general_live_dir() / "orchestrator.pid"
-    stop_file = Path("orchestrator_stop.req")
+    # The SAME path the orchestrator polls (one shared definition), wherever this CLI runs.
+    stop_file = stop_request.ORCH_STOP_FILE
     if pid_file.exists():
         try:
             orch_pid = int(pid_file.read_text().strip())
@@ -171,21 +214,24 @@ def _terminate_all() -> list[str]:
                 # belongs to THIS worktree. A sibling worktree's (possibly LIVE) orchestrator
                 # must never be stopped from here (same scoping the scans below enforce).
                 if _proc_in_worktree(p, worktree_root):
-                    # Write stop sentinel so the orchestrator's sleep loop wakes, calls
-                    # source.stop() (cancelMktData + IB disconnect + parquet flush), then exits.
+                    # Write stop sentinel so the orchestrator — asleep between sessions or
+                    # monitoring one — stops its subprocess / source.stop() (cancelMktData +
+                    # IB disconnect + parquet flush), then exits through its own `finally`.
                     stop_file.write_text("stop")
                     try:
-                        p.wait(timeout=20)
+                        p.wait(timeout=_ORCH_STOP_TIMEOUT_S)
                         killed.append(f"orchestrator pid={orch_pid} (graceful)")
                     except psutil.TimeoutExpired:
-                        # Orchestrator didn't exit in time — hard kill as fallback.
-                        try:
-                            stop_file.unlink()
-                        except OSError:
-                            pass
+                        # Orchestrator didn't exit in time — hard kill as fallback. A killed
+                        # process never removes its own pid file, so do it here.
                         p.kill()
+                        _remove_stale_pidfile(pid_file, orch_pid)
                         killed.append(f"orchestrator pid={orch_pid} (force-killed after timeout)")
+                    finally:
+                        # Never leave a request behind: the next start would obey it.
+                        stop_request.clear(stop_file)
             except psutil.NoSuchProcess:
+                _remove_stale_pidfile(pid_file, orch_pid)
                 killed.append(f"orchestrator pid={orch_pid} (already dead)")
         except (ValueError, OSError):
             pass
@@ -231,11 +277,7 @@ def _terminate_all() -> list[str]:
                 continue
             cmdline = proc.info.get("cmdline") or []
             if any("automation.main" in arg for arg in cmdline) and _proc_in_worktree(proc, worktree_root):
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except psutil.TimeoutExpired:
-                    proc.kill()
+                _stop_automation_main(proc)
                 killed.append(f"automation.main pid={proc.pid}")
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
@@ -266,6 +308,29 @@ def _agent_session_dir():
     import paths
     from session_times import session_date_str
     return paths.sessions_dir() / session_date_str()
+
+
+def _agent_restart_note() -> str | None:
+    """What a restart in THIS session means for the agent brain, from what is on disk.
+
+    `TraderGraft` disarms at construction (reason `restart`) when a live start finds a
+    plan in the session's plans.json, so the same store is read here. None when the
+    legacy brain owns the dispatcher or the session folder cannot be read."""
+    if _agent_switched_off():
+        return None
+    try:
+        from agent.trader.plan_store import PlanStore
+        store = PlanStore(_agent_session_dir())
+        has_plan = bool(store.all())
+    except Exception:
+        return None
+    if has_plan:
+        return (f"NOTE: the agent has a plan on disk ({store.path}). A restart in this "
+                "session starts the agent DISARMED (reason `restart`): it stays dark for "
+                "the rest of the session.")
+    return ("NOTE: no agent plan on disk for this session. A restart arms only if it is "
+            "running at the 09:20 ET arm; once a plan is written, any restart leaves the "
+            "agent dark for the rest of the session.")
 
 
 def _agent_menu(state_dir) -> dict:
@@ -616,6 +681,13 @@ def main() -> None:
                     print("Starting in resumed mode — automatic entries enabled")
                 else:
                     print("Already resumed — starting normally")
+        elif live_orders.is_paused():
+            # The pause sentinel outlives sessions and restarts; without this line a bare
+            # `start` carried an old pause into the new session with nothing printed.
+            print("Pause state: PAUSED (carried over) — new automatic entries stay suppressed "
+                  "until `trade.py resume` (or restart with --resume)")
+        else:
+            print("Pause state: not paused — automatic entries enabled")
 
         # Always sweep for an existing/orphaned orchestrator + automation.main in THIS
         # worktree before launching — even when the pid file is missing or stale. A
@@ -720,10 +792,26 @@ def main() -> None:
                   "re-derives levels from the shifted data.")
 
     elif cmd == "terminate":
+        # Nothing manages a position once both processes are gone, so refuse while
+        # position.json shows one (read-only here; this command never writes it).
+        pos = live_orders.get_position()
+        open_what = ("an active position" if pos.get("active")
+                     else "a working stop entry" if pos.get("stop_entry") else None)
+        if open_what and not force:
+            print(f"ERROR: position.json shows {open_what} — terminate refused. Close or "
+                  "cancel it first (trade.py close / trade.py cancel), or use --force to "
+                  "terminate anyway.")
+            sys.exit(1)
+        if open_what:
+            print(f"WARNING: terminating with {open_what}. It stays at the broker with only "
+                  "its embedded stop: nobody manages the target or the 13:00 ET flatten.")
         killed = _terminate_all()
         if killed:
             for k in killed:
                 print(f"Killed {k}")
+            note = _agent_restart_note()
+            if note:
+                print(note)
         else:
             print("Nothing to terminate")
 
