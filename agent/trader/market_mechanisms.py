@@ -63,6 +63,25 @@ def counter_thesis_extreme(mnq, direction, arm_ts):
     return float(window["Low"].min()), window["Low"].idxmin()
 
 
+def post_open_counter_extreme(mnq, direction, open_ts):
+    """(price, timestamp) of the counter-thesis extreme printed since `open_ts` (the
+    session date's 09:30:00 ET): the highest High for a DOWN plan, the lowest Low for an
+    UP one. §2's extension veto measures from it.
+
+    Same side as `counter_thesis_extreme`, different window — that one is frozen at the
+    plan arm, this one runs from the RTH open to the last bar of the frame it is handed.
+    Returns (None, None) before any bar at or after `open_ts` exists.
+    """
+    if mnq is None or not len(mnq) or open_ts is None:
+        return None, None
+    window = mnq[mnq.index >= open_ts]
+    if not len(window):
+        return None, None
+    if str(direction).upper() in _SHORT:
+        return float(window["High"].max()), window["High"].idxmax()
+    return float(window["Low"].min()), window["Low"].idxmin()
+
+
 class MarketMechanisms:
     """Owns §7's machine and §6's per-gap episodes for one plan.
 

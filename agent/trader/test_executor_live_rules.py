@@ -411,7 +411,9 @@ def test_the_five_before_dates_replay_byte_identical(date, monkeypatch):
     later deliberate commits in 879032b..cb083e2 (e.g. 8b90ee7's far-excursion veto) are
     in range but were not bisected individually. Moves: 08-31 -53.25 -> -38.25, 09-03
     +106.25 -> -32.50, 09-01/09-02 same totals with earlier `tmso_reject` entries, 09-04
-    re-seeded 2026-09-27 (+65.75).
+    re-seeded 2026-09-27 (+65.75). 09-03 ALONE re-captured 2026-09-30 for §2's extension
+    veto: its 10:18:00 `fvg_1m_post_extreme` long @ 29326.5 (-17.50) is vetoed at 127.25
+    pts, -32.50 -> -15.00.
 
     A DELIBERATE mechanism change moves these streams; re-capture them then, exactly as
     the change protocol's step 3 says. A cold cache skips — it proves nothing either way.
