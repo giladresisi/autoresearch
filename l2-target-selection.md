@@ -279,8 +279,8 @@ Pointer only; the text is `l2-mechanisms.md` §11.5 (precedent: §11.2 pointing 
 plan the Analyzer forced against an UNRELATED pre-09:20 leg, the take-profit at each fill is
 (origin + the leg's extreme up to that fill) / 2, falling back to the T2 pick when that mid
 is not at least 5 pts ahead of the entry. Scope = `Executor._set_target_on_fill` only:
-`select_target`, the menu, L1's DOL and the thesis cache key are unchanged. Needs BOTH
-`premove_context.UNRELATED_PATH_MODE = "on"` and `MID_TARGET_ENABLED = True`.
+`select_target`, the menu, L1's DOL and the thesis cache key are unchanged. Needs BOTH the
+path on (`ACT_PREMOVE_UNRELATED`, on by default) and `MID_TARGET_ENABLED = True`.
 
 ---
 

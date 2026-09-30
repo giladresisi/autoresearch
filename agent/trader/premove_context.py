@@ -1,7 +1,9 @@
 """Plan 46 — the UNRELATED pre-move classifier, as a pure function (`l2-mechanisms.md` §11.5).
 
-**A §11 CANDIDATE, not a rule.** Behind `UNRELATED_PATH_MODE`, default ``"off"``: with the
-flag off nothing in the trader calls this module. ``"shadow"`` classifies and records
+**A §11 CANDIDATE, not a rule.** The mode comes from the env var `ACT_PREMOVE_UNRELATED`
+(`path_mode`), **ON by default** (operator decision 2026-10-01): unset or empty = ``"on"``,
+``0``/``false``/``no``/``off`` = ``"off"``, ``shadow`` = ``"shadow"``. With it off nothing in
+the trader calls this module. ``"shadow"`` classifies and records
 (`analyzer.Analyzer._premove`) without changing anything; ``"on"`` lets the Analyzer force the
 thesis AGAINST an UNRELATED leg. That is the DIRECTION only: the take-profit stays the
 ordinary T2 pick unless `MID_TARGET_ENABLED` is also set (operator decision 2026-09-30, see
@@ -44,6 +46,7 @@ labelling page's ``customLeg``. Size, big and PART are then computed on that leg
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import asdict, dataclass
 
 import numpy as np
@@ -51,10 +54,17 @@ import pandas as pd
 
 TZ = "America/New_York"
 
-#: "off" | "shadow" | "on". Read at CALL time (module attribute), never cached, so a
-#: harness can flip it between replays in one process. Anything else reads as "off".
-UNRELATED_PATH_MODE = "off"
+#: The env var that sets the mode. ON by default (operator decision 2026-10-01): unset or
+#: empty = "on"; 0/false/no/off = "off"; "shadow" = "shadow"; anything else = "on" (the
+#: `ACT_EXTENSION_VETO` convention: only an explicit opt-out turns it off).
+ENV_FLAG = "ACT_PREMOVE_UNRELATED"
+
+#: Explicit override of the env var: None (production) = read `ENV_FLAG`; "off" | "shadow" |
+#: "on" = use that. Read at CALL time, never cached, so a harness or a test can flip it
+#: between replays in one process.
+UNRELATED_PATH_MODE = None
 MODES = ("off", "shadow", "on")
+_OFF_VALUES = ("0", "false", "no", "off")
 
 #: The take-profit half: with the path "on", also take profit at the leg's mid at each fill
 #: (`executor._premove_mid_pick`). **OFF by operator decision 2026-09-30** — the path
@@ -74,9 +84,16 @@ _OPPOSITE = {"UP": "DOWN", "DOWN": "UP"}
 
 
 def path_mode() -> str:
-    """The flag, validated: a typo must read as "off", never as a live path."""
-    mode = str(UNRELATED_PATH_MODE or "off").strip().lower()
-    return mode if mode in MODES else "off"
+    """"off" | "shadow" | "on". `UNRELATED_PATH_MODE` wins when set (harness/tests; a value
+    outside MODES reads as "off" there, so a harness typo never runs a live path); otherwise
+    the env var, ON unless explicitly opted out."""
+    if UNRELATED_PATH_MODE is not None:
+        mode = str(UNRELATED_PATH_MODE).strip().lower()
+        return mode if mode in MODES else "off"
+    raw = str(os.environ.get(ENV_FLAG, "")).strip().lower()
+    if raw in _OFF_VALUES:
+        return "off"
+    return "shadow" if raw == "shadow" else "on"
 
 
 @dataclass(frozen=True)

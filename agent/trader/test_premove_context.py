@@ -269,14 +269,35 @@ def test_default_params_are_read_at_call_time(monkeypatch):
 
 
 def test_mode_is_read_at_call_time(monkeypatch):
-    assert pc.UNRELATED_PATH_MODE == "off"        # the shipped default
-    assert pc.path_mode() == "off"
+    assert pc.UNRELATED_PATH_MODE is None           # production reads the env var
     monkeypatch.setattr(pc, "UNRELATED_PATH_MODE", "shadow")
     assert pc.path_mode() == "shadow"
     monkeypatch.setattr(pc, "UNRELATED_PATH_MODE", " ON ")
     assert pc.path_mode() == "on"
-    monkeypatch.setattr(pc, "UNRELATED_PATH_MODE", "yes")   # a typo is never a live path
+    monkeypatch.setattr(pc, "UNRELATED_PATH_MODE", "yes")   # a harness typo is never live
     assert pc.path_mode() == "off"
+
+
+@pytest.mark.parametrize("raw,want", [
+    (None, "on"), ("", "on"), ("on", "on"), ("1", "on"), ("TRUE", "on"),
+    ("0", "off"), ("false", "off"), ("No", "off"), (" off ", "off"),
+    ("shadow", "shadow"), ("SHADOW", "shadow"),
+])
+def test_the_env_var_is_on_by_default_and_only_an_explicit_opt_out_turns_it_off(
+        monkeypatch, raw, want):
+    """Operator decision 2026-10-01: ON when `ACT_PREMOVE_UNRELATED` is unset."""
+    monkeypatch.setattr(pc, "UNRELATED_PATH_MODE", None)
+    if raw is None:
+        monkeypatch.delenv(pc.ENV_FLAG, raising=False)
+    else:
+        monkeypatch.setenv(pc.ENV_FLAG, raw)
+    assert pc.path_mode() == want
+
+
+def test_the_override_beats_the_env_var(monkeypatch):
+    monkeypatch.setenv(pc.ENV_FLAG, "off")
+    monkeypatch.setattr(pc, "UNRELATED_PATH_MODE", "on")
+    assert pc.path_mode() == "on"
 
 
 def test_leg_mid_and_extend_extreme():

@@ -1,5 +1,6 @@
 """A/B harness for plan 46 — the UNRELATED pre-move path (`l2-mechanisms.md` §11.5, a
-CANDIDATE behind `agent/trader/premove_context.UNRELATED_PATH_MODE`, default "off").
+CANDIDATE; env var `ACT_PREMOVE_UNRELATED`, ON by default; each arm pins the mode through
+`premove_context.UNRELATED_PATH_MODE`, which overrides the env var).
 
 Arms, replayed SEQUENTIALLY in one process (memory budget; never in parallel), the flags
 flipped as module attributes that every caller reads at call time:

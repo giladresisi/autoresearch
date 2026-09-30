@@ -1901,9 +1901,11 @@ delta, so this is thin evidence, not a validation.
 **Not a rule.** An L1-side direction override (plan 37's seam, `analyzer._call`). A
 take-profit substitution at the fill (`executor._set_target_on_fill`) is built too but is a
 SEPARATE switch, off by default. Neither lives in §§2-8; entries, stops and the §8 lifecycle
-are untouched. Flags in `agent/trader/premove_context`: `UNRELATED_PATH_MODE` (default
-`"off"`) turns the DIRECTION override on; `MID_TARGET_ENABLED` (default `False`) adds the
-leg-mid take-profit.
+are untouched. The DIRECTION override is governed by the env var `ACT_PREMOVE_UNRELATED`,
+**ON by default** (operator decision 2026-10-01; `0`/`false`/`no`/`off` opts out, `shadow`
+only records; `premove_context.UNRELATED_PATH_MODE` overrides it for harnesses).
+`premove_context.MID_TARGET_ENABLED` (default `False`) adds the leg-mid take-profit.
+Still a CANDIDATE: being on by default does not make it a rule.
 
 **Operator decision 2026-09-30: direction only.** The mid target stays off: the operator
 expects the mid to be too far on many days and the move to turn back into a continuation
@@ -1998,10 +2000,14 @@ the study's back-adjusted `main/2026-12` (445.5 from 06-08 20:56): a price-scale
 The bars are identical up to the roll offset; the 04:01 pullback is 123.75 pts, which cuts the
 leg at the era's scaled cut (120 x 29697.75 / 29000 = 122.89) but not at the study's (125.34).
 The operator also starts that leg at 04:01 (and labels the day not big).
-Not evaluable warm: 05-08 and 09-21 (their seed calls returned `ledger_fallback`, which is
-never cached), and the controls 08-31, 09-02..09-04, 09-22..09-24, 09-28 (no recording for
-the current code version; not seeded, to stay within the call budget). Eight arm-A seed
-calls were made. n = 8 UNRELATED days, and the direction changed on only 3 of them; one
-day moves the sum by ~200 pts either way.
+The remaining 11 dates were seeded with one L1 call each on 2026-10-01 (same code base,
+9716e4c) and replayed. Nine are now evaluable and all are identical A vs B: 05-20 (UNRELATED
+on its replay era, NOT_BIG on the study's back-adjusted data; the model already said DOWN,
+so the forced DOWN changes nothing, -45.00), 09-21 (PART, +362.75), and the non-big
+controls 08-31, 09-02, 09-03, 09-04, 09-22, 09-24, 09-28. Still not evaluable: 05-08 and
+09-23 (the seed call returned `ledger_fallback` again, which is never cached; 05-08 is
+UNKNOWN in replay and 09-23 NOT_BIG, so B = A there by construction). Over the 31 evaluable
+dates: A +669.00, B +1301.00, **B-A +632.00** (unchanged). n = 9 UNRELATED days, and the
+direction changed on only 3 of them; one day moves the sum by ~200 pts either way.
 The offline sweep (production classifier, `main/2026-12`) reproduces the evidence table
 above exactly (UNRELATED excl. COUNTER 43 / 56% [41-70]; with COUNTER folded in 47 / 57%).

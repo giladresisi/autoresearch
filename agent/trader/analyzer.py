@@ -412,8 +412,9 @@ class Analyzer:
             # on the forced side -- and we then call the model exactly as before. A degraded
             # snapshot must lose the override, never invent a direction from it.
             #
-            # PLAN 46 (§11.5 CANDIDATE, `premove_context.UNRELATED_PATH_MODE`, default
-            # "off"): on a BIG pre-09:20 leg the classifier takes precedence over arm 1.
+            # PLAN 46 (§11.5 CANDIDATE, `premove_context.path_mode()` = env var
+            # ACT_PREMOVE_UNRELATED, ON by default): on a BIG pre-09:20 leg the classifier
+            # takes precedence over arm 1.
             # UNRELATED forces the thesis against the leg with no model call; PART and an
             # UNRELATED day whose thesis cannot be built suppress arm 1 and ask the model.
             # Every other status -- and the flag off -- is exactly the path below.
