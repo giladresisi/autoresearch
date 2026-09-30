@@ -516,6 +516,27 @@ CASES: "tuple[NamedCase, ...]" = (
                     "10:11:14: **+172.75 pts, the day's only trade.**"),
     ),
 
+    # ---- §2 the extension veto (operator, 2026-09-29) --------------------------- #
+    NamedCase(
+        key="sec2-0929-extension", date="2026-09-29", mechanism="fvg_1m_post_extreme",
+        doc_section="§2 extension veto", era="current-20260927", expect="no_fire",
+        pinned_by=("agent/trader/test_executor_extension_veto.py::"
+                   "test_down_plan_173_pts_from_the_post_open_high_is_vetoed_with_"
+                   "full_detail",
+                   "agent/trader/test_executor_extension_veto.py::"
+                   "test_0929_real_tape_the_0944_short_is_vetoed"),
+        note="The recorded live thesis (DOWN, DOL TDO 30443.75, F1 30827.5). The 09:31:00 "
+             "micro_smt_reject short @ 30675.75 is 49.25 pts below the post-09:30 high "
+             "30725.00 (09:30:02) and is taken (stopped 09:31:14 @ 30690.75, -15.00); "
+             "the 09:44:00 fvg_1m_post_extreme short @ 30552.00 is 173.00 below it and "
+             "is VETOED (it was -3.50). Asserted up to 09:44:00 only: the tape recorded "
+             "when this was written ends 10:34, so no day figure is registered.",
+        doc_quotes=("| 09:31:00 `micro_smt_reject` DOWN | 30675.75 | 30725.00 | 49.25 | "
+                    "allowed |",
+                    "| 09:44:00 `fvg_1m_post_extreme` DOWN | 30552.00 | 30725.00 | "
+                    "173.00 | VETOED |"),
+    ),
+
     # ---- §11's calibrated fill rows (the ten documented 5m bindings) ------------ #
     NamedCase(
         key="calib-0821-EXCLUDED", date="2026-08-21",
@@ -685,6 +706,12 @@ ORACLE_THESES = {
         "falsified_if": [{"type": "n_closes_beyond", "price": 30727.88, "side": "above",
                           "tf": "5m", "n": 2}],
     },
+
+    # -- §2 extension veto ---------------------------------------------------- #
+    # The thesis the live session RECORDED on 2026-09-29 (its replay_thesis.json):
+    # direction, DOL and falsifier verbatim.
+    "sec2-0929-extension": _thesis("DOWN", "TDO", 30443.75, falsify_at=30827.5,
+                                   regime="RANGE"),
 }
 
 #: Cases the document does NOT give enough input to replay. Recorded rather than

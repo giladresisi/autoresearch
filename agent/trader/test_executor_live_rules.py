@@ -411,7 +411,9 @@ def test_the_five_before_dates_replay_byte_identical(date, monkeypatch):
     later deliberate commits in 879032b..cb083e2 (e.g. 8b90ee7's far-excursion veto) are
     in range but were not bisected individually. Moves: 08-31 -53.25 -> -38.25, 09-03
     +106.25 -> -32.50, 09-01/09-02 same totals with earlier `tmso_reject` entries, 09-04
-    re-seeded 2026-09-27 (+65.75).
+    re-seeded 2026-09-27 (+65.75). 09-03 ALONE re-captured 2026-09-30 for §2's extension
+    veto: its 10:18:00 `fvg_1m_post_extreme` long @ 29326.5 (-17.50) is vetoed at 127.25
+    pts, -32.50 -> -15.00.
 
     2026-09-30 (plan 44 adoption): 08-31, 09-02, 09-03 and 09-04 re-seeded under
     per-TF level status (thesis.md §2.1g re-keys every recording; 09-01 is a

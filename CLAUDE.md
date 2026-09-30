@@ -95,6 +95,11 @@ lists what must NOT be built.
 - `ACT_THESIS_TIEBREAK` is **ON by default**: the Analyzer turns a NEUTRAL thesis into a
   direction (`agent/trader/tiebreak.py`, applied AFTER the thesis cache; `thesis_source:
   "tiebreak"` + `tiebreak_rule`). `0` keeps NEUTRAL days dark.
+- `ACT_EXTENSION_VETO` is **ON by default**: a market-mechanism fire priced more than
+  `executor.EXTENSION_MAX_PTS` (100 pts) beyond the post-09:30 counter-extreme is not
+  entered (`l2-mechanisms.md` §2; a `veto` record, reason `extension`; no attempt spent).
+  `0` (or `false`/`no`/`off`) disables it. A plain replay does not load `.env`: set it in
+  the shell for a replay.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.

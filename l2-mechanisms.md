@@ -154,6 +154,82 @@ tuning; the rules are fixed.
   No separate "market entry" mechanism exists.
 - **Max-distance guard:** the trigger price must sit within a capped distance of current price
   (analogous to the S8 DOL proximity guard).
+- **Extension veto (the five MARKET mechanisms; operator decision 2026-09-29).** No entry is
+  taken when the entry price is more than `EXTENSION_MAX_PTS` (**100 pts**, §9) beyond the
+  post-09:30 extreme OPPOSITE to the plan's direction. Operator's words: "A max distance
+  from the post-09:30 extreme OPPOSITE to the favorable direction (in today's example, the
+  top wick of the 09:30 1m bar, 30725.00). No entry should be allowed if the graph is > 100
+  pts from that opposite extreme. Entries are re-allowed if the graph retraces back inside
+  that distance, and only if the plan is still alive."
+  - **Anchor:** DOWN plan → the highest MNQ High since 09:30:00 ET of the session date; UP
+    plan → the lowest MNQ Low since 09:30:00 ET. MNQ only, in BAR time. A running extreme:
+    it only ratchets away from the favourable side, and no stop-out, cooldown, pause or new
+    micro-session resets it; a new session date starts a new one. Before any bar at or after
+    09:30:00 exists the anchor is undefined and the veto is INERT (it allows).
+  - **Measured quantity:** `anchor − entry price` (DOWN) / `entry price − anchor` (UP), the
+    entry price being the price the mechanism would fill at (the fire's own price).
+  - **Rule:** distance STRICTLY greater than the cap → the entry is not taken. Exactly
+    100.00 is allowed. No hysteresis and no latch: every fire is measured afresh, so entries
+    are re-allowed as soon as a fire's price is back inside the distance.
+  - **Scope:** `fvg_1m_post_extreme` (§6, tick and close paths), `extreme_reject_close`
+    (§7), `tmso_reject`, `fvg_1h_reject`, `micro_smt_reject` (§7a). The resting-order
+    mechanisms (§4/§5, dormant by default since 879032b) are NOT covered: their distance
+    guard is the max-distance guard above.
+  - **Order of evaluation:** EACH fire is filtered BEFORE first-trigger arbitration, so a
+    vetoed fire can never mask an allowed fire from another mechanism on the same bar.
+  - **What a veto costs:** no attempt is spent and the plan stays alive. The mechanism's
+    OWN state is whatever producing the fire made it — the standing precedent for a fire
+    that is produced and not entered (one that loses first-trigger arbitration): §6's cycle
+    returns to idle and needs a fresh strictly-inside re-entry; §7 stays armed and may fire
+    on the next new-extreme bar; `tmso_reject` and `micro_smt_reject` have spent their one
+    fire for that micro-session; `fvg_1h_reject` has spent its one fire for the plan.
+  - **Record:** one `veto`, reason `extension`, detail `{distance, cap, anchor, anchor_ts,
+    price}`, deduped per (mechanism, artifact, reason) like every other veto. `anchor_ts`
+    is the LABEL of the bar that contains the extreme, on whatever frame the Executor
+    holds (a 1m bar in replay), NOT the time of the tick that printed it.
+  - **Flag:** `ACT_EXTENSION_VETO`, ON by default; `0`/`false`/`no`/`off` restores the
+    previous behaviour exactly.
+  - **Motivating day — 2026-09-29 (thesis DOWN, `sessions/2026-09-29/comments.md` 09:56 /
+    10:07, `optimizations.md` F3/O2).** Post-09:30 high 30725.00 at 09:30:02 (the record's
+    `anchor_ts` is the label of the bar that printed it: 09:30:00 on the 1m frame).
+
+    | Fire | Price | Anchor | Distance | Verdict |
+    |---|---|---|---|---|
+    | 09:31:00 `micro_smt_reject` DOWN | 30675.75 | 30725.00 | 49.25 | allowed |
+    | 09:44:00 `fvg_1m_post_extreme` DOWN | 30552.00 | 30725.00 | 173.00 | VETOED |
+
+    The 09:44:00 short was taken 173.00 pts into the move and 6.50 pts above its low
+    (30545.50 at 09:43:06); it stopped at 30555.50 nine seconds later for −3.50 (broker
+    −6.25) and the tape never traded below 30552.25 again. Evidence: ONE day, on which every
+    cap from 50 to 172 gives the same two verdicts — 100 is the operator's starting value,
+    not a fitted one. Registry: `sec2-0929-extension`.
+  - **WHAT THE CAP OF 100 COSTS — measured 2026-09-30, and adopted ON at 100 by the
+    operator with these figures in hand.**
+    - **Re-measured stream, 2026-09-03 (thesis UP, plan-38 golden stream).** The 10:18:00
+      `fvg_1m_post_extreme` long @ 29326.5 is 127.25 pts above the post-09:30 low 29199.25
+      (09:36 bar) and is vetoed; it had stopped at 29309.0 at 10:32:36 for −17.50. **Day
+      BEFORE −32.50 on 2 attempts, AFTER −15.00 on 1.** No knock-on: the 09:38:00
+      `tmso_reject` long (−15.00) is unchanged and nothing fires before the 10:30 cutoff.
+      The stream was re-captured; 127.25 is the smallest cap that would have left it alone.
+    - **No registered named case moves, by 0.75 pt.** `cur-0814`'s winner (10:22:00 @
+      30181.5, +53.50) sits at distance 99.25 from the 30280.75 high. Any cap below 99.25
+      removes it.
+    - **Historical tally — a CROSS-ERA TALLY, NOT AN A/B.** 264 unique recorded fills over
+      53 dates, from replay and live decision logs written by several code eras under
+      oracle and recorded theses alike, deduplicated per fill, distances measured on the 1s
+      tape, knock-ons ignored. Of 170 fills by the covered mechanisms, **40 lie beyond 100
+      pts: 7 winners, summed +734.50** — `fvg_1m_post_extreme` 26 fills / +209.50,
+      `tmso_reject` 14 / +525.00, the other three none. **The set this veto removes is NET
+      POSITIVE at 100**: 33 of the 40 lose, but the winners are large (08-04 +426.75 at
+      108.25, 08-03 +229.00 at 128.00, 08-06 +212.25 at 128.50 and +170.25 at 170.50). By
+      cap, the removed set sums: 110 → +281.75, 125 → +192.50, 130 → −211.00, 150 → −17.00;
+      it turns negative only from about 130.
+  - **CONTRADICTION WITH THE DOL-FLOOR TEXT BELOW, recorded rather than resolved.** That
+    paragraph rejects this family of rule in so many words: "a distance-from-extreme veto
+    implicitly assumes a fixed move size and forfeits the big-reversal days (08-03's winner
+    entered 189 pts past the extreme with 123 pts still to go; 08-06 similar)". The tally
+    above shows the same two days. The floor that paragraph preferred has been inert since
+    plan 16; the objection itself stands, and the cap is the knob that prices it.
 - **No standing L1 plan → the mechanisms stay dark (decided 2026-08-17).** Every mechanism
   assumes a DOL-bearing plan; when L1 resolves to no-liquidity NEUTRAL (or no plan is
   armed for any reason), L3 places nothing, triggers nothing, and tracks state only.
@@ -852,6 +928,7 @@ mechanism opened it, T2 or no T2 — the instant it confirms.
 | 5m distance invalidation | 60 pts anti-trade beyond the gap | §2; permanent, unlike the momentary max-distance guard |
 | Max FVG height | **45 pts** (was 35 until 2026-08-22) | Raised after the §11 band sweep. NOTE its ORIGINAL rationale ("caps worst-case risk at ~45 pts/attempt") is now **obsolete** — the 25-pt SL cap bounds risk at any height. Under a corrected, completion-timestamped replay the only binding the raise still buys is 08-18 (+229.75); 08-21's 44-pt gap is never re-entered after real creation. Retained as a *character* filter, not a risk one — see the unbounded ablation in §11 |
 | Max distance, current price → trigger | 60 pts | Beyond that we donate too much of the multi-hour L1 move |
+| Extension veto, post-09:30 counter-extreme → entry price (`EXTENSION_MAX_PTS`) | 100 pts | §2; market mechanisms only; strictly-greater vetoes. Operator's value (2026-09-29, confirmed 2026-09-30), NOT fitted: on the motivating day every cap in 50..172 behaves identically, and the cross-era tally in §2 has the removed set net positive (+734.50) at 100, negative only from ~130. `cur-0814`'s winner is 0.75 pt inside it. `ACT_EXTENSION_VETO=0` disables |
 | No-move zone around resting trigger | 15 pts | See §8 |
 | `fvg_1m_post_extreme` SL buffer beyond excursion extreme | 2 pts | §6; excursion-anchored, not gap-edge-anchored |
 | `fvg_1m_post_extreme` SL cap | 30 pts from entry | §6; bounds deep-excursion episodes |
