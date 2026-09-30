@@ -14,6 +14,7 @@ import os
 import sys
 from pathlib import Path
 import json
+import threading as _threading
 import math as _math
 import numpy as _np
 
@@ -1352,6 +1353,35 @@ class SmtV2Dispatcher:
         _lo.dispatch(sig)
 
 
+# ── Stop request ──────────────────────────────────────────────────────────────
+
+from orchestrator import stop_request as _stop_request  # noqa: E402
+
+_STOP_POLL_S = 0.5
+
+
+def _watch_stop_request(source, stop_file=None, poll_s: float = _STOP_POLL_S,
+                        cancel=None) -> bool:
+    """Wait for the stop-request file, then stop the IB source so `start()` returns and
+    main()'s `finally` runs. The orchestrator's terminate is a hard kill on Windows (no
+    `finally`), so this file is the only way to ask this process to exit cleanly.
+
+    Runs in its own daemon thread, outside the bar loop. `cancel` (a threading.Event) ends
+    the wait without stopping anything. Returns True iff a stop request was honoured."""
+    stop_file = _stop_request.AUTOMATION_STOP_FILE if stop_file is None else stop_file
+    cancel = _threading.Event() if cancel is None else cancel
+    while not cancel.is_set():
+        if stop_file.exists():
+            print("[automation] Stop requested — shutting down", flush=True)
+            try:
+                source.stop()
+            except Exception as exc:
+                print(f"[automation] stop request: source.stop() failed: {exc}", flush=True)
+            return True
+        cancel.wait(poll_s)
+    return False
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -1499,6 +1529,13 @@ def main() -> None:
         comments_path=SESSIONS_DIR / today_str / "comments.md",
     )
 
+    # A request left over from an earlier stop must not end this fresh run.
+    _stop_request.clear(_stop_request.AUTOMATION_STOP_FILE)
+    _stop_watch_cancel = _threading.Event()
+    _threading.Thread(target=_watch_stop_request, args=(_ib_source,),
+                      kwargs={"cancel": _stop_watch_cancel}, daemon=True,
+                      name="stop-request-watch").start()
+
     _executor.start()
     try:
         _ib_source.start()  # blocks; retry loop is inside IbRealtimeSource
@@ -1537,6 +1574,7 @@ def main() -> None:
         )
         sys.exit(11)
     finally:
+        _stop_watch_cancel.set()
         # Disconnect IB before executor cleanup so the client ID is released immediately.
         # Without this, SIGTERM raises SystemExit which bypasses IbRealtimeSource's except
         # block and IB Gateway holds the client ID until its own keepalive timeout (~30s).

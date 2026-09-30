@@ -37,6 +37,7 @@ from derive_facts import (  # noqa: E402
     facts_to_validator_dict, load, render_facts_text, render_menus_text,
     render_evidence_text, session_frame, trade_date,
 )
+from validate_contracts import per_tf_level_status  # noqa: E402
 
 DEFAULT_MAIN = os.path.expanduser(
     "~/projects/auto-co-trader/global/general/main/2026-09")
@@ -68,6 +69,15 @@ class FactsResult:
 
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def per_tf_level_status_enabled() -> bool:
+    """`ACT_PER_TF_LEVEL_STATUS` (plan 44, ON by default -- same convention as
+    `ACT_TRADER`): when on, the L1 view carries `level_tf_status` (one standing 4h read per
+    suppressed stack, thesis.md §2.1g) and S9 renders its tags. Read here only, per facts
+    build; rollback = `0` / `false` / `no` / `off`."""
+    return os.environ.get("ACT_PER_TF_LEVEL_STATUS", "").strip().lower() not in (
+        "0", "false", "no", "off")
 
 
 class BoundarySliceError(Exception):
@@ -278,11 +288,21 @@ def bundle_to_l1_view(bundle) -> tuple:
                     (bundle.p1_equilibrium_stale.get(tkr) or {}).items() if flag)
         for tkr in ("MNQ", "MES")
     }
+    # plan 44 (flag ACT_PER_TF_LEVEL_STATUS, default OFF): one standing 4h read per
+    # suppressed stack. Built AFTER the level_tiers promotion, the smt_candidates view and
+    # p1_stale_levels above, from exactly those views. Flag off: the key is not set at all,
+    # and the S9 render below is unchanged.
+    if per_tf_level_status_enabled():
+        vd["level_tf_status"] = per_tf_level_status(
+            vd["suppressed_p1_levels"], vd["p1_stale_levels"], vd["suppressed_p2_sites"],
+            vd["level_htf_close_status"], vd["level_tiers"], vd["smt_candidates"],
+            p1_reasons=getattr(bundle, "p1_suppression_reasons", None))
     menu_text = render_menus_text(bundle)              # reuses cached bundle.menus
     magnitude = build_evidence_magnitude(bundle)  # plan 14 Task 5: code-derived
     # magnitude threaded into the render so the model can SEE the WEAK/NORMAL/STRONG
     # clearance label before declaring bias (gap fix: same ratio, no new computation).
-    evidence_text = render_evidence_text(bundle, magnitude=magnitude)
+    evidence_text = render_evidence_text(bundle, magnitude=magnitude,
+                                         level_tf_status=vd.get("level_tf_status"))
     # 2026-08-05: same ratios, JSON-safe nested-dict shape ({asset: {level: {tf:
     # ratio}}}, tuple keys -> nested dicts) so validate_thesis's own ARI_THESIS_BIAS
     # re-check can apply the SAME clearance-magnitude weighting the real scoring path

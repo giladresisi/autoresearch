@@ -1,14 +1,14 @@
 """Builds the `decide_thesis` facts dict from in-memory bars.
 
 **Contract, pinned by `test_assemble.py`:** `agent/run_agent.py::decide_thesis` reads
-exactly the 15 keys in `DECIDE_THESIS_KEYS` off the `facts` dict, plus positional
+exactly the 16 keys in `DECIDE_THESIS_KEYS` off the `facts` dict, plus positional
 `facts_text` / `context_text` and keyword `evidence_magnitude`.
 
 **Why this routes through `derive_facts.compute_facts` and not through the FactStore.**
 Acceptance gate 1 compares this assembler against the offline reference
 (`agent/bench/facts.py::ParquetFactsSource.build_facts` → `derive_facts`). Reconstructing
 S0–S9 from the new facts layer's own records would be comparing a fork against itself —
-and most of the 15 keys (HTF close status, mid reclaim, SMT candidates, evidence
+and most of the 16 keys (HTF close status, mid reclaim, SMT candidates, evidence
 magnitude, the S8/S9 renders) have no representation in the facts layer at all. So the
 LLM-facing view is produced by the reference code, reusing `bench.facts.bundle_to_l1_view`
 so there is exactly one copy of the overlay logic. `store` is accepted for interface
@@ -49,7 +49,7 @@ DECIDE_THESIS_KEYS = (
     "suppressed_p1_levels", "suppressed_p2_sites",
     "level_htf_close_status", "level_tiers", "smt_candidates",
     "week_extremes", "now_price", "mid_reclaim", "htf_reversal",
-    "mid_position", "p1_stale_levels",
+    "mid_position", "p1_stale_levels", "level_tf_status",
 )
 
 # The Analyzer's own window. Must equal agent/bench/facts.py LOOKBACK (17 days) or the
@@ -93,7 +93,7 @@ def normalize_for_derive(df) -> pd.DataFrame:
 
 def _empty_contract() -> dict:
     """A structurally complete but empty view. A degraded facts build must still satisfy
-    the 15-key contract — `decide_thesis` reads every key unconditionally.
+    the 16-key contract — `decide_thesis` reads every key unconditionally.
 
     Every nested dict is built FRESH. `dict(shared)` would copy the outer mapping while
     leaving all five per-ticker values aliased to the same two inner dicts, so a
@@ -114,6 +114,8 @@ def _empty_contract() -> dict:
         "htf_reversal": _by_ticker(),
         "mid_position": _by_ticker(),
         "p1_stale_levels": {"MNQ": [], "MES": []},
+        # plan 44: empty = no per-tf restoration (scores exactly as legacy; flag off).
+        "level_tf_status": {},
         "degraded": True,
     }
 

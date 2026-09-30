@@ -606,7 +606,8 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
                               smt_candidates=None, week_extremes=None,
                               now_price=None, fvg_zone_meta=None,
                               mid_reclaim=None, htf_reversal=None,
-                              mid_position=None, p1_stale_levels=None) -> tuple[dict, list]:
+                              mid_position=None, p1_stale_levels=None,
+                              level_tf_status=None) -> tuple[dict, list]:
     """Compute per-item points, net score, and the confidence ceiling from the model's
     declared P1/P2 evidence ledger (decisions/thesis.md §2.1/§4/§6). Mirrors
     _derive_daily_arithmetic/_derive_next_arithmetic: confidence is silently corrected
@@ -633,7 +634,8 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
     completed-bar verdict has already been undermined by the currently-forming next bar
     (thesis.md §10, 2026-08-05). `mid_position`/`p1_stale_levels` (2026-08-15) thread the
     unconditional-position P3 injection and the P1 equilibrium-staleness hard gate
-    (thesis.md §2.1 P3 / §2.1c)."""
+    (thesis.md §2.1 P3 / §2.1c). `level_tf_status` (plan 44, flag ACT_PER_TF_LEVEL_STATUS)
+    threads the per-tf restoration layer; None/{} scores exactly as before."""
     from validate_contracts import score_thesis_evidence
     notes: list = []
     evidence = block.get("evidence") or []
@@ -647,7 +649,8 @@ def _derive_thesis_arithmetic(block: dict, magnitude=None, dol_available=None,
                                     week_extremes=week_extremes, now_price=now_price,
                                     fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim,
                                     htf_reversal=htf_reversal, mid_position=mid_position,
-                                    p1_stale_levels=p1_stale_levels)
+                                    p1_stale_levels=p1_stale_levels,
+                                    level_tf_status=level_tf_status)
     # Audit-annotate each item with its computed points/side in place (mirrors
     # _derive_next_arithmetic writing item["score"] back onto the ledger).
     block["evidence"] = scoring["scored_evidence"]
@@ -1078,8 +1081,11 @@ _TASK_THESIS = (
     "week_low/week_high), OR a duplicate restatement of one physical sweep that another "
     "named level already covers at the identical timestamp. Do NOT declare a fresh P1 item "
     "there — code zeroes it regardless. If that same level is ALSO listed under SMT "
-    "candidates, check its tag there: 'P2-SUPPRESSED' means the level is nested — no "
-    "evidence at all here, not P1 and not P2; code zeroes it regardless of what you declare. "
+    "candidates, check its tag there: 'P2-SUPPRESSED (<reason>)' means the level is nested, "
+    "shadowed or a duplicate — no evidence at all here, not P1 and not P2; code zeroes it "
+    "regardless of what you declare — UNLESS the same level is tagged '[PER-TF: standing 4h "
+    "read]' in the close-status block, in which case its 4h read scores (thesis.md §2.1g) "
+    "and its 1h does not. "
     "Instead, look for the more extreme, un-nested level in the same family (e.g. "
     "prev1_day_low rather than a deeper prevN_day_low) — that is the level to reason about "
     "once IT is actually swept."
@@ -1158,13 +1164,15 @@ def decide_thesis(facts_text: str, context_text: str, facts: dict, backend: Back
     htf_reversal = facts.get("htf_reversal")
     mid_position = facts.get("mid_position")
     p1_stale_levels = facts.get("p1_stale_levels")
+    level_tf_status = facts.get("level_tf_status")
     score_kw = dict(
         magnitude=evidence_magnitude, dol_available=dol_available,
         suppressed_p1_levels=suppressed_p1_levels, suppressed_p2_sites=suppressed_p2_sites,
         level_htf_close_status=level_htf_close_status, level_tiers=level_tiers,
         smt_candidates=smt_candidates, week_extremes=week_extremes, now_price=now_price,
         fvg_zone_meta=fvg_zone_meta, mid_reclaim=mid_reclaim, htf_reversal=htf_reversal,
-        mid_position=mid_position, p1_stale_levels=p1_stale_levels)
+        mid_position=mid_position, p1_stale_levels=p1_stale_levels,
+        level_tf_status=level_tf_status)
     fallback = None
     if not thesis_failsafe_enabled():
         fallback = lambda attempts: _ledger_fallback_thesis(attempts, menus, score_kw)  # noqa: E731

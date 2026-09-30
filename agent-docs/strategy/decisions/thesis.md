@@ -150,7 +150,8 @@ Nesting is a STATIC, price-only fact about the CURRENT level table (§2.1b above
 — it does not matter when the divergence happened to fire, only whether the level it names is
 currently the frontier of its family. A nested level (e.g. `prev3_day_low`, superseded by a more-
 recent, deeper `prev1_day_low`) is now fully suppressed for BOTH P1 and P2, no exception — exactly
-the same treatment as a plain nested P1 level with no SMT at all.
+the same treatment as a plain nested P1 level with no SMT at all — except §2.1g's single restored
+level per (asset, side), whose 4h read scores through the ordinary P1/P2 dispatch.
 
 This does not drop the underlying signal. The frontier member of a prevN family (`prev1_day_low`/
 `prev1_day_high`) is BY CONSTRUCTION never nested — nothing more recent exists in the family to nest
@@ -224,7 +225,8 @@ immature (the framework prefers waiting over scoring a shadowed shallower read).
 only — an unswept deeper level shadows nothing. Ties (identical price under two names, the §2.1d
 shape) keep the higher-tier representative. Folded into the same `suppressed_p1_levels` set, so
 the S9 rendering rule, the P1 auto-injection skip, and the scoring backstop all inherit it;
-P2/SMT candidacy is untouched, exactly as with nesting.
+P2/SMT candidacy is untouched, exactly as with nesting. A stack whose every member is suppressed
+still keeps one standing 4h read (§2.1g).
 
 **Why this matters:** without it, a pile of nested, lower-significance echoes of the SAME
 underlying extreme can numerically out-tally one genuinely meaningful (often week-tier) signal.
@@ -319,7 +321,7 @@ declared. Deliberately structure-based, not a raw age cutoff — the trigger is 
 interacted with the tier's own equilibrium (the market re-based; the old acceptance/rejection
 belongs to a previous swing), so a genuinely old-but-untested read is NOT gated. P2 is untouched
 (divergences keep their own tier-relative shelf life above); a fresh crossing back through the
-level later fires its own new sweep/read as usual.
+level later fires its own new sweep/read as usual. The §2.1g restored level's 4h read is exempt.
 
 ### 2.1d Duplicate-simultaneous-sweep collapsing
 
@@ -393,6 +395,48 @@ structured map plus explicit S9 tags (`[PROMOTED: running day extreme — scores
 close-status row, `PROMOTED from session tier` on the candidate line). Scoped gaps, accepted for
 now: the §2.1c equilibrium-staleness check and §3a near-maturity candidacy still key off the
 stored (session) tier, so a promoted level participates in neither.
+
+### 2.1g One standing 4h read per suppressed stack (per-timeframe level status, 2026-09-30)
+
+§2.1b nesting (incl. session nesting and most-extreme-swept-only shadowing), §2.1d duplicate
+collapsing, §2.1c equilibrium staleness and §2.1b P2/SMT nesting suppression exist so that ONE
+displacement is not scored once per stacked level. Applied level-wide and on every timeframe, they
+can also score it ZERO times: every level the move crossed is suppressed, and the move's standing
+higher-timeframe verdict vanishes from the sheet (2026-09-28 09:20 ET: MNQ had closed two 4h bars
+below `prev1_day_low`, `prev3_day_low` and `prev4_day_low` with no 4h close back; all were
+suppressed, and the sheet carried nothing from that 4h verdict). A suppressor collapses a stack to
+a representative; it must not collapse it to nothing.
+
+**Rule (code: `validate_contracts.per_tf_level_status`, exported by bench/facts.py as
+`level_tf_status`; flag `ACT_PER_TF_LEVEL_STATUS`, ON by default).** Per asset:
+1. Take the suppressed set: `suppressed_p1_levels` ∪ `p1_stale_levels` ∪ `suppressed_p2_sites`,
+   minus any live P2 site (a meaningful SMT candidate on that asset not in `suppressed_p2_sites`,
+   which already scores and is left untouched).
+2. Per side (`*_high` / `*_low`, read from the level name; other names are never restored), among
+   the members with a completed 4h close since their sweep, restore the MOST EXTREME one (highest
+   high / lowest low). Ties: higher tier (week > day > session, after §2.1f promotion), then facts
+   level-map order.
+3. The restored level scores on its **4h read only**, as an ordinary un-suppressed level: P1, or
+   P2 when it is a meaningful SMT candidate whose effective 4h verdict is a rejection. Every
+   multiplier and the §10 partial-bar ladder (discount / omit / reverse) apply unchanged; §2.1c
+   staleness does not. Its **1h read is retired** and scores nothing. When the 1h agrees with the
+   4h this changes nothing (tf-dedup keeps the 4h). When it has closed back through the level, the
+   4h verdict stands and the 1h recross is what the §10 ladder already weighs.
+4. Every other suppressed level stays suppressed on every timeframe. Un-suppressed levels are
+   untouched. DOL eligibility (`_dol_menu`), §3a near-maturity candidacy and the S9
+   `mature_evidence_count` keep the level-wide sets.
+
+S9 tags the restored level's rows `[PER-TF: standing 4h read ...]` / `[PER-TF: 1h retired ...]`,
+and its SMT-candidate line states what its 4h read actually scores (`4h scores as P2 (effective
+reject)` / `4h scores as P1 (effective accept; no P2)` / `4h read OMITTED`). Every other
+`P2-SUPPRESSED (level is ...)` tag now names the real reason (nested / session-nested / duplicate /
+shadowed), where it used to say "nested" for all of them.
+
+**Evidence (2026-09-29, 685 dates 2024-02..2026-09, ledger-only).** Directional hit (larger
+09:30-13:00 excursion) 45.0% -> 48.0%; same days 45.4% -> 48.5%; 80 direct flips, 49 right.
+Positive every year; 2026 holdout +2.1 pp / +3.0 pp. This makes an anti-predictive ledger less so;
+it is not an edge claim. Alternatives measured and rejected: keeping the 1h (−0.9 pp), no REVERSE
+on the restored 4h (holdout −3.4 pp), restoring only beyond live levels (−0.4 pp).
 
 ### 2.2 Secondary criteria (lower max weight; accumulate only if aligned)
 
@@ -1115,3 +1159,9 @@ unconditional, so the directional call passed validation clean, on the first att
 ungrounded in the code-scored ledger. Fixed: the exemption now applies ONLY when `bias ==
 NEUTRAL`; a declared UP/DOWN with an empty ledger is rejected outright (retry), forcing the
 model to either transcribe real evidence or downgrade to NEUTRAL.
+
+**2026-09-28 09:20 ET — suppression erased a standing 4h verdict.** MNQ had closed two 4h bars
+below `prev1_day_low`/`prev3_day_low`/`prev4_day_low`, and every one of them was nested, shadowed or
+stale, so the ledger carried nothing from that verdict → §2.1g (one standing 4h read per
+suppressed stack). Measured over 685 dates (hit 45.0% -> 48.0%); on 09-28 itself it moves the net
++10.50 -> +5.53, still UP — §2.1g does not flip that day.

@@ -63,6 +63,18 @@ def _isolate_global_state(tmp_path, monkeypatch):
         pass
 
 
+@pytest.fixture(autouse=True)
+def _isolate_stop_requests(tmp_path, monkeypatch):
+    """Point the stop-request files at a per-test temp dir. They are anchored to the
+    worktree root and POLLED by a running orchestrator / automation.main, so a test that
+    exercises the terminate path in a worktree with a live session would otherwise stop it."""
+    from orchestrator import stop_request
+    sdir = tmp_path / "_stop_requests"
+    sdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(stop_request, "ORCH_STOP_FILE", sdir / "orchestrator_stop.req")
+    monkeypatch.setattr(stop_request, "AUTOMATION_STOP_FILE", sdir / "automation_stop.req")
+
+
 def pytest_configure(config):
     """Create a minimal manifest.json in CACHE_DIR if one doesn't exist.
 

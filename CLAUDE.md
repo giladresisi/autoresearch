@@ -54,9 +54,12 @@ lists what must NOT be built.
   and 2026-09-27 (plan 42). They are not optional extras: they are the tests that make
   the NUMBERS trustworthy — replay determinism (gate 1), replay-reproduces-live (gate 2),
   KB-edit-invalidates-the-recording (gate 4), plan-death-does-not-shorten-the-window
-  (gate 6), facts no-lookahead, and the named cases. **Run `-m slow` before believing any
-  A/B verdict, and after ANY change to an entry mechanism, the replay, thesis-cache or
-  facts path.** A behaviour change moves named-case figures: re-measure them per
+  (gate 6), facts no-lookahead, and the named cases. **Run `-m slow` ONLY when the
+  operator explicitly asks for it** (operator decision 2026-09-30): it is never a
+  prerequisite for an A/B verdict, a commit, a PR or a merge on its own. When a change
+  touches an entry mechanism, the replay, thesis-cache or facts path, say in the report
+  that the slow suite was not run, so the operator can ask for it. A behaviour change
+  moves named-case figures: re-measure them per
   `docs/entry-mechanism-change-protocol.md` (precedent: `l2-mechanisms.md` §11.3).
   Thesis recordings are keyed per date x code version; when a gate skips or raises
   `NetworkCallRefused`, re-seed that date with `--seed` (one model call; 08-13 and 09-04
@@ -84,6 +87,10 @@ lists what must NOT be built.
 - `ACT_TRADER_BACKEND` unset = auto-select by key (`OPENROUTER_API_KEY` preferred, else
   `ANTHROPIC_API_KEY`), no longer a hard-coded `openrouter`. Leave it and
   `ACT_TRADER_MODEL` unset in live.
+- `ACT_PER_TF_LEVEL_STATUS` is **ON by default** (plan 44, thesis.md §2.1g): per asset and
+  side, the most extreme suppressed level with a mature 4h read gets that 4h read back in the
+  L1 ledger (1h retired; S9 tags it `[PER-TF: ...]`). `0` (or `false`/`no`/`off`) restores the
+  all-suppressed ledger; the S9 text differs, so flipping it re-keys the thesis cache.
 - `ACT_THESIS_FAILSAFE` is **OFF by default**: a thesis call that fails validation on
   every retry becomes a code-built `ledger_fallback` thesis (verdict and `thesis_source`
   say so; never written to the thesis cache) instead of the NEUTRAL failsafe. `true`
@@ -98,6 +105,11 @@ lists what must NOT be built.
   — the DIRECTION only; the target stays the T2 pick. The leg-mid take-profit is a second
   switch, `premove_context.MID_TARGET_ENABLED`, default `False` (operator decision
   2026-09-30). Not a rule; both are module attributes, not env vars.
+- `ACT_EXTENSION_VETO` is **ON by default**: a market-mechanism fire priced more than
+  `executor.EXTENSION_MAX_PTS` (100 pts) beyond the post-09:30 counter-extreme is not
+  entered (`l2-mechanisms.md` §2; a `veto` record, reason `extension`; no attempt spent).
+  `0` (or `false`/`no`/`off`) disables it. A plain replay does not load `.env`: set it in
+  the shell for a replay.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.

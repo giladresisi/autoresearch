@@ -516,6 +516,53 @@ CASES: "tuple[NamedCase, ...]" = (
                     "10:11:14: **+172.75 pts, the day's only trade.**"),
     ),
 
+    # ---- §2 the extension veto (operator, 2026-09-29) --------------------------- #
+    NamedCase(
+        key="sec2-0929-extension", date="2026-09-29", mechanism="fvg_1m_post_extreme",
+        doc_section="§2 extension veto", era="current-20260927", expect="no_fire",
+        pinned_by=("agent/trader/test_executor_extension_veto.py::"
+                   "test_down_plan_173_pts_from_the_post_open_high_is_vetoed_with_"
+                   "full_detail",
+                   "agent/trader/test_executor_extension_veto.py::"
+                   "test_0929_real_tape_the_0944_short_is_vetoed"),
+        note="The recorded live thesis (DOWN, DOL TDO 30443.75, F1 30827.5). The 09:31:00 "
+             "micro_smt_reject short @ 30675.75 is 49.25 pts below the post-09:30 high "
+             "30725.00 (09:30:02) and is taken (stopped 09:31:14 @ 30690.75, -15.00); "
+             "the 09:44:00 fvg_1m_post_extreme short @ 30552.00 is 173.00 below it and "
+             "is VETOED (it was -3.50). Asserted up to 09:44:00 only: the tape recorded "
+             "when this was written ends 10:34, so no day figure is registered. "
+             "Measured with §7c's stop-bar retry OFF (2026-09-30): with it ON (the "
+             "default) the 09:31 stop-out's retry (09:32:00 @ 30661.25, "
+             "sec7c-0929-retry) is still open at 09:44, so the 09:44:00 fire is never "
+             "produced and there is nothing to veto; the pinning test runs both.",
+        doc_quotes=("| 09:31:00 `micro_smt_reject` DOWN | 30675.75 | 30725.00 | 49.25 | "
+                    "allowed |",
+                    "| 09:44:00 `fvg_1m_post_extreme` DOWN | 30552.00 | 30725.00 | "
+                    "173.00 | VETOED |"),
+    ),
+
+    # ---- §7c the stop-bar retry (operator, 2026-09-30) -------------------------- #
+    NamedCase(
+        key="sec7c-0929-retry", date="2026-09-29", mechanism="micro_smt_reject",
+        doc_section="§7c", era="current-20260927",
+        entry_time="09:32:00", entry_price=30661.25, stop=30676.25,
+        exit_time="10:25:57", exit_price=30676.25, pnl=-15.00, attempts_used=2,
+        pinned_by=("agent/trader/test_executor_stop_bar_retry.py::"
+                   "test_0929_real_tape_the_retry_is_taken_and_stopped_at_102557",),
+        note="The recorded live thesis (sec2-0929-extension's). The 09:31:00 "
+             "micro_smt_reject short @ 30675.75 is stopped 09:31:14 @ 30690.75 inside a "
+             "bar that then closes 30676.75 -> 30661.25 (MES 7750.50 -> 7749.00): the "
+             "retry fires at 09:32:00 @ 30661.25, stop min(30705.75 + 2, 30661.25 + 15) "
+             "= 30676.25, survives the 09:32 high 30676.00 by one tick, reaches the "
+             "day-mid initial target (09:44) and, under the T2-only exit (TDO "
+             "30443.75 never reached), is stopped 10:25:57 for -15.00. Day -15.00 -> "
+             "-30.00 on 2 attempts; the 09:44:00 fvg_1m_post_extreme fire that "
+             "sec2-0929-extension records as VETOED is never produced (a position is "
+             "open). The tape ends 10:34, so the figure is asserted up to 10:30 only.",
+        doc_quotes=("retry 09:32:00 @ 30661.25, stop 30676.25",
+                    "stopped 10:25:57 @ 30676.25, **-15.00**; day -15.00 -> -30.00, 2 att"),
+    ),
+
     # ---- §11's calibrated fill rows (the ten documented 5m bindings) ------------ #
     NamedCase(
         key="calib-0821-EXCLUDED", date="2026-08-21",
@@ -685,6 +732,15 @@ ORACLE_THESES = {
         "falsified_if": [{"type": "n_closes_beyond", "price": 30727.88, "side": "above",
                           "tf": "5m", "n": 2}],
     },
+
+    # -- §2 extension veto ---------------------------------------------------- #
+    # The thesis the live session RECORDED on 2026-09-29 (its replay_thesis.json):
+    # direction, DOL and falsifier verbatim.
+    "sec2-0929-extension": _thesis("DOWN", "TDO", 30443.75, falsify_at=30827.5,
+                                   regime="RANGE"),
+    # -- §7c stop-bar retry: the same recorded 09-29 thesis ------------------ #
+    "sec7c-0929-retry": _thesis("DOWN", "TDO", 30443.75, falsify_at=30827.5,
+                                regime="RANGE"),
 }
 
 #: Cases the document does NOT give enough input to replay. Recorded rather than
@@ -727,6 +783,7 @@ DOCUMENTED_ATTEMPTS = {
     "cur-0811": 1, "cur-0812": 1, "cur-0813": 1, "cur-0814": 2, "cur-0818": 1,
     "cur-0821": 1, "sec5-0818-5m-t2": 1,
     "sec7a1-0928": 1,                # §7a.1: "the day's only trade"
+    "sec7c-0929-retry": 2,           # §7c: the stop-out and its retry, both stopped
 }
 
 #: Which of those counts this cycle can check END TO END, and which it cannot.
