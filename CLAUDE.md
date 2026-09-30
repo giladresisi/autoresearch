@@ -84,6 +84,10 @@ lists what must NOT be built.
 - `ACT_TRADER_BACKEND` unset = auto-select by key (`OPENROUTER_API_KEY` preferred, else
   `ANTHROPIC_API_KEY`), no longer a hard-coded `openrouter`. Leave it and
   `ACT_TRADER_MODEL` unset in live.
+- `ACT_PER_TF_LEVEL_STATUS` is **ON by default** (plan 44, thesis.md §2.1g): per asset and
+  side, the most extreme suppressed level with a mature 4h read gets that 4h read back in the
+  L1 ledger (1h retired; S9 tags it `[PER-TF: ...]`). `0` (or `false`/`no`/`off`) restores the
+  all-suppressed ledger; the S9 text differs, so flipping it re-keys the thesis cache.
 - `ACT_THESIS_FAILSAFE` is **OFF by default**: a thesis call that fails validation on
   every retry becomes a code-built `ledger_fallback` thesis (verdict and `thesis_source`
   say so; never written to the thesis cache) instead of the NEUTRAL failsafe. `true`

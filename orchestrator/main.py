@@ -236,7 +236,8 @@ _threading.excepthook = _thread_excepthook
 
 _PRE_SESSION_IB_STOP_EARLY_SECS = 60  # signal mode only: stop pre-session IB this many seconds before open
 
-_STOP_FILE = Path(__file__).resolve().parent.parent / "orchestrator_stop.req"
+# The stop file is shared with trade.py (the writer) and ProcessManager (the in-session poll).
+from orchestrator import stop_request as _stop_request
 
 
 class _GracefulStop(Exception):
@@ -249,11 +250,8 @@ class _GracefulStop(Exception):
 
 
 def _check_stop_requested() -> None:
-    if _STOP_FILE.exists():
-        try:
-            _STOP_FILE.unlink()
-        except OSError:
-            pass
+    if _stop_request.ORCH_STOP_FILE.exists():
+        _stop_request.clear(_stop_request.ORCH_STOP_FILE)
         raise _GracefulStop()
 
 
@@ -573,6 +571,16 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
             if force_reset:
                 _extra["FORCE_RESET"] = "true"
             result = ProcessManager(signal_cmd, relay, orch_ch, extra_env=_extra).run_session(today, grace_end_dt=grace_end_dt)
+            if result == "stop_requested":
+                # Operator stop mid-session (trade.py terminate). Only the in-memory
+                # trades.tsv is written. NOT the 1s merge: it opens an IB connection and
+                # rewrites the main parquets, which must not race trade.py's kill timeout —
+                # _pre_session_init runs the same merge at the next start. NOT the
+                # session-end close: terminate refuses with a position open, and its
+                # override deliberately leaves the position at the broker.
+                relay.write_trades_tsv(_SESSIONS_DIR / session_label.isoformat() / "trades.tsv", today)
+                orch_ch.writeln("[ORCH] Stop requested mid-session — subprocess stopped")
+                raise _GracefulStop()
             # Post-session: fill the ~2-min gap (gap-fill end → first session tick) and merge
             # session 1s parquet into main. This runs before pre-session IB restarts so the
             # session file is cleaned up before overnight accumulation begins.

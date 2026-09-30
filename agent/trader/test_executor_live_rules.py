@@ -415,6 +415,15 @@ def test_the_five_before_dates_replay_byte_identical(date, monkeypatch):
     veto: its 10:18:00 `fvg_1m_post_extreme` long @ 29326.5 (-17.50) is vetoed at 127.25
     pts, -32.50 -> -15.00.
 
+    2026-09-30 (plan 44 adoption): 08-31, 09-02, 09-03 and 09-04 re-seeded under
+    per-TF level status (thesis.md §2.1g re-keys every recording; 09-01 is a
+    stretch-override day and makes no call). Each re-seeded thesis kept its old bias and
+    DOL, so only 08-31 was re-captured, and its move predates the re-seed: a375c83
+    (PR #108, O3 on the 07:30-09:00 -> 09:00 micro pair) opened a pre-open
+    `micro_smt_reject` short at 09:33:00 @ 29467.75, closed by `micro_smt_exit` at 12:07:00
+    @ 29371.50 (+96.25), replacing the two `fvg_1m_post_extreme` stop-outs (-8.25, -30.00).
+    The re-seeded replay is byte-identical to the old recording's replay after #108.
+
     A DELIBERATE mechanism change moves these streams; re-capture them then, exactly as
     the change protocol's step 3 says. A cold cache skips — it proves nothing either way.
     """

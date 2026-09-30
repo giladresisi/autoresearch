@@ -830,6 +830,24 @@ def _extremity_shadowed_levels(lv: dict, swept_at: dict) -> set:
     return out
 
 
+def _p1_suppression(lv: dict, swept_at: dict, session_open=None) -> tuple:
+    """thesis.md §2.1b/§2.1d: the union of the four fresh-P1 suppressors for one asset,
+    plus WHY each member is suppressed. -> (set(names), {name: sorted(reasons)}), reasons
+    in nested / nested_session / duplicate / shadowed. The set is exactly what
+    `bundle.suppressed_p1_levels[tkr]` has always held; the reasons are bookkeeping for the
+    S9 render (plan 44) and never feed scoring."""
+    parts = (("nested", _nested_prev_levels(lv)),
+             ("nested_session", _nested_session_levels(lv)),
+             ("duplicate", _duplicate_sweep_losers(lv, swept_at, session_open=session_open)),
+             # thesis.md §2.1b (2026-08-15): most-extreme-swept-only.
+             ("shadowed", _extremity_shadowed_levels(lv, swept_at)))
+    reasons: dict = {}
+    for reason, names in parts:
+        for name in names:
+            reasons.setdefault(name, []).append(reason)
+    return set(reasons), {name: sorted(r) for name, r in reasons.items()}
+
+
 def _promoted_session_extremes(data: dict, levels: dict, swept_at: dict,
                                now, wk_anchor) -> dict:
     """thesis.md §2.1 P2's meaningful-tier list includes RUNNING day/week extremes — but a
@@ -1023,6 +1041,10 @@ class FactsBundle:
     # accept/reject evidence (nested prevN levels + duplicate-simultaneous-sweep losers).
     # Never applied to P2/SMT candidacy — see _nested_prev_levels/_duplicate_sweep_losers.
     suppressed_p1_levels: dict = field(default_factory=dict)
+    # plan 44: {tkr: {name: [reason]}} — WHY each suppressed_p1_levels member is suppressed
+    # (nested / nested_session / duplicate / shadowed; see _p1_suppression). Bookkeeping
+    # for the S9 render only; never read by scoring.
+    p1_suppression_reasons: dict = field(default_factory=dict)
     # thesis.md §2.1b: {tkr: set(level names)} of SMT/P2 candidates whose level is nested —
     # see _p2_nesting_suppression. Threaded into score_thesis_evidence alongside
     # suppressed_p1_levels, but ONLY zeroes P2 items (never P1, which suppressed_p1_levels
@@ -1836,7 +1858,38 @@ def _near_maturity_candidates(bundle: "FactsBundle", data: dict, now) -> list:
     return out
 
 
-def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) -> str:
+_SUPPRESSION_REASON_TEXT = {
+    "nested": "nested",
+    "nested_session": "session-nested",
+    "duplicate": "a duplicate sweep restatement",
+    "shadowed": "shadowed by a more extreme swept same-side level",
+}
+
+
+def _suppression_reason_text(bundle: FactsBundle, tkr: str, name: str) -> str:
+    """Plain-words reason(s) a level is P1-suppressed, for the flag-on S9 P2-SUPPRESSED
+    tag (plan 44 D8: it always said 'nested', including for shadowed levels)."""
+    reasons = ((bundle.p1_suppression_reasons or {}).get(tkr) or {}).get(name) or ["nested"]
+    return " + ".join(_SUPPRESSION_REASON_TEXT.get(r, r) for r in reasons)
+
+
+def _restored_4h_scoring(bundle: FactsBundle, tkr: str, name: str) -> str:
+    """What a restored level's 4h read at a (P2-suppressed) SMT site actually scores, for
+    its S9 candidate line: P2 only on an EFFECTIVE (post partial-bar ladder) reject, P1 on an
+    effective accept, nothing under 'omit' -- the same dispatch score_thesis_evidence runs."""
+    info = (((bundle.htf_close_status or {}).get(tkr) or {}).get(name) or {}).get("4h")
+    rev = (((bundle.htf_reversal or {}).get(tkr) or {}).get(name) or {}).get("4h", "none")
+    if info is None:
+        return "4h immature -- scores nothing yet"
+    if rev == "omit":
+        return "4h read OMITTED by the partial bar -- scores nothing"
+    accept = bool(info["beyond"]) != (rev == "reverse")
+    return ("4h scores as P1 (effective accept; no P2)" if accept
+            else "4h scores as P2 (effective reject)")
+
+
+def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None,
+                         level_tf_status: Optional[dict] = None) -> str:
     """Render the S9 thesis-evidence block (decisions/thesis.md P1/P3/P4 inputs): weekly
     mid, per-level HTF close-status on BOTH tickers, and SMT candidates with tier
     eligibility. Kept SEPARATE from render_facts_text (S0-S7 stays byte-identical) and
@@ -1848,7 +1901,16 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
     the model declares its bias, instead of the magnitude multiplier being an invisible
     factor it has no way to anticipate (thesis.md §9). No new computation: this renders the
     identical ratio already used for scoring, so the label can never drift from the actual
-    multiplier applied. `None` (the default) renders exactly as before this fix."""
+    multiplier applied. `None` (the default) renders exactly as before this fix.
+
+    `level_tf_status` (plan 44, flag ACT_PER_TF_LEVEL_STATUS): `None` (flag off) renders
+    byte-identically to before. Any dict (flag on, even `{}`) tags each restored level's
+    rows `[PER-TF: ...]`, states on its SMT-candidate line what its 4h read actually scores
+    (`_restored_4h_scoring`), and names the real reason in every other `P2-SUPPRESSED (level
+    is ...)` tag."""
+    per_tf = level_tf_status is not None
+    restored = {(tkr, name): info for tkr, lv in (level_tf_status or {}).items()
+                for name, info in (lv or {}).items()}
     out: list = []
     A = out.append
     A("## S9 THESIS EVIDENCE (decisions/thesis.md P1-P4 inputs)")
@@ -1859,6 +1921,10 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
     A("(a level tagged 'nested/duplicate' below is NOT usable as a fresh, standalone P1 "
       "item — thesis.md §2.1b/§2.1d — unless it is ALSO listed under SMT candidates AND "
       "NOT tagged P2-SUPPRESSED there, in which case it is P2 evidence only, not P1):")
+    if per_tf:
+        A("(a level tagged [PER-TF: ...] is the ONE suppressed level per asset and side whose "
+          "standing 4h read still scores — thesis.md §2.1g: its 4h row scores as an ordinary "
+          "P1/P2 read, its 1h row does not, whatever other tags the level carries)")
     # thesis.md §2.1b: a candidate that was ALREADY nested when its own divergence fired
     # (p2_suppressed=True) does NOT keep a nested level's line alive here — same treatment
     # as a plain nested level with no SMT at all (fully hidden, not P1, not P2).
@@ -1877,7 +1943,8 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
             if swept_map.get(name) is None:      # never swept -> not evidence, skip entirely
                 continue
             is_candidate_site = (tkr, name) in candidate_sites
-            if name in suppressed and not is_candidate_site:
+            restored_info = restored.get((tkr, name))
+            if name in suppressed and not is_candidate_site and restored_info is None:
                 continue          # nested / duplicate restatement, not fresh P1 evidence
             rendered_any = True
             note = " [nested/duplicate -- P2-candidate context only, NOT a P1 item]" \
@@ -1886,12 +1953,24 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
             # HARD gate (score_thesis_evidence zeroes/skips it), not a suggestion.
             stale_tag = " [STALE: price has since reached equilibrium -- NOT usable P1 " \
                         "evidence]" if stale.get(name) else ""
+            tf_notes = {"1h": note, "4h": note}
+            if restored_info is not None:
+                # plan 44 §5.8: the restored level's suppression/staleness tags are
+                # replaced by its per-tf status.
+                stale_tag = ""
+                was = ", ".join(restored_info.get("was") or ()) or "suppressed"
+                tf_notes = {
+                    "4h": (f" [PER-TF: standing 4h read -- most extreme suppressed "
+                           f"{restored_info.get('side')} (was: {was}); thesis.md §2.1g]"),
+                    "1h": " [PER-TF: 1h retired -- does not score]",
+                }
             # thesis.md §2.1 (2026-08-15): running-extreme tier promotion tag.
             promo = promo_map.get(name)
             promo_tag = (f" [PROMOTED: running {promo} extreme -- scores {promo}-tier]"
                          if promo else "")
             for tf in ("1h", "4h"):
                 info = (tf_map or {}).get(tf)
+                note = tf_notes[tf]
                 if info is None:
                     A(f"  {tkr} {name} [{tf}]: immature (no qualifying close yet){note}")
                 else:
@@ -1952,6 +2031,14 @@ def render_evidence_text(bundle: FactsBundle, magnitude: Optional[dict] = None) 
             exh_tag = (f" | stretch_since_fire={stretch}x avg_1h"
                        f"{f' [SUGGESTED EXHAUSTED > {thr}x shelf-life]' if exh else ''}")
         nest_tag = " | P2-SUPPRESSED (level is nested)" if cand.get("p2_suppressed") else ""
+        if per_tf and cand.get("p2_suppressed"):
+            if (cand.get("swept_ticker"), cand.get("level")) in restored:
+                nest_tag = (" | PER-TF (thesis.md §2.1g): 1h retired; "
+                            + _restored_4h_scoring(bundle, cand.get("swept_ticker"),
+                                                   cand.get("level")))
+            else:
+                why = _suppression_reason_text(bundle, cand.get("swept_ticker"), cand.get("level"))
+                nest_tag = f" | P2-SUPPRESSED (level is {why})"
         if cand.get("promoted_from"):
             nest_tag += (f" | PROMOTED from session tier (level is the running "
                          f"{cand['tier']} extreme on both assets)")
@@ -2490,16 +2577,12 @@ def _compute_facts_impl(mnq_df: pd.DataFrame, mes_df: pd.DataFrame, *,
     # separate suppression below (_p2_nesting_suppression, computed once
     # bundle.smt_candidates exists) — no longer unconditionally exempt.
     bundle.suppressed_p1_levels = {}
+    bundle.p1_suppression_reasons = {}
     for tkr in ("MNQ", "MES"):
-        nested = _nested_prev_levels(levels[tkr])
-        nested_session = _nested_session_levels(levels[tkr])
-        dup_losers = _duplicate_sweep_losers(
+        (bundle.suppressed_p1_levels[tkr],
+         bundle.p1_suppression_reasons[tkr]) = _p1_suppression(
             levels[tkr], bundle.swept_at.get(tkr, {}),
             session_open=(sess_cache[tkr].index[0] if len(sess_cache.get(tkr, ())) else None))
-        # thesis.md §2.1b (2026-08-15): most-extreme-swept-only — see
-        # _extremity_shadowed_levels.
-        extremity = _extremity_shadowed_levels(levels[tkr], bundle.swept_at.get(tkr, {}))
-        bundle.suppressed_p1_levels[tkr] = nested | nested_session | dup_losers | extremity
 
     # thesis.md §2.1 (2026-08-15): session-tier levels that ARE the running day/week
     # extreme — tier promotion map (P1 weight via bench/facts.py's level_tiers override,
