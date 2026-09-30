@@ -268,6 +268,22 @@ offline corpus measurement (`target_offline.htf_extra_pools`) has not been run.
 
 ---
 
+## 7b. CANDIDATE — leg-mid take-profit on UNRELATED plans (plan 46, 2026-09-30)
+
+**Built but switched OFF** (`premove_context.MID_TARGET_ENABLED = False`, operator decision
+2026-09-30): plan 46's path overrides the direction only, and a forced plan takes the
+ordinary T2 pick. The operator is reworking target selection and position management for
+these days; this section describes what the switch does when it is turned on.
+
+Pointer only; the text is `l2-mechanisms.md` §11.5 (precedent: §11.2 pointing here). On a
+plan the Analyzer forced against an UNRELATED pre-09:20 leg, the take-profit at each fill is
+(origin + the leg's extreme up to that fill) / 2, falling back to the T2 pick when that mid
+is not at least 5 pts ahead of the entry. Scope = `Executor._set_target_on_fill` only:
+`select_target`, the menu, L1's DOL and the thesis cache key are unchanged. Needs BOTH
+`premove_context.UNRELATED_PATH_MODE = "on"` and `MID_TARGET_ENABLED = True`.
+
+---
+
 ## 8. Two corrections to earlier readings in this line of work
 
 Both came from an 11-date hand-picked sample and did not survive the 84-date sweep:

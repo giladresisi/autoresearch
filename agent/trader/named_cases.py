@@ -873,3 +873,68 @@ HTF_0921_UP_FILLS = (("2026-09-21T09:35:01-04:00", 30251.5),
 HTF_0921_UP_T2 = ("htf_month_high_202608", 30639.5)
 HTF_0921_UP_INITIAL = (30581.3, 30583.1375)
 HTF_0921_UP_DAY_PTS = {"off": 61.5, "on": 362.75}
+
+
+# --------------------------------------------------------------------------------------- #
+# Plan 46 (§11.5 CANDIDATE) — the pre-move classifier on the operator-labelled days.
+#
+# Plain data, like `HTF_0921_MNQ`: what `premove_context.classify` returns at 09:20 on the
+# study's back-adjusted `main/2026-12` MNQ 1m file, pinned by
+# `test_premove_context_real.py::test_reproduces_the_study_on_the_operator_labelled_days`.
+# `origin_ts` is ET. Every row reproduces `<global>/studies/premove_mid_retrace/context.csv`
+# (COUNTER folds into UNRELATED: no COUNTER branch is built, §11.5 Q2).
+#   labelled          the operator's 16 big days that are big here, plus the four the
+#                     operator calls big that are NOT big mechanically (§11.5 Q1)
+#   labelled_counter  07-30: the study's COUNTER day, UNRELATED here by construction
+#   excluded          report / half days (excluded BY HAND from the A/B), still classified
+# --------------------------------------------------------------------------------------- #
+PREMOVE_CONTEXT_LABELLED = {
+    "2025-10-17": {"status": "UNRELATED", "direction": "UP", "size": 392.25,
+                   "origin_ts": "2025-10-17 04:20", "tag": "labelled"},
+    "2025-11-17": {"status": "UNRELATED", "direction": "DOWN", "size": 351.75,
+                   "origin_ts": "2025-11-17 03:57", "tag": "labelled"},
+    "2026-03-13": {"status": "UNRELATED", "direction": "UP", "size": 337.75,
+                   "origin_ts": "2026-03-13 04:11", "tag": "labelled"},
+    "2026-03-26": {"status": "UNRELATED", "direction": "DOWN", "size": 348.25,
+                   "origin_ts": "2026-03-25 23:40", "tag": "labelled"},
+    "2026-04-17": {"status": "UNRELATED", "direction": "UP", "size": 369.25,
+                   "origin_ts": "2026-04-17 01:03", "tag": "labelled"},
+    "2026-04-30": {"status": "UNRELATED", "direction": "UP", "size": 363.0,
+                   "origin_ts": "2026-04-30 02:11", "tag": "labelled"},
+    "2026-05-08": {"status": "UNRELATED", "direction": "UP", "size": 434.75,
+                   "origin_ts": "2026-05-07 18:00", "tag": "labelled"},
+    "2026-06-08": {"status": "UNRELATED", "direction": "UP", "size": 443.5,
+                   "origin_ts": "2026-06-08 05:10", "tag": "labelled"},
+    "2026-07-21": {"status": "UNRELATED", "direction": "UP", "size": 497.5,
+                   "origin_ts": "2026-07-20 20:07", "tag": "labelled"},
+    "2026-07-23": {"status": "UNRELATED", "direction": "DOWN", "size": 435.0,
+                   "origin_ts": "2026-07-23 05:03", "tag": "labelled"},
+    "2026-08-25": {"status": "UNRELATED", "direction": "UP", "size": 403.25,
+                   "origin_ts": "2026-08-24 20:19", "tag": "labelled"},
+    "2026-09-01": {"status": "UNRELATED", "direction": "DOWN", "size": 488.25,
+                   "origin_ts": "2026-09-01 01:57", "tag": "labelled"},
+    "2026-07-30": {"status": "UNRELATED", "direction": "UP", "size": 539.75,
+                   "origin_ts": "2026-07-30 04:02", "tag": "labelled_counter"},
+    "2026-01-15": {"status": "PART", "direction": "UP", "size": 358.5,
+                   "origin_ts": "2026-01-14 20:33", "tag": "labelled"},
+    "2026-08-18": {"status": "PART", "direction": "DOWN", "size": 443.5,
+                   "origin_ts": "2026-08-17 20:51", "tag": "labelled"},
+    "2026-09-17": {"status": "PART", "direction": "UP", "size": 505.75,
+                   "origin_ts": "2026-09-16 18:04", "tag": "labelled"},
+    "2025-11-14": {"status": "NOT_BIG", "direction": "UP", "size": 105.75,
+                   "origin_ts": "2025-11-14 08:44", "tag": "labelled"},
+    "2026-02-06": {"status": "NOT_BIG", "direction": "DOWN", "size": 115.75,
+                   "origin_ts": "2026-02-06 06:58", "tag": "labelled"},
+    "2026-03-16": {"status": "NOT_BIG", "direction": "UP", "size": 211.75,
+                   "origin_ts": "2026-03-16 05:45", "tag": "labelled"},
+    "2026-03-27": {"status": "NOT_BIG", "direction": "DOWN", "size": 238.25,
+                   "origin_ts": "2026-03-27 05:32", "tag": "labelled"},
+    "2026-08-12": {"status": "NOT_BIG", "direction": "UP", "size": 142.0,
+                   "origin_ts": "2026-08-12 08:31", "tag": "excluded"},
+    "2026-03-06": {"status": "NOT_BIG", "direction": "DOWN", "size": 233.5,
+                   "origin_ts": "2026-03-06 08:35", "tag": "excluded"},
+    "2026-09-10": {"status": "UNRELATED", "direction": "DOWN", "size": 465.75,
+                   "origin_ts": "2026-09-10 01:46", "tag": "excluded"},
+    "2026-07-03": {"status": "PART", "direction": "UP", "size": 400.0,
+                   "origin_ts": "2026-07-02 20:58", "tag": "excluded"},
+}

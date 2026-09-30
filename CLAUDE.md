@@ -91,6 +91,13 @@ lists what must NOT be built.
 - `ACT_THESIS_TIEBREAK` is **ON by default**: the Analyzer turns a NEUTRAL thesis into a
   direction (`agent/trader/tiebreak.py`, applied AFTER the thesis cache; `thesis_source:
   "tiebreak"` + `tiebreak_rule`). `0` keeps NEUTRAL days dark.
+- `agent/trader/premove_context.UNRELATED_PATH_MODE` (plan 46, §11.5 CANDIDATE) is
+  `"off"` | `"shadow"` | `"on"`, default `"off"`. `off` = today's path unchanged; `shadow`
+  classifies and writes `premove_context.json` with no behaviour change; `on` forces the
+  thesis against a BIG pre-09:20 leg not part of a bigger move (UNRELATED, no model call)
+  — the DIRECTION only; the target stays the T2 pick. The leg-mid take-profit is a second
+  switch, `premove_context.MID_TARGET_ENABLED`, default `False` (operator decision
+  2026-09-30). Not a rule; both are module attributes, not env vars.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.

@@ -86,6 +86,11 @@ RETRACE_MAX_PCT = 10.0
 #: day; nothing is forced the other way. Set True to restore the 2026-09-17 behaviour.
 HALTED_ARM_ENABLED = False
 
+#: Arm 1 switch — HARNESS ONLY (plan 46 arm C, `scripts/ab_premove_unrelated.py --arm-c`):
+#: False makes every stretch fall through to the model, i.e. option (a) of plan 46 §2
+#: (the UNRELATED path REPLACING arm 1). Read at call time. Production keeps True.
+ARM1_ENABLED = True
+
 #: A noise floor only, and it must stay one. D0 measured every size gate as HARMFUL:
 #: `age<=30 AND size>=300` gives 61% and `>=450` gives 50%, against 68% for age alone —
 #: the same inversion the >=450/>=400 buckets showed (43%/41%). 2026-09-01 reads 488.25 on
@@ -112,6 +117,8 @@ def stretch_override(session_stretch, ticker: str = DECIDING_TICKER) -> dict:
     degraded snapshot has to lose the override, never invent a call.
     """
     st = (session_stretch or {}).get(ticker) if isinstance(session_stretch, dict) else None
+    if not ARM1_ENABLED:
+        return _no("arm 1 disabled", st if isinstance(st, dict) else None)
     if not isinstance(st, dict):
         return _no(f"no session_stretch for {ticker}", None)
 

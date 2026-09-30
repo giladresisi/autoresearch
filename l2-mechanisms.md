@@ -1705,3 +1705,114 @@ tie by name, so they relabel an identical fill and move nothing. A third arm wit
 detector blind to un-asked bars (the pre-§7a.1 reading) matched pair-off on all ten dates.
 Oracle theses are look-ahead (bars fallback after 08-31); one day carries the whole
 delta, so this is thin evidence, not a validation.
+
+
+### 11.5 CANDIDATE — the UNRELATED pre-move path (plan 46, 2026-09-30)
+
+**Not a rule.** An L1-side direction override (plan 37's seam, `analyzer._call`). A
+take-profit substitution at the fill (`executor._set_target_on_fill`) is built too but is a
+SEPARATE switch, off by default. Neither lives in §§2-8; entries, stops and the §8 lifecycle
+are untouched. Flags in `agent/trader/premove_context`: `UNRELATED_PATH_MODE` (default
+`"off"`) turns the DIRECTION override on; `MID_TARGET_ENABLED` (default `False`) adds the
+leg-mid take-profit.
+
+**Operator decision 2026-09-30: direction only.** The mid target stays off: the operator
+expects the mid to be too far on many days and the move to turn back into a continuation
+after it, will manage positions by hand meanwhile, and is reworking target selection and
+position management for these days. With the path on, a forced plan takes the ordinary T2
+pick like any other plan.
+
+**Definitions** (MNQ decides; bars strictly before 09:20 ET):
+- *Leg* — the current leg of a high/low zigzag on 1m bars from the 18:00 ET session open to
+  09:19, reversal threshold 120 pts x (09:19 close / 29000). Origin A, extreme E, size |E-A|.
+- *Big* — size >= 1.14% of the 09:19 close (330 pts at 29000).
+- *PART* — a zigzag on 5m bars over the previous 15 calendar days to 09:19, threshold
+  0.5 x size: its current leg has the leg's direction, starts before today's 18:00 open, and
+  is >= 1.25 x size.
+- *UNRELATED* — big and not PART.
+
+**Proposed behaviour.** UNRELATED: force the thesis AGAINST the leg, no model call
+(`thesis_source: "premove_unrelated"`). PART: never force; plan 37 arm 1 is suppressed and
+the model decides. Not big / unclassifiable: exactly today's path (arm 1, then the model).
+The target is NOT changed (T2, as on any plan). Only with `MID_TARGET_ENABLED` on: the
+take-profit at each fill is (A + the leg's extreme up to that fill) / 2, fixed for that
+position; reaching it kills the plan like any T2 (`target_reached`).
+
+**Evidence** (`<global>/studies/premove_mid_retrace/context.md`, 74 big days
+2024-01..2026-09, report/half days excluded, auto outcome = `smt_cont.resolve`):
+
+| context | n | 09:30 counter-move reached the leg mid |
+|---|---|---|
+| UNRELATED | 43 | 56% [41-70] (recent 63% n=19, older 50% n=24) |
+| PART | 27 | 33% [19-52] |
+| COUNTER (20-session extreme, NOT built) | 4 | 75% |
+
+Operator labels (16 big days): PART 01-15, 08-18, 09-17 -> none reached the mid (3/3);
+UNRELATED 8/12 reached it (misses 2025-10-17, 05-08, 06-08, 07-21); 07-30 (COUNTER) continued.
+A mechanical fade to the mid on ALL big legs was ~break-even (`phase1_target.md`); this is
+the first test of the UNRELATED subset with the real trader.
+
+**Open rule-level questions (must be pinned before this becomes a rule):**
+1. *Where the move starts.* Four operator "big" days are not big here: 2025-11-14 (zigzag
+   leg 105.75), 02-06 (115.75), 03-16 (211.75), 03-27 (238.25). Is the 120-pt cut the
+   operator's leg, or does a halt/time rule belong in the definition?
+2. *07-30 class.* Without a COUNTER branch, 07-30 (first leg off a multi-month low) is
+   UNRELATED and gets forced; it continued. Accept, or require a multi-month-extreme filter?
+   (The generic 10/20-session COUNTER test failed: 83% reached the mid.)
+3. *Mid already passed at the fill* (mid target only, currently off). Built: fall back to
+   the T2 pick when the mid is not >= 5 pts ahead of the entry.
+4. *The target and what follows it* — OPEN, operator-owned (2026-09-30). The mid may be too
+   far, and the move often turns back into a continuation after it (the study finds the leg
+   extreme revisited by 13:00 on ~40-60% of fresh days, `smt_cont.md`). Target selection and
+   position management on these days are being reworked; until then T2 applies and the
+   operator manages the position by hand.
+5. *Which direction reference.* On big days the zigzag leg decides; `_session_stretch`
+   (plan 37) may point elsewhere. Proposed: the leg wins on big days, arm 1 keeps the rest.
+6. *Outcome labels.* Auto `resolve` disagrees with the operator on several labelled days
+   (03-13, 03-26, 04-17 labelled "reached"; auto STOPPED). The 56% uses auto outcomes.
+7. *Stops.* L2's existing stops apply; the study proxy's leg-extreme stop is not built.
+   Unmeasured with the real mechanisms.
+
+Knobs (not rule questions): cut 120, big 1.14%, history 15 d, k 0.5, multiple 1.25, the
+5-pt mid-ahead floor. Report and half days are excluded BY HAND; no detector is built.
+
+**Results (plan 46 A/B, 2026-09-30; evidence only, status unchanged).**
+`scripts/ab_premove_unrelated.py`, real trader replays 09:20-13:00. Arm A = flag `off`
+(recorded theses); **B = `on`, direction only (what the flag does)**; T = B + the leg-mid
+take-profit (`MID_TARGET_ENABLED`); D = T with the operator's leg start as the origin. P&L in
+MNQ points per contract.
+
+| Day | ctx (replay) | A: source, dir, trades, pts | B: dir, trades, pts | T pts, mid hit | D pts | B-A |
+|---|---|---|---|---|---|---|
+| 05-18 | UNRELATED | arm 1 DOWN, 1, +269.25 (TDO 29055.75) | DOWN, 1, +269.25 | +90.125, hit (mid 29234.88) | = T | 0 |
+| 06-08 | UNRELATED | arm 1 DOWN, 3, -54.00 | DOWN, 3, -54.00 | -54.00, no | -54.00 (mid 29292.88 vs 29373.62) | 0 |
+| 06-29 | UNRELATED | model UP, 3, -43.75 | DOWN, 2, +198.00 | +176.25, hit | = T | +241.75 |
+| 07-21 | UNRELATED | model UP, 3, -45.00 | DOWN, 2, +83.75 | -75.00, no | = T | +128.75 |
+| 07-23 | UNRELATED | arm 1 UP, 3, -67.75 | UP, 3, -67.75 | -67.75, no (mid 28896.88) | **+107.625, hit** (07:00 origin, mid 28881.88) | 0 |
+| 07-30 | UNRELATED (study COUNTER) | arm 1 DOWN, 3, -45.00 | DOWN, 3, -45.00 | -45.00, no | = T | 0 |
+| 08-25 | UNRELATED | model UP, 3, -43.25 | DOWN, 2, +218.25 | +163.875, hit | = T | +261.50 |
+| 09-01 | UNRELATED | arm 1 UP, 3, -55.25 | UP, 3, -55.25 | -55.25, no (all three stops before the mid) | -55.25 | 0 |
+
+Totals over the 22 evaluable dates: A +278.00, **B +910.00**, T +496.00, D +671.375.
+**Direction only B-A +632.00**, all of it the three days where the direction changed (06-29,
+07-21, 08-25: the model said UP, the path forced DOWN). On the five days where arm 1 already
+forced the same direction, B = A to the point (the trades are the same; only the thesis
+source differs). Adding the mid target costs T-B **-414.00** on this sample (05-18 -179.125,
+07-21 -158.75, 06-29 -21.75, 08-25 -54.375): the T2 pick was reached on days the mid would
+have capped.
+D-T **+175.375**, all of it 07-23 (the leg start decides whether the mid is
+reached there). PART days 06-15, 08-18, 09-17 and the 10 non-big controls (08-13, 09-25,
+and eight arm-1 days: 06-05, 06-22, 06-23, 07-22, 08-06, 08-14, 08-19, 09-11) are byte-identical
+A vs B; arm A equals the pre-change capture byte for byte on all 16 dates that had one.
+06-09 is NOT_BIG on its replay era (`main/2026-06`, leg 182.0 from 04:01) but UNRELATED on
+the study's back-adjusted `main/2026-12` (445.5 from 06-08 20:56): a price-scale borderline.
+The bars are identical up to the roll offset; the 04:01 pullback is 123.75 pts, which cuts the
+leg at the era's scaled cut (120 x 29697.75 / 29000 = 122.89) but not at the study's (125.34).
+The operator also starts that leg at 04:01 (and labels the day not big).
+Not evaluable warm: 05-08 and 09-21 (their seed calls returned `ledger_fallback`, which is
+never cached), and the controls 08-31, 09-02..09-04, 09-22..09-24, 09-28 (no recording for
+the current code version; not seeded, to stay within the call budget). Eight arm-A seed
+calls were made. n = 8 UNRELATED days, and the direction changed on only 3 of them; one
+day moves the sum by ~200 pts either way.
+The offline sweep (production classifier, `main/2026-12`) reproduces the evidence table
+above exactly (UNRELATED excl. COUNTER 43 / 56% [41-70]; with COUNTER folded in 47 / 57%).

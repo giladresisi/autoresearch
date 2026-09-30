@@ -1,5 +1,42 @@
 ﻿# PROGRESS
 
+## Feature: The UNRELATED pre-move path — forced counter-direction (leg-mid take-profit built, OFF) — Plan 46
+### Status: ✅ Complete (unstaged; §11 CANDIDATE, flag defaults `off`, adopts nothing)
+
+**Revision 2026-09-30 (operator decision): direction only.** The leg-mid take-profit is behind
+a second switch, `premove_context.MID_TARGET_ENABLED = False`; with the path on, a forced plan
+takes the ordinary T2 pick. Harness arms are now A (off) / B (direction only) / T (B + mid
+target) / D (T + operator leg start). Direction-only A/B: B−A +632.00 pts over the 22
+evaluable dates, all from the 3 days where the direction changed (06-29, 07-21, 08-25);
+the mid target would cost −414.00 on this sample. Quick suite 378 passed. The figures in the
+paragraph below describe the first run, where "B" still included the mid target (now arm T).
+**Plan File**: `.agents/plans/46.unrelated-leg-override.md`
+
+Takeover job: a prior executor implemented most of the plan and ran the A/B; this pass audited
+the delivered state, filled the missing `CLAUDE.md` runtime-flags bullet, ran the full test
+matrix, and fixed 2 code-review findings (arm-1 double-compute in `Analyzer._call`'s premove
+routing; a docstring ambiguity between the DOL's frozen mid and the Executor's actual
+take-profit mid) — both re-verified behavior-preserving. Pure classifier
+`agent/trader/premove_context.py` reproduces the source study exactly on real data (20 labelled
+days + all 77 rows, 0 mismatches); Analyzer/Planner/Executor wiring matches plan §2's routing
+table; harness `scripts/ab_premove_unrelated.py` (arms A/B/C/D) shows controls/PART
+byte-identical A vs B, A-after == BEFORE 16/16 dates, B−A +$218.00 over the replayable UNRELATED
+days. Wave-level suite 376 passed; slow real/replay 5 passed; default suite 956/1(pre-existing,
+unrelated)/70; full `tests/` and full `-m slow` both match this worktree's documented
+pre-existing baselines (0 new failures). Both locked 1s regression dates PASS at documented pnl.
+code-review 2 findings fixed; acceptance-criteria-validate ACCEPTED. Flag
+`premove_context.UNRELATED_PATH_MODE` stays `"off"`; operator decides adoption. All changes
+UNSTAGED; nothing committed/pushed.
+
+### Reports Generated
+
+**Execution Report:** `.agents/execution-reports/46.unrelated-leg-override.md`
+- Detailed implementation summary by wave, 5 divergences (all pre-existing/environmental or
+  plan-sanctioned scope limits), full test/harness results, files-modified breakdown
+- Alignment score: 10/10
+
+---
+
 ## Feature: DOL floor raise 0.5 → 1.0 — Plan 18 Part A
 ### Status: ✅ Complete (unstaged — parent session commits; "Part A commit: PENDING" stands)
 **Plan File**: `.agents/plans/18-dol-floor-raise.md`
