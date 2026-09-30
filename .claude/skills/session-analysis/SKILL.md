@@ -13,7 +13,9 @@ description: >
   discrepancies, and optimizations — the file to open first).
   Downloads broker/PMT reports first if they haven't been fetched yet, then runs
   the trader replay (agent/trader, NOT the legacy 1s regression) seeded with the
-  session's recorded L1 thesis, and plots the live session.
+  session's recorded L1 thesis, and plots the live session. Ends by creating a follow-up
+  worktree (`../session-actions-<date>`) whose `analysis.md` points a separate agent at the
+  session folder and `session-analysis.md` to work on the action items.
   Trigger phrases: "analyze the session", "session analysis", "write discrepancies",
   "write optimizations", "analyze yesterday's trades", "what went wrong today",
   "session review", "post-session analysis", "compare strategy vs tradovate",
@@ -26,7 +28,9 @@ description: >
 # Session Analysis
 
 Cross-references all session data sources and writes three structured analysis files
-(`discrepancies.md`, `optimizations.md`, and the consolidated `session-analysis.md`).
+(`discrepancies.md`, `optimizations.md`, and the consolidated `session-analysis.md`), then
+creates a worktree for working on the resulting action items, with an `analysis.md` entry
+point in it (Step 3.5).
 Intended to be run once after a session ends and reports have been (or will be) downloaded.
 
 **Which engine is live (since 2026-09-18, commit 99bb32b).** The live pipeline runs
@@ -636,6 +640,101 @@ not generic advice.
 
 ---
 
+## Step 3.5 — Create the action-items worktree and its `analysis.md`
+
+The analysis produces action items (the D-list and the O-themes). They are worked on in a
+**dedicated worktree** by a separate agent whose only starting point is ONE file,
+`analysis.md`, in that worktree's root. Do this step yourself, from the worktree root
+(`<BASE>`) — do not delegate it to a subagent.
+
+Run it only if Step 3 wrote `<global>/sessions/<date>/session-analysis.md`. If that file does
+not exist, skip this step and say so in Step 4 — there is nothing to point at.
+
+This step never prompts: it also runs unattended inside the run-orchestrator maintenance
+cycle. Do not use `/new-co-trader-worktree` for it (that skill stops to ask whenever the
+current branch is not `master`, and the live worktree is on `live`).
+
+**1. Create the worktree** — a sibling of the current worktree, branched from
+`origin/master` (action-item work merges to master; the live worktree rebases onto it):
+
+```bash
+git fetch origin
+git worktree add "../session-actions-<date>" -b "session-actions/<date>" origin/master
+[ -f .env ] && cp .env "../session-actions-<date>/.env"
+git rev-parse --short HEAD; git branch --show-current            # where the analysis ran
+git -C "../session-actions-<date>" rev-parse --short HEAD        # the new worktree's base
+```
+
+If `../session-actions-<date>` already exists (the analysis was re-run for this date), do not
+create a second worktree: reuse it and overwrite its `analysis.md`. A missing `.env` in
+`<BASE>` is not an error — copy nothing. No dependency install is needed — the first
+`uv run` inside the worktree builds its venv.
+
+**2. Write `../session-actions-<date>/analysis.md`** from the template below. It is a
+pointer file, not a copy of the analysis: the three analysis files stay in the session
+folder and are the source of truth. Fill EVERY placeholder with a resolved absolute path
+(no `<global>`, no `~`, no relative paths) — the agent reading it must not have to resolve
+anything. `<SESSION>` is `<global>/sessions/<date>`, `<RUN>` the replay run folder from
+Step 2.5, `<WT>` the new worktree's absolute path.
+
+````
+# Session <DATE> — action items
+
+Entry point for this worktree. Everything needed to work on the action items from the
+<DATE> live-session analysis is in, or linked from, this file — read the files it points
+to; do not go looking elsewhere for context. Working state: never commit this file.
+
+## Read these, in this order
+1. `<SESSION>\session-analysis.md` — the analysis results: thesis & plan, P&L, the D-list,
+   the O-list, artifacts. START HERE.
+2. `<SESSION>\discrepancies.md` — full detail per D-number (expected / actual / root cause /
+   suggested fix).
+3. `<SESSION>\optimizations.md` — full detail per O-theme (pattern / suggested fix /
+   supporting findings / estimated impact).
+
+## Where everything is
+| What | Path |
+|---|---|
+| Live session folder (every live input + the three analysis files) | `<SESSION>` |
+| Operator notes for the session | `<SESSION>\comments.md` |
+| Live session chart | `<chart path>` |
+| Replay run the analysis compared live against | `<RUN>` |
+| Thesis injected into that replay | `<SESSION>\replay_thesis.json` |
+| Commit the live session ran on | `<running commit>` |
+| Worktree the analysis (and that replay) ran in | `<BASE>` @ `<short-hash>` (`<branch>`) |
+| This worktree | `<WT>` — branch `session-actions/<DATE>`, from `origin/master` @ `<short-hash>` |
+
+## Action items
+- [ ] D<N> [CRITICAL|MINOR] — <one-line summary>
+- [ ] O<N> [High|Medium|Low] — <one-line summary> (operator-proposed)
+
+## Re-running the session on this worktree's code
+```bash
+uv run python scripts/replay_session.py --dates <DATE> --thesis-file "<SESSION>\replay_thesis.json"
+uv run python scripts/report_replay_pnl.py "<run_dir>" --json
+```
+The first command writes a new run folder under this worktree's `regression\sessions\<DATE>\`;
+compare it with the replay run above to measure a change. Never pass `--seed` (it would
+replace the live thesis with a fresh model call).
+````
+
+Filling rules:
+- **Action items**: one checkbox line per item in `session-analysis.md` §4 (every D-number)
+  and §5 (every O-number) — same numbers, the severity / impact tag exactly as written
+  there, `(operator-proposed)` kept where §5 has it. The summary is the item's one-line
+  summary (for an O-theme: its theme name), cut to one sentence — the detail is in the
+  companion files. If a section is empty, write `- none` for it.
+- **`<running commit>`**: the "Running commit" line of `comments.md` (also quoted in
+  `session-analysis.md` §3); `not recorded` if there is none.
+- **`<run_dir>`** in the last section stays literal — it is the folder the first command
+  prints, not known when this file is written.
+- **Dark day / failed replay** (Step 2.5 produced no run folder): write
+  `none — <reason>` in the two replay rows and replace the body of the last section with
+  that same one line.
+- A row whose artifact was not produced (e.g. the chart failed) gets `not produced — <reason>`.
+
+---
+
 ## Step 4 — Report to user
 
 Once the subagent completes, confirm:
@@ -645,6 +744,10 @@ Once the subagent completes, confirm:
   the operator-proposed ones from comments.md
 - File paths written — all THREE: `discrepancies.md`, `optimizations.md`, and the
   consolidated `session-analysis.md`
+- The action-items worktree from Step 3.5: its path, branch and base commit, and the path
+  of its `analysis.md` — or that the step was skipped, and why. To work on the action
+  items, start a separate agent there (`cd ../session-actions-<date>`, then `claude`) with
+  "Read analysis.md and work on the action items".
 
 **Data Health back-fill:** `session-analysis.md` has a "Data Health" section. The
 session-analysis skill does NOT itself run the parquet-check. If a parquet-check WAS
