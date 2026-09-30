@@ -193,6 +193,18 @@ class DecisionRecorder:
                     "artifact_id": artifact_id, "artifact_label": artifact_label})
         self._write(rec)
 
+    def stop_bar_retry(self, *, now, plan_id, mechanism, armed, reason=None,
+                       detail=None) -> None:
+        """O1 (§7c): the stop-bar retry's fate. `stop_bar_retry_armed` at the stop-out
+        (`detail` names bar B and the instant it will be judged); `stop_bar_retry_skipped`
+        with its `reason` when the retry then did not happen. A retry that DID happen is
+        the `fill` that follows, stamped `retry_of`. One record per stop-out per kind, so
+        the log always says why a retry did or did not follow a stop-out."""
+        kind = "stop_bar_retry_armed" if armed else "stop_bar_retry_skipped"
+        rec = self._base(kind, now, plan_id, mechanism)
+        rec.update({"reason": reason, "detail": detail or {}})
+        self._write(rec)
+
     def would_have_killed(self, *, now, plan_id, reason, detail=None) -> None:
         """A plan-death condition that no longer kills. Recorded, NOT acted on.
 

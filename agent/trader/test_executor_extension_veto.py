@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 
 import agent.trader.micro_smt as micro_smt
+import agent.trader.tmso_reject as tmso_reject
 from agent.trader import executor as executor_mod
 from agent.trader.executor import (EXTENSION_MAX_PTS, EXTENSION_VETO_ENV_FLAG, Executor,
                                    extension_veto_enabled)
@@ -96,6 +97,10 @@ class StubMarket:
     def fvg1h_on_bar_close(self, *a, **k): return self._take("fvg_1h_reject")
     def micro_smt_entry_on_bar_close(self, *a, **k): return self._take("micro_smt_reject")
     def micro_smt_exit_on_bar_close(self, *a, **k): return None
+    # O1 (§7c) inert here: `test_executor_stop_bar_retry.py` covers the retry.
+    def stop_bar_retry_enabled(self, mechanism): return False
+    def stop_bar_retry_due(self, now): return False
+    def drop_stop_bar_retry(self): return None
 
 
 def _fire(hms, price, *, mechanism="fvg_1m_post_extreme", direction="DOWN", gap_id=None,
@@ -424,7 +429,13 @@ def test_0929_real_tape_the_0944_short_is_vetoed(tmp_path, monkeypatch):
     """`sec2-0929-extension` end to end: a replay of 2026-09-29 under the thesis the live
     session recorded takes the 09:31:00 short and refuses the 09:44:00 one. Asserted up
     to 09:44:00 only — the tape may still grow past where it ended when this was
-    written."""
+    written.
+
+    Re-scoped 2026-09-30 for §7c's stop-bar retry: the veto is proved with BOTH retry
+    constants off (the pre-O1 configuration the figures were measured under), and a
+    second replay with the retry ON documents the interaction — the 09:31 stop-out's
+    retry (09:32:00 @ 30661.25) is still open at 09:44, so the 09:44:00 fire is never
+    produced and there is nothing to veto (`sec7c-0929-retry`)."""
     import os
     from agent.trader import named_cases as nc
     from agent.trader.replay import run_replay
@@ -433,15 +444,21 @@ def test_0929_real_tape_the_0944_short_is_vetoed(tmp_path, monkeypatch):
     monkeypatch.setenv("ACT_THESIS_CACHE_DIR", str(tmp_path / "thesis_cache"))
     monkeypatch.delenv("ACT_TRADER_5M", raising=False)
     monkeypatch.delenv(EXTENSION_VETO_ENV_FLAG, raising=False)
-    try:
-        res = run_replay([case.date], allow_calls=False,
-                         thesis=nc.thesis_for(case.key))[case.date]
-    except Exception as exc:                        # no 09-29 tape in this environment
-        pytest.skip(f"2026-09-29 replay unavailable: {type(exc).__name__}: {exc}")
-    rows = [json.loads(line) for line in open(
-        os.path.join(res["run_dir"], "trader_decisions.jsonl"), encoding="utf-8")
-        if line.strip()]
-    upto = [r for r in rows if r["time"] <= "2026-09-29T09:44:00-04:00"]
+
+    def _replay(retry):
+        monkeypatch.setattr(micro_smt, "STOP_BAR_RETRY", retry)
+        monkeypatch.setattr(tmso_reject, "STOP_BAR_RETRY", retry)
+        try:
+            res = run_replay([case.date], allow_calls=False,
+                             thesis=nc.thesis_for(case.key))[case.date]
+        except Exception as exc:                    # no 09-29 tape in this environment
+            pytest.skip(f"2026-09-29 replay unavailable: {type(exc).__name__}: {exc}")
+        rows = [json.loads(line) for line in open(
+            os.path.join(res["run_dir"], "trader_decisions.jsonl"), encoding="utf-8")
+            if line.strip()]
+        return [r for r in rows if r["time"] <= "2026-09-29T09:44:00-04:00"]
+
+    upto = _replay(retry=False)
     fills = [r for r in upto if r.get("kind") == "fill"]
     assert [(f["time"], f["mechanism"], f["price"]) for f in fills] == [
         ("2026-09-29T09:31:00-04:00", "micro_smt_reject", 30675.75)]
@@ -454,3 +471,15 @@ def test_0929_real_tape_the_0944_short_is_vetoed(tmp_path, monkeypatch):
     assert vetoes[0]["detail"] == {
         "distance": 173.0, "cap": 100.0, "anchor": 30725.0,
         "anchor_ts": "2026-09-29T09:30:00-04:00", "price": 30552.0}
+
+    # With the retry ON (the default): the 09:32:00 retry is open at 09:44, so no fire
+    # reaches the veto — no veto record, no fill; only the retry's own initial-target
+    # flip lands on that bar.
+    upto = _replay(retry=True)
+    fills = [r for r in upto if r.get("kind") == "fill"]
+    assert [(f["time"], f["price"], "retry_of" in f) for f in fills] == [
+        ("2026-09-29T09:31:00-04:00", 30675.75, False),
+        ("2026-09-29T09:32:00-04:00", 30661.25, True)]
+    assert not [r for r in upto if r.get("kind") == "veto"]
+    assert [r["kind"] for r in upto if r["time"].startswith("2026-09-29T09:44")] == [
+        "initial_target_reached"]

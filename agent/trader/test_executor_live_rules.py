@@ -82,6 +82,10 @@ class StubMarket:
     def sec7_on_bar_close(self, *a, **k): return None
     def tmso_on_bar_close(self, *a, **k): return None
     def fvg1h_on_bar_close(self, *a, **k): return None
+    # O1 (§7c) inert here: `test_executor_stop_bar_retry.py` covers the retry.
+    def stop_bar_retry_enabled(self, mechanism): return False
+    def stop_bar_retry_due(self, now): return False
+    def drop_stop_bar_retry(self): return None
 
 
 def _fire(now, px, *, direction="UP", risk=15.0, mechanism="extreme_reject_close"):
@@ -423,6 +427,16 @@ def test_the_five_before_dates_replay_byte_identical(date, monkeypatch):
     `micro_smt_reject` short at 09:33:00 @ 29467.75, closed by `micro_smt_exit` at 12:07:00
     @ 29371.50 (+96.25), replacing the two `fvg_1m_post_extreme` stop-outs (-8.25, -30.00).
     The re-seeded replay is byte-identical to the old recording's replay after #108.
+
+    2026-09-30 (§7c, the stop-bar retry): 09-01, 09-02, 09-03 and 09-04 re-captured.
+    Each `tmso_reject` stop-out now writes `stop_bar_retry_armed` and, its bar having
+    closed AGAINST the thesis, `stop_bar_retry_skipped adverse_close` (09-01 09:36:58,
+    09-02 09:45:56, 09-04 09:31:33) — records only, every trade unchanged. 09-03's
+    10:08:27 stop-out bar closed WITH the thesis: the retry fills 10:09:00 @ 29256.5
+    (stop 29241.5), reaches its initial target 11:30 and is closed by `micro_smt_exit`
+    12:59:00 @ 29532.0 (+275.50); the 10:18:00 extension veto is no longer produced
+    (position open): -15.00 -> +260.50, 1 -> 2 attempts. 08-31 untouched (no covered
+    stop-out; byte-identical).
 
     A DELIBERATE mechanism change moves these streams; re-capture them then, exactly as
     the change protocol's step 3 says. A cold cache skips — it proves nothing either way.

@@ -97,13 +97,26 @@ micro-session opened, regardless of which asset (MNQ or MES) is the one that act
 broke its level. `SL_BUFFER_PTS` (2.0, per the operator's worked example) beyond that,
 capped at `SL_CAP_PTS` (15.0, borrowed from §7 and `tmso_reject`; UNTUNED here) from
 entry -- the nearer of the two, `reject_core.capped_stop`.
+
+**The stop-bar retry (O1, operator 2026-09-30; `l2-mechanisms.md` §7c).** When the O3
+position is STOPPED OUT and the 1m bar that took the stop (bar B) closes with the signal
+on BOTH assets (the same both-assets test the confirmation uses), and the divergence is
+still live at B's close (not cancelled by the second asset breaking), O3 fires ONE
+re-entry by market at B's close. Armed by the stop-out alone (`arm_retry`), judged once
+(`retry_on_bar_close`), never chained; the one-fire-per-micro-session latch is untouched.
+Stop: O3's own rule -- MNQ's running micro-session extreme (which by then includes B) + 2,
+capped at 15 from the retry's entry. `STOP_BAR_RETRY = False` restores the pre-O1
+behaviour byte for byte. Motivating day 2026-09-29 (`sessions/2026-09-29/comments.md`
+09:55): the 09:31:00 short @ 30675.75 was stopped 09:31:14 by a bar that then closed
+30676.75 -> 30661.25.
 """
 from __future__ import annotations
 
 import pandas as pd
 
 from agent.trader.reject_core import capped_stop
-from agent.trader.tmso_reject import MICRO_SESSION_MINUTES, micro_session_start
+from agent.trader.tmso_reject import (MICRO_SESSION_MINUTES, micro_session_start,
+                                      retry_bar_reason, retry_of, retry_state)
 
 #: O3: a new market-entry mechanism, `micro_smt_reject`. ON by default (operator adoption,
 #: 2026-09-26 -- see `l2-mechanisms.md` §7a).
@@ -127,6 +140,10 @@ MICRO_SMT_PREOPEN_WINDOW_ET = ((9, 30), (10, 30))
 #: The operator's worked example: MNQ's own swept extreme + 2 pts, capped at 15 from entry.
 SL_BUFFER_PTS = 2.0
 SL_CAP_PTS = 15.0
+#: O1 (§7c): an O3 stop-out whose bar closes with the signal on both assets re-enters
+#: once at that bar's close. False restores the pre-O1 stream byte for byte; read at CALL
+#: time like every flag above.
+STOP_BAR_RETRY = True
 
 
 def micro_smt_entry_armed() -> bool:
@@ -224,13 +241,70 @@ class MicroSmt:
         self._mes_broken = False
         self._caught_up_to = None       # history folded in up to (excluding) this label
         self._fired_sessions: set = set()
+        self._retry = None              # O1 (§7c): the armed stop-bar retry, if any
 
     def state(self) -> dict:
         return {"session": self._session, "mnq_broken": self._mnq_broken,
                 "mes_broken": self._mes_broken, "mnq_extreme": self._mnq_extreme,
                 "armed": self._mnq_broken != self._mes_broken,
                 "fired_sessions": sorted(str(s) for s in self._fired_sessions),
-                "bearish": self._bearish}
+                "bearish": self._bearish,
+                "retry": None if self._retry is None else dict(self._retry)}
+
+    # -- O1: the stop-bar retry (§7c) ------------------------------------------- #
+
+    def arm_retry(self, stop_out: dict) -> "dict | None":
+        """Arm the single retry off the stop-out of this machine's own fire (the fire
+        latched `_session`). None when the constant is off or nothing of ours fired."""
+        if not STOP_BAR_RETRY or self._session is None \
+                or self._session not in self._fired_sessions:
+            return None
+        self._retry = retry_state(stop_out, self._session)
+        return dict(self._retry)
+
+    def retry_pending(self) -> "dict | None":
+        return None if self._retry is None else dict(self._retry)
+
+    def drop_retry(self) -> "dict | None":
+        r, self._retry = self._retry, None
+        return r
+
+    def retry_on_bar_close(self, now, mnq_bar, mes_bar, prev_extremes, *, mnq_hist=None,
+                           mes_hist=None) -> "tuple[dict | None, str | None]":
+        """Judge bar B at its close: `(fire, None)`, or `(None, reason)`. Disarms either
+        way. The bars the position was open through are folded in first (the machine
+        stops folding once its session is latched), so the divergence's live state and
+        MNQ's running extreme are read over the WHOLE micro-session, as §7a.1 pins."""
+        r = self.drop_retry()
+        if r is None:
+            return None, None
+        reason = retry_bar_reason(now, r)
+        if reason is not None:
+            return None, reason
+        if mnq_bar is None or mes_bar is None:
+            return None, "missing_bar"
+        session = (prev_extremes or {}).get("session_start")
+        if session != r["session"] or session != self._session:
+            return None, "micro_session_ended"
+        label = now.floor("1min") - pd.Timedelta(minutes=1)
+        if mnq_hist is not None and mes_hist is not None:
+            if label > self._caught_up_to:
+                self._catch_up(mnq_hist, mes_hist, label, None)
+            self._caught_up_to = max(self._caught_up_to, label + pd.Timedelta(minutes=1))
+        self._fold(self._adverse_of(mnq_bar), self._adverse_of(mes_bar))
+        if self._mnq_broken == self._mes_broken:
+            return None, "divergence_cancelled"
+        if not self._closes_with(mnq_bar):
+            return None, "adverse_close"
+        if not self._closes_with(mes_bar):
+            return None, "mes_adverse_close"
+        entry = float(mnq_bar["Close"])
+        stop = capped_stop(entry, self._mnq_extreme, buffer_pts=SL_BUFFER_PTS,
+                           cap_pts=SL_CAP_PTS, short=self._bearish)
+        return {"time": now, "price": entry, "stop": stop,
+                "direction": "DOWN" if self._bearish else "UP",
+                "swept_by": "MNQ" if self._mnq_broken else "MES",
+                "mechanism": None, "retry_of": retry_of(r)}, None
 
     def on_bar_close(self, now, mnq_bar, mes_bar, prev_extremes, *, mnq_hist=None,
                      mes_hist=None, latch_from=None) -> "dict | None":

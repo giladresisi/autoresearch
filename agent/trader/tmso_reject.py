@@ -84,10 +84,23 @@ trades the study above credits.
 **UNTUNED, and stated as such.** `SL_CAP_PTS` is borrowed from §7 and has been fitted to
 nothing. No A/B exists. This is a candidate under
 `docs/entry-mechanism-change-protocol.md`, not an adopted mechanism.
+
+**The stop-bar retry (O1, operator 2026-09-30; `l2-mechanisms.md` §7c).** When the
+position this mechanism opened is STOPPED OUT and the 1m bar that took the stop (bar B)
+closes WITH the thesis against its own open, the mechanism fires ONE re-entry by market at
+B's close -- the same instant every other bar-close fire is booked, i.e. the end of §2's
+cooldown. The retry is armed by the stop-out alone (`arm_retry`), judged once
+(`retry_on_bar_close`) and then gone: a stopped retry never retries again, and the
+per-micro-session latch is untouched, so a fresh micro-session behaves exactly as before.
+Stop: this mechanism's own rule -- the swept extreme, extended by B's own adverse extreme
+if that is further, capped at `SL_CAP_PTS` from the retry's entry. `STOP_BAR_RETRY = False`
+restores the pre-O1 behaviour byte for byte.
 """
 from __future__ import annotations
 
 import pandas as pd
+
+from agent.trader.reject_core import closes_with_thesis
 
 MICRO_SESSION_MINUTES = 90.0
 #: Q2 of four equal quarters -> one quarter after the micro-session opens.
@@ -103,6 +116,10 @@ SWEEP_BAR_MAY_CONFIRM = True
 #: The far-excursion veto (see the docstring). Points beyond TMSO, adverse to the thesis,
 #: reached BEFORE the sweep bar. None disables the veto.
 VETO_EXCURSION_PTS = 50.0
+#: O1 (§7c): a stop-out whose bar closes with the thesis re-enters once at that bar's
+#: close. False restores the pre-O1 stream byte for byte -- one line, like
+#: `SWEEP_BAR_MAY_CONFIRM`, so the A/B is a flip. Read at CALL time, never captured.
+STOP_BAR_RETRY = True
 
 _SHORT = ("DOWN", "SHORT")
 
@@ -167,6 +184,9 @@ class TmsoReject:
         self._armed_level = None
         self._armed_extreme = None
         self._fired_sessions: set = set()
+        # O1 (§7c): the fire whose stop-out may arm a retry, and the armed retry itself.
+        self._last_fire = None
+        self._retry = None
 
     @property
     def short(self) -> bool:
@@ -175,7 +195,51 @@ class TmsoReject:
     def state(self) -> dict:
         return {"armed": self._armed_bar is not None, "level": self._armed_level,
                 "extreme": self._armed_extreme, "short": self._short,
-                "fired_sessions": sorted(str(s) for s in self._fired_sessions)}
+                "fired_sessions": sorted(str(s) for s in self._fired_sessions),
+                "retry": None if self._retry is None else dict(self._retry)}
+
+    # -- O1: the stop-bar retry (§7c) ------------------------------------------- #
+
+    def arm_retry(self, stop_out: dict) -> "dict | None":
+        """Arm the single retry off the stop-out of THIS mechanism's own fire. Returns
+        what was armed, or None (constant off, or no fire of ours to retry)."""
+        if not STOP_BAR_RETRY or self._last_fire is None:
+            return None
+        self._retry = retry_state(stop_out, self._last_fire["session"],
+                                  extreme=self._last_fire["extreme"],
+                                  level=self._last_fire["level"])
+        return dict(self._retry)
+
+    def retry_pending(self) -> "dict | None":
+        return None if self._retry is None else dict(self._retry)
+
+    def drop_retry(self) -> "dict | None":
+        """Disarm without judging (the Executor's own gates said no)."""
+        r, self._retry = self._retry, None
+        return r
+
+    def retry_on_bar_close(self, now, bar) -> "tuple[dict | None, str | None]":
+        """Judge bar B once it has closed: `(fire, None)` when it closed with the
+        thesis, else `(None, reason)`. Disarms either way -- one retry per stop-out."""
+        r = self.drop_retry()
+        if r is None:
+            return None, None
+        reason = retry_bar_reason(now, r)
+        if reason is not None:
+            return None, reason
+        if not closes_with_thesis(bar, self._short):
+            return None, "adverse_close"
+        entry = float(bar["Close"])
+        # The swept extreme the fire used, extended by B's own excursion: the running
+        # adverse extreme since the sweep, which is at least B's.
+        wick = (max(r["extreme"], float(bar["High"])) if self._short
+                else min(r["extreme"], float(bar["Low"])))
+        capped = entry + SL_CAP_PTS if self._short else entry - SL_CAP_PTS
+        stop = min(wick, capped) if self._short else max(wick, capped)
+        return {"time": now, "price": entry, "stop": stop,
+                "direction": "DOWN" if self._short else "UP",
+                "level": r["level"], "mechanism": "tmso_reject",
+                "retry_of": retry_of(r)}, None
 
     # -- the tape -------------------------------------------------------------- #
 
@@ -232,6 +296,38 @@ class TmsoReject:
         wick = self._armed_extreme
         capped = entry + SL_CAP_PTS if self._short else entry - SL_CAP_PTS
         stop = min(wick, capped) if self._short else max(wick, capped)
+        # What a retry off this fire's stop-out anchors on (§7c).
+        self._last_fire = {"session": micro_session_start(now), "extreme": float(wick),
+                           "level": self._armed_level}
         return {"time": now, "price": entry, "stop": stop,
                 "direction": "DOWN" if self._short else "UP",
                 "level": self._armed_level, "mechanism": "tmso_reject"}
+
+
+# -- O1 (§7c): the retry bookkeeping both reject mechanisms share ---------------- #
+
+def retry_state(stop_out: dict, session, **anchor) -> dict:
+    """The armed retry: bar B = the 1m bar that took the stop, judged at its close."""
+    so_time = pd.Timestamp(stop_out["time"])
+    bar = so_time.floor("1min")
+    state = {"stop_out_time": so_time, "entry": stop_out.get("entry"), "bar": bar,
+             "retry_at": bar + pd.Timedelta(minutes=1), "session": session}
+    state.update(anchor)
+    return state
+
+
+def retry_bar_reason(now, r: dict) -> "str | None":
+    """Why the bar completing at `now` is NOT the one the retry waits for, or None.
+    `now` is the retry's own entry instant, so it must still lie in the micro-session
+    the fire belonged to -- the level (TMSO) or the divergence (§7a) is that session's."""
+    if now.floor("1min") - pd.Timedelta(minutes=1) != r["bar"]:
+        return "missed"
+    if micro_session_start(now) != r["session"]:
+        return "micro_session_ended"
+    return None
+
+
+def retry_of(r: dict) -> dict:
+    """The `retry_of` field stamped on the retry's fill record."""
+    return {"stop_out_time": r["stop_out_time"].isoformat(), "entry": r["entry"],
+            "bar": r["bar"].isoformat()}
