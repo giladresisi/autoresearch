@@ -232,6 +232,9 @@ class Executor:
         self._last_row = None
         # §8: the open deeper-gap penetration window, or None.
         self._tk_window = None
+        # O1 (§7c): the `retry_of` of the OPEN position when it is a stop-bar retry,
+        # else None. A stopped retry must not arm another (never chained).
+        self._open_retry = None
         self._state = {
             "tracking": False,
             "plan_alive": True,
@@ -535,6 +538,8 @@ class Executor:
         self._state["stop"] = None
         self._rec.plan_dead(now=now, plan_id=self._plan.get("plan_id"),
                             reason=reason, detail=detail)
+        # A stop-bar retry still armed dies with the plan, and says so (§7c).
+        self._stop_bar_retry_skip(now, "plan_dead")
         # An unfilled order belongs to the dead plan and is withdrawn. An OPEN
         # position is not withdrawn — it keeps being managed by `_drive_orders`
         # until it stops out, reaches its target or the window ends.
@@ -1241,6 +1246,9 @@ class Executor:
             self._market.arbiter.spend(self._state.get("mechanism"))
         except Exception:
             pass
+        # O1 (§7c): AFTER the attempt is spent, so the budget it checks is the one the
+        # retry would trade under.
+        self._arm_stop_bar_retry(event)
 
         failed_id = event.get("artifact_id")
         if not failed_id:
@@ -1310,6 +1318,78 @@ class Executor:
         if hi is not None:
             win["high"] = hi if win.get("high") is None else max(win["high"], hi)
         self._scan_takeover(now)
+
+    # -- O1 (§7c): the stop-bar retry, `tmso_reject` / `micro_smt_reject` only ---- #
+
+    @staticmethod
+    def _retry_detail(state: dict) -> dict:
+        return {k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                for k, v in state.items()
+                if k in ("stop_out_time", "entry", "bar", "retry_at")}
+
+    def _arm_stop_bar_retry(self, event: dict) -> None:
+        """Arm ONE retry off this stop-out, and say at the stop-out itself when none
+        can follow. Nothing is written when the mechanism's constant is off, so the
+        stream is byte-identical to the pre-O1 one."""
+        mechanism = self._state.get("mechanism")
+        if not self._market.stop_bar_retry_enabled(mechanism):
+            return
+        now = pd.Timestamp(event.get("time"))
+        detail = {"stop_out_time": now.isoformat(), "entry": event.get("entry")}
+        if self._open_retry is not None:
+            # The position that just stopped WAS the retry: never chained.
+            self._open_retry = None
+            self._rec.stop_bar_retry(now=now, plan_id=self._plan.get("plan_id"),
+                                     mechanism=mechanism, armed=False,
+                                     reason="no_chain", detail=detail)
+            return
+        cap = self._plan.get("max_attempts")
+        if cap is not None and int(self._plan.get("attempts_used") or 0) >= int(cap):
+            self._rec.stop_bar_retry(now=now, plan_id=self._plan.get("plan_id"),
+                                     mechanism=mechanism, armed=False,
+                                     reason="attempts_exhausted", detail=detail)
+            return
+        armed = self._market.arm_stop_bar_retry(mechanism, event)
+        if armed is None:
+            return
+        self._rec.stop_bar_retry(now=now, plan_id=self._plan.get("plan_id"),
+                                 mechanism=mechanism, armed=True,
+                                 detail=self._retry_detail(armed))
+
+    def _stop_bar_retry_skip(self, now, reason, pending=None) -> None:
+        """Disarm the pending retry (unless the machine already judged it, in which
+        case the caller hands over `pending`) and record why it did not happen."""
+        pending = pending if pending is not None else self._market.drop_stop_bar_retry()
+        if pending is None:
+            return
+        mechanism, state = pending
+        self._rec.stop_bar_retry(now=now, plan_id=self._plan.get("plan_id"),
+                                 mechanism=mechanism, armed=False, reason=reason,
+                                 detail=self._retry_detail(state))
+
+    def _stop_bar_retry_fire(self, now, bar, mnq, block):
+        """The retry's fire at bar B's close, or None with its skip recorded. Returns
+        `(fire, (mechanism, state))`; the state is needed again should the fire be
+        vetoed or lose arbitration after the machine has already let it go."""
+        mechanism, _ = self._market.stop_bar_retry_pending()
+        mes = mes_bar = None
+        if mechanism == "micro_smt_reject":
+            # O3's own gates (its flag and windows), exactly as for its ordinary fire.
+            mblock = (None if micro_smt.MICRO_SMT_ENTRY_ENABLED else "micro_smt_disabled") \
+                or self._micro_smt_entry_block(now)
+            if mblock is not None:
+                self._stop_bar_retry_skip(now, mblock)
+                return None, None
+            mes = truncate(normalize((self._bars or {}).get("MES")), now)
+            mes_bar = self._completed_1m(mes, now) if len(mes) else None
+        elif block is not None:
+            self._stop_bar_retry_skip(now, block)
+            return None, None
+        mechanism, fire, reason, state = self._market.stop_bar_retry_on_bar_close(
+            now, bar, mnq, mes_bar, mes)
+        if fire is None:
+            self._stop_bar_retry_skip(now, reason, pending=(mechanism, state))
+        return fire, (mechanism, state)
 
     def _in_cooldown(self, now: pd.Timestamp) -> bool:
         """§2: after a stop-out, no placement or triggering until the 1m bar in which
@@ -1645,13 +1725,22 @@ class Executor:
         time), during the settle window, inside a stop-out cooldown (§6.1 clause 3, which
         ALSO resets every gap cycle), or with the shared attempt budget spent.
         """
+        # O1 (§7c): a stop-bar retry is judged on the BAR-CLOSE path at bar B's close —
+        # the first instant after §2's cooldown — and every gate it fails is recorded.
+        due = bar is not None and self._market.stop_bar_retry_due(now)
         if not self._state["plan_alive"] or self._sim.position is not None:
+            if due:
+                self._stop_bar_retry_skip(now, "position_open")
             return
         if self._state["in_settle"] or not len(mnq):
+            if due:
+                self._stop_bar_retry_skip(now, "in_settle")
             return
         block = self._entry_block(now)                 # §8's temporary spine gates
         micro_smt_only = block == "entry_cutoff" and micro_smt.MICRO_SMT_ENTRY_ENABLED
         if block is not None and not micro_smt_only:
+            if due:
+                self._stop_bar_retry_skip(now, block)
             return
         if self._in_cooldown(now):
             # Clause 3: no cycle may complete while the cooldown is in force, and every
@@ -1660,6 +1749,8 @@ class Executor:
             return
         cap = self._plan.get("max_attempts")
         if cap is not None and int(self._plan.get("attempts_used") or 0) >= int(cap):
+            if due:
+                self._stop_bar_retry_skip(now, "attempts_exhausted")
             return
 
         price = self._state.get("now_price")
@@ -1707,14 +1798,26 @@ class Executor:
                     fires.append(("micro_smt_reject",
                                   self._market.micro_smt_entry_on_bar_close(
                                       now, bar, mes_bar, mnq, mes)))
+        # O1 (§7c): the retry is one more fire source on this bar, filtered and
+        # arbitrated exactly like the others.
+        retry = retry_pending = None
+        if due:
+            retry, retry_pending = self._stop_bar_retry_fire(now, bar, mnq, block)
+            if retry is not None:
+                fires.append((retry["mechanism"], retry))
         if self._extension_veto:
             # EACH fire, BEFORE `pick`: a vetoed fire must not mask an allowed one from
             # another mechanism on the same bar.
             fires = [(m, f if f is None or self._extension_allows(now, mnq, f) else None)
                      for m, f in fires]
+            if retry is not None and not any(f is retry for _, f in fires):
+                self._stop_bar_retry_skip(now, "vetoed", pending=retry_pending)
+                retry = None
         fire = self._market.pick(fires)
         if fire is None:
             return
+        if retry is not None and fire is not retry:
+            self._stop_bar_retry_skip(now, "lost_arbitration", pending=retry_pending)
         self._enter_by_market(now, fire)
 
     def _extension_allows(self, now, mnq, fire: dict) -> bool:
@@ -1802,12 +1905,15 @@ class Executor:
                                    price=float(fire["price"]),
                                    stop=float(fire["stop"]),
                                    artifact_id=fire.get("gap_id") or mechanism)
+        # A stop-bar retry's fill is stamped with the stop-out it retries (§7c).
+        retry_of = fire.get("retry_of")
         self._rec.order_event(now=now, plan_id=self._plan.get("plan_id"),
                               mechanism=mechanism,
                               artifact_label=self._label_for(ev.get("artifact_id")),
-                              **ev)
+                              **ev, **({"retry_of": retry_of} if retry_of else {}))
         if ev.get("kind") == "fill":
             self._set_target_on_fill(now)
+            self._open_retry = retry_of         # after the reset every fill performs
         # NO attempt is spent HERE. The budget counts STOP-OUTS, not entries
         # (`_on_stop_out`, and `order_sim`'s own "the attempt counter counts stop-outs"),
         # so incrementing on the fill double-counted every §6/§7 trade that then stopped
@@ -1853,8 +1959,10 @@ class Executor:
         unmeasured — see plan 16's out-of-scope list.
         """
         # A new fill is a new position: O4's unwired-refusal record is per-position, so
-        # the next position that hits the same live-port gap is recorded again.
+        # the next position that hits the same live-port gap is recorded again. The
+        # retry marker is per-position too (`_enter_by_market` re-sets it for a retry).
         self._micro_smt_exit_unwired_recorded = False
+        self._open_retry = None
         pick = select_target(self._bars, now, self._plan.get("direction"), self._ticker,
                              **self._htf_kw())
         # Plan 41: the rows D1 was chosen from, and D1 itself, kept for the operator's

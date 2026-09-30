@@ -42,6 +42,8 @@ from agent.trader.fvg_reject import FvgReject, zone_at_0700
 from agent.trader.micro_smt import (MicroSmt, entry_latch_from,
                                     entry_previous_micro_extremes, micro_smt_entry_armed,
                                     previous_micro_extremes)
+import agent.trader.micro_smt as micro_smt_mod
+import agent.trader.tmso_reject as tmso_reject_mod
 
 _SHORT = ("DOWN", "SHORT")
 
@@ -183,6 +185,60 @@ class MarketMechanisms:
     def micro_smt_exit_on_bar_close(self, now, mnq_bar, mes_bar, mnq, mes) -> "dict | None":
         return self._micro_smt_exit.on_bar_close(
             now, mnq_bar, mes_bar, previous_micro_extremes(mnq, mes, now))
+
+    # -- O1: the stop-bar retry (§7c) — `tmso_reject` and `micro_smt_reject` only -- #
+
+    #: Each retrying mechanism's constant, read live off its module (never captured).
+    _RETRY_FLAGS = {"tmso_reject": (tmso_reject_mod, "STOP_BAR_RETRY"),
+                    "micro_smt_reject": (micro_smt_mod, "STOP_BAR_RETRY")}
+
+    def _retry_machine(self, mechanism):
+        return {"tmso_reject": self._tmso,
+                "micro_smt_reject": self._micro_smt_entry}.get(mechanism)
+
+    def stop_bar_retry_enabled(self, mechanism) -> bool:
+        flag = self._RETRY_FLAGS.get(mechanism)
+        return bool(getattr(*flag)) if flag else False
+
+    def arm_stop_bar_retry(self, mechanism, stop_out: dict) -> "dict | None":
+        machine = self._retry_machine(mechanism)
+        return None if machine is None else machine.arm_retry(stop_out)
+
+    def stop_bar_retry_pending(self) -> "tuple[str, dict] | None":
+        """`(mechanism, state)` of the armed retry, or None. At most one exists: a
+        retry is armed by a stop-out, and a stop-out needs a position."""
+        for name in self._RETRY_FLAGS:
+            r = self._retry_machine(name).retry_pending()
+            if r is not None:
+                return name, r
+        return None
+
+    def stop_bar_retry_due(self, now) -> bool:
+        pending = self.stop_bar_retry_pending()
+        return pending is not None and now >= pending[1]["retry_at"]
+
+    def drop_stop_bar_retry(self) -> "tuple[str, dict] | None":
+        pending = self.stop_bar_retry_pending()
+        if pending is not None:
+            self._retry_machine(pending[0]).drop_retry()
+        return pending
+
+    def stop_bar_retry_on_bar_close(self, now, mnq_bar, mnq, mes_bar=None,
+                                    mes=None) -> "tuple[str, dict | None, str | None, dict]":
+        """Judge the armed retry's bar: `(mechanism, fire, reason, state)`. The fire
+        carries the mechanism's name and its `retry_of`, like an ordinary fire."""
+        mechanism, state = self.stop_bar_retry_pending()
+        machine = self._retry_machine(mechanism)
+        if mechanism == "tmso_reject":
+            fire, reason = machine.retry_on_bar_close(now, mnq_bar)
+        else:
+            fire, reason = machine.retry_on_bar_close(
+                now, mnq_bar, mes_bar, entry_previous_micro_extremes(mnq, mes, now),
+                mnq_hist=mnq, mes_hist=mes)
+            if fire is not None:
+                fire = dict(fire)
+                fire["mechanism"] = "micro_smt_reject"
+        return mechanism, fire, reason, state
 
     # -- §6 -------------------------------------------------------------------- #
 

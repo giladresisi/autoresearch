@@ -54,9 +54,12 @@ lists what must NOT be built.
   and 2026-09-27 (plan 42). They are not optional extras: they are the tests that make
   the NUMBERS trustworthy — replay determinism (gate 1), replay-reproduces-live (gate 2),
   KB-edit-invalidates-the-recording (gate 4), plan-death-does-not-shorten-the-window
-  (gate 6), facts no-lookahead, and the named cases. **Run `-m slow` before believing any
-  A/B verdict, and after ANY change to an entry mechanism, the replay, thesis-cache or
-  facts path.** A behaviour change moves named-case figures: re-measure them per
+  (gate 6), facts no-lookahead, and the named cases. **Run `-m slow` ONLY when the
+  operator explicitly asks for it** (operator decision 2026-09-30): it is never a
+  prerequisite for an A/B verdict, a commit, a PR or a merge on its own. When a change
+  touches an entry mechanism, the replay, thesis-cache or facts path, say in the report
+  that the slow suite was not run, so the operator can ask for it. A behaviour change
+  moves named-case figures: re-measure them per
   `docs/entry-mechanism-change-protocol.md` (precedent: `l2-mechanisms.md` §11.3).
   Thesis recordings are keyed per date x code version; when a gate skips or raises
   `NetworkCallRefused`, re-seed that date with `--seed` (one model call; 08-13 and 09-04

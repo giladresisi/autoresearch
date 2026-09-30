@@ -202,7 +202,9 @@ tuning; the rules are fixed.
     (30545.50 at 09:43:06); it stopped at 30555.50 nine seconds later for −3.50 (broker
     −6.25) and the tape never traded below 30552.25 again. Evidence: ONE day, on which every
     cap from 50 to 172 gives the same two verdicts — 100 is the operator's starting value,
-    not a fitted one. Registry: `sec2-0929-extension`.
+    not a fitted one. Registry: `sec2-0929-extension`. Measured with §7c's stop-bar
+    retry OFF: with it ON (the default) the 09:31 stop-out's retry is open at 09:44 and
+    the second fire is never produced (§7c).
   - **WHAT THE CAP OF 100 COSTS — measured 2026-09-30, and adopted ON at 100 by the
     operator with these figures in hand.**
     - **Re-measured stream, 2026-09-03 (thesis UP, plan-38 golden stream).** The 10:18:00
@@ -717,7 +719,9 @@ anchored — inherited open question, not re-litigated here), confirmed by a 1m 
   (+$57.00)**, not the A/B's +54.50 — see the adoption PR's description for the full table.
 - **Scope:** shares the plan's attempt budget, stop-out cooldown, and `NO_ENTRY_AFTER_POSITIVE`
   exactly like every other market mechanism. One fire per micro-session (latched), matching
-  `tmso_reject`'s own convention.
+  `tmso_reject`'s own convention. A stop-out whose bar closes with the signal on both
+  assets re-enters ONCE at that bar's close without lifting the latch — §7c (O1,
+  2026-09-30), which applies to `tmso_reject` too.
 - **Evidence (30-day A/B, lookahead-oracle theses, adoption PR description):** summed Δ(B−A) +54.50 pts
   over 30 dates (63→66 trades) at the A/B's WIDER window, every non-zero per-date Δ traced to
   an O3 entry or an O4 exit, no unexplained knock-on. 3 O3 entries total (1 winner +51.50 on
@@ -804,6 +808,113 @@ mechanism opened it, T2 or no T2 — the instant it confirms.
   and +28.50 pts vs a held-to-close mark on 09-10 (+158.50 realised vs +130.00 marked). Neither
   date's O3/O4 activity falls inside §7a's shipped window question — O4 itself carries no
   window, so both exits are unaffected by the O3 window narrowing.
+
+## 7c. The stop-bar retry (O1) — `tmso_reject` and `micro_smt_reject` ONLY — ADOPTED 2026-09-30
+
+Operator decision (`sessions/2026-09-29/comments.md` 09:41 / 09:55, `optimizations.md`
+O1), adopted as a RULE with the content below; the research behind it (O1 report and its
+oracle re-run, 2026-09-30) found no survival edge at a 15-pt stop over 197 recorded
+stop-outs and is recorded plainly under "Evidence". Scope is these two mechanisms and
+nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
+
+- **Trigger.** The position one of these two mechanisms opened is STOPPED OUT — the
+  Executor's own `stop_out`, never the broker fill (on 09-29 the broker filled 30691.00
+  against the simulated 30690.75) and never a `stop_out_initial` or a losing
+  `micro_smt_exit` — and **bar B**, the 1m bar in which the stop was hit
+  (`floor(stop_out time, 1 min)`, left-labelled), **closes in the favourable direction
+  against its own open**: a short needs `Close < Open`, a long `Close > Open`
+  (definition D1 of the research; D2 "beyond the entry" and D3 "beyond the bar's mid"
+  were rejected). For `micro_smt_reject` the same must hold on MES (D4) — its
+  confirmation is a both-assets rule and so is its retry — AND the divergence must still
+  be live at B's close: every bar the position was open through is folded in first
+  (§7a.1's whole-session reading), and a second-asset break anywhere in them cancels the
+  retry.
+- **Action.** ONE re-entry by market in the plan's direction at B's close, booked at
+  B's completion instant — the same bar-close instant every other fire is booked at,
+  which is also the end of §2's cooldown. It goes through the ordinary
+  fire → extension-veto filter → first-trigger arbitration → market-fill path, so §2's
+  extension veto, the shared attempt budget, `after_positive_trade`, the 10:30 cutoff
+  (`tmso_reject`) or O3's own windows (`micro_smt_reject`) and the T2 selection at the
+  fill all apply unchanged. A fire from another mechanism on the same bar competes with
+  it exactly as fires already do (ties break on the mechanism name, §2); a §6 tick fire
+  at the same instant precedes it, as the tick path already precedes the bar-close path.
+- **Stop: the mechanism's OWN rule, unchanged — the operator explicitly refused a wider
+  stop.** `tmso_reject`: the swept extreme it fired on, extended by B's own adverse
+  extreme where that is further (the running adverse extreme since the sweep, which is
+  at least B's), capped at 15 pts from the retry's entry; no buffer, as for its ordinary
+  fire. `micro_smt_reject`: MNQ's running micro-session extreme — which at B's close
+  includes B — + 2, capped at 15 from the retry's entry. In every measured event B's
+  close sits more than 15 pts from B's extreme, so the cap binds and the retry risks
+  exactly 15.
+- **One retry per stop-out, never chained.** A stopped retry does not retry again. The
+  retry spends an attempt through its own stop-out exactly like any entry (the budget
+  counts stop-outs, §8), so a day can spend attempt 2 on the retry and attempt 3 on
+  whatever fires next.
+- **The latch is NOT lifted.** The retry is a separate, single fire source armed only by
+  the stop-out itself. The mechanism's one-fire-per-micro-session latch stands, so a
+  fresh micro-session behaves exactly as today, and the retry must fall inside the
+  micro-session the fire belonged to (a stop at 10:29:40 judged at 10:30:00 is the next
+  micro-session's — no retry; for `tmso_reject` the cutoff refuses it first anyway).
+- **Record.** `stop_bar_retry_armed` at the stop-out (detail: `stop_out_time`, `entry`,
+  `bar` = B's label, `retry_at` = B's close). Then either the retry's normal `fill` —
+  the mechanism's name, plus `retry_of: {stop_out_time, entry, bar}` — or ONE
+  `stop_bar_retry_skipped` with `reason` ∈ {`adverse_close`, `mes_adverse_close`,
+  `divergence_cancelled`, `micro_session_ended`, `vetoed` (the `veto` record precedes
+  it), `lost_arbitration`, `entry_cutoff` / `after_positive_trade` / O3's window
+  reasons, `position_open`, `attempts_exhausted`, `plan_dead`, `missed`, `no_chain`
+  (the stop-out was the retry's own)}. When the constant is off nothing is written.
+- **Switch:** `tmso_reject.STOP_BAR_RETRY` and `micro_smt.STOP_BAR_RETRY`, module
+  constants in the style of `SWEEP_BAR_MAY_CONFIRM`, default True, read at call time (§9).
+  False restores the pre-O1 stream byte for byte (measured: the 09-03 golden stream and
+  every A/B date below are identical under False).
+- **Evidence.** The research (197 unique recorded stop-outs on 50 dates, 1s tape): a
+  favourable-close re-entry with a 15-pt stop survives 5 minutes 12/38 (31.6%) against
+  34.5% for original entries and 24.5% for non-favourable re-entries — no edge; with the
+  direction right, 10/22 vs a 42.8% base rate. `micro_smt_reject` has ONE qualifying
+  event, 09-29 itself. The operator adopted the rule with these figures in hand; the A/B
+  below is the acceptance test, not a validation. Registry: `sec7c-0929-retry`.
+- **A/B on the days these two mechanisms had a favourable-close stop-out in the
+  recordings (constant False → True on the SAME thesis, `trader_decisions.jsonl` diffed,
+  2026-09-30, 1s replay, current code).** Every retry risked exactly 15 (the cap bound);
+  under False every stream is byte-identical to the pre-O1 code (09-03 = its
+  `plan38_before` fixture).
+
+  | Date | Thesis | Stop-out (bar B) | Retry | Outcome | Day, attempts |
+  |---|---|---|---|---|---|
+  | **09-29** | recorded live (DOWN, TDO 30443.75) | `micro_smt_reject` 09:31:00 @ 30675.75, stopped 09:31:14 @ 30690.75; B 30676.75 → 30661.25 red, MES 7750.50 → 7749.00 red | retry 09:32:00 @ 30661.25, stop 30676.25 (= min(30705.75 + 2, 30661.25 + 15)); the 09:32 high 30676.00 misses it by ONE TICK | reaches the day-mid initial target (09:44, `record` action); TDO never reached; stopped 10:25:57 @ 30676.25, **-15.00**; day -15.00 -> -30.00, 2 att | the 09:44:00 `fvg_1m_post_extreme` fire that §2 records as VETOED is never produced (a position is open) — `sec7c-0929-retry` |
+  | 09-28 | recorded live (UP) | `tmso_reject` 09:32:00 stopped 09:33:32; `micro_smt_reject` 09:37:00 stopped 09:38:00 — BOTH bars close adverse | none (`adverse_close` twice) | — | -45.00, 3 att, unchanged (the §7a.1 counterfactual is a D3 event, not a D1 one) |
+  | 09-03 | recorded (UP), plan-38 golden stream | `tmso_reject` 09:38:00 @ 29260.75, stopped 10:08:27 @ 29245.75; B closes green | retry 10:09:00 @ 29256.50, stop 29241.50 | survives; initial target 11:30; closed by O4 `micro_smt_exit` 12:59:00 @ 29532.00, **+275.50**; the 10:18:00 extension veto is never produced | -15.00 -> **+260.50**, 1 -> 2 att — MOVES the golden stream |
+  | 09-24 | recorded live (DOWN; the oracle says UP) | `tmso_reject` 09:31:00 @ 30511.50, stopped 09:32:01 @ 30526.50; B closes red | retry 09:33:00 @ 30503.25, stop 30518.25 | stopped 09:33:13, -15.00 | +78.25 -> +63.25, 2 -> 3 att; the 10:37 O3 winner unchanged |
+  | 09-25 | oracle, bars rule (DOWN, 30684.00) | `tmso_reject` 09:44:00 @ 30864.25, stopped 09:45:00 @ 30879.25; B closes red | retry 09:46:00 @ 30859.25, stop 30874.25 | stopped 09:46:53, -15.00 | -15.00 -> -30.00, 1 -> 2 att |
+  | 08-14 | `sec10-0814` (DOWN) | `tmso_reject` 09:32:00 @ 30245.00, stopped 09:44:11; B closes green | none (`adverse_close`) | — | +38.50, 2 att, unchanged: `cur-0814` holds |
+  | 07-23 | recorded (UP) | no `tmso_reject` stop-out in this era (the research's came from an older run); `micro_smt_reject` 10:35:00 stopped 10:35:06, B adverse | none | — | -24.25, unchanged |
+  | 07-30 | recorded (DOWN) | three `extreme_reject_close` stops — out of scope | none | — | -45.00, byte-identical |
+
+  Net over the set: three retries stopped at -15.00 (09-29, 09-24, 09-25), one retry
+  +275.50 (09-03), no retry on the adverse-close days. 07-23 and 07-30 were also re-run
+  under `scripts/ab_micro_smt.oracle_for`'s skeleton thesis (UP on both): 07-23 gives the
+  identical stream (its recording is UP too); 07-30 is a plan-37 stretch-override day —
+  the Analyzer forces DOWN over any thesis — so its stream is again the three §7 shorts
+  and the research's UP `tmso_reject` event (an older-era run) is unreachable on current
+  code.
+- **Re-measured golden streams (plan-38 `plan38_before`, re-captured 2026-09-30, operator
+  accepted).** Every covered stop-out writes the `stop_bar_retry_armed` / `_skipped`
+  bookkeeping, so four of the five streams change; the TRADES move on one:
+
+  | Stream | Stop-out (bar B) | Retry | Before → after |
+  |---|---|---|---|
+  | 09-01 | `tmso_reject` 09:36:58; B adverse | none | -55.25, 3 att, records only |
+  | 09-02 | `tmso_reject` 09:45:56; B adverse | none | +120.75, 3 att, records only |
+  | 09-03 | `tmso_reject` 10:08:27 @ 29245.75; B green | 10:09:00 @ 29256.50, stop 29241.50 → O4 exit 12:59:00 @ 29532.00, +275.50 | **-15.00 → +260.50**, 1 → 2 att; the 10:18:00 extension veto is no longer produced |
+  | 09-04 | `tmso_reject` 09:31:33; B adverse | none | +65.75, 3 att, records only |
+  | 08-31 | no covered stop-out | — | +96.25, byte-identical, not re-captured |
+
+- **Interaction with §2's motivating day (`sec2-0929-extension`).** That case's 09:44:00
+  `fvg_1m_post_extreme` fire and its 173.00-pt veto were measured with this retry OFF.
+  With it ON (the default) the 09:31 stop-out's retry is open from 09:32:00 to 10:25:57,
+  so at 09:44 no fire is produced and there is nothing to veto; the veto's figures are
+  unchanged and its pinning test replays the day both ways. `cur-0814` and
+  `sec7a1-0928` do not move (both stopping bars closed adverse).
 
 ## 8. L3 binding & order lifecycle
 
@@ -929,6 +1040,7 @@ mechanism opened it, T2 or no T2 — the instant it confirms.
 | Max FVG height | **45 pts** (was 35 until 2026-08-22) | Raised after the §11 band sweep. NOTE its ORIGINAL rationale ("caps worst-case risk at ~45 pts/attempt") is now **obsolete** — the 25-pt SL cap bounds risk at any height. Under a corrected, completion-timestamped replay the only binding the raise still buys is 08-18 (+229.75); 08-21's 44-pt gap is never re-entered after real creation. Retained as a *character* filter, not a risk one — see the unbounded ablation in §11 |
 | Max distance, current price → trigger | 60 pts | Beyond that we donate too much of the multi-hour L1 move |
 | Extension veto, post-09:30 counter-extreme → entry price (`EXTENSION_MAX_PTS`) | 100 pts | §2; market mechanisms only; strictly-greater vetoes. Operator's value (2026-09-29, confirmed 2026-09-30), NOT fitted: on the motivating day every cap in 50..172 behaves identically, and the cross-era tally in §2 has the removed set net positive (+734.50) at 100, negative only from ~130. `cur-0814`'s winner is 0.75 pt inside it. `ACT_EXTENSION_VETO=0` disables |
+| Stop-bar retry (`tmso_reject.STOP_BAR_RETRY`, `micro_smt.STOP_BAR_RETRY`) | **True** | §7c; a favourable-close (D1, + MES for O3) stop-out re-enters once at bar B's close, own stop rule, never chained. Operator's decision (2026-09-30) against the research's null result; False restores the pre-O1 stream byte for byte |
 | No-move zone around resting trigger | 15 pts | See §8 |
 | `fvg_1m_post_extreme` SL buffer beyond excursion extreme | 2 pts | §6; excursion-anchored, not gap-edge-anchored |
 | `fvg_1m_post_extreme` SL cap | 30 pts from entry | §6; bounds deep-excursion episodes |
