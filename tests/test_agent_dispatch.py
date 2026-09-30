@@ -183,7 +183,8 @@ def test_a_fill_becomes_one_json_safe_ascii_market_entry(tmp_path, direction, ex
                                          ("take_profit", "take_profit"),
                                          ("mark", "window_end"),
                                          ("micro_smt_exit", "micro_smt_exit"),
-                                         ("initial_opp_close", "initial_opp_close")])
+                                         ("initial_opp_close", "initial_opp_close"),
+                                         ("stop_out_initial", "stop_out_initial")])
 def test_every_close_becomes_a_market_close_with_its_reason(tmp_path, kind, reason):
     """Case 26."""
     book = FakeBook()
@@ -317,6 +318,48 @@ def test_agreement_is_silent_and_a_kill_happens_once(tmp_path):
     for sec in (2, 3, 4):
         port.supervise(_ts(f"09:50:0{sec}"), graft)
     assert len(graft.kills) == 1
+
+
+def _held_book(stop):
+    book = FakeBook()
+    book.active = {"direction": "long", "contracts": 1, "source": "strategy",
+                   "stop": stop}
+    return book
+
+
+def test_a_persistent_stop_divergence_is_recorded_once(tmp_path):
+    """Plan 47 D1: position.json carries a stop the model does not. Record-only — it is
+    the operator's stop, not an external position change — and once per pair."""
+    book = _held_book(29280.0)
+    port = _port(tmp_path, book)
+    graft = FakeGraft(position=HELD)                          # model stop 29235.0
+    for sec in range(0, 30):
+        port.supervise(_ts(f"09:50:{sec:02d}"), graft)
+    div = [l for l in _lines(tmp_path) if l["sim_event"]["kind"] == "stop_diverged"]
+    assert len(div) == 1
+    ev = div[0]["sim_event"]
+    assert ev["active_stop"] == 29280.0 and ev["model_stop"] == 29235.0
+    assert graft.kills == [] and book.signals == []
+
+    book.active["stop"] = 29290.0                             # a NEW pair: recorded again
+    for sec in range(30, 60):
+        port.supervise(_ts(f"09:50:{sec:02d}"), graft)
+    assert len([l for l in _lines(tmp_path)
+                if l["sim_event"]["kind"] == "stop_diverged"]) == 2
+
+
+def test_a_stop_divergence_within_the_grace_is_silent(tmp_path):
+    """The CLI writes position.json first and the agent adopts the stop a tick or two
+    later: that window is normal operation, not a divergence."""
+    book = _held_book(29280.0)
+    port = _port(tmp_path, book)
+    graft = FakeGraft(position=HELD)
+    port.supervise(_ts("09:50:00"), graft)
+    port.supervise(_ts("09:50:02"), graft)
+    graft._position = dict(HELD, stop=29280.0)                # adopted
+    for sec in range(3, 40):
+        port.supervise(_ts(f"09:50:{sec:02d}"), graft)
+    assert _lines(tmp_path) == []
 
 
 def test_no_plan_yet_means_nothing_to_supervise(tmp_path):

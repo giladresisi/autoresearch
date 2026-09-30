@@ -114,19 +114,24 @@ class OrderSim:
         event carrying the previous stop, or None when nothing is open. `level_name`
         is the broker mirror's concern (its signal names the level); ignored here.
 
-        The only writer of `position["stop"]` after the fill (plan 35's action A). It
-        is a plain field, so the next `on_bar` tests the new level with the same
-        adverse-first rule as the original; nothing else changes.
+        The only writer of `position["stop"]` after the fill (plan 35's action A, and an
+        operator's `set_stop`). It is a plain field, so the next `on_bar` tests the new
+        level with the same adverse-first rule as the original; nothing else changes.
         """
         if self.position is None:
             return None
         p = self.position
         prev = p["stop"]
         p["stop"] = float(price)
-        # A moved stop sits on the PROFIT side of the entry (plan 35 action A). Its
-        # touch must book a distinct kind: `stop_out` is what §8's attempt budget and
-        # §2's cooldown count, and a profitable exit is neither.
-        p["stop_moved"] = True
+        # A stop moved to the entry or beyond it on the PROFIT side books a distinct
+        # kind when touched: `stop_out` is what §8's attempt budget and §2's cooldown
+        # count, and an exit at breakeven or better is neither. A stop moved but left on
+        # the LOSING side (an operator tightening it) is still a loss when hit, so it
+        # keeps the plain kind.
+        entry = p.get("entry")
+        p["stop_moved"] = (entry is None
+                           or ((float(price) >= float(entry)) if _is_long(p.get("direction"))
+                               else (float(price) <= float(entry))))
         return {"kind": "stop_moved", "time": now, "price": float(price),
                 "prev_stop": prev, "direction": p.get("direction"),
                 "artifact_id": p.get("artifact_id"), "entry": p.get("entry")}

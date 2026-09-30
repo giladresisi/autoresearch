@@ -208,6 +208,43 @@ def test_a_failed_close_ack_does_not_resurrect_the_position():
     assert port.last_stop_out is not None, "the stop-out happened; the cooldown stands"
 
 
+def test_mirroring_port_adopt_stop_sends_nothing_and_a_touch_mirrors_one_close():
+    """Plan 47 D1. The far side ALREADY holds the operator's stop, so adopting it is a
+    model edit only; the touch is mirrored like any other close. The capability is not
+    called `move_stop`: the port still cannot move a stop on the far side."""
+    sink = _Sink()
+    port, _ = _port(sink)
+    port.fill_market(_ts("09:40:00"), direction="UP", price=29250.0, stop=29235.0,
+                     artifact_id="x")
+    ev = port.adopt_stop(_ts("09:50:00"), 29280.0)
+    assert ev["kind"] == "stop_moved" and ev["prev_stop"] == 29235.0
+    assert port.position["stop"] == 29280.0
+    assert [e["kind"] for e in sink.events] == ["fill"]
+    assert not hasattr(port, "move_stop")
+
+    evs = port.on_bar(_ts("09:51:00"), _bar(29281.0, lo=29279.0))
+    assert [e["kind"] for e in evs] == ["stop_out_initial"]
+    assert [e["kind"] for e in sink.events] == ["fill", "stop_out_initial"]
+    assert sink.events[1]["price"] == 29280.0 and port.position is None
+
+
+def test_adopt_stop_with_nothing_open_returns_none():
+    port, _ = _port(_Sink())
+    assert port.adopt_stop(_ts("09:50:00"), 29280.0) is None
+
+
+def test_a_moved_stop_on_the_losing_side_still_books_a_stop_out():
+    """`stop_out_initial` is a PROFIT-side exit. A stop moved but left on the losing side
+    of the entry books the kind the attempt budget and the cooldown count."""
+    sim = OrderSim(dol=None)
+    sim.fill_market(_ts("09:40:00"), direction="DOWN", price=29250.0, stop=29265.0,
+                    artifact_id="x")
+    sim.move_stop(_ts("09:41:00"), 29258.0)
+    evs = sim.on_bar(_ts("09:42:00"), _bar(29255.0, hi=29259.0))
+    assert [e["kind"] for e in evs] == ["stop_out"] and evs[0]["price"] == 29258.0
+    assert sim.last_stop_out is not None
+
+
 def test_the_module_names_no_legacy_module_docstrings_included():
     """Case 7. Raw source, not the AST: a docstring mention is already too close."""
     src = inspect.getsource(order_port)

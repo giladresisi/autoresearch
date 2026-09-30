@@ -1,8 +1,9 @@
 """The operator's control channel into a RUNNING session (plan 41).
 
 `trade.py` appends one JSON record per command to `<state_dir>/operator_control.jsonl`;
-the graft drains the pending ones on a bar close and applies them. A file, not a socket
-or a signal, for three reasons:
+the graft drains the pending ones on a bar close and applies them (`set_stop` alone is
+applied on the tick while a position is open). A file, not a socket or a signal, for
+three reasons:
 
   * **The CLI is a separate process.** It cannot reach the Executor's objects, and the
     agent must never import `live_orders` (CLAUDE.md), so the two halves meet on disk.
@@ -28,7 +29,11 @@ CONTROL_FILE = "operator_control.jsonl"
 KIND_SET_DIRECTION = "set_direction"
 KIND_SET_TARGET = "set_target"
 KIND_RESET_TARGET = "reset_target"
-KINDS = (KIND_SET_DIRECTION, KIND_SET_TARGET, KIND_RESET_TARGET)
+#: The operator moved the protective stop AT THE BROKER (`trade.py update-sl`); this tells
+#: the position model, which otherwise keeps the original stop and never sees the fill
+#: (2026-09-30: a phantom long for eleven minutes after the raised stop was hit).
+KIND_SET_STOP = "set_stop"
+KINDS = (KIND_SET_DIRECTION, KIND_SET_TARGET, KIND_RESET_TARGET, KIND_SET_STOP)
 
 
 class OperatorControl:

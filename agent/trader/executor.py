@@ -492,7 +492,7 @@ class Executor:
                     self._note_exit(ev)
                 if ev.get("kind") == "stop_out":
                     self._on_stop_out(ev)
-                if ev.get("kind") in ("stop_out", "take_profit"):
+                if ev.get("kind") in ("stop_out", "take_profit", "stop_out_initial"):
                     self._note_close(ev)
         except Exception as exc:
             # Swallowed so an order-book bug cannot take the bar loop down — but NOT
@@ -647,10 +647,9 @@ class Executor:
         return sign * (float(price) - float(entry)) > 0
 
     def _note_close(self, ev: dict) -> None:
-        """Latch the first PROFITABLE close. Today that is a take-profit or a profitable
-        `micro_smt_exit` (O4, operator decision) — a stop is never trailed, and the
-        target kills the plan on the same bar; the latch is what keeps the rule true if
-        either of those stops being so."""
+        """Latch the first PROFITABLE close: a take-profit, a profitable `micro_smt_exit`
+        (O4, operator decision), or a moved stop touched in profit (`stop_out_initial` —
+        the operator trailing the broker stop, 2026-09-30). A no-op on a loser."""
         if self._is_profitable(ev):
             self._positive_close = True
 
@@ -2088,6 +2087,45 @@ class Executor:
         return {"accepted": True, "detail": {"price": float(price),
                                              "level": self._target_level}}
 
+    def set_stop_override(self, now, price) -> dict:
+        """Adopt a protective stop the operator has ALREADY moved at the broker
+        (`trade.py update-sl`, plan 47 D1).
+
+        Found on 2026-09-30: the broker stop was raised twice by hand and filled, while
+        this model kept the original stop and managed a position that no longer existed
+        for eleven minutes. The model follows the broker here, it does not judge it: any
+        real price is accepted, tighter or looser, because the broker already holds it.
+        From this bar the touch is tested on the tick like the original stop, and the
+        exit is booked and mirrored here (`stop_out_initial` at or beyond the entry,
+        `stop_out` on the losing side).
+
+        Nothing is sent to the broker: a mirroring port is asked to `adopt_stop`, which
+        edits the model only; the plain simulation (every replay of a recorded control
+        file) moves its own stop.
+        """
+        if self._sim.position is None:
+            return {"accepted": False, "reason": "no_position"}
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            return {"accepted": False, "reason": "bad_price"}
+        if not price > 0:                            # also False for NaN
+            return {"accepted": False, "reason": "bad_price"}
+        mover = (getattr(self._sim, "adopt_stop", None)
+                 or getattr(self._sim, "move_stop", None))
+        if mover is None:
+            return {"accepted": False, "reason": "port_cannot_adopt_stop"}
+        ev = mover(now, price)
+        if ev is None:
+            return {"accepted": False, "reason": "no_position"}
+        self._rec.order_event(
+            now=now, plan_id=self._plan.get("plan_id"),
+            mechanism=self._state.get("mechanism"),
+            artifact_label=self._label_for(ev.get("artifact_id")),
+            reason="operator", **ev)
+        return {"accepted": True,
+                "detail": {"stop": price, "prev_stop": ev.get("prev_stop")}}
+
     def has_position(self) -> bool:
         return self._sim.position is not None
 
@@ -2250,7 +2288,9 @@ class Executor:
         divergence nobody would see until the stop filled at the wrong price — action A
         refuses and says so; it stays refused on `MirroringOrderPort` until a stop-modify
         path exists. Action B (`opp_close`) and O4 (`micro_smt_exit`) both close outright,
-        which the live port CAN do, so they are wired.
+        which the live port CAN do, so they are wired. (The port's `adopt_stop` is the
+        OTHER direction — the model taking on a stop the operator already moved at the
+        broker, `set_stop_override` — and is deliberately not this capability.)
         """
         return hasattr(self._sim, op)
 

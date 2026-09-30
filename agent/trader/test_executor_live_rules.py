@@ -377,6 +377,80 @@ def test_kill_plan_and_void_position_from_outside(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# plan 47 D1: a stop the OPERATOR moved at the broker is adopted by the model    #
+# --------------------------------------------------------------------------- #
+
+def test_set_stop_moves_the_sim_stop_and_records_it(tmp_path, monkeypatch):
+    ex = make_executor(tmp_path, monkeypatch)
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    res = ex.set_stop_override(_ts("09:50:00"), 29280.0)
+    assert res == {"accepted": True, "detail": {"stop": 29280.0, "prev_stop": 29235.0}}
+    assert ex.position()["stop"] == 29280.0
+    moved = [r for r in _recs(tmp_path) if r["kind"] == "stop_moved"]
+    assert len(moved) == 1 and moved[0]["reason"] == "operator"
+    assert moved[0]["price"] == 29280.0 and moved[0]["prev_stop"] == 29235.0
+
+
+def test_set_stop_refused_with_no_position(tmp_path, monkeypatch):
+    ex = make_executor(tmp_path, monkeypatch)
+    assert ex.set_stop_override(_ts("09:50:00"), 29280.0) == {
+        "accepted": False, "reason": "no_position"}
+    assert "stop_moved" not in _kinds(tmp_path)
+
+
+@pytest.mark.parametrize("price", ["abc", None, 0.0, -5.0, float("nan")])
+def test_set_stop_refused_with_a_bad_price(tmp_path, monkeypatch, price):
+    ex = make_executor(tmp_path, monkeypatch)
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    assert ex.set_stop_override(_ts("09:50:00"), price)["reason"] == "bad_price"
+    assert ex.position()["stop"] == 29235.0
+
+
+def test_a_touch_of_an_operator_stop_books_stop_out_initial_and_latches_positive(
+        tmp_path, monkeypatch):
+    """The 2026-09-30 shape: the operator trails the broker stop into profit and it is
+    hit. The model books the exit itself, at the moved stop, on the tick that touches it
+    — not a failed attempt, and a positive close."""
+    seen = []
+    port = MirroringOrderPort(OrderSim(dol=None), lambda ev: seen.append(ev) or None)
+    ex = make_executor(tmp_path, monkeypatch, order_port=port)
+    port._context = ex.order_context
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    assert ex.set_stop_override(_ts("09:50:00"), 29280.0)["accepted"] is True
+    assert [e["kind"] for e in seen] == ["fill"], "adopting a stop sends nothing"
+
+    _step(ex, "09:50:01", 29290.0, lo=29282.0)                 # above it: still open
+    assert ex.position() is not None
+    _step(ex, "09:51:10", 29281.0, lo=29279.5)                 # through it
+    assert ex.position() is None
+    out = [r for r in _recs(tmp_path) if r["kind"] == "stop_out_initial"]
+    assert len(out) == 1 and out[0]["price"] == 29280.0
+    assert [e["kind"] for e in seen] == ["fill", "stop_out_initial"]
+    assert ex._plan["attempts_used"] == 0 and "stop_out" not in _kinds(tmp_path)
+    assert ex._positive_close is True
+
+    asked = ex._market.asked
+    _step(ex, "09:53:00", 29290.0, fire=True)
+    assert ex.position() is None and ex._market.asked == asked
+    assert _kinds(tmp_path).count("fill") == 1
+
+
+def test_an_operator_stop_on_the_losing_side_still_books_a_stop_out(tmp_path,
+                                                                     monkeypatch):
+    """Tightened but still below the entry: a touch is a LOSS, so it is a `stop_out` —
+    an attempt spent — exactly like the mechanism's own stop."""
+    ex = make_executor(tmp_path, monkeypatch)
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    assert ex.set_stop_override(_ts("09:41:00"), 29244.0)["accepted"] is True
+    _step(ex, "09:41:30", 29246.0, lo=29243.0)
+    assert ex.position() is None
+    kinds = _kinds(tmp_path)
+    assert "stop_out" in kinds and "stop_out_initial" not in kinds
+    assert [r for r in _recs(tmp_path) if r["kind"] == "stop_out"][0]["price"] == 29244.0
+    assert ex._plan["attempts_used"] == 1 and ex._positive_close is False
+
+
+# --------------------------------------------------------------------------- #
 # cases 16, 17: the standing gates still hold                                   #
 # --------------------------------------------------------------------------- #
 
