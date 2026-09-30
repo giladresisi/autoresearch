@@ -92,7 +92,7 @@ RTH_OPEN_MINUTE = 30
 # against the ARM's date, and each comes out by changing one line: `None` removes the
 # cutoff, `False` removes the positive-trade rule.
 ENTRY_CUTOFF_ET = (10, 30)           # no NEW entry at or after this; positions managed on
-NO_ENTRY_AFTER_POSITIVE = True       # a plan that closed a winner takes no further entry
+NO_ENTRY_AFTER_POSITIVE = True       # a plan that closed a winner is done: it dies (`positive_close`)
 # §8's window end, and the ONE source of it: `replay.py` imports this constant. Replay's
 # last bar is 12:59:59, so the rule below is unreachable there; live runs the whole CME
 # session and needs it spelled out.
@@ -167,8 +167,10 @@ class Executor:
         # gives it an instant to anchor on. `_target_for_fill` sets it there.
         self._sim = order_port if order_port is not None else OrderSim(dol=None)
         # §8's temporary spine gates and the window end. `_positive_close` latches on the
-        # first profitable close; `_window_ended` makes the window end fire exactly once.
+        # first profitable close (and ends the plan, `_positive_close_death`);
+        # `_window_ended` makes the window end fire exactly once.
         self._positive_close = False
+        self._positive_close_detail = None
         self._window_ended = False
         # The bars handed to the CURRENT `on_bar` call, so a fill discovered inside
         # `_drive_orders` can build its menu at that instant. Set per bar and never read
@@ -386,6 +388,9 @@ class Executor:
             reason, detail = self._spine_death()
             if reason is None:
                 reason, detail = self._death(self._since_arm(mnq), now, bar_complete)
+            if reason is None:
+                # LAST, so a target touch still dies as `target_reached`.
+                reason, detail = self._positive_close_death()
             if reason is not None:
                 self._kill_plan(now, reason, detail)
         if not self._state["plan_alive"]:
@@ -648,10 +653,24 @@ class Executor:
 
     def _note_close(self, ev: dict) -> None:
         """Latch the first PROFITABLE close: a take-profit, a profitable `micro_smt_exit`
-        (O4, operator decision), or a moved stop touched in profit (`stop_out_initial` —
-        the operator trailing the broker stop, 2026-09-30). A no-op on a loser."""
-        if self._is_profitable(ev):
+        (O4, operator decision), a profitable `initial_opp_close`, or a moved stop touched
+        in profit (`stop_out_initial` — the operator trailing the broker stop,
+        2026-09-30). A no-op on a loser."""
+        if self._is_profitable(ev) and not self._positive_close:
             self._positive_close = True
+            self._positive_close_detail = {"exit": ev.get("kind"),
+                                           "entry": ev.get("entry"),
+                                           "price": ev.get("price")}
+
+    def _positive_close_death(self):
+        """§8: a positive trade ENDS THE PLAN, however the exit happened (operator,
+        2026-09-30: "kill the plan on a profitable exit regardless of how we exited ...
+        the day is done"). Until then the latch only blocked entries, which left the plan
+        alive — binding, recording, and open to a later re-derivation — after the day's
+        work was done. No entry moves: every entry path already honoured the block."""
+        if NO_ENTRY_AFTER_POSITIVE and self._positive_close:
+            return "positive_close", dict(self._positive_close_detail or {})
+        return None, None
 
     def _settle_end_ts(self, now: pd.Timestamp) -> pd.Timestamp:
         """The instant the settle window closes on `now`'s date: 09:30:30 ET.
@@ -2338,6 +2357,7 @@ class Executor:
             mechanism=self._state.get("mechanism"),
             artifact_label=self._label_for(ev.get("artifact_id")), **ev)
         self._note_exit(ev)
+        self._note_close(ev)
 
     def _drive_micro_smt_exit(self, now: pd.Timestamp, mnq: pd.DataFrame,
                               bar_complete: bool) -> None:

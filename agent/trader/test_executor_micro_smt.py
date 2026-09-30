@@ -363,6 +363,12 @@ def test_flag_on_profitable_micro_smt_exit_closes_and_latches_no_entry_after_pos
     assert ex.attempts_used() == before, "a WINNING O4 exit must not spend an attempt"
     assert ex._positive_close is True, "a WINNING O4 exit must latch " \
         "NO_ENTRY_AFTER_POSITIVE exactly like a T2 touch does"
+    # 2026-09-30: the latch is a plan death, on the exit's own bar.
+    dead = [r for r in _records(tmp_path) if r["kind"] == "plan_dead"]
+    assert [d["reason"] for d in dead] == ["positive_close"]
+    assert dead[0]["time"].endswith("10:33:00-04:00")
+    assert dead[0]["detail"]["exit"] == "micro_smt_exit"
+    assert ex.bind_state()["plan_alive"] is False
 
     # And NO further entry, of any mechanism, for the rest of the plan -- the NEXT
     # call is the first one whose CACHED `entry_block` reflects the latch above (it is
@@ -395,6 +401,7 @@ def test_flag_on_losing_micro_smt_exit_spends_the_shared_attempt(tmp_path, monke
     # any new entry regardless of this latch -- the invariant under test is the LATCH
     # itself, which only `_positive_close` isolates from that unrelated time gate.
     assert ex._positive_close is False, "a loser does not latch NO_ENTRY_AFTER_POSITIVE"
+    assert ex.bind_state()["plan_alive"] is True and "plan_dead" not in _kinds(tmp_path)
 
 
 def test_flag_on_micro_smt_exit_closes_live_through_the_mirroring_port(tmp_path,

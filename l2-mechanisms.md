@@ -791,7 +791,8 @@ mechanism opened it, T2 or no T2 — the instant it confirms.
   any bar-close confirmation while a position is open, at any time of day past 10:30 (before
   10:30 there is no previous micro-session to diverge from, same as O3).
 - **A PROFITABLE O4 exit latches `NO_ENTRY_AFTER_POSITIVE`** exactly like a T2 touch — an
-  explicit operator decision (`comments.md` 2026-09-24 11:29).
+  explicit operator decision (`comments.md` 2026-09-24 11:29). Since 2026-09-30 that latch
+  is a plan death (`positive_close`, §8).
 - **A LOSING O4 exit spends the shared 3-attempt budget** exactly as a stop-out does
   (increment `attempts_used`, `arbiter.spend`) — but does NOT run the stop-out's gap-takeover
   scan, since a `micro_smt_exit` has no gap artifact behind it. This is a new rule for a
@@ -1001,12 +1002,24 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
   attempt budget above — they change no mechanism's own rule, its trigger, its stop or its
   target. Both are evaluated in BAR time, and both sit behind named Executor constants so
   removing one is a one-line change:
-  - **No entry after a positive trade** (`NO_ENTRY_AFTER_POSITIVE`). Once a position of the
-    plan closes at a profit, the plan takes no further entry that session. Already true by
-    construction today — the only positive close is `take_profit`, and reaching the target
-    kills the plan on the same bar (`target_reached`); a stop is never trailed, so a
-    `stop_out` is always adverse — and written as an explicit guard so it stays true if
-    either of those facts changes.
+  - **A positive trade ends the plan** (`NO_ENTRY_AFTER_POSITIVE`). Once a position of the
+    plan closes at a profit, the plan takes no further entry that session — and, since
+    2026-09-30 (operator decision, `comments.md` 10:17: "kill the plan on a profitable
+    exit regardless of how we exited, don't call L1 again or anything — the day is
+    done"), the plan DIES on that bar with reason `positive_close`, however the exit
+    happened. The positive closes are: `take_profit` (which already killed the plan as
+    `target_reached`, and still records that reason — `positive_close` is evaluated
+    last); a profitable `micro_smt_exit` (§7b); a profitable `initial_opp_close`; and
+    `stop_out_initial`, a moved stop touched in profit — which since 2026-09-30 includes
+    a stop the OPERATOR trailed at the broker (`trade.py update-sl`, adopted by the model
+    as `set_stop`). A manual `trade.py close` kills the plan through the watchdog
+    (`external_position_change`), profitable or not. No entry moves: every entry path
+    already honoured the block, so the death adds one `plan_dead` record and ends the
+    plan's binding / re-derivation for the day. Evidence: 2026-09-30, `tmso_reject` long
+    09:31:00 @ 30725.0, exited on the operator's raised stop at 30852.0 (+127.00) at
+    10:09:21 with the plan still alive and 0 of 3 attempts used; two fixture streams gain
+    the record and nothing else (08-31 at 12:07:00, 09-03 at 12:59:00, both after a
+    profitable `micro_smt_exit`).
   - **No entry at or after 10:30:00 ET** (`ENTRY_CUTOFF_ET`). A 10:29:59 entry is allowed;
     from 10:30:00 no resting order is placed, a resting order still unfilled is withdrawn,
     and no market mechanism fires. A position ALREADY OPEN keeps being managed to its

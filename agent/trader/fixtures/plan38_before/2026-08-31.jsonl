@@ -5,3 +5,4 @@
 {"kind": "initial_target_cf_stop", "time": "2026-08-31T09:37:00-04:00", "plan_id": "81e7a53a034f", "mechanism": "micro_smt_reject", "bar": "2026-08-31T09:36:00-04:00", "price": 29410.5, "position_open": true}
 {"kind": "initial_target_cf_opp_close", "time": "2026-08-31T09:37:00-04:00", "plan_id": "81e7a53a034f", "mechanism": "micro_smt_reject", "bar": "2026-08-31T09:36:00-04:00", "price": 29418.5, "position_open": true}
 {"kind": "micro_smt_exit", "time": "2026-08-31T12:07:00-04:00", "plan_id": "81e7a53a034f", "mechanism": "micro_smt_reject", "artifact_label": null, "price": 29371.5, "direction": "DOWN", "artifact_id": "micro_smt_reject", "entry": 29467.75}
+{"kind": "plan_dead", "time": "2026-08-31T12:07:00-04:00", "plan_id": "81e7a53a034f", "mechanism": null, "reason": "positive_close", "detail": {"exit": "micro_smt_exit", "entry": 29467.75, "price": 29371.5}}

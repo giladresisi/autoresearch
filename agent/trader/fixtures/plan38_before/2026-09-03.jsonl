@@ -11,3 +11,4 @@
 {"kind": "initial_target_cf_opp_close", "time": "2026-09-03T11:33:00-04:00", "plan_id": "45a0830e2360", "mechanism": "tmso_reject", "bar": "2026-09-03T11:32:00-04:00", "price": 29532.0, "position_open": true}
 {"kind": "initial_target_cf_stop", "time": "2026-09-03T11:34:00-04:00", "plan_id": "45a0830e2360", "mechanism": "tmso_reject", "bar": "2026-09-03T11:33:00-04:00", "price": 29523.825, "position_open": true}
 {"kind": "micro_smt_exit", "time": "2026-09-03T12:59:00-04:00", "plan_id": "45a0830e2360", "mechanism": "tmso_reject", "artifact_label": null, "price": 29532.0, "direction": "UP", "artifact_id": "tmso_reject", "entry": 29256.5}
+{"kind": "plan_dead", "time": "2026-09-03T12:59:00-04:00", "plan_id": "45a0830e2360", "mechanism": null, "reason": "positive_close", "detail": {"exit": "micro_smt_exit", "entry": 29256.5, "price": 29532.0}}
