@@ -429,6 +429,39 @@ def test_touch_without_close_is_not_reached_and_close_beyond_is():
     assert tr.reached and tr.reached_at == _t("10:01")
 
 
+def test_a_touch_without_a_close_beyond_is_reported_once():
+    """Plan 47 O4 (2026-09-30: the initial was the high of the move to within 0.86 pt,
+    and a touch that did not close beyond left no record at all). The FIRST touching bar
+    is handed over exactly once; `reached` is untouched by it."""
+    tr = InitialTargetTracker("DOWN", INITIAL, level=INITIAL_LEVEL)
+    assert tr.take_touch() is None
+    assert tr.on_bar_close(_bar(29790.0, 29793.0, 29766.0, 29777.25, _t("09:59"))) is None
+    touch = tr.take_touch()
+    assert touch == {"kind": "touched", "bar": _t("09:59"), "price": INITIAL,
+                     "extreme": 29766.0, "close": 29777.25, "level": INITIAL_LEVEL}
+    assert tr.take_touch() is None
+    # a second touching bar is not a second event
+    assert tr.on_bar_close(_bar(29777.0, 29779.0, 29765.5, 29775.0, _t("10:00"))) is None
+    assert tr.take_touch() is None
+    assert tr.reached is False and tr.state()["touched_at"] == str(_t("09:59"))
+    # and the later close beyond still flips
+    assert tr.on_bar_close(_bar(29775.0, 29776.0, 29751.5, 29751.5, _t("10:01"))) is not None
+    assert tr.take_touch() is None
+
+
+def test_a_reach_on_the_first_touching_bar_reports_no_touch():
+    tr = InitialTargetTracker("UP", 29763.5)
+    assert tr.on_bar_close(_bar(29760.0, 29770.0, 29755.0, 29768.0, _t("10:01"))) is not None
+    assert tr.take_touch() is None and tr.state()["touched_at"] is None
+
+
+def test_the_stop_winning_the_bar_reports_no_touch():
+    tr = InitialTargetTracker("DOWN", INITIAL)
+    bar = _bar(29775.0, STOP, 29766.0, 29777.0, _t("10:01"))      # touches both
+    assert tr.on_bar_close(bar, stop=STOP) is None
+    assert tr.stopped is True and tr.take_touch() is None
+
+
 def test_close_beyond_without_a_touch_cannot_happen_but_a_touch_is_still_required():
     """A long: high >= initial AND close > initial. A bar closing above without its high
     reaching (impossible on real OHLC, but the two tests are independent) stays False."""
@@ -592,6 +625,29 @@ def test_not_reached_on_a_touch_alone_before_the_close_beyond(tmp_path, monkeypa
     _run(ex, _frame(), end="10:01")       # the 10:01 bar is not yet COMPLETED
     assert "initial_target_reached" not in _kinds(tmp_path)
     assert ex.bind_state()["initial_target"]["reached"] is False
+
+
+def test_the_executor_records_initial_target_touched(tmp_path, monkeypatch):
+    """Plan 47 O4. The 09:59 bar touches the initial and closes back; it is recorded
+    when that bar completes, once (10:00 touches again), and changes nothing."""
+    ex = _executor(tmp_path, monkeypatch)
+    _run(ex, _frame(), end="10:01")
+    touched = [r for r in _recs(tmp_path) if r["kind"] == "initial_target_touched"]
+    assert len(touched) == 1
+    t = touched[0]
+    assert t["bar"].startswith(f"{DATE}T09:59") and t["time"].startswith(f"{DATE}T10:00")
+    assert t["price"] == pytest.approx(INITIAL) and t["extreme"] == 29766.0
+    assert t["close"] == 29777.25 and t["position_open"] is True
+    assert t["level"] == INITIAL_LEVEL
+    kinds = _kinds(tmp_path)
+    assert "stop_moved" not in kinds and "initial_opp_close" not in kinds
+    assert ex._sim.position is not None and ex._sim.position["stop"] == STOP
+    assert ex.bind_state()["initial_target"]["touched_at"].startswith(f"{DATE} 09:59")
+
+    _run(ex, _frame(), start="10:02", end="10:06", fill_at="09:00")    # no second fill
+    kinds = _kinds(tmp_path)
+    assert kinds.count("initial_target_touched") == 1
+    assert kinds.index("initial_target_touched") < kinds.index("initial_target_reached")
 
 
 def test_no_stage_when_the_menu_has_no_target(tmp_path, monkeypatch):
@@ -822,3 +878,70 @@ def test_report_shows_initial_reached_and_the_counterfactuals_per_trade(tmp_path
     text = rep.render(s)
     assert f"initial {INITIAL} ({INITIAL_LEVEL}) reached 10:01" in text
     assert "counterfactual A" in text
+
+
+# --------------------------------------------------------------------------- #
+# plan 47: the touch record, and a stop the operator moved                      #
+# --------------------------------------------------------------------------- #
+
+#: 09:59 touches the initial and closes back; nothing after it touches again.
+TOUCH_ONLY = dict(TAPE, **{"10:00": (29777.0, 29779.0, 29770.0, 29775.0),
+                           "10:01": (29775.0, 29778.0, 29769.0, 29772.0),
+                           "10:02": (29772.0, 29776.0, 29768.0, 29771.0),
+                           "10:03": (29771.0, 29774.0, 29768.0, 29770.0)})
+
+
+def test_report_shows_a_touch_that_never_reached(tmp_path, monkeypatch):
+    """The 2026-09-30 shape: touched, never closed beyond, and until plan 47 invisible."""
+    ex = _executor(tmp_path, monkeypatch, action="record")
+    _run(ex, _frame(TOUCH_ONLY))
+    ex.mark_open_position()
+    kinds = _kinds(tmp_path)
+    assert kinds.count("initial_target_touched") == 1
+    assert "initial_target_reached" not in kinds
+    rep = _report_module()
+    s = rep.summarize(str(tmp_path))
+    assert s["n_initial_reached"] == 0 and s["n_initial_touched_only"] == 1
+    t = s["trades"][0]
+    assert t["initial_touched"].startswith(f"{DATE}T09:59") and t["initial_reached"] is None
+    assert t["points_A"] == t["points"] and t["points_B"] == t["points"]
+    text = rep.render(s)
+    assert "touched 09:59, not reached" in text and "touched-only=1" in text
+
+
+def test_a_stop_adopted_mid_bar_does_not_end_the_stage(tmp_path, monkeypatch):
+    """The tracker's "the stop wins the bar" test assumes one stop for the whole bar. A
+    stop the operator tightened at 09:59:40 sits below that bar's EARLIER high; the
+    position is still open, so the stage must still see the bar's touch."""
+    ex = _executor(tmp_path, monkeypatch, action="record")
+
+    def hook(ts):
+        if ts == _t("10:00"):                     # after the 09:59 ticks, before 10:00's
+            assert ex.set_stop_override(_t("09:59", 40), 29800.0)["accepted"] is True
+
+    _run(ex, _frame(TOUCH_ONLY), hook=hook)
+    assert ex._sim.position is not None and ex._sim.position["stop"] == 29800.0
+    assert _kinds(tmp_path).count("initial_target_touched") == 1
+    assert ex.bind_state()["initial_target"]["stopped"] is False
+
+
+def test_report_keeps_action_a_counterfactual_when_the_operator_moved_the_stop(
+        tmp_path, monkeypatch):
+    """`stop_moved` used to mean "action A ran", and the report then booked the real exit
+    as A's result. An operator's stop is not action A."""
+    ex = _executor(tmp_path, monkeypatch, action="record")
+
+    def hook(ts):
+        if ts == _t("09:50"):
+            assert ex.set_stop_override(ts, STOP - 4.5)["accepted"] is True
+
+    _run(ex, _frame(), hook=hook)
+    ex.mark_open_position()
+    rep = _report_module()
+    s = rep.summarize(str(tmp_path))
+    t = s["trades"][0]
+    assert t["exit_kind"] == "mark"
+    assert t["stop_moved"] is True and t["stop_moved_by"] == "operator"
+    assert t["points_A"] == pytest.approx(ENTRY - INITIAL)      # A's own counterfactual
+    assert "stop moved (operator)" in rep.render(s)
+

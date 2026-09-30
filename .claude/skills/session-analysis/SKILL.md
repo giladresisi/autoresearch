@@ -313,6 +313,9 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
 11. <SESSION>\trader_decisions.jsonl   (LIVE Executor decision log — the graft's own truth)
     JSONL. Kinds: fill {mechanism, price, direction, artifact_id}, target_selected {pick
     {id, level, price, dist_ratio, band}, target}, stop_out, take_profit, hard_close, mark,
+    initial_target_selected / initial_target_touched {bar, extreme, close} (the first 1m
+    bar that touched the initial WITHOUT closing beyond it) / initial_target_reached
+    (touched AND closed beyond) — all record-only while `INITIAL_TARGET_ACTION = "record"`,
     operator_override {command, accepted, reason} (every operator command, refusals too),
     stop_moved {price, prev_stop, reason: operator} + stop_out_initial (`trade.py update-sl`
     reached the agent as `set_stop`; an `update-stop-loss` in events.jsonl with NO matching

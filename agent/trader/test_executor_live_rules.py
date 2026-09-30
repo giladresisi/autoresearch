@@ -561,6 +561,11 @@ def test_the_five_before_dates_replay_byte_identical(date, monkeypatch):
     price or attempt moves. 09-01, 09-02 and 09-04 byte-identical (no positive close
     that was not already a plan death).
 
+    2026-09-30 (plan 47 O4, the initial-target touch record): 09-03 ALONE re-captured.
+    It gains one `initial_target_touched` record — the 11:27 bar touched the retry's
+    initial (29523.825) and closed back, two bars before the 11:29 bar reached it. A
+    record only; the other four have no touch that was not already the reach bar.
+
     A DELIBERATE mechanism change moves these streams; re-capture them then, exactly as
     the change protocol's step 3 says. A cold cache skips — it proves nothing either way.
     """

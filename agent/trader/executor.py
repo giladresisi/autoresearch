@@ -2137,6 +2137,8 @@ class Executor:
         ev = mover(now, price)
         if ev is None:
             return {"accepted": False, "reason": "no_position"}
+        if self._it is not None:
+            self._it["stop_adopted_minute"] = minute_of(now)   # see `_judge_initial_bar`
         self._rec.order_event(
             now=now, plan_id=self._plan.get("plan_id"),
             mechanism=self._state.get("mechanism"),
@@ -2269,7 +2271,14 @@ class Executor:
                 return True                          # the stop wins the bar
         tracker = it["tracker"]
         if not tracker.reached:
-            ev = tracker.on_bar_close(bar, stop=(pos.get("stop") if open_ else None))
+            stop = pos.get("stop") if open_ else None
+            if it.get("stop_adopted_minute") == label:
+                # The tracker's same-bar "the stop wins" test assumes ONE stop for the
+                # whole bar. A stop the operator raised during this bar can sit above
+                # the bar's EARLIER low, which was traded under the old stop — and the
+                # position is demonstrably still open.
+                stop = None
+            ev = tracker.on_bar_close(bar, stop=stop)
             if ev is not None:
                 self._rec.initial_target_reached(
                     now=now, plan_id=self._plan.get("plan_id"),
@@ -2278,6 +2287,16 @@ class Executor:
                     position_open=open_, action=INITIAL_TARGET_ACTION)
                 if open_:
                     self._apply_initial_action(now, it, pos)
+            touch = tracker.take_touch()
+            if touch is not None:
+                # Record-only, under every action: what a touch-based rule (exit or
+                # scale at the touch) would have had to work with.
+                self._rec.order_event(
+                    now=now, plan_id=self._plan.get("plan_id"),
+                    mechanism=it.get("mechanism"), kind="initial_target_touched",
+                    bar=label, price=touch["price"], extreme=touch["extreme"],
+                    close=touch["close"], level=touch.get("level"),
+                    position_open=open_)
         else:
             for cf in tracker.post_flip(bar):
                 self._rec.order_event(
