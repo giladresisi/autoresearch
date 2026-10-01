@@ -63,6 +63,7 @@ from agent.trader.initial_target import (InitialTargetTracker, select_initial_ta
 from agent.trader.arbiter import Arbiter
 from agent.trader.market_mechanisms import MarketMechanisms, post_open_counter_extreme
 import agent.trader.micro_smt as micro_smt
+import agent.trader.trail as trail
 
 # l2-mechanisms.md §9 starting values.
 SETTLE_UNTIL_SECONDS = 30            # settle window ends at 09:30:30
@@ -214,6 +215,9 @@ class Executor:
         # every fill (`_set_target_on_fill`), so a live session shows each time O4 would
         # have exited a DIFFERENT position, not the same observation repeated all day.
         self._micro_smt_exit_unwired_recorded = False
+        # O3 trail (`agent/trader/trail.py`, STUDY, flag OFF): the stage of the CURRENT
+        # position, or None.
+        self._trail = None
         self._vetoed: set = set()
         # §2's extension veto, read ONCE here: the flag is a session setting, and the
         # bar loop must not re-read the environment on every fire.
@@ -369,6 +373,13 @@ class Executor:
         # not blind its management. The order events of this call are already booked,
         # so a same-bar stop-out is visible here and wins (§2.4).
         self._drive_initial_target(now, mnq, bar_complete)
+        # 2b'. O3 trail (STUDY, `trail.TRAIL_ENABLED` False by default = inert). After the
+        # initial-target stage, so that stage judges the completed bar under the stop
+        # that was in force for it. Total, like every stage above.
+        try:
+            self._drive_trail(now, mnq, bar_complete)
+        except Exception as exc:
+            self._state["trail_error"] = f"{type(exc).__name__}: {exc}"
 
         # 2c. O4 (`micro_smt_exit`, ADOPTED, flag-gated ON by default): a counter-thesis
         # micro-SMT market-closes an OPEN position, T2 or no T2, regardless of plan life — same
@@ -2377,6 +2388,69 @@ class Executor:
             artifact_label=self._label_for(ev.get("artifact_id")), **ev)
         self._note_exit(ev)
         self._note_close(ev)
+
+    def _drive_trail(self, now, mnq, bar_complete) -> None:
+        """O3 (`agent/trader/trail.py`): trail the stop under the 1m continuation gaps
+        once price has reached the mid of entry and T2. STUDY ONLY — inert unless
+        `trail.TRAIL_ENABLED`, which the A/B harness flips; never on in live until
+        `l2-mechanisms.md` adopts a rule. Arming is a tick test on the current bar's
+        extremes; moves happen on completed 1m bars and go through `move_stop`, so a
+        touch books `stop_out_initial` at or beyond the entry and `stop_out` below it,
+        exactly like an operator's `set_stop`. The mirroring live port has no
+        `move_stop`, so live this records `trail_unwired` and moves nothing. With
+        `trail.TRAIL_BE_AT_ARM` the arming tick also moves the stop to break-even
+        (`reason="breakeven"`); a touch of it books `stop_out_initial` at the entry, which
+        is neither a profitable close nor a spent attempt."""
+        if not trail.TRAIL_ENABLED:
+            return
+        pos = self._sim.position
+        if pos is None:
+            self._trail = None
+            return
+        if self._trail is None or self._trail.opened_at != pos.get("opened_at"):
+            if self._target_price is None:
+                return                                   # no T2, no mid to arm on
+            self._trail = trail.TrailStage(pos.get("direction"), pos.get("entry"),
+                                           self._target_price, pos.get("opened_at"))
+        st = self._trail
+        if st.arm(now, self._state.get("now_high"), self._state.get("now_low")):
+            self._rec.order_event(
+                now=now, plan_id=self._plan.get("plan_id"),
+                mechanism=self._state.get("mechanism"), kind="trail_armed",
+                price=st.mid, entry=st.entry, target=st.target)
+            # Operator decision 2026-10-01: break-even on the arming TICK, not the next
+            # bar close, so a pullback inside the arming minute is already protected.
+            be = st.breakeven_stop(pos.get("stop"))
+            if be is not None:
+                if not self._port_supports("move_stop"):
+                    self._state["trail_unwired"] = True
+                else:
+                    ev = self._sim.move_stop(now, be)
+                    if ev is not None:
+                        self._rec.order_event(
+                            now=now, plan_id=self._plan.get("plan_id"),
+                            mechanism=self._state.get("mechanism"),
+                            artifact_label=self._label_for(ev.get("artifact_id")),
+                            reason="breakeven", **ev)
+        self._state["trail"] = st.state()
+        if not bar_complete:
+            return
+        move = st.on_bar_close(now, mnq, self._sim.position.get("stop"))
+        if move is None:
+            return
+        if not self._port_supports("move_stop"):
+            self._state["trail_unwired"] = True
+            return
+        ev = self._sim.move_stop(now, move["stop"])
+        if ev is None:
+            return
+        self._rec.order_event(
+            now=now, plan_id=self._plan.get("plan_id"),
+            mechanism=self._state.get("mechanism"),
+            artifact_label=self._label_for(ev.get("artifact_id")),
+            reason="trail", gap=str(move["gap"]), gap_edge=move["gap_edge"],
+            gap_size=move["gap_size"], n_gaps=move["n_gaps"], **ev)
+        self._state["trail"] = st.state()
 
     def _drive_micro_smt_exit(self, now: pd.Timestamp, mnq: pd.DataFrame,
                               bar_complete: bool) -> None:
