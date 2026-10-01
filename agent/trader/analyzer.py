@@ -39,6 +39,7 @@ import pandas as pd
 from agent.facts.assemble import assemble_facts
 from agent.facts.requirements import ANALYZER_REQUIREMENT
 from agent.stretch_override import stretch_override
+from agent.trader import premove_context
 
 ARM_HOUR = 9
 ARM_MINUTE = 20
@@ -60,6 +61,9 @@ ARM_MINUTE = 20
 #: case misses 09:30:00 and the settle window closes on a plan that does not exist yet.
 LATE_ARM_GRACE_MIN = 7
 THESIS_FILE = "thesis_state.json"
+#: Plan 46: what the pre-move classifier saw and what the Analyzer did with it. Written in
+#: `shadow` and `on` modes only; never in `off`.
+PREMOVE_FILE = "premove_context.json"
 
 # thesis.md §3a — near-maturity WAIT.
 #
@@ -407,7 +411,34 @@ class Analyzer:
             # cannot produce a COMPLETE thesis -- no stretch, criteria unmet, or no DOL menu
             # on the forced side -- and we then call the model exactly as before. A degraded
             # snapshot must lose the override, never invent a direction from it.
-            forced = self._override_thesis(facts, now)
+            #
+            # PLAN 46 (§11.5 CANDIDATE, `premove_context.path_mode()` = env var
+            # ACT_PREMOVE_UNRELATED, ON by default): on a BIG pre-09:20 leg the classifier
+            # takes precedence over arm 1.
+            # UNRELATED forces the thesis against the leg with no model call; PART and an
+            # UNRELATED day whose thesis cannot be built suppress arm 1 and ask the model.
+            # Every other status -- and the flag off -- is exactly the path below.
+            pm = self._premove(bars, now)
+            arm1 = None
+            if pm is not None:
+                forced, arm1 = self._premove_route(pm, facts, health, now)
+                if forced is not None:
+                    with self._lock:
+                        self._health = health
+                        self._thesis = forced
+                        self._meta = {"verdict": "premove_unrelated"}
+                        self._save()
+                    return self._thesis
+            if pm is not None and premove_context.path_mode() == "on" and \
+                    pm.status in (premove_context.PART, premove_context.UNRELATED):
+                forced = None                      # arm 1 suppressed: the model decides
+            elif pm is not None:
+                # `_premove_route` already computed arm 1 (to fill `arm1_would_fire` in
+                # `premove_context.json`) -- reuse it instead of a second, redundant call.
+                # `_override_thesis` is pure, so this is exactly what a fresh call returns.
+                forced = arm1
+            else:
+                forced = self._override_thesis(facts, now)
             if forced is not None:
                 with self._lock:
                     self._health = health
@@ -498,6 +529,107 @@ class Analyzer:
             }
         except Exception:
             return None
+
+    # -- plan 46: the UNRELATED pre-move path (§11.5 CANDIDATE) --------------------- #
+
+    def _premove(self, bars, now) -> "premove_context.PremoveContext | None":
+        """The pre-move context of this session, or None when the flag is "off".
+
+        Never raises: a failing classifier becomes an UNKNOWN context (recorded), and
+        UNKNOWN falls through to today's path."""
+        if premove_context.path_mode() == "off":
+            return None
+        try:
+            return premove_context.classify((bars or {}).get(premove_context.DEFAULT_PARAMS.ticker),
+                                            now)
+        except Exception as exc:
+            return premove_context.PremoveContext(
+                status=premove_context.UNKNOWN,
+                reason=f"classifier raised: {type(exc).__name__}: {exc}")
+
+    def _premove_route(self, pm, facts, health, now) -> "tuple[dict | None, dict | None]":
+        """(forced thesis or None, arm 1's result or None) -- the second so the caller can
+        reuse it instead of calling `_override_thesis` a second time. Records
+        `premove_context.json` either way.
+
+        Total: any error returns (None, None), and the caller then takes today's path
+        (a fresh arm 1, then the model) -- never a dark day."""
+        try:
+            return self._premove_route_inner(pm, facts, health, now)
+        except Exception:
+            return None, None
+
+    def _premove_route_inner(self, pm, facts, health, now) -> "tuple[dict | None, dict | None]":
+        mode = premove_context.path_mode()
+        arm1 = self._override_thesis(facts, now)
+        record = {"boundary": str(now), "mode": mode, "context": pm.to_dict(),
+                  "would_force": pm.forced_direction(),
+                  "arm1_would_fire": arm1 is not None,
+                  "arm1_direction": (arm1 or {}).get("bias"),
+                  "action": None, "note": None}
+        forced = None
+        if mode != "on":
+            record["action"] = "shadow"
+        elif pm.status == premove_context.UNRELATED:
+            record["action"] = "arm1_suppressed"
+            if (health or {}).get("degraded"):
+                record["note"] = "degraded facts: not forced"
+            else:
+                forced = self._premove_thesis(pm, now)
+                if forced is not None:
+                    record["action"] = "forced"
+                else:
+                    record["note"] = "forced thesis could not be built"
+        elif pm.status == premove_context.PART:
+            record["action"] = "arm1_suppressed"
+        else:
+            record["action"] = "today"
+        self._save_premove(record)
+        return forced, arm1
+
+    def _premove_thesis(self, pm, now) -> "dict | None":
+        """A complete thesis AGAINST the leg, or None. Total, like `_override_thesis`.
+
+        The DOL is the leg's mid AT THE BOUNDARY (09:20, `pm.mid_at_boundary()`): inert
+        since plan 16 (T2 picks the take-profit at the fill), but `stands()` needs one,
+        and the mid makes `dol_reached` record the (frozen) mid touch. This is NOT the
+        same price as the plan's actual take-profit: `Executor._premove_mid_pick`
+        recomputes the mid from the leg's extreme EXTENDED to the fill
+        (`_track_premove_extreme`), which can differ when the leg keeps extending past
+        09:20. `dol_reached` is a record only and is never acted on."""
+        try:
+            direction = pm.forced_direction()
+            mid = pm.mid_at_boundary()
+            if direction is None or mid is None or mid != mid:
+                return None
+            block = pm.to_dict()
+            block.update({"forced_direction": direction, "mid_0920": float(mid)})
+            return {
+                "bias": direction,
+                "regime": None,
+                "confidence": None,
+                "dol": {"level": "premove_leg_mid", "price": float(mid)},
+                "falsified_if": [],
+                "evidence": [],
+                "thesis_source": "premove_unrelated",
+                "override_reason": (f"MNQ leg {pm.leg_direction} {pm.size:.2f} pts "
+                                    f"({pm.size_pct:.2f}%) UNRELATED -> force {direction}"
+                                    if pm.size is not None and pm.size_pct is not None
+                                    else f"UNRELATED -> force {direction}"),
+                "premove": block,
+            }
+        except Exception:
+            return None
+
+    def _save_premove(self, record: dict) -> None:
+        try:
+            os.makedirs(self.state_dir, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=self.state_dir, prefix=".premove_", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(record, fh, default=str)
+            os.replace(tmp, os.path.join(self.state_dir, PREMOVE_FILE))
+        except Exception:
+            pass
 
     def pending(self) -> bool:
         """True while a threaded call is still in flight."""

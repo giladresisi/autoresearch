@@ -63,6 +63,7 @@ from agent.trader.initial_target import (InitialTargetTracker, select_initial_ta
 from agent.trader.arbiter import Arbiter
 from agent.trader.market_mechanisms import MarketMechanisms, post_open_counter_extreme
 import agent.trader.micro_smt as micro_smt
+from agent.trader import premove_context
 
 # l2-mechanisms.md §9 starting values.
 SETTLE_UNTIL_SECONDS = 30            # settle window ends at 09:30:30
@@ -189,6 +190,20 @@ class Executor:
         # operator the rows to choose between.
         self._default_pick = None
         self._menu_rows = None
+        # Plan 46 (§11.5 CANDIDATE): the UNRELATED pre-move leg this plan was forced
+        # against, or None. Only a plan the Analyzer forced carries it (`derive_plan`
+        # passes it through), so every other plan -- and the whole flag-off path -- never
+        # touches the hook below. `_pm_ext` is the leg's extreme extended tick by tick
+        # after the boundary; each fill's take-profit is the mid of origin and it.
+        # The mid target is a SECOND switch, off by default (operator decision
+        # 2026-09-30: the path overrides the direction only); with it off `_pm` is None
+        # and a forced plan takes the ordinary T2 pick like any other.
+        pm = self._plan.get("premove")
+        self._pm = (dict(pm) if premove_context.MID_TARGET_ENABLED
+                    and isinstance(pm, dict) and pm.get("status") == "UNRELATED"
+                    else None)
+        self._pm_ext = None
+        self._pm_ext_ts = None
         # Plan 35: the initial-target stage of the CURRENT position, or None. Armed at
         # the fill (`_arm_initial_target`), driven on completed 1m bars
         # (`_drive_initial_target`), dropped once the bar containing the exit has been
@@ -351,6 +366,8 @@ class Executor:
                 and self._sim.position is None):
             self._sim.cancel()
         self._last_row = mnq.iloc[-1] if len(mnq) else None
+        if self._pm is not None:
+            self._track_premove_extreme(now, mnq)
         self._drive_orders(now, mnq)
 
         # 2b. §8's WINDOW END, once, at the first bar at or after it — and whether or
@@ -1965,6 +1982,9 @@ class Executor:
         self._open_retry = None
         pick = select_target(self._bars, now, self._plan.get("direction"), self._ticker,
                              **self._htf_kw())
+        # Plan 46: on an UNRELATED plan the leg's mid replaces the T2 pick (or not, and
+        # says why). Everything below takes the returned pick exactly as it takes T2's.
+        pick, extra = self._premove_mid_pick(now, pick)
         # Plan 41: the rows D1 was chosen from, and D1 itself, kept for the operator's
         # `agent-target` command (`--list` reads the file, `--reset` restores the pick).
         # Both are records of THIS fill, so they are replaced at every fill.
@@ -1984,8 +2004,74 @@ class Executor:
         self._write_menu(now)
         self._rec.target_selected(
             now=now, plan_id=self._plan.get("plan_id"),
-            mechanism=self._state.get("mechanism"), pick=pick)
+            mechanism=self._state.get("mechanism"), pick=pick, **extra)
         self._arm_initial_target(now, pick)
+
+    # -- plan 46: the leg-mid take-profit (§11.5 CANDIDATE) ----------------------- #
+
+    def _track_premove_extreme(self, now, mnq) -> None:
+        """Extend the UNRELATED leg's extreme with the tape after the boundary.
+
+        First call: seeded from the leg's extreme and every row in [boundary, now]. Every
+        call after that re-reads the LAST row only, so an intra-minute tick that trades
+        beyond the extreme counts even when the minute closes back (live's last row is
+        overlaid to replay's shape, `graft._overlay_last_row`). Bar time only. Total."""
+        try:
+            pm = self._pm
+            if pm is None or not len(mnq):
+                return
+            up = str(pm.get("leg_direction") or "").upper() == "UP"
+            col = "High" if up else "Low"
+            if self._pm_ext is None:
+                # Seeded into locals first: a raise here leaves the tracker unseeded, so
+                # the next call seeds again instead of skipping [boundary, now].
+                before = float(pm["extreme"])
+                boundary = pd.Timestamp(pm["boundary"])
+                rows = mnq[(mnq.index >= boundary) & (mnq.index <= now)]
+            else:
+                before = self._pm_ext
+                rows = mnq.iloc[-1:]
+            ext = premove_context.extend_extreme(
+                "UP" if up else "DOWN", before, rows[col].tolist() if len(rows) else [])
+            if ext != before:
+                self._pm_ext_ts = now
+            self._pm_ext = ext
+        except Exception as exc:
+            self._state["premove_error"] = f"{type(exc).__name__}: {exc}"
+
+    def _premove_mid_pick(self, now, pick):
+        """(pick, extra fields for `target_selected`). Unchanged -- and NO extra field --
+        on every plan without an UNRELATED leg, so those records stay byte-identical."""
+        pm = self._pm
+        if pm is None:
+            return pick, {}
+        try:
+            forced = str(pm.get("forced_direction") or "").upper()
+            direction = str(self._plan.get("direction") or "").upper()
+            if direction != forced:
+                return pick, {"premove_mid": {"skipped": "direction_changed",
+                                              "plan_direction": direction or None,
+                                              "forced_direction": forced or None}}
+            pos = self._sim.position
+            if pos is None or pos.get("entry") is None:
+                return pick, {"premove_mid": {"skipped": "no_position"}}
+            extreme = self._pm_ext if self._pm_ext is not None else float(pm["extreme"])
+            mid = premove_context.leg_mid(pm["origin"], extreme)
+            entry = float(pos["entry"])
+            floor = float((pm.get("params") or {}).get(
+                "mid_min_ahead_pts", premove_context.DEFAULT_PARAMS.mid_min_ahead_pts))
+            ahead = (entry - mid) if direction in _SHORT else (mid - entry)
+            if ahead < floor:
+                return pick, {"premove_mid": {"skipped": "behind_entry", "mid": mid,
+                                              "entry": entry, "min_ahead_pts": floor}}
+            detail = {"origin": float(pm["origin"]), "extreme": extreme, "mid": mid,
+                      "entry": entry, "displaced": pick}
+            if self._pm_ext_ts is not None:
+                detail["extreme_ts"] = str(self._pm_ext_ts)
+            return ({"level": "premove_leg_mid", "price": mid, "premove": True},
+                    {"premove_mid": detail})
+        except Exception as exc:
+            return pick, {"premove_mid": {"skipped": f"error: {type(exc).__name__}: {exc}"}}
 
     # -- plan 41: the operator's target controls ---------------------------------- #
 

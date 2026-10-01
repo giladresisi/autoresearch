@@ -235,7 +235,10 @@ def validate_thesis(thesis, facts: Optional[dict] = None) -> ContractValidation:
     # override thesis is never validated anyway -- but that is an accident of where the call
     # sits. A future refactor that validated inside the Analyzer would otherwise start
     # rejecting every override silently.
-    if str((thesis or {}).get("thesis_source") or "") == "stretch_override":
+    # Plan 46's UNRELATED path (`premove_unrelated`) is the same kind of deterministic
+    # override, with the same empty ledger, so it carries the same exemption.
+    if str((thesis or {}).get("thesis_source") or "") in ("stretch_override",
+                                                          "premove_unrelated"):
         pass
     elif scoring["scored_evidence"]:
         if t.bias in BIASES and t.bias != scoring["expected_bias"]:
