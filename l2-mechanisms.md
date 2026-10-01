@@ -460,10 +460,18 @@ resting order beyond them.
     29149.75 instead of the 29139.50 close fill). The beyond-open condition is load-bearing —
     it blocked a false fire on 08-05 where the runaway price was still above the bar's open.
   - *Subsequent bars of a live episode:* exit-tick market entry, gated by the previous
-    completed 1m bar — if it closed inside the gap or beyond it on the exit side, or closed
-    against its open (red), the exit tick fires; if it closed with-trend-colored beyond the
-    gap on the adverse side, defer to the current bar's close (enter there if it closed
-    beyond the exit side — accepting the worse price as the cost of the missing conviction).
+    completed 1m bar — **since 2026-10-01 (§6.1 clause 6): only if it closed against its
+    open in the trade direction (red), wherever it closed**; any other previous close
+    defers to the current bar's close (enter there if it closed beyond the exit side —
+    accepting the worse price as the cost of the missing conviction). *Until 2026-10-01
+    the gate was wider:* a previous bar that closed inside the gap, or beyond it on the
+    exit side, also let the exit tick fire whatever its colour, and only a
+    with-trend-coloured close beyond the gap on the adverse side deferred. Every §6
+    validation figure in this document was recorded under that wider gate.
+  - *Mid-bar entries after a stop-out (2026-10-01, §6.1 clause 5):* neither intra-bar
+    path (early-runaway, exit tick) may fire within a full **60 s of a stop-out**, which
+    outlasts §2's cooldown whenever the stop came late in its bar. Nothing is remembered
+    across it.
   - *A skip voids the cycle (strict reading, explicit):* entries fire only on an actual exit
     TICK (or close verdict) of a live cycle — never on already-crossed state carried over
     from a skipped one. When an entering bar's close verdict is a skip (wrong color), that
@@ -523,9 +531,51 @@ simulator hit every one of them. These are now normative; implement exactly this
    complete its cycle fires. Measured OUTCOME-NEUTRAL on all four recorded days (creation
    order gives byte-identical results), so this is a tie-break convention, not a result driver
    — specified only so two implementations agree.
+5. **A full 60 s from a stop-out before a mid-bar entry** (operator, 2026-10-01;
+   `episode.INTRABAR_COOLDOWN_SEC`, §9). Measured from the stop-out itself — any
+   mechanism's — not from its bar. §2's cooldown (clause 3) is unchanged and still resets
+   every cycle until the stop bar closes; from that close to stop + 60 s the episodes are
+   driven normally (a tick may enter a gap, a bar close may make a cycle live or take a
+   close verdict) but **neither intra-bar path fires**. Nothing is remembered: a cross
+   made inside the window is not a pending entry. The first tick at or after stop + 60 s
+   reads the tape as it is then — price still beyond the exit side of a live, un-deferred
+   cycle is an exit tick at that instant's market price; a runaway whose trigger was
+   crossed inside the window and is still crossed fills at the MARKET, not at the trigger
+   price clause 2 gives an ordinary runaway (that price is no longer available); price
+   back inside the gap means the cross never happened. Close verdicts are bar-close
+   entries and are not gated by this clause.
+6. **The exit tick needs a favourable previous close** (operator, 2026-10-01;
+   `episode.FAVOURABLE_CLOSE_GATE`, §9). The previous completed 1m bar must have closed
+   against its own open in the trade direction (red for a short, green for a long;
+   close == open is not favourable). Where it closed — inside the gap, beyond it on
+   either side — no longer matters. Otherwise the exit tick does not fire and the cycle
+   defers to the current bar's close, on the existing deferred-verdict terms (enter if it
+   closed beyond the exit side). The intra-bar sub-rules are REFINED, not removed: this is
+   not "trigger at the 1m close".
 
-**Known residual (±1 cycle, deliberately left open, do NOT silently "fix" it):** the
-subsequent-bar gate is implemented DOC-LITERAL — previous completed bar closed inside the
+**Evidence for clauses 5-6, and what was NOT done.** One live day: 2026-10-01 (thesis
+DOWN, gap [30783.75, 30790.75]). Attempt 2 stopped at 09:54:16; §2's cooldown expired at
+09:55:00; the 09:54 bar had closed GREEN inside the gap (30780.75 → 30784.75), which the
+old gate accepted, so the exit tick at 09:55:05 entered short 30782.50, 49 s after the
+stop-out, and was stopped at 09:55:18 (−15.25, the plan's third and last attempt). The
+09:55 bar then closed red below the gap (30768.25) and price did not trade above 30770.75
+again before the thesis DOL was hit at 10:00:54. Under clause 6 the 09:55:05 tick defers
+and the 09:55 close is the entry (09:56:00, ≈ 30768.25); under clause 5 alone the tick
+falls inside the window, and at 09:55:16 price is back above the gap, so nothing is taken
+then. Live record of the mechanism at adoption: 6 fills, 6 stop-outs, −114.25 pts
+(09-18..10-01). **These figures are read off the 1m/1s tape by hand; nothing was
+replayed.** The rule was adopted on the operator's decision (2026-10-01) with protocol
+steps 3-5 and 7 deliberately skipped: no BEFORE streams were captured, `named_cases.py`
+and the tests were not updated, and **no named day was re-measured**. Every §6 figure in
+this document (§6's validation list, §6.2's table, §10, §11.3) predates both clauses and
+must be treated as stale until re-measured; the rows most likely to move are the ones
+whose entry is an exit tick after an unfavourable previous close (07-21's 09:39:11 entry
+and 07-17's breakdown-bar entry are the first to check). Setting both §9 knobs to
+`0` / `False` restores the previous behaviour for that A/B.
+
+**Known residual (±1 cycle, deliberately left open, do NOT silently "fix" it) — applies
+to the PRE-2026-10-01 gate, kept for the record and for `FAVOURABLE_CLOSE_GATE = False`:** the
+subsequent-bar gate was implemented DOC-LITERAL — previous completed bar closed inside the
 gap, or beyond it on the exit side, or against its own open → the exit tick fires; closed
 with-trend-coloured beyond the gap on the adverse side → defer to the current bar's close.
 An alternative raw-exit-tick reading (no previous-bar gate) matches 08-06 better (+150.00 vs
@@ -1045,6 +1095,8 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
 | `fvg_1m_post_extreme` SL buffer beyond excursion extreme | 2 pts | §6; excursion-anchored, not gap-edge-anchored |
 | `fvg_1m_post_extreme` SL cap | 30 pts from entry | §6; bounds deep-excursion episodes |
 | `fvg_1m_post_extreme` early-runaway trigger | 25 pts beyond the exit edge | §6; plus beyond-bar-open condition |
+| `fvg_1m_post_extreme` mid-bar cooldown after a stop-out (`episode.INTRABAR_COOLDOWN_SEC`) | **60 s** from the stop-out | §6.1 clause 5; operator's value (2026-10-01), one live day, NOT fitted and NOT replayed. `0` disables |
+| `fvg_1m_post_extreme` exit-tick gate (`episode.FAVOURABLE_CLOSE_GATE`) | **True** | §6.1 clause 6; previous bar must close with the thesis against its own open. Operator's decision (2026-10-01), named days not re-measured. `False` restores the pre-2026-10-01 gate |
 | Stop-out cooldown | until the stop-out 1m bar closes | §2; acts on current state at the close (crossed trigger ⇒ market) |
 | DOL-floor veto | 60 pts remaining, entry → DOL | §2; ABSOLUTE floor, not an RR ratio; winners ≥65.75 / losing chases ≤45.5 on studied dates — thin band, tune early |
 | `extreme_reject_close` quiet count | 3 consecutive 1m closes | §7; tick-based restarts |

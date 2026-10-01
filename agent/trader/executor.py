@@ -63,6 +63,7 @@ from agent.trader.initial_target import (InitialTargetTracker, select_initial_ta
 from agent.trader.arbiter import Arbiter
 from agent.trader.market_mechanisms import MarketMechanisms, post_open_counter_extreme
 import agent.trader.micro_smt as micro_smt
+import agent.trader.episode as episode
 from agent.trader import premove_context
 
 # l2-mechanisms.md §9 starting values.
@@ -1416,6 +1417,17 @@ class Executor:
             return False
         return now < pd.Timestamp(so["time"]).floor("1min") + pd.Timedelta(minutes=1)
 
+    def _in_intrabar_cooldown(self, now: pd.Timestamp) -> bool:
+        """§6.1 clause 5: a full `INTRABAR_COOLDOWN_SEC` from a stop-out — any
+        mechanism's — before §6 may enter MID-BAR. Longer than §2's cooldown whenever the
+        stop came late in its bar (10-01: stopped 09:54:16, §2 expired 09:55:00, exit
+        tick taken 09:55:05). Measured from the stop-out's own bar time."""
+        so = getattr(self._sim, "last_stop_out", None)
+        if not so or so.get("time") is None or episode.INTRABAR_COOLDOWN_SEC <= 0:
+            return False
+        return now < (pd.Timestamp(so["time"])
+                      + pd.Timedelta(seconds=episode.INTRABAR_COOLDOWN_SEC))
+
     def _crossed(self, trigger, price) -> bool:
         """Is the trigger already beyond price in the TRADE direction?"""
         if trigger is None or price is None:
@@ -1787,9 +1799,10 @@ class Executor:
             if block is not None:
                 return
             fires.append(("fvg_1m_post_extreme",
-                          self._market.sec6_on_tick(now, price,
-                                                    bar_open=self._bar_open_of(mnq),
-                                                    mid=self._market_price())))
+                          self._market.sec6_on_tick(
+                              now, price, bar_open=self._bar_open_of(mnq),
+                              mid=self._market_price(),
+                              intrabar_ok=not self._in_intrabar_cooldown(now))))
         else:
             # `block is None` here means every ordinary spine gate passed (the
             # `micro_smt_only` branch above only lets O3 through the entry cutoff, and
