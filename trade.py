@@ -8,7 +8,7 @@ Usage:
   python trade.py down 27000             # Stop entry SHORT at 27000
   python trade.py cancel                 # Cancel unfilled stop entry
   python trade.py move 28000             # Move unfilled stop entry to 28000
-  python trade.py update-sl 19700        # Move stop-loss on active position to 19700
+  python trade.py update-sl 19700        # Move stop-loss on active position to 19700 (the AGENT brain adopts it too)
   python trade.py close                  # Market close active position
   python trade.py trend-broken           # Reset hypothesis direction and log trend-broken (releases any manual lock)
   python trade.py hypothesis             # Force a fresh hypothesis evaluation right now (releases any manual lock)
@@ -440,6 +440,37 @@ def _agent_override(cmd: str, rest: list, *, force: bool) -> None:
           + (f" ({known[0].get('price')})" if known else ""))
 
 
+def _queue_agent_stop(stop_price: float) -> None:
+    """Tell the RUNNING agent about the stop the broker was just given (`update-sl`).
+
+    `live_orders.update_stop_loss` moves the broker stop and position.json, and the agent
+    reads neither: its position model keeps its own stop. On 2026-09-30 a stop raised this
+    way was hit and the agent managed a position that no longer existed for eleven
+    minutes. One `set_stop` record on the operator control file closes that gap — the
+    graft applies it on its next tick and books the exit itself when the stop is touched.
+
+    Only when the agent owns the dispatcher and today's session folder exists (never
+    created here). Best-effort: the broker update has already gone out, so a failure is
+    printed, not raised.
+    """
+    if _agent_switched_off():
+        return
+    try:
+        state_dir = _agent_session_dir()
+        if not state_dir.is_dir():
+            return
+        from agent.trader.operator_control import KIND_SET_STOP, OperatorControl
+        ctl = OperatorControl(state_dir)
+        ctl.append({"kind": KIND_SET_STOP, "price": float(stop_price),
+                    "created_at": _now_iso()})
+        print(f"Queued for the agent: stop -> {stop_price} ({ctl.path}). Watch "
+              "trader_decisions.jsonl for the `operator_override` record.")
+    except Exception as exc:
+        print(f"WARNING: could not queue the stop for the agent "
+              f"({type(exc).__name__}: {exc}). The agent still models its OLD stop and "
+              "will not see this one fill.")
+
+
 #: Order commands whose broker-result lines are mirrored into the session's signals.log.
 _ORDER_CMDS = ("up", "down", "cancel", "move", "update-sl", "close")
 _BROKER_LINE_PREFIXES = ("[PMT]", "[FILL-WARN]")
@@ -589,6 +620,7 @@ def main() -> None:
         direction = _resolve_direction(pos.get("active", {}).get("direction", ""), extra)
         print(f"Moving stop-loss to {stop_price} | direction: {direction or 'unknown'}")
         live_orders.update_stop_loss(stop_price, "user-requested", direction=direction)
+        _queue_agent_stop(stop_price)
 
     elif cmd == "close":
         pos = live_orders.get_position()

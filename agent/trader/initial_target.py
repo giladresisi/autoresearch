@@ -249,7 +249,8 @@ class InitialTargetTracker:
     so a same-minute flip is a genuine 40-pt displacement, not an artefact). `reached`
     flips once, when a bar both touches the
     initial (Low <= it for a short, High >= for a long) AND closes beyond it. A touch
-    alone flips nothing. Same-bar precedence: when `stop` is supplied and the bar also
+    alone flips nothing; the first one is reported once through `take_touch`, as an
+    observation. Same-bar precedence: when `stop` is supplied and the bar also
     touched it, the stop wins — the position is gone, so there is nothing to stage.
     (The Executor's `OrderSim` books that stop on the tick, before this ever runs; the
     argument makes the rule hold for a caller driving 1m bars directly.)
@@ -269,6 +270,11 @@ class InitialTargetTracker:
         self.reached = False
         self.reached_at = None
         self.reached_close = None
+        # The FIRST completed bar that touched the initial WITHOUT closing beyond it
+        # (2026-09-30: the initial was the high of the move to within 0.86 pt, the bar
+        # closed back, and the day left no record to count). An observation only.
+        self.touched_at = None
+        self._touch = None
         self.stopped = False
         self.cf_stop_at = None
         self.cf_opp_close_at = None
@@ -297,13 +303,28 @@ class InitialTargetTracker:
         if self._stop_touched(hi, lo, stop):
             self.stopped = True           # the stop wins; the position is gone
             return None
-        if self._touched(hi, lo) and self._closed_beyond(close):
+        if not self._touched(hi, lo):
+            return None
+        if self._closed_beyond(close):
             self.reached = True
             self.reached_at = _label(bar)
             self.reached_close = close
             return {"kind": "reached", "bar": self.reached_at, "price": self.initial,
                     "close": close, "level": self.level}
+        if self.touched_at is None:
+            self.touched_at = _label(bar)
+            self._touch = {"kind": "touched", "bar": self.touched_at,
+                           "price": self.initial,
+                           "extreme": lo if self.side < 0 else hi,
+                           "close": close, "level": self.level}
         return None
+
+    def take_touch(self) -> "dict | None":
+        """The first touch-without-a-close-beyond, handed over exactly once. None when
+        there is none pending — including when the first touching bar also closed
+        beyond (the `reached` event carries that bar) or the stop won it."""
+        ev, self._touch = self._touch, None
+        return ev
 
     def post_flip(self, bar) -> "list[dict]":
         """Bars AFTER the flip bar: the counterfactual exits of actions A and B, each
@@ -327,6 +348,7 @@ class InitialTargetTracker:
     def state(self) -> dict:
         return {"initial": self.initial, "level": self.level, "reached": self.reached,
                 "reached_at": (str(self.reached_at) if self.reached_at is not None else None),
+                "touched_at": (str(self.touched_at) if self.touched_at is not None else None),
                 "stopped": self.stopped,
                 "cf_stop_at": (str(self.cf_stop_at) if self.cf_stop_at is not None else None),
                 "cf_opp_close_at": (str(self.cf_opp_close_at)

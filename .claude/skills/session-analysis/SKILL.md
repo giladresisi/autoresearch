@@ -191,6 +191,14 @@ would diverge on the thesis rather than on execution.
    uv run python scripts/replay_session.py --dates <date> --thesis-file "<global>/sessions/<date>/replay_thesis.json"
    ```
 
+   **Operator commands.** If `<global>/sessions/<date>/operator_control.jsonl` exists, the
+   operator steered the agent during the session (`agent-direction`, `agent-target`, or
+   since 2026-09-30 a `set_stop` written by `trade.py update-sl`). Add
+   `--operator-control "<global>/sessions/<date>/operator_control.jsonl"` so the replay
+   applies the same commands at the same bar instants; that run is the one to diff
+   against live. For the strategy-alone measure, run a second replay WITHOUT the flag and
+   report both P&L figures, labelled.
+
    The CLI prints `[replay] <date> done -> <run_dir>` and a P&L block. Note `<run_dir>`
    (`regression/sessions/<date>/<HH-MM-SS>/`) — it is the `<REPLAY>` folder Step 3 reads.
 
@@ -262,7 +270,8 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
    JSONL file — one JSON object per line. Each has "kind", "time", and kind-specific fields.
    Agent-era order kinds (dispatched to the broker): market-entry {direction up/down,
    price, stop, source "agent", mechanism}, market-close {price, reason: "stop_out" |
-   "take_profit" | "window_end" | "user-requested" | "session-end", source}. EVERY exit is
+   "stop_out_initial" (a stop the operator moved into profit, adopted by the agent, was
+   touched) | "take_profit" | "window_end" | "user-requested" | "session-end", source}. EVERY exit is
    a market-close carrying `skip_recon` — there is no `stopped-out` order kind on this
    path; a stop-out is a market-close with reason "stop_out". Session-start seeding still writes legacy informational kinds
    (new-hypothesis at startup, smt-div with source "v2-warmup", liquidity/levels) — they
@@ -337,6 +346,14 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
 11. <SESSION>\trader_decisions.jsonl   (LIVE Executor decision log — the graft's own truth)
     JSONL. Kinds: fill {mechanism, price, direction, artifact_id}, target_selected {pick
     {id, level, price, dist_ratio, band}, target}, stop_out, take_profit, hard_close, mark,
+    initial_target_selected / initial_target_touched {bar, extreme, close} (the first 1m
+    bar that touched the initial WITHOUT closing beyond it) / initial_target_reached
+    (touched AND closed beyond) — all record-only while `INITIAL_TARGET_ACTION = "record"`,
+    operator_override {command, accepted, reason} (every operator command, refusals too),
+    stop_moved {price, prev_stop, reason: operator} + stop_out_initial (`trade.py update-sl`
+    reached the agent as `set_stop`; an `update-stop-loss` in events.jsonl with NO matching
+    `stop_moved` here means the agent never adopted that stop — a D-class finding, see also
+    `stop_diverged` in agent_dispatch.jsonl),
     cancel_entry_cutoff, plan_dead {reason: target_reached | hard_close | falsified |
     attempts_exhausted | ..., detail}, would_have_falsified (falsifier met, NOT acted on —
     plans no longer die on falsification), would_have_killed (dol_reached, recorded only),
