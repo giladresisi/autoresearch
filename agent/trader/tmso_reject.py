@@ -241,6 +241,12 @@ class TmsoReject:
                 "level": r["level"], "mechanism": "tmso_reject",
                 "retry_of": retry_of(r)}, None
 
+    def release_fire(self, now) -> None:
+        """Un-mark the micro-session `now` falls in, for a fire the Executor BLOCKED (the
+        SMT-wait block, `smt_wait.py`): a fire that was never entered must not spend the
+        session's one fire. Only the latch moves; the sweep it consumed stays consumed."""
+        self._fired_sessions.discard(micro_session_start(now))
+
     # -- the tape -------------------------------------------------------------- #
 
     def on_bar_close(self, now, bar, tmso, prior_excursion=None) -> "dict | None":

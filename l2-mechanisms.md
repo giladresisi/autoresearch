@@ -2094,3 +2094,86 @@ dates: A +669.00, B +1301.00, **B-A +632.00** (unchanged). n = 9 UNRELATED days,
 direction changed on only 3 of them; one day moves the sum by ~200 pts either way.
 The offline sweep (production classifier, `main/2026-12`) reproduces the evidence table
 above exactly (UNRELATED excl. COUNTER 43 / 56% [41-70]; with COUNTER folded in 47 / 57%).
+
+
+### 11.6 CANDIDATE — the SMT-wait block (session 2026-10-01 O2)
+
+**Switched ON by default by operator decision (2026-10-03), still recorded here as a
+CANDIDATE** (precedent: §11.5): the rule is expected to apply on very few days and to
+matter on the days it does. A filter on the MARKET mechanisms' fires (everything that reaches
+`executor._drive_market_mechanisms`: the §6 tick path, every bar-close mechanism, the
+stop-bar retry), from 09:30:00 ET of the session date. Nothing in §§2-8 changes; entries,
+stops and the §8 lifecycle are untouched. Built in `agent/trader/smt_wait.py`, wired in the
+Executor after the §2 extension veto and before first-trigger arbitration. Governed by
+`ACT_SMT_WAIT_BLOCK`, **ON by default**: `0`/`false`/`no`/`off` disables it, and off is
+the bar loop exactly as it was. Operator's rule, 2026-10-01 11:31 ET
+(`<global>/sessions/2026-10-01/comments.md`, "10:43 ET" note and its updates): do not enter
+into a predictable opposite SMT.
+
+**Definitions** (each asset against its OWN level and its OWN average 1h range, MNQ and
+MES; favourable side = lows for a DOWN plan, highs for an UP plan):
+- *LEVEL* — the asset's London extreme on that side, 00:00:00 <= t < 06:00:00 ET.
+- *Not applicable for the day* (nothing is ever blocked) — either asset traded at or through
+  its LEVEL in 06:00:00-09:30:00, or has no London bars, or has no positive average 1h range.
+- *TOUCH* — at or after 09:30:00 the asset's Low <= LEVEL (High >= LEVEL for UP).
+- *WITHIN* — distance to LEVEL <= 0.3 x the asset's average 1h range.
+
+**Phase 1** (09:30:00 until either asset first touches): a fire is BLOCKED iff exactly one
+asset is WITHIN (`veto` reason `smt_wait_proximity`). Both or neither: allowed.
+
+**Phase 2** (exactly one asset has touched; B0 = the minute floor of the first touching
+row): every fire with touch_time <= now < B0 + 2 min is BLOCKED (`smt_wait_sweep`), i.e.
+the intra-bar entries on the sweeping bar and on the next bar and the bar-close entry at
+the sweeping bar's own close. The first entry allowed is the close of the next bar, on each
+mechanism's own terms and with every other veto applied. Nothing more is blocked that day.
+
+**Common.** No deferred fire: a blocked fire is not remembered, and every machine is still
+driven exactly as before (only the produced fires are filtered). A blocked fire spends no
+attempt. A blocked `tmso_reject` fire does NOT spend that mechanism's one fire per
+micro-session (the latch is released, `TmsoReject.release_fire`), so it can fire again
+later in the same micro-session; a blocked stop-bar retry holds no latch and is recorded
+`vetoed`. Every other mechanism behaves as under the extension veto. One `veto` record per
+blocked fire (not deduped), detail carrying the phase, each asset's level, price used,
+distance, average 1h range, ratio and within flag, and for phase 2 the touching asset, touch
+time and B0. The block is total and fails OPEN: an error is recorded in
+`state["smt_wait_error"]` and the fire is allowed.
+
+**Evidence as first written (2026-10-01, plan DOWN; read off the tape by hand — the
+replays are under "What was measured" below).** MNQ London low
+30757.0, MES 7704.75, neither taken before 09:30. 09:31:00 `tmso_reject` short @ 30771.0:
+MNQ 14.0 pts from its level (~0.13 of its ~108.7 average 1h range, WITHIN), MES last close
+7727.0, 22.25 pts (~1 range, not within) -> blocked `smt_wait_proximity`, latch released.
+MNQ first trades through 30757.0 at 09:31:28 while MES holds (low 7720.50 at 09:31:52), so
+B0 = 09:31:00 and fires are blocked through 09:32:59; the first allowed instant is 09:33:00.
+MES does not touch until 10:00:26. The block removes the 09:31:00 short (-15.00); with the
+latch unspent `tmso_reject` fires again at 09:35:00 and is stopped 09:37:46, so the day is
+about unchanged. One day, one hand-read.
+
+**Implementer-pinned readings (shown to the operator, not individually confirmed):**
+1. MNQ's distance is measured from the FIRE's price; MES's from its last close at or before now.
+2. A touch includes trading exactly at the level.
+3. The phase-2 block lifts the instant the second asset touches; both assets touching in the
+   same 1s row leaves no phase 2.
+4. "Not applicable" when EITHER asset took its level between 06:00 and 09:30.
+5. Inert when either average 1h range is missing (or not positive).
+
+**What was measured (2026-10-02/03).**
+- *Frequency.* On 51 replayable dates the block acts on a recorded entry on ONE (10-01);
+  on 22 it is not applicable (London extreme taken before 09:30) and on 14 the geometry
+  appears without an entry inside a blocked instant.
+- *A/B, ten dates* (10-01, 07-22, 08-27, 08-14, 09-25 with the setup near losing entries;
+  08-31, 08-11, 08-21, 09-08, 07-17 with it near winners; pre-merge code, thesis
+  injected): entries and exits identical on nine; no winner is blocked.
+- *10-01, replayed on master `4c5b927`.* `smt_wait_proximity` at 09:31:00 (MNQ ratio 0.13,
+  MES about 1.2), latch released, `tmso_reject` re-fires 09:35:00 @ 30809.50. Judged as an
+  ENTRY by its MFE against its own 15-pt stop: the blocked entry had 36.25 pts before the
+  reversal, its replacement 68.25. (Session figure, secondary: +80.25 with the block,
+  +117.25 without — the gap is §7c of `l2-target-selection.md` binding the nearer first
+  pick, asia(cur)_low 30685.0, on the later fills; not this rule.)
+- *Not exercised.* **Phase 2 has never fired in a replay** (no fire fell inside a sweep
+  window on any tested date); it is checked only by hand against the 10-01 numbers.
+- *Threshold.* 07-22's two losing longs sit at MES 0.44 and 0.34 and 08-31's +96.25
+  winner at MES 0.40, so a threshold wide enough to catch the first also blocks the winner.
+
+**Not done:** no test suite was run and no tests were written for it; named days were not
+re-measured (the block does not fire on them in the ten-date A/B).

@@ -118,6 +118,13 @@ lists what must NOT be built.
   `false`/`no`/`off`) disables it; read once per Executor. The live port cannot move a
   stop yet, so live records `veto reason=trail_unwired` instead. The FVG one-behind trail
   in the same module is study code, `trail.TRAIL_FVG_MOVES = False`, not a rule.
+- `ACT_SMT_WAIT_BLOCK` is **ON by default** (`l2-mechanisms.md` §11.6 CANDIDATE, operator
+  decision 2026-10-03): a market-mechanism fire is blocked while exactly one of MNQ/MES is
+  within 0.3 avg-1h-ranges of its London extreme (before either touches it post-09:30), and on
+  the sweeping 1m bar plus the next after a one-asset touch (`veto` reasons `smt_wait_proximity`
+  / `smt_wait_sweep`; no attempt spent; a blocked `tmso_reject` keeps its micro-session fire).
+  `0` (or `false`/`no`/`off`) disables it. A plain replay does not load `.env`: set it in the
+  shell for a replay.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.

@@ -163,6 +163,13 @@ class MarketMechanisms:
         excursion = prior_adverse_excursion(mnq, level, q2, before, short=self._tmso.short)
         return self._tmso.on_bar_close(now, bar, level, prior_excursion=excursion)
 
+    def release_tmso_fire(self, fire) -> None:
+        """Give back the micro-session's one `tmso_reject` fire when `fire` was blocked
+        before entry. A stop-bar retry holds no session latch of its own, so releasing for
+        one would reopen the ORIGINAL fire's session."""
+        if "retry_of" not in fire:
+            self._tmso.release_fire(fire["time"])
+
     def fvg1h_on_bar_close(self, now, bar, mnq) -> "dict | None":
         return self._fvg1h.on_bar_close(now, bar, zone_at_0700(mnq, now))
 
