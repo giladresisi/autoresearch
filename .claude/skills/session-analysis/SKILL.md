@@ -13,9 +13,11 @@ description: >
   discrepancies, and optimizations — the file to open first).
   Downloads broker/PMT reports first if they haven't been fetched yet, then runs
   the trader replay (agent/trader, NOT the legacy 1s regression) seeded with the
-  session's recorded L1 thesis, and plots the live session. Ends by creating a follow-up
-  worktree (`../session-actions-<date>`) whose `analysis.md` points a separate agent at the
-  session folder and `session-analysis.md` to work on the action items.
+  session's recorded L1 thesis, and plots the live session. Runs in a dedicated worktree
+  it creates off `origin/master` (`../analyze-<mon>-<day>`, e.g. `../analyze-oct-2`): the
+  replay, and afterwards every code change and experiment for the action items, happen
+  there and never in the worktree the skill was invoked from. Stops early if that worktree
+  already exists, unless a re-analysis is explicitly requested.
   Trigger phrases: "analyze the session", "session analysis", "write discrepancies",
   "write optimizations", "analyze yesterday's trades", "what went wrong today",
   "session review", "post-session analysis", "compare strategy vs tradovate",
@@ -28,12 +30,17 @@ description: >
 # Session Analysis
 
 Cross-references all session data sources and writes three structured analysis files
-(`discrepancies.md`, `optimizations.md`, and the consolidated `session-analysis.md`), then
-creates a worktree for working on the resulting action items, with an `analysis.md` entry
-point in it (Step 3.5).
+(`discrepancies.md`, `optimizations.md`, and the consolidated `session-analysis.md`).
 Intended to be run once after a session ends and reports have been (or will be) downloaded:
 with no date it analyzes the latest live run that is no longer running, and it stops early
-when that run was already analyzed unless a re-analysis is explicitly requested (Step 1).
+when that run was already analyzed, or its analysis worktree already exists, unless a
+re-analysis is explicitly requested (Step 1).
+
+**Where it runs.** Each analyzed session gets its own worktree, `../analyze-<mon>-<day>`
+(e.g. `../analyze-oct-2`), branched from `origin/master` (Step 1.5). The replay, the
+analysis and — afterwards, in the same agent session — every code change, experiment and
+plan for the action items happen in that worktree (Step 5). The worktree the skill was
+invoked from only runs the Step-1 gate; nothing is edited, replayed or committed there.
 
 **Which engine is live (since 2026-09-18, commit 99bb32b).** The live pipeline runs
 `trader_only=True`: the legacy trend/SMT/hypothesis/strategy engine is BLOCKED and every
@@ -61,7 +68,8 @@ broker reports keep their legacy shapes. The deterministic counterpart is theref
   (`comments.md`), the `run-orchestrator` skill (the running-commit line in `comments.md`),
   and the `get-reports` extractors (`tradovate_orders.csv`, `tradovate_position_history.csv`,
   `pickmytrade_alerts.csv`). Never look anywhere else for session inputs.
-- **Replay** outputs are worktree-local, per-run, under the per-date regression root:
+- **Replay** outputs are local to the analysis worktree (`<WT>`, Step 1.5), per-run, under
+  the per-date regression root:
   `regression/sessions/<date>/<HH-MM-SS>/` (one timestamped folder per run; `HH-MM-SS` is
   the TH/Asia-Bangkok start time — the replay shares `paths.regression_run_dir` with the
   legacy regression). A replay run folder holds `trader_decisions.jsonl`, `plans.json` and
@@ -90,7 +98,14 @@ uv run python .claude/skills/session-analysis/scripts/resolve_session.py [--date
 Act on the `STATUS` line:
 
 - `STATUS: ANALYZE` — continue with `SESSION_DATE` as `<date>`. `REANALYSIS: true` means
-  the three analysis files exist and will be overwritten (the user asked for that).
+  the three analysis files exist and will be overwritten (the user asked for that). Keep
+  `WORKTREE` (the analysis worktree's absolute path, `<WT>`), `WORKTREE_BRANCH` and
+  `WORKTREE_EXISTS` for Step 1.5.
+- `STATUS: WORKTREE_EXISTS` (exit 4) — the session's analysis worktree is already there
+  (someone is, or was, working this session). **Stop here; run nothing else and write
+  nothing.** Tell the user:
+  > "The `<date>` analysis worktree already exists: `WORKTREE`. Ask for a re-analysis
+  > explicitly to run the analysis again in it."
 - `STATUS: ALREADY_ANALYZED` (exit 3) — **stop here; run nothing else and write nothing.**
   Tell the user:
   > "The `<date>` live run was already analyzed (`ANALYZED_AT`): `ANALYSIS_FILE`. Ask for a
@@ -101,6 +116,56 @@ Act on the `STATUS` line:
   recommend the re-analysis — the existing files cover only the first part of the run.
 - `STATUS: NO_SESSION` (exit 2) — stop and relay `REASON`:
   > "No session directory found for `<date>`. Please verify the date."
+
+---
+
+## Step 1.5 — Create (or, on a re-analysis, reuse) the analysis worktree
+
+Everything after this step runs in the session's own worktree: `<WT>` = the `WORKTREE` path
+Step 1 printed — `analyze-<mon>-<day>` beside the current worktree (three-letter lowercase
+month, day without a leading zero: 2026-10-02 → `analyze-oct-2`), on a branch of the same
+name. Do this step yourself — do not delegate it to a subagent, and do not use
+`/new-co-trader-worktree` for it (that skill stops to ask whenever the current branch is
+not `master`).
+
+**`WORKTREE_EXISTS: false` — create it from `origin/master`:**
+
+```bash
+git fetch origin
+git worktree add "<WT>" -b "<WORKTREE_BRANCH>" origin/master
+[ -f .env ] && cp .env "<WT>/.env"
+git -C "<WT>" rev-parse --short HEAD        # the worktree's base, for analysis.md and Step 4
+```
+
+A missing `.env` is not an error — copy nothing. No dependency install is needed — the
+first `uv run` inside the worktree builds its venv. If `git worktree add` fails (e.g. the
+branch name is taken by a stale registration), stop and relay the error — never fall back
+to running the analysis in the worktree the skill was invoked from.
+
+**`WORKTREE_EXISTS: true` — reuse it as it stands.** Step 1 only gets here on an explicit
+re-analysis. Do not recreate, reset, rebase, stash or clean the worktree: it may hold
+action-item work in progress. Measure its state and keep the result for Step 4:
+
+```bash
+git fetch origin
+git -C "<WT>" branch --show-current; git -C "<WT>" rev-parse --short HEAD
+git -C "<WT>" rev-list --left-right --count origin/master...HEAD   # "<behind> <ahead>"
+git -C "<WT>" status --porcelain
+```
+
+- **Up to date with `origin/master`** = `behind` is 0. Otherwise it is `behind` commits
+  behind (and `ahead` commits of its own on top).
+- **Local changes** = the `status --porcelain` lines: a letter in column 1 is a STAGED
+  change, a letter in column 2 an UNSTAGED one, `??` an untracked file. `analysis.md` is
+  this skill's own untracked file — leave it out of the verdict.
+
+The re-analysis replay runs on that worktree's code exactly as it stands — behind master
+and with its local changes, if any — which is why Step 4 must report this state.
+
+**Then move into it** — `cd "<WT>"` once (the shell's working directory persists) and
+confirm `git rev-parse --show-toplevel` prints `<WT>`. Every command in Steps 2–3.5 runs
+from `<WT>`, so the reports, the ledger rebuild, the replay and the plot all run
+`origin/master`'s code, and the replay run folder lands under `<WT>/regression/`.
 
 ---
 
@@ -239,15 +304,19 @@ Artifacts. If the plot command fails, note the error and continue — the analys
 Delegate all the reading, cross-referencing, and writing to a subagent. This keeps the main context clean and lets the subagent focus entirely on the analysis.
 
 Use the general-purpose subagent with this prompt. Fill in `<DATE>`, `<BASE>` (the
-worktree root), `<GLOBAL>` (env `ACT_GLOBAL_DIR`, default
+analysis worktree `<WT>` from Step 1.5 — NOT the worktree the skill was invoked from),
+`<GLOBAL>` (env `ACT_GLOBAL_DIR`, default
 `~/projects/auto-co-trader/global` — resolve with `paths.global_root()`), and `<RUN>`
-(the replay run folder produced in Step 2.5, e.g. `<BASE>\regression\sessions\<DATE>\<HH-MM-SS>`):
+(the replay run folder produced in Step 2.5, e.g. `<BASE>\regression\sessions\<DATE>\<HH-MM-SS>`).
+On a re-analysis in a worktree that is behind `origin/master` or has local changes
+(Step 1.5), append that state to the prompt: the replay ran on that code, uncommitted
+changes included.
 
 ```
 You are a trading session analyst for an automated MNQ futures strategy.
 Your job is to cross-reference all session data sources and write three analysis files.
 
-BASE = C:\Users\gilad\projects\auto-co-trader\live           # the worktree root
+BASE = <WT>                                                  # the analysis worktree (C:\Users\gilad\projects\auto-co-trader\analyze-<mon>-<day>); the replay ran on ITS code
 GLOBAL = <GLOBAL>                                            # ACT_GLOBAL_DIR; default ~/projects/auto-co-trader/global
 DATE = <DATE>
 SESSION = <GLOBAL>\sessions\<DATE>
@@ -412,6 +481,19 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
     deployed after the live run already occurred but are baked into the replay (which
     always runs on the current codebase). They are the primary reason a replay decision
     may differ from the live one.
+
+    The replay ran on BASE's HEAD — `origin/master` as of the worktree's creation — not on
+    the code the live run used. So also list both sides against that running commit:
+
+    ```bash
+    git -C <BASE> log --oneline <running-commit>..HEAD    # in the replay, not in the live run
+    git -C <BASE> log --oneline HEAD..<running-commit>    # in the live run, not in the replay
+    ```
+
+    The first list is the complete set of after-run commits (it also catches ones that
+    landed after 17:00 ET). The second is normally empty; when it is not, the live run
+    carried code that master does not have and the replay lacks it — say so in
+    session-analysis.md §3 and treat it as a candidate cause of any section-B divergence.
 
 ---
 CROSS-REFERENCE METHODOLOGY:
@@ -686,42 +768,22 @@ not generic advice.
 
 ---
 
-## Step 3.5 — Create the action-items worktree and its `analysis.md`
+## Step 3.5 — Write `analysis.md` in the analysis worktree
 
-The analysis produces action items (the D-list and the O-themes). They are worked on in a
-**dedicated worktree** by a separate agent whose only starting point is ONE file,
-`analysis.md`, in that worktree's root. Do this step yourself, from the worktree root
-(`<BASE>`) — do not delegate it to a subagent.
+The analysis produces action items (the D-list and the O-themes). They are worked on in
+the analysis worktree (Step 5), and `<WT>/analysis.md` is the checklist and path index for
+that work — it survives a context compaction or a later session resuming in the worktree.
+Do this step yourself — do not delegate it to a subagent.
 
 Run it only if Step 3 wrote `<global>/sessions/<date>/session-analysis.md`. If that file does
 not exist, skip this step and say so in Step 4 — there is nothing to point at.
 
-This step never prompts: it also runs unattended inside the run-orchestrator maintenance
-cycle. Do not use `/new-co-trader-worktree` for it (that skill stops to ask whenever the
-current branch is not `master`, and the live worktree is on `live`).
-
-**1. Create the worktree** — a sibling of the current worktree, branched from
-`origin/master` (action-item work merges to master; the live worktree rebases onto it):
-
-```bash
-git fetch origin
-git worktree add "../session-actions-<date>" -b "session-actions/<date>" origin/master
-[ -f .env ] && cp .env "../session-actions-<date>/.env"
-git rev-parse --short HEAD; git branch --show-current            # where the analysis ran
-git -C "../session-actions-<date>" rev-parse --short HEAD        # the new worktree's base
-```
-
-If `../session-actions-<date>` already exists (the analysis was re-run for this date), do not
-create a second worktree: reuse it and overwrite its `analysis.md`. A missing `.env` in
-`<BASE>` is not an error — copy nothing. No dependency install is needed — the first
-`uv run` inside the worktree builds its venv.
-
-**2. Write `../session-actions-<date>/analysis.md`** from the template below. It is a
-pointer file, not a copy of the analysis: the three analysis files stay in the session
-folder and are the source of truth. Fill EVERY placeholder with a resolved absolute path
+**Write `<WT>/analysis.md`** from the template below (on a re-analysis, overwrite the one
+that is there). It is a pointer file, not a copy of the analysis: the three analysis files
+stay in the session folder and are the source of truth. Fill EVERY placeholder with a resolved absolute path
 (no `<global>`, no `~`, no relative paths) — the agent reading it must not have to resolve
 anything. `<SESSION>` is `<global>/sessions/<date>`, `<RUN>` the replay run folder from
-Step 2.5, `<WT>` the new worktree's absolute path.
+Step 2.5, `<WT>` the analysis worktree's absolute path.
 
 ````
 # Session <DATE> — action items
@@ -747,8 +809,7 @@ to; do not go looking elsewhere for context. Working state: never commit this fi
 | Replay run the analysis compared live against | `<RUN>` |
 | Thesis injected into that replay | `<SESSION>\replay_thesis.json` |
 | Commit the live session ran on | `<running commit>` |
-| Worktree the analysis (and that replay) ran in | `<BASE>` @ `<short-hash>` (`<branch>`) |
-| This worktree | `<WT>` — branch `session-actions/<DATE>`, from `origin/master` @ `<short-hash>` |
+| This worktree (the analysis and that replay ran here) | `<WT>` — branch `<WORKTREE_BRANCH>`, from `origin/master`; the replay ran @ `<short-hash>` |
 
 ## Action items
 - [ ] D<N> [CRITICAL|MINOR] — <one-line summary>
@@ -778,6 +839,9 @@ Filling rules:
   `none — <reason>` in the two replay rows and replace the body of the last section with
   that same one line.
 - A row whose artifact was not produced (e.g. the chart failed) gets `not produced — <reason>`.
+- **Re-analysis in a worktree that was behind `origin/master` or had local changes**
+  (Step 1.5): append that state to the "This worktree" row, e.g.
+  `; 3 behind origin/master, uncommitted changes`.
 
 ---
 
@@ -790,18 +854,41 @@ Once the subagent completes, confirm:
   the operator-proposed ones from comments.md
 - File paths written — all THREE: `discrepancies.md`, `optimizations.md`, and the
   consolidated `session-analysis.md`
-- The action-items worktree from Step 3.5: its path, branch and base commit, and the path
-  of its `analysis.md` — or that the step was skipped, and why. To work on the action
-  items, start a separate agent there (`cd ../session-actions-<date>`, then `claude`) with
-  "Read analysis.md and work on the action items".
+- The analysis worktree from Step 1.5: its path, branch and the commit the replay ran on,
+  whether it was created now or reused, and the path of its `analysis.md` — or that Step
+  3.5 was skipped, and why.
+- **On a re-analysis that reused an existing worktree — always, even when all is clean:**
+  whether it is up to date with `origin/master` (if not: how many commits behind, and how
+  many of its own ahead), whether it has local changes, and whether any of them is
+  UNSTAGED (list the files, split staged / unstaged / untracked). State that the replay
+  ran on that code as it stood; nothing in the worktree was rebased, stashed or reset.
 
 **Data Health back-fill:** `session-analysis.md` has a "Data Health" section. The
 session-analysis skill does NOT itself run the parquet-check. If a parquet-check WAS
-run in the same flow (e.g. the user chained `/parquet-check` then `/session-analysis`,
-or the run-orchestrator maintenance cycle ran it first), paste its per-instrument result
-summary into the subagent prompt (Step 3) so the subagent fills that section; otherwise it
+run in the same flow (e.g. the user chained `/parquet-check` then `/session-analysis`),
+paste its per-instrument result summary into the subagent prompt (Step 3) so the subagent
+fills that section; otherwise it
 will record "Not assessed in this run". If you have the parquet-check summary but only
 realize it after the subagent finished, edit the "Data Health" section of
 `session-analysis.md` in place to add it.
 
 If any discrepancy is marked [CRITICAL], call it out explicitly and offer to investigate the root cause in the code.
+
+---
+
+## Step 5 — Work the action items in the analysis worktree
+
+The agent that ran the analysis also handles its action items, in this same session. Which
+items to take is the operator's call: report first (Step 4), then work the ones they pick.
+
+All of that work lives in `<WT>`, on its `analyze-<mon>-<day>` branch: code changes, tests,
+replays, A/B runs, study scripts, plan files. Nothing is edited, run or committed in the
+worktree the skill was invoked from.
+
+- Keep the shell in `<WT>` (Step 1.5) and give every file you write or edit an absolute
+  path under `<WT>`. Before the first write of each item, confirm
+  `git rev-parse --show-toplevel` prints `<WT>`.
+- A subagent spawned for an item gets `<WT>` as its root, stated in its prompt — it does
+  not inherit it.
+- Tick the item in `<WT>/analysis.md` when it is done or ruled out, with the outcome in a
+  few words.

@@ -6,8 +6,8 @@ description: >
   kills any existing instance, launches the orchestrator with stdout capture, then arms a
   persistent monitor that sends push notifications at each session milestone (gap-fill complete,
   session started, daily.py done, first directed hypothesis, orchestrator death). At the CME
-  17:00–18:00 ET maintenance break it runs a post-session cycle (parquet-check, session-analysis,
-  pull+rebase onto master) and auto-restarts the orchestrator for the next session once IB
+  17:00–18:00 ET maintenance break it runs a post-session cycle (parquet-check, pull+rebase
+  onto master) and auto-restarts the orchestrator for the next session once IB
   realtime data is confirmed live again at the reopen. Trigger phrases include "start the
   orchestrator", "run the orchestrator", "kick it off", "bring it back up", "restart after crash",
   or any request to get the trading system running. Does not edit session_times.py at runtime —
@@ -471,7 +471,7 @@ As each line arrives from the Monitor, call `PushNotification` for EVERY milesto
 | `[KEEPALIVE] Orchestrator … died before session start …` | `CRITICAL: Orchestrator died before session start — check stdout log` |
 | `[KEEPALIVE] Orchestrator … has DIED` | `CRITICAL: Orchestrator died during session` |
 | `[KEEPALIVE] automation.main … has DIED` | `WARNING: automation.main died — orchestrator should restart it` |
-| `[MAINTENANCE] break started …` | `Maintenance break — running parquet-check, session-analysis, rebase; will auto-restart at the 18:00 ET reopen` — then **run Step 4** |
+| `[MAINTENANCE] break started …` | `Maintenance break — running parquet-check, rebase; will auto-restart at the 18:00 ET reopen` — then **run Step 4** |
 | `[REOPEN] IB realtime data confirmed …` | `IB live after maintenance — restarting orchestrator for the next session` — then **restart (Step 1) and re-arm this Monitor (Step 2)** |
 | `[REOPEN] WARN: no IB realtime data …` | `WARNING: IB data not back after the maintenance break — manual check needed` |
 
@@ -492,10 +492,7 @@ the next session.
 
   a. Invoke the **`parquet-check`** skill (validate/repair the session + main parquets).
 
-  b. Invoke the **`session-analysis`** skill (discrepancies / optimizations / digest for
-     the session that just closed).
-
-  c. Pull + rebase the worktree onto remote master so the next session runs the latest
+  b. Pull + rebase the worktree onto remote master so the next session runs the latest
      code:
 
   ```bash
@@ -537,7 +534,7 @@ Monitor**. The full cycle then repeats automatically each trading day:
 
 ```
 session running → [ORCH] Session ended (16:55) → pre-session accumulate →
-[MAINTENANCE] break started (~17:00) → parquet-check + session-analysis + rebase →
+[MAINTENANCE] break started (~17:00) → parquet-check + rebase →
 [REOPEN-WAIT] poll verify script → [REOPEN] data confirmed (~18:00) →
 trade.py start + re-arm Monitor → session running …
 ```
