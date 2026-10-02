@@ -272,6 +272,61 @@ def test_update_sl_calls_update_stop_loss(monkeypatch, capsys):
     mock_lo.update_stop_loss.assert_called_once_with(19700.0, "user-requested", direction="long")
 
 
+def _session_dir(tmp_path, monkeypatch):
+    """A session folder for 'today' under an isolated global root."""
+    import paths
+    from session_times import session_date_str
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
+    d = paths.sessions_dir() / session_date_str()
+    d.mkdir(parents=True)
+    return d
+
+
+def test_update_sl_queues_the_stop_for_the_agent(monkeypatch, tmp_path, capsys):
+    """Plan 47 D1: the broker stop and the agent's modelled stop move together. The
+    broker update goes out first; the control record is what the running agent reads."""
+    import json
+    monkeypatch.delenv("ACT_TRADER", raising=False)
+    session = _session_dir(tmp_path, monkeypatch)
+    mock_lo = MagicMock()
+    mock_lo.get_position.return_value = {
+        "active": {"direction": "long"}, "stop_entry": "", "stop_direction": "",
+    }
+    _run_trade(["update-sl", "30852"], monkeypatch, mock_lo, MagicMock())
+    mock_lo.update_stop_loss.assert_called_once_with(30852.0, "user-requested",
+                                                     direction="long")
+    lines = (session / "operator_control.jsonl").read_text(encoding="utf-8").splitlines()
+    rec = json.loads(lines[-1])
+    assert len(lines) == 1 and rec["kind"] == "set_stop" and rec["price"] == 30852.0
+    assert rec["seq"] == 1 and rec["created_at"]
+    assert "Queued for the agent" in capsys.readouterr().out
+
+
+def test_update_sl_is_not_queued_when_the_agent_is_off(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("ACT_TRADER", "0")
+    session = _session_dir(tmp_path, monkeypatch)
+    mock_lo = MagicMock()
+    mock_lo.get_position.return_value = {
+        "active": {"direction": "long"}, "stop_entry": "", "stop_direction": "",
+    }
+    _run_trade(["update-sl", "30852"], monkeypatch, mock_lo, MagicMock())
+    mock_lo.update_stop_loss.assert_called_once()
+    assert not (session / "operator_control.jsonl").exists()
+
+
+def test_update_sl_without_a_session_folder_queues_nothing(monkeypatch, tmp_path, capsys):
+    """No session folder means no running agent to read the record; never create one."""
+    monkeypatch.delenv("ACT_TRADER", raising=False)
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path))
+    mock_lo = MagicMock()
+    mock_lo.get_position.return_value = {
+        "active": {"direction": "long"}, "stop_entry": "", "stop_direction": "",
+    }
+    _run_trade(["update-sl", "30852"], monkeypatch, mock_lo, MagicMock())
+    mock_lo.update_stop_loss.assert_called_once()
+    assert not list(tmp_path.rglob("operator_control.jsonl"))
+
+
 def test_update_sl_fails_when_no_active(monkeypatch, capsys):
     mock_lo = MagicMock()
     mock_lo.get_position.return_value = {

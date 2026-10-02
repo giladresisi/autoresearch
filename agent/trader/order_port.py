@@ -140,6 +140,15 @@ class MirroringOrderPort:
         self._inner.set_target(None)
         self._open_ctx = {}
 
+    def adopt_stop(self, now, price):
+        """Take on a protective stop the FAR SIDE ALREADY HOLDS (the operator moved it
+        there by hand). A model edit only: nothing is sent, because there is nothing to
+        send — and that is why this is not named like the simulation's own stop mover.
+        This port still cannot move a stop on the far side, and a caller probing for
+        that capability must keep getting "no". Returns the simulation's `stop_moved`
+        event, or None when nothing is open."""
+        return self._inner.move_stop(now, price)
+
     # -- the mirrored events ---------------------------------------------------- #
 
     def fill_market(self, now, *, direction, price, stop, artifact_id) -> dict:

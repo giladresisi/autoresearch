@@ -12,7 +12,8 @@ import pytest
 
 from agent.trader.executor import Executor
 from agent.trader.operator_control import (KIND_RESET_TARGET, KIND_SET_DIRECTION,
-                                           KIND_SET_TARGET, OperatorControl)
+                                           KIND_SET_STOP, KIND_SET_TARGET,
+                                           OperatorControl)
 from agent.trader.records import DECISIONS_FILE
 
 TZ = "America/New_York"
@@ -143,6 +144,7 @@ class _StubExecutor:
         self._position, self._attempts = position, attempts
         self.killed = None
         self.set_calls, self.reset_calls = [], 0
+        self.stop_calls = []
 
     def has_position(self):
         return self._position
@@ -160,6 +162,10 @@ class _StubExecutor:
     def reset_target(self, now):
         self.reset_calls += 1
         return {"accepted": True}
+
+    def set_stop_override(self, now, price):
+        self.stop_calls.append((now, price))
+        return {"accepted": True, "detail": {"stop": price}}
 
     def refresh_menu(self, now):
         return [{"id": "D2", "level": "htf_month_high_202608", "price": 30639.5}]
@@ -305,3 +311,61 @@ def test_a_record_without_a_stamp_is_due_immediately(tmp_path):
     OperatorControl(tmp_path).append({"kind": KIND_RESET_TARGET})
     g._drain_operator(NOW, {}, {"bias": "DOWN"})
     assert ex.reset_calls == 1
+
+
+# --------------------------------------------------------------------------- #
+# plan 47 D1: `set_stop` — a stop the operator moved at the broker              #
+# --------------------------------------------------------------------------- #
+
+def test_set_stop_command_reaches_the_executor(tmp_path):
+    ex = _StubExecutor(position=True)
+    g = _graft(tmp_path, executor=ex)
+    OperatorControl(tmp_path).append({"kind": KIND_SET_STOP, "price": 30852.0})
+    g._drain_operator(NOW, {}, {"bias": "UP"})
+    assert ex.stop_calls == [(NOW, 30852.0)]
+    rec = _recs(tmp_path, "operator_override")[-1]
+    assert rec["accepted"] is True and rec["command"] == KIND_SET_STOP
+    assert rec["detail"]["stop"] == 30852.0
+
+
+def test_set_stop_without_a_price_is_refused(tmp_path):
+    ex = _StubExecutor(position=True)
+    g = _graft(tmp_path, executor=ex)
+    OperatorControl(tmp_path).append({"kind": KIND_SET_STOP})
+    g._drain_operator(NOW, {}, {"bias": "UP"})
+    assert ex.stop_calls == []
+    assert _recs(tmp_path, "operator_override")[-1]["reason"] == "no_price"
+
+
+def test_set_stop_is_applied_mid_bar_with_a_position_open(tmp_path):
+    """The broker stop is live from the instant the CLI returns, so the model must not
+    wait for the minute to close: every second it lags is a second a fill goes unseen."""
+    ex = _StubExecutor(position=True)
+    g = _graft(tmp_path, executor=ex)
+    OperatorControl(tmp_path).append(
+        {"kind": KIND_SET_STOP, "price": 30852.0,
+         "created_at": f"{DATE} 09:35:20-04:00"})
+    tick = pd.Timestamp(f"{DATE} 09:35:19", tz=TZ)
+    g._drain_operator(tick, {}, {"bias": "UP"}, closed=False)          # not yet due
+    assert ex.stop_calls == []
+    tick = pd.Timestamp(f"{DATE} 09:35:21", tz=TZ)
+    g._drain_operator(tick, {}, {"bias": "UP"}, closed=False)
+    assert ex.stop_calls == [(tick, 30852.0)]
+    assert _recs(tmp_path, "operator_override")[-1]["time"].startswith(
+        f"{DATE}T09:35:21")
+
+
+def test_a_bar_close_command_ahead_of_a_set_stop_keeps_the_order(tmp_path):
+    """Mid-bar only a `set_stop` at the HEAD of the queue is applied. One queued behind a
+    bar-close command waits for it, so nothing is applied out of `seq` order or lost."""
+    ex = _StubExecutor(position=True)
+    g = _graft(tmp_path, executor=ex)
+    ctl = OperatorControl(tmp_path)
+    ctl.append({"kind": KIND_RESET_TARGET})
+    ctl.append({"kind": KIND_SET_STOP, "price": 30852.0})
+    g._drain_operator(NOW, {}, {"bias": "UP"}, closed=False)
+    assert ex.reset_calls == 0 and ex.stop_calls == []
+    g._drain_operator(NOW + pd.Timedelta(seconds=40), {}, {"bias": "UP"}, closed=True)
+    assert ex.reset_calls == 1 and len(ex.stop_calls) == 1
+    assert [r["seq"] for r in _recs(tmp_path, "operator_override")] == [1, 2]
+

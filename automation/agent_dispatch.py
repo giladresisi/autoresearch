@@ -17,7 +17,8 @@ Three jobs:
                       order all share. Deduped on `(plan_id, seq)`.
   * `supervise(now)`  the fail-closed watchdog, once per live bar: a position change the
                       agent did not cause kills the plan; a trader error with a position
-                      open flattens it and disarms the session.
+                      open flattens it and disarms the session; a protective stop the
+                      file and the model disagree on is recorded.
   * the record        one JSON line per event in `<session>/agent_dispatch.jsonl`.
 
 Market kinds ONLY. Every exit is a market close carrying `skip_recon`: the agent always
@@ -55,8 +56,17 @@ CLOSE_REASONS = {"stop_out": "stop_out", "take_profit": "take_profit",
                  "micro_smt_exit": "micro_smt_exit",
                  # Plan 35 action B (`agent/trader/executor.py::_initial_opp_close`), wired
                  # live alongside O4 — same `flatten` call, same mapping requirement.
-                 "initial_opp_close": "initial_opp_close"}
+                 "initial_opp_close": "initial_opp_close",
+                 # A MOVED stop touched at or beyond the entry (plan 47 D1: the operator
+                 # trailed the broker stop and the model adopted it). The broker stop has
+                 # normally filled already, so this close lands on a flat account; when it
+                 # has not, it is the flatten. Same mapping requirement as the two above.
+                 "stop_out_initial": "stop_out_initial"}
 _DIRECTIONS = {"UP": "up", "LONG": "up", "DOWN": "down", "SHORT": "down"}
+#: How long position.json's stop and the modelled stop may disagree before the watchdog
+#: records it. The CLI writes the file first and the agent adopts the stop on its next
+#: tick or two, so a short disagreement is normal operation. BAR time.
+STOP_DIVERGENCE_GRACE = pd.Timedelta(seconds=10)
 
 
 def refusal_reason(environ=None, *, pipeline=None) -> "str | None":
@@ -127,6 +137,9 @@ class AgentDispatchPort:
         self._stood_down = None          # why the watchdog stopped: "killed" | "disarmed"
         self._stood_down_at = None
         self._window_close_sent = False
+        # The standing stop disagreement, or None: [(active_stop, model_stop), first
+        # seen, recorded]. See `_note_stop_divergence`.
+        self._stop_diverged = None
 
     # -- the sink --------------------------------------------------------------- #
 
@@ -252,6 +265,7 @@ class AgentDispatchPort:
         elif active and int(active.get("contracts") or 0) != self._contracts:
             reason = "contracts_mismatch"
         if reason is None:
+            self._note_stop_divergence(now, active, position)
             return
         # No order. The position changed and the agent did not change it; sending
         # anything now would be acting on a state it has just learned it does not know.
@@ -260,6 +274,38 @@ class AgentDispatchPort:
         self._record({"kind": "watchdog_kill", "time": now, "reason": reason,
                       "void_position": void, "active": _jsonable(active),
                       "position": _jsonable(position or {})}, None, None, None, None)
+
+    def _note_stop_divergence(self, now, active, position) -> None:
+        """RECORD (never act on) position.json holding a stop the model does not.
+
+        2026-09-30: the operator raised the broker stop by hand; the file followed, the
+        model did not, and this watchdog — which compared only whether a position
+        existed — saw agreement for the eleven minutes the model held a position the
+        broker had closed. The stop now reaches the model through the operator control
+        file; this is the evidence when it did not. Not a kill: the position is real and
+        still managed, and the operator's stop is resting at the broker either way.
+        Once per distinct pair, after `STOP_DIVERGENCE_GRACE`.
+        """
+        pair = None
+        if active and position:
+            try:
+                a, m = float(active.get("stop")), float(position.get("stop"))
+                if abs(a - m) > 1e-9:
+                    pair = (a, m)
+            except (TypeError, ValueError):
+                pair = None
+        if pair is None:
+            self._stop_diverged = None
+            return
+        state = self._stop_diverged
+        if state is None or state[0] != pair:
+            self._stop_diverged = [pair, now, False]
+            return
+        if state[2] or now - state[1] < STOP_DIVERGENCE_GRACE:
+            return
+        state[2] = True
+        self._record({"kind": "stop_diverged", "time": now, "active_stop": pair[0],
+                      "model_stop": pair[1], "since": state[1]}, None, None, None, None)
 
     def _stand_down(self, why, now) -> None:
         self._stood_down = why

@@ -47,7 +47,8 @@ from agent.facts.store import ensure_coverage
 from agent.trader.analyzer import Analyzer
 from agent.trader.executor import Executor
 from agent.trader.operator_control import (KIND_RESET_TARGET, KIND_SET_DIRECTION,
-                                           KIND_SET_TARGET, OperatorControl)
+                                           KIND_SET_STOP, KIND_SET_TARGET,
+                                           OperatorControl)
 from agent.trader.order_port import MirroringOrderPort
 from agent.trader.order_sim import OrderSim
 from agent.trader.plan_store import PlanStore
@@ -280,8 +281,11 @@ class TraderGraft:
         # Plan 41: the operator's commands are applied HERE — after the plan exists and
         # before the Executor runs, so a direction change takes effect on this bar rather
         # than one bar late, and only on a bar close (no wall clock, and never mid-bar).
-        if closed:
-            self._drain_operator(now, bars, thesis)
+        # The one exception is `set_stop` (plan 47 D1), applied on the tick while a
+        # position is open: the broker stop it reports is already live, and the Executor
+        # must test THIS tick against it.
+        if closed or (self._executor is not None and self._executor.has_position()):
+            self._drain_operator(now, bars, thesis, closed=closed)
 
         if self._executor is not None:
             self._executor.on_bar(now, bars, bar_complete=closed)
@@ -294,13 +298,18 @@ class TraderGraft:
 
     # -- plan 41: operator overrides ------------------------------------------ #
 
-    def _drain_operator(self, now, bars, thesis) -> None:
+    def _drain_operator(self, now, bars, thesis, closed: bool = True) -> None:
         """Apply every control record written since the last drain. Never raises.
 
         Each record is recorded with BAR time and its verdict, accepted or not: a refused
         command is the operator believing the session is in a state it is not, and they
         have to be able to see that in the artifact (and in the log line the recorder
-        announces) rather than wait for a change that never came."""
+        announces) rather than wait for a change that never came.
+
+        `closed=False` is a mid-bar tick: only `set_stop` records at the HEAD of the queue
+        are applied. The first record of any other kind stops the drain and waits, with
+        everything behind it, for the bar close — `_control_seq` is a high-water mark, so
+        applying past it would lose it."""
         try:
             pending = self._control.pending(self._control_seq)
         except Exception:
@@ -316,14 +325,18 @@ class TraderGraft:
             # and leaves itself and its successors pending.
             if not _due(rec, now):
                 break
+            kind = str(rec.get("kind") or "")
+            if not closed and kind != KIND_SET_STOP:
+                break
             seq = int(rec.get("seq") or 0)
             self._control_seq = max(self._control_seq, seq)
-            kind = str(rec.get("kind") or "")
             try:
                 if kind == KIND_SET_DIRECTION:
                     res = self._apply_direction(now, bars, thesis, rec)
                 elif kind == KIND_SET_TARGET:
                     res = self._apply_target(now, rec)
+                elif kind == KIND_SET_STOP:
+                    res = self._apply_stop(now, rec)
                 elif kind == KIND_RESET_TARGET:
                     res = (self._executor.reset_target(now)
                            if self._executor is not None
@@ -403,6 +416,15 @@ class TraderGraft:
         if price is None:
             return {"accepted": False, "reason": "no_price"}
         return self._executor.set_target_override(now, price, level=level)
+
+    def _apply_stop(self, now, rec) -> dict:
+        """The operator moved the broker stop; the model takes it on (plan 47 D1)."""
+        if self._executor is None:
+            return {"accepted": False, "reason": "no_plan"}
+        price = rec.get("price")
+        if price is None:
+            return {"accepted": False, "reason": "no_price"}
+        return self._executor.set_stop_override(now, price)
 
     def _maybe_snapshot(self, now, closed) -> None:
         """One store snapshot per session date, on a bar close.

@@ -112,6 +112,12 @@ lists what must NOT be built.
   entered (`l2-mechanisms.md` §2; a `veto` record, reason `extension`; no attempt spent).
   `0` (or `false`/`no`/`off`) disables it. A plain replay does not load `.env`: set it in
   the shell for a replay.
+- `ACT_STOP_BE` is **ON by default** (`l2-mechanisms.md` §8, 2026-10-02): once a position
+  has covered half the way from its entry to T2 the stop moves to the entry (`stop_moved`
+  reason `breakeven`; a touch is `stop_out_initial`, no attempt spent). `0` (or
+  `false`/`no`/`off`) disables it; read once per Executor. The live port cannot move a
+  stop yet, so live records `veto reason=trail_unwired` instead. The FVG one-behind trail
+  in the same module is study code, `trail.TRAIL_FVG_MOVES = False`, not a rule.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.

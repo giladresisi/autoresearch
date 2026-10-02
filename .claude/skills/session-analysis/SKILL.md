@@ -31,7 +31,9 @@ Cross-references all session data sources and writes three structured analysis f
 (`discrepancies.md`, `optimizations.md`, and the consolidated `session-analysis.md`), then
 creates a worktree for working on the resulting action items, with an `analysis.md` entry
 point in it (Step 3.5).
-Intended to be run once after a session ends and reports have been (or will be) downloaded.
+Intended to be run once after a session ends and reports have been (or will be) downloaded:
+with no date it analyzes the latest live run that is no longer running, and it stops early
+when that run was already analyzed unless a re-analysis is explicitly requested (Step 1).
 
 **Which engine is live (since 2026-09-18, commit 99bb32b).** The live pipeline runs
 `trader_only=True`: the legacy trend/SMT/hypothesis/strategy engine is BLOCKED and every
@@ -66,12 +68,39 @@ broker reports keep their legacy shapes. The deterministic counterpart is theref
   `thesis_state.json`; it never writes `events.jsonl` / `trades_1s.tsv` (those are legacy
   regression artifacts and will NOT exist). Use the run folder you produced in Step 2.5.
 
-## Step 1 — Determine session date
+## Step 1 — Determine session date (and the already-analyzed gate)
 
-If the user provided a date (e.g. "analyze 2026-05-21"), use it. Otherwise use yesterday's date in `YYYY-MM-DD` format.
+Resolve the session with the gate script — never by "yesterday's date":
 
-Check that `<global>/sessions/<date>/` exists (`paths.sessions_dir() / "<date>"`). If it doesn't, stop:
-> "No session directory found for `<date>`. Please verify the date."
+```bash
+uv run python .claude/skills/session-analysis/scripts/resolve_session.py [--date <date>] [--reanalyze]
+```
+
+- Pass `--date <date>` only if the user named a date (e.g. "analyze 2026-05-21").
+- **No date = the latest live run that is no longer running.** The script takes the newest
+  `<global>/sessions/<date>/` folder that holds a live run (`signals.log` / `events.jsonl`)
+  and skips the one whose live run is in progress (orchestrator alive AND session window
+  open — the live-comment gate), so a call made mid-session analyzes the PREVIOUS live run.
+  A run stopped mid-day, or one sitting in the 16:55–18:00 ET maintenance break, is no
+  longer running and is the default.
+- Pass `--reanalyze` only if the user EXPLICITLY asked to redo the analysis ("reanalyze",
+  "re-run the analysis", "analyze it again", "overwrite the analysis"). A bare date is not
+  such a request.
+
+Act on the `STATUS` line:
+
+- `STATUS: ANALYZE` — continue with `SESSION_DATE` as `<date>`. `REANALYSIS: true` means
+  the three analysis files exist and will be overwritten (the user asked for that).
+- `STATUS: ALREADY_ANALYZED` (exit 3) — **stop here; run nothing else and write nothing.**
+  Tell the user:
+  > "The `<date>` live run was already analyzed (`ANALYZED_AT`): `ANALYSIS_FILE`. Ask for a
+  > re-analysis explicitly to redo it."
+
+  If it also printed `ANALYSIS_STALE: true`, the live run wrote to the folder AFTER that
+  analysis (it was stopped mid-day, analyzed, then resumed): still stop, but say so and
+  recommend the re-analysis — the existing files cover only the first part of the run.
+- `STATUS: NO_SESSION` (exit 2) — stop and relay `REASON`:
+  > "No session directory found for `<date>`. Please verify the date."
 
 ---
 
@@ -162,6 +191,14 @@ would diverge on the thesis rather than on execution.
    uv run python scripts/replay_session.py --dates <date> --thesis-file "<global>/sessions/<date>/replay_thesis.json"
    ```
 
+   **Operator commands.** If `<global>/sessions/<date>/operator_control.jsonl` exists, the
+   operator steered the agent during the session (`agent-direction`, `agent-target`, or
+   since 2026-09-30 a `set_stop` written by `trade.py update-sl`). Add
+   `--operator-control "<global>/sessions/<date>/operator_control.jsonl"` so the replay
+   applies the same commands at the same bar instants; that run is the one to diff
+   against live. For the strategy-alone measure, run a second replay WITHOUT the flag and
+   report both P&L figures, labelled.
+
    The CLI prints `[replay] <date> done -> <run_dir>` and a P&L block. Note `<run_dir>`
    (`regression/sessions/<date>/<HH-MM-SS>/`) — it is the `<REPLAY>` folder Step 3 reads.
 
@@ -233,7 +270,8 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
    JSONL file — one JSON object per line. Each has "kind", "time", and kind-specific fields.
    Agent-era order kinds (dispatched to the broker): market-entry {direction up/down,
    price, stop, source "agent", mechanism}, market-close {price, reason: "stop_out" |
-   "take_profit" | "window_end" | "user-requested" | "session-end", source}. EVERY exit is
+   "stop_out_initial" (a stop the operator moved into profit, adopted by the agent, was
+   touched) | "take_profit" | "window_end" | "user-requested" | "session-end", source}. EVERY exit is
    a market-close carrying `skip_recon` — there is no `stopped-out` order kind on this
    path; a stop-out is a market-close with reason "stop_out". Session-start seeding still writes legacy informational kinds
    (new-hypothesis at startup, smt-div with source "v2-warmup", liquidity/levels) — they
@@ -308,6 +346,14 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
 11. <SESSION>\trader_decisions.jsonl   (LIVE Executor decision log — the graft's own truth)
     JSONL. Kinds: fill {mechanism, price, direction, artifact_id}, target_selected {pick
     {id, level, price, dist_ratio, band}, target}, stop_out, take_profit, hard_close, mark,
+    initial_target_selected / initial_target_touched {bar, extreme, close} (the first 1m
+    bar that touched the initial WITHOUT closing beyond it) / initial_target_reached
+    (touched AND closed beyond) — all record-only while `INITIAL_TARGET_ACTION = "record"`,
+    operator_override {command, accepted, reason} (every operator command, refusals too),
+    stop_moved {price, prev_stop, reason: operator} + stop_out_initial (`trade.py update-sl`
+    reached the agent as `set_stop`; an `update-stop-loss` in events.jsonl with NO matching
+    `stop_moved` here means the agent never adopted that stop — a D-class finding, see also
+    `stop_diverged` in agent_dispatch.jsonl),
     cancel_entry_cutoff, plan_dead {reason: target_reached | hard_close | falsified |
     attempts_exhausted | ..., detail}, would_have_falsified (falsifier met, NOT acted on —
     plans no longer die on falsification), would_have_killed (dol_reached, recorded only),

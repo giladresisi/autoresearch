@@ -232,8 +232,9 @@ def test_the_cutoff_is_measured_on_the_arm_date_not_the_bar_date(tmp_path, monke
 def test_no_entry_after_a_positive_close_with_target_death_disabled(tmp_path,
                                                                      monkeypatch):
     """Case 12 (F16). The take-profit also kills the plan via `target_reached`, which
-    would hide this guard. The Executor's own copy of the target is cleared after the
-    fill, so the plan SURVIVES the winner and the guard is what blocks."""
+    would hide this rule. The Executor's own copy of the target is cleared after the
+    fill, so `target_reached` cannot fire and the positive close is what ends the plan
+    (2026-09-30: a plan death, `positive_close`, on the exit's own bar)."""
     ex = make_executor(tmp_path, monkeypatch,
                        pick={"id": "D1", "level": "x", "price": 29300.0})
     _step(ex, "09:40:00", 29250.0, fire=True)
@@ -242,13 +243,55 @@ def test_no_entry_after_a_positive_close_with_target_death_disabled(tmp_path,
     _ORDER_KINDS = ("fill", "fill_voided", "stop_out", "take_profit", "mark",
                    "initial_opp_close")
     assert [k for k in _kinds(tmp_path) if k in _ORDER_KINDS][-1] == "take_profit"
-    assert ex.bind_state()["plan_alive"] is True
+    dead = [r for r in _recs(tmp_path) if r["kind"] == "plan_dead"]
+    assert [d["reason"] for d in dead] == ["positive_close"]
+    assert dead[0]["time"] == _ts("09:50:00").isoformat()
+    assert dead[0]["detail"] == {"exit": "take_profit", "entry": 29250.0,
+                                 "price": 29300.0}
+    assert ex.bind_state()["plan_alive"] is False
 
     asked = ex._market.asked
     _step(ex, "09:52:00", 29290.0, fire=True)
     assert ex.position() is None and ex._market.asked == asked
     assert ex.bind_state()["entry_block"] == "after_positive_trade"
     assert _kinds(tmp_path).count("fill") == 1
+    assert _kinds(tmp_path).count("plan_dead") == 1
+
+
+def test_a_take_profit_still_dies_as_target_reached(tmp_path, monkeypatch):
+    """`positive_close` is evaluated LAST: a target touch keeps the reason it always
+    recorded, so no stream with a take-profit in it moves."""
+    ex = make_executor(tmp_path, monkeypatch,
+                       pick={"id": "D1", "level": "x", "price": 29300.0})
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    _step(ex, "09:50:00", 29295.0, hi=29301.0)
+    dead = [r for r in _recs(tmp_path) if r["kind"] == "plan_dead"]
+    assert [d["reason"] for d in dead] == ["target_reached"]
+
+
+def test_a_profitable_operator_stop_exit_kills_the_plan(tmp_path, monkeypatch):
+    """The 2026-09-30 session: the exit was the operator's trailed stop, the target was
+    never reached, and the plan stayed alive with all three attempts in hand."""
+    ex = make_executor(tmp_path, monkeypatch,
+                       pick={"id": "D1", "level": "x", "price": 29400.0})
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    ex.set_stop_override(_ts("09:50:00"), 29280.0)
+    _step(ex, "09:51:10", 29281.0, lo=29279.5)
+    dead = [r for r in _recs(tmp_path) if r["kind"] == "plan_dead"]
+    assert [d["reason"] for d in dead] == ["positive_close"]
+    assert dead[0]["detail"]["exit"] == "stop_out_initial"
+    assert ex.bind_state()["plan_alive"] is False and ex._plan["attempts_used"] == 0
+
+
+def test_a_breakeven_stop_exit_is_not_a_positive_close(tmp_path, monkeypatch):
+    """Stop moved to the entry and hit: nothing was made, so the plan lives (and no
+    attempt is spent — `stop_out_initial` is not a failed attempt either)."""
+    ex = make_executor(tmp_path, monkeypatch)
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    ex.set_stop_override(_ts("09:50:00"), 29250.0)
+    _step(ex, "09:51:10", 29251.0, lo=29249.0)
+    assert ex.position() is None and "stop_out_initial" in _kinds(tmp_path)
+    assert ex.bind_state()["plan_alive"] is True and ex._plan["attempts_used"] == 0
 
 
 def test_a_losing_close_does_not_block_the_next_entry(tmp_path, monkeypatch):
@@ -377,6 +420,80 @@ def test_kill_plan_and_void_position_from_outside(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# plan 47 D1: a stop the OPERATOR moved at the broker is adopted by the model    #
+# --------------------------------------------------------------------------- #
+
+def test_set_stop_moves_the_sim_stop_and_records_it(tmp_path, monkeypatch):
+    ex = make_executor(tmp_path, monkeypatch)
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    res = ex.set_stop_override(_ts("09:50:00"), 29280.0)
+    assert res == {"accepted": True, "detail": {"stop": 29280.0, "prev_stop": 29235.0}}
+    assert ex.position()["stop"] == 29280.0
+    moved = [r for r in _recs(tmp_path) if r["kind"] == "stop_moved"]
+    assert len(moved) == 1 and moved[0]["reason"] == "operator"
+    assert moved[0]["price"] == 29280.0 and moved[0]["prev_stop"] == 29235.0
+
+
+def test_set_stop_refused_with_no_position(tmp_path, monkeypatch):
+    ex = make_executor(tmp_path, monkeypatch)
+    assert ex.set_stop_override(_ts("09:50:00"), 29280.0) == {
+        "accepted": False, "reason": "no_position"}
+    assert "stop_moved" not in _kinds(tmp_path)
+
+
+@pytest.mark.parametrize("price", ["abc", None, 0.0, -5.0, float("nan")])
+def test_set_stop_refused_with_a_bad_price(tmp_path, monkeypatch, price):
+    ex = make_executor(tmp_path, monkeypatch)
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    assert ex.set_stop_override(_ts("09:50:00"), price)["reason"] == "bad_price"
+    assert ex.position()["stop"] == 29235.0
+
+
+def test_a_touch_of_an_operator_stop_books_stop_out_initial_and_latches_positive(
+        tmp_path, monkeypatch):
+    """The 2026-09-30 shape: the operator trails the broker stop into profit and it is
+    hit. The model books the exit itself, at the moved stop, on the tick that touches it
+    — not a failed attempt, and a positive close."""
+    seen = []
+    port = MirroringOrderPort(OrderSim(dol=None), lambda ev: seen.append(ev) or None)
+    ex = make_executor(tmp_path, monkeypatch, order_port=port)
+    port._context = ex.order_context
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    assert ex.set_stop_override(_ts("09:50:00"), 29280.0)["accepted"] is True
+    assert [e["kind"] for e in seen] == ["fill"], "adopting a stop sends nothing"
+
+    _step(ex, "09:50:01", 29290.0, lo=29282.0)                 # above it: still open
+    assert ex.position() is not None
+    _step(ex, "09:51:10", 29281.0, lo=29279.5)                 # through it
+    assert ex.position() is None
+    out = [r for r in _recs(tmp_path) if r["kind"] == "stop_out_initial"]
+    assert len(out) == 1 and out[0]["price"] == 29280.0
+    assert [e["kind"] for e in seen] == ["fill", "stop_out_initial"]
+    assert ex._plan["attempts_used"] == 0 and "stop_out" not in _kinds(tmp_path)
+    assert ex._positive_close is True
+
+    asked = ex._market.asked
+    _step(ex, "09:53:00", 29290.0, fire=True)
+    assert ex.position() is None and ex._market.asked == asked
+    assert _kinds(tmp_path).count("fill") == 1
+
+
+def test_an_operator_stop_on_the_losing_side_still_books_a_stop_out(tmp_path,
+                                                                     monkeypatch):
+    """Tightened but still below the entry: a touch is a LOSS, so it is a `stop_out` —
+    an attempt spent — exactly like the mechanism's own stop."""
+    ex = make_executor(tmp_path, monkeypatch)
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    assert ex.set_stop_override(_ts("09:41:00"), 29244.0)["accepted"] is True
+    _step(ex, "09:41:30", 29246.0, lo=29243.0)
+    assert ex.position() is None
+    kinds = _kinds(tmp_path)
+    assert "stop_out" in kinds and "stop_out_initial" not in kinds
+    assert [r for r in _recs(tmp_path) if r["kind"] == "stop_out"][0]["price"] == 29244.0
+    assert ex._plan["attempts_used"] == 1 and ex._positive_close is False
+
+
+# --------------------------------------------------------------------------- #
 # cases 16, 17: the standing gates still hold                                   #
 # --------------------------------------------------------------------------- #
 
@@ -437,6 +554,27 @@ def test_the_five_before_dates_replay_byte_identical(date, monkeypatch):
     12:59:00 @ 29532.0 (+275.50); the 10:18:00 extension veto is no longer produced
     (position open): -15.00 -> +260.50, 1 -> 2 attempts. 08-31 untouched (no covered
     stop-out; byte-identical).
+
+    2026-09-30 (plan 47 O2, §8: a positive trade ends the plan): 08-31 and 09-03
+    re-captured. Each gains exactly ONE record, `plan_dead reason=positive_close`, on the
+    bar of its profitable `micro_smt_exit` (08-31 12:07:00, 09-03 12:59:00) — no trade,
+    price or attempt moves. 09-01, 09-02 and 09-04 byte-identical (no positive close
+    that was not already a plan death).
+
+    2026-09-30 (plan 47 O4, the initial-target touch record): 09-03 ALONE re-captured.
+    It gains one `initial_target_touched` record — the 11:27 bar touched the retry's
+    initial (29523.825) and closed back, two bars before the 11:29 bar reached it. A
+    record only; the other four have no touch that was not already the reach bar.
+
+    2026-10-02 (§8 break-even at 50%, ON): 08-31, 09-02, 09-03 and 09-04 re-captured.
+    Each position that reached half the way to T2 gains `trail_armed` + `stop_moved
+    reason=breakeven` on that tick (09-02 10:07:15, 09-03 11:03:16, 09-04 10:12:00 —
+    exits unchanged). 08-31 MOVES: the 09:33 `micro_smt_reject` short armed 09:35:59,
+    came back to the entry and scratched (`stop_out_initial` @ 29467.75 at 09:47:47)
+    instead of riding to the 12:07 micro-SMT exit (+96.25 -> 0.00); the plan lived on
+    and recorded one extension veto at 10:07. 09-01 byte-identical (no position reached
+    the mid). This is the rig's 08-31 result (o3-trail-study.md Part 4) reproduced on
+    the recorded thesis.
 
     A DELIBERATE mechanism change moves these streams; re-capture them then, exactly as
     the change protocol's step 3 says. A cold cache skips — it proves nothing either way.

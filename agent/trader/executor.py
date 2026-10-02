@@ -64,6 +64,7 @@ from agent.trader.arbiter import Arbiter
 from agent.trader.market_mechanisms import MarketMechanisms, post_open_counter_extreme
 import agent.trader.micro_smt as micro_smt
 import agent.trader.episode as episode
+import agent.trader.trail as trail
 from agent.trader import premove_context
 
 # l2-mechanisms.md §9 starting values.
@@ -94,7 +95,7 @@ RTH_OPEN_MINUTE = 30
 # against the ARM's date, and each comes out by changing one line: `None` removes the
 # cutoff, `False` removes the positive-trade rule.
 ENTRY_CUTOFF_ET = (10, 30)           # no NEW entry at or after this; positions managed on
-NO_ENTRY_AFTER_POSITIVE = True       # a plan that closed a winner takes no further entry
+NO_ENTRY_AFTER_POSITIVE = True       # a plan that closed a winner is done: it dies (`positive_close`)
 # §8's window end, and the ONE source of it: `replay.py` imports this constant. Replay's
 # last bar is 12:59:59, so the rule below is unreachable there; live runs the whole CME
 # session and needs it spelled out.
@@ -173,8 +174,10 @@ class Executor:
         # gives it an instant to anchor on. `_target_for_fill` sets it there.
         self._sim = order_port if order_port is not None else OrderSim(dol=None)
         # §8's temporary spine gates and the window end. `_positive_close` latches on the
-        # first profitable close; `_window_ended` makes the window end fire exactly once.
+        # first profitable close (and ends the plan, `_positive_close_death`);
+        # `_window_ended` makes the window end fire exactly once.
         self._positive_close = False
+        self._positive_close_detail = None
         self._window_ended = False
         # The bars handed to the CURRENT `on_bar` call, so a fill discovered inside
         # `_drive_orders` can build its menu at that instant. Set per bar and never read
@@ -236,10 +239,17 @@ class Executor:
         # every fill (`_set_target_on_fill`), so a live session shows each time O4 would
         # have exited a DIFFERENT position, not the same observation repeated all day.
         self._micro_smt_exit_unwired_recorded = False
+        # O3 trail (`agent/trader/trail.py`, STUDY, flag OFF): the stage of the CURRENT
+        # position, or None.
+        self._trail = None
         self._vetoed: set = set()
         # §2's extension veto, read ONCE here: the flag is a session setting, and the
         # bar loop must not re-read the environment on every fire.
         self._extension_veto = extension_veto_enabled()
+        # Break-even at 50% (`agent/trader/trail.py`, §8): the switch and its environment
+        # rollback, read once here for the same reason.
+        self._trail_enabled = trail.enabled()
+        self._trail_unwired_recorded = False
         self._last_minute = None
         # The last bar instant this Executor was handed. BAR time, never a wall clock
         # (the gate in `test_executor.py` forbids one here). Only `mark_open_position`
@@ -393,6 +403,13 @@ class Executor:
         # not blind its management. The order events of this call are already booked,
         # so a same-bar stop-out is visible here and wins (§2.4).
         self._drive_initial_target(now, mnq, bar_complete)
+        # 2b'. O3 trail (STUDY, `trail.TRAIL_ENABLED` False by default = inert). After the
+        # initial-target stage, so that stage judges the completed bar under the stop
+        # that was in force for it. Total, like every stage above.
+        try:
+            self._drive_trail(now, mnq, bar_complete)
+        except Exception as exc:
+            self._state["trail_error"] = f"{type(exc).__name__}: {exc}"
 
         # 2c. O4 (`micro_smt_exit`, ADOPTED, flag-gated ON by default): a counter-thesis
         # micro-SMT market-closes an OPEN position, T2 or no T2, regardless of plan life — same
@@ -412,6 +429,9 @@ class Executor:
             reason, detail = self._spine_death()
             if reason is None:
                 reason, detail = self._death(self._since_arm(mnq), now, bar_complete)
+            if reason is None:
+                # LAST, so a target touch still dies as `target_reached`.
+                reason, detail = self._positive_close_death()
             if reason is not None:
                 self._kill_plan(now, reason, detail)
         if not self._state["plan_alive"]:
@@ -518,7 +538,7 @@ class Executor:
                     self._note_exit(ev)
                 if ev.get("kind") == "stop_out":
                     self._on_stop_out(ev)
-                if ev.get("kind") in ("stop_out", "take_profit"):
+                if ev.get("kind") in ("stop_out", "take_profit", "stop_out_initial"):
                     self._note_close(ev)
         except Exception as exc:
             # Swallowed so an order-book bug cannot take the bar loop down — but NOT
@@ -673,12 +693,25 @@ class Executor:
         return sign * (float(price) - float(entry)) > 0
 
     def _note_close(self, ev: dict) -> None:
-        """Latch the first PROFITABLE close. Today that is a take-profit or a profitable
-        `micro_smt_exit` (O4, operator decision) — a stop is never trailed, and the
-        target kills the plan on the same bar; the latch is what keeps the rule true if
-        either of those stops being so."""
-        if self._is_profitable(ev):
+        """Latch the first PROFITABLE close: a take-profit, a profitable `micro_smt_exit`
+        (O4, operator decision), a profitable `initial_opp_close`, or a moved stop touched
+        in profit (`stop_out_initial` — the operator trailing the broker stop,
+        2026-09-30). A no-op on a loser."""
+        if self._is_profitable(ev) and not self._positive_close:
             self._positive_close = True
+            self._positive_close_detail = {"exit": ev.get("kind"),
+                                           "entry": ev.get("entry"),
+                                           "price": ev.get("price")}
+
+    def _positive_close_death(self):
+        """§8: a positive trade ENDS THE PLAN, however the exit happened (operator,
+        2026-09-30: "kill the plan on a profitable exit regardless of how we exited ...
+        the day is done"). Until then the latch only blocked entries, which left the plan
+        alive — binding, recording, and open to a later re-derivation — after the day's
+        work was done. No entry moves: every entry path already honoured the block."""
+        if NO_ENTRY_AFTER_POSITIVE and self._positive_close:
+            return "positive_close", dict(self._positive_close_detail or {})
+        return None, None
 
     def _settle_end_ts(self, now: pd.Timestamp) -> pd.Timestamp:
         """The instant the settle window closes on `now`'s date: 09:30:30 ET.
@@ -1791,7 +1824,11 @@ class Executor:
             return
 
         price = self._state.get("now_price")
-        self._market.seed_sec7(self._since_arm(mnq))
+        # The WHOLE frame, not `_since_arm`: §7's anchor is the counter-thesis extreme of
+        # the 24h BEFORE the arm, and a frame cut at the arm leaves that window holding
+        # the arm bar alone — age 0, so always the "24h" track off the arm bar's own
+        # extreme, and the post-09:30 track unreachable.
+        self._market.seed_sec7(mnq)
 
         # §6's arming is the arbitration form of its own precondition.
         usable = self.usable_5m_gaps(now, price)
@@ -2231,6 +2268,47 @@ class Executor:
         return {"accepted": True, "detail": {"price": float(price),
                                              "level": self._target_level}}
 
+    def set_stop_override(self, now, price) -> dict:
+        """Adopt a protective stop the operator has ALREADY moved at the broker
+        (`trade.py update-sl`, plan 47 D1).
+
+        Found on 2026-09-30: the broker stop was raised twice by hand and filled, while
+        this model kept the original stop and managed a position that no longer existed
+        for eleven minutes. The model follows the broker here, it does not judge it: any
+        real price is accepted, tighter or looser, because the broker already holds it.
+        From this bar the touch is tested on the tick like the original stop, and the
+        exit is booked and mirrored here (`stop_out_initial` at or beyond the entry,
+        `stop_out` on the losing side).
+
+        Nothing is sent to the broker: a mirroring port is asked to `adopt_stop`, which
+        edits the model only; the plain simulation (every replay of a recorded control
+        file) moves its own stop.
+        """
+        if self._sim.position is None:
+            return {"accepted": False, "reason": "no_position"}
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            return {"accepted": False, "reason": "bad_price"}
+        if not price > 0:                            # also False for NaN
+            return {"accepted": False, "reason": "bad_price"}
+        mover = (getattr(self._sim, "adopt_stop", None)
+                 or getattr(self._sim, "move_stop", None))
+        if mover is None:
+            return {"accepted": False, "reason": "port_cannot_adopt_stop"}
+        ev = mover(now, price)
+        if ev is None:
+            return {"accepted": False, "reason": "no_position"}
+        if self._it is not None:
+            self._it["stop_adopted_minute"] = minute_of(now)   # see `_judge_initial_bar`
+        self._rec.order_event(
+            now=now, plan_id=self._plan.get("plan_id"),
+            mechanism=self._state.get("mechanism"),
+            artifact_label=self._label_for(ev.get("artifact_id")),
+            reason="operator", **ev)
+        return {"accepted": True,
+                "detail": {"stop": price, "prev_stop": ev.get("prev_stop")}}
+
     def has_position(self) -> bool:
         return self._sim.position is not None
 
@@ -2355,7 +2433,14 @@ class Executor:
                 return True                          # the stop wins the bar
         tracker = it["tracker"]
         if not tracker.reached:
-            ev = tracker.on_bar_close(bar, stop=(pos.get("stop") if open_ else None))
+            stop = pos.get("stop") if open_ else None
+            if it.get("stop_adopted_minute") == label:
+                # The tracker's same-bar "the stop wins" test assumes ONE stop for the
+                # whole bar. A stop the operator raised during this bar can sit above
+                # the bar's EARLIER low, which was traded under the old stop — and the
+                # position is demonstrably still open.
+                stop = None
+            ev = tracker.on_bar_close(bar, stop=stop)
             if ev is not None:
                 self._rec.initial_target_reached(
                     now=now, plan_id=self._plan.get("plan_id"),
@@ -2364,6 +2449,16 @@ class Executor:
                     position_open=open_, action=INITIAL_TARGET_ACTION)
                 if open_:
                     self._apply_initial_action(now, it, pos)
+            touch = tracker.take_touch()
+            if touch is not None:
+                # Record-only, under every action: what a touch-based rule (exit or
+                # scale at the touch) would have had to work with.
+                self._rec.order_event(
+                    now=now, plan_id=self._plan.get("plan_id"),
+                    mechanism=it.get("mechanism"), kind="initial_target_touched",
+                    bar=label, price=touch["price"], extreme=touch["extreme"],
+                    close=touch["close"], level=touch.get("level"),
+                    position_open=open_)
         else:
             for cf in tracker.post_flip(bar):
                 self._rec.order_event(
@@ -2393,7 +2488,9 @@ class Executor:
         divergence nobody would see until the stop filled at the wrong price — action A
         refuses and says so; it stays refused on `MirroringOrderPort` until a stop-modify
         path exists. Action B (`opp_close`) and O4 (`micro_smt_exit`) both close outright,
-        which the live port CAN do, so they are wired.
+        which the live port CAN do, so they are wired. (The port's `adopt_stop` is the
+        OTHER direction — the model taking on a stop the operator already moved at the
+        broker, `set_stop_override` — and is deliberately not this capability.)
         """
         return hasattr(self._sim, op)
 
@@ -2441,6 +2538,91 @@ class Executor:
             mechanism=self._state.get("mechanism"),
             artifact_label=self._label_for(ev.get("artifact_id")), **ev)
         self._note_exit(ev)
+        self._note_close(ev)
+
+    def _drive_trail(self, now, mnq, bar_complete) -> None:
+        """§8 break-even at 50% (`agent/trader/trail.py`, ON; `ACT_STOP_BE=0` is the
+        rollback) and, behind `trail.TRAIL_FVG_MOVES` (OFF, study), the trail under the
+        1m continuation gaps. Arming is a tick test on the current bar's
+        extremes; moves happen on completed 1m bars and go through `move_stop`, so a
+        touch books `stop_out_initial` at or beyond the entry and `stop_out` below it,
+        exactly like an operator's `set_stop`. The mirroring live port has no
+        `move_stop`, so live this records `trail_unwired` and moves nothing. With
+        `trail.TRAIL_BE_AT_ARM` the arming tick also moves the stop to break-even
+        (`reason="breakeven"`); a touch of it books `stop_out_initial` at the entry, which
+        is neither a profitable close nor a spent attempt."""
+        if not self._trail_enabled:
+            return
+        pos = self._sim.position
+        if pos is None:
+            self._trail = None
+            return
+        if self._trail is None or self._trail.opened_at != pos.get("opened_at"):
+            if self._target_price is None:
+                return                                   # no T2, no mid to arm on
+            self._trail_unwired_recorded = False          # one record per position
+            self._trail = trail.TrailStage(pos.get("direction"), pos.get("entry"),
+                                           self._target_price, pos.get("opened_at"))
+        st = self._trail
+        if st.arm(now, self._state.get("now_high"), self._state.get("now_low")):
+            self._rec.order_event(
+                now=now, plan_id=self._plan.get("plan_id"),
+                mechanism=self._state.get("mechanism"), kind="trail_armed",
+                price=st.mid, entry=st.entry, target=st.target)
+            # Operator decision 2026-10-01: break-even on the arming TICK, not the next
+            # bar close, so a pullback inside the arming minute is already protected.
+            be = st.breakeven_stop(pos.get("stop"))
+            if be is not None:
+                if not self._port_supports("move_stop"):
+                    # The live port has no stop-modify path yet: say so ONCE per
+                    # position in the decision stream, so a live session shows where
+                    # the stop would have gone rather than silently doing nothing.
+                    self._state["trail_unwired"] = True
+                    if not self._trail_unwired_recorded:
+                        self._trail_unwired_recorded = True
+                        self._rec.veto(now=now, plan_id=self._plan.get("plan_id"),
+                                       mechanism=self._state.get("mechanism"),
+                                       reason="trail_unwired",
+                                       detail={"stop": be, "entry": st.entry})
+                else:
+                    ev = self._sim.move_stop(now, be)
+                    if ev is not None:
+                        self._rec.order_event(
+                            now=now, plan_id=self._plan.get("plan_id"),
+                            mechanism=self._state.get("mechanism"),
+                            artifact_label=self._label_for(ev.get("artifact_id")),
+                            reason="breakeven", **ev)
+            # `TRAIL_APPLY_AT_ARM`: the gaps already on the chart count at arming too.
+            move = st.arm_move(now, mnq, self._sim.position.get("stop"))
+            if move is not None and self._port_supports("move_stop"):
+                ev = self._sim.move_stop(now, move["stop"])
+                if ev is not None:
+                    self._rec.order_event(
+                        now=now, plan_id=self._plan.get("plan_id"),
+                        mechanism=self._state.get("mechanism"),
+                        artifact_label=self._label_for(ev.get("artifact_id")),
+                        reason="trail", at_arm=True, gap=str(move["gap"]),
+                        gap_edge=move["gap_edge"], gap_size=move["gap_size"],
+                        n_gaps=move["n_gaps"], **ev)
+        self._state["trail"] = st.state()
+        if not bar_complete:
+            return
+        move = st.on_bar_close(now, mnq, self._sim.position.get("stop"))
+        if move is None:
+            return
+        if not self._port_supports("move_stop"):
+            self._state["trail_unwired"] = True
+            return
+        ev = self._sim.move_stop(now, move["stop"])
+        if ev is None:
+            return
+        self._rec.order_event(
+            now=now, plan_id=self._plan.get("plan_id"),
+            mechanism=self._state.get("mechanism"),
+            artifact_label=self._label_for(ev.get("artifact_id")),
+            reason="trail", gap=str(move["gap"]), gap_edge=move["gap_edge"],
+            gap_size=move["gap_size"], n_gaps=move["n_gaps"], **ev)
+        self._state["trail"] = st.state()
 
     def _drive_micro_smt_exit(self, now: pd.Timestamp, mnq: pd.DataFrame,
                               bar_complete: bool) -> None:

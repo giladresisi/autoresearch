@@ -47,6 +47,7 @@ _LONG = ("UP", "LONG")
 #: Plan 35: the per-trade observations the Executor records between a fill and its
 #: exit. `cf_*` are what actions A / B WOULD have done, observed under any action.
 _INITIAL_KINDS = ("initial_target_selected", "initial_target_reached",
+                  "initial_target_touched",
                   "initial_target_cf_stop", "initial_target_cf_opp_close", "stop_moved")
 
 
@@ -130,6 +131,7 @@ def _initial_fields(trade: dict, extras: dict) -> dict:
     """
     sel = extras.get("initial_target_selected") or {}
     reached = extras.get("initial_target_reached")
+    touched = extras.get("initial_target_touched")
     cf_a = extras.get("initial_target_cf_stop")
     cf_b = extras.get("initial_target_cf_opp_close")
     direction, entry = trade.get("direction"), trade.get("entry")
@@ -146,10 +148,15 @@ def _initial_fields(trade: dict, extras: dict) -> dict:
         return _points(direction, entry, rec.get("price"))
 
     exit_kind = trade.get("exit_kind")
-    stop_moved = extras.get("stop_moved") is not None
+    moved = extras.get("stop_moved")
+    stop_moved = moved is not None
+    # A stop the OPERATOR moved (`set_stop`) is not action A having run: A's own
+    # counterfactual still stands for that trade.
+    moved_by = ((moved or {}).get("reason") or "initial_target") if stop_moved else None
+    by_action = stop_moved and moved_by != "operator"
     # When the action itself RAN, its booked exit is the truth (the live B close is a
     # market fill on the next tick, not the completed bar's close the cf record holds).
-    points_a = (real if (stop_moved and exit_kind in ("stop_out_initial", "stop_out"))
+    points_a = (real if (by_action and exit_kind in ("stop_out_initial", "stop_out"))
                 else (_cf(cf_a, strictly_before=False) if reached else real))
     points_b = (real if exit_kind == "initial_opp_close"
                 else (_cf(cf_b, strictly_before=True) if reached else real))
@@ -158,7 +165,11 @@ def _initial_fields(trade: dict, extras: dict) -> dict:
         "initial_tier": sel.get("tier"),
         "initial_action": sel.get("action"),
         "initial_reached": (reached or {}).get("bar"),
+        # The first bar that touched the initial WITHOUT closing beyond it. None when
+        # the first touching bar was the reach bar, or the initial was never touched.
+        "initial_touched": (touched or {}).get("bar"),
         "stop_moved": stop_moved,
+        "stop_moved_by": moved_by,
         "points_A": points_a,
         "points_B": points_b,
     }
@@ -213,6 +224,8 @@ def summarize(run_dir: str) -> dict:
         "initial_action": ",".join(sorted(actions)) if actions else None,
         "n_initial_selected": sum(1 for t in tr if t.get("initial") is not None),
         "n_initial_reached": sum(1 for t in tr if t.get("initial_reached")),
+        "n_initial_touched_only": sum(1 for t in tr if t.get("initial_touched")
+                                      and not t.get("initial_reached")),
         "total_pts_A": sum(t["points_A"] for t in booked if t.get("points_A") is not None),
         "total_pts_B": sum(t["points_B"] for t in booked if t.get("points_B") is not None),
     }
@@ -264,13 +277,17 @@ def render(summary: dict, date=None) -> str:
             f"{t['points']:+.2f} pts{tag}   [{t['mechanism']}]")
         if t.get("initial") is not None:
             reached = t.get("initial_reached")
-            reached_txt = (f"reached {str(reached)[11:16]}" if reached else "not reached")
+            touched = t.get("initial_touched")
+            reached_txt = (f"reached {str(reached)[11:16]}" if reached
+                           else f"touched {str(touched)[11:16]}, not reached" if touched
+                           else "not reached")
             tier = t.get("initial_tier")
             tier_txt = "" if tier is None or tier == 0 else f" tier {tier}"   # 0 = synthetic
             lines.append(
                 f"[pnl]     initial {t['initial']} ({t['initial_level']}{tier_txt}) {reached_txt}"
                 f" | A {t['points_A']:+.2f} B {t['points_B']:+.2f} pts"
-                + (" | stop moved" if t.get("stop_moved") else ""))
+                + ((" | stop moved (operator)" if t.get("stop_moved_by") == "operator"
+                    else " | stop moved") if t.get("stop_moved") else ""))
     lines.append("[pnl] " + "-" * 72)
     lines.append(
         f"[pnl] TOTAL {summary['total_pts']:+.2f} pts "
@@ -284,6 +301,7 @@ def render(summary: dict, date=None) -> str:
         lines.append(
             f"[pnl] initial-target (action={summary.get('initial_action')}): "
             f"selected={summary['n_initial_selected']} reached={summary['n_initial_reached']}"
+            f" touched-only={summary.get('n_initial_touched_only', 0)}"
             f" | counterfactual A {summary['total_pts_A']:+.2f} pts, "
             f"B {summary['total_pts_B']:+.2f} pts vs booked {summary['total_pts']:+.2f} pts")
     if summary["vetoes"]:
