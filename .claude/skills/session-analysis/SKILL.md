@@ -31,7 +31,9 @@ Cross-references all session data sources and writes three structured analysis f
 (`discrepancies.md`, `optimizations.md`, and the consolidated `session-analysis.md`), then
 creates a worktree for working on the resulting action items, with an `analysis.md` entry
 point in it (Step 3.5).
-Intended to be run once after a session ends and reports have been (or will be) downloaded.
+Intended to be run once after a session ends and reports have been (or will be) downloaded:
+with no date it analyzes the latest live run that is no longer running, and it stops early
+when that run was already analyzed unless a re-analysis is explicitly requested (Step 1).
 
 **Which engine is live (since 2026-09-18, commit 99bb32b).** The live pipeline runs
 `trader_only=True`: the legacy trend/SMT/hypothesis/strategy engine is BLOCKED and every
@@ -66,12 +68,39 @@ broker reports keep their legacy shapes. The deterministic counterpart is theref
   `thesis_state.json`; it never writes `events.jsonl` / `trades_1s.tsv` (those are legacy
   regression artifacts and will NOT exist). Use the run folder you produced in Step 2.5.
 
-## Step 1 — Determine session date
+## Step 1 — Determine session date (and the already-analyzed gate)
 
-If the user provided a date (e.g. "analyze 2026-05-21"), use it. Otherwise use yesterday's date in `YYYY-MM-DD` format.
+Resolve the session with the gate script — never by "yesterday's date":
 
-Check that `<global>/sessions/<date>/` exists (`paths.sessions_dir() / "<date>"`). If it doesn't, stop:
-> "No session directory found for `<date>`. Please verify the date."
+```bash
+uv run python .claude/skills/session-analysis/scripts/resolve_session.py [--date <date>] [--reanalyze]
+```
+
+- Pass `--date <date>` only if the user named a date (e.g. "analyze 2026-05-21").
+- **No date = the latest live run that is no longer running.** The script takes the newest
+  `<global>/sessions/<date>/` folder that holds a live run (`signals.log` / `events.jsonl`)
+  and skips the one whose live run is in progress (orchestrator alive AND session window
+  open — the live-comment gate), so a call made mid-session analyzes the PREVIOUS live run.
+  A run stopped mid-day, or one sitting in the 16:55–18:00 ET maintenance break, is no
+  longer running and is the default.
+- Pass `--reanalyze` only if the user EXPLICITLY asked to redo the analysis ("reanalyze",
+  "re-run the analysis", "analyze it again", "overwrite the analysis"). A bare date is not
+  such a request.
+
+Act on the `STATUS` line:
+
+- `STATUS: ANALYZE` — continue with `SESSION_DATE` as `<date>`. `REANALYSIS: true` means
+  the three analysis files exist and will be overwritten (the user asked for that).
+- `STATUS: ALREADY_ANALYZED` (exit 3) — **stop here; run nothing else and write nothing.**
+  Tell the user:
+  > "The `<date>` live run was already analyzed (`ANALYZED_AT`): `ANALYSIS_FILE`. Ask for a
+  > re-analysis explicitly to redo it."
+
+  If it also printed `ANALYSIS_STALE: true`, the live run wrote to the folder AFTER that
+  analysis (it was stopped mid-day, analyzed, then resumed): still stop, but say so and
+  recommend the re-analysis — the existing files cover only the first part of the run.
+- `STATUS: NO_SESSION` (exit 2) — stop and relay `REASON`:
+  > "No session directory found for `<date>`. Please verify the date."
 
 ---
 
