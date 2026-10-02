@@ -16,6 +16,22 @@ class AccountNotFoundError(RuntimeError):
     """
 
 
+def _dismiss_roll_forward(page) -> None:
+    """Close Tradovate's "Roll Forward" workspace prompt if it shows up after login.
+
+    The prompt (a workspace product nearing expiry) is a modal that intercepts every click
+    on the platform behind it, so the account selector and the Reports button time out.
+    Cancel rolls nothing: the operator's workspace is left exactly as it was.
+    """
+    dlg = page.locator("[role='dialog']").filter(has_text="Roll Forward")
+    try:
+        dlg.first.wait_for(state="visible", timeout=3_000)
+    except Exception:
+        return
+    dlg.first.get_by_role("button", name="Cancel").click()
+    dlg.first.wait_for(state="hidden", timeout=5_000)
+
+
 def login_and_select_account(page, username: str, password: str, account_id: str) -> None:
     """Perform the cookie-accept -> login -> trading-mode interstitial -> account-select flow
     on an already-created Playwright ``page``, leaving the platform loaded with the correct
@@ -70,6 +86,7 @@ def login_and_select_account(page, username: str, password: str, account_id: str
     # ── Wait for platform; select the correct account ──────────────────
     reports_btn = page.locator("a.btn.btn-icon:has(.icon-columns)")
     reports_btn.wait_for(timeout=30_000)
+    _dismiss_roll_forward(page)
     # The account selector is a custom dropdown in the platform header.
     # Click the inner div.account (the toggle/display) to open the list,
     # then click the target a.account link. If the dropdown doesn't open,

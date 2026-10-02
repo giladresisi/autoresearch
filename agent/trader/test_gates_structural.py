@@ -52,6 +52,9 @@ RAW_SOURCE_BANS = {
     "agent.trader.analyzer": ("live_orders", "get_et_now", "datetime.now",
                               "Timestamp.now"),
     "agent.trader.graft": ("live_orders",),
+    # Plan 46: the pre-move classifier is pure -- bar time in, context out.
+    "agent.trader.premove_context": ("live_orders", "get_et_now", "datetime.now",
+                                     "Timestamp.now"),
 }
 
 # The ledger is a LOGGING HOOK ONLY: it must not be able to reach a trading path.

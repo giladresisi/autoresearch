@@ -98,6 +98,15 @@ lists what must NOT be built.
 - `ACT_THESIS_TIEBREAK` is **ON by default**: the Analyzer turns a NEUTRAL thesis into a
   direction (`agent/trader/tiebreak.py`, applied AFTER the thesis cache; `thesis_source:
   "tiebreak"` + `tiebreak_rule`). `0` keeps NEUTRAL days dark.
+- `ACT_PREMOVE_UNRELATED` (plan 46, §11.5 CANDIDATE) is **ON by default**: unset or empty
+  = `on`; `0`/`false`/`no`/`off` = `off` (today's path unchanged, the rollback); `shadow`
+  classifies and writes `premove_context.json` with no behaviour change. `on` forces the
+  thesis against a BIG pre-09:20 leg not part of a bigger move (UNRELATED, no model call)
+  — the DIRECTION only; the target stays the T2 pick. The leg-mid take-profit is a second
+  switch, `premove_context.MID_TARGET_ENABLED`, default `False` (operator decision
+  2026-09-30; a module attribute, not an env var). `premove_context.UNRELATED_PATH_MODE`
+  overrides the env var for harnesses and tests. A plain replay does not load `.env`: set it
+  in the shell for a replay.
 - `ACT_EXTENSION_VETO` is **ON by default**: a market-mechanism fire priced more than
   `executor.EXTENSION_MAX_PTS` (100 pts) beyond the post-09:30 counter-extreme is not
   entered (`l2-mechanisms.md` §2; a `veto` record, reason `extension`; no attempt spent).

@@ -152,7 +152,7 @@ def derive_plan(thesis: dict, legs, now: pd.Timestamp,
     # re-seed of every date. Ignoring the field downstream costs nothing.
     valid_while = list(thesis.get("falsified_if") or [])
 
-    return {
+    plan = {
         "plan_id": _plan_id(thesis, now),
         "thesis_id": thesis.get("thesis_id"),
         "direction": bias or None,
@@ -168,3 +168,9 @@ def derive_plan(thesis: dict, legs, now: pd.Timestamp,
                         "extreme_ts": str(trend.reference_ts)} if trend is not None
                        else None),
     }
+    # Plan 46 (§11.5 CANDIDATE): the UNRELATED path's leg, for the Executor's leg-mid
+    # take-profit. Present ONLY when the thesis carries it -- never as None -- so every
+    # other plan stays byte-identical. `_plan_id` does not hash it.
+    if isinstance(thesis.get("premove"), dict):
+        plan["premove"] = dict(thesis["premove"])
+    return plan
