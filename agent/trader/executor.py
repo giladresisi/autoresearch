@@ -66,6 +66,7 @@ import agent.trader.micro_smt as micro_smt
 import agent.trader.episode as episode
 import agent.trader.trail as trail
 from agent.trader import premove_context
+from agent.trader.smt_wait import SmtWait
 
 # l2-mechanisms.md §9 starting values.
 SETTLE_UNTIL_SECONDS = 30            # settle window ends at 09:30:30
@@ -124,6 +125,17 @@ def extension_veto_enabled() -> bool:
     """§2's extension veto. ON by default; `ACT_EXTENSION_VETO=0` (or false/no/off) is
     the opt-out, and restores the bar loop as it was before the veto existed."""
     raw = str(os.environ.get(EXTENSION_VETO_ENV_FLAG, "")).strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+SMT_WAIT_BLOCK_ENV_FLAG = "ACT_SMT_WAIT_BLOCK"
+
+
+def smt_wait_block_enabled() -> bool:
+    """The SMT-wait block (`smt_wait.py`, `l2-mechanisms.md` §11.6). ON by default
+    (operator decision 2026-10-03); `ACT_SMT_WAIT_BLOCK=0` (or false/no/off) is the
+    opt-out, and leaves the bar loop exactly as it was before the block existed."""
+    raw = str(os.environ.get(SMT_WAIT_BLOCK_ENV_FLAG, "")).strip().lower()
     return raw not in ("0", "false", "no", "off")
 
 
@@ -250,6 +262,10 @@ class Executor:
         # rollback, read once here for the same reason.
         self._trail_enabled = trail.enabled()
         self._trail_unwired_recorded = False
+        # The SMT-wait block (§11.6, ON by default), read ONCE for the same reason.
+        # `_smt_wait` is built on the first fire it judges: it needs the session date.
+        self._smt_wait_block = smt_wait_block_enabled()
+        self._smt_wait = None
         self._last_minute = None
         # The last bar instant this Executor was handed. BAR time, never a wall clock
         # (the gate in `test_executor.py` forbids one here). Only `mark_open_position`
@@ -1888,6 +1904,14 @@ class Executor:
             if retry is not None and not any(f is retry for _, f in fires):
                 self._stop_bar_retry_skip(now, "vetoed", pending=retry_pending)
                 retry = None
+        if self._smt_wait_block:
+            # After the extension veto, before `pick`, for the same reason. The machines
+            # above were all driven; only their fires are filtered here.
+            fires = [(m, f if f is None or self._smt_wait_allows(now, mnq, f) else None)
+                     for m, f in fires]
+            if retry is not None and not any(f is retry for _, f in fires):
+                self._stop_bar_retry_skip(now, "vetoed", pending=retry_pending)
+                retry = None
         fire = self._market.pick(fires)
         if fire is None:
             return
@@ -1935,6 +1959,37 @@ class Executor:
                            artifact_id=artifact_id,
                            artifact_label=self._label_for(artifact_id))
         return False
+
+    def _smt_wait_allows(self, now, mnq, fire: dict) -> bool:
+        """The SMT-wait block (`smt_wait.py`): False when the fire is blocked, and the block
+        is recorded. One `veto` record per blocked fire, not deduped across bars.
+
+        The machine that produced the fire has already moved on, as for any filtered fire;
+        no attempt is spent. The one exception is `tmso_reject`'s per-micro-session latch,
+        which the fire set and a blocked fire must not keep (operator, 2026-10-01).
+
+        Total, and fails OPEN: an error here is recorded in state and the fire is allowed.
+        """
+        try:
+            if self._smt_wait is None:
+                self._smt_wait = SmtWait(self._plan.get("direction"),
+                                         self._day_ts(now, (0, 0)))
+            mes = truncate(normalize((self._bars or {}).get("MES")), now)
+            verdict = self._smt_wait.check(now, mnq, mes, fire["price"], self._maint.atrs)
+            if verdict is None:
+                return True
+            mechanism = fire.get("mechanism")
+            artifact_id = fire.get("gap_id") or mechanism
+            self._rec.veto(now=now, plan_id=self._plan.get("plan_id"),
+                           mechanism=mechanism, reason=verdict["reason"],
+                           detail=verdict["detail"], artifact_id=artifact_id,
+                           artifact_label=self._label_for(artifact_id))
+            if mechanism == "tmso_reject":
+                self._market.release_tmso_fire(fire)
+            return False
+        except Exception as exc:
+            self._state["smt_wait_error"] = f"{type(exc).__name__}: {exc}"
+            return True
 
     @staticmethod
     def _completed_1m(mnq, now):
