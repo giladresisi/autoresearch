@@ -27,6 +27,23 @@ above the gap top).
    Measured OUTCOME-NEUTRAL on all four recorded days, so it is a tie-break convention
    specified only so two implementations agree.
 
+THE 2026-10-01 INTRABAR REFINEMENTS (§6.1 clauses 5-6, operator; both are module knobs):
+
+5. **A full 60 s from a stop-out before a MID-BAR entry** (`INTRABAR_COOLDOWN_SEC`).
+   §2's cooldown ends when the stop bar closes — as little as one second after the
+   stop — and from there to stop + 60 s the tick path may not fire (`intrabar_ok=False`).
+   State tracking continues and NOTHING IS REMEMBERED: a cross that happens inside the
+   window is not a pending entry. The first tick after it reads the tape as it is then —
+   still beyond the exit side fires at the MARKET (the trigger price of a runaway that
+   crossed inside the window is gone); back inside the gap, the cross never happened.
+   Bar-close verdicts are not mid-bar entries and are untouched.
+6. **The exit tick needs a FAVOURABLE previous close** (`FAVOURABLE_CLOSE_GATE`): the
+   previous completed bar closed against its own open in the trade direction (red for a
+   short), wherever it closed. Anything else defers to the current bar's close. Named
+   case: 10-01's 09:55:05 exit tick fired off a 09:54 bar that closed GREEN inside the
+   gap, 49 s after a stop-out, and was stopped 13 s later; the 09:55 bar's own close
+   (red, below the gap) was the entry of the day.
+
 GEOMETRY. The near edge and the exit-side edge are THE SAME edge, and that is not a
 simplification: a continuation gap is retraced into from the trade side and left the same
 way. For a short the gap is entered from below and exited downward through `gap_low`
@@ -47,6 +64,9 @@ from __future__ import annotations
 EARLY_RUNAWAY_PTS = 25.0          # beyond the exit-side edge
 SL_BUFFER_PTS = 2.0               # beyond the episode's excursion extreme
 SL_CAP_PTS = 30.0                 # from the entry price
+# §6.1 clauses 5-6 (2026-10-01). 0 / False restore the pre-refinement behaviour.
+INTRABAR_COOLDOWN_SEC = 60.0      # from ANY stop-out; the Executor owns the clock
+FAVOURABLE_CLOSE_GATE = True      # exit tick only after a with-thesis previous close
 
 _SHORT = ("DOWN", "SHORT", "BEAR")
 
@@ -71,6 +91,7 @@ class Episode:
         self._bar_open = None           # the entering bar's open
         self._prev_bar = None           # the previous COMPLETED bar, for the gate
         self._defer = False             # gate says: wait for this bar's close
+        self._held = False              # a runaway crossed inside the intrabar cooldown
         self._pending = None            # the fire not yet consumed by the caller
         self.cycles_voided = 0
         self.cycles_skipped_by_sl_cap = 0
@@ -128,13 +149,19 @@ class Episode:
         """
         self._cycle = IDLE
         self._defer = False
+        self._held = False
         self._prev_bar = None
         self._pending = None
 
     # -- the tape --------------------------------------------------------------- #
 
-    def on_tick(self, now, price, *, bar_open=None, mid=None) -> "dict | None":
-        """One tick. Returns an early-runaway or exit-tick fire, or None."""
+    def on_tick(self, now, price, *, bar_open=None, mid=None,
+                intrabar_ok: bool = True) -> "dict | None":
+        """One tick. Returns an early-runaway or exit-tick fire, or None.
+
+        `intrabar_ok=False` is clause 5's cooldown: the state advances exactly as it
+        would, and no fire is returned or remembered.
+        """
         if price is None:
             return None
         p = float(price)
@@ -156,11 +183,19 @@ class Episode:
                 else (p > float(self._bar_open)))
             # The beyond-open condition is LOAD-BEARING: it blocked a false fire on
             # 08-05 where the runaway price was still above the bar's open.
-            if reached and beyond_open:
-                return self._fire(now, trig, "early_runaway")
-            return None
+            if not (reached and beyond_open):
+                self._held = False
+                return None
+            if not intrabar_ok:
+                self._held = True
+                return None
+            # Clause 5: a cross made inside the cooldown cannot fill at its trigger.
+            fill = (mid if mid is not None else p) if self._held else trig
+            return self._fire(now, fill, "early_runaway")
 
         if self._cycle == LIVE and not self._defer and self._beyond_exit(p):
+            if not intrabar_ok:
+                return None
             # Exit-tick market entry. NEVER length-gated, even in §8 re-entry mode.
             return self._fire(now, mid if mid is not None else p, "exit_tick")
         return None
@@ -212,6 +247,7 @@ class Episode:
         self.entered_at = now
         self._bar_open = bar_open
         self._defer = False
+        self._held = False
         if not self._started:
             self._started = True
             # Clause 1: the excursion is seeded AT the entering tick, so a print earlier
@@ -230,17 +266,22 @@ class Episode:
     def _arm_gate(self, bar) -> None:
         """Set the NEXT bar's exit-tick gate from this completed bar.
 
-        Doc-literal (§6.1's known residual, deliberately left open): previous bar closed
-        inside the gap, or beyond it on the exit side, or against its own open -> the
-        exit tick fires. Closed with-trend-coloured beyond the gap on the ADVERSE side ->
-        defer to the current bar's close.
+        Clause 6 (2026-10-01): the exit tick fires only if this bar closed against its
+        own open in the trade direction; otherwise defer to the next bar's close. WHERE
+        it closed no longer matters.
 
-        A raw exit-tick reading (no previous-bar gate) matches 08-06 better but is worse
-        on 08-05 and contradicts §6's own statement that the colour gates "skipped the
-        noise cycles a raw exit-tick rule would have taken". The +/-1 cycle discrepancy
-        on 08-06 is a known uncertainty, NOT a defect to chase.
+        `FAVOURABLE_CLOSE_GATE = False` is the pre-2026-10-01 doc-literal gate: closed
+        inside the gap, or beyond it on the exit side, or against its own open -> the
+        exit tick fires; closed with-trend-coloured beyond the gap on the ADVERSE side ->
+        defer. A raw exit-tick reading (no previous-bar gate) matched 08-06 better but
+        was worse on 08-05 and contradicts §6's own statement that the colour gates
+        "skipped the noise cycles a raw exit-tick rule would have taken"; that +/-1 cycle
+        discrepancy on 08-06 was a known uncertainty, NOT a defect to chase.
         """
         self._prev_bar = bar
+        if FAVOURABLE_CLOSE_GATE:
+            self._defer = not self._with_thesis(bar)
+            return
         close = float(bar["Close"])
         self._defer = self._beyond_adverse(close) and not self._with_thesis(bar)
 
@@ -270,6 +311,7 @@ class Episode:
         stop = min(raw, capped) if self._short else max(raw, capped)
         self._cycle = IDLE
         self._defer = False
+        self._held = False
         self._pending = {"time": now, "price": entry, "stop": stop, "kind": kind,
                          "direction": "DOWN" if self._short else "UP",
                          "gap_id": self.gap_id, "excursion": self._excursion,

@@ -260,12 +260,15 @@ class MarketMechanisms:
             live[g.id] = ep
         self._episodes = live
 
-    def sec6_on_tick(self, now, price, *, bar_open=None, mid=None) -> "dict | None":
+    def sec6_on_tick(self, now, price, *, bar_open=None, mid=None,
+                     intrabar_ok: bool = True) -> "dict | None":
         """Clause 4: most-recently-ENTERED gap first. Measured outcome-neutral on all
         four recorded days, so it is a tie-break convention, specified only so two
-        implementations agree."""
+        implementations agree. `intrabar_ok=False` is clause 5's post-stop cooldown:
+        every episode is still driven, none may fire."""
         for ep in evaluation_order(list(self._episodes.values())):
-            fire = ep.on_tick(now, price, bar_open=bar_open, mid=mid)
+            fire = ep.on_tick(now, price, bar_open=bar_open, mid=mid,
+                              intrabar_ok=intrabar_ok)
             if fire is not None:
                 return fire
         return None

@@ -63,6 +63,7 @@ from agent.trader.initial_target import (InitialTargetTracker, select_initial_ta
 from agent.trader.arbiter import Arbiter
 from agent.trader.market_mechanisms import MarketMechanisms, post_open_counter_extreme
 import agent.trader.micro_smt as micro_smt
+import agent.trader.episode as episode
 import agent.trader.trail as trail
 from agent.trader import premove_context
 
@@ -109,6 +110,10 @@ INITIAL_TARGET_ACTION = "record"
 INITIAL_TARGET_ACTIONS = ("record", "be_structure", "opp_close")
 if INITIAL_TARGET_ACTION not in INITIAL_TARGET_ACTIONS:      # a typo must not run as "record"
     raise ValueError(f"INITIAL_TARGET_ACTION={INITIAL_TARGET_ACTION!r} not in {INITIAL_TARGET_ACTIONS}")
+
+# `l2-target-selection.md` §7c: a plan's later fills take the T2 its FIRST fill picked.
+# False restores a fresh pick at every fill.
+REUSE_FIRST_T2 = True
 
 _SHORT = ("DOWN", "SHORT")
 
@@ -187,6 +192,10 @@ class Executor:
         self._target_price = None
         self._target_level = None
         self._target_since = None
+        # The plan's FIRST T2 pick and its instant, reused by the plan's later fills
+        # (`_reused_first_pick`). Never an operator override, never the leg mid.
+        self._first_pick = None
+        self._first_pick_at = None
         # Plan 41: the DEFAULT pick of the current fill (what `_set_target_on_fill`
         # chose), kept so `reset_target` can restore it after an operator override, and
         # the menu that pick came from, so `trade.py agent-target --list` can show the
@@ -1449,6 +1458,17 @@ class Executor:
             return False
         return now < pd.Timestamp(so["time"]).floor("1min") + pd.Timedelta(minutes=1)
 
+    def _in_intrabar_cooldown(self, now: pd.Timestamp) -> bool:
+        """§6.1 clause 5: a full `INTRABAR_COOLDOWN_SEC` from a stop-out — any
+        mechanism's — before §6 may enter MID-BAR. Longer than §2's cooldown whenever the
+        stop came late in its bar (10-01: stopped 09:54:16, §2 expired 09:55:00, exit
+        tick taken 09:55:05). Measured from the stop-out's own bar time."""
+        so = getattr(self._sim, "last_stop_out", None)
+        if not so or so.get("time") is None or episode.INTRABAR_COOLDOWN_SEC <= 0:
+            return False
+        return now < (pd.Timestamp(so["time"])
+                      + pd.Timedelta(seconds=episode.INTRABAR_COOLDOWN_SEC))
+
     def _crossed(self, trigger, price) -> bool:
         """Is the trigger already beyond price in the TRADE direction?"""
         if trigger is None or price is None:
@@ -1824,9 +1844,10 @@ class Executor:
             if block is not None:
                 return
             fires.append(("fvg_1m_post_extreme",
-                          self._market.sec6_on_tick(now, price,
-                                                    bar_open=self._bar_open_of(mnq),
-                                                    mid=self._market_price())))
+                          self._market.sec6_on_tick(
+                              now, price, bar_open=self._bar_open_of(mnq),
+                              mid=self._market_price(),
+                              intrabar_ok=not self._in_intrabar_cooldown(now))))
         else:
             # `block is None` here means every ordinary spine gate passed (the
             # `micro_smt_only` branch above only lets O3 through the entry cutoff, and
@@ -2010,18 +2031,25 @@ class Executor:
 
         NOT re-run on later bars. T2 is "the nearest eligible draw AT THE FILL"; asking
         again every bar would be a different selector (continuous re-anchoring), which is
-        unmeasured — see plan 16's out-of-scope list.
+        unmeasured — see plan 16's out-of-scope list. Nor re-run on the plan's LATER
+        fills: they reuse the first fill's pick (`_reused_first_pick`).
         """
         # A new fill is a new position: O4's unwired-refusal record is per-position, so
         # the next position that hits the same live-port gap is recorded again. The
         # retry marker is per-position too (`_enter_by_market` re-sets it for a retry).
         self._micro_smt_exit_unwired_recorded = False
         self._open_retry = None
-        pick = select_target(self._bars, now, self._plan.get("direction"), self._ticker,
-                             **self._htf_kw())
+        pick, reuse = self._reused_first_pick(now)
+        if pick is None:
+            pick = select_target(self._bars, now, self._plan.get("direction"),
+                                 self._ticker, **self._htf_kw())
+            if self._first_pick is None and isinstance(pick, dict) \
+                    and pick.get("price") is not None:
+                self._first_pick, self._first_pick_at = dict(pick), now
         # Plan 46: on an UNRELATED plan the leg's mid replaces the T2 pick (or not, and
         # says why). Everything below takes the returned pick exactly as it takes T2's.
         pick, extra = self._premove_mid_pick(now, pick)
+        extra = {**reuse, **extra}
         # Plan 41: the rows D1 was chosen from, and D1 itself, kept for the operator's
         # `agent-target` command (`--list` reads the file, `--reset` restores the pick).
         # Both are records of THIS fill, so they are replaced at every fill.
@@ -2043,6 +2071,35 @@ class Executor:
             now=now, plan_id=self._plan.get("plan_id"),
             mechanism=self._state.get("mechanism"), pick=pick, **extra)
         self._arm_initial_target(now, pick)
+
+    def _reused_first_pick(self, now):
+        """(pick, extra fields for `target_selected`): the plan's FIRST T2 pick, for a
+        later fill of the same plan (`l2-target-selection.md` §7c). `(None, {})` on the
+        first fill, when the first fill selected nothing, or with the knob off — the
+        caller then picks afresh, and no extra field is written.
+
+        The pick is the plan's objective, chosen once: a retry trades toward the same
+        draw instead of whatever is nearest where the retry happens to fill. Reaching it
+        kills the plan (`_death`), so a level reused here has not traded since it was
+        picked — except under an operator override, which moves the objective for its
+        own position; hence the guard: a first pick that is not AHEAD of this fill's
+        entry is not reused, and the refusal is recorded. The row is the first fill's,
+        verbatim: its `dist_ratio` / `band` describe that fill, not this one.
+
+        In memory only. A restart mid-plan picks afresh at its next fill.
+        """
+        first = self._first_pick
+        if not REUSE_FIRST_T2 or first is None:
+            return None, {}
+        pos = self._sim.position
+        entry = (pos or {}).get("entry")
+        price = float(first["price"])
+        if entry is not None:
+            ahead = (price < float(entry)) if self._is_short() else (price > float(entry))
+            if not ahead:
+                return None, {"first_pick": {"skipped": "not_ahead_of_entry",
+                                             "price": price, "entry": float(entry)}}
+        return dict(first), {"first_pick": {"reused_from": str(self._first_pick_at)}}
 
     # -- plan 46: the leg-mid take-profit (§11.5 CANDIDATE) ----------------------- #
 

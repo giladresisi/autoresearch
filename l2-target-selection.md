@@ -284,6 +284,45 @@ path on (`ACT_PREMOVE_UNRELATED`, on by default) and `MID_TARGET_ENABLED = True`
 
 ---
 
+## 7c. A plan's later fills reuse its first T2 pick — RULE, ON (operator, 2026-10-01)
+
+**Status: implemented; `agent/trader/executor.REUSE_FIRST_T2 = True` by operator decision
+(2026-10-01, session 2026-10-01 O6). UNMEASURED: no replay, no A/B, no named day
+re-measured.** `False` restores a fresh pick at every fill.
+
+T2 is picked at a plan's FIRST fill exactly as before (`select_target`, §3's `D1` re-anchored
+at that fill). Every later fill of the same plan — a retry after a stop-out — binds that
+same level instead of picking again. The reason is consistency, not capture: the pick is
+the plan's objective (reaching it kills the plan), and a retry that fills somewhere else
+should trade toward the same draw rather than toward whatever is nearest to where the retry
+happened to fill.
+
+- **Scope** = `Executor._set_target_on_fill` only. `select_target`, the menu, L1's DOL and
+  the thesis cache key are unchanged; `target_menu.json` still lists the menu re-priced at
+  each fill.
+- **What is reused** is the first fill's own T2 pick — not an operator override
+  (`agent-target`, which stays per-position) and not plan 46's leg mid (§7b), which is
+  still computed per fill on top of the reused pick.
+- **First fill picked nothing** (empty menu, §5): nothing is bound, and the next fill picks
+  afresh.
+- **Guard:** a first pick that is not ahead of the new fill's entry is not reused and the
+  fill picks afresh. This can only arise after an operator override moved the objective
+  past the first pick; otherwise the plan would already have died on `target_reached`.
+- **Record:** `target_selected` carries `first_pick: {reused_from: <first pick time>}` on a
+  reuse, or `first_pick: {skipped: "not_ahead_of_entry", ...}` when the guard refused. The
+  reused `pick` row is the first fill's verbatim, so its `dist_ratio` / `band` describe
+  the first fill. A first fill writes no extra field.
+- **In memory only:** a live restart mid-plan picks afresh at its next fill.
+
+Evidence: none for capture. On 2026-10-01 all three fills picked the same level on their own
+(`prev1_day_low` 30511.75, dist_ratio 2.39 / 2.25 / 2.48), so the rule is a no-op there. It
+only matters on days when price moves far enough between fills for the band to select
+another level, and how often that happens — and which pick was the better one — has not
+been counted. Open: a reused level may sit closer to a late retry than the band's floor
+would allow a fresh pick to be.
+
+---
+
 ## 8. Two corrections to earlier readings in this line of work
 
 Both came from an 11-date hand-picked sample and did not survive the 84-date sweep:
