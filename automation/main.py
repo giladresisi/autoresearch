@@ -1007,6 +1007,7 @@ _AGENT_OWNED_KINDS = frozenset({
     "new-stop-entry", "move-stop-entry", "stop-entry-filled", "market-entry",
     "market-close", "stop-exit", "new-stop-exit", "move-stop-exit",
     "cancel-stop-entry", "stop-entry-cancelled", "stopped-out",
+    "update-stop-loss",
 })
 
 

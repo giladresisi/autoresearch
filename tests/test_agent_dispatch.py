@@ -89,6 +89,7 @@ class FakeBook:
         self.refuse_entries = False
         self.contracts = contracts
         self.raises = False
+        self.ignore_stop_updates = False
 
     def emit(self, sig):
         json.dumps(sig)                       # exactly what the real emit does first
@@ -101,6 +102,9 @@ class FakeBook:
                                "source": "strategy"}
         elif sig["kind"] == "market-close":
             self.active = {}
+        elif sig["kind"] == "update-stop-loss":
+            if self.active and not self.ignore_stop_updates:
+                self.active["stop"] = sig["stop_price"]
 
     def read(self):
         return dict(self.active)
@@ -128,6 +132,12 @@ def _close(kind, seq=2, hms="09:45:00", px=29235.0):
     return {"kind": kind, "time": _ts(hms), "price": px, "direction": "UP",
             "artifact_id": "extreme_reject_close", "entry": 29250.0, "seq": seq,
             "plan_id": "p38", "mechanism": "extreme_reject_close"}
+
+
+def _stop_move(seq=2, hms="09:45:00", px=29250.0, prev=29235.0):
+    return {"kind": "stop_moved", "time": _ts(hms), "price": px, "prev_stop": prev,
+            "direction": "UP", "artifact_id": "extreme_reject_close", "entry": 29250.0,
+            "seq": seq, "plan_id": "p38", "mechanism": "extreme_reject_close"}
 
 
 class FakeGraft:
@@ -200,11 +210,53 @@ def test_every_close_becomes_a_market_close_with_its_reason(tmp_path, kind, reas
 
 def test_the_port_source_builds_market_kinds_only():
     """Cases 26 / 2.8 — a SOURCE-level gate (D4, D5, F13). No resting-order kind, no
-    legacy stop kind, no cancel kind may even be spelled in this module."""
+    legacy stop kind, no cancel kind may even be spelled in this module. The one
+    non-market kind it builds is the update of the stop an OPEN position already has
+    (2026-10-02 D1) — it opens, rests and cancels nothing."""
     src = inspect.getsource(ad)
     for token in ("stop-exit", "stop-entry", "stopped-out", "cancel-"):
         assert token not in src, token
     assert {ad.ENTRY_KIND, ad.CLOSE_KIND} == {"market-entry", "market-close"}
+    assert ad.STOP_KIND == "update-stop-loss"
+
+
+def test_a_stop_move_becomes_one_json_safe_stop_update_and_is_acked_off_the_file(
+        tmp_path):
+    """2026-10-02 D1: the model's own stop move (break-even at 50%) reaches the
+    dispatcher as ONE stop update, acked by reading the stop back off position.json."""
+    book = FakeBook()
+    port = _port(tmp_path, book)
+    port.sink(_fill())
+    assert port.sink(_stop_move()) == {"ok": True, "reason": ""}
+    assert [s["kind"] for s in book.signals] == ["market-entry", "update-stop-loss"]
+    sig = book.signals[1]
+    assert sig["stop_price"] == 29250.0 and sig["source"] == "agent"
+    assert sig["reason"] == ad.STOP_REASON and sig["seq"] == 2
+    assert sig["plan_id"] == "p38" and isinstance(sig["time"], str)
+    json.dumps(sig).encode("ascii")
+    assert all(v is None or isinstance(v, (bool, int, float, str)) for v in sig.values())
+    assert book.active["stop"] == 29250.0
+    line = _lines(tmp_path)[-1]
+    assert line["signal"]["kind"] == "update-stop-loss" and line["ack"]["ok"] is True
+
+    # delivered twice: emitted once
+    assert port.sink(_stop_move()) == {"ok": True, "reason": ""}
+    assert len(book.signals) == 2
+
+
+def test_a_stop_move_the_file_does_not_show_is_not_ok(tmp_path):
+    book = FakeBook()
+    book.ignore_stop_updates = True
+    port = _port(tmp_path, book)
+    port.sink(_fill())
+    assert port.sink(_stop_move()) == {"ok": False, "reason": "stop_not_confirmed"}
+
+
+def test_a_stop_move_on_a_flat_book_is_not_ok(tmp_path):
+    book = FakeBook()
+    ack = _port(tmp_path, book).sink(_stop_move(seq=1))
+    assert ack == {"ok": False, "reason": "no_active_position"}
+    assert [s["kind"] for s in book.signals] == ["update-stop-loss"]
 
 
 def test_the_same_plan_and_seq_delivered_twice_is_emitted_once(tmp_path):
@@ -533,6 +585,42 @@ def test_an_agent_close_on_an_already_flat_book_sends_one_close(
     assert _active() == {} and len(emitted) == 1
 
 
+def test_an_agent_stop_move_updates_the_broker_stop_and_the_file(
+        tmp_path, monkeypatch, _no_broker_no_real_state):
+    """2026-10-02 D1, over the REAL dispatch: the broker call an operator's
+    `trade.py update-sl` makes, and position.json follows, so the watchdog's stop
+    comparison keeps agreeing."""
+    monkeypatch.setenv("TRADING_CONTRACTS", "1")
+    executor = _no_broker_no_real_state
+    port = _real_port(tmp_path)
+    assert port.sink(_fill())["ok"] is True
+    assert port.sink(_stop_move()) == {"ok": True, "reason": ""}
+    assert executor.update_stop_loss.call_count == 1
+    assert executor.update_stop_loss.call_args.args[0] == {"direction": "long",
+                                                           "stop_price": 29250.0}
+    assert _active()["stop"] == 29250.0
+    assert executor.place_entry.call_count == 1 and executor.place_close.call_count == 0
+
+
+def test_an_agent_stop_move_on_a_flat_book_sends_nothing_to_the_broker(
+        tmp_path, _no_broker_no_real_state):
+    """There is no position whose stop could move, and a stop update posted with no
+    direction would be a SELL-side request: the dispatch must not make the call."""
+    assert _active() == {}
+    ack = _real_port(tmp_path).sink(_stop_move(seq=1))
+    assert ack == {"ok": False, "reason": "no_active_position"}
+    assert _no_broker_no_real_state.update_stop_loss.call_count == 0
+    assert _active() == {}
+
+
+def test_a_legacy_dispatch_of_the_stop_update_kind_without_a_price_is_log_only(
+        _no_broker_no_real_state):
+    live_orders.place_market_entry("long", 29250.0, 29235.0)
+    live_orders.dispatch({"kind": "update-stop-loss", "reason": "x"})
+    assert _no_broker_no_real_state.update_stop_loss.call_count == 0
+    assert _active()["stop"] == 29235.0
+
+
 def test_pending_close_after_stays_none_through_an_agent_only_session(
         tmp_path, monkeypatch, _no_broker_no_real_state):
     """Case 41 (F13): only the cancel kind arms it, and the agent never emits one."""
@@ -735,6 +823,48 @@ def test_the_raw_second_not_the_cumulative_minute_decides_a_stop(tmp_path, monke
     assert [s["kind"] for s in book.signals] == ["market-entry", "market-close"]
 
 
+def test_the_live_breakeven_moves_the_broker_stop_and_the_exit_is_one_close(
+        tmp_path, monkeypatch, _no_broker_no_real_state):
+    """2026-10-02 D1, end to end on the LIVE shape: graft -> mirroring port -> dispatch
+    port -> the real dispatch. That day live armed the break-even at 09:45:40, recorded
+    `trail_unwired` and left the stop where it was; the replay moved it."""
+    monkeypatch.setenv("TRADING_CONTRACTS", "1")
+    monkeypatch.delenv("ACT_STOP_BE", raising=False)
+    executor = _no_broker_no_real_state
+    port = _real_port(tmp_path)
+    g = _armed_graft(tmp_path, monkeypatch, port)
+    monkeypatch.setattr(executor_mod, "select_target",
+                        lambda *a, **k: {"id": "D1", "level": "x", "price": 29400.0})
+
+    _live_bar(g, "09:40:00", 29250.0, fire=True)              # stop 29235, mid 29325
+    assert _active()["stop"] == 29235.0
+    _live_bar(g, "09:41:00", 29300.0, raw_hi=29324.75, minute_hi=29324.75)
+    assert executor.update_stop_loss.call_count == 0
+
+    now = _live_bar(g, "09:42:00", 29320.0, raw_hi=29325.0, minute_hi=29325.0)
+    assert executor.update_stop_loss.call_count == 1
+    assert executor.update_stop_loss.call_args.args[0] == {"direction": "long",
+                                                           "stop_price": 29250.0}
+    assert _active()["stop"] == 29250.0 and g.position_view()["stop"] == 29250.0
+    moved = [r for r in _decisions(tmp_path) if r["kind"] == "stop_moved"]
+    assert [(m["price"], m["prev_stop"], m["reason"]) for m in moved] == [
+        (29250.0, 29235.0, "breakeven")]
+    assert "far_side" not in moved[0]
+    assert not [r for r in _decisions(tmp_path) if r["kind"] == "veto"]
+    for sec in range(1, 31):                                  # past the divergence grace
+        port.supervise(now + pd.Timedelta(seconds=sec), g)
+    assert g.plan_alive() is True
+    kinds = [l["sim_event"]["kind"] for l in _lines(tmp_path)]
+    assert kinds == ["fill", "stop_moved"], "no stop_diverged, no watchdog kill"
+
+    _live_bar(g, "09:43:00", 29255.0, raw_lo=29249.5, minute_lo=29249.5)
+    assert g.position_view() is None and _active() == {}
+    assert executor.place_close.call_count == 1
+    assert executor.update_stop_loss.call_count == 1
+    assert [r["kind"] for r in _decisions(tmp_path)][-1] == "stop_out_initial"
+    assert g._executor._plan["attempts_used"] == 0 and g.plan_alive() is True
+
+
 # --------------------------------------------------------------------------- #
 # cases 37-40d: automation/main.py wiring                                       #
 # --------------------------------------------------------------------------- #
@@ -811,6 +941,12 @@ def test_the_agent_owns_the_dispatcher_by_default_and_a_legacy_order_is_dropped(
     d._emit(dict(AGENT_ENTRY))
     d._emit({"kind": "new-hypothesis", "direction": "up"})     # log-only: passes
     assert [s["kind"] for s in _wired] == ["market-entry", "new-hypothesis"]
+
+    # The stop update is an ORDER kind (2026-10-02 D1): only the agent's own passes.
+    d._emit({"kind": "update-stop-loss", "stop_price": 0.5})
+    assert len(_wired) == 2
+    d._emit({"kind": "update-stop-loss", "stop_price": 0.5, "source": "agent"})
+    assert [s["kind"] for s in _wired][-1] == "update-stop-loss" and len(_wired) == 3
 
 
 def test_the_sink_is_the_ports_and_reaches_the_dispatcher(monkeypatch, _wired):

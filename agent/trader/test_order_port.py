@@ -211,8 +211,8 @@ def test_a_failed_close_ack_does_not_resurrect_the_position():
 
 def test_mirroring_port_adopt_stop_sends_nothing_and_a_touch_mirrors_one_close():
     """Plan 47 D1. The far side ALREADY holds the operator's stop, so adopting it is a
-    model edit only; the touch is mirrored like any other close. The capability is not
-    called `move_stop`: the port still cannot move a stop on the far side."""
+    model edit only; the touch is mirrored like any other close. It is a different
+    capability from `move_stop`, which TELLS the far side."""
     sink = _Sink()
     port, _ = _port(sink)
     port.fill_market(_ts("09:40:00"), direction="UP", price=29250.0, stop=29235.0,
@@ -221,7 +221,6 @@ def test_mirroring_port_adopt_stop_sends_nothing_and_a_touch_mirrors_one_close()
     assert ev["kind"] == "stop_moved" and ev["prev_stop"] == 29235.0
     assert port.position["stop"] == 29280.0
     assert [e["kind"] for e in sink.events] == ["fill"]
-    assert not hasattr(port, "move_stop")
 
     evs = port.on_bar(_ts("09:51:00"), _bar(29281.0, lo=29279.0))
     assert [e["kind"] for e in evs] == ["stop_out_initial"]
@@ -232,6 +231,68 @@ def test_mirroring_port_adopt_stop_sends_nothing_and_a_touch_mirrors_one_close()
 def test_adopt_stop_with_nothing_open_returns_none():
     port, _ = _port(_Sink())
     assert port.adopt_stop(_ts("09:50:00"), 29280.0) is None
+
+
+def test_move_stop_moves_the_model_and_tells_the_far_side_once():
+    """The model's OWN stop move (break-even at 50%, §8): one `stop_moved` reaches the
+    sink with the new price, the plan, the open position's mechanism and its own seq."""
+    sink = _Sink()
+    port, _ = _port(sink)
+    port.fill_market(_ts("09:40:00"), direction="UP", price=29250.0, stop=29235.0,
+                     artifact_id="x")
+    ev = port.move_stop(_ts("09:45:00"), 29250.0)
+    assert ev["kind"] == "stop_moved" and ev["prev_stop"] == 29235.0
+    assert port.position["stop"] == 29250.0
+    assert [e["kind"] for e in sink.events] == ["fill", "stop_moved"]
+    sent = sink.events[1]
+    assert sent["price"] == 29250.0 and sent["prev_stop"] == 29235.0
+    assert sent["seq"] == 2 and sent["plan_id"] == "p38"
+    assert sent["mechanism"] == "extreme_reject_close"
+    assert "seq" not in ev and "far_side" not in ev and port.external is None
+
+    evs = port.on_bar(_ts("09:46:00"), _bar(29251.0, lo=29249.0))
+    assert [e["kind"] for e in evs] == ["stop_out_initial"]
+    assert [e["kind"] for e in sink.events] == ["fill", "stop_moved", "stop_out_initial"]
+    assert sink.events[2]["seq"] == 3 and port.position is None
+
+
+def test_move_stop_with_nothing_open_returns_none_and_sends_nothing():
+    sink = _Sink()
+    port, _ = _port(sink)
+    assert port.move_stop(_ts("09:45:00"), 29250.0) is None
+    assert sink.events == []
+
+
+@pytest.mark.parametrize("sink", [_Sink(acks=[None, {"ok": False,
+                                                     "reason": "stop_not_confirmed"}]),
+                                  None])
+def test_a_stop_move_the_far_side_did_not_confirm_keeps_the_tighter_model_stop(sink):
+    """Fail safe, not fail closed. The model tests its own stop on the tick and closes by
+    market when it is touched, so holding the TIGHTER stop is the protected state whatever
+    the far side did; undoing it would leave the model on a stop that may no longer be
+    the one resting there. Not an external change: the position is real and managed. The
+    returned event says the far side did not confirm."""
+    if sink is None:                                   # a sink that raises on the move
+        calls = []
+
+        def sink(event):
+            calls.append(event)
+            if event["kind"] == "stop_moved":
+                raise RuntimeError("far side down")
+            return None
+        reason = "sink_raised: RuntimeError"
+        sent = calls
+    else:
+        reason, sent = "stop_not_confirmed", sink.events
+    port, _ = _port(sink)
+    port.fill_market(_ts("09:40:00"), direction="UP", price=29250.0, stop=29235.0,
+                     artifact_id="x")
+    ev = port.move_stop(_ts("09:45:00"), 29250.0)
+    assert ev["kind"] == "stop_moved" and ev["far_side"] == reason
+    assert port.position["stop"] == 29250.0 and port.external is None
+    evs = port.on_bar(_ts("09:46:00"), _bar(29251.0, lo=29249.0))
+    assert [e["kind"] for e in evs] == ["stop_out_initial"]
+    assert [e["kind"] for e in sent] == ["fill", "stop_moved", "stop_out_initial"]
 
 
 def test_a_moved_stop_on_the_losing_side_still_books_a_stop_out():

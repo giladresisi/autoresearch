@@ -65,6 +65,7 @@ from agent.trader.market_mechanisms import MarketMechanisms, post_open_counter_e
 import agent.trader.micro_smt as micro_smt
 import agent.trader.episode as episode
 import agent.trader.trail as trail
+import agent.trader.mes_sweep as mes_sweep
 from agent.trader import premove_context
 from agent.trader.smt_wait import SmtWait
 
@@ -266,6 +267,10 @@ class Executor:
         # `_smt_wait` is built on the first fire it judges: it needs the session date.
         self._smt_wait_block = smt_wait_block_enabled()
         self._smt_wait = None
+        # MES day-extreme sweep stop (`agent/trader/mes_sweep.py`, §11.7 CANDIDATE, ON by
+        # default): the switch, read once, and the stage of the CURRENT position.
+        self._mes_sweep_enabled = mes_sweep.enabled()
+        self._mes_sweep = None
         self._last_minute = None
         # The last bar instant this Executor was handed. BAR time, never a wall clock
         # (the gate in `test_executor.py` forbids one here). Only `mark_open_position`
@@ -426,6 +431,13 @@ class Executor:
             self._drive_trail(now, mnq, bar_complete)
         except Exception as exc:
             self._state["trail_error"] = f"{type(exc).__name__}: {exc}"
+        # 2b''. MES day-extreme sweep stop (§11.7 CANDIDATE, ON by default).
+        # After the break-even stage: both only ever tighten, so the order between them
+        # decides nothing. Total, like every stage above.
+        try:
+            self._drive_mes_sweep(now, mnq, bar_complete)
+        except Exception as exc:
+            self._state["mes_sweep_error"] = f"{type(exc).__name__}: {exc}"
 
         # 2c. O4 (`micro_smt_exit`, ADOPTED, flag-gated ON by default): a counter-thesis
         # micro-SMT market-closes an OPEN position, T2 or no T2, regardless of plan life — same
@@ -2532,20 +2544,18 @@ class Executor:
     def _port_supports(self, op: str) -> bool:
         """True when the current order port implements `op`. A per-operation check, not
         a blanket "is this the bare simulation": `OrderSim` implements both `flatten` and
-        `move_stop`, so a replay is unaffected either way, but `MirroringOrderPort` (the
-        live port, plan 38) implements `flatten` — it forwards to a market close via
-        `automation/agent_dispatch` — while deliberately NOT implementing `move_stop`.
+        `move_stop`, so a replay is unaffected either way, and `MirroringOrderPort` (the
+        live port, plan 38) implements both too — `flatten` forwards a market close and
+        `move_stop` a stop update via `automation/agent_dispatch`.
 
-        Plan 35 action A (`be_structure`) was built on the `live` branch against a mirror
-        that turned a stop move into a legacy signal; plan 38's port speaks market entries
-        and market closes ONLY, and there is no market order that moves a resting stop.
-        Rather than move a SIMULATED stop while the broker keeps the original — a silent
-        divergence nobody would see until the stop filled at the wrong price — action A
-        refuses and says so; it stays refused on `MirroringOrderPort` until a stop-modify
-        path exists. Action B (`opp_close`) and O4 (`micro_smt_exit`) both close outright,
-        which the live port CAN do, so they are wired. (The port's `adopt_stop` is the
-        OTHER direction — the model taking on a stop the operator already moved at the
-        broker, `set_stop_override` — and is deliberately not this capability.)
+        `move_stop` on the live port dates from 2026-10-02 (session D1): until then the
+        port spoke market entries and market closes only, the break-even at 50% recorded
+        `trail_unwired` live and moved nothing, and every replay that armed it measured
+        a behaviour live did not have. A port with no stop-modify path still gets the
+        refusal: rather than move a SIMULATED stop the far side never hears about,
+        action A and the trail say so (`initial_action_unwired`, `trail_unwired`).
+        (The port's `adopt_stop` is the OTHER direction — the model taking on a stop the
+        operator already moved at the broker, `set_stop_override`.)
         """
         return hasattr(self._sim, op)
 
@@ -2601,8 +2611,9 @@ class Executor:
         1m continuation gaps. Arming is a tick test on the current bar's
         extremes; moves happen on completed 1m bars and go through `move_stop`, so a
         touch books `stop_out_initial` at or beyond the entry and `stop_out` below it,
-        exactly like an operator's `set_stop`. The mirroring live port has no
-        `move_stop`, so live this records `trail_unwired` and moves nothing. With
+        exactly like an operator's `set_stop`. The mirroring live port forwards the move
+        to the broker (2026-10-02 D1); a port with no `move_stop` records `trail_unwired`
+        and moves nothing. With
         `trail.TRAIL_BE_AT_ARM` the arming tick also moves the stop to break-even
         (`reason="breakeven"`); a touch of it books `stop_out_initial` at the entry, which
         is neither a profitable close nor a spent attempt."""
@@ -2629,9 +2640,9 @@ class Executor:
             be = st.breakeven_stop(pos.get("stop"))
             if be is not None:
                 if not self._port_supports("move_stop"):
-                    # The live port has no stop-modify path yet: say so ONCE per
-                    # position in the decision stream, so a live session shows where
-                    # the stop would have gone rather than silently doing nothing.
+                    # This port has no stop-modify path: say so ONCE per position in
+                    # the decision stream, so the session shows where the stop would
+                    # have gone rather than silently doing nothing.
                     self._state["trail_unwired"] = True
                     if not self._trail_unwired_recorded:
                         self._trail_unwired_recorded = True
@@ -2678,6 +2689,73 @@ class Executor:
             reason="trail", gap=str(move["gap"]), gap_edge=move["gap_edge"],
             gap_size=move["gap_size"], n_gaps=move["n_gaps"], **ev)
         self._state["trail"] = st.state()
+
+    def _drive_mes_sweep(self, now, mnq, bar_complete) -> None:
+        """§11.7 CANDIDATE (`agent/trader/mes_sweep.py`, `ACT_MES_SWEEP_STOP`, ON by
+        default): MES takes its day extreme in the trade's direction while the position
+        is open, in a 1m bar that opens before 10:30 ET and fails to close beyond it —
+        on that bar's close the stop moves to the close of the MNQ 1m bar that just
+        completed, less `MES_SWEEP_STOP_PTS`, if that tightens it and the new stop is at
+        or beyond the entry (never a tighter LOSING stop). Once per position. The stage is built
+        on the first call after the fill (the level is the extreme AS OF the fill) and
+        judged on completed 1m bars; the move goes through `move_stop` like the
+        break-even's, so a touch books `stop_out_initial`.
+
+        The stop is 5 points from a price that is already one tick old, so the market can
+        be through it when it is set: the next bar then books the touch AT the stop, which
+        on a gap is better than the tape gave."""
+        if not self._mes_sweep_enabled:
+            return
+        pos = self._sim.position
+        if pos is None:
+            self._mes_sweep = None
+            return
+        mes = None
+        st = self._mes_sweep
+        if st is None or st.opened_at != pos.get("opened_at"):
+            mes = truncate(normalize((self._bars or {}).get("MES")), now)
+            found = mes_sweep.day_extreme(mes, pos.get("direction"), pos.get("opened_at"))
+            level, set_at = found if found is not None else (None, None)
+            st = self._mes_sweep = mes_sweep.MesSweepStage(
+                pos.get("direction"), pos.get("opened_at"), level, set_at)
+            self._state["mes_sweep"] = st.state()
+        if not bar_complete or st.done:
+            return
+        if mes is None:
+            mes = truncate(normalize((self._bars or {}).get("MES")), now)
+        fired = st.on_bar_close(now, mes)
+        self._state["mes_sweep"] = st.state()
+        if not fired:
+            return
+        # The reference is the CLOSE of the MNQ 1m bar that just completed, not the
+        # current tick; the tick is the fallback when that bar cannot be read.
+        bar = self._completed_1m(mnq, now)
+        price = float(bar["Close"]) if bar is not None else self._state.get("now_price")
+        new_stop, why = st.new_stop(price, pos.get("stop"), pos.get("entry"))
+        detail = {"mes_level": st.level, "level_set_at": str(st.level_set_at),
+                  "sweep_bar": str(st.sweep_bar), "mnq_price": price}
+        if new_stop is None:
+            # Confirmed, but nothing moves — the stop in force is already tighter, or
+            # the new one would sit on the losing side of the entry: say so once, so a
+            # session shows the rule fired and why nothing moved.
+            self._rec.veto(now=now, plan_id=self._plan.get("plan_id"),
+                           mechanism=self._state.get("mechanism"),
+                           reason="mes_sweep_" + str(why),
+                           detail=dict(detail, stop=pos.get("stop"),
+                                       entry=pos.get("entry")))
+            return
+        if not self._port_supports("move_stop"):
+            self._rec.veto(now=now, plan_id=self._plan.get("plan_id"),
+                           mechanism=self._state.get("mechanism"),
+                           reason="mes_sweep_unwired", detail=dict(detail, stop=new_stop))
+            return
+        ev = self._sim.move_stop(now, new_stop)
+        if ev is not None:
+            self._rec.order_event(
+                now=now, plan_id=self._plan.get("plan_id"),
+                mechanism=self._state.get("mechanism"),
+                artifact_label=self._label_for(ev.get("artifact_id")),
+                reason="mes_sweep", **detail, **ev)
 
     def _drive_micro_smt_exit(self, now: pd.Timestamp, mnq: pd.DataFrame,
                               bar_complete: bool) -> None:

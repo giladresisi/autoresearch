@@ -250,14 +250,68 @@ def test_the_env_rollback_switches_breakeven_off(tmp_path, monkeypatch, raw):
     assert "stop_moved" not in _kinds(tmp_path) and ex.position()["stop"] == 29235.0
 
 
-def test_the_live_port_without_move_stop_records_trail_unwired_once(tmp_path, monkeypatch):
-    """The mirroring port has no stop-modify path yet: the break-even is recorded as a
-    `veto` with reason `trail_unwired`, once per position, and nothing moves."""
+def test_the_live_port_moves_to_breakeven_and_tells_the_far_side_once(tmp_path,
+                                                                      monkeypatch):
+    """2026-10-02 D1: live armed the break-even, recorded `trail_unwired` and moved
+    nothing, while the replay of the same tape moved the stop. The mirroring port now
+    has a stop-modify path, so live does what the replay does: one `stop_moved` to the
+    far side, the same decision record, no veto."""
     monkeypatch.delenv(trail.ENV_FLAG, raising=False)
-    port = MirroringOrderPort(OrderSim(dol=None), lambda ev: None)
+    sunk = []
+    port = MirroringOrderPort(OrderSim(dol=None), lambda ev: sunk.append(ev) or None)
     ex = make_executor(tmp_path, monkeypatch, order_port=port,
                        pick={"id": "D1", "level": "x", "price": 29400.0})
     port._context = ex.order_context
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    _run_rows(ex)
+    _step(ex, "09:50:00", 29330.0, hi=29335.0)
+    moved = [(r["price"], r["prev_stop"], r["reason"]) for r in _recs(tmp_path)
+             if r["kind"] == "stop_moved"]
+    assert moved == [(29250.0, 29235.0, "breakeven")]
+    assert ex.position()["stop"] == 29250.0
+    assert [e["kind"] for e in sunk] == ["fill", "stop_moved"]
+    assert sunk[1]["price"] == 29250.0
+    assert not [r for r in _recs(tmp_path) if r["kind"] == "veto"]
+    assert ex.bind_state().get("trail_unwired") is None
+
+
+def test_a_far_side_that_did_not_confirm_is_named_in_the_decision_record(tmp_path,
+                                                                         monkeypatch):
+    monkeypatch.delenv(trail.ENV_FLAG, raising=False)
+
+    def sink(ev):
+        return {"ok": False, "reason": "stop_not_confirmed"} \
+            if ev["kind"] == "stop_moved" else None
+    port = MirroringOrderPort(OrderSim(dol=None), sink)
+    ex = make_executor(tmp_path, monkeypatch, order_port=port,
+                       pick={"id": "D1", "level": "x", "price": 29400.0})
+    port._context = ex.order_context
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    _run_rows(ex)
+    moved = [r for r in _recs(tmp_path) if r["kind"] == "stop_moved"]
+    assert len(moved) == 1 and moved[0]["far_side"] == "stop_not_confirmed"
+    assert ex.position()["stop"] == 29250.0
+
+
+class _NoMovePort:
+    """A port with no stop-modify path at all: everything but `move_stop`."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        if name == "move_stop":
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+
+def test_a_port_without_move_stop_records_trail_unwired_once(tmp_path, monkeypatch):
+    """The capability is still probed per port: one that cannot move a stop records the
+    break-even as a `veto` with reason `trail_unwired`, once per position, and nothing
+    moves."""
+    monkeypatch.delenv(trail.ENV_FLAG, raising=False)
+    ex = make_executor(tmp_path, monkeypatch, order_port=_NoMovePort(OrderSim(dol=None)),
+                       pick={"id": "D1", "level": "x", "price": 29400.0})
     _step(ex, "09:40:00", 29250.0, fire=True)
     _run_rows(ex)
     _step(ex, "09:50:00", 29330.0, hi=29335.0)

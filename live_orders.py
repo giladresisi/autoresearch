@@ -849,6 +849,18 @@ def dispatch(sig: dict) -> None:
         close_position(float(sig.get("price", 0.0)), sig.get("reason", "strategy"))
         return
 
+    if kind == "update-stop-loss":
+        # The agent stack moving its OWN protective stop (break-even at 50% of the way
+        # to T2). Same broker call as `trade.py update-sl`; `update_stop_loss` logs the
+        # event. With nothing open there is no stop to move, and the call would go out
+        # with no direction — log only.
+        stop_price = sig.get("stop_price")
+        if stop_price is not None and _load_pos().get("active"):
+            update_stop_loss(float(stop_price), reason=sig.get("reason", "strategy"))
+        else:
+            _log(sig)
+        return
+
     if kind == "stop-exit":
         # Cautious stop-exit: IB stop already fired in normal flow; this is a safety-net
         # market-close in case the stop order didn't execute (e.g. connectivity gap).
