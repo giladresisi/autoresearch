@@ -51,8 +51,11 @@ ARMS = {
                              TRAIL_BE_OFFSET_PTS=0.0, TRAIL_FVG_MOVES=True),
     "H-be50-only": dict(TRAIL_ENABLED=True, TRAIL_ARM_FRACTION=0.5, TRAIL_BE_AT_ARM=True,
                         TRAIL_BE_OFFSET_PTS=0.0, TRAIL_FVG_MOVES=False),
+    "I-be50-lag1-min5-armapply": dict(TRAIL_ENABLED=True, TRAIL_LAG=1, TRAIL_MIN_GAP_PTS=5.0,
+                                      TRAIL_ARM_FRACTION=0.5, TRAIL_BE_AT_ARM=True,
+                                      TRAIL_FVG_MOVES=True, TRAIL_APPLY_AT_ARM=True),
 }
-_KNOBS = ("TRAIL_ENABLED", "TRAIL_LAG", "TRAIL_MIN_GAP_PTS", "TRAIL_ARM_FRACTION",
+_KNOBS = ("TRAIL_APPLY_AT_ARM", "TRAIL_ENABLED", "TRAIL_LAG", "TRAIL_MIN_GAP_PTS", "TRAIL_ARM_FRACTION",
           "TRAIL_BUFFER_PTS", "TRAIL_BE_AT_ARM", "TRAIL_BE_OFFSET_PTS", "TRAIL_FVG_MOVES")
 
 

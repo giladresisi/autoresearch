@@ -2432,6 +2432,18 @@ class Executor:
                             mechanism=self._state.get("mechanism"),
                             artifact_label=self._label_for(ev.get("artifact_id")),
                             reason="breakeven", **ev)
+            # `TRAIL_APPLY_AT_ARM`: the gaps already on the chart count at arming too.
+            move = st.arm_move(now, mnq, self._sim.position.get("stop"))
+            if move is not None and self._port_supports("move_stop"):
+                ev = self._sim.move_stop(now, move["stop"])
+                if ev is not None:
+                    self._rec.order_event(
+                        now=now, plan_id=self._plan.get("plan_id"),
+                        mechanism=self._state.get("mechanism"),
+                        artifact_label=self._label_for(ev.get("artifact_id")),
+                        reason="trail", at_arm=True, gap=str(move["gap"]),
+                        gap_edge=move["gap_edge"], gap_size=move["gap_size"],
+                        n_gaps=move["n_gaps"], **ev)
         self._state["trail"] = st.state()
         if not bar_complete:
             return

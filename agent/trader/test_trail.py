@@ -55,6 +55,7 @@ def test_continuation_gaps_read_the_three_bar_pattern_in_the_trade_direction():
 
 def test_the_stage_arms_at_the_mid_and_moves_one_gap_behind_only_on_a_new_gap(monkeypatch):
     monkeypatch.setattr(trail, "TRAIL_MIN_GAP_PTS", 0.0)
+    monkeypatch.setattr(trail, "TRAIL_FVG_MOVES", True)
     st = trail.TrailStage("UP", 100.0, 140.0, pd.Timestamp("2026-09-03 09:40", tz=TZ))
     assert st.mid == 120.0
     assert st.arm(_ts("09:45:00"), 119.0, 110.0) is False
@@ -88,6 +89,7 @@ def test_the_executor_trails_through_move_stop_and_books_stop_out_initial(tmp_pa
     monkeypatch.setattr(trail, "TRAIL_ENABLED", True)
     monkeypatch.setattr(trail, "TRAIL_MIN_GAP_PTS", 5.0)
     monkeypatch.setattr(trail, "TRAIL_BE_AT_ARM", False)         # the pure gap trail
+    monkeypatch.setattr(trail, "TRAIL_FVG_MOVES", True)
     ex = make_executor(tmp_path, monkeypatch, pick={"id": "D1", "level": "x", "price": 29400.0})
     _step(ex, "09:40:00", 29250.0, fire=True)                   # mid = 29325
     _run_rows(ex)
@@ -194,9 +196,41 @@ def test_breakeven_then_the_gap_trail_ratchets_from_it(tmp_path, monkeypatch):
 
 
 def test_breakeven_off_leaves_the_gap_trail_unchanged(tmp_path, monkeypatch):
-    ex = _beh(tmp_path, monkeypatch, TRAIL_BE_AT_ARM=False)
+    ex = _beh(tmp_path, monkeypatch, TRAIL_BE_AT_ARM=False, TRAIL_FVG_MOVES=True)
     _step(ex, "09:40:00", 29250.0, fire=True)
     _run_rows(ex)
     moved = [(r["price"], r["reason"]) for r in _recs(tmp_path) if r["kind"] == "stop_moved"]
     assert moved == [(29272.0, "trail")]
     assert "trail_armed" in _kinds(tmp_path)
+
+
+def test_apply_at_arm_moves_off_the_gaps_already_on_the_chart(monkeypatch):
+    """Operator, 2026-10-01: if two or more gaps already exist at 50%, the move at 50%
+    goes to the one behind the newest. Off by default; counts those gaps as seen."""
+    monkeypatch.setattr(trail, "TRAIL_MIN_GAP_PTS", 0.0)
+    monkeypatch.setattr(trail, "TRAIL_FVG_MOVES", True)
+    rows = [(100, 102, 99, 101), (101, 108, 101, 107), (107, 110, 104, 109),
+            (109, 109.5, 108, 109), (109, 114, 110, 113), (113, 118, 112, 117)]
+    frame = _m1(rows)                                   # gaps A (edge 102), B (109.5)
+    st = trail.TrailStage("UP", 100.0, 140.0, pd.Timestamp("2026-09-03 09:40", tz=TZ))
+    st.arm(_ts("09:46:00"), 120.0, 110.0)
+    assert st.arm_move(_ts("09:46:00"), frame, 100.0) is None          # knob off
+    monkeypatch.setattr(trail, "TRAIL_APPLY_AT_ARM", True)
+    mv = st.arm_move(_ts("09:46:00"), frame, 95.0)
+    assert mv["stop"] == 99.0 and mv["gap"] == frame.index[1] and st.n_seen == 2
+    assert st.arm_move(_ts("09:46:00"), frame, 100.0) is None          # not tighter
+    assert st.on_bar_close(_ts("09:47:00"), frame, 99.0) is None       # nothing NEW
+
+
+def test_the_defaults_are_breakeven_only(tmp_path, monkeypatch):
+    """Operator, 2026-10-02: the kept rule is break-even at 50% alone (rig arm H)."""
+    assert trail.TRAIL_ENABLED is False
+    assert trail.TRAIL_BE_AT_ARM is True and trail.TRAIL_BE_OFFSET_PTS == 0.0
+    assert trail.TRAIL_FVG_MOVES is False and trail.TRAIL_APPLY_AT_ARM is False
+    assert trail.TRAIL_ARM_FRACTION == 0.5
+    monkeypatch.setattr(trail, "TRAIL_ENABLED", True)
+    ex = make_executor(tmp_path, monkeypatch, pick={"id": "D1", "level": "x", "price": 29400.0})
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    _run_rows(ex)
+    moved = [(r["price"], r["reason"]) for r in _recs(tmp_path) if r["kind"] == "stop_moved"]
+    assert moved == [(29250.0, "breakeven")]

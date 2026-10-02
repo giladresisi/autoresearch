@@ -1,4 +1,14 @@
-"""O3 (2026-10-01): a trailing stop under the 1m continuation FVGs — STUDY ONLY, flag OFF.
+"""O3 (2026-10-01): break-even at 50% of the way to T2, and (study code, off) a trailing
+stop under the 1m continuation FVGs — the whole module is behind `TRAIL_ENABLED`, OFF.
+
+What the module does with the defaults, once `TRAIL_ENABLED` is True (operator decision
+2026-10-02, after o3-trail-study.md Part 4 — rig arm "H"): on the tick the position has
+covered half the way from the entry to T2, move the stop to the entry if that tightens
+it; a touch books `stop_out_initial` (no attempt spent, not a positive close). Nothing
+else. Measured at -33.50 pts over 30 dates against today (four small losses scratched,
+one +96.25 ride given back); kept by the operator as a risk rule, not an edge.
+
+The FVG trail below is the study code the rule came out of:
 
 The operator's rule (`<global>/sessions/2026-09-30/o3-trail-study.md`): once price has
 reached the midpoint between the entry and the T2 target, every time a NEW 1m
@@ -41,8 +51,16 @@ TRAIL_ARM_FRACTION = 0.5
 TRAIL_BE_AT_ARM = True
 #: Break-even = the entry plus/minus this many points in the trade's favour (0 = the entry).
 TRAIL_BE_OFFSET_PTS = 0.0
-#: False = no gap moves (the gaps are still counted); isolates the break-even rule.
-TRAIL_FVG_MOVES = True
+#: False = no gap moves (the gaps are still counted). OFF since 2026-10-02 (operator): on
+#: the 30-date rig the gap trail cost a further ~-100 pts on top of break-even in every
+#: variant (o3-trail-study.md Part 4), so the kept rule is break-even at 50% ALONE; the
+#: gap trail stays as study code behind this knob.
+TRAIL_FVG_MOVES = False
+#: On the arming tick, after break-even, also apply the one-behind rule to the gaps
+#: ALREADY on the chart (operator, 2026-10-01: "if at the 50% a 2nd one or more are
+#: already formed then the s/l move at 50% should be to the one-behind FVG"). Off = the
+#: original reading, which moves only when a NEW gap appears after arming.
+TRAIL_APPLY_AT_ARM = False
 
 _LONG = ("UP", "LONG")
 
@@ -132,6 +150,17 @@ class TrailStage:
                 return None
         return cand
 
+    def arm_move(self, now, frame, current_stop) -> "dict | None":
+        """`TRAIL_APPLY_AT_ARM`: the one-behind move off the gaps already visible at the
+        arming instant, or None. Counts those gaps as seen, so the next `on_bar_close`
+        moves only on a genuinely new one."""
+        if not TRAIL_APPLY_AT_ARM or not TRAIL_FVG_MOVES:
+            return None
+        m1 = completed_1m(frame, self.opened_at, now)
+        gaps = continuation_gaps(m1, self.direction, TRAIL_MIN_GAP_PTS)
+        self.n_seen = max(self.n_seen, len(gaps))
+        return self._one_behind(gaps, current_stop)
+
     def on_bar_close(self, now, frame, current_stop) -> "dict | None":
         """A new protective stop to move to, or None. Reads the gaps visible by `now`
         since the fill's minute; moves only when a NEW gap became visible, to the gap
@@ -142,6 +171,9 @@ class TrailStage:
         self.n_seen = max(self.n_seen, len(gaps))
         if n_new <= 0 or not self.armed or not TRAIL_FVG_MOVES:
             return None
+        return self._one_behind(gaps, current_stop)
+
+    def _one_behind(self, gaps, current_stop) -> "dict | None":
         k = len(gaps) - 1 - int(TRAIL_LAG)
         if k < 0:
             return None
