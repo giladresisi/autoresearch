@@ -1771,7 +1771,11 @@ class Executor:
             return
 
         price = self._state.get("now_price")
-        self._market.seed_sec7(self._since_arm(mnq))
+        # The WHOLE frame, not `_since_arm`: §7's anchor is the counter-thesis extreme of
+        # the 24h BEFORE the arm, and a frame cut at the arm leaves that window holding
+        # the arm bar alone — age 0, so always the "24h" track off the arm bar's own
+        # extreme, and the post-09:30 track unreachable.
+        self._market.seed_sec7(mnq)
 
         # §6's arming is the arbitration form of its own precondition.
         usable = self.usable_5m_gaps(now, price)
