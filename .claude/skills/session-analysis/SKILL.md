@@ -46,7 +46,9 @@ invoked from only runs the Step-1 gate; nothing is edited, replayed or committed
 `trader_only=True`: the legacy trend/SMT/hypothesis/strategy engine is BLOCKED and every
 entry comes from the trader graft (`agent/trader`: L1 Analyzer at 09:20 ET, Planner,
 Executor; market-only mechanisms `fvg_1m_post_extreme`, `extreme_reject_close`,
-`tmso_reject`; no entries at/after 10:30 ET; open position flattened at 13:00 ET). The
+`tmso_reject`, `fvg_1h_reject`, `micro_smt_reject`; no entries at/after 10:30 ET; open
+position flattened at 13:00 ET). Position management changes often — `l2-mechanisms.md`
+§8 in the analysis worktree is the authority, not any summary in this file. The
 graft's simulated orders are mirrored into the legacy signal vocabulary
 (`market-entry` / `market-close` with `"source": "agent"`) and dispatched to PMT through
 `live_orders` by `automation/agent_dispatch.py`, which also writes its own per-event record
@@ -162,9 +164,10 @@ git -C "<WT>" status --porcelain
 The re-analysis replay runs on that worktree's code exactly as it stands — behind master
 and with its local changes, if any — which is why Step 4 must report this state.
 
-**Then move into it** — `cd "<WT>"` once (the shell's working directory persists) and
-confirm `git rev-parse --show-toplevel` prints `<WT>`. Every command in Steps 2–3.5 runs
-from `<WT>`, so the reports, the ledger rebuild, the replay and the plot all run
+**Then run everything from it.** The shell does NOT stay in `<WT>` between commands (it is
+reset to the directory the session started in), so prefix EVERY command in Steps 2–3.5
+with `cd "<WT>" &&` — confirm once that `cd "<WT>" && git rev-parse --show-toplevel`
+prints `<WT>`. That way the reports, the ledger rebuild, the replay and the plot all run
 `origin/master`'s code, and the replay run folder lands under `<WT>/regression/`.
 
 ---
@@ -287,9 +290,11 @@ Generate the live session chart (the mirror emits legacy-shaped events, so the l
 chart shows the trader's entries/exits exactly as before):
 
 ```bash
-python plot_session.py <date>
+uv run python plot_session.py <date>
 ```
-Writes and opens `<global>/sessions/<date>/chart.html`.
+Writes and opens `<global>/sessions/<date>/chart_<HH-MM>.html` (timestamped with the ET
+time of the request, so each run adds a file) and prints `Chart: <path>` — that printed
+path is the `<chart path>` for Step 3 and Step 3.5.
 
 **No replay chart exists yet.** The replay writes no `events.jsonl`, so the legacy
 `regression/plot_regression.py` cannot draw it. Do not attempt it; record
@@ -325,12 +330,20 @@ REPLAY = <RUN>                                               # <BASE>\regression
 WHICH ENGINE WAS LIVE: since 2026-09-18 (commit 99bb32b) the legacy engine is blocked
 (trader_only) and every entry comes from the trader graft (agent/trader): L1 Analyzer arms on
 the 09:20 ET bar (one OpenRouter call), a plan derives on the next bar close, the Executor
-enters by MARKET only via fvg_1m_post_extreme (§6), extreme_reject_close (§7) or tmso_reject,
-with a fixed stop (embedded at the broker) and ONE T2 target picked at the fill (exit = market
-close on a tick touch). No breakeven / trail / cautious / initial target exists. No new entries
-at/after 10:30 ET; an open position is flattened at 13:00 ET (reason "hard-close-13:00").
-Reaching the target kills the plan (no re-entry that day); a stop-out spends one of 3 attempts.
+enters by MARKET only via fvg_1m_post_extreme (§6), extreme_reject_close (§7), tmso_reject,
+fvg_1h_reject or micro_smt_reject (§7a), with a stop embedded at the broker and ONE T2 target
+picked at the fill (exit = market close on a tick touch). No new entries at/after 10:30 ET; an
+open position is flattened at 13:00 ET. Reaching the target kills the plan (no re-entry that
+day); a stop-out spends one of 3 attempts.
 The 16:55 ET session-end close and pause/resume still apply through live_orders.
+
+POSITION MANAGEMENT is not summarised here because it changes between sessions. Before judging
+any stop move or exit, read `l2-mechanisms.md` §8 and the "Runtime flags" section of `CLAUDE.md`
+in BASE — they say which rules are ON (e.g. break-even at 50% of the way to T2, the micro-SMT
+exit, the initial target's action, a profitable exit ending the plan, operator stop adoption)
+and which of them the LIVE order port can actually execute. A rule the replay applies and the
+live port cannot (live records a `veto` with an `..._unwired` reason instead) is a D-class
+finding every time it changes an exit, even when documented.
 
 ---
 DATA SOURCES TO READ (read ALL of them before writing anything):
@@ -440,7 +453,7 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
     scripts/report_replay_pnl.py (Step 2.5.3) — `realised` vs `marked` (a mark is the
     position open at the 13:00 window end, not an exit).
 
-13. <SESSION>gent_dispatch.jsonl   (the agent's own order record, plan 38)
+13. <SESSION>\agent_dispatch.jsonl   (the agent's own order record, plan 38)
     One JSON line per simulated order event the port reported: the signal built from it,
     the ack (read back off position.json), `dispatch_ms`, and whether it was suppressed or
     deduped on `(plan_id, seq)`. This is where an order that the brain decided but the
@@ -641,7 +654,7 @@ Structure:
 
 ## After-Run Commits — Impact Summary
 
-List every commit from data source #14 that landed after the running commit.  For each:
+List every commit from data source #15 that landed after the running commit.  For each:
 
 ### <short-hash> — <commit subject>
 
@@ -660,8 +673,11 @@ Include ALL meaningful discrepancies found. Skip trivial noise (sub-tick roundin
 cosmetic label differences, known acceptable differences listed above).
 Classify severity in the title: use "[CRITICAL]" if the bug could cause unlimited
 or unintended risk (a legacy entry kind, a wrong armed_classes set, an entry after 10:30,
-a position not flattened at 13:00, a stop not embedded at the broker), "[MINOR]" if it's
-cosmetic or small-impact.
+a position not flattened at 13:00, a stop not embedded at the broker); "[MAJOR]" if no
+unintended risk was taken but live did something materially different from what the
+strategy or the replay says — a decided action that never reached the broker, or a
+difference that moves a reported P&L figure by more than about $100; "[MINOR]" if it's
+cosmetic or small-impact. Exactly these three tags.
 The "After-Run Commits" section is required whenever data source #15 returns at least one
 commit after the running commit.  If there are none, omit the section entirely.
 
@@ -812,7 +828,7 @@ to; do not go looking elsewhere for context. Working state: never commit this fi
 | This worktree (the analysis and that replay ran here) | `<WT>` — branch `<WORKTREE_BRANCH>`, from `origin/master`; the replay ran @ `<short-hash>` |
 
 ## Action items
-- [ ] D<N> [CRITICAL|MINOR] — <one-line summary>
+- [ ] D<N> [CRITICAL|MAJOR|MINOR] — <one-line summary>
 - [ ] O<N> [High|Medium|Low] — <one-line summary> (operator-proposed)
 
 ## Re-running the session on this worktree's code
@@ -885,9 +901,9 @@ All of that work lives in `<WT>`, on its `analyze-<mon>-<day>` branch: code chan
 replays, A/B runs, study scripts, plan files. Nothing is edited, run or committed in the
 worktree the skill was invoked from.
 
-- Keep the shell in `<WT>` (Step 1.5) and give every file you write or edit an absolute
-  path under `<WT>`. Before the first write of each item, confirm
-  `git rev-parse --show-toplevel` prints `<WT>`.
+- Prefix every command with `cd "<WT>" &&` (Step 1.5: the shell does not stay there) and
+  give every file you write or edit an absolute path under `<WT>`. Before the first write
+  of each item, confirm `cd "<WT>" && git rev-parse --show-toplevel` prints `<WT>`.
 - A subagent spawned for an item gets `<WT>` as its root, stated in its prompt — it does
   not inherit it.
 - Tick the item in `<WT>/analysis.md` when it is done or ruled out, with the outcome in a
