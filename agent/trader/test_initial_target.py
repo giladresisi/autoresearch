@@ -555,6 +555,9 @@ def _kinds(tmp_path):
 def _executor(tmp_path, monkeypatch, action="record", levels=LEVELS_0918, pick=T2,
               **kw):
     monkeypatch.setattr(executor_mod, "INITIAL_TARGET_ACTION", action)
+    # The §8 break-even at 50% (ON since 2026-10-02) would move the stop on this tape
+    # before the stage under test is judged; it has its own tests (`test_trail.py`).
+    monkeypatch.setattr(executor_mod.trail, "TRAIL_ENABLED", False)
     monkeypatch.setattr(executor_mod, "select_target",
                         lambda *a, **k: (dict(pick) if pick else None))
     monkeypatch.setattr(executor_mod, "level_universe",

@@ -1,12 +1,14 @@
-"""O3 (2026-10-01): break-even at 50% of the way to T2, and (study code, off) a trailing
-stop under the 1m continuation FVGs — the whole module is behind `TRAIL_ENABLED`, OFF.
+"""O3 (2026-10-01/02): break-even at 50% of the way to T2 — ON by default — and, as study
+code behind `TRAIL_FVG_MOVES` (OFF), a trailing stop under the 1m continuation FVGs.
 
-What the module does with the defaults, once `TRAIL_ENABLED` is True (operator decision
-2026-10-02, after o3-trail-study.md Part 4 — rig arm "H"): on the tick the position has
-covered half the way from the entry to T2, move the stop to the entry if that tightens
-it; a touch books `stop_out_initial` (no attempt spent, not a positive close). Nothing
-else. Measured at -33.50 pts over 30 dates against today (four small losses scratched,
-one +96.25 ride given back); kept by the operator as a risk rule, not an edge.
+The rule that is ON (operator decision 2026-10-02, after o3-trail-study.md Part 4 — rig
+arm "H"; `l2-mechanisms.md` §8): on the tick the position has covered half the way from
+the entry to T2, move the stop to the entry if that tightens it; a touch books
+`stop_out_initial` (no attempt spent, not a positive close). Nothing else. Measured at
+-33.50 pts over 30 dates against the stop-only control (four small losses scratched, one
++96.25 ride given back, no T2 winner touched); kept as a RISK rule, not an edge.
+Rollback: `ACT_STOP_BE=0` (or false/no/off) in the environment, read once per Executor
+(`enabled()`), or `TRAIL_ENABLED = False` for a harness.
 
 The FVG trail below is the study code the rule came out of:
 
@@ -35,9 +37,22 @@ Not a rule yet (`docs/entry-mechanism-change-protocol.md` step 0): it is not in
 """
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 
-TRAIL_ENABLED = False
+TRAIL_ENABLED = True
+ENV_FLAG = "ACT_STOP_BE"
+
+
+def enabled() -> bool:
+    """The module switch AND the environment rollback. Read ONCE per Executor, at its
+    construction — never inside the bar loop (same discipline as the extension veto)."""
+    if not TRAIL_ENABLED:
+        return False
+    raw = str(os.environ.get(ENV_FLAG, "")).strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
 #: 1 = the gap BEFORE the newest one (the operator's rule); 0 = the newest gap.
 TRAIL_LAG = 1
 #: Continuation gaps smaller than this are ignored (the study's `min5` variant; 0 = all).

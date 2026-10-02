@@ -6,6 +6,8 @@ import pytest
 
 from agent.trader import trail
 from agent.trader.executor import Executor
+from agent.trader.order_port import MirroringOrderPort
+from agent.trader.order_sim import OrderSim
 from agent.trader.test_executor_live_rules import (_kinds, _recs, _step, _ts,
                                                    make_executor)
 
@@ -78,6 +80,7 @@ def test_the_stage_arms_at_the_mid_and_moves_one_gap_behind_only_on_a_new_gap(mo
 
 
 def test_flag_off_is_inert(tmp_path, monkeypatch):
+    monkeypatch.setattr(trail, "TRAIL_ENABLED", False)
     ex = make_executor(tmp_path, monkeypatch, pick={"id": "D1", "level": "x", "price": 29400.0})
     _step(ex, "09:40:00", 29250.0, fire=True)
     _step(ex, "09:50:00", 29330.0, hi=29335.0)
@@ -223,14 +226,42 @@ def test_apply_at_arm_moves_off_the_gaps_already_on_the_chart(monkeypatch):
 
 
 def test_the_defaults_are_breakeven_only(tmp_path, monkeypatch):
-    """Operator, 2026-10-02: the kept rule is break-even at 50% alone (rig arm H)."""
-    assert trail.TRAIL_ENABLED is False
+    """Operator, 2026-10-02: the kept rule is break-even at 50% alone (rig arm H), ON."""
+    assert trail.TRAIL_ENABLED is True
+    monkeypatch.delenv(trail.ENV_FLAG, raising=False)
+    assert trail.enabled() is True
     assert trail.TRAIL_BE_AT_ARM is True and trail.TRAIL_BE_OFFSET_PTS == 0.0
     assert trail.TRAIL_FVG_MOVES is False and trail.TRAIL_APPLY_AT_ARM is False
     assert trail.TRAIL_ARM_FRACTION == 0.5
-    monkeypatch.setattr(trail, "TRAIL_ENABLED", True)
     ex = make_executor(tmp_path, monkeypatch, pick={"id": "D1", "level": "x", "price": 29400.0})
     _step(ex, "09:40:00", 29250.0, fire=True)
     _run_rows(ex)
     moved = [(r["price"], r["reason"]) for r in _recs(tmp_path) if r["kind"] == "stop_moved"]
     assert moved == [(29250.0, "breakeven")]
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off", " OFF "])
+def test_the_env_rollback_switches_breakeven_off(tmp_path, monkeypatch, raw):
+    monkeypatch.setenv(trail.ENV_FLAG, raw)
+    assert trail.enabled() is False
+    ex = make_executor(tmp_path, monkeypatch, pick={"id": "D1", "level": "x", "price": 29400.0})
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    _run_rows(ex)
+    assert "stop_moved" not in _kinds(tmp_path) and ex.position()["stop"] == 29235.0
+
+
+def test_the_live_port_without_move_stop_records_trail_unwired_once(tmp_path, monkeypatch):
+    """The mirroring port has no stop-modify path yet: the break-even is recorded as a
+    `veto` with reason `trail_unwired`, once per position, and nothing moves."""
+    monkeypatch.delenv(trail.ENV_FLAG, raising=False)
+    port = MirroringOrderPort(OrderSim(dol=None), lambda ev: None)
+    ex = make_executor(tmp_path, monkeypatch, order_port=port,
+                       pick={"id": "D1", "level": "x", "price": 29400.0})
+    port._context = ex.order_context
+    _step(ex, "09:40:00", 29250.0, fire=True)
+    _run_rows(ex)
+    _step(ex, "09:50:00", 29330.0, hi=29335.0)
+    vetoes = [r for r in _recs(tmp_path)
+              if r["kind"] == "veto" and r["reason"] == "trail_unwired"]
+    assert len(vetoes) == 1 and vetoes[0]["detail"]["stop"] == 29250.0
+    assert "stop_moved" not in _kinds(tmp_path) and ex.position()["stop"] == 29235.0

@@ -566,6 +566,16 @@ def test_the_five_before_dates_replay_byte_identical(date, monkeypatch):
     initial (29523.825) and closed back, two bars before the 11:29 bar reached it. A
     record only; the other four have no touch that was not already the reach bar.
 
+    2026-10-02 (§8 break-even at 50%, ON): 08-31, 09-02, 09-03 and 09-04 re-captured.
+    Each position that reached half the way to T2 gains `trail_armed` + `stop_moved
+    reason=breakeven` on that tick (09-02 10:07:15, 09-03 11:03:16, 09-04 10:12:00 —
+    exits unchanged). 08-31 MOVES: the 09:33 `micro_smt_reject` short armed 09:35:59,
+    came back to the entry and scratched (`stop_out_initial` @ 29467.75 at 09:47:47)
+    instead of riding to the 12:07 micro-SMT exit (+96.25 -> 0.00); the plan lived on
+    and recorded one extension veto at 10:07. 09-01 byte-identical (no position reached
+    the mid). This is the rig's 08-31 result (o3-trail-study.md Part 4) reproduced on
+    the recorded thesis.
+
     A DELIBERATE mechanism change moves these streams; re-capture them then, exactly as
     the change protocol's step 3 says. A cold cache skips — it proves nothing either way.
     """

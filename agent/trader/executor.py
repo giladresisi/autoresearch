@@ -222,6 +222,10 @@ class Executor:
         # §2's extension veto, read ONCE here: the flag is a session setting, and the
         # bar loop must not re-read the environment on every fire.
         self._extension_veto = extension_veto_enabled()
+        # Break-even at 50% (`agent/trader/trail.py`, §8): the switch and its environment
+        # rollback, read once here for the same reason.
+        self._trail_enabled = trail.enabled()
+        self._trail_unwired_recorded = False
         self._last_minute = None
         # The last bar instant this Executor was handed. BAR time, never a wall clock
         # (the gate in `test_executor.py` forbids one here). Only `mark_open_position`
@@ -2390,10 +2394,9 @@ class Executor:
         self._note_close(ev)
 
     def _drive_trail(self, now, mnq, bar_complete) -> None:
-        """O3 (`agent/trader/trail.py`): trail the stop under the 1m continuation gaps
-        once price has reached the mid of entry and T2. STUDY ONLY — inert unless
-        `trail.TRAIL_ENABLED`, which the A/B harness flips; never on in live until
-        `l2-mechanisms.md` adopts a rule. Arming is a tick test on the current bar's
+        """§8 break-even at 50% (`agent/trader/trail.py`, ON; `ACT_STOP_BE=0` is the
+        rollback) and, behind `trail.TRAIL_FVG_MOVES` (OFF, study), the trail under the
+        1m continuation gaps. Arming is a tick test on the current bar's
         extremes; moves happen on completed 1m bars and go through `move_stop`, so a
         touch books `stop_out_initial` at or beyond the entry and `stop_out` below it,
         exactly like an operator's `set_stop`. The mirroring live port has no
@@ -2401,7 +2404,7 @@ class Executor:
         `trail.TRAIL_BE_AT_ARM` the arming tick also moves the stop to break-even
         (`reason="breakeven"`); a touch of it books `stop_out_initial` at the entry, which
         is neither a profitable close nor a spent attempt."""
-        if not trail.TRAIL_ENABLED:
+        if not self._trail_enabled:
             return
         pos = self._sim.position
         if pos is None:
@@ -2410,6 +2413,7 @@ class Executor:
         if self._trail is None or self._trail.opened_at != pos.get("opened_at"):
             if self._target_price is None:
                 return                                   # no T2, no mid to arm on
+            self._trail_unwired_recorded = False          # one record per position
             self._trail = trail.TrailStage(pos.get("direction"), pos.get("entry"),
                                            self._target_price, pos.get("opened_at"))
         st = self._trail
@@ -2423,7 +2427,16 @@ class Executor:
             be = st.breakeven_stop(pos.get("stop"))
             if be is not None:
                 if not self._port_supports("move_stop"):
+                    # The live port has no stop-modify path yet: say so ONCE per
+                    # position in the decision stream, so a live session shows where
+                    # the stop would have gone rather than silently doing nothing.
                     self._state["trail_unwired"] = True
+                    if not self._trail_unwired_recorded:
+                        self._trail_unwired_recorded = True
+                        self._rec.veto(now=now, plan_id=self._plan.get("plan_id"),
+                                       mechanism=self._state.get("mechanism"),
+                                       reason="trail_unwired",
+                                       detail={"stop": be, "entry": st.entry})
                 else:
                     ev = self._sim.move_stop(now, be)
                     if ev is not None:

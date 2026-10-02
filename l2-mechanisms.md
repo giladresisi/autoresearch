@@ -1031,6 +1031,24 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
     evidence — once a live session has passed the post-session conformance run with every
     delta explained (plan 38 D12) and a measured A/B over the replay set shows what the
     gate costs. Until then neither is a tuning knob: do not move 10:30.
+- **Break-even at 50% of the way to T2 (2026-10-02, operator decision — a RISK rule, not
+  an edge).** On the first tick at which the position has covered half the distance from
+  its entry to its bound T2 (the bar's extreme reaches `entry + 0.5 x (T2 - entry)`), the
+  protective stop moves to the ENTRY, if that tightens it; once per position, ratchet only,
+  no other stop movement. A touch of the moved stop books `stop_out_initial`: it spends no
+  attempt, starts no cooldown and is not a positive close (the plan lives). The T2 target,
+  the micro-SMT exit (§7b) and the window end are unchanged. Code `agent/trader/trail.py`
+  (`TRAIL_BE_AT_ARM`, offset 0), wired in `Executor._drive_trail`; rollback `ACT_STOP_BE=0`.
+  Evidence (`<global>/sessions/2026-09-30/o3-trail-study.md` Part 4, the 30-date oracle-
+  thesis rig against the stop-only control): **-33.50 pts** — four small losses scratched
+  (08-27 +31.75 incl. a fourth entry the un-spent attempt allowed, 08-28 +7.50, 09-16
+  +8.50, 09-29 +15.00) against one ride given back (08-31: armed 09:35:59, back to the
+  entry 09:47:47, in the control the micro-SMT exit at 12:07 for +96.25); no T2 winner
+  touched. The operator kept it for the risk profile. The FVG one-behind trail studied with
+  it (Parts 1-2, 4: a further ~-100 through one clipped T2 winner, 09-28) stays study code
+  behind `TRAIL_FVG_MOVES = False` and is NOT a rule. Live: the mirroring port has no
+  stop-modify path yet, so a live session records `veto reason=trail_unwired` with the
+  stop it would have set and moves nothing until that path exists.
 - **Window end 13:00:00 ET (2026-09-17, plan 38 D8).** The replay window already ends at
   13:00 (its last bar is 12:59:59); live has no such edge, because the bar loop runs the
   whole CME session. At the first bar with bar time >= 13:00:00 the Executor marks any open
