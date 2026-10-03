@@ -289,6 +289,13 @@ class TraderGraft:
 
         if self._executor is not None:
             self._executor.on_bar(now, bars, bar_complete=closed)
+            # The Executor counts attempts on ITS copy of the plan; `plans.json` showed
+            # the derivation-time 0 all day (2026-09-29 D5, 2026-10-01 D5). Rewritten
+            # only when the count moves, so a quiet bar costs nothing.
+            used = self._executor.attempts_used()
+            if used != int(self._plan.get("attempts_used") or 0):
+                self._plan["attempts_used"] = used
+                self._plans.put(self._plan)
 
         # Last, so the arming bar is covered too: under the default switch the
         # maintenance block above runs BEFORE the Executor exists, so a snapshot taken

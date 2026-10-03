@@ -38,7 +38,9 @@ def _fmt(d: datetime.date) -> str:
 
 
 def _convert_timestamps_to_et(path: Path) -> None:
-    """Subtract 11 h from Timestamp and Fill Time columns (Tradovate exports UTC+7; ET = UTC-4 in summer)."""
+    """Subtract 11 h from the timestamp columns (Tradovate exports UTC+7; ET = UTC-4 in
+    summer). Orders: Timestamp, Fill Time. Position history: Timestamp plus the pair's
+    Bought / Sold Timestamp (left unconverted until 2026-10-03, so every pair read ET+11h)."""
     import csv as _csv
     text = path.read_text(encoding="utf-8")
     if not text.strip():
@@ -50,7 +52,7 @@ def _convert_timestamps_to_et(path: Path) -> None:
     offset = datetime.timedelta(hours=11)
     ts_fmt = "%m/%d/%Y %H:%M:%S"
     for row in rows:
-        for col in ("Timestamp", "Fill Time"):
+        for col in ("Timestamp", "Fill Time", "Bought Timestamp", "Sold Timestamp"):
             val = (row.get(col) or "").strip()
             if val:
                 try:

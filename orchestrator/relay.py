@@ -22,7 +22,10 @@ _EXIT_RE = re.compile(
 
 # ── V2 (automation.main) JSON event kinds ────────────────────────────────────
 _V2_ENTRY_KINDS = {"stop-entry-filled", "market-entry"}
-_V2_EXIT_KINDS  = {"stopped-out", "stop-exit"}
+# `market-close` is the agent era's ONLY exit kind (stop-outs, targets and the 13:00
+# close are all market closes carrying a `reason`); without it trades.tsv paired nothing
+# after 2026-09-18 (2026-10-01 D1).
+_V2_EXIT_KINDS  = {"stopped-out", "stop-exit", "market-close"}
 
 _MNQ_PNL_PER_POINT = 2.0
 _TSV_HEADERS = [
@@ -108,10 +111,19 @@ class SessionRelay:
                 "stop":       float(evt.get("stop") or evt.get("stop_price", 0)),
             })
         elif kind in _V2_EXIT_KINDS:
-            # stopped-out: {"price": exit_price, "direction": ..., "time": ISO}
-            # stop-exit:   {"price": exit_price, "reason": "...", "direction": ..., "time": ISO}
+            # stopped-out:  {"price": exit_price, "direction": ..., "time": ISO}
+            # stop-exit:    {"price": exit_price, "reason": "...", "direction": ..., "time": ISO}
+            # market-close: {"price": exit_price, "reason": "stop_out" | "take_profit" |
+            #                "window_end" | "user-requested" | "session-end", "time": ISO}
+            # An exit with no entry still open is a close sent on a flat account (the
+            # 13:00 / 16:55 safety closes, a simulator exit after a manual close): it
+            # pairs with nothing, and appending it would shift every later pair.
+            n_open = sum(1 for e in self._events if e["type"] == "SIGNAL") \
+                - sum(1 for e in self._events if e["type"] == "EXIT")
+            if n_open <= 0:
+                return
             iso_time = evt.get("time", "")
-            reason = evt.get("reason", kind) if kind == "stop-exit" else kind
+            reason = evt.get("reason", kind) if kind in ("stop-exit", "market-close") else kind
             self._events.append({
                 "type":      "EXIT",
                 "time":      _iso_to_hms(iso_time),
