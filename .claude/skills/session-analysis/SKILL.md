@@ -705,20 +705,45 @@ Structure:
 
 ### O<N> — <Theme name>: <one-line description> — [High/Medium/Low]
 
+**In plain words**: <one or two sentences a reader who does not know the mechanism names
+    can follow, using this session's own example (times and prices)>
+**Type**: <ENTRY | TARGET/MANAGEMENT | OTHER>
 **Pattern**: <describe the recurring behavior and cite the supporting findings>
-**Suggested fix**: <concrete change to the trader logic (agent/trader) or the live bridge;
-    if an after-run commit already addresses this, write "Already addressed by commit <hash>">
+**Suggested fix**: <concrete change to the trader logic (agent/trader) or the live bridge>
+**Already on master?**: <no | yes: commit / flag / l2-mechanisms section> — checked against
+    `origin/master` as it is now (code, flags, `l2-mechanisms.md`), not only against the
+    running commit. A theme that is already there is reported as such, not proposed.
 **Supporting findings**: <list of F-numbers that back this up, and/or the comments.md note
     quoted verbatim when the theme originates from an operator comment>
-**Estimated session impact**: <estimated additional P&L if the fix had been applied>
+**Criterion score (this session)**: <the operator's success criterion for the theme's Type —
+    see "Scoring a theme" below. Name the retrace threshold used.>
+**Session P&L swing (secondary context)**: <estimated additional P&L if the fix had been
+    applied — never the verdict>
+**Frequency**: <left as "not counted yet"; Step 3.6 fills it>
 
 ---
 ```
 
 Raw findings capture individual trade-level observations. Optimization themes
-group them into actionable strategy improvements. High/Medium/Low refers to
-estimated impact over many sessions, not just this one. Themes originating from
+group them into actionable strategy improvements. Themes originating from
 comments.md (operator-proposed features) are REQUIRED, not optional.
+
+**Scoring a theme** (the operator's criteria, `~/.claude/CLAUDE.md`, "Project:
+auto-co-trader"). Judge a theme by the part of the trade it changes, never by the session's
+end-to-end P&L, which mixes that part with whatever entries, targets and exits followed it:
+- **ENTRY** themes (entry mechanisms, entry timing, entry filters / blocks / vetoes): for
+  each entry the idea changes, its **MFE** against the stop that entry's own mechanism
+  places, up to the first meaningful retrace / reversal, ignoring the selected target and
+  any position management. If the idea swaps one entry for another, give both MFEs.
+- **TARGET/MANAGEMENT** themes (target choice, break-even, trailing, exits): **points
+  gained from an ideal entry** — the post-09:30 farthest price against the trade direction
+  within the leg that leads to the exit the idea produces, taken again after every
+  meaningful opposite retrace — against the same measure for the actual exit. Ignore where
+  the real entry was and whether it would have fired.
+- "Meaningful retrace / reversal": **40 pts, flat, no scaling with the leg** (operator,
+  2026-10-04; `agent/study/corpus.DEFAULT_RETRACE_PTS`). State it when a test uses another.
+- **High/Medium/Low** ranks the theme by its criterion score and by how often it is likely
+  to apply over many sessions, not by this session's P&L swing.
 
 ### File 3: <SESSION>\session-analysis.md
 
@@ -765,8 +790,10 @@ figure to trust as the strategy measure. Reference the D-number.>
 <Bulleted D-list: each D-number, severity tag, one-line summary. Mark [CRITICAL] ones with 🔴.>
 
 ## 5. Optimization Themes (see `optimizations.md`)
-<Table or bulleted O-list: each O-number, theme, impact tier, est. session swing. Themes
-that came from comments.md are tagged "(operator-proposed)".>
+<Table, one row per O-number: # | in plain words | Type | criterion score this session |
+frequency ("not counted yet" until Step 3.6) | on master? | impact tier. Themes that came
+from comments.md are tagged "(operator-proposed)". The session P&L swing may follow the
+table as secondary context, labelled as such.>
 
 ## 6. Artifacts
 - Live session chart: <path>
@@ -861,13 +888,48 @@ Filling rules:
 
 ---
 
+## Step 3.6 — Count each theme before anything is built
+
+A theme that reads well on one session can apply on one day in fifty (2026-10-01 O2), or
+turn out to be a coin flip on the base rate (2026-10-01 O4). That is cheap to learn before
+writing code and expensive after. Do this step yourself, in `<WT>`, read-only.
+
+For every ENTRY or TARGET/MANAGEMENT theme that is NOT already on master and whose trigger
+can be expressed on bars, scan the replayable dates:
+- on how many dates the idea would have acted, and which ones;
+- its criterion score (Step 3, "Scoring a theme") on those dates;
+- the near-misses: dates where the setup appears but the trigger does not fire.
+
+Inputs: the latest replay run folder per date (any worktree's
+`regression/sessions/<date>/<run>/` holding `plans.json` + `trader_decisions.jsonl`) for the
+plan direction and the entries, and the 1s parquets from the contract folder
+`<global>/general/main/rollover_ledger.json` assigns to that date. Run folders come from
+different code versions, so the recorded entries are indicative, not exact — say so. NO
+replays, no model calls and no code changes in this step; keep the scan scripts in the
+scratchpad.
+
+Write the result into the theme's **Frequency** line in `optimizations.md` and the matching
+table cell in `session-analysis.md` §5: `N of M dates (<dates>)`, plus one sentence on the
+score across them. A theme that cannot be counted gets `not countable: <why>`. If the scan
+for one theme would take more than a few minutes, record `not counted: <why>` and offer it
+in Step 4 instead of running it.
+
+---
+
 ## Step 4 — Report to user
 
 Once the subagent completes, confirm:
 - Thesis / plan summary (bias, DOL, plan outcome) or "dark day" with the reason
 - Which discrepancies were found (D1, D2... with one-line summaries and source tag)
-- Which optimization themes were identified (O1, O2... with estimated impact), marking
-  the operator-proposed ones from comments.md
+- The optimization themes as ONE triage table, so the operator can decide every row in a
+  single reply before any code is written:
+
+  `| # | In plain words | Type | Score this session | Frequency | On master? | Suggested call |`
+
+  "In plain words" is the theme's one or two plain sentences, not its title. "Suggested
+  call" is one of `build`, `count more`, `drop`, `already done`, with the reason in a few
+  words. Mark the operator-proposed themes from comments.md. Ask for a call on each row;
+  do not start on any theme until the operator has answered.
 - File paths written — all THREE: `discrepancies.md`, `optimizations.md`, and the
   consolidated `session-analysis.md`
 - The analysis worktree from Step 1.5: its path, branch and the commit the replay ran on,
@@ -908,3 +970,17 @@ worktree the skill was invoked from.
   not inherit it.
 - Tick the item in `<WT>/analysis.md` when it is done or ruled out, with the outcome in a
   few words.
+
+Rules for each theme the operator picks:
+- **One theme per commit**, never two mixed, so each can be landed, measured or reverted by
+  itself. Give it its own PR when the operator asks for one.
+- **Before any merge, replay the motivating date** with the change off and on (the two
+  commands in `<WT>/analysis.md`) and report the result by the theme's criterion (Step 3,
+  "Scoring a theme"); the session P&L comes second and is labelled as secondary. This holds
+  even when the operator has waived the test suites: it is one replay pair, and it is how
+  2026-10-01's O1 gain and O6 cost were found.
+- **List every reading of the rule you had to pin yourself** and get it confirmed, or
+  record it as unconfirmed in the spec text.
+- **Decide a new flag's default with the operator at commit time**; say what the live
+  process will do with the variable unset.
+- **Say plainly which suites were not run.**
