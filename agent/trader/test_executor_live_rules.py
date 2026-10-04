@@ -576,6 +576,17 @@ def test_the_five_before_dates_replay_byte_identical(date, monkeypatch):
     the mid). This is the rig's 08-31 result (o3-trail-study.md Part 4) reproduced on
     the recorded thesis.
 
+    2026-10-03: all five re-captured, for two reasons at once. (1) Every `fill` record
+    now carries `stop` (`order_sim._open`; the entry-criterion scorer reads it). (2) The
+    first capture since PRs #116 (O1: §6.1 clauses 5-6; O6: §7c first-T2 reuse) and #117
+    (O2: §11.6) were merged WITHOUT re-capture: 09-02 loses its 09:55:04 exit-tick
+    entry (-4.75; O1), two trades instead of three; 09-04 loses its 10:03:05 exit-tick
+    entry (-9.50; O1) and the 10:06:00 fill binds the first fill's pick asia(cur)_low
+    29481.5 instead of TDO 29571.0 (O6), so break-even arms 10:26:38 and the take-profit
+    lands 11:30:54 @ 29481.5 (+179.75 instead of +90.25 at 10:26:39); 09-01's plan_id
+    moved (faf69eb4ae1d -> 1755712af6f6) with every trade unchanged; 08-31 and 09-03 are
+    field-only. None of these moves was bisected to a single commit.
+
     A DELIBERATE mechanism change moves these streams; re-capture them then, exactly as
     the change protocol's step 3 says. A cold cache skips — it proves nothing either way.
     """

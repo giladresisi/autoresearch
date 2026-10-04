@@ -10,9 +10,13 @@ Picks the session to analyze and decides whether the analysis may run:
   mid-session resolves to the previous live run.
 - the chosen session already has `session-analysis.md` and `--reanalyze` was not passed
   -> `STATUS: ALREADY_ANALYZED`, exit 3 (the skill stops without touching anything).
+- the session's analysis worktree (`analyze-<mon>-<day>` beside this worktree, e.g.
+  `analyze-oct-2`) already exists and `--reanalyze` was not passed
+  -> `STATUS: WORKTREE_EXISTS`, exit 4 (same: the skill stops).
 
-Prints `STATUS: ANALYZE` (exit 0), `STATUS: ALREADY_ANALYZED` (exit 3) or
-`STATUS: NO_SESSION` (exit 2), plus SESSION_DATE / SESSION_FOLDER / SELECTED_BY.
+Prints `STATUS: ANALYZE` (exit 0), `STATUS: ALREADY_ANALYZED` (exit 3),
+`STATUS: WORKTREE_EXISTS` (exit 4) or `STATUS: NO_SESSION` (exit 2), plus SESSION_DATE /
+SESSION_FOLDER / SELECTED_BY / WORKTREE / WORKTREE_BRANCH / WORKTREE_EXISTS.
 
 Run with the project venv from the worktree root:
     uv run python .claude/skills/session-analysis/scripts/resolve_session.py [--date D] [--reanalyze]
@@ -39,6 +43,13 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # automation.main writes both from its first minute; a folder with neither never ran live.
 _LIVE_RUN_MARKERS = ("signals.log", "events.jsonl")
 _ANALYSIS_MARKER = "session-analysis.md"
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+
+
+def _worktree_name(date: str) -> str:
+    """2026-10-02 -> analyze-oct-2 (also the branch name)."""
+    d = datetime.strptime(date, "%Y-%m-%d")
+    return f"analyze-{_MONTHS[d.month - 1]}-{d.day}"
 
 
 def _running_session_date() -> tuple[str | None, str]:
@@ -102,6 +113,12 @@ def main() -> None:
     if date == running:
         print("WARNING: this session's live run is still in progress")
 
+    # Worktrees are siblings: the analysis worktree sits beside the one this runs in.
+    worktree = ROOT.parent / _worktree_name(date)
+    print(f"WORKTREE: {worktree.as_posix()}")
+    print(f"WORKTREE_BRANCH: {worktree.name}")
+    print(f"WORKTREE_EXISTS: {str(worktree.exists()).lower()}")
+
     marker = folder / _ANALYSIS_MARKER
     if marker.exists() and not args.reanalyze:
         analyzed_ts = marker.stat().st_mtime
@@ -116,6 +133,10 @@ def main() -> None:
         print(f"ANALYSIS_FILE: {marker.as_posix()}")
         print(f"ANALYSIS_STALE: {str(stale).lower()}")
         sys.exit(3)
+
+    if worktree.exists() and not args.reanalyze:
+        print("STATUS: WORKTREE_EXISTS")
+        sys.exit(4)
 
     print("STATUS: ANALYZE")
     print(f"REANALYSIS: {str(marker.exists()).lower()}")

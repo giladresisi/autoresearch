@@ -166,8 +166,12 @@ class OrderSim:
         self.position = {"direction": direction, "entry": float(price),
                          "stop": float(stop), "artifact_id": artifact_id,
                          "opened_at": now}
+        # `stop` travels with the fill so the decision log carries the risk each entry
+        # was taken with (2026-10-03: the entry criterion scores MFE against it;
+        # before this the scorer had to assume each mechanism's cap).
         self.last_fill = {"kind": "fill", "time": now, "price": float(price),
-                          "direction": direction, "artifact_id": artifact_id}
+                          "direction": direction, "artifact_id": artifact_id,
+                          "stop": float(stop)}
         return dict(self.last_fill)
 
     def _close(self, now, kind, price) -> dict:

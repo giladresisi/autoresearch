@@ -13,9 +13,11 @@ description: >
   discrepancies, and optimizations — the file to open first).
   Downloads broker/PMT reports first if they haven't been fetched yet, then runs
   the trader replay (agent/trader, NOT the legacy 1s regression) seeded with the
-  session's recorded L1 thesis, and plots the live session. Ends by creating a follow-up
-  worktree (`../session-actions-<date>`) whose `analysis.md` points a separate agent at the
-  session folder and `session-analysis.md` to work on the action items.
+  session's recorded L1 thesis, and plots the live session. Runs in a dedicated worktree
+  it creates off `origin/master` (`../analyze-<mon>-<day>`, e.g. `../analyze-oct-2`): the
+  replay, and afterwards every code change and experiment for the action items, happen
+  there and never in the worktree the skill was invoked from. Stops early if that worktree
+  already exists, unless a re-analysis is explicitly requested.
   Trigger phrases: "analyze the session", "session analysis", "write discrepancies",
   "write optimizations", "analyze yesterday's trades", "what went wrong today",
   "session review", "post-session analysis", "compare strategy vs tradovate",
@@ -28,18 +30,25 @@ description: >
 # Session Analysis
 
 Cross-references all session data sources and writes three structured analysis files
-(`discrepancies.md`, `optimizations.md`, and the consolidated `session-analysis.md`), then
-creates a worktree for working on the resulting action items, with an `analysis.md` entry
-point in it (Step 3.5).
+(`discrepancies.md`, `optimizations.md`, and the consolidated `session-analysis.md`).
 Intended to be run once after a session ends and reports have been (or will be) downloaded:
 with no date it analyzes the latest live run that is no longer running, and it stops early
-when that run was already analyzed unless a re-analysis is explicitly requested (Step 1).
+when that run was already analyzed, or its analysis worktree already exists, unless a
+re-analysis is explicitly requested (Step 1).
+
+**Where it runs.** Each analyzed session gets its own worktree, `../analyze-<mon>-<day>`
+(e.g. `../analyze-oct-2`), branched from `origin/master` (Step 1.5). The replay, the
+analysis and — afterwards, in the same agent session — every code change, experiment and
+plan for the action items happen in that worktree (Step 5). The worktree the skill was
+invoked from only runs the Step-1 gate; nothing is edited, replayed or committed there.
 
 **Which engine is live (since 2026-09-18, commit 99bb32b).** The live pipeline runs
 `trader_only=True`: the legacy trend/SMT/hypothesis/strategy engine is BLOCKED and every
 entry comes from the trader graft (`agent/trader`: L1 Analyzer at 09:20 ET, Planner,
 Executor; market-only mechanisms `fvg_1m_post_extreme`, `extreme_reject_close`,
-`tmso_reject`; no entries at/after 10:30 ET; open position flattened at 13:00 ET). The
+`tmso_reject`, `fvg_1h_reject`, `micro_smt_reject`; no entries at/after 10:30 ET; open
+position flattened at 13:00 ET). Position management changes often — `l2-mechanisms.md`
+§8 in the analysis worktree is the authority, not any summary in this file. The
 graft's simulated orders are mirrored into the legacy signal vocabulary
 (`market-entry` / `market-close` with `"source": "agent"`) and dispatched to PMT through
 `live_orders` by `automation/agent_dispatch.py`, which also writes its own per-event record
@@ -61,7 +70,8 @@ broker reports keep their legacy shapes. The deterministic counterpart is theref
   (`comments.md`), the `run-orchestrator` skill (the running-commit line in `comments.md`),
   and the `get-reports` extractors (`tradovate_orders.csv`, `tradovate_position_history.csv`,
   `pickmytrade_alerts.csv`). Never look anywhere else for session inputs.
-- **Replay** outputs are worktree-local, per-run, under the per-date regression root:
+- **Replay** outputs are local to the analysis worktree (`<WT>`, Step 1.5), per-run, under
+  the per-date regression root:
   `regression/sessions/<date>/<HH-MM-SS>/` (one timestamped folder per run; `HH-MM-SS` is
   the TH/Asia-Bangkok start time — the replay shares `paths.regression_run_dir` with the
   legacy regression). A replay run folder holds `trader_decisions.jsonl`, `plans.json` and
@@ -90,7 +100,14 @@ uv run python .claude/skills/session-analysis/scripts/resolve_session.py [--date
 Act on the `STATUS` line:
 
 - `STATUS: ANALYZE` — continue with `SESSION_DATE` as `<date>`. `REANALYSIS: true` means
-  the three analysis files exist and will be overwritten (the user asked for that).
+  the three analysis files exist and will be overwritten (the user asked for that). Keep
+  `WORKTREE` (the analysis worktree's absolute path, `<WT>`), `WORKTREE_BRANCH` and
+  `WORKTREE_EXISTS` for Step 1.5.
+- `STATUS: WORKTREE_EXISTS` (exit 4) — the session's analysis worktree is already there
+  (someone is, or was, working this session). **Stop here; run nothing else and write
+  nothing.** Tell the user:
+  > "The `<date>` analysis worktree already exists: `WORKTREE`. Ask for a re-analysis
+  > explicitly to run the analysis again in it."
 - `STATUS: ALREADY_ANALYZED` (exit 3) — **stop here; run nothing else and write nothing.**
   Tell the user:
   > "The `<date>` live run was already analyzed (`ANALYZED_AT`): `ANALYSIS_FILE`. Ask for a
@@ -101,6 +118,57 @@ Act on the `STATUS` line:
   recommend the re-analysis — the existing files cover only the first part of the run.
 - `STATUS: NO_SESSION` (exit 2) — stop and relay `REASON`:
   > "No session directory found for `<date>`. Please verify the date."
+
+---
+
+## Step 1.5 — Create (or, on a re-analysis, reuse) the analysis worktree
+
+Everything after this step runs in the session's own worktree: `<WT>` = the `WORKTREE` path
+Step 1 printed — `analyze-<mon>-<day>` beside the current worktree (three-letter lowercase
+month, day without a leading zero: 2026-10-02 → `analyze-oct-2`), on a branch of the same
+name. Do this step yourself — do not delegate it to a subagent, and do not use
+`/new-co-trader-worktree` for it (that skill stops to ask whenever the current branch is
+not `master`).
+
+**`WORKTREE_EXISTS: false` — create it from `origin/master`:**
+
+```bash
+git fetch origin
+git worktree add "<WT>" -b "<WORKTREE_BRANCH>" origin/master
+[ -f .env ] && cp .env "<WT>/.env"
+git -C "<WT>" rev-parse --short HEAD        # the worktree's base, for analysis.md and Step 4
+```
+
+A missing `.env` is not an error — copy nothing. No dependency install is needed — the
+first `uv run` inside the worktree builds its venv. If `git worktree add` fails (e.g. the
+branch name is taken by a stale registration), stop and relay the error — never fall back
+to running the analysis in the worktree the skill was invoked from.
+
+**`WORKTREE_EXISTS: true` — reuse it as it stands.** Step 1 only gets here on an explicit
+re-analysis. Do not recreate, reset, rebase, stash or clean the worktree: it may hold
+action-item work in progress. Measure its state and keep the result for Step 4:
+
+```bash
+git fetch origin
+git -C "<WT>" branch --show-current; git -C "<WT>" rev-parse --short HEAD
+git -C "<WT>" rev-list --left-right --count origin/master...HEAD   # "<behind> <ahead>"
+git -C "<WT>" status --porcelain
+```
+
+- **Up to date with `origin/master`** = `behind` is 0. Otherwise it is `behind` commits
+  behind (and `ahead` commits of its own on top).
+- **Local changes** = the `status --porcelain` lines: a letter in column 1 is a STAGED
+  change, a letter in column 2 an UNSTAGED one, `??` an untracked file. `analysis.md` is
+  this skill's own untracked file — leave it out of the verdict.
+
+The re-analysis replay runs on that worktree's code exactly as it stands — behind master
+and with its local changes, if any — which is why Step 4 must report this state.
+
+**Then run everything from it.** The shell does NOT stay in `<WT>` between commands (it is
+reset to the directory the session started in), so prefix EVERY command in Steps 2–3.5
+with `cd "<WT>" &&` — confirm once that `cd "<WT>" && git rev-parse --show-toplevel`
+prints `<WT>`. That way the reports, the ledger rebuild, the replay and the plot all run
+`origin/master`'s code, and the replay run folder lands under `<WT>/regression/`.
 
 ---
 
@@ -222,9 +290,11 @@ Generate the live session chart (the mirror emits legacy-shaped events, so the l
 chart shows the trader's entries/exits exactly as before):
 
 ```bash
-python plot_session.py <date>
+uv run python plot_session.py <date>
 ```
-Writes and opens `<global>/sessions/<date>/chart.html`.
+Writes and opens `<global>/sessions/<date>/chart_<HH-MM>.html` (timestamped with the ET
+time of the request, so each run adds a file) and prints `Chart: <path>` — that printed
+path is the `<chart path>` for Step 3 and Step 3.5.
 
 **No replay chart exists yet.** The replay writes no `events.jsonl`, so the legacy
 `regression/plot_regression.py` cannot draw it. Do not attempt it; record
@@ -239,15 +309,19 @@ Artifacts. If the plot command fails, note the error and continue — the analys
 Delegate all the reading, cross-referencing, and writing to a subagent. This keeps the main context clean and lets the subagent focus entirely on the analysis.
 
 Use the general-purpose subagent with this prompt. Fill in `<DATE>`, `<BASE>` (the
-worktree root), `<GLOBAL>` (env `ACT_GLOBAL_DIR`, default
+analysis worktree `<WT>` from Step 1.5 — NOT the worktree the skill was invoked from),
+`<GLOBAL>` (env `ACT_GLOBAL_DIR`, default
 `~/projects/auto-co-trader/global` — resolve with `paths.global_root()`), and `<RUN>`
-(the replay run folder produced in Step 2.5, e.g. `<BASE>\regression\sessions\<DATE>\<HH-MM-SS>`):
+(the replay run folder produced in Step 2.5, e.g. `<BASE>\regression\sessions\<DATE>\<HH-MM-SS>`).
+On a re-analysis in a worktree that is behind `origin/master` or has local changes
+(Step 1.5), append that state to the prompt: the replay ran on that code, uncommitted
+changes included.
 
 ```
 You are a trading session analyst for an automated MNQ futures strategy.
 Your job is to cross-reference all session data sources and write three analysis files.
 
-BASE = C:\Users\gilad\projects\auto-co-trader\live           # the worktree root
+BASE = <WT>                                                  # the analysis worktree (C:\Users\gilad\projects\auto-co-trader\analyze-<mon>-<day>); the replay ran on ITS code
 GLOBAL = <GLOBAL>                                            # ACT_GLOBAL_DIR; default ~/projects/auto-co-trader/global
 DATE = <DATE>
 SESSION = <GLOBAL>\sessions\<DATE>
@@ -256,12 +330,20 @@ REPLAY = <RUN>                                               # <BASE>\regression
 WHICH ENGINE WAS LIVE: since 2026-09-18 (commit 99bb32b) the legacy engine is blocked
 (trader_only) and every entry comes from the trader graft (agent/trader): L1 Analyzer arms on
 the 09:20 ET bar (one OpenRouter call), a plan derives on the next bar close, the Executor
-enters by MARKET only via fvg_1m_post_extreme (§6), extreme_reject_close (§7) or tmso_reject,
-with a fixed stop (embedded at the broker) and ONE T2 target picked at the fill (exit = market
-close on a tick touch). No breakeven / trail / cautious / initial target exists. No new entries
-at/after 10:30 ET; an open position is flattened at 13:00 ET (reason "hard-close-13:00").
-Reaching the target kills the plan (no re-entry that day); a stop-out spends one of 3 attempts.
+enters by MARKET only via fvg_1m_post_extreme (§6), extreme_reject_close (§7), tmso_reject,
+fvg_1h_reject or micro_smt_reject (§7a), with a stop embedded at the broker and ONE T2 target
+picked at the fill (exit = market close on a tick touch). No new entries at/after 10:30 ET; an
+open position is flattened at 13:00 ET. Reaching the target kills the plan (no re-entry that
+day); a stop-out spends one of 3 attempts.
 The 16:55 ET session-end close and pause/resume still apply through live_orders.
+
+POSITION MANAGEMENT is not summarised here because it changes between sessions. Before judging
+any stop move or exit, read `l2-mechanisms.md` §8 and the "Runtime flags" section of `CLAUDE.md`
+in BASE — they say which rules are ON (e.g. break-even at 50% of the way to T2, the micro-SMT
+exit, the initial target's action, a profitable exit ending the plan, operator stop adoption)
+and which of them the LIVE order port can actually execute. A rule the replay applies and the
+live port cannot (live records a `veto` with an `..._unwired` reason instead) is a D-class
+finding every time it changes an exit, even when documented.
 
 ---
 DATA SOURCES TO READ (read ALL of them before writing anything):
@@ -371,7 +453,7 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
     scripts/report_replay_pnl.py (Step 2.5.3) — `realised` vs `marked` (a mark is the
     position open at the 13:00 window end, not an exit).
 
-13. <SESSION>gent_dispatch.jsonl   (the agent's own order record, plan 38)
+13. <SESSION>\agent_dispatch.jsonl   (the agent's own order record, plan 38)
     One JSON line per simulated order event the port reported: the signal built from it,
     the ack (read back off position.json), `dispatch_ms`, and whether it was suppressed or
     deduped on `(plan_id, seq)`. This is where an order that the brain decided but the
@@ -412,6 +494,19 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
     deployed after the live run already occurred but are baked into the replay (which
     always runs on the current codebase). They are the primary reason a replay decision
     may differ from the live one.
+
+    The replay ran on BASE's HEAD — `origin/master` as of the worktree's creation — not on
+    the code the live run used. So also list both sides against that running commit:
+
+    ```bash
+    git -C <BASE> log --oneline <running-commit>..HEAD    # in the replay, not in the live run
+    git -C <BASE> log --oneline HEAD..<running-commit>    # in the live run, not in the replay
+    ```
+
+    The first list is the complete set of after-run commits (it also catches ones that
+    landed after 17:00 ET). The second is normally empty; when it is not, the live run
+    carried code that master does not have and the replay lacks it — say so in
+    session-analysis.md §3 and treat it as a candidate cause of any section-B divergence.
 
 ---
 CROSS-REFERENCE METHODOLOGY:
@@ -559,7 +654,7 @@ Structure:
 
 ## After-Run Commits — Impact Summary
 
-List every commit from data source #14 that landed after the running commit.  For each:
+List every commit from data source #15 that landed after the running commit.  For each:
 
 ### <short-hash> — <commit subject>
 
@@ -578,8 +673,11 @@ Include ALL meaningful discrepancies found. Skip trivial noise (sub-tick roundin
 cosmetic label differences, known acceptable differences listed above).
 Classify severity in the title: use "[CRITICAL]" if the bug could cause unlimited
 or unintended risk (a legacy entry kind, a wrong armed_classes set, an entry after 10:30,
-a position not flattened at 13:00, a stop not embedded at the broker), "[MINOR]" if it's
-cosmetic or small-impact.
+a position not flattened at 13:00, a stop not embedded at the broker); "[MAJOR]" if no
+unintended risk was taken but live did something materially different from what the
+strategy or the replay says — a decided action that never reached the broker, or a
+difference that moves a reported P&L figure by more than about $100; "[MINOR]" if it's
+cosmetic or small-impact. Exactly these three tags.
 The "After-Run Commits" section is required whenever data source #15 returns at least one
 commit after the running commit.  If there are none, omit the section entirely.
 
@@ -607,20 +705,45 @@ Structure:
 
 ### O<N> — <Theme name>: <one-line description> — [High/Medium/Low]
 
+**In plain words**: <one or two sentences a reader who does not know the mechanism names
+    can follow, using this session's own example (times and prices)>
+**Type**: <ENTRY | TARGET/MANAGEMENT | OTHER>
 **Pattern**: <describe the recurring behavior and cite the supporting findings>
-**Suggested fix**: <concrete change to the trader logic (agent/trader) or the live bridge;
-    if an after-run commit already addresses this, write "Already addressed by commit <hash>">
+**Suggested fix**: <concrete change to the trader logic (agent/trader) or the live bridge>
+**Already on master?**: <no | yes: commit / flag / l2-mechanisms section> — checked against
+    `origin/master` as it is now (code, flags, `l2-mechanisms.md`), not only against the
+    running commit. A theme that is already there is reported as such, not proposed.
 **Supporting findings**: <list of F-numbers that back this up, and/or the comments.md note
     quoted verbatim when the theme originates from an operator comment>
-**Estimated session impact**: <estimated additional P&L if the fix had been applied>
+**Criterion score (this session)**: <the operator's success criterion for the theme's Type —
+    see "Scoring a theme" below. Name the retrace threshold used.>
+**Session P&L swing (secondary context)**: <estimated additional P&L if the fix had been
+    applied — never the verdict>
+**Frequency**: <left as "not counted yet"; Step 3.6 fills it>
 
 ---
 ```
 
 Raw findings capture individual trade-level observations. Optimization themes
-group them into actionable strategy improvements. High/Medium/Low refers to
-estimated impact over many sessions, not just this one. Themes originating from
+group them into actionable strategy improvements. Themes originating from
 comments.md (operator-proposed features) are REQUIRED, not optional.
+
+**Scoring a theme** (the operator's criteria, `~/.claude/CLAUDE.md`, "Project:
+auto-co-trader"). Judge a theme by the part of the trade it changes, never by the session's
+end-to-end P&L, which mixes that part with whatever entries, targets and exits followed it:
+- **ENTRY** themes (entry mechanisms, entry timing, entry filters / blocks / vetoes): for
+  each entry the idea changes, its **MFE** against the stop that entry's own mechanism
+  places, up to the first meaningful retrace / reversal, ignoring the selected target and
+  any position management. If the idea swaps one entry for another, give both MFEs.
+- **TARGET/MANAGEMENT** themes (target choice, break-even, trailing, exits): **points
+  gained from an ideal entry** — the post-09:30 farthest price against the trade direction
+  within the leg that leads to the exit the idea produces, taken again after every
+  meaningful opposite retrace — against the same measure for the actual exit. Ignore where
+  the real entry was and whether it would have fired.
+- "Meaningful retrace / reversal": **40 pts, flat, no scaling with the leg** (operator,
+  2026-10-04; `agent/study/corpus.DEFAULT_RETRACE_PTS`). State it when a test uses another.
+- **High/Medium/Low** ranks the theme by its criterion score and by how often it is likely
+  to apply over many sessions, not by this session's P&L swing.
 
 ### File 3: <SESSION>\session-analysis.md
 
@@ -667,8 +790,10 @@ figure to trust as the strategy measure. Reference the D-number.>
 <Bulleted D-list: each D-number, severity tag, one-line summary. Mark [CRITICAL] ones with 🔴.>
 
 ## 5. Optimization Themes (see `optimizations.md`)
-<Table or bulleted O-list: each O-number, theme, impact tier, est. session swing. Themes
-that came from comments.md are tagged "(operator-proposed)".>
+<Table, one row per O-number: # | in plain words | Type | criterion score this session |
+frequency ("not counted yet" until Step 3.6) | on master? | impact tier. Themes that came
+from comments.md are tagged "(operator-proposed)". The session P&L swing may follow the
+table as secondary context, labelled as such.>
 
 ## 6. Artifacts
 - Live session chart: <path>
@@ -686,42 +811,22 @@ not generic advice.
 
 ---
 
-## Step 3.5 — Create the action-items worktree and its `analysis.md`
+## Step 3.5 — Write `analysis.md` in the analysis worktree
 
-The analysis produces action items (the D-list and the O-themes). They are worked on in a
-**dedicated worktree** by a separate agent whose only starting point is ONE file,
-`analysis.md`, in that worktree's root. Do this step yourself, from the worktree root
-(`<BASE>`) — do not delegate it to a subagent.
+The analysis produces action items (the D-list and the O-themes). They are worked on in
+the analysis worktree (Step 5), and `<WT>/analysis.md` is the checklist and path index for
+that work — it survives a context compaction or a later session resuming in the worktree.
+Do this step yourself — do not delegate it to a subagent.
 
 Run it only if Step 3 wrote `<global>/sessions/<date>/session-analysis.md`. If that file does
 not exist, skip this step and say so in Step 4 — there is nothing to point at.
 
-This step never prompts: it also runs unattended inside the run-orchestrator maintenance
-cycle. Do not use `/new-co-trader-worktree` for it (that skill stops to ask whenever the
-current branch is not `master`, and the live worktree is on `live`).
-
-**1. Create the worktree** — a sibling of the current worktree, branched from
-`origin/master` (action-item work merges to master; the live worktree rebases onto it):
-
-```bash
-git fetch origin
-git worktree add "../session-actions-<date>" -b "session-actions/<date>" origin/master
-[ -f .env ] && cp .env "../session-actions-<date>/.env"
-git rev-parse --short HEAD; git branch --show-current            # where the analysis ran
-git -C "../session-actions-<date>" rev-parse --short HEAD        # the new worktree's base
-```
-
-If `../session-actions-<date>` already exists (the analysis was re-run for this date), do not
-create a second worktree: reuse it and overwrite its `analysis.md`. A missing `.env` in
-`<BASE>` is not an error — copy nothing. No dependency install is needed — the first
-`uv run` inside the worktree builds its venv.
-
-**2. Write `../session-actions-<date>/analysis.md`** from the template below. It is a
-pointer file, not a copy of the analysis: the three analysis files stay in the session
-folder and are the source of truth. Fill EVERY placeholder with a resolved absolute path
+**Write `<WT>/analysis.md`** from the template below (on a re-analysis, overwrite the one
+that is there). It is a pointer file, not a copy of the analysis: the three analysis files
+stay in the session folder and are the source of truth. Fill EVERY placeholder with a resolved absolute path
 (no `<global>`, no `~`, no relative paths) — the agent reading it must not have to resolve
 anything. `<SESSION>` is `<global>/sessions/<date>`, `<RUN>` the replay run folder from
-Step 2.5, `<WT>` the new worktree's absolute path.
+Step 2.5, `<WT>` the analysis worktree's absolute path.
 
 ````
 # Session <DATE> — action items
@@ -747,11 +852,10 @@ to; do not go looking elsewhere for context. Working state: never commit this fi
 | Replay run the analysis compared live against | `<RUN>` |
 | Thesis injected into that replay | `<SESSION>\replay_thesis.json` |
 | Commit the live session ran on | `<running commit>` |
-| Worktree the analysis (and that replay) ran in | `<BASE>` @ `<short-hash>` (`<branch>`) |
-| This worktree | `<WT>` — branch `session-actions/<DATE>`, from `origin/master` @ `<short-hash>` |
+| This worktree (the analysis and that replay ran here) | `<WT>` — branch `<WORKTREE_BRANCH>`, from `origin/master`; the replay ran @ `<short-hash>` |
 
 ## Action items
-- [ ] D<N> [CRITICAL|MINOR] — <one-line summary>
+- [ ] D<N> [CRITICAL|MAJOR|MINOR] — <one-line summary>
 - [ ] O<N> [High|Medium|Low] — <one-line summary> (operator-proposed)
 
 ## Re-running the session on this worktree's code
@@ -778,6 +882,37 @@ Filling rules:
   `none — <reason>` in the two replay rows and replace the body of the last section with
   that same one line.
 - A row whose artifact was not produced (e.g. the chart failed) gets `not produced — <reason>`.
+- **Re-analysis in a worktree that was behind `origin/master` or had local changes**
+  (Step 1.5): append that state to the "This worktree" row, e.g.
+  `; 3 behind origin/master, uncommitted changes`.
+
+---
+
+## Step 3.6 — Count each theme before anything is built
+
+A theme that reads well on one session can apply on one day in fifty (2026-10-01 O2), or
+turn out to be a coin flip on the base rate (2026-10-01 O4). That is cheap to learn before
+writing code and expensive after. Do this step yourself, in `<WT>`, read-only.
+
+For every ENTRY or TARGET/MANAGEMENT theme that is NOT already on master and whose trigger
+can be expressed on bars, scan the replayable dates:
+- on how many dates the idea would have acted, and which ones;
+- its criterion score (Step 3, "Scoring a theme") on those dates;
+- the near-misses: dates where the setup appears but the trigger does not fire.
+
+Inputs: the latest replay run folder per date (any worktree's
+`regression/sessions/<date>/<run>/` holding `plans.json` + `trader_decisions.jsonl`) for the
+plan direction and the entries, and the 1s parquets from the contract folder
+`<global>/general/main/rollover_ledger.json` assigns to that date. Run folders come from
+different code versions, so the recorded entries are indicative, not exact — say so. NO
+replays, no model calls and no code changes in this step; keep the scan scripts in the
+scratchpad.
+
+Write the result into the theme's **Frequency** line in `optimizations.md` and the matching
+table cell in `session-analysis.md` §5: `N of M dates (<dates>)`, plus one sentence on the
+score across them. A theme that cannot be counted gets `not countable: <why>`. If the scan
+for one theme would take more than a few minutes, record `not counted: <why>` and offer it
+in Step 4 instead of running it.
 
 ---
 
@@ -786,22 +921,66 @@ Filling rules:
 Once the subagent completes, confirm:
 - Thesis / plan summary (bias, DOL, plan outcome) or "dark day" with the reason
 - Which discrepancies were found (D1, D2... with one-line summaries and source tag)
-- Which optimization themes were identified (O1, O2... with estimated impact), marking
-  the operator-proposed ones from comments.md
+- The optimization themes as ONE triage table, so the operator can decide every row in a
+  single reply before any code is written:
+
+  `| # | In plain words | Type | Score this session | Frequency | On master? | Suggested call |`
+
+  "In plain words" is the theme's one or two plain sentences, not its title. "Suggested
+  call" is one of `build`, `count more`, `drop`, `already done`, with the reason in a few
+  words. Mark the operator-proposed themes from comments.md. Ask for a call on each row;
+  do not start on any theme until the operator has answered.
 - File paths written — all THREE: `discrepancies.md`, `optimizations.md`, and the
   consolidated `session-analysis.md`
-- The action-items worktree from Step 3.5: its path, branch and base commit, and the path
-  of its `analysis.md` — or that the step was skipped, and why. To work on the action
-  items, start a separate agent there (`cd ../session-actions-<date>`, then `claude`) with
-  "Read analysis.md and work on the action items".
+- The analysis worktree from Step 1.5: its path, branch and the commit the replay ran on,
+  whether it was created now or reused, and the path of its `analysis.md` — or that Step
+  3.5 was skipped, and why.
+- **On a re-analysis that reused an existing worktree — always, even when all is clean:**
+  whether it is up to date with `origin/master` (if not: how many commits behind, and how
+  many of its own ahead), whether it has local changes, and whether any of them is
+  UNSTAGED (list the files, split staged / unstaged / untracked). State that the replay
+  ran on that code as it stood; nothing in the worktree was rebased, stashed or reset.
 
 **Data Health back-fill:** `session-analysis.md` has a "Data Health" section. The
 session-analysis skill does NOT itself run the parquet-check. If a parquet-check WAS
-run in the same flow (e.g. the user chained `/parquet-check` then `/session-analysis`,
-or the run-orchestrator maintenance cycle ran it first), paste its per-instrument result
-summary into the subagent prompt (Step 3) so the subagent fills that section; otherwise it
+run in the same flow (e.g. the user chained `/parquet-check` then `/session-analysis`),
+paste its per-instrument result summary into the subagent prompt (Step 3) so the subagent
+fills that section; otherwise it
 will record "Not assessed in this run". If you have the parquet-check summary but only
 realize it after the subagent finished, edit the "Data Health" section of
 `session-analysis.md` in place to add it.
 
 If any discrepancy is marked [CRITICAL], call it out explicitly and offer to investigate the root cause in the code.
+
+---
+
+## Step 5 — Work the action items in the analysis worktree
+
+The agent that ran the analysis also handles its action items, in this same session. Which
+items to take is the operator's call: report first (Step 4), then work the ones they pick.
+
+All of that work lives in `<WT>`, on its `analyze-<mon>-<day>` branch: code changes, tests,
+replays, A/B runs, study scripts, plan files. Nothing is edited, run or committed in the
+worktree the skill was invoked from.
+
+- Prefix every command with `cd "<WT>" &&` (Step 1.5: the shell does not stay there) and
+  give every file you write or edit an absolute path under `<WT>`. Before the first write
+  of each item, confirm `cd "<WT>" && git rev-parse --show-toplevel` prints `<WT>`.
+- A subagent spawned for an item gets `<WT>` as its root, stated in its prompt — it does
+  not inherit it.
+- Tick the item in `<WT>/analysis.md` when it is done or ruled out, with the outcome in a
+  few words.
+
+Rules for each theme the operator picks:
+- **One theme per commit**, never two mixed, so each can be landed, measured or reverted by
+  itself. Give it its own PR when the operator asks for one.
+- **Before any merge, replay the motivating date** with the change off and on (the two
+  commands in `<WT>/analysis.md`) and report the result by the theme's criterion (Step 3,
+  "Scoring a theme"); the session P&L comes second and is labelled as secondary. This holds
+  even when the operator has waived the test suites: it is one replay pair, and it is how
+  2026-10-01's O1 gain and O6 cost were found.
+- **List every reading of the rule you had to pin yourself** and get it confirmed, or
+  record it as unconfirmed in the spec text.
+- **Decide a new flag's default with the operator at commit time**; say what the live
+  process will do with the variable unset.
+- **Say plainly which suites were not run.**

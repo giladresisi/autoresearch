@@ -182,6 +182,7 @@ def _trade(fill: dict, close: "dict | None", extras: "dict | None" = None) -> di
     t = {
         "entry_ts": fill.get("time"), "entry": entry, "direction": direction,
         "mechanism": fill.get("mechanism"), "label": fill.get("artifact_label"),
+        "stop": fill.get("stop"),              # on fills recorded since 2026-10-03
         "exit_ts": (close or {}).get("time"), "exit": exit_price,
         "exit_kind": (close or {}).get("kind"),
         "points": _points(direction, entry, exit_price) if close else None,
