@@ -62,8 +62,9 @@ def test_a_fill_reaches_the_sink_once_with_stop_plan_mechanism_and_seq():
     assert sent["seq"] == 1 and sent["direction"] == "UP" and sent["price"] == 29250.0
     assert sent["time"] == _ts("09:40:00")
     # The Executor gets the simulation's OWN event back — nothing the mirror added may
-    # leak into the decision stream.
-    assert ev["kind"] == "fill" and "seq" not in ev and "stop" not in ev
+    # leak into the decision stream. (`stop` is the simulation's own field since
+    # 2026-10-03, carried on every fill; `seq` is the mirror's.)
+    assert ev["kind"] == "fill" and "seq" not in ev and ev["stop"] == 29235.0
     assert port.position is not None and port.external is None
 
 
