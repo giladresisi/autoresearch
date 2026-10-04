@@ -719,7 +719,20 @@ Structure:
     see "Scoring a theme" below. Name the retrace threshold used.>
 **Session P&L swing (secondary context)**: <estimated additional P&L if the fix had been
     applied — never the verdict>
-**Frequency**: <left as "not counted yet"; Step 3.6 fills it>
+**Idea card** (the research spec; from the operator's `comments.md` card when the note has
+    one, otherwise drafted here — every drafted or missing field is marked `proposed:` and
+    goes to the Step 3.6 question round):
+  - *What it may harm*: <the trades / days the change would make worse, in plain words>
+  - *Necessity check*: <which past days are relevant and how to count them — the setup's
+    definition on bars>
+  - *Implementation check*: <per relevant day: what counts as success (the criterion for the
+    Type), and what flags a day as harmed>
+  - *Knobs to calibrate*: <every number in the idea, with the values to sweep>
+  - *Priority*: <the operator's, or `proposed: <High/Medium/Low>`>
+**Readings**: <left as "pending the question round"; Step 3.6 fills it with each reading
+    as `confirmed` / `changed to ...` / `proposed, unconfirmed`>
+**Frequency**: <left as "not counted yet"; Step 3.7 fills it>
+**What the data says**: <left as "not researched yet"; Step 3.7 fills it>
 
 ---
 ```
@@ -744,6 +757,9 @@ end-to-end P&L, which mixes that part with whatever entries, targets and exits f
   2026-10-04; `agent/study/corpus.DEFAULT_RETRACE_PTS`). State it when a test uses another.
 - **High/Medium/Low** ranks the theme by its criterion score and by how often it is likely
   to apply over many sessions, not by this session's P&L swing.
+- **A harmed day** (the default harm flag, unless the idea card says otherwise): a day where
+  the change removes or alters an entry whose MFE was at least twice its stop, or where a
+  target / management change reduces the ideal-entry points of an exit.
 
 ### File 3: <SESSION>\session-analysis.md
 
@@ -791,9 +807,11 @@ figure to trust as the strategy measure. Reference the D-number.>
 
 ## 5. Optimization Themes (see `optimizations.md`)
 <Table, one row per O-number: # | in plain words | Type | criterion score this session |
-frequency ("not counted yet" until Step 3.6) | on master? | impact tier. Themes that came
-from comments.md are tagged "(operator-proposed)". The session P&L swing may follow the
-table as secondary context, labelled as such.>
+frequency ("not counted yet" until Step 3.7) | harmed days | on master? | impact tier.
+Themes that came from comments.md are tagged "(operator-proposed)". Under the table, per
+theme: "What the data says" (Step 3.7's conclusions, or "not researched yet") and
+"Readings" (Step 3.6). The session P&L swing may follow as secondary context, labelled
+as such.>
 
 ## 6. Artifacts
 - Live session chart: <path>
@@ -888,31 +906,68 @@ Filling rules:
 
 ---
 
-## Step 3.6 — Count each theme before anything is built
+## Step 3.6 — The question round: confirm each theme's research spec, in ONE batch
+
+The research in Step 3.7 is only as good as the definitions it runs on, and the
+definitions are the operator's. Before any scan, collect every open or drafted idea-card
+field across all themes and settle them in one exchange. Do this step yourself.
+
+1. For each theme that is not already on master, list its card's `proposed:` fields
+   with the reading you propose — a complete answer the operator can accept with one word,
+   not an open question. Skip fields that are not load-bearing for the research (say which
+   you skipped and why). Skip whole themes you judge unlikely to matter, with the reason.
+2. Ask them all at once with AskUserQuestion (several questions per call; one per theme
+   is a fine shape, each option = your proposed reading, "Other" for a change). Wait for
+   the answers; do not start Step 3.7 before they arrive.
+3. Record the outcome in each theme's **Readings** line: `confirmed`, `changed to ...`, or
+   `proposed, unconfirmed`.
+
+**Unattended invocation** (the run-orchestrator maintenance cycle, or any run where no
+operator is present to answer): do NOT block on a question. Proceed with your proposed
+readings, mark every one `proposed, unconfirmed`, and put the full question list — each
+with its proposed reading — at the top of the Step 4 report, so the operator answers it
+the next morning and only the affected counts are re-run.
+
+---
+
+## Step 3.7 — Research every theme before anything is built
 
 A theme that reads well on one session can apply on one day in fifty (2026-10-01 O2), or
 turn out to be a coin flip on the base rate (2026-10-01 O4). That is cheap to learn before
-writing code and expensive after. Do this step yourself, in `<WT>`, read-only.
+writing code and expensive after — and it is research the operator would ask for anyway, so
+it is done here, before the summary, on the readings settled in Step 3.6. Do this step
+yourself, in `<WT>`, read-only on every input.
 
-For every ENTRY or TARGET/MANAGEMENT theme that is NOT already on master and whose trigger
-can be expressed on bars, scan the replayable dates:
-- on how many dates the idea would have acted, and which ones;
-- its criterion score (Step 3, "Scoring a theme") on those dates;
-- the near-misses: dates where the setup appears but the trigger does not fire.
+For every ENTRY or TARGET/MANAGEMENT theme that is not already on master and whose card
+can be expressed on bars, over the replayable dates (`scripts/corpus_manifest.py`, the
+manifest under `<global>/studies/corpus/`):
+- **Necessity**: on how many dates the idea would have acted, which ones, and the
+  near-misses (the setup appears, the trigger does not fire).
+- **Harm**: the days it would have harmed, by the card's harm flag (default in "Scoring a
+  theme"), listed.
+- **Criterion score** on the acting dates: ENTRY themes per entry (MFE against the stop,
+  `scripts/score_run.py`), TARGET themes per exit (ideal-entry points).
+- **Calibration**: for every knob on the card, a small sensitivity table — per value, the
+  days touched, the winners harmed, the losers removed — so a default is read off the
+  data rather than picked.
+- **Base rate** when the idea is a new trade rather than a filter: the outcome
+  distribution of the setup itself (as the 2026-10-01 counter-sweep scalp was counted).
 
-Inputs: the latest replay run folder per date (any worktree's
-`regression/sessions/<date>/<run>/` holding `plans.json` + `trader_decisions.jsonl`) for the
-plan direction and the entries, and the 1s parquets from the contract folder
-`<global>/general/main/rollover_ledger.json` assigns to that date. Run folders come from
-different code versions, so the recorded entries are indicative, not exact — say so. NO
-replays, no model calls and no code changes in this step; keep the scan scripts in the
-scratchpad.
+Tools: `scripts/ab_replay.py` for replays with an override (only when the idea exists as a
+flag or knob; otherwise none), `scripts/score_run.py` for scores, `agent/study/corpus.py`
+(`day_bars`, `load_1s`, `contract_folder`) for scans. Run folders come from different code
+versions, so recorded entries are indicative, not exact — say so. No model calls and no
+code changes in this step; scan scripts stay in the scratchpad.
 
-Write the result into the theme's **Frequency** line in `optimizations.md` and the matching
-table cell in `session-analysis.md` §5: `N of M dates (<dates>)`, plus one sentence on the
-score across them. A theme that cannot be counted gets `not countable: <why>`. If the scan
-for one theme would take more than a few minutes, record `not counted: <why>` and offer it
-in Step 4 instead of running it.
+Budget: a few minutes per theme. Beyond that, record `not yet counted: <why>` and offer it
+in Step 4 rather than running it; a theme that cannot be expressed on bars gets
+`not countable: <why>`.
+
+Write the results into each theme in `optimizations.md` — **Frequency** (`N of M dates
+(<dates>)`) and **What the data says**, written as CONCLUSIONS a decision can rest on
+(e.g. "acts on 1 of 110 dates; on it the blocked entry had 36 pts of MFE and its
+replacement 68; at 0.4 it would also block the 08-31 winner"), not as a data dump — and
+the matching cells of `session-analysis.md` §5.
 
 ---
 
@@ -924,12 +979,16 @@ Once the subagent completes, confirm:
 - The optimization themes as ONE triage table, so the operator can decide every row in a
   single reply before any code is written:
 
-  `| # | In plain words | Type | Score this session | Frequency | On master? | Suggested call |`
+  `| # | In plain words | Type | Score this session | Frequency | Harmed days | On master? | Suggested call |`
 
-  "In plain words" is the theme's one or two plain sentences, not its title. "Suggested
-  call" is one of `build`, `count more`, `drop`, `already done`, with the reason in a few
-  words. Mark the operator-proposed themes from comments.md. Ask for a call on each row;
-  do not start on any theme until the operator has answered.
+  followed, per theme, by its **What the data says** conclusions from Step 3.7 and its
+  **Readings** (which were confirmed, which are still proposed). "In plain words" is the
+  theme's one or two plain sentences, not its title. "Suggested call" is one of `build`,
+  `count more`, `drop`, `already done`, with the reason in a few words. Mark the
+  operator-proposed themes from comments.md. The operator's decision per row is two
+  things: the call, and any reading to change (which re-runs only that theme's research).
+  Do not start on any theme until the operator has answered.
+- On an unattended run (Step 3.6): the question list, with proposed readings, FIRST.
 - File paths written — all THREE: `discrepancies.md`, `optimizations.md`, and the
   consolidated `session-analysis.md`
 - The analysis worktree from Step 1.5: its path, branch and the commit the replay ran on,

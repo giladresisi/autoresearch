@@ -84,6 +84,52 @@ recorded, or is this a distinct observation?*
 
 Be decisive when it's clear, though — don't ask on an obvious new-vs-existing call.
 
+## Step 3.5 — Is this an IDEA? Then capture its card
+
+An observation ("the graph zigzagged under the daily mid") needs nothing more. An **idea**
+— anything that proposes changing how the agent enters, exits, picks targets, manages a
+position, or filters a day ("we should block entries when…", "the stop should move
+when…", "maybe trade the opposite scalp") — gets a short **idea card**, because the
+post-session analysis (`session-analysis`, Step 3.6–3.7) researches every idea before the
+operator sees the summary, and it can only research what is defined. The card's purpose is
+to nudge the operator to say what the idea is for, what it could break, and how to check
+it on other days — WHILE the example is in front of them.
+
+Fill what the user's text already answers, then ask for the rest with ONE AskUserQuestion
+call (several questions in it), limited to the two or three fields that are load-bearing
+and missing. Every option must be a concrete proposed answer drawn from the note itself,
+so the user can accept with a click; "Other" covers a change, and "later" is always an
+acceptable answer — they are watching a live chart. Never block the note on the card.
+
+The card's fields:
+- **Improve what** — in plain words, what gets better and on which part of the trade
+  (entry / target or management / other).
+- **May harm** — which trades or days the change as proposed could make worse.
+- **Necessity check** — how to tell on other days whether the problem exists: the setup's
+  definition on bars, so the analysis can count how many days are relevant.
+- **Implementation check** — per relevant day, what counts as success for the proposed
+  implementation, and what flags a day as harmed.
+- **Knobs** — every number in the idea (thresholds, distances, times), to be calibrated.
+- **Priority** — High / Medium / Low, the operator's.
+
+Write it as a fenced block at the end of the note, one line per field, `open` for a field
+the user deferred (the analysis will propose a reading and ask):
+
+````markdown
+```idea-card
+improve: <...>
+type: entry | target/management | other
+may-harm: <...>
+necessity-check: <...>
+implementation-check: <...>
+knobs: <name = proposed value, ...>
+priority: <High | Medium | Low | open>
+```
+````
+
+When a later note develops the same idea (Step 3, "update an existing note"), update the
+card's lines in place rather than adding a second card.
+
 ## Step 4 — Write the note
 
 **Timestamping:** every note's heading carries the invocation time from `NOW_ET` — when
