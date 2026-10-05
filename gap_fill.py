@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import socket
 import sys
+import time
 from pathlib import Path
 
 import paths
@@ -124,6 +125,10 @@ def gap_fill_until_now(
 # Max repair windows per file per run — bounds IB budget spend; anything beyond is
 # logged and left for the next run.
 _MAX_REPAIR_WINDOWS = 8
+# Extra rounds a hole gets after _fetch_gap_chunked exhausts its own pacing retries; spacing
+# matches run_gap_fill_with_retries (IB's ~10-min pacing window).
+_INTERIOR_RETRY_ROUNDS = 3
+_INTERIOR_RETRY_SLEEP_S = 650.0
 
 
 def find_interior_1s_gaps(df, threshold_s: float = 120.0) -> list:
@@ -209,6 +214,20 @@ def repair_interior_1s_gaps(bar_data_dir: Path | None = None) -> None:
             fetched = []
             for start, end in holes:
                 gap_df, ok = _pm._fetch_gap_chunked(ib, contract, start, end)
+                # _fetch_gap_chunked gives up (ok=False) after its own pacing retries;
+                # sleep a pacing window and retry the hole instead of leaving it unrepaired.
+                for attempt in range(1, _INTERIOR_RETRY_ROUNDS + 1):
+                    if ok:
+                        break
+                    print(
+                        f"[gap_fill] interior repair: {name} "
+                        f"{start.strftime('%m-%d %H:%M')} -> {end.strftime('%m-%d %H:%M')} "
+                        f"hit IB pacing — retry {attempt}/{_INTERIOR_RETRY_ROUNDS} in "
+                        f"~{_INTERIOR_RETRY_SLEEP_S / 60:.0f} min",
+                        flush=True,
+                    )
+                    time.sleep(_INTERIOR_RETRY_SLEEP_S)
+                    gap_df, ok = _pm._fetch_gap_chunked(ib, contract, start, end)
                 print(
                     f"[gap_fill] interior repair: {name} "
                     f"{start.strftime('%m-%d %H:%M')} -> {end.strftime('%m-%d %H:%M')}: "
