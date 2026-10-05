@@ -351,7 +351,7 @@ def merge_session_1s_parquets(bar_data_dir: Path) -> None:
     ib = IB()
     ib_ok = False
     try:
-        ib.connect(_host, _port, clientId=_client)
+        ib.connect(_host, _port, clientId=_client, readonly=True)
         ib_ok = True
     except Exception as exc:
         print(f"[merge_session_1s] IB unavailable ({exc}) — merging without gap fill", flush=True)

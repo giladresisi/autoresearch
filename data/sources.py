@@ -345,7 +345,7 @@ class IBGatewaySource:
 
         ib = IB()
         try:
-            ib.connect(self.host, self.port, clientId=self.client_id)
+            ib.connect(self.host, self.port, clientId=self.client_id, readonly=True)
 
             # Normalize to ET regardless of whether the caller passed a tz-aware string
             start_dt = _to_et(start)

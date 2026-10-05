@@ -51,6 +51,13 @@ def _no_real_ib_reachable_probe(monkeypatch):
     monkeypatch.setattr("orchestrator.main._check_ib_reachable", lambda *a, **kw: None)
 
 
+@pytest.fixture(autouse=True)
+def _live_trading_mode(monkeypatch):
+    """LIVE_TRADING comes from .env; when false, run() takes the signal-mode IB paths (real
+    gap fill, pre-session accumulator) and these tests hang on a live Gateway. Pin it on."""
+    monkeypatch.setattr("orchestrator.main.LIVE_TRADING", True)
+
+
 
 def test_main_after_grace_end_skips_to_next_day():
     mock_summarizer = MagicMock()
