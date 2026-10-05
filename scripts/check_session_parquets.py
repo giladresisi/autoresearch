@@ -981,6 +981,24 @@ def main():
             if result_1m.get("repair_success") is False:
                 exit_code = max(exit_code, 2)
 
+        # Plan 50: publish the finished run to R2 (same tail as `trade.py promote`). Runs AFTER
+        # the 1m main check so a repaired main 1m is what gets uploaded, and after the IB work.
+        # stdout carries this script's JSON report, so the tail writes to stderr. A failed
+        # publish does not undo the promote; it only raises the exit code.
+        if (report.get("promotion") or {}).get("promote_success") is True:
+            try:
+                from scripts import r2_sync
+                _pub = r2_sync.publish_after_promote(stream=sys.stderr)
+                report["promotion"]["publish_success"] = _pub["success"]
+                report["promotion"]["publish_error"] = _pub["error"]
+                report["promotion"]["publish_configured"] = _pub["configured"]
+                if not _pub["success"]:
+                    exit_code = max(exit_code, 2)
+            except Exception as _exc:
+                report["promotion"]["publish_success"] = False
+                report["promotion"]["publish_error"] = str(_exc)
+                exit_code = max(exit_code, 2)
+
     except Exception as exc:
         report["error"] = str(exc)
         exit_code = 3

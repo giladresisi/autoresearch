@@ -522,6 +522,30 @@ def test_update_stop_loss_long():
     assert body == "OK"
 
 
+def test_place_protective_stop_order_long_sends_sell_stp():
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    status, body = ex.place_protective_stop_order("long", 19980.0)
+    payload = ex._http.post.call_args.kwargs["json"]
+    assert payload["data"] == "sell"
+    assert payload["order_type"] == "STP"
+    assert payload["price"] == 19980.0
+    assert payload["quantity"] == 1
+    assert "update_sl" not in payload
+    assert "sl" not in payload
+    assert status == 200
+
+
+def test_place_protective_stop_order_short_sends_buy_stp():
+    ex = _make_executor()
+    ex._http.post = MagicMock(return_value=_ok_response())
+    ex.place_protective_stop_order("short", 20020.0)
+    payload = ex._http.post.call_args.kwargs["json"]
+    assert payload["data"] == "buy"
+    assert payload["order_type"] == "STP"
+    assert payload["price"] == 20020.0
+
+
 def test_update_stop_loss_short():
     ex = _make_executor()
     ex._http.post = MagicMock(return_value=_ok_response())

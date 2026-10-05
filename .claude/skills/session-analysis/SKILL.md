@@ -78,6 +78,21 @@ broker reports keep their legacy shapes. The deterministic counterpart is theref
   `thesis_state.json`; it never writes `events.jsonl` / `trades_1s.tsv` (those are legacy
   regression artifacts and will NOT exist). Use the run folder you produced in Step 2.5.
 
+## Step 0 — Sync the data folder from R2
+
+Run `python trade.py sync` from the project root before anything else (no sync logic lives in
+this skill; `scripts/r2_sync.py` owns it). It pulls the finished run's `general/main`,
+`general/live`, sessions and thesis cache into `<global>`, and never overwrites a local parquet
+that is AHEAD of R2 (the machine that ran the live keeps its own live parquets).
+
+- Reports `R2 not configured`, an auth error, or an unreachable bucket → say so in one line and
+  continue with the local data. Never block the analysis on it.
+- Reports a CONFLICT (both sides hold data the other lacks) → STOP and show it to the operator;
+  `--force` (remote wins) is the operator's call.
+- Prints WARNING lines (conid mismatch, publisher commit not in this checkout) → carry them into
+  the session-analysis.md data-health section.
+- Refused because the orchestrator is running → skip it; the live machine does not need it.
+
 ## Step 1 — Determine session date (and the already-analyzed gate)
 
 Resolve the session with the gate script — never by "yesterday's date":

@@ -472,6 +472,33 @@ def test_repair_interior_1s_gaps_merges_fetched_bars(monkeypatch, tmp_path):
     assert repaired.index.is_monotonic_increasing
 
 
+def test_repair_interior_1s_gaps_retries_hole_after_pacing_failure(monkeypatch, tmp_path):
+    """A hole whose fetch fails (pacing exhausted) is retried after a sleep, then merged."""
+    ET = "America/New_York"
+    idx = list(pd.date_range("2026-06-16 09:00", "2026-06-16 10:00", freq="1s", tz=ET))
+    idx += list(pd.date_range("2026-06-16 10:30", "2026-06-16 11:00", freq="1s", tz=ET))
+    df = _bars_df(idx)
+    df.to_parquet(tmp_path / "MNQ_1s.parquet")
+    monkeypatch.setenv("MNQ_CONID", "111")
+    monkeypatch.delenv("MES_CONID", raising=False)
+
+    fake_ib = MagicMock()
+    fake_ib.isConnected.return_value = True
+    monkeypatch.setattr(gap_fill, "_connect_ib", lambda: fake_ib)
+
+    hole = _bars_df(list(pd.date_range("2026-06-16 10:00:01", "2026-06-16 10:29:59", freq="1s", tz=ET)))
+    results = iter([(pd.DataFrame(), False), (hole, True)])
+    import data.parquet_maintenance as _pm
+    monkeypatch.setattr(_pm, "_fetch_gap_chunked", lambda *a: next(results))
+    sleeps = []
+    monkeypatch.setattr(gap_fill.time, "sleep", sleeps.append)
+
+    gap_fill.repair_interior_1s_gaps(tmp_path)
+
+    assert sleeps == [gap_fill._INTERIOR_RETRY_SLEEP_S]
+    assert len(pd.read_parquet(tmp_path / "MNQ_1s.parquet")) == len(df) + len(hole)
+
+
 def test_repair_interior_1s_gaps_clean_files_no_ib_connection(monkeypatch, tmp_path):
     """No repairable holes → never connects to IB."""
     ET = "America/New_York"

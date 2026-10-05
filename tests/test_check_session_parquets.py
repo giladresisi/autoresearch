@@ -847,6 +847,79 @@ class TestMainEntryPoint:
 
 
 # ---------------------------------------------------------------------------
+# Session-end -> R2 publish tail (plan 50)
+# ---------------------------------------------------------------------------
+
+class TestSessionEndPublish:
+    """main() session-end: publish only after a successful merge + promote. Everything that
+    touches IB / the filesystem / R2 is patched."""
+
+    def _run(self, tmp_path, mode="session-end", merge_ok=True, pub=None, promote_exc=None,
+             order=None):
+        from scripts import check_session_parquets as csp
+        from scripts import r2_sync
+        result = {"action": "merge", "severity": "minor", "merge_success": merge_ok,
+                  "backup_written": False}
+        pub_res = pub or {"configured": True, "success": True, "error": None, "report": None}
+        order = order if order is not None else []
+        pub_mock = MagicMock(side_effect=lambda *a, **k: order.append("publish") or pub_res)
+        promote = MagicMock(side_effect=promote_exc, return_value={"MNQ_1m.parquet": "ok"})
+        fake_ib_mod = MagicMock(IB=MagicMock(return_value=MagicMock()))
+        fake_maint = MagicMock()
+        if not merge_ok:
+            fake_maint.merge_session_1s_parquets.side_effect = RuntimeError("merge failed")
+        with patch.object(csp, "DATA_DIR", tmp_path), \
+             patch("sys.argv", ["prog", "--mode", mode]), \
+             patch.object(csp, "process_instrument", return_value=result), \
+             patch.object(csp, "promote_live_to_main", promote), \
+             patch.object(csp, "check_1m_parquet",
+                          side_effect=lambda *a, **k: order.append("1m") or {}), \
+             patch.object(r2_sync, "publish_after_promote", pub_mock), \
+             patch.dict(sys.modules, {"ib_insync": fake_ib_mod,
+                                      "data.parquet_maintenance": fake_maint}), \
+             patch("scripts.rollover_prep.rollover_block_reason", return_value=None):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured), pytest.raises(SystemExit) as exc:
+                csp.main()
+        return json.loads(captured.getvalue()), exc.value.code, pub_mock
+
+    def test_session_end_promotion_publishes(self, tmp_path):
+        report, code, pub = self._run(tmp_path)
+        pub.assert_called_once()
+        assert report["promotion"]["promote_success"] is True
+        assert report["promotion"]["publish_success"] is True
+        assert report["promotion"]["publish_error"] is None
+
+    def test_session_end_publishes_after_the_1m_check(self, tmp_path):
+        order = []
+        self._run(tmp_path, order=order)
+        assert order[-1] == "publish" and "1m" in order[:-1]
+
+    def test_session_end_publish_failure_sets_exit_2_and_report_flag(self, tmp_path):
+        report, code, pub = self._run(tmp_path, pub={"configured": True, "success": False,
+                                                     "error": "boom", "report": None})
+        assert code == 2
+        assert report["promotion"]["promote_success"] is True      # local promote stands
+        assert report["promotion"]["publish_success"] is False
+        assert report["promotion"]["publish_error"] == "boom"
+
+    def test_session_end_without_successful_merge_does_not_publish(self, tmp_path):
+        report, code, pub = self._run(tmp_path, merge_ok=False)
+        pub.assert_not_called()
+        assert report["promotion"] is None
+
+    def test_session_end_failed_promote_does_not_publish(self, tmp_path):
+        report, code, pub = self._run(tmp_path, promote_exc=RuntimeError("disk"))
+        pub.assert_not_called()
+        assert report["promotion"]["promote_success"] is False
+
+    def test_orchestrator_start_never_publishes(self, tmp_path):
+        report, code, pub = self._run(tmp_path, mode="orchestrator-start")
+        pub.assert_not_called()
+        assert report["promotion"] is None
+
+
+# ---------------------------------------------------------------------------
 # TestPromoteLiveToMain
 # ---------------------------------------------------------------------------
 

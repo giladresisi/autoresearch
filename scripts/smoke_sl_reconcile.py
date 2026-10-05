@@ -66,7 +66,7 @@ def main() -> int:
     tick = 0.25
     px = live_orders._current_price()
     if not px or px <= 0.0:
-        print("No current market price available — is the orchestrator/feed running? Aborting.")
+        print("No current market price available -- is the orchestrator/feed running? Aborting.")
         return 1
 
     direction = "long"
@@ -81,7 +81,7 @@ def main() -> int:
     # by its own unit tests.
     wrong_sl = round(px + args.ticks * tick, 2)
     print(f"[smoke] market={px}  sending LONG market entry with WRONG-side SL={wrong_sl} "
-          f"(above market → expect SL leg rejected, entry filled; PREVENTIVE LAYER BYPASSED)")
+          f"(above market -> expect SL leg rejected, entry filled; PREVENTIVE LAYER BYPASSED)")
     try:
         live_orders._executor.place_entry(
             {"direction": direction, "entry_price": 0.0, "stop_price": wrong_sl}, None)
@@ -101,9 +101,9 @@ def main() -> int:
         print("\n" + "=" * 70)
         print("INSPECT TRADOVATE NOW:")
         print(f"  Is there a WORKING protective SELL-stop resting at ~{corrective}?")
-        print("    YES → PASS: keep the default seam (update_sl).")
-        print("    NO  → FAIL: switch the seam to the fresh-standalone-STP fallback,")
-        print("          then re-run this smoke test.")
+        print("    YES -> PASS: the standalone-STP seam works (passed live 2026-09-28).")
+        print("    NO  -> FAIL: the seam no longer places a stop; the update_sl path")
+        print("          was already ruled out (2026-09-28) -- protect stops manually.")
         print("=" * 70 + "\n")
     finally:
         # Step 4: ALWAYS flatten so nothing is left open.
@@ -111,7 +111,7 @@ def main() -> int:
         try:
             live_orders.close_position(0.0, reason="smoke-flatten")
         except Exception as exc:
-            print(f"[smoke] WARNING: flatten failed — MANUALLY FLATTEN ON TRADOVATE NOW: {exc}")
+            print(f"[smoke] WARNING: flatten failed -- MANUALLY FLATTEN ON TRADOVATE NOW: {exc}")
             return 1
     return 0
 

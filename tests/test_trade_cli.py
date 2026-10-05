@@ -27,6 +27,15 @@ def _run_trade(argv: list[str], monkeypatch,
     trade.main()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_r2(monkeypatch):
+    """trade.py loads .env for the R2 commands: never let a test see (or use) real R2 creds."""
+    import dotenv
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: False)
+    for v in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"):
+        monkeypatch.delenv(v, raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Test 1: `trade.py up` reads bar_state.potential_stop_long
 # ---------------------------------------------------------------------------
@@ -516,3 +525,105 @@ def test_promote_warns_when_nothing_promoted(monkeypatch, capsys):
     _run_trade(["promote"], monkeypatch, MagicMock(), MagicMock())
 
     assert "nothing promoted" in capsys.readouterr().out.lower()
+
+
+# ---------------------------------------------------------------------------
+# promote / rollover-prep -> R2 publish tail (plan 50)
+# ---------------------------------------------------------------------------
+
+def _promote_env(monkeypatch, publish_result=None, calls=None):
+    from scripts import r2_sync
+    calls = calls if calls is not None else []
+    mock_csp = MagicMock()
+    mock_csp.promote_live_to_main.side_effect = lambda: calls.append("promote") or {"MNQ_1m.parquet": "ok"}
+    monkeypatch.setitem(sys.modules, "scripts.check_session_parquets", mock_csp)
+    res = publish_result or {"configured": True, "success": True, "error": None, "report": None}
+    monkeypatch.setattr(r2_sync, "publish_after_promote",
+                        lambda *a, **k: calls.append("publish") or res)
+    return calls
+
+
+def test_promote_publishes_after_local_copy(monkeypatch, capsys):
+    calls = _promote_env(monkeypatch)
+    _run_trade(["promote"], monkeypatch, MagicMock(), MagicMock())
+    assert calls == ["promote", "publish"]
+
+
+def test_promote_upload_failure_keeps_local_promote_and_exits_nonzero(monkeypatch, capsys):
+    calls = _promote_env(monkeypatch, {"configured": True, "success": False,
+                                       "error": "boom", "report": None})
+    with pytest.raises(SystemExit) as exc:
+        _run_trade(["promote"], monkeypatch, MagicMock(), MagicMock())
+    assert exc.value.code == 1 and calls == ["promote", "publish"]
+    assert "Promoted 1 file(s)" in capsys.readouterr().out
+
+
+def test_promote_without_r2_env_still_promotes_and_exits_zero(monkeypatch, capsys):
+    mock_csp = MagicMock()
+    mock_csp.promote_live_to_main.return_value = {"MNQ_1m.parquet": "ok"}
+    monkeypatch.setitem(sys.modules, "scripts.check_session_parquets", mock_csp)
+    _run_trade(["promote"], monkeypatch, MagicMock(), MagicMock())     # no SystemExit
+    out = capsys.readouterr().out
+    assert "Promoted 1 file(s)" in out and "R2 not configured" in out
+
+
+def test_promote_no_publish_flag_skips_upload(monkeypatch, capsys):
+    calls = _promote_env(monkeypatch)
+    _run_trade(["promote", "--no-publish"], monkeypatch, MagicMock(), MagicMock())
+    assert calls == ["promote"]
+
+
+def _rollover_env(monkeypatch):
+    from scripts import r2_sync
+    calls = []
+    mock_rp = MagicMock()
+    mock_rp.run_rollover_prep.return_value = {
+        "old_conids": {"mnq": 1, "mes": 2}, "new_conids": {"mnq": 3, "mes": 4},
+        "gaps": {"mnq": 1.0, "mes": 1.0}, "boundaries": {"mnq": "t", "mes": "t"},
+        "expiry": "2026-12-18", "subfolder": "2026-12", "next_prep_date": "2027-03-06"}
+    monkeypatch.setitem(sys.modules, "scripts.rollover_prep", mock_rp)
+    monkeypatch.setattr(r2_sync, "publish_after_promote",
+                        lambda *a, **k: calls.append("publish")
+                        or {"configured": True, "success": True, "error": None, "report": None})
+    return calls
+
+
+def test_rollover_prep_publishes_ledger_and_new_subfolder(monkeypatch, capsys):
+    calls = _rollover_env(monkeypatch)
+    _run_trade(["rollover-prep"], monkeypatch, MagicMock(), MagicMock())
+    assert calls == ["publish"]
+
+
+def test_rollover_prep_dry_run_does_not_publish(monkeypatch, capsys):
+    calls = _rollover_env(monkeypatch)
+    _run_trade(["rollover-prep", "--dry-run"], monkeypatch, MagicMock(), MagicMock())
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# publish / sync subcommands
+# ---------------------------------------------------------------------------
+
+def test_publish_and_sync_commands_pass_selectors(monkeypatch, capsys):
+    from scripts import r2_sync
+    seen = {}
+    ok = {"ok": True, "groups": {}, "errors": [], "conflicts": [], "warnings": []}
+    monkeypatch.setattr(r2_sync, "publish", lambda **kw: seen.update(pub=kw) or ok)
+    monkeypatch.setattr(r2_sync, "sync", lambda **kw: seen.update(syn=kw) or ok)
+    _run_trade(["publish", "--only", "main,live", "--dry-run"], monkeypatch, MagicMock(), MagicMock())
+    _run_trade(["sync", "--date", "2026-10-01", "--prune", "--force"], monkeypatch,
+               MagicMock(), MagicMock())
+    assert seen["pub"] == {"only": "main,live", "date": None, "dry_run": True, "force": False}
+    assert seen["syn"] == {"only": None, "date": "2026-10-01", "dry_run": False,
+                           "prune": True, "force": True}
+
+
+def test_sync_conflict_exits_nonzero(monkeypatch, capsys):
+    from scripts import r2_sync
+    bad = {"ok": False, "groups": {}, "errors": [], "warnings": [],
+           "conflicts": [{"group": "live", "path": "MNQ_1m.parquet",
+                          "local_last_ts": "a", "remote_last_ts": "b"}]}
+    monkeypatch.setattr(r2_sync, "sync", lambda **kw: bad)
+    with pytest.raises(SystemExit) as exc:
+        _run_trade(["sync"], monkeypatch, MagicMock(), MagicMock())
+    assert exc.value.code == 1 and "CONFLICT" in capsys.readouterr().out

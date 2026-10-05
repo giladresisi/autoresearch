@@ -224,6 +224,17 @@ class PickMyTradeExecutor:
         )
         return self._post_order(order_id, payload)
 
+    def place_protective_stop_order(self, direction: str, stop_price: float) -> tuple:
+        """Place a FRESH standalone protective STP opposite an open position (a sell-STP for
+        a long, a buy-STP for a short). Used when the entry's SL leg was rejected: update_sl
+        only replaces a resting SL and creates none (live smoke 2026-09-28).
+        Returns (status_code, response_body).
+        """
+        order_id = f"pmt-{uuid.uuid4().hex[:8]}"
+        data = "sell" if direction == "long" else "buy"
+        payload = self._build_payload(data, order_type="STP", price=float(stop_price))
+        return self._post_order(order_id, payload)
+
     def place_close(self, label: str = "close") -> None:
         order_id = f"pmt-{uuid.uuid4().hex[:8]}"
         payload = self._build_payload("close")

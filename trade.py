@@ -31,8 +31,11 @@ Usage:
   python trade.py terminate              # Stop orchestrator and automation.main (refused with a position/order open)
   python trade.py terminate --force      # ... even with a position/order open (left at the broker, unmanaged)
   python trade.py gap-fill               # IB-backfill main 1s+1m parquets up to now (orchestrator must NOT be running)
-  python trade.py promote                # Copy live parquets over main (prior main backed up to .bak) — run after gap-fill
-  python trade.py rollover-prep          # Quarterly contract roll — run ONLY after gap-fill + promote (see --dry-run)
+  python trade.py promote                # Copy live parquets over main (prior main backed up to .bak) — run after gap-fill; then publishes to R2
+  python trade.py promote --no-publish   # ... without the R2 upload
+  python trade.py publish [--only g1,g2] [--date YYYY-MM-DD] [--dry-run] [--force]   # Upload to R2 (groups: main,live,sessions,thesis_cache,logs; studies only via --only)
+  python trade.py sync [--only g1,g2] [--date YYYY-MM-DD] [--dry-run] [--prune] [--force]   # Pull from R2 into <global> (never overwrites a local parquet that is AHEAD of R2)
+  python trade.py rollover-prep          # Quarterly contract roll — run ONLY after gap-fill + promote (see --dry-run); publishes main to R2
   python trade.py rollover-prep --dry-run  # Resolve new conids + measure gaps, change nothing
 
 Add --force / -f to bypass position.json state checks and override broker state:
@@ -59,6 +62,55 @@ def _agent_switched_off() -> bool:
     """
     import os as _os
     return _os.environ.get("ACT_TRADER", "1").strip().lower() in ("0", "false", "no", "off")
+
+
+def _load_env() -> None:
+    """trade.py does not load .env elsewhere; the R2 commands read R2_* / MNQ_CONID from it."""
+    from pathlib import Path
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+
+
+def _publish_tail() -> None:
+    """R2 publish after a local promote / roll. Not configured -> one line, exit 0; a failed
+    upload keeps the local change and exits non-zero."""
+    from scripts import r2_sync
+    res = r2_sync.publish_after_promote()
+    if not res["success"]:
+        sys.exit(1)
+
+
+def _r2_option(args, name):
+    """Value of `--name X` / `--name=X` in args, else None."""
+    for i, a in enumerate(args):
+        if a == name and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def _r2_cli(cmd: str, args, force: bool) -> None:
+    from scripts import r2_sync
+    _load_env()
+    dry = "--dry-run" in args
+    try:
+        if cmd == "publish":
+            rep = r2_sync.publish(only=_r2_option(args, "--only"), date=_r2_option(args, "--date"),
+                                  dry_run=dry, force=force)
+        else:
+            rep = r2_sync.sync(only=_r2_option(args, "--only"), date=_r2_option(args, "--date"),
+                               dry_run=dry, prune="--prune" in args, force=force)
+    except r2_sync.R2Error as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
+    for line in r2_sync.format_report(rep, cmd):
+        print(line)
+    if cmd == "sync" and rep.get("pulled_parquets"):
+        for line in r2_sync.checklist(rep):
+            print(line)
+    if not rep["ok"]:
+        sys.exit(1)
 
 
 def _resolve_direction(pos_dir: str, extra_arg: str | None) -> str | None:
@@ -803,9 +855,21 @@ def main() -> None:
                   + ", ".join(sorted(promoted)))
         else:
             print("No live parquets found — nothing promoted")
+        publish_failed = False
+        if "--no-publish" not in args:
+            _load_env()
+            try:
+                _publish_tail()
+            except SystemExit:
+                publish_failed = True
         # Printed AFTER the promote: at this point the old contract's final session is frozen
         # in its own subfolder, which is exactly the precondition the roll needs.
         _warn_if_rollover_due()
+        if publish_failed:
+            sys.exit(1)
+
+    elif cmd in ("publish", "sync"):
+        _r2_cli(cmd, args, force)
 
     elif cmd == "rollover-prep":
         from scripts.rollover_prep import run_rollover_prep
@@ -822,6 +886,10 @@ def main() -> None:
         if not dry:
             print("Rollover complete. The next gap-fill uses the new conids; `daily` "
                   "re-derives levels from the shifted data.")
+            # The roll rewrote the ledger and created main/<YYYY-MM>/: both live in the `main`
+            # group, so an unpublished roll leaves the other machine on the old contract era.
+            _load_env()
+            _publish_tail()
 
     elif cmd == "terminate":
         # Nothing manages a position once both processes are gone, so refuse while
