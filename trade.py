@@ -396,6 +396,26 @@ def _agent_menu(state_dir) -> dict:
         return {}
 
 
+def _agent_no_plan_reason(state_dir) -> str | None:
+    """Why the agent has no plan to re-direct, from the session folder; None if one exists."""
+    import json
+    try:
+        plans = json.loads((state_dir / "plans.json").read_text(encoding="utf-8"))
+        if plans:
+            return None
+    except Exception:
+        pass
+    try:
+        st = json.loads((state_dir / "thesis_state.json").read_text(encoding="utf-8"))
+        if st.get("thesis") is None:
+            err = st.get("call_error") or {}
+            return ("the L1 thesis call failed (%s: %s)" % (err.get("type"), err.get("message"))
+                    if err else "no L1 thesis yet (pending or dark day)")
+    except Exception:
+        return "no thesis or plan on disk for this session"
+    return "no plan on disk for this session"
+
+
 def _agent_override(cmd: str, rest: list, *, force: bool) -> None:
     """`agent-direction` / `agent-target`: queue a command for the running agent.
 
@@ -424,6 +444,13 @@ def _agent_override(cmd: str, rest: list, *, force: bool) -> None:
         if not force and (live_orders.get_position() or {}).get("active"):
             print("ERROR: a position is open — close it first "
                   "(trade.py close), then set the direction. --force queues it anyway.")
+            sys.exit(1)
+        # Without a plan the graft refuses this with `no_plan`, visible only in
+        # trader_decisions.jsonl; say so here instead of printing "Queued".
+        no_plan = _agent_no_plan_reason(state_dir)
+        if no_plan and not force:
+            print(f"ERROR: {no_plan} — agent-direction would be refused with no_plan. "
+                  "--force queues it anyway.")
             sys.exit(1)
         rec = ctl.append({"kind": KIND_SET_DIRECTION, "direction": direction,
                           "reset_attempts": "--reset-attempts" in flags,

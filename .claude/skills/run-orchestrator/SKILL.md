@@ -36,7 +36,7 @@ files left over by a previous run on the same calendar day.
 | **Gap-fill NOT done by 09:15 ET** | clock check, not a log line | **WARNING.** The gap-fill BLOCKS the bar feed (`IbRealtimeSource.start`). Since 2026-09-21 the arm has a 7-minute grace window (`analyzer.LATE_ARM_GRACE_MIN`), so a fill finishing by **09:27** still takes the thesis — 09:27 is the last minute that leaves the plan time to derive on the next bar close before entries open at 09:30:30, at the worst recorded call latency. A fill still running at 09:27 IS a dark day: push CRITICAL then |
 | **Late arm taken** | `[AGENT-LIVE] LATE ARM` | The gap-fill overran 09:20 and the thesis was taken inside the grace window instead. Not an error — but it means the fill is running close to the wire; tell the user to start earlier tomorrow |
 | Agent owns the dispatcher | `[AGENT-LIVE] OK` | Positive confirmation that the agent took the dispatcher and the legacy engine is dark. Its ABSENCE is not proof of failure (it prints once, early) but its presence is proof of success |
-| L1 thesis armed | `thesis_state.json` appears in `<global>/sessions/<date>/` | The 09:20 model call landed (16–104 s, median ~40 s). A DARK day writes no such file — report which |
+| L1 thesis armed | `thesis_state.json` appears in `<global>/sessions/<date>/` with a non-null `thesis` | The 09:20 model call landed (16–104 s, median ~40 s). The file exists from the arm minute with `"thesis": null`, so existence alone means nothing. `[AGENT-LIVE] THESIS OVERDUE` (09:22, 09:25) = still null; `THESIS CALL RETRY` / `THESIS CALL FAILED` = the call raised (3 attempts, `call_error` in the file) — push CRITICAL on FAILED |
 | Plan derived | `plans.json` appears in the same folder | The Planner turned the thesis into a plan; entries become possible after 09:30:30 |
 | First agent order | `"source": "agent"` in a signal line, then `[PMT] Order … sent OK` | The first real order of the session. Push it — this is the one the user wants to see |
 | Startup fatal | `FATAL` | IB unreachable or other hard failure; monitor exits immediately |
@@ -432,10 +432,15 @@ while true; do
 
         # --- the agent's own milestones (files, not log lines: the thesis and the plan
         # --- are written to the session folder, they are never [TRADER] records)
-        if [ "$thesis_done" = false ] && [ -f "$SESSION/thesis_state.json" ]; then
+        # The file exists from the arm minute with `"thesis": null`: only a non-null thesis
+        # is "armed" (2026-10-05: the empty stamp was reported as a thesis).
+        if [ "$thesis_done" = false ] && [ -f "$SESSION/thesis_state.json" ]                 && ! grep -qE '"thesis"[[:space:]]*:[[:space:]]*null' "$SESSION/thesis_state.json"; then
             thesis_done=true
             bias=$(grep -oE '"bias"[[:space:]]*:[[:space:]]*"[A-Z]+"' "$SESSION/thesis_state.json" | head -1)
             echo "[MONITOR] L1 thesis armed: $bias"
+        fi
+        if cur | grep -qF "THESIS CALL FAILED"; then
+            echo "[MONITOR] L1 THESIS CALL FAILED — see call_error in thesis_state.json"
         fi
         if [ "$plan_done" = false ] && [ -f "$SESSION/plans.json" ]; then
             plan_done=true
