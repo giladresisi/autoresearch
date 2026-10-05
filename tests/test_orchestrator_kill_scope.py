@@ -123,3 +123,34 @@ def test_terminate_all_kills_orphan_orchestrator_scoped(tmp_path, monkeypatch):
     orch_same.terminate.assert_called_once()
     orch_other.terminate.assert_not_called()
     assert any("993001" in k for k in killed)
+
+
+# ---------------------------------------------------------------------------
+# Plan 52: macOS interpreter names (python3.12) must still be matched
+# ---------------------------------------------------------------------------
+
+def test_kill_automation_main_matches_python3_12_name(monkeypatch):
+    import orchestrator.main as om
+
+    root = str(Path(om.__file__).resolve().parent.parent)
+    auto = _fake_proc(995001, cwd=root, name="python3.12",
+                      cmdline=("python3.12", "-m", "automation.main"))
+    monkeypatch.setattr("psutil.process_iter", lambda attrs=None: [auto])
+
+    om._kill_automation_main()
+
+    auto.terminate.assert_called_once()
+
+
+def test_stale_orchestrator_kill_matches_python3_12_name(tmp_path, monkeypatch):
+    import orchestrator.main as om
+
+    root = str(Path(om.__file__).resolve().parent.parent)
+    stale = _fake_proc(995002, cwd=root, name="python3.12",
+                       cmdline=("python3.12", "-m", "orchestrator.main"))
+    monkeypatch.setattr("psutil.process_iter", lambda attrs=None: [stale])
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path / "g"))
+
+    om._kill_stale_orchestrator()
+
+    stale.terminate.assert_called_once()

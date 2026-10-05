@@ -171,6 +171,25 @@ a parquet decides by LAST INDEX TIMESTAMP, so `sync` never overwrites a local fi
 R2, a truncated local copy is replaced (old one kept as `.r2prev`), and a two-sided move is a
 CONFLICT (exit 1; `--force` picks a side). Both commands refuse while the orchestrator runs.
 
+## Cross-platform code (Windows, macOS, Linux)
+
+This project runs on all three platforms (Windows now, a Mac next, a Linux VPS later). All new and
+changed code must work on all three: no Windows-only or POSIX-only calls outside
+`platform_compat.py` (the single OS switch), `pathlib` for paths, no hard-coded drive letters or
+`\` separators, no shell syntax tied to one OS, explicit `ZoneInfo` instead of the machine
+timezone. A test that needs the other OS must simulate it, not skip.
+
+## macOS (plan 52)
+
+`platform_compat.py` is the ONLY OS switch: `is_python_process_name` (matches `python3.12`, `Python`,
+`python.exe`), `detached_popen_kwargs` (`trade.py start`: `creationflags` on Windows, `start_new_session`
+on POSIX) and `prevent_idle_sleep` (Windows execution state / macOS `caffeinate -dimsu -w <orchestrator
+pid>`, started once by the orchestrator). Do not add `os.name` / `sys.platform` branches elsewhere.
+Stop is file-based (platform-independent); SIGTERM has no handler, so `finally` blocks do not run on
+`terminate`, same as the Windows hard kill. First-run checklist for the Mac: plan 52 section 6
+(`.agents/plans/52.macos-posix-live-support.md`): .env by hand, one IB login per account, AC power,
+smoke `start`, confirm one orchestrator + one automation.main + a `caffeinate` child, `terminate` leaves none.
+
 ## Never commit
 
 `feature.md`'s deletion, `agent-optimizations.md`, `refinement-proposals.md`, and the
