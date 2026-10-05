@@ -52,6 +52,8 @@ from __future__ import annotations
 
 import sys
 
+from platform_compat import detached_popen_kwargs, is_python_process_name
+
 
 def _agent_switched_off() -> bool:
     """True when ACT_TRADER=0/false/no/off, i.e. the LEGACY brain owns the dispatcher.
@@ -167,7 +169,7 @@ def _request_profile_snapshots(worktree_root, timeout: float = 120.0) -> None:
     labels = set()
     for proc in psutil.process_iter(["name", "cmdline"]):
         try:
-            if proc.info.get("name", "").lower() not in ("python.exe", "python"):
+            if not is_python_process_name(proc.info.get("name") or ""):
                 continue
             cmdline = proc.info.get("cmdline") or []
             if "--profile" not in cmdline or not _proc_in_worktree(proc, worktree_root):
@@ -310,7 +312,7 @@ def _terminate_all() -> list[str]:
     # so a surviving orchestrator can't respawn a child mid-sweep.
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
-            if proc.info.get("name", "").lower() not in ("python.exe", "python"):
+            if not is_python_process_name(proc.info.get("name") or ""):
                 continue
             cmdline = proc.info.get("cmdline") or []
             if any("orchestrator.main" in arg for arg in cmdline) and _proc_in_worktree(proc, worktree_root):
@@ -325,7 +327,7 @@ def _terminate_all() -> list[str]:
 
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
-            if proc.info.get("name", "").lower() not in ("python.exe", "python"):
+            if not is_python_process_name(proc.info.get("name") or ""):
                 continue
             cmdline = proc.info.get("cmdline") or []
             if any("automation.main" in arg for arg in cmdline) and _proc_in_worktree(proc, worktree_root):
@@ -802,7 +804,6 @@ def main() -> None:
         if profile:
             orch_cmd.append("--profile")
 
-        CREATE_NO_WINDOW = 0x08000000
         _popen_env = {**os.environ, "FORCE_RESET": "true"} if force else None
         with open(stdout_log, "a", encoding="utf-8") as out_f, \
              open(stderr_log, "a", encoding="utf-8") as err_f:
@@ -810,8 +811,8 @@ def main() -> None:
                 orch_cmd,
                 stdout=out_f,
                 stderr=err_f,
-                creationflags=CREATE_NO_WINDOW,
                 env=_popen_env,
+                **detached_popen_kwargs(),
             )
 
         time.sleep(3)

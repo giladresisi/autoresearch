@@ -31,6 +31,7 @@ from orchestrator.summarizer import Summarizer
 from session_times import SESSION_OPEN as _SESSION_OPEN_V2, SESSION_CLOSE as _SESSION_CLOSE_V2, cme_session_date
 
 import paths
+from platform_compat import is_python_process_name, prevent_idle_sleep
 
 LIVE_TRADING = _os.environ.get("LIVE_TRADING", "false").lower() == "true"
 
@@ -207,16 +208,12 @@ def _atexit_clean_exit() -> None:
 
 _atexit.register(_atexit_clean_exit)
 
-# Prevent Windows Modern Standby / idle sleep from suspending this process or dropping
-# network connections while the orchestrator is running.  Without this, the Mediatek WiFi
-# driver enters deep sleep on idle-timeout, tears down TCP connections to IB Gateway, and
-# kills this process — leaving automation.main as an orphan with no supervision.
-# ES_CONTINUOUS (0x80000000) | ES_SYSTEM_REQUIRED (0x00000001) = 0x80000001
-try:
-    import ctypes as _ctypes
-    _ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)
-except Exception:
-    pass
+# Prevent Windows Modern Standby / macOS idle sleep from suspending this process or dropping
+# network connections while the orchestrator is running.  Without this, the network driver
+# enters deep sleep on idle-timeout, tears down TCP connections to IB Gateway, and kills this
+# process - leaving automation.main as an orphan with no supervision.  (Windows:
+# SetThreadExecutionState; macOS: caffeinate tied to this pid; see platform_compat.)
+prevent_idle_sleep()
 
 
 def _thread_excepthook(args) -> None:
@@ -396,7 +393,7 @@ def _kill_stale_orchestrator() -> None:
 
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
-            if proc.info.get("name", "").lower() not in ("python.exe", "python"):
+            if not is_python_process_name(proc.info.get("name") or ""):
                 continue
             if proc.pid in protected:
                 continue
@@ -438,7 +435,7 @@ def _kill_automation_main() -> None:
     killed: list[int] = []
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
-            if proc.info.get("name", "").lower() not in ("python.exe", "python"):
+            if not is_python_process_name(proc.info.get("name") or ""):
                 continue
             cmdline = proc.info.get("cmdline") or []
             if not any("automation.main" in str(c) for c in cmdline):

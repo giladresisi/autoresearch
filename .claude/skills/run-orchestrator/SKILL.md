@@ -16,6 +16,9 @@ description: >
 
 # Run Orchestrator
 
+> Note (plan 52): the Bash snippets below use Windows-style temp paths and `$BASE`. On macOS an
+> operator-run supervisor is expected instead; this skill has not been rewritten for POSIX.
+
 Starts the orchestrator as a hidden background process with stdout captured, then arms a
 persistent Monitor that pushes a notification for each trading session milestone.
 

@@ -627,3 +627,95 @@ def test_sync_conflict_exits_nonzero(monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         _run_trade(["sync"], monkeypatch, MagicMock(), MagicMock())
     assert exc.value.code == 1 and "CONFLICT" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Plan 52: POSIX launch kwargs + python3.x process-name matching
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("os_name,expected", [
+    ("nt", {"creationflags": 0x08000000}),
+    ("posix", {"start_new_session": True}),
+])
+def test_start_launch_uses_detached_kwargs_on_windows_and_posix(monkeypatch, tmp_path, os_name, expected):
+    import os as _os
+    import subprocess as _subp
+    import time as _time
+    import types
+    import platform_compat
+    monkeypatch.chdir(tmp_path)
+    popen_kwargs = {}
+
+    def _popen(*a, **k):
+        popen_kwargs.update(k)
+        return MagicMock()
+
+    monkeypatch.setattr(_subp, "Popen", _popen)
+    monkeypatch.setattr(_time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(platform_compat, "os", types.SimpleNamespace(name=os_name, getpid=_os.getpid))
+
+    monkeypatch.setattr(sys, "argv", ["trade.py", "start"])
+    monkeypatch.setitem(sys.modules, "live_orders", MagicMock())
+    monkeypatch.setitem(sys.modules, "smt_state", MagicMock())
+    if "trade" in sys.modules:
+        del sys.modules["trade"]
+    trade = importlib.import_module("trade")
+    monkeypatch.setattr(trade, "_orchestrator_pid", lambda: None)
+    monkeypatch.setattr(trade, "_terminate_all", MagicMock(return_value=[]))
+
+    trade.main()
+
+    for key, val in expected.items():
+        assert popen_kwargs[key] == val
+    if os_name == "posix":
+        assert "creationflags" not in popen_kwargs
+    else:
+        assert "start_new_session" not in popen_kwargs
+
+
+def _sweep_proc(pid, cwd, name, cmdline):
+    p = MagicMock()
+    p.pid = pid
+    p.info = {"pid": pid, "name": name, "cmdline": list(cmdline)}
+    p.cwd.return_value = cwd
+    return p
+
+
+def _import_trade(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ACT_GLOBAL_DIR", str(tmp_path / "g"))
+    monkeypatch.setitem(sys.modules, "live_orders", MagicMock())
+    monkeypatch.setitem(sys.modules, "smt_state", MagicMock())
+    if "trade" in sys.modules:
+        del sys.modules["trade"]
+    return importlib.import_module("trade")
+
+
+def test_terminate_sweep_finds_python3_12_orchestrator_by_cmdline_and_cwd(monkeypatch, tmp_path):
+    from pathlib import Path
+    trade = _import_trade(monkeypatch, tmp_path)
+    root = str(Path(trade.__file__).resolve().parent)
+    orch = _sweep_proc(994001, root, "python3.12", ("python3.12", "-m", "orchestrator.main"))
+    monkeypatch.setattr("psutil.process_iter", lambda attrs=None: [orch])
+    killed = trade._terminate_all()
+    orch.terminate.assert_called_once()
+    assert any("994001" in k for k in killed)
+
+
+def test_terminate_sweep_ignores_non_python_even_with_matching_cmdline(monkeypatch, tmp_path):
+    from pathlib import Path
+    trade = _import_trade(monkeypatch, tmp_path)
+    root = str(Path(trade.__file__).resolve().parent)
+    uv = _sweep_proc(994002, root, "uv", ("uv", "run", "python", "-m", "orchestrator.main"))
+    monkeypatch.setattr("psutil.process_iter", lambda attrs=None: [uv])
+    trade._terminate_all()
+    uv.terminate.assert_not_called()
+
+
+def test_terminate_sweep_ignores_other_worktree_cwd(monkeypatch, tmp_path):
+    trade = _import_trade(monkeypatch, tmp_path)
+    orch = _sweep_proc(994003, str(tmp_path / "other_worktree"), "python3.12",
+                       ("python3.12", "-m", "orchestrator.main"))
+    monkeypatch.setattr("psutil.process_iter", lambda attrs=None: [orch])
+    trade._terminate_all()
+    orch.terminate.assert_not_called()
