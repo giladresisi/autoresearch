@@ -92,6 +92,11 @@ subfolders are never overwritten. The `promotion` field:
 - `promote_success: true` + `promoted: {<name>: "ok", ...}` — live→main promotion done.
 - `promote_success: false` + `reason` — promotion failed; main was NOT updated (escalate).
 - `null` — no promotion attempted (dry-run, orchestrator-start mode, or no successful merge).
+- `publish_success` / `publish_error` / `publish_configured` (inside `promotion`, only after a
+  successful promote) — the R2 upload that follows it (plan 50, `scripts/r2_sync.py`).
+  `publish_configured: false` = R2 env not set, nothing uploaded, still `publish_success: true`.
+  `publish_success: false` + `publish_error` — the local promote stands but the upload failed or
+  was refused (e.g. the orchestrator still running); exit code is 2. Fix and run `trade.py publish`.
 
 This promotion runs only in `session-end` mode; `orchestrator-start` never promotes.
 

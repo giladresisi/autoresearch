@@ -162,6 +162,15 @@ lists what must NOT be built.
   that would otherwise deposit a synthetic recording into `<global>/thesis_cache`, which
   every worktree reads.
 
+## R2 data sync (plan 50)
+
+`trade.py publish` / `trade.py sync` move `<global>` (main, live, sessions, thesis cache) to/from a
+private R2 bucket (`scripts/r2_sync.py`; `R2_*` in `.env`). `promote`, `rollover-prep` and the
+parquet-check session-end publish automatically; session-analysis Step 0 runs `sync`. Baton rule:
+a parquet decides by LAST INDEX TIMESTAMP, so `sync` never overwrites a local file that is ahead of
+R2, a truncated local copy is replaced (old one kept as `.r2prev`), and a two-sided move is a
+CONFLICT (exit 1; `--force` picks a side). Both commands refuse while the orchestrator runs.
+
 ## Never commit
 
 `feature.md`'s deletion, `agent-optimizations.md`, `refinement-proposals.md`, and the
