@@ -272,7 +272,9 @@ def test_no_standing_thesis_means_no_plan_and_no_sink_call(tmp_path, monkeypatch
                     order_sink=lambda ev: seen.append(ev) or None)
     for hms in ("09:19:59", "09:20:00", "09:21:00", "09:31:00", "10:00:00", "12:59:00"):
         _bar(g, hms)
-    assert calls == [1], "the backend must be REACHED, once, or this proves nothing"
+    # A raising backend is retried as a whole (analyzer.CALL_ATTEMPTS); the others answer once.
+    expected = analyzer_mod.CALL_ATTEMPTS if backend is _raises else 1
+    assert calls == [1] * expected, "the backend must be REACHED, or this proves nothing"
     assert g.plan() is None and g._executor is None and seen == []
     assert g.position_view() is None and g.plan_alive() is False
     assert not PlanStore(tmp_path).all()

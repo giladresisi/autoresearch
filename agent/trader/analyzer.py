@@ -33,6 +33,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import traceback
 
 import pandas as pd
@@ -61,6 +62,13 @@ ARM_MINUTE = 20
 #: before the first legal entry. Arming at 09:28 still just works; past 09:28:15 the worst
 #: case misses 09:30:00 and the settle window closes on a plan that does not exist yet.
 LATE_ARM_GRACE_MIN = 7
+# A thesis call that raises is retried as a whole (view, model call, tie-break): a transient
+# provider error must not cost the day (2026-10-05). The backoff sleeps only on the live
+# worker thread; inline callers (replay, tests) retry at once. A failure is never cached.
+CALL_ATTEMPTS = 3
+CALL_RETRY_BACKOFF_SEC = (3.0, 8.0)
+# Minutes after the arm at which a thesis still null says so on stdout (bar time).
+OVERDUE_NOTICE_MIN = (2, 5)
 THESIS_FILE = "thesis_state.json"
 #: Plan 46: what the pre-move classifier saw and what the Analyzer did with it. Written in
 #: `shadow` and `on` modes only; never in `off`.
@@ -214,6 +222,7 @@ class Analyzer:
         self._health = None
         self._meta: dict = {}
         self._call_error: "dict | None" = None   # the exception that ended `_call`, if any
+        self._overdue_said: set = set()          # OVERDUE_NOTICE_MIN marks already printed
         self._deferred_until = None
         self._deferred_date = None
         self._load()
@@ -282,6 +291,7 @@ class Analyzer:
             if now is None:
                 return None
             if self._armed_date == now.date():
+                self._overdue_notice(now)
                 return None
 
             # A deferral is in flight: fire the moment the awaited close has happened.
@@ -332,6 +342,7 @@ class Analyzer:
                 self._thesis = None
                 self._meta = {}
                 self._call_error = None
+                self._overdue_said = set()
                 self._save()
 
             if not self._threaded:
@@ -389,6 +400,23 @@ class Analyzer:
             return None
 
     def _call(self, now: pd.Timestamp, bars: dict):
+        """`_attempt`, retried as a whole when it raises (CALL_ATTEMPTS, then a recorded
+        failure). Returns the thesis, or None when every attempt failed."""
+        for attempt in range(1, CALL_ATTEMPTS + 1):
+            try:
+                return self._attempt(now, bars)
+            except Exception as exc:
+                if attempt == CALL_ATTEMPTS:
+                    self._record_failure(exc, attempts=attempt)
+                    return None
+                print("[AGENT-LIVE] THESIS CALL RETRY %d/%d: %s: %s"
+                      % (attempt, CALL_ATTEMPTS - 1, type(exc).__name__, str(exc)[:200]),
+                      flush=True)
+                if self._threaded:
+                    time.sleep(CALL_RETRY_BACKOFF_SEC[min(attempt - 1,
+                                                          len(CALL_RETRY_BACKOFF_SEC) - 1)])
+
+    def _attempt(self, now: pd.Timestamp, bars: dict):
         """The actual work: view assembly, then one L1 thesis call.
 
         There is deliberately NO FactStore here. An earlier revision drove the full
@@ -399,76 +427,71 @@ class Analyzer:
         now taken from the view that was ACTUALLY sent, which is the honest thing to
         record.
         """
-        try:
-            facts_text, context_text, facts, magnitude = assemble_facts(None, bars, now)
-            health = _view_provenance(facts, facts_text, now)
+        facts_text, context_text, facts, magnitude = assemble_facts(None, bars, now)
+        health = _view_provenance(facts, facts_text, now)
 
-            # PLAN 37: the deterministic direction override, BEFORE the model call.
-            #
-            # Placed here rather than in `derive_facts` (computing the stretch belongs
-            # there, DECIDING direction does not) and not in `decide_thesis` (that is the
-            # LLM adapter and must not carry strategy). This is the seam that owns "the
-            # thesis for this session", so it is the seam that may decide not to ask.
-            #
-            # FAIL-THROUGH, never fail-forward: `_override_thesis` returns None whenever it
-            # cannot produce a COMPLETE thesis -- no stretch, criteria unmet, or no DOL menu
-            # on the forced side -- and we then call the model exactly as before. A degraded
-            # snapshot must lose the override, never invent a direction from it.
-            #
-            # PLAN 46 (§11.5 CANDIDATE, `premove_context.path_mode()` = env var
-            # ACT_PREMOVE_UNRELATED, ON by default): on a BIG pre-09:20 leg the classifier
-            # takes precedence over arm 1.
-            # UNRELATED forces the thesis against the leg with no model call; PART and an
-            # UNRELATED day whose thesis cannot be built suppress arm 1 and ask the model.
-            # Every other status -- and the flag off -- is exactly the path below.
-            pm = self._premove(bars, now)
-            arm1 = None
-            if pm is not None:
-                forced, arm1 = self._premove_route(pm, facts, health, now)
-                if forced is not None:
-                    with self._lock:
-                        self._health = health
-                        self._thesis = forced
-                        self._meta = {"verdict": "premove_unrelated"}
-                        self._save()
-                    return self._thesis
-            if pm is not None and premove_context.path_mode() == "on" and \
-                    pm.status in (premove_context.PART, premove_context.UNRELATED):
-                forced = None                      # arm 1 suppressed: the model decides
-            elif pm is not None:
-                # `_premove_route` already computed arm 1 (to fill `arm1_would_fire` in
-                # `premove_context.json`) -- reuse it instead of a second, redundant call.
-                # `_override_thesis` is pure, so this is exactly what a fresh call returns.
-                forced = arm1
-            else:
-                forced = self._override_thesis(facts, now)
+        # PLAN 37: the deterministic direction override, BEFORE the model call.
+        #
+        # Placed here rather than in `derive_facts` (computing the stretch belongs
+        # there, DECIDING direction does not) and not in `decide_thesis` (that is the
+        # LLM adapter and must not carry strategy). This is the seam that owns "the
+        # thesis for this session", so it is the seam that may decide not to ask.
+        #
+        # FAIL-THROUGH, never fail-forward: `_override_thesis` returns None whenever it
+        # cannot produce a COMPLETE thesis -- no stretch, criteria unmet, or no DOL menu
+        # on the forced side -- and we then call the model exactly as before. A degraded
+        # snapshot must lose the override, never invent a direction from it.
+        #
+        # PLAN 46 (§11.5 CANDIDATE, `premove_context.path_mode()` = env var
+        # ACT_PREMOVE_UNRELATED, ON by default): on a BIG pre-09:20 leg the classifier
+        # takes precedence over arm 1.
+        # UNRELATED forces the thesis against the leg with no model call; PART and an
+        # UNRELATED day whose thesis cannot be built suppress arm 1 and ask the model.
+        # Every other status -- and the flag off -- is exactly the path below.
+        pm = self._premove(bars, now)
+        arm1 = None
+        if pm is not None:
+            forced, arm1 = self._premove_route(pm, facts, health, now)
             if forced is not None:
                 with self._lock:
                     self._health = health
                     self._thesis = forced
-                    # No latency, no usage, no retries, no model: `verdict` says which
-                    # path produced this so no artifact can read it as a call.
-                    self._meta = {"verdict": "stretch_override"}
+                    self._meta = {"verdict": "premove_unrelated"}
                     self._save()
                 return self._thesis
-
-            result = self._backend(facts_text, context_text, facts,
-                                   evidence_magnitude=magnitude)
-            thesis, meta = _split_result(result)
-            tied = self._tiebreak(thesis, meta, facts, magnitude, health)
-            if tied is not None:
-                thesis, meta = tied, {**meta, "tiebreak": tied["tiebreak_rule"]}
+        if pm is not None and premove_context.path_mode() == "on" and \
+                pm.status in (premove_context.PART, premove_context.UNRELATED):
+            forced = None                      # arm 1 suppressed: the model decides
+        elif pm is not None:
+            # `_premove_route` already computed arm 1 (to fill `arm1_would_fire` in
+            # `premove_context.json`) -- reuse it instead of a second, redundant call.
+            # `_override_thesis` is pure, so this is exactly what a fresh call returns.
+            forced = arm1
+        else:
+            forced = self._override_thesis(facts, now)
+        if forced is not None:
             with self._lock:
                 self._health = health
-                self._thesis = thesis if isinstance(thesis, dict) else None
-                self._meta = meta if self._thesis is not None else {}
+                self._thesis = forced
+                # No latency, no usage, no retries, no model: `verdict` says which
+                # path produced this so no artifact can read it as a call.
+                self._meta = {"verdict": "stretch_override"}
                 self._save()
             return self._thesis
-        except Exception as exc:
-            self._record_failure(exc)
-            return None
 
-    def _record_failure(self, exc: BaseException) -> None:
+        result = self._backend(facts_text, context_text, facts,
+                               evidence_magnitude=magnitude)
+        thesis, meta = _split_result(result)
+        tied = self._tiebreak(thesis, meta, facts, magnitude, health)
+        if tied is not None:
+            thesis, meta = tied, {**meta, "tiebreak": tied["tiebreak_rule"]}
+        with self._lock:
+            self._health = health
+            self._thesis = thesis if isinstance(thesis, dict) else None
+            self._meta = meta if self._thesis is not None else {}
+            self._save()
+        return self._thesis
+    def _record_failure(self, exc: BaseException, attempts: int = 1) -> None:
         """Persist why a call ended without a thesis, and say so once on stdout.
 
         The swallow around the call is deliberate (fail dark, never stall the bar loop);
@@ -478,10 +501,27 @@ class Analyzer:
             self._thesis = None
             self._meta = {}
             self._call_error = {"type": type(exc).__name__, "message": str(exc)[:500],
+                                "attempts": attempts,
                                 "traceback": traceback.format_exc()[-3000:]}
             self._save()
         print("[AGENT-LIVE] THESIS CALL FAILED: %s: %s (see call_error in %s)"
               % (type(exc).__name__, str(exc)[:200], THESIS_FILE), flush=True)
+
+    def _overdue_notice(self, now: pd.Timestamp) -> None:
+        """Say once per mark (OVERDUE_NOTICE_MIN) that the armed thesis is still null."""
+        try:
+            if self._armed_at is None or self._thesis is not None:
+                return
+            elapsed = (now - self._armed_at).total_seconds() / 60.0
+            for mark in OVERDUE_NOTICE_MIN:
+                if elapsed >= mark and mark not in self._overdue_said:
+                    self._overdue_said.add(mark)
+                    state = "FAILED" if self._call_error else "PENDING"
+                    print("[AGENT-LIVE] THESIS OVERDUE (%s): armed %s, still no thesis at %s"
+                          % (state, self._armed_at.strftime("%H:%M"), now.strftime("%H:%M")),
+                          flush=True)
+        except Exception:
+            pass
 
     def _tiebreak(self, thesis, meta, facts, magnitude, health) -> "dict | None":
         """The NEUTRAL tie-break (agent/trader/tiebreak.py), or None to keep `thesis`.
