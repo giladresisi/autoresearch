@@ -1096,9 +1096,18 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
   entry 09:47:47, in the control the micro-SMT exit at 12:07 for +96.25); no T2 winner
   touched. The operator kept it for the risk profile. The FVG one-behind trail studied with
   it (Parts 1-2, 4: a further ~-100 through one clipped T2 winner, 09-28) stays study code
-  behind `TRAIL_FVG_MOVES = False` and is NOT a rule. Live: the mirroring port has no
-  stop-modify path yet, so a live session records `veto reason=trail_unwired` with the
-  stop it would have set and moves nothing until that path exists.
+  behind `TRAIL_FVG_MOVES = False` and is NOT a rule. Live (since the 2026-10-02 session,
+  D1): the mirroring port has a stop-modify path — `MirroringOrderPort.move_stop` moves
+  the model's stop and reports one `stop_moved`; `automation/agent_dispatch` turns it into
+  ONE `update-stop-loss` signal, the broker call an operator's `trade.py update-sl` makes,
+  acked by reading the stop back off position.json. On 2026-10-02 itself the port had no
+  such path: live armed at 09:45:40, recorded `veto reason=trail_unwired` and moved
+  nothing, while the replay of the same tape moved the stop — 139.25 pts apart
+  strategy-alone on that date, and it cut AGAINST the rule (the replay scratched at the
+  entry at 09:55:36; the unmoved stop would have reached T2 at 10:20:16). A move the far
+  side does not confirm is kept in the model and named (`far_side` on the `stop_moved`
+  record): the model closes by market when its own stop is touched, so the tighter stop
+  is enforced either way. A port with no stop-modify path still records `trail_unwired`.
 - **Window end 13:00:00 ET (2026-09-17, plan 38 D8).** The replay window already ends at
   13:00 (its last bar is 12:59:59); live has no such edge, because the bar loop runs the
   whole CME session. At the first bar with bar time >= 13:00:00 the Executor marks any open
@@ -2177,3 +2186,181 @@ about unchanged. One day, one hand-read.
 
 **Not done:** no test suite was run and no tests were written for it; named days were not
 re-measured (the block does not fire on them in the ten-date A/B).
+
+### 11.7 CANDIDATE — MES day-extreme sweep stop (2026-10-02/03, operator)
+
+**Not a rule.** Position management, not an entry mechanism: entries, the T2 pick and the
+§8 lifecycle are untouched. Code `agent/trader/mes_sweep.py`, driven by
+`Executor._drive_mes_sweep`; env var `ACT_MES_SWEEP_STOP`, **ON by default** (operator
+decision 2026-10-03: unset or empty = on; `0` / `false` / `no` / `off` is the rollback,
+read once per Executor; `mes_sweep.MES_SWEEP_ENABLED` overrides it for a harness). Being
+on by default does not make it a rule.
+
+**As built (second version, 2026-10-03).** While an MNQ position is open: take MES's
+24h-session extreme in the trade's direction (high for a long, low for a short) AS OF THE
+FILL. The first completed MES 1m bar from the fill's minute on that trades beyond it is
+the sweeping bar; it must open before 10:30 ET (a first sweep at or after 10:30 ends the
+stage with nothing done). If that bar closes at or inside the level, then on the tick it
+completes the MNQ stop moves to the CLOSE of the MNQ 1m bar that just completed less 5 pts
+(plus 5 for a short), if that tightens it AND the new stop is at or beyond the entry in
+the trade's favour — the rule locks a result and never swaps the original stop for a
+tighter losing one (`veto` `mes_sweep_not_in_profit` when it would). Once per position. A
+close beyond the level is acceptance and ends the stage for that position. MNQ's own extreme is not consulted
+(operator, 2026-10-03). The move goes through `move_stop` (`stop_moved` reason
+`mes_sweep`, carrying `mes_level`, `level_set_at`, `sweep_bar`, `mnq_price`), so live it
+reaches the broker like the break-even's, and a touch books `stop_out_initial` (a
+profitable one ends the plan, `positive_close`). Break-even at 50% (§8) only ever moves the stop when that tightens it, so it
+cannot pull this stop back. Knobs: `MES_SWEEP_STOP_PTS` 5, `MES_SWEEP_CONFIRM_BARS` 1,
+`MES_SWEEP_REQUIRE_FAILED_CLOSE` True, `MES_SWEEP_CUTOFF_ET` (10, 30),
+`MES_SWEEP_REQUIRE_PROFIT_STOP` True.
+
+**A risk rule, not an edge (operator, 2026-10-05).** The exit stays even though it is
+unprofitable on paper: the operator does not want to rely on the retrace that follows a MES
+liquidity sweep not fully retracing, and prefers to exit at the sweep with no follow-up
+entry over hoping the profit survives it. The price is known from the retrace study: MNQ
+goes on past the sweep peak in about 86% of fires, so that continuation is forfeited
+(real replays: +45 on 2026-10-02 against -24 without the rule, but -125 on 2026-09-04 and
+-27 on 2026-09-18 against holding). The follow-up entry (§11.8) that was meant to recover
+it is parked, OFF by default.
+
+**The stop is meant to be hit.** The operator's intent: exit as the retrace starts and
+take the continuation with a FOLLOW-UP ENTRY (§11.8). With that flag off, a profitable
+touch ends the plan and the continuation is simply not traded.
+
+**The motivating date (2026-10-02, long 31128.25 at 09:42:00, T2 31267.5).** MES day high
+7803.00 since 09:05; the 09:45 bar took it (7805.00) and closed 7802.00. Replay
+strategy-alone: break-even at 09:45:40 (31128.25), `mes_sweep` at 09:46:00 to **31173.75**
+(MNQ 09:45 close 31178.75 - 5), out at 09:46:17 for **+45.50** (day +21.50 pts). The first
+version (two failing closes, current price - 15) moved at 09:47:00 to 31164.75 and booked
++36.50; the operator's hand-moved 31160.00 booked +31.75 live; break-even alone scratches
+at the entry (09:55:36); NO stop move reaches T2 at 10:20:16 (+139.25).
+
+**Retrace study (2026-10-03, `<global>/studies/mes_day_extreme_sweep`; not a P&L test).**
+Every 09:30-10:30 sweep of a MES session extreme that had stood >= 10 min, a trade assumed
+open in the sweep's direction; the retrace is how far MNQ goes against the trade below its
+price at the bar close, until MNQ is 15 pts beyond its sweep peak again (or 13:00).
+1s history, 110 days, 105 events:
+
+| Sweeping bar closed | n | median retrace | >= 5 | >= 15 | >= 30 | MNQ continued |
+|---|---|---|---|---|---|---|
+| at or inside the level | 57 | 46.0 | 88% | 74% | 58% | 86% |
+| beyond the level | 48 | 12.6 | 79% | 40% | 29% | 96% |
+
+Waiting for a second failing close adds nothing (>= 15 pts still to come: 74% after one
+close, 80% after two, 72% after three) while the median already given back grows 14 ->
+25 -> 31 pts. MNQ taking or not taking its own extreme, and the level's age, do not
+separate the outcomes. Sweeps AFTER 10:30 carry no information (two failing closes: 60%
+>= 15 against 62% when accepted). On the stored 1m history the separation is a 2026
+feature: over 2024-26 a two-close failure gives 66% against 63%.
+
+**Open.**
+- *The follow-up entry* — the rule's reason for being; built as §11.8 below.
+- *Underwater positions* (decided 2026-10-03): the stop moves only when the new stop is
+  at or beyond the entry. Below that the original stop stands and a `veto` records it.
+- *Sweeps after 10:30* (decided 2026-10-03): ignored, per the study.
+- *A level made seconds before the fill* counts (`level_set_at` is recorded).
+- *Day vs week.* On 10-02 the day and week highs fell together; only the day extreme is read.
+
+**Not done.** No unit tests. No replay A/B. The study assumes a trade is open at every
+sweep and is in points, not adjusted for the index level.
+
+### 11.8 CANDIDATE — follow-up entry after the MES-sweep stop (2026-10-03, operator; plan 50)
+
+**Not a rule.** An entry path for ONE situation, beside §§2-8 and leaving their text and
+their mechanisms untouched. Code `agent/trader/followup.py` (a pure state machine over
+completed 1m bars) driven by `Executor._drive_followup_state` / `_drive_followup_entry`;
+env var `ACT_FOLLOWUP_ENTRY`, **OFF by default** (operator decision 2026-10-05, work
+parked after the forced-entry rig: unset or empty = off; `1` / `true` / `yes` / `on`
+switches it on, read once per Executor; `followup.FOLLOWUP_ENABLED` overrides it for a
+harness). Off = the §11.7 exit ends the plan exactly as before: the 2026-10-02
+decision log is identical to the pre-change baseline.
+
+**As built.**
+- *Opens* at the touch of the §11.7 sweep stop (`stop_out_initial` at exactly the price
+  `mes_sweep` moved the stop to) on a position that is not itself a follow-up, when the
+  exit is a profit, the thesis has not been falsified, and the plan's T2 is bound with
+  `remaining = T2 - exit price` >= 30 pts AND >= 25% of the first fill's own distance to
+  T2. Record `followup_opened {exit_px, exit_kind, window_end, t2, t2_remaining,
+  first_entry, counter_extreme}`. Otherwise `followup_skipped {reason: t2_unbound |
+  t2_too_close | falsified | window_closed}` and the plan dies `positive_close` as today.
+- *Window* 20 min from the exit, never past 11:00 ET. The 10:30 entry cutoff does not
+  apply to its triggers; the settle window, `external` and §2's cooldown do. §2's
+  extension veto is not applied (its anchor is the 09:30 counter-extreme; this leg starts
+  at the retrace low).
+- *Trigger R, `followup_reject_close`.* A FRESH `ExtremeReject` with no standing extreme,
+  driven on completed 1m bars from the exit's minute on: the first bar sets the extreme,
+  three quiet closes arm it, a new-extreme bar closing with the thesis fires at its close;
+  stop = the wick capped 15 (§7's own stop, unchanged).
+- *Trigger F, `followup_fvg_1m`.* The first thesis-direction three-bar 1m FVG (gaps under a
+  tick ignored) whose first bar opens at or after the exit's minute, on its third bar's
+  completion: entry = that close, stop = the three bars' extreme -/+ 0.25 capped 25 pts
+  (§6's cap). Each gap fires once.
+- *Budget* 2 follow-up positions stopped out. A follow-up stop-out does NOT increment the
+  plan's `attempts_used`, but the shared arbiter tally, the order book's cooldown and the
+  takeover scan behave as for any stop-out. A non-profitable, non-stop-out exit of a
+  follow-up position (a break-even touch, a losing `micro_smt_exit`) spends one too.
+- *Deferred death.* While open, `_positive_close_death` returns None and `_entry_block`
+  returns `followup_only` instead of `after_positive_trade`: the regular mechanisms (§6,
+  §7, tmso, fvg_1h, micro-SMT entry, the resting stop-entries) stay shut and the
+  follow-up's triggers are the only way in. It closes (record `followup_closed {reason,
+  attempts}`) on `window_end` with nothing open (a follow-up position open at the window
+  end is managed to its own exit first), `attempts_exhausted`, `positive_close` (a
+  follow-up exit in profit), `structure_broken` (the first tick beyond the post-09:30
+  counter-thesis extreme as of the exit), `falsified`, or `plan_dead`; the plan's
+  `positive_close` death follows on that tick, its detail carrying `followup {reason,
+  attempts}`.
+- *Target and management.* A follow-up fill takes the first fill's T2 (`_reused_first_pick`,
+  recorded in `target_selected.first_pick`). Break-even at 50%, the initial-target stage,
+  O4 and the §11.7 stage manage it like any position; its own sweep stop opens NO second
+  follow-up. Fill records carry `followup: true`.
+
+**Evidence (`<global>/studies/mes_day_extreme_sweep/followup*.py`, 1s history, 55 stopped
+events before 10:30, 46 continued).** The retrace low comes a median 2.1 min after the exit
+(p75 11 min) and sits a median 41 pts below the exit price; the ideal entry ran 180 pts
+(median). A reject-close at the retrace low caught 35-46% of the continuations at 5-9 R; a
+post-low 1m FVG caught 72-87% at 2-3 R. A 20-min window halved the cost on the 9
+non-continuing days.
+
+**The motivating date (2026-10-02, replay, `--thesis-file`, no `--seed`).** Long 31128.25
+at 09:42:00, §11.7 stop 31173.75 touched 09:46:17 (+45.50). The follow-up opens there
+(T2 31267.5, 93.75 left); `followup_reject_close` fires 09:58:00 @ 31160.50, stop 31145.50
+(the operator's own entry); T2 is touched 10:20:16 (+107.00). Day total +128.50 pts against
++21.50 with the flag off: one date, context only, entries are judged by MFE, not day P&L.
+
+**Open.**
+- *No A/B.* The rule's edge is unmeasured on the replay rig; that is a separate run on the
+  operator's request. The slow suite was not run.
+- *The sweep stage's 10:30 cutoff* applies to a follow-up position too: one filled after
+  10:30 can never be swept-stopped.
+- *The exit price is matched, not the mover.* "The stop was last moved by `mes_sweep`" is
+  read as "the exit is at exactly the sweep stop's price"; a later mover landing on the
+  identical price would pass for it.
+- *Trigger R's stop* is §7's (wick capped 15, no tick buffer).
+
+**Decided 2026-10-04 (operator).** A met falsifier neither skips nor closes the follow-up
+(09-18: that veto blocked a follow-up the tape rewarded; plans stopped dying on
+falsification for the same reason). A follow-up POSITION is exempt from the MES-sweep stop
+(09-04: the stage rebuilt at the follow-up's fill swept it out again six minutes later
+for +5); it is managed by its own §7/§6 stop, break-even, T2 and O4.
+
+**Forced-entry rig (2026-10-04, `<global>/studies/mes_day_extreme_sweep/forced_rig.py`,
+`forced_rig_report.py`).** The real Executor, the regular mechanisms silenced, one forced
+fill 10 min before each of the 55 studied sweeps (stop 5 pts beyond the post-09:30
+extreme), both direction overrides off. 23 forced positions were out before the sweep bar
+closed, 4 were vetoed `not_in_profit`; the sweep stop fired on **23** (20 of the 46
+continuing events, 3 of the 9 others), the follow-up opened on 20 (one `t2_too_close`).
+Of the 20: 8 closed with NO entry (structure veto 7 — six of them on days that then
+continued, because the post-09:30 extreme is a shallow origin for an early sweep —
+window end 1), 12 traded, 15 trades: **2 winners** (10-02 +107.00 to T2; 09-04 +17.50 to
+T2), 7 stop-outs (-10.50 to -25.00), 5 break-even scratches, 1 open at the tape's end.
+Sum -20 pts; MFE median 27, >= 60 in 23%. Four of the scratches had MFE 29-93 pts before
+break-even at 50% took them out (05-13 93, 07-29 81, 08-31 33, 07-10 29). Both
+non-continuing events that traded lost (-3.50, -10.50). What separated the two winners
+(n too small to lean on): a deeper retrace (60-64% of the leg vs 33%), T2 nearer (67 vs
+155 pts), 10-02's SMT at the low (none of the 10 losers had one).
+
+**Not done.** A follow-up after any other exit kind; shorts have unit tests only (no
+replay); live wiring is the existing order port, untested live. The rig says the
+follow-up as built rarely captures the continuation it was designed for; the open
+questions above (origin for the structure veto, break-even on a follow-up position, the
+stops) are where to look next.

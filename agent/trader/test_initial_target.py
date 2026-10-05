@@ -775,23 +775,23 @@ def test_action_b_exits_live_through_the_mirroring_port(tmp_path, monkeypatch):
     assert ex.bind_state().get("initial_action_unwired") is None
 
 
-def test_action_a_still_refuses_on_the_mirroring_port(tmp_path, monkeypatch):
-    """`move_stop` is deliberately NOT on `MirroringOrderPort` — the dispatcher speaks
-    market entries/closes only, and there is no market order that moves a resting stop.
-    Action A must keep refusing exactly as before `flatten` was wired, on the exact same
-    port that now lets O4 and action B exit live."""
+def test_action_a_moves_the_stop_through_the_mirroring_port(tmp_path, monkeypatch):
+    """`MirroringOrderPort.move_stop` exists since the 2026-10-02 D1 fix (the dispatcher
+    forwards a stop update, the same broker call as an operator's), so action A — still
+    OFF, `INITIAL_TARGET_ACTION = "record"` — does on the live port what it does on the
+    bare simulation: one stop move, told to the far side, then the protected exit."""
     from agent.trader.order_port import MirroringOrderPort
     sunk = []
     port = MirroringOrderPort(OrderSim(dol=None), lambda ev: sunk.append(ev) or None)
     ex = _executor(tmp_path, monkeypatch, action="be_structure", order_port=port)
     port._context = ex.order_context
     _run(ex, _frame())
-    kinds = _kinds(tmp_path)
-    assert "stop_moved" not in kinds and "stop_out_initial" not in kinds
-    assert ex.bind_state().get("initial_action_unwired") == "be_structure"
-    assert ex._sim.position is not None
-    assert ex._sim.position["stop"] == pytest.approx(STOP), "the stop was never moved"
-    assert [e["kind"] for e in sunk] == ["fill"]
+    moved = [r for r in _recs(tmp_path) if r["kind"] == "stop_moved"]
+    assert len(moved) == 1 and moved[0]["price"] == pytest.approx(INITIAL)
+    assert ex.bind_state().get("initial_action_unwired") is None
+    assert [e["kind"] for e in sunk] == ["fill", "stop_moved", "stop_out_initial"]
+    assert sunk[1]["price"] == pytest.approx(INITIAL)
+    assert ex._sim.position is None
 
 
 def test_same_bar_stop_out_wins_over_the_flip(tmp_path, monkeypatch):

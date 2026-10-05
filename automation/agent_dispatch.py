@@ -21,11 +21,15 @@ Three jobs:
                       file and the model disagree on is recorded.
   * the record        one JSON line per event in `<session>/agent_dispatch.jsonl`.
 
-Market kinds ONLY. Every exit is a market close carrying `skip_recon`: the agent always
-sends a real flatten, so its state and the broker's converge at each close, and the
-synchronous pre-close broker reconcile (a headed-browser login, seconds long) must not
-delay an exit. Resting-order kinds and the legacy stop kinds are never built here — a
-source-level gate in `tests/test_agent_dispatch.py` greps this file for them.
+Market kinds, plus ONE stop update. Every exit is a market close carrying `skip_recon`:
+the agent always sends a real flatten, so its state and the broker's converge at each
+close, and the synchronous pre-close broker reconcile (a headed-browser login, seconds
+long) must not delay an exit. Resting-order kinds and the legacy stop kinds are never
+built here — a source-level gate in `tests/test_agent_dispatch.py` greps this file for
+them. The stop update (2026-10-02 D1) re-prices the protective stop an OPEN position
+already has — the broker call an operator's `trade.py update-sl` makes — when the model
+moves its own stop (break-even at 50%); it opens, rests and cancels nothing, and is acked
+by reading the stop back off position.json.
 
 Signals are plain floats, ISO strings and ASCII: the emit path `json.dumps` a signal
 BEFORE dispatching it, so one `pd.Timestamp` would raise and the order would never leave.
@@ -41,6 +45,9 @@ import pandas as pd
 
 ENTRY_KIND = "market-entry"
 CLOSE_KIND = "market-close"
+#: The model moved its own protective stop (`stop_moved` off the mirroring port).
+STOP_KIND = "update-stop-loss"
+STOP_REASON = "agent-stop-move"
 SOURCE = "agent"
 RECORD_FILE = "agent_dispatch.jsonl"
 
@@ -177,7 +184,12 @@ class AgentDispatchPort:
             error = "emit_raised: %s" % type(exc).__name__
         dispatch_ms = round((time.perf_counter() - started) * 1000.0, 3)
 
-        ack = {"ok": False, "reason": error} if error else self._ack(is_entry)
+        if error:
+            ack = {"ok": False, "reason": error}
+        elif sig["kind"] == STOP_KIND:
+            ack = self._ack_stop(sig["stop_price"])
+        else:
+            ack = self._ack(is_entry)
         self._acks[key] = ack
         self._record(event, sig, ack, dispatch_ms, None)
         return ack
@@ -199,6 +211,8 @@ class AgentDispatchPort:
         elif kind in CLOSE_REASONS:
             sig = {"kind": CLOSE_KIND, "price": float(price),
                    "reason": CLOSE_REASONS[kind], "skip_recon": True}
+        elif kind == "stop_moved":
+            sig = {"kind": STOP_KIND, "stop_price": float(price), "reason": STOP_REASON}
         else:
             return None
         sig.update(base)
@@ -218,6 +232,21 @@ class AgentDispatchPort:
         if active.get("source") == "recon-adopt":
             return {"ok": False, "reason": "recon_adopt"}
         return {"ok": False, "reason": "close_not_confirmed"}
+
+    def _ack_stop(self, stop_price: float) -> dict:
+        """The dispatcher writes the new stop to position.json after the broker call;
+        reading it back is the same rendezvous an entry and a close are acked on. It
+        says the dispatcher TOOK the update, not that the broker re-priced its order —
+        the mirroring port keeps the tighter model stop either way."""
+        active = self._read_active()
+        if not active:
+            return {"ok": False, "reason": "no_active_position"}
+        try:
+            if abs(float(active.get("stop")) - float(stop_price)) <= 1e-9:
+                return {"ok": True, "reason": ""}
+        except (TypeError, ValueError):
+            pass
+        return {"ok": False, "reason": "stop_not_confirmed"}
 
     # -- the watchdog ----------------------------------------------------------- #
 

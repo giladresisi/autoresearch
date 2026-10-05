@@ -115,8 +115,10 @@ lists what must NOT be built.
 - `ACT_STOP_BE` is **ON by default** (`l2-mechanisms.md` §8, 2026-10-02): once a position
   has covered half the way from its entry to T2 the stop moves to the entry (`stop_moved`
   reason `breakeven`; a touch is `stop_out_initial`, no attempt spent). `0` (or
-  `false`/`no`/`off`) disables it; read once per Executor. The live port cannot move a
-  stop yet, so live records `veto reason=trail_unwired` instead. The FVG one-behind trail
+  `false`/`no`/`off`) disables it; read once per Executor. Live it reaches the broker as
+  one `update-stop-loss` signal (`source: agent`, the same call as `trade.py update-sl`);
+  a `stop_moved` record carrying `far_side` means the dispatcher did not confirm it — the
+  model keeps the tighter stop and closes by market on a touch. The FVG one-behind trail
   in the same module is study code, `trail.TRAIL_FVG_MOVES = False`, not a rule.
 - `ACT_SMT_WAIT_BLOCK` is **ON by default** (`l2-mechanisms.md` §11.6 CANDIDATE, operator
   decision 2026-10-03): a market-mechanism fire is blocked while exactly one of MNQ/MES is
@@ -125,6 +127,28 @@ lists what must NOT be built.
   / `smt_wait_sweep`; no attempt spent; a blocked `tmso_reject` keeps its micro-session fire).
   `0` (or `false`/`no`/`off`) disables it. A plain replay does not load `.env`: set it in the
   shell for a replay.
+- `ACT_MES_SWEEP_STOP` (`l2-mechanisms.md` §11.7 CANDIDATE, 2026-10-02) is **ON by
+  default** (operator decision 2026-10-03): unset or empty = on; `0` (or
+  `false`/`no`/`off`) is the rollback, read once per Executor. With a position open, MES
+  taking its 24h-session extreme in the trade's direction with a 1m bar that opens before
+  10:30 ET and closes at or inside it moves the MNQ stop, on that bar's close, to the
+  completed MNQ 1m bar's close less 5 pts, if that tightens it and the new stop is at or
+  beyond the entry (`stop_moved` reason `mes_sweep`; otherwise a `veto`
+  `mes_sweep_not_in_profit` / `mes_sweep_not_tighter`). The stop is meant to
+  be hit; its follow-up entry is `ACT_FOLLOWUP_ENTRY` below. Still a CANDIDATE, not a
+  rule; a plain replay does not load `.env`, so set the rollback in the shell.
+- `ACT_FOLLOWUP_ENTRY` (`l2-mechanisms.md` §11.8 CANDIDATE, plan 50, 2026-10-03) is **OFF
+  by default** (operator decision 2026-10-05; parked: the forced-entry rig found 2 winners
+  in 15 trades): unset or empty = off, so the sweep stop's profitable exit ends the plan at
+  once; `1` (or `true`/`yes`/`on`) enables it, read once per Executor;
+  `followup.FOLLOWUP_ENABLED` overrides it for a harness. When the first position's MES
+  sweep stop is touched in profit with at least 30 pts (and 25% of the first leg) of T2
+  left, the plan's `positive_close` death is DEFERRED for up to 20 min (never past 11:00 ET)
+  and two triggers anchored at the retrace low may re-enter by market, past the 10:30
+  cutoff: `followup_reject_close` (a fresh §7 machine) and `followup_fvg_1m`. Budget 2
+  follow-up stop-outs (not counted in `attempts_used`); the regular mechanisms stay shut
+  meanwhile (`entry_block` `followup_only`). Records `followup_opened` / `_skipped` /
+  `_closed`. A plain replay does not load `.env`: set the rollback in the shell.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.

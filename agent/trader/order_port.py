@@ -10,8 +10,8 @@ more: five attributes and seven methods. `OrderSim` satisfies it unchanged, whic
 keeps a replay byte-identical — the default port IS the simulation.
 
 `MirroringOrderPort` wraps a simulation and, after every event the simulation RETURNS
-(`fill`, `stop_out`, `take_profit`, `mark`, `flatten`'s explicit-kind close), calls
-`sink(event)` once. The sink is injected; this module does not know what is on the other
+(`fill`, `stop_out`, `take_profit`, `mark`, `flatten`'s explicit-kind close, and the
+`stop_moved` of the model's own `move_stop`), calls `sink(event)` once. The sink is injected; this module does not know what is on the other
 side of it, imports nothing outside the standard library, and names no order-routing
 module anywhere — docstrings included, because the structural gates grep the whole
 source.
@@ -143,11 +143,30 @@ class MirroringOrderPort:
     def adopt_stop(self, now, price):
         """Take on a protective stop the FAR SIDE ALREADY HOLDS (the operator moved it
         there by hand). A model edit only: nothing is sent, because there is nothing to
-        send — and that is why this is not named like the simulation's own stop mover.
-        This port still cannot move a stop on the far side, and a caller probing for
-        that capability must keep getting "no". Returns the simulation's `stop_moved`
-        event, or None when nothing is open."""
+        send — and that is why this is not `move_stop`, which tells the far side.
+        Returns the simulation's `stop_moved` event, or None when nothing is open."""
         return self._inner.move_stop(now, price)
+
+    def move_stop(self, now, price, *, level_name=None):
+        """The model's OWN stop move (break-even at 50%, a trail step): the simulation
+        moves first, then the far side is told ONCE, with its own `seq`. None when
+        nothing is open; nothing is sent in that case.
+
+        A move the far side did not confirm is NOT undone and is NOT an external
+        change. Every caller only ever tightens, and the model tests its own stop on
+        the tick and closes BY MARKET when it is touched — so the tighter stop is
+        enforced by this side whatever the far side did, and the looser one still
+        resting there can at worst fill after the model's close has already gone out.
+        Undoing the move would instead leave the model on a stop that may no longer be
+        the one resting there. The event handed back carries `far_side` (the reason) so
+        the decision stream says the move was not confirmed."""
+        ev = self._inner.move_stop(now, price, level_name=level_name)
+        if ev is None:
+            return None
+        ack = self._send(ev, self._open_ctx or self._ctx())
+        if ack["ok"]:
+            return ev
+        return dict(ev, far_side=ack["reason"])
 
     # -- the mirrored events ---------------------------------------------------- #
 
