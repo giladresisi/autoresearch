@@ -159,6 +159,7 @@ def _connect_ib():
         os.environ.get("IB_HOST", "127.0.0.1"),
         int(os.environ.get("IB_PORT", "4002")),
         clientId=int(os.environ.get("PRE_SESSION_IB_CLIENT_ID", "10")) + 1,
+        readonly=True,
     )
     return ib
 

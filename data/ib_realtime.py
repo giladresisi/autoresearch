@@ -412,7 +412,7 @@ class IbRealtimeSource:
         self._last_1s_round_progressed = False  # did this round append any bars?
         ib = IB()
         try:
-            ib.connect(self._host, self._port, clientId=self._client_id + 1)
+            ib.connect(self._host, self._port, clientId=self._client_id + 1, readonly=True)
             # Count IB pacing violations (error 162) so the chunk loop can distinguish a
             # transient throttle (back off + retry the same chunk) from a genuine no-data
             # boundary. errorEvent signature varies by ib_insync version, so read positionally.
@@ -1000,7 +1000,7 @@ class IbRealtimeSource:
                 # Detect gateway-initiated disconnects (not our own stop() call).
                 self._ib.disconnectedEvent += self._on_gateway_disconnect
                 self._ib.errorEvent += self._on_ib_error
-                self._ib.connect(self._host, self._port, clientId=self._client_id)
+                self._ib.connect(self._host, self._port, clientId=self._client_id, readonly=True)
                 self._setup_subscriptions(mnq_contract, mes_contract)
                 self._last_data_ts = time.monotonic()
                 self._watchdog_thread = threading.Thread(
