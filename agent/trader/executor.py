@@ -66,6 +66,7 @@ import agent.trader.micro_smt as micro_smt
 import agent.trader.episode as episode
 import agent.trader.trail as trail
 import agent.trader.mes_sweep as mes_sweep
+import agent.trader.followup as followup
 from agent.trader import premove_context
 from agent.trader.smt_wait import SmtWait
 
@@ -271,6 +272,16 @@ class Executor:
         # default): the switch, read once, and the stage of the CURRENT position.
         self._mes_sweep_enabled = mes_sweep.enabled()
         self._mes_sweep = None
+        # The stop `_drive_mes_sweep` last moved the CURRENT position to, or None: an exit
+        # at exactly that price is the sweep stop being touched. Cleared at every fill.
+        self._sweep_stop = None
+        # Follow-up entry (`agent/trader/followup.py`, §11.8 CANDIDATE, plan 50, ON by
+        # default): the switch, read once, the follow-up of this plan (or None), whether
+        # its close has been recorded, and whether the OPEN position is one of its own.
+        self._followup_enabled = followup.enabled()
+        self._followup = None
+        self._followup_close_recorded = False
+        self._pos_is_followup = False
         self._last_minute = None
         # The last bar instant this Executor was handed. BAR time, never a wall clock
         # (the gate in `test_executor.py` forbids one here). Only `mark_open_position`
@@ -317,6 +328,7 @@ class Executor:
             "takeover_label": None,
             "initial_target": None,
             "initial_target_error": None,
+            "followup": None,
         }
 
     # -- public ---------------------------------------------------------------- #
@@ -439,6 +451,14 @@ class Executor:
         except Exception as exc:
             self._state["mes_sweep_error"] = f"{type(exc).__name__}: {exc}"
 
+        # 2b-follow. Follow-up entry (§11.8 CANDIDATE): its own closes (window end,
+        # structure, falsification), BEFORE the plan-death check so the deferred death
+        # lands on the tick the follow-up closes. Total, like every stage above.
+        try:
+            self._drive_followup_state(now)
+        except Exception as exc:
+            self._state["followup_error"] = f"{type(exc).__name__}: {exc}"
+
         # 2c. O4 (`micro_smt_exit`, ADOPTED, flag-gated ON by default): a counter-thesis
         # micro-SMT market-closes an OPEN position, T2 or no T2, regardless of plan life — same
         # reasoning as 2b, an open position is not plan state. Total for the same reason
@@ -526,6 +546,14 @@ class Executor:
         except Exception as exc:
             self._state["market_mech_error"] = f"{type(exc).__name__}: {exc}"
 
+        # 4c. The follow-up's two triggers (§11.8 CANDIDATE), bar close only. After 4b: the
+        # regular mechanisms are shut while it is open (`_entry_block`), so there is
+        # nothing for them to compete with.
+        try:
+            self._drive_followup_entry(now, mnq)
+        except Exception as exc:
+            self._state["followup_error"] = f"{type(exc).__name__}: {exc}"
+
     # -- internals -------------------------------------------------------------- #
 
     def _label_for(self, artifact_id):
@@ -568,6 +596,7 @@ class Executor:
                     self._on_stop_out(ev)
                 if ev.get("kind") in ("stop_out", "take_profit", "stop_out_initial"):
                     self._note_close(ev)
+                    self._after_exit(now, ev)
         except Exception as exc:
             # Swallowed so an order-book bug cannot take the bar loop down — but NOT
             # silently. A raise here on every bar makes the whole lifecycle inert:
@@ -662,6 +691,11 @@ class Executor:
         nothing about a position already open, which keeps being managed."""
         if getattr(self._sim, "external", None):
             return "external_position_change"
+        if self._followup_open():
+            # The profit that would block entries is deferred while the follow-up lives,
+            # but the REGULAR paths stay shut: the follow-up's own triggers are the only
+            # way in (`_drive_followup_entry`, which does not consult this).
+            return "followup_only"
         if NO_ENTRY_AFTER_POSITIVE and self._positive_close:
             return "after_positive_trade"
         if ENTRY_CUTOFF_ET is not None and now >= self._day_ts(now, ENTRY_CUTOFF_ET):
@@ -737,8 +771,14 @@ class Executor:
         the day is done"). Until then the latch only blocked entries, which left the plan
         alive — binding, recording, and open to a later re-derivation — after the day's
         work was done. No entry moves: every entry path already honoured the block."""
+        if self._followup_open():
+            return None, None                  # deferred: see `_drive_followup_state`
         if NO_ENTRY_AFTER_POSITIVE and self._positive_close:
-            return "positive_close", dict(self._positive_close_detail or {})
+            detail = dict(self._positive_close_detail or {})
+            if self._followup is not None:
+                detail["followup"] = {"reason": self._followup.closed_reason,
+                                      "attempts": self._followup.attempts}
+            return "positive_close", detail
         return None, None
 
     def _settle_end_ts(self, now: pd.Timestamp) -> pd.Timestamp:
@@ -1324,7 +1364,11 @@ class Executor:
         gap's edge falsifies that edge, and that is only established when price has
         moved on to a deeper one.
         """
-        self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
+        # A follow-up position spends the FOLLOW-UP's own budget (`_after_exit`), never the
+        # plan's; everything else below — the shared tally, the cooldown the order book
+        # starts, the takeover scan — behaves as for any stop-out.
+        if not self._pos_is_followup:
+            self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
         self._plan.setdefault("max_attempts", MAX_ATTEMPTS)
         # The SHARED per-plan budget, tallied per mechanism for the artifact only
         # (`Arbiter.spent_by` is "RECORDED, never scored"). Spent at the same instant as
@@ -2049,13 +2093,17 @@ class Executor:
                                    artifact_id=fire.get("gap_id") or mechanism)
         # A stop-bar retry's fill is stamped with the stop-out it retries (§7c).
         retry_of = fire.get("retry_of")
+        extra = {"retry_of": retry_of} if retry_of else {}
+        if fire.get("followup"):
+            extra["followup"] = True
         self._rec.order_event(now=now, plan_id=self._plan.get("plan_id"),
                               mechanism=mechanism,
                               artifact_label=self._label_for(ev.get("artifact_id")),
-                              **ev, **({"retry_of": retry_of} if retry_of else {}))
+                              **ev, **extra)
         if ev.get("kind") == "fill":
             self._set_target_on_fill(now)
             self._open_retry = retry_of         # after the reset every fill performs
+            self._pos_is_followup = bool(fire.get("followup"))
         # NO attempt is spent HERE. The budget counts STOP-OUTS, not entries
         # (`_on_stop_out`, and `order_sim`'s own "the attempt counter counts stop-outs"),
         # so incrementing on the fill double-counted every §6/§7 trade that then stopped
@@ -2106,6 +2154,8 @@ class Executor:
         # retry marker is per-position too (`_enter_by_market` re-sets it for a retry).
         self._micro_smt_exit_unwired_recorded = False
         self._open_retry = None
+        self._pos_is_followup = False
+        self._sweep_stop = None
         pick, reuse = self._reused_first_pick(now)
         if pick is None:
             pick = select_target(self._bars, now, self._plan.get("direction"),
@@ -2620,7 +2670,11 @@ class Executor:
         if not self._trail_enabled:
             return
         pos = self._sim.position
-        if pos is None:
+        if pos is None or self._pos_is_followup:
+            # A FOLLOW-UP position is exempt from break-even at 50% (operator, 2026-10-04):
+            # on the forced-entry rig the rule scratched four follow-ups that had run
+            # 29-93 pts (T2 150-250 pts away, so "half way" arms deep into the move that
+            # then pulls back to the entry). Its stop is the trigger's own, then T2 / O4.
             self._trail = None
             return
         if self._trail is None or self._trail.opened_at != pos.get("opened_at"):
@@ -2707,7 +2761,11 @@ class Executor:
         if not self._mes_sweep_enabled:
             return
         pos = self._sim.position
-        if pos is None:
+        if pos is None or self._pos_is_followup:
+            # A FOLLOW-UP position is exempt (operator, 2026-10-04): it was entered on the
+            # retrace the sweep stop stepped aside from, and on 09-04 the stage, rebuilt
+            # with a fresh level at the follow-up's fill, swept it out again six minutes
+            # later for +5. Its stop is the §7 / §6 one, then break-even, T2 and O4.
             self._mes_sweep = None
             return
         mes = None
@@ -2751,11 +2809,119 @@ class Executor:
             return
         ev = self._sim.move_stop(now, new_stop)
         if ev is not None:
+            self._sweep_stop = float(new_stop)
             self._rec.order_event(
                 now=now, plan_id=self._plan.get("plan_id"),
                 mechanism=self._state.get("mechanism"),
                 artifact_label=self._label_for(ev.get("artifact_id")),
                 reason="mes_sweep", **detail, **ev)
+
+    # -- follow-up entry (§11.8 CANDIDATE, plan 50) ---------------------------------- #
+
+    def _followup_open(self) -> bool:
+        return self._followup is not None and self._followup.is_open
+
+    def _after_exit(self, now, ev: dict) -> None:
+        """A position just exited. One of the follow-up's own: it spends the follow-up's
+        budget (or, in profit, closes it). The first position's sweep stop touched in
+        profit: the follow-up opens. Anything else: nothing, as today."""
+        if self._pos_is_followup:
+            self._pos_is_followup = False
+            if self._followup is not None:
+                self._followup.note_exit(self._is_profitable(ev))
+                self._record_followup_close(now)
+            return
+        sweep, self._sweep_stop = self._sweep_stop, None
+        if (ev.get("kind") != "stop_out_initial" or sweep is None
+                or ev.get("price") is None or float(ev["price"]) != sweep
+                or not self._is_profitable(ev) or not self._followup_enabled
+                or self._followup is not None):
+            return
+        self._open_followup(now, ev)
+
+    def _open_followup(self, now, ev: dict) -> None:
+        """Open the follow-up at the sweep stop's exit, or say why not (the plan then
+        dies `positive_close` exactly as without it)."""
+        direction = self._plan.get("direction")
+        t2 = self._target_price
+        plan_id = self._plan.get("plan_id")
+        end = followup.window_end(now)
+        # A met falsifier is NOT a reason to skip (operator, 2026-10-04): plans stopped
+        # dying on falsification because the falsifiers proved unreliable, and on 09-18
+        # that veto blocked a follow-up the tape then rewarded. Structure (`on_tick`,
+        # the leg's origin) is the only thesis check the follow-up keeps.
+        if now >= end:
+            reason = "window_closed"
+        else:
+            reason = followup.skip_reason(direction, ev["price"], ev.get("entry"), t2)
+        if reason is not None:
+            self._rec.order_event(now=now, plan_id=plan_id, mechanism=None,
+                                  kind="followup_skipped", reason=reason,
+                                  exit_px=ev["price"], t2=t2, first_entry=ev.get("entry"))
+            return
+        mnq = truncate(normalize((self._bars or {}).get(self._ticker)), now)
+        origin, _ = post_open_counter_extreme(
+            mnq, direction, self._day_ts(now, followup.FOLLOWUP_ORIGIN_ET))
+        sign = -1.0 if self._is_short() else 1.0
+        self._followup = followup.FollowUp.open(
+            direction, now, exit_px=ev["price"], exit_kind=ev.get("kind"), t2=t2,
+            first_entry=ev.get("entry"), counter_extreme=origin)
+        self._followup_close_recorded = False
+        self._state["followup"] = self._followup.state()
+        self._rec.order_event(now=now, plan_id=plan_id, mechanism=None,
+                              kind="followup_opened", exit_px=ev["price"],
+                              exit_kind=ev.get("kind"), window_end=end, t2=t2,
+                              t2_remaining=sign * (float(t2) - float(ev["price"])),
+                              first_entry=ev.get("entry"), counter_extreme=origin)
+
+    def _record_followup_close(self, now) -> None:
+        fu = self._followup
+        if fu is None or fu.is_open or self._followup_close_recorded:
+            return
+        self._followup_close_recorded = True
+        self._state["followup"] = fu.state()
+        self._rec.order_event(now=now, plan_id=self._plan.get("plan_id"), mechanism=None,
+                              kind="followup_closed", reason=fu.closed_reason,
+                              attempts=fu.attempts)
+
+    def _drive_followup_state(self, now) -> None:
+        """The follow-up's own closes, every tick: the plan dying under it, price trading
+        beyond the leg's origin, and the window ending with nothing open (a follow-up
+        position open at the window end is managed to its own exit first). The plan's
+        deferred `positive_close` death follows on the same tick
+        (`_positive_close_death`). A met falsifier does not close it (`_open_followup`)."""
+        fu = self._followup
+        if fu is None or not fu.is_open:
+            return
+        if not self._state["plan_alive"]:
+            fu.close("plan_dead")
+        elif fu.on_tick(self._state.get("now_high"), self._state.get("now_low")):
+            pass
+        elif now >= fu.window_end and self._sim.position is None:
+            fu.close("window_end")
+        self._record_followup_close(now)
+        if fu.is_open:
+            self._state["followup"] = fu.state()
+
+    def _drive_followup_entry(self, now, mnq) -> None:
+        """Evaluate the follow-up's triggers on the completed 1m bar and enter by market,
+        through `_enter_by_market` like every §6/§7 fire. The same preconditions as
+        `_drive_market_mechanisms` EXCEPT the positive-trade block and the 10:30 cutoff,
+        and without §2's extension veto (its anchor is the 09:30 counter-extreme; this
+        leg starts at the retrace low). The machines are fed on EVERY bar while open, so
+        their state tracks the tape through a cooldown or an open position."""
+        fu = self._followup
+        if fu is None or not fu.is_open or not self._state["plan_alive"]:
+            return
+        fires = fu.on_bars(now, trail.completed_1m(mnq, fu.exit_ts, now))
+        self._state["followup"] = fu.state()
+        if (not fires or self._sim.position is not None or self._state["in_settle"]
+                or not len(mnq) or getattr(self._sim, "external", None)
+                or now >= fu.window_end or self._in_cooldown(now)):
+            return
+        chosen = Arbiter.first_trigger([(f["mechanism"], f.get("time")) for f in fires])
+        fire = next(f for f in fires if f["mechanism"] == chosen)
+        self._enter_by_market(now, fire)
 
     def _drive_micro_smt_exit(self, now: pd.Timestamp, mnq: pd.DataFrame,
                               bar_complete: bool) -> None:
@@ -2819,9 +2985,11 @@ class Executor:
             now=now, plan_id=self._plan.get("plan_id"),
             mechanism=self._state.get("mechanism"),
             artifact_label=self._label_for(ev.get("artifact_id")), **ev)
+        was_followup = self._pos_is_followup
         self._note_exit(ev)
         self._note_close(ev)
-        if not self._is_profitable(ev):
+        self._after_exit(now, ev)
+        if not self._is_profitable(ev) and not was_followup:
             self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
             self._plan.setdefault("max_attempts", MAX_ATTEMPTS)
             try:

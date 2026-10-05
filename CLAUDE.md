@@ -135,8 +135,20 @@ lists what must NOT be built.
   completed MNQ 1m bar's close less 5 pts, if that tightens it and the new stop is at or
   beyond the entry (`stop_moved` reason `mes_sweep`; otherwise a `veto`
   `mes_sweep_not_in_profit` / `mes_sweep_not_tighter`). The stop is meant to
-  be hit; the follow-up entry it assumes is not built. Still a CANDIDATE, not a rule; a
-  plain replay does not load `.env`, so set the rollback in the shell.
+  be hit; its follow-up entry is `ACT_FOLLOWUP_ENTRY` below. Still a CANDIDATE, not a
+  rule; a plain replay does not load `.env`, so set the rollback in the shell.
+- `ACT_FOLLOWUP_ENTRY` (`l2-mechanisms.md` §11.8 CANDIDATE, plan 50, 2026-10-03) is **OFF
+  by default** (operator decision 2026-10-05; parked: the forced-entry rig found 2 winners
+  in 15 trades): unset or empty = off, so the sweep stop's profitable exit ends the plan at
+  once; `1` (or `true`/`yes`/`on`) enables it, read once per Executor;
+  `followup.FOLLOWUP_ENABLED` overrides it for a harness. When the first position's MES
+  sweep stop is touched in profit with at least 30 pts (and 25% of the first leg) of T2
+  left, the plan's `positive_close` death is DEFERRED for up to 20 min (never past 11:00 ET)
+  and two triggers anchored at the retrace low may re-enter by market, past the 10:30
+  cutoff: `followup_reject_close` (a fresh §7 machine) and `followup_fvg_1m`. Budget 2
+  follow-up stop-outs (not counted in `attempts_used`); the regular mechanisms stay shut
+  meanwhile (`entry_block` `followup_only`). Records `followup_opened` / `_skipped` /
+  `_closed`. A plain replay does not load `.env`: set the rollback in the shell.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.
