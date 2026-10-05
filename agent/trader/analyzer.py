@@ -33,6 +33,7 @@ import json
 import os
 import tempfile
 import threading
+import traceback
 
 import pandas as pd
 
@@ -212,6 +213,7 @@ class Analyzer:
         self._thesis = None
         self._health = None
         self._meta: dict = {}
+        self._call_error: "dict | None" = None   # the exception that ended `_call`, if any
         self._deferred_until = None
         self._deferred_date = None
         self._load()
@@ -231,6 +233,7 @@ class Analyzer:
             self._thesis = blob.get("thesis")
             self._health = blob.get("facts_health")
             self._meta = blob.get("call_meta") or {}
+            self._call_error = blob.get("call_error")
             armed = blob.get("armed_date")
             self._armed_date = pd.Timestamp(armed).date() if armed else None
             armed_at = blob.get("armed_at")
@@ -250,6 +253,11 @@ class Analyzer:
                 "stands": stands(self._thesis),
                 "facts_health": self._health,
                 "call_meta": self._meta,
+                # `status` tells a pending call (arm stamp only) from a failed one and
+                # a finished one; `call_error` is why a failed call failed.
+                "status": ("failed" if self._call_error else
+                           "ok" if self._thesis is not None else "pending"),
+                "call_error": self._call_error,
                 "requirement": {"name": self._requirement.name,
                                 "version": self._requirement.version},
             }
@@ -308,11 +316,8 @@ class Analyzer:
                 return None
 
             return self._arm(now, bars)
-        except Exception:
-            with self._lock:
-                self._thesis = None
-                self._meta = {}                # never leave a previous call's provenance
-                self._save()                   # attached to a thesis that no longer exists
+        except Exception as exc:
+            self._record_failure(exc)          # also drops a previous call's provenance
             return None
 
     def _arm(self, now: pd.Timestamp, bars: dict):
@@ -326,6 +331,7 @@ class Analyzer:
                 self._armed_at = now
                 self._thesis = None
                 self._meta = {}
+                self._call_error = None
                 self._save()
 
             if not self._threaded:
@@ -339,11 +345,8 @@ class Analyzer:
                 name="cycle1-analyzer")
             self._thread.start()
             return None
-        except Exception:
-            with self._lock:
-                self._thesis = None
-                self._meta = {}
-                self._save()
+        except Exception as exc:
+            self._record_failure(exc)
             return None
 
     # -- thesis.md §3a --------------------------------------------------------- #
@@ -461,12 +464,24 @@ class Analyzer:
                 self._meta = meta if self._thesis is not None else {}
                 self._save()
             return self._thesis
-        except Exception:
-            with self._lock:
-                self._thesis = None
-                self._meta = {}
-                self._save()
+        except Exception as exc:
+            self._record_failure(exc)
             return None
+
+    def _record_failure(self, exc: BaseException) -> None:
+        """Persist why a call ended without a thesis, and say so once on stdout.
+
+        The swallow around the call is deliberate (fail dark, never stall the bar loop);
+        what it must not do is fail without a trace (2026-10-05: a dark day whose cause
+        is unknown)."""
+        with self._lock:
+            self._thesis = None
+            self._meta = {}
+            self._call_error = {"type": type(exc).__name__, "message": str(exc)[:500],
+                                "traceback": traceback.format_exc()[-3000:]}
+            self._save()
+        print("[AGENT-LIVE] THESIS CALL FAILED: %s: %s (see call_error in %s)"
+              % (type(exc).__name__, str(exc)[:200], THESIS_FILE), flush=True)
 
     def _tiebreak(self, thesis, meta, facts, magnitude, health) -> "dict | None":
         """The NEUTRAL tie-break (agent/trader/tiebreak.py), or None to keep `thesis`.
