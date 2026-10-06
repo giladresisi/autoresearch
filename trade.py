@@ -38,6 +38,8 @@ Usage:
   python trade.py promote --no-publish   # ... without the R2 upload
   python trade.py publish [--only g1,g2] [--date YYYY-MM-DD] [--dry-run] [--force]   # Upload to R2 (groups: main,live,sessions,thesis_cache,logs; studies only via --only)
   python trade.py sync [--only g1,g2] [--date YYYY-MM-DD] [--dry-run] [--prune] [--force]   # Pull from R2 into <global> (never overwrites a local parquet that is AHEAD of R2)
+  python trade.py session-end            # Session-end parquet check (replaces the parquet-check skill): validate/repair 1s+1m, merge, promote, R2 publish; refuses if IB is down
+  python trade.py session-end --dry-run  # ... validation only, no IB, no writes  (--full-validate: re-scan the whole 1m mains)
   python trade.py rollover-prep          # Quarterly contract roll — run ONLY after gap-fill + promote (see --dry-run); publishes main to R2
   python trade.py rollover-prep --dry-run  # Resolve new conids + measure gaps, change nothing
 
@@ -950,6 +952,14 @@ def main() -> None:
         _warn_if_rollover_due()
         if publish_failed:
             sys.exit(1)
+
+    elif cmd == "session-end":
+        from scripts import session_end
+
+        _load_env()
+        rc = session_end.run(args[1:])
+        if rc:
+            sys.exit(rc)
 
     elif cmd in ("publish", "sync"):
         _r2_cli(cmd, args, force)
