@@ -190,7 +190,7 @@ def main():
     from ib_insync import IB, Contract
 
     ib = IB()
-    ib.connect(HOST, PORT, clientId=96)
+    ib.connect(HOST, PORT, clientId=96, readonly=True)
     mnq_contract = Contract(conId=MNQ_CONID, exchange="CME")
     mes_contract = Contract(conId=MES_CONID, exchange="CME")
 

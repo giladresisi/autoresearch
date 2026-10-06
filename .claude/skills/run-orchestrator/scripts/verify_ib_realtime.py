@@ -69,7 +69,7 @@ def main() -> int:
 
     ib = IB()
     try:
-        ib.connect(host, port, clientId=cid, timeout=15)
+        ib.connect(host, port, clientId=cid, timeout=15, readonly=True)
     except Exception as exc:
         print(f"VERIFY: IB connect failed ({exc}) — likely mid-maintenance restart", flush=True)
         return 3

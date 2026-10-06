@@ -899,7 +899,7 @@ def main():
             from ib_insync import IB
             try:
                 ib = IB()
-                ib.connect(HOST, PORT, clientId=IB_CLIENT_ID)
+                ib.connect(HOST, PORT, clientId=IB_CLIENT_ID, readonly=True)
             except Exception as exc:
                 print(
                     f"[check] IB unavailable ({exc}) — merge will proceed without gap fill",

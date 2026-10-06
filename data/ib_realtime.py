@@ -1330,7 +1330,7 @@ def gap_fill_1m_ib(bar_data_dir: Path, check_names: "tuple | None" = None) -> No
 
     ib = _IB()
     try:
-        ib.connect(host, port, clientId=17)
+        ib.connect(host, port, clientId=17, readonly=True)
     except Exception as exc:
         print(f"[gap_fill_1m_ib] IB unavailable ({exc}) — skipping", flush=True)
         return
