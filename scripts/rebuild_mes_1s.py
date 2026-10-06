@@ -89,7 +89,7 @@ def fetch_all(end_dt: pd.Timestamp, start_dt: pd.Timestamp) -> pd.DataFrame:
     from ib_insync import IB, Contract, util as ib_util
 
     ib = IB()
-    ib.connect(HOST, PORT, clientId=99)
+    ib.connect(HOST, PORT, clientId=99, readonly=True)
     contract     = Contract(conId=MES_CONID, exchange="CME")
     all_bars: list = []
     chunk_end    = end_dt

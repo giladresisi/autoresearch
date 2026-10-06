@@ -191,7 +191,7 @@ def main():
     from ib_insync import IB, Contract
 
     ib = IB()
-    ib.connect(HOST, PORT, clientId=98)
+    ib.connect(HOST, PORT, clientId=98, readonly=True)
     contract = Contract(conId=MNQ_CONID, exchange="CME")
 
     valid_dfs = []
