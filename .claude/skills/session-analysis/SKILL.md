@@ -986,6 +986,27 @@ the matching cells of `session-analysis.md` §5.
 
 ---
 
+## Step 3.8 — Publish the analysis to R2
+
+The analysis outputs live in the session folder, so another machine (or the next
+analysis) only sees them once they are in R2. Publish that one session folder — never
+the other groups — from `<WT>`:
+
+```bash
+cd "<WT>" && uv run python trade.py publish --only sessions --date <date>
+```
+
+It uploads whatever is in `<global>/sessions/<date>/` now: the three analysis files,
+`replay_thesis.json`, the chart(s), the downloaded reports. Replay run folders stay local
+in `<WT>/regression/` (they are not under `<global>`). `R2 not configured` → one line in
+the report, continue. Refused because the orchestrator is running (the publish is
+refused while it runs, e.g. after the 18:00 ET restart) → say so in the report and
+continue; the next session-end publish picks the files up. A CONFLICT → show it to the
+operator, do not `--force`. When `optimizations.md` / `session-analysis.md` are edited
+later in Step 5, run the same command again.
+
+---
+
 ## Step 4 — Report to user
 
 Once the subagent completes, confirm:
@@ -1006,6 +1027,8 @@ Once the subagent completes, confirm:
 - On an unattended run (Step 3.6): the question list, with proposed readings, FIRST.
 - File paths written — all THREE: `discrepancies.md`, `optimizations.md`, and the
   consolidated `session-analysis.md`
+- The Step 3.8 R2 publish: uploaded N files, or why it did not run (not configured /
+  refused while the orchestrator runs / conflict)
 - The analysis worktree from Step 1.5: its path, branch and the commit the replay ran on,
   whether it was created now or reused, and the path of its `analysis.md` — or that Step
   3.5 was skipped, and why.
