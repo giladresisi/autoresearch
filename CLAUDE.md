@@ -170,6 +170,13 @@ parquet-check session-end publish automatically; session-analysis Step 0 runs `s
 a parquet decides by LAST INDEX TIMESTAMP, so `sync` never overwrites a local file that is ahead of
 R2, a truncated local copy is replaced (old one kept as `.r2prev`), and a two-sided move is a
 CONFLICT (exit 1; `--force` picks a side). Both commands refuse while the orchestrator runs.
+Plan 51 (two machines, one live at a time): with R2 configured, `trade.py start` first checks stale
+data (`sync --dry-run` of main/live would download or conflict), HEAD (the `live` manifest's git_sha
+must be in this checkout; tracked files clean) and the R2 live lock `live_owner.json` (other host
+holds it = refused; same host = restart allowed), then acquires the lock. Fail closed when R2 is
+unreachable. `promote` / `rollover-prep` / session-end release the lock after a good publish.
+Overrides are their own flags, never `--force`: `start --take-over`, `start --skip-r2-checks`;
+`trade.py live-lock [status|release|take-over]`. Host name: optional `ACT_HOST_ID`.
 
 ## Cross-platform code (Windows, macOS, Linux)
 
