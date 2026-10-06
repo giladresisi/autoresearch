@@ -48,6 +48,10 @@ LOG_FILES = ("orchestrator_stdout.log", "orchestrator_stderr.log", "orchestrator
 # a run's story is in the tail, so a log larger than this is published as its last LOG_TAIL_BYTES.
 LOG_TAIL_BYTES = 5 * 1024 * 1024
 
+#: The live lock (plan 51): ONE object at the bucket root, outside every group, so no walker
+#: (publish / sync / prune) ever sees it.
+LIVE_LOCK_KEY = "live_owner.json"
+
 DEFAULT_PUBLISH_GROUPS = ("main", "live", "sessions", "thesis_cache", "logs")
 DEFAULT_SYNC_GROUPS = ("main", "live", "sessions", "thesis_cache")
 ALL_GROUPS = DEFAULT_PUBLISH_GROUPS + ("studies",)
@@ -113,7 +117,8 @@ def _orchestrator_pid():
 # ---------------------------------------------------------------------------------------
 
 def _is_excluded(p: Path) -> bool:
-    return p.name in EXCLUDE_NAMES or p.name.endswith(EXCLUDE_SUFFIXES)
+    return (p.name in EXCLUDE_NAMES or p.name == LIVE_LOCK_KEY
+            or p.name.endswith(EXCLUDE_SUFFIXES))
 
 
 def _walk(root: Path, only: Callable[[Path], bool] | None = None) -> dict[str, Path]:
@@ -332,9 +337,14 @@ def _git_contains(sha: str) -> bool:
         return False
 
 
+def host_id() -> str:
+    """This machine's name for the lock and the manifests: ACT_HOST_ID, else the hostname."""
+    return (os.environ.get("ACT_HOST_ID") or "").strip() or socket.gethostname()
+
+
 def _provenance() -> dict:
     return {"git_sha": _git_sha(), "MNQ_CONID": os.environ.get("MNQ_CONID"),
-            "MES_CONID": os.environ.get("MES_CONID"), "source_host": socket.gethostname()}
+            "MES_CONID": os.environ.get("MES_CONID"), "source_host": host_id()}
 
 
 def _scope(group: str, date: str | None) -> Callable[[str], bool]:
@@ -688,6 +698,225 @@ def checklist(rep: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------------------
+# live lock + `trade.py start` guards (plan 51)
+# ---------------------------------------------------------------------------------------
+# IB allows one login per account, so only one machine may run the live at a time. The lock is
+# one bucket-root object, `live_owner.json`. Acquire tries an S3 conditional put
+# (`IfNoneMatch="*"`) first so two machines starting at once cannot both win. If the endpoint
+# rejects that header (not implemented / invalid argument, or the installed boto3 does not know
+# it) the code FALLS BACK to get-then-put, which is best-effort only (a race window of
+# milliseconds; acceptable for two hand-operated machines). Which path R2 really takes is
+# verified by the operator with a throwaway key (plan 51 step 1).
+
+class LockHeld(R2Error):
+    """The live lock is held by another host (or lost to one in a race)."""
+
+
+def _now_et() -> _dt.datetime:
+    from zoneinfo import ZoneInfo
+    return _dt.datetime.now(ZoneInfo("America/New_York"))
+
+
+def _session_date() -> str:
+    try:
+        from session_times import session_date_str
+        return session_date_str()
+    except Exception:
+        return _now_et().date().isoformat()
+
+
+def _err_code(exc: Exception) -> str:
+    resp = getattr(exc, "response", None)
+    return str(resp.get("Error", {}).get("Code", "")) if isinstance(resp, dict) else ""
+
+
+def _is_precondition_failed(exc: Exception) -> bool:
+    return _err_code(exc) in ("PreconditionFailed", "412") or \
+        type(exc).__name__ == "PreconditionFailed"
+
+
+def _age_text(started_at: str | None) -> str:
+    try:
+        t = _dt.datetime.fromisoformat(started_at)
+        secs = int((_now_et() - t).total_seconds())
+    except Exception:
+        return "unknown age"
+    if secs < 0:
+        return "started in the future (clock skew?)"
+    h, m = divmod(secs // 60, 60)
+    return f"{h}h{m:02d}m old" if h else f"{m}m old"
+
+
+def read_live_lock(client, bucket: str) -> dict | None:
+    """The lock record, or None when absent. Unreadable -> R2Error (callers fail closed)."""
+    try:
+        body = client.get_object(Bucket=bucket, Key=LIVE_LOCK_KEY)["Body"].read()
+    except Exception as exc:
+        if _is_missing(exc):
+            return None
+        raise R2Error(f"cannot read {LIVE_LOCK_KEY}: {exc}") from exc
+    try:
+        d = json.loads(body.decode("utf-8"))
+    except Exception as exc:
+        raise R2Error(f"{LIVE_LOCK_KEY} is not valid JSON: {exc}") from exc
+    return d if isinstance(d, dict) else {}
+
+
+def _lock_record() -> dict:
+    return {"host": host_id(), "started_at": _now_et().isoformat(timespec="seconds"),
+            "session_date": _session_date(), "git_sha": _git_sha(), "pid": os.getpid()}
+
+
+def _held_message(cur: dict) -> str:
+    return (f"the live is locked by host {cur.get('host')!r} ({_age_text(cur.get('started_at'))}, "
+            f"started {cur.get('started_at')}, session {cur.get('session_date')}). Run "
+            "`trade.py promote` on that machine (releases the lock), or "
+            "`trade.py start --take-over` / `trade.py live-lock release --take-over` here "
+            "if that machine has crashed")
+
+
+def _put_new_lock(client, bucket: str, rec: dict) -> None:
+    """Write the lock only if absent. Raises LockHeld when another writer got there first."""
+    kw = {"Bucket": bucket, "Key": LIVE_LOCK_KEY, "ContentType": "application/json",
+          "Body": json.dumps(rec, indent=1, sort_keys=True).encode("utf-8")}
+    try:
+        client.put_object(IfNoneMatch="*", **kw)
+        return
+    except TypeError:
+        pass                                    # client signature without the argument
+    except Exception as exc:
+        if _is_precondition_failed(exc):
+            raise LockHeld("lost the race: another host took the live lock first") from exc
+        if not (_err_code(exc) in ("NotImplemented", "501", "InvalidArgument", "MalformedHeader")
+                or type(exc).__name__ in ("ParamValidationError", "UnknownParameterError")):
+            raise R2Error(f"cannot write {LIVE_LOCK_KEY}: {exc}") from exc
+    # Fallback: get-then-put (best-effort, see the section comment).
+    if read_live_lock(client, bucket) is not None:
+        raise LockHeld("lost the race: another host took the live lock first")
+    client.put_object(**kw)
+
+
+def _put_lock(client, bucket: str, rec: dict) -> None:
+    client.put_object(Bucket=bucket, Key=LIVE_LOCK_KEY, ContentType="application/json",
+                      Body=json.dumps(rec, indent=1, sort_keys=True).encode("utf-8"))
+
+
+def acquire_live_lock(force: bool = False, client=None, cfg: R2Config | None = None) -> dict:
+    """Take the live lock for this host. Absent -> written (conditional put); same host ->
+    refreshed; foreign host -> LockHeld unless `force` (take-over). Returns the record written."""
+    cfg = cfg or load_config()
+    client = client or make_client(cfg)
+    cur = read_live_lock(client, cfg.bucket)
+    rec = _lock_record()
+    if cur is None:
+        try:
+            _put_new_lock(client, cfg.bucket, rec)
+            return rec
+        except LockHeld:
+            cur = read_live_lock(client, cfg.bucket) or {}
+    if cur.get("host") == host_id() or force:
+        _put_lock(client, cfg.bucket, rec)
+        return rec
+    raise LockHeld(_held_message(cur))
+
+
+def release_live_lock(force: bool = False, client=None, cfg: R2Config | None = None) -> bool:
+    """Delete the lock when this host owns it (or `force`). True when deleted, False when there
+    was none. A foreign lock without `force` -> LockHeld."""
+    cfg = cfg or load_config()
+    client = client or make_client(cfg)
+    cur = read_live_lock(client, cfg.bucket)
+    if cur is None:
+        return False
+    if cur.get("host") != host_id() and not force:
+        raise LockHeld(_held_message(cur))
+    try:
+        client.delete_object(Bucket=cfg.bucket, Key=LIVE_LOCK_KEY)
+    except Exception as exc:
+        raise R2Error(f"cannot delete {LIVE_LOCK_KEY}: {exc}") from exc
+    return True
+
+
+def _git_dirty() -> bool:
+    """True when a TRACKED file differs from HEAD (untracked files are ignored)."""
+    try:
+        r = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                           cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
+def check_start_guards(force_lock: bool = False, client=None, cfg: R2Config | None = None,
+                       stream=None) -> list[str]:
+    """The read-only guards of `trade.py start`: stale data, HEAD, foreign lock. Returns the
+    refusal reasons (empty = go). R2 not configured -> one line, []. Configured but unreachable
+    or unreadable -> a refusal (fail closed). Never writes anything."""
+    stream = stream or sys.stdout
+    if client is None and cfg is None and not is_configured():
+        print("R2 not configured — two-machine guards skipped", file=stream)
+        return []
+    reasons: list[str] = []
+    try:
+        cfg = cfg or load_config()
+        client = client or make_client(cfg)
+        rep = sync(only="main,live", dry_run=True, client=client, cfg=cfg)
+        if rep["conflicts"]:
+            reasons.append("stale/diverged data: main/live parquets conflict with R2 ("
+                           + ", ".join(f"{c['group']}/{c['path']}" for c in rep["conflicts"])
+                           + ") — run `trade.py sync` (and resolve the conflict) first")
+        if rep["downloaded"]:
+            reasons.append(f"this machine is behind R2: `sync` would download {rep['downloaded']} "
+                           "file(s) from main/live — run `trade.py sync` first")
+        for e in rep["errors"]:
+            reasons.append(f"R2 check failed: {e}")
+
+        man = _get_manifest(client, cfg.bucket, "live")
+        local = _git_sha()
+        theirs = (man or {}).get("git_sha")
+        if not theirs:
+            print("WARNING: no git_sha in the published `live` manifest — HEAD check skipped",
+                  file=stream)
+        elif theirs != local and not _git_contains(theirs):
+            reasons.append(f"HEAD guard: published data came from commit {theirs[:10]}, which is "
+                           f"not in this checkout (HEAD {str(local)[:10]}). Run `git pull` / "
+                           "`git rebase` so HEAD contains it")
+        if _git_dirty():
+            reasons.append("HEAD guard: tracked files have uncommitted changes — commit or "
+                           "stash them (the live must run committed code)")
+
+        cur = read_live_lock(client, cfg.bucket)
+        if cur is not None and cur.get("host") != host_id() and not force_lock:
+            reasons.append("live lock: " + _held_message(cur))
+    except Exception as exc:
+        reasons.append(f"R2 unreachable or unreadable ({type(exc).__name__}: {exc}) — refusing "
+                       "(fail closed); `--skip-r2-checks` overrides")
+    return reasons
+
+
+def start_guards(force_lock: bool = False, skip: bool = False, client=None,
+                 cfg: R2Config | None = None, stream=None) -> list[str]:
+    """`trade.py start` entry: skip / check, then acquire the lock when nothing refused.
+    Returns refusal reasons (empty = go; the lock is then held by this host)."""
+    stream = stream or sys.stdout
+    if skip:
+        print("--skip-r2-checks: stale-data, HEAD and live-lock checks SKIPPED", file=stream)
+        return []
+    reasons = check_start_guards(force_lock, client=client, cfg=cfg, stream=stream)
+    if reasons or (client is None and cfg is None and not is_configured()):
+        return reasons
+    try:
+        if force_lock:
+            print("--take-over: acquiring the live lock even if another host holds it",
+                  file=stream)
+        rec = acquire_live_lock(force=force_lock, client=client, cfg=cfg)
+        print(f"[r2] live lock held by {rec['host']} (session {rec['session_date']})", file=stream)
+    except Exception as exc:
+        return [f"live lock: {exc}"]
+    return []
+
+
+# ---------------------------------------------------------------------------------------
 # post-promote tail + CLI formatting
 # ---------------------------------------------------------------------------------------
 
@@ -711,7 +940,23 @@ def publish_after_promote(stream=None, client=None, cfg: R2Config | None = None)
         print(line, file=stream)
     err = None if rep["ok"] else "; ".join(
         rep["errors"] + [f"conflict {c['group']}/{c['path']}" for c in rep["conflicts"]]) or "failed"
+    if rep["ok"]:
+        _release_after_publish(stream, client, cfg)
     return {"configured": True, "success": rep["ok"], "error": err, "report": rep}
+
+
+def _release_after_publish(stream, client, cfg) -> None:
+    """Release the live lock after a SUCCESSFUL publish, when this host owns it. Never raises:
+    a lock that cannot be released is reported and left (`trade.py live-lock release`)."""
+    try:
+        cfg = cfg or load_config()
+        client = client or make_client(cfg)
+        if release_live_lock(client=client, cfg=cfg):
+            print(f"[r2] live lock released ({host_id()})", file=stream)
+    except LockHeld:
+        pass   # another host owns it: not ours to release
+    except Exception as exc:
+        print(f"[r2] live lock NOT released: {type(exc).__name__}: {exc}", file=stream)
 
 
 def format_report(rep: dict, verb: str) -> list[str]:

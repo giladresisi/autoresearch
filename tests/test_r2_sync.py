@@ -20,8 +20,18 @@ class _NoSuchKey(Exception):
     response = {"Error": {"Code": "NoSuchKey"}}
 
 
+class _PreconditionFailed(Exception):
+    response = {"Error": {"Code": "PreconditionFailed"}}
+
+
+class _NotImplemented(Exception):
+    response = {"Error": {"Code": "NotImplemented"}}
+
+
 class FakeS3:
     def __init__(self):
+        self.reject_conditional = False
+        self.race_record: bytes | None = None
         self.objects: dict[str, bytes] = {}
         self.calls: list[tuple[str, str]] = []
         self.fail_on_upload_n: int | None = None
@@ -35,9 +45,21 @@ class FakeS3:
         self.calls.append(("upload", Key))
         self.objects[Key] = Path(Filename).read_bytes()
 
-    def put_object(self, Bucket, Key, Body, **kw):
+    def put_object(self, Bucket, Key, Body, IfNoneMatch=None, **kw):
         self.calls.append(("put", Key))
+        if IfNoneMatch == "*":
+            if self.reject_conditional:
+                raise _NotImplemented()
+            if self.race_record is not None:       # another writer got in between get and put
+                self.objects[Key] = self.race_record
+                self.race_record = None
+            if Key in self.objects:
+                raise _PreconditionFailed()
         self.objects[Key] = Body
+
+    def delete_object(self, Bucket, Key):
+        self.calls.append(("delete", Key))
+        self.objects.pop(Key, None)
 
     def get_object(self, Bucket, Key):
         self.calls.append(("get", Key))
@@ -602,3 +624,276 @@ def test_sync_rejects_path_traversal_in_manifest(machines):
     b = machines("b")
     rep = sync(c, only="live")
     assert not rep["ok"] and not (b / "general" / "evil.txt").exists()
+
+
+# --------------------------------------------------------------------------- live lock (plan 51)
+
+LOCK = r2_sync.LIVE_LOCK_KEY
+
+
+def _host(monkeypatch, name):
+    monkeypatch.setenv("ACT_HOST_ID", name)
+
+
+def _lock(c) -> dict:
+    return json.loads(c.objects[LOCK])
+
+
+def _put_foreign(c, host="machine-a", started_at="2026-10-05T09:00:00-04:00"):
+    c.objects[LOCK] = json.dumps({"host": host, "started_at": started_at,
+                                  "session_date": "2026-10-06", "git_sha": "a" * 40,
+                                  "pid": 1}).encode()
+
+
+def test_acquire_when_absent_writes_owner_record(machines, monkeypatch):
+    monkeypatch.setattr(r2_sync, "_git_sha", lambda: "c" * 40)
+    _host(monkeypatch, "machine-a")
+    c = FakeS3()
+    r2_sync.acquire_live_lock(client=c, cfg=CFG)
+    rec = _lock(c)
+    assert rec["host"] == "machine-a" and rec["git_sha"] == "c" * 40
+    assert isinstance(rec["pid"], int) and rec["session_date"]
+    assert rec["started_at"].endswith(("-04:00", "-05:00"))   # ET offset, not the machine zone
+
+
+def test_acquire_same_host_refreshes_started_at(machines, monkeypatch):
+    _host(monkeypatch, "machine-a")
+    c = FakeS3()
+    _put_foreign(c, host="machine-a")
+    r2_sync.acquire_live_lock(client=c, cfg=CFG)
+    assert _lock(c)["host"] == "machine-a"
+    assert _lock(c)["started_at"] != "2026-10-05T09:00:00-04:00"
+
+
+def test_acquire_foreign_host_refused_with_age_in_message(machines, monkeypatch):
+    _host(monkeypatch, "machine-b")
+    c = FakeS3()
+    _put_foreign(c)
+    with pytest.raises(r2_sync.LockHeld) as e:
+        r2_sync.acquire_live_lock(client=c, cfg=CFG)
+    msg = str(e.value)
+    assert "machine-a" in msg and "old" in msg and "promote" in msg and "--take-over" in msg
+    assert _lock(c)["host"] == "machine-a"
+
+
+def test_acquire_take_over_rewrites_owner(machines, monkeypatch):
+    _host(monkeypatch, "machine-b")
+    c = FakeS3()
+    _put_foreign(c)
+    r2_sync.acquire_live_lock(force=True, client=c, cfg=CFG)
+    assert _lock(c)["host"] == "machine-b"
+
+
+def test_acquire_conditional_put_race_second_writer_loses(machines, monkeypatch):
+    _host(monkeypatch, "machine-b")
+    c = FakeS3()
+    c.race_record = json.dumps({"host": "machine-a", "started_at": "2026-10-06T09:00:00-04:00",
+                                "session_date": "2026-10-06"}).encode()
+    with pytest.raises(r2_sync.LockHeld) as e:
+        r2_sync.acquire_live_lock(client=c, cfg=CFG)
+    assert "machine-a" in str(e.value)
+    assert _lock(c)["host"] == "machine-a"
+
+
+def test_acquire_falls_back_to_get_then_put_when_conditional_put_unsupported(machines, monkeypatch):
+    _host(monkeypatch, "machine-a")
+    c = FakeS3()
+    c.reject_conditional = True
+    r2_sync.acquire_live_lock(client=c, cfg=CFG)
+    assert _lock(c)["host"] == "machine-a"
+
+
+def test_release_only_by_owner(machines, monkeypatch):
+    c = FakeS3()
+    _put_foreign(c)
+    _host(monkeypatch, "machine-b")
+    with pytest.raises(r2_sync.LockHeld):
+        r2_sync.release_live_lock(client=c, cfg=CFG)
+    assert LOCK in c.objects
+    assert r2_sync.release_live_lock(force=True, client=c, cfg=CFG) is True
+    assert LOCK not in c.objects
+    _host(monkeypatch, "machine-a")
+    _put_foreign(c)
+    assert r2_sync.release_live_lock(client=c, cfg=CFG) is True
+    assert r2_sync.release_live_lock(client=c, cfg=CFG) is False
+
+
+def test_publish_after_promote_releases_lock_on_success(machines, monkeypatch, capsys):
+    populate(machines("a"))
+    _host(monkeypatch, "machine-a")
+    c = FakeS3()
+    r2_sync.acquire_live_lock(client=c, cfg=CFG)
+    res = r2_sync.publish_after_promote(client=c, cfg=CFG)
+    assert res["success"] and LOCK not in c.objects
+
+
+def test_publish_after_promote_leaves_foreign_lock(machines, monkeypatch):
+    populate(machines("a"))
+    _host(monkeypatch, "machine-b")
+    c = FakeS3()
+    _put_foreign(c)
+    assert r2_sync.publish_after_promote(client=c, cfg=CFG)["success"]
+    assert _lock(c)["host"] == "machine-a"
+
+
+def test_release_after_failed_publish_keeps_lock(machines, monkeypatch):
+    populate(machines("a"))
+    _host(monkeypatch, "machine-a")
+    c = FakeS3()
+    r2_sync.acquire_live_lock(client=c, cfg=CFG)
+    c.fail_on_upload_n = 1
+    res = r2_sync.publish_after_promote(client=c, cfg=CFG)
+    assert not res["success"] and LOCK in c.objects
+
+
+def test_standalone_publish_does_not_release(machines, monkeypatch):
+    populate(machines("a"))
+    _host(monkeypatch, "machine-a")
+    c = FakeS3()
+    r2_sync.acquire_live_lock(client=c, cfg=CFG)
+    assert publish(c)["ok"]
+    assert LOCK in c.objects
+
+
+def test_live_lock_key_never_published_or_synced_as_data(machines, monkeypatch):
+    a = machines("a")
+    populate(a)
+    (a / "general" / "live" / LOCK).write_text("{}")      # a local file with the same name
+    _host(monkeypatch, "machine-a")
+    c = FakeS3()
+    r2_sync.acquire_live_lock(client=c, cfg=CFG)
+    before = c.objects[LOCK]
+    publish(c)
+    assert c.objects[LOCK] == before
+    assert not any(k.endswith("/" + LOCK) for k in c.objects)
+    b = machines("b")
+    sync(c)
+    assert not list(b.rglob(LOCK))
+
+
+# --------------------------------------------------------------------------- start guards (plan 51)
+
+def _guard_setup(machines, monkeypatch, pub_sha="a" * 40, local_sha="a" * 40):
+    """A publishes at pub_sha; B is fully synced and is the machine about to start."""
+    populate(machines("a"))
+    monkeypatch.setattr(r2_sync, "_git_sha", lambda: pub_sha)
+    c = FakeS3()
+    publish(c)
+    b = machines("b")
+    sync(c)
+    monkeypatch.setattr(r2_sync, "_git_sha", lambda: local_sha)
+    monkeypatch.setattr(r2_sync, "_git_contains", lambda sha: sha == local_sha)
+    monkeypatch.setattr(r2_sync, "_git_dirty", lambda: False)
+    _host(monkeypatch, "machine-b")
+    return b, c
+
+
+def guards(c, **kw):
+    return r2_sync.check_start_guards(client=c, cfg=CFG, **kw)
+
+
+def test_guards_pass_when_synced_clean_and_unlocked(machines, monkeypatch):
+    b, c = _guard_setup(machines, monkeypatch)
+    assert guards(c) == []
+
+
+def test_stale_data_guard_refuses_when_sync_would_download(machines, monkeypatch):
+    b, c = _guard_setup(machines, monkeypatch)
+    (b / "general" / "live" / "MNQ_1m.parquet").unlink()
+    reasons = guards(c)
+    assert any("behind R2" in r and "trade.py sync" in r for r in reasons)
+
+
+def test_stale_data_guard_allows_when_local_is_ahead(machines, monkeypatch):
+    b, c = _guard_setup(machines, monkeypatch)
+    write_pq(b / "general" / "live" / "MNQ_1m.parquet", 25)
+    assert guards(c) == []
+
+
+def test_stale_data_guard_refuses_on_conflict(machines, monkeypatch):
+    b, c = _guard_setup(machines, monkeypatch)
+    machines("a")
+    write_pq(machines("a") / "general" / "live" / "MNQ_1m.parquet", 11, close=5.0)
+    publish(c)
+    write_pq(machines("b") / "general" / "live" / "MNQ_1m.parquet", 13, close=7.0)
+    assert any("conflict" in r for r in guards(c))
+
+
+def test_guards_never_write_local_files(machines, monkeypatch):
+    b, c = _guard_setup(machines, monkeypatch)
+    (b / "general" / "live" / "global.json").write_text('{"ath": 0}')
+    before = (b / "general" / "live" / "global.json").read_text()
+    guards(c)
+    assert (b / "general" / "live" / "global.json").read_text() == before
+
+
+def test_head_guard_allows_equal_and_newer_local(machines, monkeypatch):
+    b, c = _guard_setup(machines, monkeypatch)
+    assert guards(c) == []                                      # equal
+    monkeypatch.setattr(r2_sync, "_git_sha", lambda: "f" * 40)  # newer: publisher is an ancestor
+    monkeypatch.setattr(r2_sync, "_git_contains", lambda sha: sha == "a" * 40)
+    assert guards(c) == []
+
+
+def test_head_guard_refuses_behind(machines, monkeypatch):
+    b, c = _guard_setup(machines, monkeypatch, pub_sha="b" * 40, local_sha="a" * 40)
+    reasons = guards(c)
+    assert any("HEAD guard" in r and "bbbbbbbbbb" in r and "git pull" in r for r in reasons)
+
+
+def test_head_guard_refuses_diverged(machines, monkeypatch):
+    b, c = _guard_setup(machines, monkeypatch)
+    monkeypatch.setattr(r2_sync, "_git_sha", lambda: "d" * 40)
+    monkeypatch.setattr(r2_sync, "_git_contains", lambda sha: False)
+    assert any("HEAD guard" in r and "not in this checkout" in r for r in guards(c))
+
+
+def test_head_guard_refuses_dirty_tracked_tree(machines, monkeypatch):
+    b, c = _guard_setup(machines, monkeypatch)
+    monkeypatch.setattr(r2_sync, "_git_dirty", lambda: True)
+    assert any("uncommitted" in r for r in guards(c))
+
+
+def test_head_guard_warns_when_manifest_has_no_sha(machines, monkeypatch, capsys):
+    b, c = _guard_setup(machines, monkeypatch)
+    m = json.loads(c.objects["manifest/live.json"])
+    m["git_sha"] = None
+    c.objects["manifest/live.json"] = json.dumps(m).encode()
+    assert guards(c) == []
+    assert "no git_sha" in capsys.readouterr().out
+
+
+def test_guard_refuses_foreign_lock_and_take_over_allows(machines, monkeypatch):
+    b, c = _guard_setup(machines, monkeypatch)
+    _put_foreign(c)
+    assert any("live lock" in r and "machine-a" in r for r in guards(c))
+    assert guards(c, force_lock=True) == []
+
+
+def test_guards_skipped_with_one_line_when_r2_not_configured(machines, monkeypatch, capsys):
+    for v in r2_sync.R2_VARS:
+        monkeypatch.delenv(v, raising=False)
+    assert r2_sync.check_start_guards() == []
+    assert capsys.readouterr().out.strip() == "R2 not configured — two-machine guards skipped"
+    assert r2_sync.start_guards() == []
+
+
+def test_unreachable_r2_refuses(machines, monkeypatch):
+    machines("b")
+    reasons = r2_sync.check_start_guards(client=DeadClient(), cfg=CFG)
+    assert reasons and any("fail closed" in r for r in reasons)
+
+
+def test_skip_r2_checks_flag_bypasses_everything_and_prints_a_line(machines, monkeypatch, capsys):
+    machines("b")
+    assert r2_sync.start_guards(skip=True, client=DeadClient(), cfg=CFG) == []
+    assert "--skip-r2-checks" in capsys.readouterr().out
+
+
+def test_start_guards_acquires_lock_when_clear_and_not_when_refused(machines, monkeypatch):
+    b, c = _guard_setup(machines, monkeypatch)
+    assert r2_sync.start_guards(client=c, cfg=CFG) == []
+    assert _lock(c)["host"] == "machine-b"
+    _host(monkeypatch, "machine-c")
+    assert r2_sync.start_guards(client=c, cfg=CFG)             # foreign lock refuses
+    assert _lock(c)["host"] == "machine-b"

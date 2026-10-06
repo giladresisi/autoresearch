@@ -27,7 +27,10 @@ Usage:
   python trade.py start --force          # Reset hypothesis direction and position state (start fresh)
   python trade.py start --pause          # Start with automatic entries paused (creates data/paused; start continues regardless)
   python trade.py start --resume         # Start with automatic entries enabled (clears data/paused; start continues regardless)
-  python trade.py start --profile        # + memory profiling -> <session>/profile/ (RSS every 30s; allocation snapshots 09:15:30 + 13:05:30 ET or at terminate)
+  python trade.py start --take-over      # Two-machine guards (R2 configured): acquire the live lock even if another host holds it
+  python trade.py start --skip-r2-checks # ... skip the stale-data, HEAD and live-lock guards (e.g. the bucket is down)
+  python trade.py live-lock [status|release|take-over]   # R2 live lock; `release --take-over` clears another host's (stale) lock
+  python trade.py start --profile       # + memory profiling -> <session>/profile/ (RSS every 30s; allocation snapshots 09:15:30 + 13:05:30 ET or at terminate)
   python trade.py terminate              # Stop orchestrator and automation.main (refused with a position/order open)
   python trade.py terminate --force      # ... even with a position/order open (left at the broker, unmanaged)
   python trade.py gap-fill               # IB-backfill main 1s+1m parquets up to now (orchestrator must NOT be running)
@@ -112,6 +115,42 @@ def _r2_cli(cmd: str, args, force: bool) -> None:
         for line in r2_sync.checklist(rep):
             print(line)
     if not rep["ok"]:
+        sys.exit(1)
+
+
+def _live_lock_cli(rest) -> None:
+    """`trade.py live-lock [status|release|take-over] [--take-over]` (R2 live lock, plan 51)."""
+    from scripts import r2_sync
+    _load_env()
+    sub = rest[0].lower() if rest and not rest[0].startswith("--") else "status"
+    if sub not in ("status", "release", "take-over"):
+        print(f"ERROR: unknown live-lock action {sub!r} (status|release|take-over)")
+        sys.exit(1)
+    if not r2_sync.is_configured():
+        print("R2 not configured — no live lock")
+        return
+    try:
+        cfg = r2_sync.load_config()
+        client = r2_sync.make_client(cfg)
+        if sub == "status":
+            cur = r2_sync.read_live_lock(client, cfg.bucket)
+            if cur is None:
+                print("live lock: none")
+            else:
+                print(f"live lock: host={cur.get('host')} started_at={cur.get('started_at')} "
+                      f"({r2_sync._age_text(cur.get('started_at'))}) session={cur.get('session_date')} "
+                      f"git_sha={str(cur.get('git_sha'))[:10]} pid={cur.get('pid')}"
+                      f"{'  [this host]' if cur.get('host') == r2_sync.host_id() else ''}")
+        elif sub == "release":
+            if r2_sync.release_live_lock(force="--take-over" in rest, client=client, cfg=cfg):
+                print("live lock released")
+            else:
+                print("live lock: none")
+        else:
+            rec = r2_sync.acquire_live_lock(force=True, client=client, cfg=cfg)
+            print(f"live lock taken over by {rec['host']}")
+    except r2_sync.R2Error as exc:
+        print(f"ERROR: {exc}")
         sys.exit(1)
 
 
@@ -743,6 +782,9 @@ def main() -> None:
     elif cmd in ("agent-direction", "agent-target"):
         _agent_override(cmd, args[1:], force=force)
 
+    elif cmd == "live-lock":
+        _live_lock_cli(args[1:])
+
     elif cmd == "start":
         import os
         import subprocess
@@ -770,6 +812,19 @@ def main() -> None:
                   "       ACT_TRADER=0 — then --force means what it always meant.")
             sys.exit(1)
 
+        # Two-machine guards (plan 51): stale data, HEAD, R2 live lock. BEFORE anything that
+        # touches a process or a file; a refusal exits 1 with the lock untouched. Own flags,
+        # never --force (that one means FORCE_RESET here).
+        from scripts import r2_sync
+        _load_env()
+        reasons = r2_sync.start_guards(force_lock="--take-over" in raw_args,
+                                       skip="--skip-r2-checks" in raw_args)
+        if reasons:
+            print("ERROR: start refused by the two-machine guards:")
+            for r in reasons:
+                print(f"  - {r}")
+            print("Overrides (operator only): --take-over (lock), --skip-r2-checks (all guards).")
+            sys.exit(1)
 
         # Optional pause/resume of automatic entries from the moment the orchestrator
         # starts. Independent of --force (different concern). The start proceeds either

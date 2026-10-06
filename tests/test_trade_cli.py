@@ -719,3 +719,145 @@ def test_terminate_sweep_ignores_other_worktree_cwd(monkeypatch, tmp_path):
     monkeypatch.setattr("psutil.process_iter", lambda attrs=None: [orch])
     trade._terminate_all()
     orch.terminate.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Plan 51: `start` guards + `live-lock` subcommand (fake client, tmp dirs; never real R2)
+# ---------------------------------------------------------------------------
+
+class _MemClient:
+    """Just enough S3 for the lock object."""
+
+    def __init__(self):
+        self.objects: dict[str, bytes] = {}
+
+    def get_object(self, Bucket, Key):
+        import io
+        if Key not in self.objects:
+            class _Missing(Exception):
+                response = {"Error": {"Code": "NoSuchKey"}}
+            raise _Missing()
+        return {"Body": io.BytesIO(self.objects[Key])}
+
+    def put_object(self, Bucket, Key, Body, IfNoneMatch=None, **kw):
+        if IfNoneMatch == "*" and Key in self.objects:
+            class _Pre(Exception):
+                response = {"Error": {"Code": "PreconditionFailed"}}
+            raise _Pre()
+        self.objects[Key] = Body
+
+    def delete_object(self, Bucket, Key):
+        self.objects.pop(Key, None)
+
+
+def _r2_env(monkeypatch, host):
+    for v, val in (("R2_ACCOUNT_ID", "acct"), ("R2_ACCESS_KEY_ID", "k"),
+                   ("R2_SECRET_ACCESS_KEY", "s"), ("R2_BUCKET", "bkt")):
+        monkeypatch.setenv(v, val)
+    monkeypatch.setenv("ACT_HOST_ID", host)
+    client = _MemClient()
+    from scripts import r2_sync
+    monkeypatch.setattr(r2_sync, "make_client", lambda cfg: client)
+    monkeypatch.setattr(r2_sync, "_git_dirty", lambda: False)
+    monkeypatch.setattr(r2_sync, "_git_sha", lambda: "a" * 40)
+    return client
+
+
+def _start(monkeypatch, tmp_path, argv, guard_reasons=None):
+    """Run `trade.py <argv>` with the process-touching parts mocked; returns the spies."""
+    import subprocess
+    trade = _import_trade(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", ["trade.py", *argv])
+    term = MagicMock(return_value=[])
+    popen = MagicMock()
+    monkeypatch.setattr(trade, "_terminate_all", term)
+    monkeypatch.setattr(trade, "_orchestrator_pid", lambda: None)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    if guard_reasons is not None:
+        from scripts import r2_sync
+        monkeypatch.setattr(r2_sync, "start_guards", lambda **kw: guard_reasons)
+    return trade, term, popen
+
+
+def test_start_refusal_runs_before_terminate_all_and_launch(monkeypatch, tmp_path, capsys):
+    trade, term, popen = _start(monkeypatch, tmp_path, ["start", "--resume"],
+                                guard_reasons=["live lock: held by machine-a"])
+    with pytest.raises(SystemExit) as e:
+        trade.main()
+    assert e.value.code == 1
+    term.assert_not_called()
+    popen.assert_not_called()
+    out = capsys.readouterr().out
+    assert "refused by the two-machine guards" in out and "machine-a" in out
+
+
+def test_start_force_semantics_unchanged(monkeypatch, tmp_path, capsys):
+    called = []
+    trade, term, popen = _start(monkeypatch, tmp_path, ["start", "--force"], guard_reasons=[])
+    from scripts import r2_sync
+    monkeypatch.setattr(r2_sync, "start_guards", lambda **kw: called.append(kw) or [])
+    with pytest.raises(SystemExit):
+        trade.main()
+    out = capsys.readouterr().out
+    assert "--force sets FORCE_RESET" in out
+    assert called == [] and term.call_count == 0     # refused by the existing check, before the guards
+
+
+def test_start_passes_own_flags_to_guards_not_force(monkeypatch, tmp_path):
+    seen = {}
+    trade, term, popen = _start(monkeypatch, tmp_path,
+                                ["start", "--take-over", "--skip-r2-checks"], guard_reasons=[])
+    from scripts import r2_sync
+    monkeypatch.setattr(r2_sync, "start_guards", lambda **kw: seen.update(kw) or [])
+    trade.main()
+    assert seen == {"force_lock": True, "skip": True}
+    popen.assert_called_once()
+    assert popen.call_args.kwargs["env"] is None      # FORCE_RESET not set
+
+
+def test_start_same_host_restart_allowed(monkeypatch, tmp_path):
+    client = _r2_env(monkeypatch, "machine-a")
+    client.objects["live_owner.json"] = (
+        b'{"host": "machine-a", "started_at": "2026-10-05T09:00:00-04:00", "session_date": "x"}')
+    trade, term, popen = _start(monkeypatch, tmp_path, ["start", "--resume"])
+    trade.main()
+    popen.assert_called_once()
+    import json
+    assert json.loads(client.objects["live_owner.json"])["started_at"] != "2026-10-05T09:00:00-04:00"
+
+
+def test_start_foreign_lock_refused_and_lock_untouched(monkeypatch, tmp_path):
+    client = _r2_env(monkeypatch, "machine-b")
+    before = b'{"host": "machine-a", "started_at": "2026-10-05T09:00:00-04:00"}'
+    client.objects["live_owner.json"] = before
+    trade, term, popen = _start(monkeypatch, tmp_path, ["start", "--resume"])
+    with pytest.raises(SystemExit) as e:
+        trade.main()
+    assert e.value.code == 1
+    term.assert_not_called()
+    popen.assert_not_called()
+    assert client.objects["live_owner.json"] == before
+
+
+def test_live_lock_status_release_take_over(monkeypatch, tmp_path, capsys):
+    client = _r2_env(monkeypatch, "machine-b")
+    trade = _import_trade(monkeypatch, tmp_path)
+
+    def run(*a):
+        monkeypatch.setattr(sys, "argv", ["trade.py", "live-lock", *a])
+        trade.main()
+        return capsys.readouterr().out
+
+    assert "none" in run("status")
+    client.objects["live_owner.json"] = (
+        b'{"host": "machine-a", "started_at": "2026-10-05T09:00:00-04:00", "session_date": "d"}')
+    assert "host=machine-a" in run()
+    with pytest.raises(SystemExit):
+        run("release")                                  # foreign: refused
+    assert "live_owner.json" in client.objects
+    assert "released" in run("release", "--take-over")
+    assert "live_owner.json" not in client.objects
+    assert "taken over by machine-b" in run("take-over")
+    assert "[this host]" in run("status")
+    assert "released" in run("release")                 # own lock: no flag needed

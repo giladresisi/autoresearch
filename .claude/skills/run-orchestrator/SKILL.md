@@ -74,6 +74,14 @@ day — but do not reach for `--force` as a habit. It is valid only with `ACT_TR
 `--force` restarts without a prompt and resets hypothesis/position state
 at session start.
 
+**The start may REFUSE (plan 51, when R2 is configured).** `trade.py start` runs three guards
+first and exits 1 with `ERROR: start refused by the two-machine guards:` plus one line per
+reason: (1) stale data ("this machine is behind R2 ... run `trade.py sync` first" / a parquet
+conflict), (2) HEAD ("published data came from commit ..., not in this checkout" or "tracked files
+have uncommitted changes"), (3) live lock ("the live is locked by host ..." with its age), or
+"R2 unreachable or unreadable". Show the refusal text to the operator verbatim and STOP. Never
+retry with `--take-over` or `--skip-r2-checks` on your own; those are the operator's call.
+
 Choose flags based on the user's request:
 
 | User intent | Command |
