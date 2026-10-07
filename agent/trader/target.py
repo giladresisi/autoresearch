@@ -36,6 +36,7 @@ from agent.derive_facts import build_menus, facts_to_validator_dict
 from agent.facts.assemble import build_bundle
 from agent.facts.detectors._common import normalize
 from agent.facts.htf_extremes import menu_rows, pools_at
+from agent.trader.tmso_reject import MICRO_SESSION_MINUTES
 
 #: `build_menus` keys its DOL menus by the plan's own direction words.
 _DIRECTIONS = ("UP", "DOWN")
@@ -92,13 +93,17 @@ _BLOCK_STARTS = (("asia", 18), ("london", 0), ("ny_morning", 6), ("ny_evening", 
 def _running_block(frame, now):
     """Running high/low of the 6h block `now` sits in, named as the bundle will name it
     once it closes. The bundle only lists CLOSED blocks; the legacy universe carried the
-    in-progress one too (2026-09-18 09:41: ny_morning_low 29764.0 was the live block)."""
+    in-progress one too (2026-09-18 09:41: ny_morning_low 29764.0 was the live block).
+    In the block's first micro-session the range starts at the PREVIOUS block's start,
+    like the extended day and week windows (`derive_facts._day_start_ts`, `week_start_ts`)."""
     out = []
     try:
         h = int(now.hour)
         name, start_h = next((n, s) for n, s in _BLOCK_STARTS
                              if (s <= h < s + 6) or (s == 18 and h >= 18))
         start = now.normalize() + pd.Timedelta(hours=start_h)
+        if now - start < pd.Timedelta(minutes=MICRO_SESSION_MINUTES):
+            start -= pd.Timedelta(hours=6)
         seg = frame[(frame.index >= start) & (frame.index <= now)]
         if len(seg):
             out.append({"name": f"{name}(cur)_high", "price": float(seg["High"].max()),
