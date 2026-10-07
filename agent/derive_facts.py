@@ -144,7 +144,9 @@ def _day_start_ts(now: pd.Timestamp) -> pd.Timestamp:
     exactly the current session's own open (no extension needed -- by then the session
     already has ample same-session data). Deliberately does NOT port
     compute_live_hl_mid's opening-spike outlier skip (excluding the first 90min from
-    whichever side it distorts) -- window extension only, a separate refinement."""
+    whichever side it distorts) -- window extension only, a separate refinement. Asia and
+    London roll a weekend day back to Friday, so a Sunday-open session reaches Friday's NY
+    blocks instead of an empty weekend window."""
     today = now.date()
     if now.hour >= 18:
         d, hr = today, 6
@@ -152,6 +154,8 @@ def _day_start_ts(now: pd.Timestamp) -> pd.Timestamp:
         d, hr = today - datetime.timedelta(days=1), 12
     else:
         d, hr = today - datetime.timedelta(days=1), 18
+    while hr != 18 and d.weekday() >= 5:
+        d -= datetime.timedelta(days=1)
     return pd.Timestamp(datetime.datetime(d.year, d.month, d.day, hr, 0), tz=TZ)
 
 
