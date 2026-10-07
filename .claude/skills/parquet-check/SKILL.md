@@ -15,6 +15,12 @@ description: >
 Validates and repairs 1s session parquet files, merges them into main parquets, and
 backs up the result. Runs fully autonomously once invoked — no confirmation prompts.
 
+**Agent-free equivalent (session-end):** `uv run python trade.py session-end` runs the same
+engine with this skill's rules fixed in code (`scripts/session_end.py`): it refuses when IB is
+down (Step 0), retries a failed 1s merge after a 650 s IB pacing wait (twice), maps the
+benign exit 1 to 0, and prints the Step-4 summary. `--dry-run` / `--full-validate` pass through.
+Use it wherever no agent is present; this skill remains for interactive runs.
+
 ## Mode Selection
 
 | Context | Mode |
