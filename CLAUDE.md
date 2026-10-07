@@ -154,6 +154,19 @@ baselines below are historical.
   follow-up stop-outs (not counted in `attempts_used`); the regular mechanisms stay shut
   meanwhile (`entry_block` `followup_only`). Records `followup_opened` / `_skipped` /
   `_closed`. A plain replay does not load `.env`: set the rollback in the shell.
+- `ACT_NYM_MID_REJECT` (`l2-mechanisms.md` §11.9 CANDIDATE, 2026-10-06) is **ON by default**
+  (`nym_mid_reject.DEFAULT_ENABLED`, one constant; operator decision 2026-10-07):
+  unset or empty = the default; `0`/`false`/`no`/`off` = off (the bar loop and the plan's
+  `armed_classes` exactly as before); `1`/`true`/`yes`/`on` = on; read once per Executor
+  (and by the Planner at the arm); `nym_mid_reject.NYM_MID_REJECT_ENABLED` overrides it for a
+  harness. A market mechanism: the 09:30 open on the thesis side of the MNQ NY-morning mid
+  (06:00 range high+low / 2, recomputed every 1m close), a bar trading through the mid
+  against the thesis, and that bar or the next closing back across it with the thesis
+  against its own open -> enter at that close, stop 20 pts; one FILL a day; sweep bars
+  from 09:31 (the 09:30 opening bar is excluded, operator 2026-10-07), no fire at/after
+  10:30; every market-mechanism gate and veto applies. Same bar as `tmso_reject` = one entry,
+  `nym_mid_reject`'s, with the bigger stop (`also_fired` on the fill). A plain replay does
+  not load `.env`: set it in the shell for a replay.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.

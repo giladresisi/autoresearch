@@ -172,7 +172,8 @@ tuning; the rules are fixed.
     100.00 is allowed. No hysteresis and no latch: every fire is measured afresh, so entries
     are re-allowed as soon as a fire's price is back inside the distance.
   - **Scope:** `fvg_1m_post_extreme` (§6, tick and close paths), `extreme_reject_close`
-    (§7), `tmso_reject`, `fvg_1h_reject`, `micro_smt_reject` (§7a). The resting-order
+    (§7), `tmso_reject`, `fvg_1h_reject`, `micro_smt_reject` (§7a), and the §11.9
+    CANDIDATE `nym_mid_reject` while its flag is on. The resting-order
     mechanisms (§4/§5, dormant by default since 879032b) are NOT covered: their distance
     guard is the max-distance guard above.
   - **Order of evaluation:** EACH fire is filtered BEFORE first-trigger arbitration, so a
@@ -2364,3 +2365,114 @@ replay); live wiring is the existing order port, untested live. The rig says the
 follow-up as built rarely captures the continuation it was designed for; the open
 questions above (origin for the structure veto, break-even on a follow-up position, the
 stops) are where to look next.
+
+### 11.9 CANDIDATE — `nym_mid_reject`: a sweep of the NY-morning mid closed back with the thesis (2026-10-06, operator; O7)
+
+**Not a rule.** A market entry mechanism beside §§2-8, leaving their text and their
+mechanisms untouched. Code `agent/trader/nym_mid_reject.py` (a pure state machine over
+completed 1m bars, the shape of `tmso_reject` on a different anchor), driven from
+`Executor._drive_market_mechanisms` beside `tmso_reject`; env var `ACT_NYM_MID_REJECT`,
+**ON by default for now** (`nym_mid_reject.DEFAULT_ENABLED`, one constant; the operator
+confirms the default at commit time): unset or empty = the default, `0` / `false` / `no` /
+`off` = off, `1` / `true` / `yes` / `on` = on, read once per Executor (and by the Planner,
+which arms `nym_mid_reject` in `armed_classes` only while it is on);
+`nym_mid_reject.NYM_MID_REJECT_ENABLED` overrides it for a harness. Off = the bar loop and
+the plan exactly as before.
+
+**As built (operator spec 2026-10-06, all readings confirmed by the operator).**
+- *The mid.* MNQ, recomputed at the close of every 1m bar: (High + Low) / 2 of the range
+  from the 06:00 ET open through the close of the last CLOSED 1m bar, the bar being judged
+  included. Never a fact, a menu row or a KB input (no thesis recording is re-keyed).
+- *Precondition, once a day.* The 09:30 open (the first print of the 09:30 bar) on the
+  favourable side of the mid as of that instant (range 06:00 through the 09:29 bar): UP
+  open > mid, DOWN open < mid. Otherwise the mechanism is off for the day.
+- *Sweep.* A bar labelled 09:31 or later trading through the mid against the thesis (UP
+  Low < mid; DOWN High > mid); it may close on either side. **The 09:30 opening bar is
+  excluded** (operator, 2026-10-07, motivated by 09-18, whose only fire was the opening
+  bar sweeping and closing back, stopped in 8 s with MFE 0): it can neither sweep, arm nor
+  confirm (`FIRST_SWEEP_ET` = 09:31). The precondition still reads the 09:30 open.
+- *Fire.* The sweep bar itself, or the immediately next 1m bar, closing on the favourable
+  side of ITS OWN mid and with the thesis against its own open (UP Close > mid and Close >
+  Open). Market entry at that bar's close, at the instant the bar completes (like
+  `tmso_reject`). Stop `STOP_PTS` = 20 pts from the entry.
+- *Budget.* ONE FILL a day: latched when a fire of this mechanism fills, never on the fire
+  itself, so a vetoed / blocked / out-arbitrated fire leaves it free; no re-fire after its
+  stop-out and no stop-bar retry (§7c does not apply). A stop-out spends a normal attempt.
+- *Window and gates.* Sweep bars from 09:31, fires from 09:32:00, none at or after
+  10:30:00 ET; and every gate the
+  other market mechanisms get: nothing while a position is open, the settle window, §8's
+  spine gates (10:30 cutoff, after-positive-trade), §2's cooldown, the attempt budget, §2's
+  extension veto, §11.6's SMT-wait block. Armed only in the plan's direction. T2 selection
+  and position management exactly as for every fill. Live, it reaches the broker through
+  the existing market-entry path (no new order kind).
+- *Shared bar with `tmso_reject`* (operator decision). When both fire on the same bar
+  (after the per-fire vetoes, before first-trigger arbitration), ONE entry is taken,
+  attributed to `nym_mid_reject`, with the BIGGER stop (the one farther from the entry:
+  O7's 20 against tmso's at most 15); the fill records `also_fired: [{mechanism:
+  tmso_reject, price, stop, level}]`; both latches are consumed (tmso's one fire per
+  micro-session by its own fire, nym's by the fill). A tmso stop-bar retry is not merged.
+- *Records.* The fill carries `nym_mid {level, confirm: sweep_bar | next_bar, bar}`; vetoes
+  and blocks are the ordinary `veto` records with `mechanism: nym_mid_reject`.
+
+**The motivating date (2026-10-06, UP).** The 09:35 bar wicks to 31478.50 under the mid,
+closing red; the next bar confirms:
+09:36 bar L 31457.75 C 31489.50 > O 31482.50 and > mid 31480.00 -> long 09:37:00 @ 31489.50, stop 31469.50
+(registry key `o7-1006`, pinned over the real 1m tape). In the replay (oracle UP, both L1
+overrides patched out) T2 `htf_month_running_high` 31567.00 is touched 10:07:52: +77.50;
+without the mechanism the day is `tmso_reject` 09:39:00 stopped and `fvg_1m_post_extreme`
+10:01:00 stopped, -29.50. As an ENTRY: MFE 92.00 against its 20-pt stop before the first
+40-pt retrace.
+
+**Implementer-pinned readings (not individually confirmed by the operator).**
+1. Strict inequalities everywhere: a Low exactly AT the mid is not a sweep; an open or a
+   close exactly at the mid is not favourable.
+2. The mid needs the 06:00 open in the frame: a frame starting after 06:00:59 gives no mid
+   (the day is off, `precondition.reason = no_range`).
+3. "No fire at or after 10:30:00" — the same instant as `executor.ENTRY_CUTOFF_ET`, so a
+   sweep on the 10:29 bar can never fire.
+4. A bar that fails to confirm an armed sweep but itself sweeps re-arms (it is a new sweep
+   bar); a bar that neither confirms nor sweeps disarms.
+5. Bars the machine is not driven on (a position open, a cooldown, a block) are not seen:
+   a sweep on such a bar never arms, exactly as for `tmso_reject`.
+6. The bigger stop on a shared bar is the one farther from the (common) entry price.
+7. A shared fill is `nym_mid_reject`'s, so its stop-out arms no §7c retry.
+
+**What was measured** — measured BEFORE the 09:30 opening-bar exclusion; not re-measured (operator, 2026-10-07): 09-18's 09:31:00 fire below came from the opening bar and no longer fires, and the named-case figures were not re-era'd. **(2026-10-07, the real implementation; `ACT_NYM_MID_REJECT=0` vs `1`,
+oracle direction from `scripts/ab_micro_smt.oracle_for` — the skeleton/label corpus where
+it covers the date, else its bars rule: bias = the larger excursion from the 09:30 open over
+09:30-13:00 — both L1 overrides patched out, `--thesis-file`, window to 13:00, no model
+call). Entries judged by MFE against their own stop to the first flat 40-pt retrace.**
+- *Re-verification, 09-16..10-02 + 10-06 (14 dates).* Identical to the research
+  prototype: 09-18 09:31:00 @ 29813.00 stopped (MFE 0); 09-25 09:43:00 @ 30881.00 (MFE
+  33.25, stopped; replaces two `tmso_reject` stop-outs); 10-06 09:37:00 (above); 10-01's
+  shared bar is now ONE fill, `nym_mid_reject` 09:35:00 @ 30809.50 with the 20-pt stop
+  30829.50 and `also_fired` tmso (stop 30824.50) — scratched at break-even exactly as
+  tmso's was, day unchanged. Precondition held on 6 of 14.
+- *The 15 replayable dates before 09-16 (08-26..09-15).* Precondition held on 6; 4 fills:
+  09-02 09:39:00 @ 29057.00 MFE 62.00 (3.1 R; replaces `tmso_reject` 09:40:00, MFE 32.00);
+  09-14 09:42:00 @ 29198.50 MFE 137.00 (6.85 R; replaces `tmso_reject` 09:43:00, MFE
+  123.25, on the same move); 08-27 09:42:00 @ 29503.75 stopped (MFE 19.75; its 09:32:00
+  fire was vetoed `extension`, 102 pts); 09-04 09:46:00 @ 29593.00 stopped (MFE 4.00). No
+  fire on 09-03 (no sweep in the window) or 09-09 (its 10:26:00 sweep came after the plan
+  died at its target, 09:59:20). Session totals (secondary): +15.00, +13.75, -20.00, -20.00.
+- *Named cases (flag ON vs OFF, `run_replay` with the registry theses, overrides on).*
+  `cur-0813` +55.75 -> **+121.25** (`nym_mid_reject` 09:33:00 @ 29880.25 to the same T2
+  30001.5 at 09:36:43, pre-empting `tmso_reject` 09:35:00); `sec10-0813` (5m on) +93.25 ->
+  +121.25 (the same nym entry pre-empts the §5 09:33:26 fill); `cur-0818` +129.25 ->
+  **+179.00** (nym 09:33:00 @ 29665.25 stopped 09:34:56 -20.00; §7's 09:42:00 @ 29760.25
+  then inherits the nym fill's T2 `prev1_week_low` 29533.5 under the first-T2 reuse and is
+  closed by `micro_smt_exit` 10:56:00 @ 29561.25, +199.00; 1 attempt); `sec5-0818-5m-t2`
+  +132.25 -> +183.00 (same shape; the §5 fill becomes 09:41:00 @ 29764.25 and is RECORDED
+  under `nym_mid_reject` — a pre-existing labelling defect: the resting-fill path records
+  `_state["mechanism"]`, the last market fill's name); `cur-0814` same P&L, but its 09:32:00
+  entry is a shared bar and is now attributed to `nym_mid_reject` with stop 30265.00
+  instead of tmso's 30260.00. (With the flag OFF `cur-0814` already replays +46.50 on one
+  fill against the registry's +38.50 / 2 att — drift that predates this change.) The
+  precondition fails on 08-11, 08-12, 08-21, 09-28 and 09-29, so those cases cannot move.
+  The registry rows are NOT re-era'd: that waits on the operator's flag decision; with the
+  flag ON the slow tests pinning `cur-0813`, `sec10-0813`, `cur-0814`, `cur-0818` and
+  `sec5-0818-fresh-entry` would fail.
+
+**Not done.** The slow suite was not run. No study beyond these 29 dates; 6 fills in total
+outside 10-01's shared bar: 3 runners by MFE (10-06 4.6 R, 09-02 3.1 R, 09-14 6.85 R) and
+4 stopped (09-18 0 R, 08-27 1.0 R, 09-04 0.2 R, 09-25 1.66 R). The stop (20) is untuned.

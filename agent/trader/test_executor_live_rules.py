@@ -82,6 +82,14 @@ class StubMarket:
     def sec7_on_bar_close(self, *a, **k): return None
     def tmso_on_bar_close(self, *a, **k): return None
     def fvg1h_on_bar_close(self, *a, **k): return None
+    def nym_on_bar_close(self, *a, **k): return None
+    def latch_nym(self): pass
+
+    @staticmethod
+    def merge_shared_bar(fires):
+        from agent.trader.market_mechanisms import MarketMechanisms
+        return MarketMechanisms.merge_shared_bar(fires)
+
     # O1 (§7c) inert here: `test_executor_stop_bar_retry.py` covers the retry.
     def stop_bar_retry_enabled(self, mechanism): return False
     def stop_bar_retry_due(self, now): return False

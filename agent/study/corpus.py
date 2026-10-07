@@ -40,7 +40,7 @@ DEFAULT_RETRACE_FRACTION = 0.0      # no scaling with the leg (operator, 2026-10
 # criterion when the trade did not stop out (a stop-out's own price is exact).
 STOP_CAP_BY_MECHANISM = {
     "fvg_1m_post_extreme": 30.0, "extreme_reject_close": 15.0, "tmso_reject": 15.0,
-    "micro_smt_reject": 15.0, "fvg_1h_reject": 25.0,
+    "micro_smt_reject": 15.0, "fvg_1h_reject": 25.0, "nym_mid_reject": 20.0,
 }
 DEFAULT_STOP_CAP = 25.0            # resting 5m entries (§9, `executor.STOP_CAP_PTS`)
 # How far back a code-built thesis's placeholder falsifier sits, against the bias.

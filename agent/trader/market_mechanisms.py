@@ -38,6 +38,8 @@ from agent.trader.arbiter import Arbiter, Candidate
 from agent.trader.episode import Episode, evaluation_order
 from agent.trader.extreme_reject import ExtremeReject, choose_track
 from agent.trader.tmso_reject import TmsoReject, prior_adverse_excursion, tmso_for
+from agent.trader.nym_mid_reject import NymMidReject
+import agent.trader.nym_mid_reject as nym_mid_mod
 from agent.trader.fvg_reject import FvgReject, zone_at_0700
 from agent.trader.micro_smt import (MicroSmt, entry_latch_from,
                                     entry_previous_micro_extremes, micro_smt_entry_armed,
@@ -104,6 +106,9 @@ class MarketMechanisms:
         # CANDIDATE — see `fvg_reject.py`. Self-gating: inert until the 07:00 1h FVG
         # exists and price makes a new post-09:30 extreme inside it.
         self._fvg1h = FvgReject(direction)
+        # §11.9 CANDIDATE — see `nym_mid_reject.py`. Built eagerly; the Executor drives it
+        # only when `ACT_NYM_MID_REJECT` is on, and it latches only on a FILL (`latch_nym`).
+        self._nym = NymMidReject(direction)
         # O3/O4, ADOPTED 2026-09-26 (`l2-mechanisms.md` §7a/§7b) — see `micro_smt.py`.
         # Both flag-gated, both default ON, and built eagerly regardless: cheap, and
         # self-gating until a previous micro-session exists (for the entry, from 09:00
@@ -126,6 +131,7 @@ class MarketMechanisms:
         return {"sec7": self._sec7.state() if self._sec7 is not None else None,
                 "episodes": {k: e.state() for k, e in self._episodes.items()},
                 "tmso": self._tmso.state(), "fvg_1h": self._fvg1h.state(),
+                "nym_mid": self._nym.state(),
                 "micro_smt_entry": self._micro_smt_entry.state(),
                 "micro_smt_exit": self._micro_smt_exit.state(),
                 "seeded": self._seeded}
@@ -169,6 +175,15 @@ class MarketMechanisms:
         one would reopen the ORIGINAL fire's session."""
         if "retry_of" not in fire:
             self._tmso.release_fire(fire["time"])
+
+    # -- nym_mid_reject (§11.9 CANDIDATE) --------------------------------------- #
+
+    def nym_on_bar_close(self, now, bar, mnq) -> "dict | None":
+        return self._nym.on_bar_close(now, bar, mnq)
+
+    def latch_nym(self) -> None:
+        """A `nym_mid_reject` fire FILLED: the day's one fire is spent."""
+        self._nym.latch()
 
     def fvg1h_on_bar_close(self, now, bar, mnq) -> "dict | None":
         return self._fvg1h.on_bar_close(now, bar, zone_at_0700(mnq, now))
@@ -306,8 +321,42 @@ class MarketMechanisms:
             out.append(Candidate("fvg_1m_post_extreme", "market"))
         out.append(Candidate("tmso_reject", "market"))
         out.append(Candidate("fvg_1h_reject", "market"))
+        if nym_mid_mod.enabled():
+            out.append(Candidate("nym_mid_reject", "market"))
         if micro_smt_entry_armed():
             out.append(Candidate("micro_smt_reject", "market"))
+        return out
+
+    @staticmethod
+    def merge_shared_bar(fires) -> list:
+        """§11.9's shared-bar rule (operator, 2026-10-06): when `nym_mid_reject` and
+        `tmso_reject` both fire on the same bar (both enter at that bar's close), ONE entry
+        is taken, attributed to `nym_mid_reject`, with the BIGGER of the two stops (the one
+        farther from the entry), and the fill records that `tmso_reject` fired too
+        (`also_fired`). Both latches are consumed: tmso's by its own fire, nym's by the
+        fill. Applied AFTER the per-fire vetoes, so a vetoed fire never merges.
+        `fires` is `[(mechanism, fire_or_None), ...]`; returns the same shape."""
+        nym = next((f for m, f in fires if m == "nym_mid_reject" and f is not None), None)
+        # A stop-bar retry (§7c) is not the ordinary fire; it holds no latch to share.
+        tmso = next((f for m, f in fires if m == "tmso_reject" and f is not None
+                     and "retry_of" not in f), None)
+        if nym is None or tmso is None:
+            return fires
+        price = float(nym["price"])
+        stop = max((float(nym["stop"]), float(tmso["stop"])),
+                   key=lambda s: abs(price - s))
+        merged = dict(nym)
+        merged["stop"] = stop
+        merged["also_fired"] = [{"mechanism": "tmso_reject", "price": tmso.get("price"),
+                                 "stop": tmso.get("stop"), "level": tmso.get("level")}]
+        out = []
+        for m, f in fires:
+            if f is nym:
+                out.append((m, merged))
+            elif f is tmso:
+                out.append((m, None))
+            else:
+                out.append((m, f))
         return out
 
     def pick(self, fires) -> "dict | None":

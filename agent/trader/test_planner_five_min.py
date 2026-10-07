@@ -41,6 +41,8 @@ def test_neither_5m_class_is_armed_by_default(tape, monkeypatch):
     # test is about the UNRELATED §4/§5 5m suspension, so it is pinned OFF here rather
     # than baking today's O3 default into an assertion about a different mechanism.
     monkeypatch.setattr("agent.trader.planner.micro_smt_entry_armed", lambda: False)
+    # Same for the §11.9 CANDIDATE `nym_mid_reject` (flag-gated, see its own tests).
+    monkeypatch.setattr("agent.trader.planner.nym_mid_reject_armed", lambda: False)
     for bias in ("DOWN", "UP"):
         armed = _plan(tape, bias)["armed_classes"]
         assert not [c for c in armed if c in FIVE_MIN_CLASSES], armed
@@ -53,6 +55,7 @@ def test_micro_smt_reject_is_armed_by_default_alongside_the_self_gating_four(tap
     """O3's actual default (2026-09-26 adoption): armed classes are the self-gating four
     PLUS `micro_smt_reject`, unlike the still-suspended 5m pair."""
     monkeypatch.delenv(FIVE_MIN_ENV_FLAG, raising=False)
+    monkeypatch.setattr("agent.trader.planner.nym_mid_reject_armed", lambda: False)
     assert micro_smt_entry_armed() is True
     armed = _plan(tape, "DOWN")["armed_classes"]
     assert list(armed) == list(SELF_GATING_CLASSES) + ["micro_smt_reject"]
