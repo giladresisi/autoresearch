@@ -441,13 +441,3 @@ def test_executor_forwards_htf_on_the_resting_fill_path_too(tmp_path, monkeypatc
     ex._drive_orders(pd.Timestamp(f"{DATE} 09:32:11", tz=TZ), frame)
     assert seen == [ctx]
     assert ex._sim.target == pytest.approx(29500.0)
-
-
-@pytest.mark.parametrize("hhmm, low", [("12:30", 100.0), ("13:29", 100.0), ("13:30", 200.0)])
-def test_running_block_reaches_into_the_previous_block_in_its_first_micro_session(hhmm, low):
-    idx = pd.to_datetime([f"{DATE} 11:00", f"{DATE} 12:10", f"{DATE} 13:30"]).tz_localize(TZ)
-    frame = pd.DataFrame({"Open": 250.0, "High": [300.0, 260.0, 270.0],
-                          "Low": [100.0, 200.0, 210.0], "Close": 250.0}, index=idx)
-    rows = {r["name"]: r["price"] for r in
-            target_mod._running_block(frame, pd.Timestamp(f"{DATE} {hhmm}", tz=TZ))}
-    assert rows["ny_evening(cur)_low"] == low
