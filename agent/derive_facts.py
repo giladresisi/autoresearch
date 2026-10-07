@@ -119,10 +119,8 @@ def week_start_ts(now):
     start of Friday's OWN session). A trading day's session runs from 18:00 the evening
     before to ~17:00 that day (trade_date's +7h convention) -- anchoring at "Thursday 18:00"
     would only capture the LAST hour of Thursday's session (18:00-17:00 the next day is
-    already trade-date Friday), missing the entire rest of it. This is a DELIBERATE
-    divergence from session_pipeline._week_start_ts / hypothesis.py::compute_live_hl_mid
-    (both still anchor one day later, e.g. prev Thursday for a Monday session) -- those are
-    live production code, not touched here; this fixes the L1-thesis-only copy."""
+    already trade-date Friday), missing the entire rest of it. Same anchor as
+    session_pipeline._week_start_ts / hypothesis.py::compute_live_hl_mid."""
     today = now.date()
     session_open = today if now.hour >= 18 else today - datetime.timedelta(days=1)
     wd = session_open.weekday()  # Mon=0 .. Sun=6
