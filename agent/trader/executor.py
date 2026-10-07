@@ -67,6 +67,7 @@ import agent.trader.episode as episode
 import agent.trader.trail as trail
 import agent.trader.mes_sweep as mes_sweep
 import agent.trader.followup as followup
+import agent.trader.nym_mid_reject as nym_mid_reject
 from agent.trader import premove_context
 from agent.trader.smt_wait import SmtWait
 
@@ -268,6 +269,8 @@ class Executor:
         # `_smt_wait` is built on the first fire it judges: it needs the session date.
         self._smt_wait_block = smt_wait_block_enabled()
         self._smt_wait = None
+        # `nym_mid_reject` (§11.9 CANDIDATE): its switch, read ONCE for the same reason.
+        self._nym_mid = nym_mid_reject.enabled()
         # MES day-extreme sweep stop (`agent/trader/mes_sweep.py`, §11.7 CANDIDATE, ON by
         # default): the switch, read once, and the stage of the CURRENT position.
         self._mes_sweep_enabled = mes_sweep.enabled()
@@ -1938,6 +1941,11 @@ class Executor:
                               self._market.tmso_on_bar_close(now, bar, mnq)))
                 fires.append(("fvg_1h_reject",
                               self._market.fvg1h_on_bar_close(now, bar, mnq)))
+                if self._nym_mid:
+                    # §11.9 CANDIDATE: a sweep of the NY-morning mid closed back with the
+                    # thesis. Same gates as `tmso_reject` (driven only with no block).
+                    fires.append(("nym_mid_reject",
+                                  self._market.nym_on_bar_close(now, bar, mnq)))
             if micro_smt.MICRO_SMT_ENTRY_ENABLED and self._micro_smt_entry_block(now) is None:
                 mes = truncate(normalize((self._bars or {}).get("MES")), now)
                 mes_bar = self._completed_1m(mes, now) if len(mes) else None
@@ -1968,6 +1976,10 @@ class Executor:
             if retry is not None and not any(f is retry for _, f in fires):
                 self._stop_bar_retry_skip(now, "vetoed", pending=retry_pending)
                 retry = None
+        if self._nym_mid:
+            # §11.9's shared-bar rule, after every veto: nym + tmso on one bar -> one
+            # entry, nym's, with the bigger stop.
+            fires = self._market.merge_shared_bar(fires)
         fire = self._market.pick(fires)
         if fire is None:
             return
@@ -2096,6 +2108,11 @@ class Executor:
         extra = {"retry_of": retry_of} if retry_of else {}
         if fire.get("followup"):
             extra["followup"] = True
+        if mechanism == "nym_mid_reject":
+            extra["nym_mid"] = {"level": fire.get("level"), "confirm": fire.get("confirm"),
+                                "bar": fire.get("bar")}
+            if fire.get("also_fired"):
+                extra["also_fired"] = fire["also_fired"]
         self._rec.order_event(now=now, plan_id=self._plan.get("plan_id"),
                               mechanism=mechanism,
                               artifact_label=self._label_for(ev.get("artifact_id")),
@@ -2104,6 +2121,8 @@ class Executor:
             self._set_target_on_fill(now)
             self._open_retry = retry_of         # after the reset every fill performs
             self._pos_is_followup = bool(fire.get("followup"))
+            if mechanism == "nym_mid_reject":
+                self._market.latch_nym()          # one FILL a day (§11.9)
         # NO attempt is spent HERE. The budget counts STOP-OUTS, not entries
         # (`_on_stop_out`, and `order_sim`'s own "the attempt counter counts stop-outs"),
         # so incrementing on the fill double-counted every §6/§7 trade that then stopped

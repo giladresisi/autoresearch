@@ -660,6 +660,9 @@ class StubMarket:
     def sec7_on_bar_close(self, *a, **k): return None
     def tmso_on_bar_close(self, *a, **k): return None
     def fvg1h_on_bar_close(self, *a, **k): return None
+    def nym_on_bar_close(self, *a, **k): return None
+    def latch_nym(self): pass
+    def merge_shared_bar(self, fires): return fires
 
 
 class _FakeAnalyzer:

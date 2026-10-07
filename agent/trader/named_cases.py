@@ -563,6 +563,21 @@ CASES: "tuple[NamedCase, ...]" = (
                     "stopped 10:25:57 @ 30676.25, **-15.00**; day -15.00 -> -30.00, 2 att"),
     ),
 
+    # ---- §11.9 nym_mid_reject CANDIDATE (operator, 2026-10-06) ------------------ #
+    NamedCase(
+        key="o7-1006", date="2026-10-06", mechanism="nym_mid_reject",
+        doc_section="§11.9", era="current-20260927",
+        entry_time="09:37:00", entry_price=31489.50, stop=31469.50,
+        pinned_by=("agent/trader/test_nym_mid_reject.py::"
+                   "test_1006_real_tape_fires_long_0937_at_31489_50",),
+        note="The fire (entry/stop) is pinned over the real 1m tape and depends only on "
+             "the plan direction (UP). The exit is the replay's (§11.9); no day figure is "
+             "registered: it is a CANDIDATE and the day's P&L depends on every other "
+             "mechanism's fills.",
+        doc_quotes=("09:36 bar L 31457.75 C 31489.50 > O 31482.50 and > mid 31480.00 -> "
+                    "long 09:37:00 @ 31489.50, stop 31469.50",),
+    ),
+
     # ---- §11's calibrated fill rows (the ten documented 5m bindings) ------------ #
     NamedCase(
         key="calib-0821-EXCLUDED", date="2026-08-21",

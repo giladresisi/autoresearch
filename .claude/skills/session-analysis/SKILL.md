@@ -46,7 +46,8 @@ invoked from only runs the Step-1 gate; nothing is edited, replayed or committed
 `trader_only=True`: the legacy trend/SMT/hypothesis/strategy engine is BLOCKED and every
 entry comes from the trader graft (`agent/trader`: L1 Analyzer at 09:20 ET, Planner,
 Executor; market-only mechanisms `fvg_1m_post_extreme`, `extreme_reject_close`,
-`tmso_reject`, `fvg_1h_reject`, `micro_smt_reject`; no entries at/after 10:30 ET; open
+`tmso_reject`, `fvg_1h_reject`, `micro_smt_reject`, `nym_mid_reject` (§11.9 CANDIDATE,
+`ACT_NYM_MID_REJECT`); no entries at/after 10:30 ET; open
 position flattened at 13:00 ET). Position management changes often — `l2-mechanisms.md`
 §8 in the analysis worktree is the authority, not any summary in this file. The
 graft's simulated orders are mirrored into the legacy signal vocabulary
@@ -346,7 +347,8 @@ WHICH ENGINE WAS LIVE: since 2026-09-18 (commit 99bb32b) the legacy engine is bl
 (trader_only) and every entry comes from the trader graft (agent/trader): L1 Analyzer arms on
 the 09:20 ET bar (one OpenRouter call), a plan derives on the next bar close, the Executor
 enters by MARKET only via fvg_1m_post_extreme (§6), extreme_reject_close (§7), tmso_reject,
-fvg_1h_reject or micro_smt_reject (§7a), with a stop embedded at the broker and ONE T2 target
+fvg_1h_reject, micro_smt_reject (§7a) or nym_mid_reject (§11.9 CANDIDATE, ACT_NYM_MID_REJECT),
+with a stop embedded at the broker and ONE T2 target
 picked at the fill (exit = market close on a tick touch). No new entries at/after 10:30 ET; an
 open position is flattened at 13:00 ET. Reaching the target kills the plan (no re-entry that
 day); a stop-out spends one of 3 attempts.
@@ -435,7 +437,9 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
 10. <SESSION>\plans.json   (LIVE plan(s) derived from the thesis)
     {plan_id: {direction, dol, valid_while (falsifiers), armed_classes, attempts_used,
     cooldown_until, created_at, last_trend}}. armed_classes MUST be exactly the market set
-    [fvg_1m_post_extreme, extreme_reject_close, tmso_reject, fvg_1h_reject, micro_smt_reject]
+    [fvg_1m_post_extreme, extreme_reject_close, tmso_reject, fvg_1h_reject, micro_smt_reject,
+    nym_mid_reject] (`nym_mid_reject`, §11.9 CANDIDATE, joined 2026-10-06 and is present only
+    while `ACT_NYM_MID_REJECT` is on — ON by default; absent with the flag off is correct)
     (updated 2026-09-26: `fvg_1h_reject` was already unconditionally armed and this line had
     fallen behind; `micro_smt_reject` (O3) joined it at adoption, both flag-gated ON by
     default — see `l2-mechanisms.md` §7a); anything else is [CRITICAL].
