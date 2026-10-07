@@ -40,6 +40,11 @@ lists what must NOT be built.
 
 ## Test baselines
 
+**Operator decision 2026-10-07: the pytest suites are no longer maintained.** Never run any
+of them (default, `-m slow`, `tests/`, any subset) unless the operator explicitly asks, and
+do not add or update tests alongside code changes. Do not delete the suites yet. The
+baselines below are historical.
+
 (Measured 2026-09-27, plan 42.)
 
 - `python -m pytest tests/ -q` → **2 failed / 1578 passed / 4 skipped / 16 errors.**
