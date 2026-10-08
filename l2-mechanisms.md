@@ -1132,6 +1132,7 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
 | Max distance, current price → trigger | 60 pts | Beyond that we donate too much of the multi-hour L1 move |
 | Extension veto, post-09:30 counter-extreme → entry price (`EXTENSION_MAX_PTS`) | 100 pts | §2; market mechanisms only; strictly-greater vetoes. Operator's value (2026-09-29, confirmed 2026-09-30), NOT fitted: on the motivating day every cap in 50..172 behaves identically, and the cross-era tally in §2 has the removed set net positive (+734.50) at 100, negative only from ~130. `cur-0814`'s winner is 0.75 pt inside it. `ACT_EXTENSION_VETO=0` disables |
 | Stop-bar retry (`tmso_reject.STOP_BAR_RETRY`, `micro_smt.STOP_BAR_RETRY`) | **True** | §7c; a favourable-close (D1, + MES for O3) stop-out re-enters once at bar B's close, own stop rule, never chained. Operator's decision (2026-09-30) against the research's null result; False restores the pre-O1 stream byte for byte |
+| `tmso_reject` close-back tolerance (`tmso_reject.CLOSE_BACK_TOLERANCE_PTS`) | **2.25 pts**, inclusive | §11.10; a sweep bar whose close lands up to 2.25 pts on the wrong side of TMSO counts as closed back. Operator's value (2026-10-08), the smallest that flips 10-07; NOT fitted. `0.0` restores the strict test byte for byte |
 | No-move zone around resting trigger | 15 pts | See §8 |
 | `fvg_1m_post_extreme` SL buffer beyond excursion extreme | 2 pts | §6; excursion-anchored, not gap-edge-anchored |
 | `fvg_1m_post_extreme` SL cap | 30 pts from entry | §6; bounds deep-excursion episodes |
@@ -2476,3 +2477,44 @@ call). Entries judged by MFE against their own stop to the first flat 40-pt retr
 **Not done.** The slow suite was not run. No study beyond these 29 dates; 6 fills in total
 outside 10-01's shared bar: 3 runners by MFE (10-06 4.6 R, 09-02 3.1 R, 09-14 6.85 R) and
 4 stopped (09-18 0 R, 08-27 1.0 R, 09-04 0.2 R, 09-25 1.66 R). The stop (20) is untuned.
+
+### 11.10 `tmso_reject` close-back tolerance (session 2026-10-07 O1, operator, 2026-10-08)
+
+**What changed.** The sweep bar's "closed back across TMSO" test is inclusive, with a
+tolerance: a short counts `close <= TMSO + 2.25`, a long `close >= TMSO - 2.25`
+(`tmso_reject.CLOSE_BACK_TOLERANCE_PTS`, a module constant; `0.0` = the old strict
+`close < TMSO` / `close > TMSO`). Everything else is unchanged: the colour test, the 50-pt
+excursion veto, one fire per micro-session, and the stop (the swept extreme, capped at 15).
+The aim is to enter one bar earlier when the sweep bar closes ON the line.
+
+**Why 2.25 and not a few ticks.** TMSO is the open of the first 1m bar at or after 09:22:30,
+and the Executor's 1m bars are built from the 1s stream, both live and in replay. Their OPEN
+differs from IB's own 1m bar, and from TradingView's, on 67 of 125 minutes on 10-07, by up to
+3 pts. Closes match on every minute, and volume matches to 99.5%. IB's open usually sits
+inside the last 1s bar of the previous minute: a sub-second boundary skew, not lost ticks.
+On 10-07 the 1s-built TMSO is 31234.00 (one contract at 09:23:00) against IB's 31235.50, so
+the 09:36 close of 31236.25 was 2.25 pts on the wrong side, not 0.75. Reading TMSO from IB's
+1m bar instead would be the first intraday use of IB 1m bars in live (today live reads the
+1m parquet only for history before the open), so the operator chose the tolerance.
+
+**Evidence.**
+- Motivating day, 2026-10-07 (DOWN): the strict path fires 09:38:00 @ 31205.75 (MFE 55.5,
+  3.7R). At 2.25 it fires 09:37:00 @ 31236.25, stop 31247.25 (11 pts), MFE 86.0 (7.8R)
+  before the first 40-pt retrace. Replay: entry MFE sum 91.5 -> 133.5; P&L +6.50 -> +17.00.
+- Corpus scan on the Executor's own frame (112 dates, the machine on its own). At 2.25 it
+  touches 5 days:
+  - 10-07: improves (above).
+  - 09-15: a 0.32R loser becomes a 3.45R winner.
+  - 07-03: still a loser, with a wider stop.
+  - 09-02: a 2.13R winner becomes a 0.5R loser (the one harmed day).
+  - 05-25: a new 0.06R loser.
+  - Mean R 1.24 -> 2.46.
+  - 2.5 adds 06-19 (a 0.74R loser); 1-2 ticks change nothing.
+- Replay A/B, strict vs 2.5, on all six days 2.5 touches: entry MFE 612 -> 696.
+  2.25 differs from 2.5 only on 06-19, which replays identical to strict at 2.25.
+  Session P&L (secondary) +259.5 -> +249.25. The cost is one added early stop on 05-25 and
+  on 09-02, where the bar had really closed beyond TMSO.
+
+**Not done.** No named-case date is touched, so no figure moved. The slow suite was not
+run. The underlying 1s-vs-IB 1m open skew is untraced at the source (live tick-to-1s
+builder, `data/ib_realtime.py`).

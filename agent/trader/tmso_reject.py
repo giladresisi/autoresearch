@@ -113,6 +113,14 @@ SL_CAP_PTS = 15.0
 #: for the next bar. False restores the strict two-bar signature — one line, so the A/B
 #: the docstring asks for is cheap.
 SWEEP_BAR_MAY_CONFIRM = True
+#: How far on the WRONG side of TMSO a sweep bar's close may land and still count as
+#: closed back, inclusive (`close <= TMSO + tol` for a short). Enters a bar earlier when
+#: the close lands on the line. TMSO here is the open of the 1s-built 09:23 bar, which
+#: differs from IB's / TradingView's 1m open on about half of the minutes (10-07: 31234.00
+#: vs 31235.50), so the 09:36 close 31236.25 was 2.25 pts on the wrong side. 2.25 is the
+#: operator's value (session 2026-10-07 O1, l2-mechanisms.md §11.10): the smallest that
+#: flips 10-07. 0.0 restores the strict `close < TMSO` test byte for byte.
+CLOSE_BACK_TOLERANCE_PTS = 2.25
 #: The far-excursion veto (see the docstring). Points beyond TMSO, adverse to the thesis,
 #: reached BEFORE the sweep bar. None disables the veto.
 VETO_EXCURSION_PTS = 50.0
@@ -271,8 +279,13 @@ class TmsoReject:
 
         # Sweep bar: traded through TMSO on the adverse side and closed back across it.
         swept = (float(bar["High"]) >= tmso) if self._short else (float(bar["Low"]) <= tmso)
-        closed_back = (float(bar["Close"]) < tmso) if self._short \
-            else (float(bar["Close"]) > tmso)
+        tol = CLOSE_BACK_TOLERANCE_PTS
+        if tol:
+            closed_back = (float(bar["Close"]) <= tmso + tol) if self._short \
+                else (float(bar["Close"]) >= tmso - tol)
+        else:
+            closed_back = (float(bar["Close"]) < tmso) if self._short \
+                else (float(bar["Close"]) > tmso)
         vetoed = (VETO_EXCURSION_PTS is not None and prior_excursion is not None
                   and prior_excursion > VETO_EXCURSION_PTS)
         if swept and closed_back and not vetoed:

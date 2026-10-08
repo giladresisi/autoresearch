@@ -179,3 +179,40 @@ def test_14_prior_excursion_reads_only_bars_from_tmso_up_to_the_sweep_bar():
     assert tr.prior_adverse_excursion(mnq, TMSO_0925, q2, before, short=False) == 98.0
     assert tr.prior_adverse_excursion(mnq, TMSO_0925, q2, before, short=True) == 0.75
     assert tr.prior_adverse_excursion(mnq, None, q2, before, short=False) is None
+
+
+# -- §11.10: the close-back tolerance (session 2026-10-07 O1) ---------------------- #
+# The real 2026-10-07 09:36 MNQ bar, built from 1s as the Executor sees it, against the
+# 1s-built TMSO 31234.00: it swept over and closed RED 2.25 pts ABOVE the line.
+TMSO_1007 = 31234.00
+BAR_1007_0936 = _bar(31238.75, 31247.25, 31228.25, 31236.25)
+
+
+def test_15_a_close_within_the_tolerance_counts_as_closed_back():
+    m = TmsoReject("DOWN")
+    fire = m.on_bar_close(pd.Timestamp("2026-10-07 09:37", tz=TZ), BAR_1007_0936, TMSO_1007)
+    assert tr.CLOSE_BACK_TOLERANCE_PTS == 2.25
+    assert fire is not None and fire["price"] == 31236.25
+    assert fire["stop"] == 31247.25                          # swept extreme, 11 pts: cap idle
+
+
+def test_16_the_tolerance_is_inclusive_and_bounded(monkeypatch):
+    monkeypatch.setattr(tr, "CLOSE_BACK_TOLERANCE_PTS", 2.0)
+    assert TmsoReject("DOWN").on_bar_close(
+        pd.Timestamp("2026-10-07 09:37", tz=TZ), BAR_1007_0936, TMSO_1007) is None
+    beyond = _bar(TMSO + 3.00, TMSO + 9.00, TMSO - 5.00, TMSO + 2.50)   # 2.50 above: RED
+    m = TmsoReject("DOWN")
+    monkeypatch.setattr(tr, "CLOSE_BACK_TOLERANCE_PTS", 2.25)
+    assert m.on_bar_close(_ts("09:31"), beyond, TMSO) is None
+    assert m.state()["armed"] is False
+    up = _bar(TMSO - 3.00, TMSO + 5.00, TMSO - 9.00, TMSO - 2.25)       # long mirror, GREEN
+    assert TmsoReject("UP").on_bar_close(_ts("09:31"), up, TMSO) is not None
+
+
+def test_17_zero_restores_the_strict_test(monkeypatch):
+    monkeypatch.setattr(tr, "CLOSE_BACK_TOLERANCE_PTS", 0.0)
+    m = TmsoReject("DOWN")
+    assert m.on_bar_close(pd.Timestamp("2026-10-07 09:37", tz=TZ), BAR_1007_0936,
+                          TMSO_1007) is None
+    on_line = _bar(TMSO + 1.00, TMSO + 4.00, TMSO - 2.00, TMSO)          # closes AT TMSO
+    assert TmsoReject("DOWN").on_bar_close(_ts("09:31"), on_line, TMSO) is None

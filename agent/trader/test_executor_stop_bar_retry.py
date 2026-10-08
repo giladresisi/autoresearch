@@ -36,6 +36,13 @@ PX = 30000.0
 MES_PX = 7700.0
 
 
+@pytest.fixture(autouse=True)
+def _strict_tmso_close_back(monkeypatch):
+    """The flat tape sits ON TMSO, so the §11.10 close-back tolerance would arm the flat
+    09:30 bar a bar early; these tests are about the retry, so they read the strict test."""
+    monkeypatch.setattr(tmso_reject, "CLOSE_BACK_TOLERANCE_PTS", 0.0)
+
+
 def _ts(hms):
     return pd.Timestamp(f"{DATE} {hms}", tz=TZ)
 
