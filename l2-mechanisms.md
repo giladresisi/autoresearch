@@ -92,6 +92,23 @@ tuning; the rules are fixed.
     §6's "1m FVGs created since that extreme", and every binding decision. A gap is invisible
     to the engine until its existence instant, and carries its identity timestamp forever
     after.
+  - **The pattern is read off COMPLETED bars only (erratum 2026-10-08).** Until 2026-10-08
+    the facts cascade built its 1m frame with the FORMING minute's partial row on the end
+    (the live driver and the 1s replay both append one), so a gap could be detected from
+    the third bar's first second: live 2026-10-08, "MNQ 1min bear FVG 09:40 [31211.75,
+    31224.25]" was read at 09:41:00, its lower edge being the 09:41:00 one-second high,
+    and §6's 09:43:00 and 09:45:10 shorts traded it; on the completed bars there is no gap
+    (09:39 low = 09:41 high = 31224.25). The identity and existence instants above were
+    always right; only the bar the detector read was wrong. The FVG and leg frames now drop
+    every 1m row whose minute has not ended (`facts.batch._tf_frame`); running extremes
+    and level sweeps still read the forming row. Replay 2026-10-08 (live thesis): the two
+    shorts are gone; the plan's attempts 2 and 3 become `extreme_reject_close` shorts at
+    10:22:00 (-8.50) and 10:24:00 (-4.50), and the day moves -36.00 -> -28.00 pts.
+    Re-replayed on the corpus theses, base 8dbab32 vs the fix: 08-05, 08-06, 09-29 and
+    10-01 are unchanged; 07-21 loses its 09:38:00 short (-30.00), which traded "1min bear
+    FVG 09:30 [29185.75, 29206.50]" -- the lower edge being the 09:31 bar's high in its
+    first seconds; completed, 09:31's high is 29199.25 and the gap is [29199.25, 29206.50],
+    the one the 09:40:00 entry trades in both runs. 07-21 moves -75.00 -> -45.00 pts.
   - **Reading older prose in this document.** Text written before this split uses the THIRD
     bar's LABEL as the identity — e.g. "labelled 09:35 … only exists at 09:40:00" (§11
     erratum) and "labelled 04:05 / completes 04:10". Under the pinned convention those same

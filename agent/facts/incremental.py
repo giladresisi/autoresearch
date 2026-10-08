@@ -103,7 +103,7 @@ def _one_ticker(store: FactStore, st: dict, tkr: str, raw, now: pd.Timestamp,
         marks[key] = str(floor)
         fired_any = True
         try:
-            frame = _tf_frame(win, tf)
+            frame = _tf_frame(win, tf, now)
         except Exception:
             continue
         if len(frame) < 3:
@@ -124,7 +124,7 @@ def _one_ticker(store: FactStore, st: dict, tkr: str, raw, now: pd.Timestamp,
     if leg_floor is not None and marks.get("legs") != str(leg_floor):
         marks["legs"] = str(leg_floor)
         try:
-            legs = segment_legs(_tf_frame(win, LEG_TIMEFRAME), now, tkr)
+            legs = segment_legs(_tf_frame(win, LEG_TIMEFRAME, now), now, tkr)
         except Exception:
             legs = []
         store.replace_class(FactClass.LEG, tkr, legs)
