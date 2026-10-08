@@ -219,21 +219,21 @@ def test_tmso_retry_with_the_veto_off_is_taken(tmp_path, monkeypatch):
     assert ex.position()["stop"] == PX + 9
 
 
-def test_tmso_no_retry_at_or_after_the_1030_cutoff(tmp_path, monkeypatch):
-    """The sweep at 10:28 fires 10:29:00; the 10:29 bar takes the stop at 10:29:40 and
-    closes red at 10:30:00 -- the shared cutoff. No retry, and the reason says so."""
+def test_tmso_no_retry_at_or_after_the_1100_cutoff(tmp_path, monkeypatch):
+    """The sweep at 10:58 fires 10:59:00; the 10:59 bar takes the stop at 10:59:40 and
+    closes red at 11:00:00 -- the shared cutoff. No retry, and the reason says so."""
     ex = make_executor(tmp_path, monkeypatch)
-    tape = Tape(ex, {"10:28": (PX + 2, PX + 5, PX - 10, PX - 5)},
-                {"10:28": (MES_PX + 2, MES_PX + 5, MES_PX - 10, MES_PX - 5)})
-    for hms in ("10:26:00", "10:27:00", "10:28:00", "10:29:00"):
+    tape = Tape(ex, {"10:58": (PX + 2, PX + 5, PX - 10, PX - 5)},
+                {"10:58": (MES_PX + 2, MES_PX + 5, MES_PX - 10, MES_PX - 5)})
+    for hms in ("10:56:00", "10:57:00", "10:58:00", "10:59:00"):
         tape.step(hms)
     assert len(_kind(tmp_path, "fill")) == 1
-    tape.mnq["10:29"] = B_FAV
-    tape.mes["10:29"] = (MES_PX + 1, MES_PX + 6, MES_PX - 8, MES_PX - 6)
-    tape.step("10:29:40")
+    tape.mnq["10:59"] = B_FAV
+    tape.mes["10:59"] = (MES_PX + 1, MES_PX + 6, MES_PX - 8, MES_PX - 6)
+    tape.step("10:59:40")
     assert len(_kind(tmp_path, "stop_out")) == 1
     assert len(_kind(tmp_path, "stop_bar_retry_armed")) == 1
-    tape.step("10:30:00")
+    tape.step("11:00:00")
     assert len(_kind(tmp_path, "fill")) == 1 and ex.position() is None
     skipped = _kind(tmp_path, "stop_bar_retry_skipped")
     assert len(skipped) == 1 and skipped[0]["reason"] == "entry_cutoff"

@@ -125,7 +125,8 @@ MICRO_SMT_ENTRY_ENABLED = True
 #: (operator adoption, 2026-09-26 -- see `l2-mechanisms.md` §7a). Wired live the same day
 #: via `MirroringOrderPort.flatten` -- see `executor._drive_micro_smt_exit`.
 MICRO_SMT_EXIT_ENABLED = True
-#: O3 is EXEMPT from the shared `executor.ENTRY_CUTOFF_ET` (10:30) -- an explicit operator
+#: O3 is EXEMPT from the shared `executor.ENTRY_CUTOFF_ET` (10:30 until 2026-10-08, now 11:00,
+#: the same end as this window) -- an explicit operator
 #: decision (2026-09-24) -- and instead carries its OWN window, pinned by the operator
 #: (2026-09-26) to 10:30 <= entry < 11:00 ET rather than the wider 10:30-12:30 originally
 #: implemented for the A/B: `((10, 30), (11, 0))`. `None` removes the window entirely
@@ -134,7 +135,8 @@ MICRO_SMT_ENTRY_WINDOW_ET = ((10, 30), (11, 0))
 #: §7a.1 (operator, 2026-09-28): O3's ENTRY on the 07:30-09:00 -> 09:00-10:30 pair. ON by
 #: default; off restores §7a's inert-before-10:30 entry (the whole-session reading stays).
 MICRO_SMT_PREOPEN_PAIR_ENABLED = True
-#: That pair's own window: RTH open to the shared 10:30 `ENTRY_CUTOFF_ET`. `None` removes
+#: That pair's own window: RTH open to 10:30, the end of the 09:00-10:30 micro-session (the
+#: shared `ENTRY_CUTOFF_ET` was 10:30 too until 2026-10-08). `None` removes
 #: it (the pair then never enters), like `MICRO_SMT_ENTRY_WINDOW_ET`.
 MICRO_SMT_PREOPEN_WINDOW_ET = ((9, 30), (10, 30))
 #: The operator's worked example: MNQ's own swept extreme + 2 pts, capped at 15 from entry.

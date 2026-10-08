@@ -302,15 +302,15 @@ def test_preopen_pair_leaves_the_other_mechanisms_on_their_own_gates(tmp_path, m
     assert ex._market.entry_calls == 1
 
 
-def test_the_other_four_mechanisms_are_still_blocked_past_1030_when_O3_is_on(tmp_path,
+def test_the_other_four_mechanisms_are_still_blocked_past_1100_when_O3_is_on(tmp_path,
                                                                               monkeypatch):
-    """Enabling O3 must not silently re-open the 10:30 cutoff for tmso/§6/§7/fvg_1h."""
+    """Enabling O3 must not silently re-open the shared cutoff (11:00 since 2026-10-08) for tmso/§6/§7/fvg_1h."""
     ex = make_executor(tmp_path, monkeypatch)
     monkeypatch.setattr(micro_smt, "MICRO_SMT_ENTRY_ENABLED", True)
     calls = []
     ex._market.tmso_on_bar_close = lambda *a, **k: (calls.append(1), None)[1]
-    _seed(ex, "10:30:00", 30600.0)
-    _step(ex, "10:31:00", 30600.0)
+    _seed(ex, "11:00:00", 30600.0)
+    _step(ex, "11:01:00", 30600.0)
     assert ex.position() is None
     assert calls == [], "tmso_reject must not even be asked once the shared cutoff hits"
 

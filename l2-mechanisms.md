@@ -776,7 +776,8 @@ anchored — inherited open question, not re-litigated here), confirmed by a 1m 
   number — every other reject mechanism in this document uses 3, UNTUNED here), capped at 15
   pts from entry (the nearer of the two, `reject_core.capped_stop`).
 - **Entry window (operator, 2026-09-26): `10:30 <= entry < 11:00 ET` only.** O3 is exempt from
-  the shared `ENTRY_CUTOFF_ET` (10:30) — every other mechanism keeps that cutoff unchanged —
+  the shared `ENTRY_CUTOFF_ET` (10:30 at the time; 11:00 since 2026-10-08, the same end as
+  this window) — every other mechanism keeps that cutoff unchanged —
   but is NOT given the unbounded run to the 13:00 flatten the A/B measured it with (10:30 up
   to 12:30). **Consequence, checked against the A/B evidence AND re-run:** all three A/B
   entries fired AFTER 11:00 (11:08 on 08-17, 11:16 on 09-24, 12:02 on 09-17) — none falls
@@ -1088,8 +1089,9 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
     10:09:21 with the plan still alive and 0 of 3 attempts used; two fixture streams gain
     the record and nothing else (08-31 at 12:07:00, 09-03 at 12:59:00, both after a
     profitable `micro_smt_exit`).
-  - **No entry at or after 10:30:00 ET** (`ENTRY_CUTOFF_ET`). A 10:29:59 entry is allowed;
-    from 10:30:00 no resting order is placed, a resting order still unfilled is withdrawn,
+  - **No entry at or after 11:00:00 ET** (`ENTRY_CUTOFF_ET`; 10:30:00 until 2026-10-08).
+    A 10:59:59 entry is allowed;
+    from 11:00:00 no resting order is placed, a resting order still unfilled is withdrawn,
     and no market mechanism fires. A position ALREADY OPEN keeps being managed to its
     stop, its target or the window end. Registry check: every ENTRY in
     `agent/trader/named_cases.py` is before 10:30 (the 11:00 / 11:01 values there are
@@ -1098,7 +1100,20 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
     the agent stack owns the dispatcher at one contract. They come out — each on its own
     evidence — once a live session has passed the post-session conformance run with every
     delta explained (plan 38 D12) and a measured A/B over the replay set shows what the
-    gate costs. Until then neither is a tuning knob: do not move 10:30.
+    gate costs. Until then neither is a tuning knob.
+  - **Cutoff moved 10:30 -> 11:00 (operator decision, 2026-10-08)**, so every market
+    mechanism ends where O3's §7a window ends (10:30 <= entry < 11:00). Motivating day
+    2026-10-08: the 09:55 up-leg reversed at TDO (MNQ 31370.00 at 10:29:29) and the
+    down-leg that followed ran past 31219.00 by 11:15 with no 40-pt retrace; a short
+    was available at 10:30:00 (`extreme_reject_close` @ 31358.75, stop 31370.00) and at
+    10:33:00 (§6 off the 10:30 bear 1m gap [31348.25, 31355.00]), both after the old
+    cutoff. NOT taken in the replay of that day all the same: the plan's 3 attempts are
+    spent by 10:24:40 (`tmso_reject` 09:36, `extreme_reject_close` 10:22 and 10:24, all
+    stopped), so 10-08 stays -28.00 pts with the move; only with attempts left (a
+    6-attempt counterfactual) does the 10:30:00 short fill, +92.00 marked at 10:56.
+    Unchanged by this move: §7a.1's pre-open pair window (09:30-10:30, the end of
+    its micro-session), §11.9 `nym_mid_reject`'s own window (fires before 10:30:00), and
+    §11.7's MES-sweep stage (a bar that opens before 10:30).
 - **Break-even at 50% of the way to T2 (2026-10-02, operator decision — a RISK rule, not
   an edge).** On the first tick at which the position has covered half the distance from
   its entry to its bound T2 (the bar's extreme reaches `entry + 0.5 x (T2 - entry)`), the
@@ -2446,7 +2461,8 @@ without the mechanism the day is `tmso_reject` 09:39:00 stopped and `fvg_1m_post
    close exactly at the mid is not favourable.
 2. The mid needs the 06:00 open in the frame: a frame starting after 06:00:59 gives no mid
    (the day is off, `precondition.reason = no_range`).
-3. "No fire at or after 10:30:00" — the same instant as `executor.ENTRY_CUTOFF_ET`, so a
+3. "No fire at or after 10:30:00" — the same instant as `executor.ENTRY_CUTOFF_ET` until
+   2026-10-08 (the shared cutoff is 11:00 since; this window was left at 10:30), so a
    sweep on the 10:29 bar can never fire.
 4. A bar that fails to confirm an armed sweep but itself sweeps re-arms (it is a new sweep
    bar); a bar that neither confirms nor sweeps disarms.

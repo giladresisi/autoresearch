@@ -98,7 +98,8 @@ RTH_OPEN_MINUTE = 30
 # §8's TEMPORARY live-rollout spine gates (2026-09-17). Both are tested in BAR time
 # against the ARM's date, and each comes out by changing one line: `None` removes the
 # cutoff, `False` removes the positive-trade rule.
-ENTRY_CUTOFF_ET = (10, 30)           # no NEW entry at or after this; positions managed on
+# 11:00 since 2026-10-08 (operator): the same end as O3's `MICRO_SMT_ENTRY_WINDOW_ET`.
+ENTRY_CUTOFF_ET = (11, 0)            # no NEW entry at or after this; positions managed on
 NO_ENTRY_AFTER_POSITIVE = True       # a plan that closed a winner is done: it dies (`positive_close`)
 # §8's window end, and the ONE source of it: `replay.py` imports this constant. Replay's
 # last bar is 12:59:59, so the rule below is unreachable there; live runs the whole CME
