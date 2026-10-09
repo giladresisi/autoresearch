@@ -231,6 +231,27 @@ def test_a_resting_order_still_unfilled_at_the_cutoff_is_withdrawn(tmp_path,
     assert "fill" not in _kinds(tmp_path)
 
 
+
+def test_tmso_and_sec7_are_not_driven_from_1030_while_the_others_run_to_1100(tmp_path,
+                                                                            monkeypatch):
+    """Operator 2026-10-09: `tmso_reject` and `extreme_reject_close` keep the 10:30 cutoff
+    (`MECHANISM_CUTOFF_ET`); §6 and `fvg_1h_reject` run to the shared 11:00."""
+    from agent.trader.executor import MECHANISM_CUTOFF_ET
+    assert MECHANISM_CUTOFF_ET == {"tmso_reject": (10, 30), "extreme_reject_close": (10, 30)}
+    ex = make_executor(tmp_path, monkeypatch)
+    driven = []
+    for name in ("sec6_on_bar_close", "sec7_on_bar_close", "tmso_on_bar_close",
+                 "fvg1h_on_bar_close"):
+        setattr(ex._market, name, lambda *a, _n=name, **k: driven.append(_n))
+    _step(ex, "10:28:00", 29250.0)
+    _step(ex, "10:29:00", 29250.0)
+    assert set(driven) == {"sec6_on_bar_close", "sec7_on_bar_close", "tmso_on_bar_close",
+                           "fvg1h_on_bar_close"}
+    driven.clear()
+    _step(ex, "10:30:00", 29250.0)
+    _step(ex, "10:45:00", 29250.0)
+    assert driven and set(driven) == {"sec6_on_bar_close", "fvg1h_on_bar_close"}
+
 def test_the_cutoff_is_measured_on_the_arm_date_not_the_bar_date(tmp_path, monkeypatch):
     """The live bar loop runs the whole CME session. 09:40 the morning AFTER a 20:00
     arm is not 'after 11:00' merely because 20:00 was."""

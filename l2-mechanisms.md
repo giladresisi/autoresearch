@@ -1111,6 +1111,16 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
     spent by 10:24:40 (`tmso_reject` 09:36, `extreme_reject_close` 10:22 and 10:24, all
     stopped), so 10-08 stays -28.00 pts with the move; only with attempts left (a
     6-attempt counterfactual) does the 10:30:00 short fill, +92.00 marked at 10:56.
+  - **`tmso_reject` and `extreme_reject_close` keep 10:30 (operator decision, 2026-10-09;
+    `executor.MECHANISM_CUTOFF_ET`).** From 10:30:00 neither is driven at all and a
+    `tmso_reject` stop-bar retry due then is skipped `entry_cutoff`, exactly as under the
+    shared 10:30 cutoff. Evidence, replays on the 11:00 code over 49 corpus days (the 30
+    with two or more §7 fires plus 19 recent; corpus theses), entries between 10:30 and
+    11:00 by the ENTRY criterion (MFE >= 2x own stop before a flat 40-pt retrace), with
+    and without §7's quiet-after-stop candidate: `tmso_reject` 1 winner in 7 (all at
+    10:53-10:55, the 10:30-12:00 micro-session's first fires), `extreme_reject_close` 0 in
+    4, `fvg_1m_post_extreme` 3 in 5 (10-08 10:30, 09-11 10:34, 05-01 10:33). Small
+    samples, not a random set of days.
     Unchanged by this move: §7a.1's pre-open pair window (09:30-10:30, the end of
     its micro-session), §11.9 `nym_mid_reject`'s own window (fires before 10:30:00), and
     §11.7's MES-sweep stage (a bar that opens before 10:30).

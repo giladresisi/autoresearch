@@ -100,6 +100,10 @@ RTH_OPEN_MINUTE = 30
 # cutoff, `False` removes the positive-trade rule.
 # 11:00 since 2026-10-08 (operator): the same end as O3's `MICRO_SMT_ENTRY_WINDOW_ET`.
 ENTRY_CUTOFF_ET = (11, 0)            # no NEW entry at or after this; positions managed on
+# Mechanisms that keep the old 10:30 cutoff (operator 2026-10-09): from this instant they
+# are not driven at all, exactly as under the shared 10:30 cutoff (10:30-11:00 replays of
+# the 49 corpus days: tmso_reject 1 winner in 7, extreme_reject_close 0 in 4).
+MECHANISM_CUTOFF_ET = {"tmso_reject": (10, 30), "extreme_reject_close": (10, 30)}
 NO_ENTRY_AFTER_POSITIVE = True       # a plan that closed a winner is done: it dies (`positive_close`)
 # §8's window end, and the ONE source of it: `replay.py` imports this constant. Replay's
 # last bar is 12:59:59, so the rule below is unreachable there; live runs the whole CME
@@ -705,6 +709,11 @@ class Executor:
         if ENTRY_CUTOFF_ET is not None and now >= self._day_ts(now, ENTRY_CUTOFF_ET):
             return "entry_cutoff"
         return None
+
+    def _past_mechanism_cutoff(self, now: pd.Timestamp, mechanism) -> bool:
+        """True from `mechanism`'s own cutoff (`MECHANISM_CUTOFF_ET`), on the arm date."""
+        hm = MECHANISM_CUTOFF_ET.get(mechanism)
+        return hm is not None and now >= self._day_ts(now, hm)
 
     def _micro_smt_entry_block(self, now: pd.Timestamp):
         """Why `micro_smt_reject` (O3) specifically may NOT enter at `now`, or None.
@@ -1520,6 +1529,9 @@ class Executor:
         elif block is not None:
             self._stop_bar_retry_skip(now, block)
             return None, None
+        elif self._past_mechanism_cutoff(now, mechanism):
+            self._stop_bar_retry_skip(now, "entry_cutoff")
+            return None, None
         mechanism, fire, reason, state = self._market.stop_bar_retry_on_bar_close(
             now, bar, mnq, mes_bar, mes)
         if fire is None:
@@ -1930,16 +1942,18 @@ class Executor:
             # every other mechanism must still respect it, so they run ONLY when there
             # was no block at all).
             if block is None:
-                fires.append(("extreme_reject_close",
-                              self._market.sec7_on_bar_close(now, bar)))
+                if not self._past_mechanism_cutoff(now, "extreme_reject_close"):
+                    fires.append(("extreme_reject_close",
+                                  self._market.sec7_on_bar_close(now, bar)))
                 fires.append(("fvg_1m_post_extreme",
                               self._market.sec6_on_bar_close(now, bar,
                                                              mid=self._market_price())))
                 # CANDIDATE mechanism, armed like any other market mechanism: it fires
                 # only when nothing is open and the budget allows, which is the "if we
                 # didn't already enter" condition it was specified with.
-                fires.append(("tmso_reject",
-                              self._market.tmso_on_bar_close(now, bar, mnq)))
+                if not self._past_mechanism_cutoff(now, "tmso_reject"):
+                    fires.append(("tmso_reject",
+                                  self._market.tmso_on_bar_close(now, bar, mnq)))
                 fires.append(("fvg_1h_reject",
                               self._market.fvg1h_on_bar_close(now, bar, mnq)))
                 if self._nym_mid:
