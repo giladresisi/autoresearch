@@ -98,7 +98,12 @@ RTH_OPEN_MINUTE = 30
 # §8's TEMPORARY live-rollout spine gates (2026-09-17). Both are tested in BAR time
 # against the ARM's date, and each comes out by changing one line: `None` removes the
 # cutoff, `False` removes the positive-trade rule.
-ENTRY_CUTOFF_ET = (10, 30)           # no NEW entry at or after this; positions managed on
+# 11:00 since 2026-10-08 (operator): the same end as O3's `MICRO_SMT_ENTRY_WINDOW_ET`.
+ENTRY_CUTOFF_ET = (11, 0)            # no NEW entry at or after this; positions managed on
+# Mechanisms that keep the old 10:30 cutoff (operator 2026-10-09): from this instant they
+# are not driven at all, exactly as under the shared 10:30 cutoff (10:30-11:00 replays of
+# the 49 corpus days: tmso_reject 1 winner in 7, extreme_reject_close 0 in 4).
+MECHANISM_CUTOFF_ET = {"tmso_reject": (10, 30), "extreme_reject_close": (10, 30)}
 NO_ENTRY_AFTER_POSITIVE = True       # a plan that closed a winner is done: it dies (`positive_close`)
 # §8's window end, and the ONE source of it: `replay.py` imports this constant. Replay's
 # last bar is 12:59:59, so the rule below is unreachable there; live runs the whole CME
@@ -140,6 +145,24 @@ def smt_wait_block_enabled() -> bool:
     opt-out, and leaves the bar loop exactly as it was before the block existed."""
     raw = str(os.environ.get(SMT_WAIT_BLOCK_ENV_FLAG, "")).strip().lower()
     return raw not in ("0", "false", "no", "off")
+
+
+SEC7_QUIET_ENV_FLAG = "ACT_SEC7_QUIET_AFTER_STOP"
+#: What an unset / empty `ACT_SEC7_QUIET_AFTER_STOP` means (§11.11 CANDIDATE): ON
+#: (operator decision 2026-10-09).
+SEC7_QUIET_DEFAULT = True
+
+
+def sec7_quiet_enabled() -> bool:
+    """§11.11 CANDIDATE: `extreme_reject_close` goes quiet for the rest of the plan once
+    one of its own positions has stopped out. `0`/`false`/`no`/`off` off, `1`/`true`/
+    `yes`/`on` on, unset or empty = `SEC7_QUIET_DEFAULT`."""
+    raw = str(os.environ.get(SEC7_QUIET_ENV_FLAG, "")).strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return bool(SEC7_QUIET_DEFAULT)
 
 
 class Executor:
@@ -269,6 +292,10 @@ class Executor:
         # `_smt_wait` is built on the first fire it judges: it needs the session date.
         self._smt_wait_block = smt_wait_block_enabled()
         self._smt_wait = None
+        # §11.11 CANDIDATE: the switch, read once; `_sec7_quiet` is set by the plan's
+        # first `extreme_reject_close` stop-out and never cleared (one plan per Executor).
+        self._sec7_quiet_rule = sec7_quiet_enabled()
+        self._sec7_quiet = False
         # `nym_mid_reject` (§11.9 CANDIDATE): its switch, read ONCE for the same reason.
         self._nym_mid = nym_mid_reject.enabled()
         # MES day-extreme sweep stop (`agent/trader/mes_sweep.py`, §11.7 CANDIDATE, ON by
@@ -704,6 +731,11 @@ class Executor:
         if ENTRY_CUTOFF_ET is not None and now >= self._day_ts(now, ENTRY_CUTOFF_ET):
             return "entry_cutoff"
         return None
+
+    def _past_mechanism_cutoff(self, now: pd.Timestamp, mechanism) -> bool:
+        """True from `mechanism`'s own cutoff (`MECHANISM_CUTOFF_ET`), on the arm date."""
+        hm = MECHANISM_CUTOFF_ET.get(mechanism)
+        return hm is not None and now >= self._day_ts(now, hm)
 
     def _micro_smt_entry_block(self, now: pd.Timestamp):
         """Why `micro_smt_reject` (O3) specifically may NOT enter at `now`, or None.
@@ -1372,6 +1404,8 @@ class Executor:
         # starts, the takeover scan — behaves as for any stop-out.
         if not self._pos_is_followup:
             self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
+            if self._sec7_quiet_rule and self._state.get("mechanism") == "extreme_reject_close":
+                self._sec7_quiet = True
         self._plan.setdefault("max_attempts", MAX_ATTEMPTS)
         # The SHARED per-plan budget, tallied per mechanism for the artifact only
         # (`Arbiter.spent_by` is "RECORDED, never scored"). Spent at the same instant as
@@ -1518,6 +1552,9 @@ class Executor:
             mes_bar = self._completed_1m(mes, now) if len(mes) else None
         elif block is not None:
             self._stop_bar_retry_skip(now, block)
+            return None, None
+        elif self._past_mechanism_cutoff(now, mechanism):
+            self._stop_bar_retry_skip(now, "entry_cutoff")
             return None, None
         mechanism, fire, reason, state = self._market.stop_bar_retry_on_bar_close(
             now, bar, mnq, mes_bar, mes)
@@ -1929,16 +1966,27 @@ class Executor:
             # every other mechanism must still respect it, so they run ONLY when there
             # was no block at all).
             if block is None:
-                fires.append(("extreme_reject_close",
-                              self._market.sec7_on_bar_close(now, bar)))
+                if not self._past_mechanism_cutoff(now, "extreme_reject_close"):
+                    # The machine keeps tracking while quiet (§11.11); only its fire is
+                    # dropped, and recorded.
+                    fire7 = self._market.sec7_on_bar_close(now, bar)
+                    if fire7 is not None and self._sec7_quiet:
+                        self._rec.veto(now=now, plan_id=self._plan.get("plan_id"),
+                                       mechanism="extreme_reject_close",
+                                       reason="sec7_quiet_after_stop",
+                                       detail={"price": fire7.get("price"),
+                                               "stop": fire7.get("stop")})
+                        fire7 = None
+                    fires.append(("extreme_reject_close", fire7))
                 fires.append(("fvg_1m_post_extreme",
                               self._market.sec6_on_bar_close(now, bar,
                                                              mid=self._market_price())))
                 # CANDIDATE mechanism, armed like any other market mechanism: it fires
                 # only when nothing is open and the budget allows, which is the "if we
                 # didn't already enter" condition it was specified with.
-                fires.append(("tmso_reject",
-                              self._market.tmso_on_bar_close(now, bar, mnq)))
+                if not self._past_mechanism_cutoff(now, "tmso_reject"):
+                    fires.append(("tmso_reject",
+                                  self._market.tmso_on_bar_close(now, bar, mnq)))
                 fires.append(("fvg_1h_reject",
                               self._market.fvg1h_on_bar_close(now, bar, mnq)))
                 if self._nym_mid:

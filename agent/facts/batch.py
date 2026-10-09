@@ -42,15 +42,26 @@ def _slice(df: pd.DataFrame, now: pd.Timestamp, window) -> pd.DataFrame:
     return out
 
 
-def _tf_frame(win: pd.DataFrame, tf: str) -> pd.DataFrame:
+_ONE_MINUTE = pd.Timedelta(minutes=1)
+
+
+def _tf_frame(win: pd.DataFrame, tf: str, now: "pd.Timestamp | None" = None) -> pd.DataFrame:
+    """`win` at `tf`, built from COMPLETED 1m rows only when `now` is given.
+
+    Rows are left-labelled, so a row whose minute has not ended at `now` is the forming
+    bar (the live driver and the 1s replay append one every second). A gap or leg read
+    off it can vanish when the minute completes (2026-10-08 09:41:00: a 1m FVG built on
+    the 09:41 row's first second, absent on the completed bars)."""
+    if now is not None and len(win):
+        win = win[win.index + _ONE_MINUTE <= now]
     return win if tf == "1min" else resample(win, tf)
 
 
-def _fvg_facts(win: pd.DataFrame, ticker: str) -> "list[Fact]":
+def _fvg_facts(win: pd.DataFrame, ticker: str, now: "pd.Timestamp | None" = None) -> "list[Fact]":
     out: list[Fact] = []
     for tf in FVG_TIMEFRAMES:
         try:
-            frame = _tf_frame(win, tf)
+            frame = _tf_frame(win, tf, now)
         except Exception:
             continue
         if len(frame) < 3:
@@ -100,9 +111,9 @@ def run_batch(store: FactStore, bars_by_ticker: dict, req, now: pd.Timestamp) ->
                     facts = apply_supersession(facts)
                     facts = apply_sweep_states(facts, win, now)
                 elif cls is FactClass.FVG:
-                    facts = _fvg_facts(win, tkr)
+                    facts = _fvg_facts(win, tkr, now)
                 elif cls is FactClass.LEG:
-                    facts = segment_legs(_tf_frame(win, LEG_TIMEFRAME), now, tkr)
+                    facts = segment_legs(_tf_frame(win, LEG_TIMEFRAME, now), now, tkr)
                 elif cls is FactClass.EXTREME:
                     # TWO tracks. §7 follows the 24h extreme and falls back to the
                     # post-09:30 one when it is stale; §6 needs a day extreme printed

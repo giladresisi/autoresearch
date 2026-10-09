@@ -109,3 +109,43 @@ def test_incremental_state_is_json_serializable():
     sub = {tk: df.iloc[:60] for tk, df in BARS.items()}
     state = run_incremental(inc, state, sub, sub["MNQ"].index[-1], bar_complete=True)
     json.dumps(state)
+
+
+# --- 2026-10-08: a 1m FVG must not be detected on the FORMING minute ----------- #
+
+def _phantom_gap_bars():
+    """Flat tape, then 09:39 / 09:40 / 09:41 where only the 09:41 row's first second
+    (high 28980) leaves a gap under the 09:39 low (28997). Left-labelled 1m rows."""
+    idx = pd.date_range("2026-10-08 08:00", "2026-10-08 09:41", freq="1min",
+                        tz="America/New_York")
+    df = pd.DataFrame({"Open": 29000.0, "High": 29003.0, "Low": 28997.0,
+                       "Close": 29000.0, "Volume": 1.0}, index=idx)
+    df.loc[idx[-2]] = [28998.0, 28998.0, 28970.0, 28972.0, 1.0]   # 09:40 displacement
+    df.loc[idx[-1]] = [28975.0, 28980.0, 28975.0, 28978.0, 1.0]   # 09:41, one second in
+    return {"MNQ": df, "MES": df.copy()}
+
+
+def _fvg_1m_ids(store):
+    return {f.id for f in store.query(cls=FactClass.FVG, ticker="MNQ")
+            if f.timeframe == "1min"}
+
+
+def test_batch_ignores_a_1m_gap_formed_by_the_forming_minute():
+    """2026-10-08 09:41:00: the forming 09:41 row must not complete a 1m FVG."""
+    now = pd.Timestamp("2026-10-08 09:41:00", tz="America/New_York")
+    s = run_batch(FactStore(), _phantom_gap_bars(), EXECUTOR_REQUIREMENT, now)
+    assert _fvg_1m_ids(s) == set()
+
+
+def test_incremental_ignores_a_1m_gap_formed_by_the_forming_minute():
+    now = pd.Timestamp("2026-10-08 09:41:00", tz="America/New_York")
+    inc = FactStore()
+    run_incremental(inc, {}, _phantom_gap_bars(), now, bar_complete=True)
+    assert _fvg_1m_ids(inc) == set()
+
+
+def test_a_1m_gap_exists_once_its_third_minute_has_completed():
+    """Same bars, one minute later: the 09:41 row is complete, so the gap exists."""
+    now = pd.Timestamp("2026-10-08 09:42:00", tz="America/New_York")
+    s = run_batch(FactStore(), _phantom_gap_bars(), EXECUTOR_REQUIREMENT, now)
+    assert len(_fvg_1m_ids(s)) == 1

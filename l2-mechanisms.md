@@ -92,6 +92,23 @@ tuning; the rules are fixed.
     §6's "1m FVGs created since that extreme", and every binding decision. A gap is invisible
     to the engine until its existence instant, and carries its identity timestamp forever
     after.
+  - **The pattern is read off COMPLETED bars only (erratum 2026-10-08).** Until 2026-10-08
+    the facts cascade built its 1m frame with the FORMING minute's partial row on the end
+    (the live driver and the 1s replay both append one), so a gap could be detected from
+    the third bar's first second: live 2026-10-08, "MNQ 1min bear FVG 09:40 [31211.75,
+    31224.25]" was read at 09:41:00, its lower edge being the 09:41:00 one-second high,
+    and §6's 09:43:00 and 09:45:10 shorts traded it; on the completed bars there is no gap
+    (09:39 low = 09:41 high = 31224.25). The identity and existence instants above were
+    always right; only the bar the detector read was wrong. The FVG and leg frames now drop
+    every 1m row whose minute has not ended (`facts.batch._tf_frame`); running extremes
+    and level sweeps still read the forming row. Replay 2026-10-08 (live thesis): the two
+    shorts are gone; the plan's attempts 2 and 3 become `extreme_reject_close` shorts at
+    10:22:00 (-8.50) and 10:24:00 (-4.50), and the day moves -36.00 -> -28.00 pts.
+    Re-replayed on the corpus theses, base 8dbab32 vs the fix: 08-05, 08-06, 09-29 and
+    10-01 are unchanged; 07-21 loses its 09:38:00 short (-30.00), which traded "1min bear
+    FVG 09:30 [29185.75, 29206.50]" -- the lower edge being the 09:31 bar's high in its
+    first seconds; completed, 09:31's high is 29199.25 and the gap is [29199.25, 29206.50],
+    the one the 09:40:00 entry trades in both runs. 07-21 moves -75.00 -> -45.00 pts.
   - **Reading older prose in this document.** Text written before this split uses the THIRD
     bar's LABEL as the identity — e.g. "labelled 09:35 … only exists at 09:40:00" (§11
     erratum) and "labelled 04:05 / completes 04:10". Under the pinned convention those same
@@ -759,7 +776,8 @@ anchored — inherited open question, not re-litigated here), confirmed by a 1m 
   number — every other reject mechanism in this document uses 3, UNTUNED here), capped at 15
   pts from entry (the nearer of the two, `reject_core.capped_stop`).
 - **Entry window (operator, 2026-09-26): `10:30 <= entry < 11:00 ET` only.** O3 is exempt from
-  the shared `ENTRY_CUTOFF_ET` (10:30) — every other mechanism keeps that cutoff unchanged —
+  the shared `ENTRY_CUTOFF_ET` (10:30 at the time; 11:00 since 2026-10-08, the same end as
+  this window) — every other mechanism keeps that cutoff unchanged —
   but is NOT given the unbounded run to the 13:00 flatten the A/B measured it with (10:30 up
   to 12:30). **Consequence, checked against the A/B evidence AND re-run:** all three A/B
   entries fired AFTER 11:00 (11:08 on 08-17, 11:16 on 09-24, 12:02 on 09-17) — none falls
@@ -1071,8 +1089,9 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
     10:09:21 with the plan still alive and 0 of 3 attempts used; two fixture streams gain
     the record and nothing else (08-31 at 12:07:00, 09-03 at 12:59:00, both after a
     profitable `micro_smt_exit`).
-  - **No entry at or after 10:30:00 ET** (`ENTRY_CUTOFF_ET`). A 10:29:59 entry is allowed;
-    from 10:30:00 no resting order is placed, a resting order still unfilled is withdrawn,
+  - **No entry at or after 11:00:00 ET** (`ENTRY_CUTOFF_ET`; 10:30:00 until 2026-10-08).
+    A 10:59:59 entry is allowed;
+    from 11:00:00 no resting order is placed, a resting order still unfilled is withdrawn,
     and no market mechanism fires. A position ALREADY OPEN keeps being managed to its
     stop, its target or the window end. Registry check: every ENTRY in
     `agent/trader/named_cases.py` is before 10:30 (the 11:00 / 11:01 values there are
@@ -1081,7 +1100,30 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
     the agent stack owns the dispatcher at one contract. They come out — each on its own
     evidence — once a live session has passed the post-session conformance run with every
     delta explained (plan 38 D12) and a measured A/B over the replay set shows what the
-    gate costs. Until then neither is a tuning knob: do not move 10:30.
+    gate costs. Until then neither is a tuning knob.
+  - **Cutoff moved 10:30 -> 11:00 (operator decision, 2026-10-08)**, so every market
+    mechanism ends where O3's §7a window ends (10:30 <= entry < 11:00). Motivating day
+    2026-10-08: the 09:55 up-leg reversed at TDO (MNQ 31370.00 at 10:29:29) and the
+    down-leg that followed ran past 31219.00 by 11:15 with no 40-pt retrace; a short
+    was available at 10:30:00 (`extreme_reject_close` @ 31358.75, stop 31370.00) and at
+    10:33:00 (§6 off the 10:30 bear 1m gap [31348.25, 31355.00]), both after the old
+    cutoff. NOT taken in the replay of that day all the same: the plan's 3 attempts are
+    spent by 10:24:40 (`tmso_reject` 09:36, `extreme_reject_close` 10:22 and 10:24, all
+    stopped), so 10-08 stays -28.00 pts with the move; only with attempts left (a
+    6-attempt counterfactual) does the 10:30:00 short fill, +92.00 marked at 10:56.
+  - **`tmso_reject` and `extreme_reject_close` keep 10:30 (operator decision, 2026-10-09;
+    `executor.MECHANISM_CUTOFF_ET`).** From 10:30:00 neither is driven at all and a
+    `tmso_reject` stop-bar retry due then is skipped `entry_cutoff`, exactly as under the
+    shared 10:30 cutoff. Evidence, replays on the 11:00 code over 49 corpus days (the 30
+    with two or more §7 fires plus 19 recent; corpus theses), entries between 10:30 and
+    11:00 by the ENTRY criterion (MFE >= 2x own stop before a flat 40-pt retrace), with
+    and without §7's quiet-after-stop candidate: `tmso_reject` 1 winner in 7 (all at
+    10:53-10:55, the 10:30-12:00 micro-session's first fires), `extreme_reject_close` 0 in
+    4, `fvg_1m_post_extreme` 3 in 5 (10-08 10:30, 09-11 10:34, 05-01 10:33). Small
+    samples, not a random set of days.
+    Unchanged by this move: §7a.1's pre-open pair window (09:30-10:30, the end of
+    its micro-session), §11.9 `nym_mid_reject`'s own window (fires before 10:30:00), and
+    §11.7's MES-sweep stage (a bar that opens before 10:30).
 - **Break-even at 50% of the way to T2 (2026-10-02, operator decision — a RISK rule, not
   an edge).** On the first tick at which the position has covered half the distance from
   its entry to its bound T2 (the bar's extreme reaches `entry + 0.5 x (T2 - entry)`), the
@@ -2429,7 +2471,8 @@ without the mechanism the day is `tmso_reject` 09:39:00 stopped and `fvg_1m_post
    close exactly at the mid is not favourable.
 2. The mid needs the 06:00 open in the frame: a frame starting after 06:00:59 gives no mid
    (the day is off, `precondition.reason = no_range`).
-3. "No fire at or after 10:30:00" — the same instant as `executor.ENTRY_CUTOFF_ET`, so a
+3. "No fire at or after 10:30:00" — the same instant as `executor.ENTRY_CUTOFF_ET` until
+   2026-10-08 (the shared cutoff is 11:00 since; this window was left at 10:30), so a
    sweep on the 10:29 bar can never fire.
 4. A bar that fails to confirm an armed sweep but itself sweeps re-arms (it is a new sweep
    bar); a bar that neither confirms nor sweeps disarms.
@@ -2518,3 +2561,49 @@ the 09:36 close of 31236.25 was 2.25 pts on the wrong side, not 0.75. Reading TM
 **Not done.** No named-case date is touched, so no figure moved. The slow suite was not
 run. The underlying 1s-vs-IB 1m open skew is untraced at the source (live tick-to-1s
 builder, `data/ib_realtime.py`).
+
+### 11.11 CANDIDATE — `extreme_reject_close` quiet after its own stop-out (session 2026-10-08 O6, operator, 2026-10-09)
+
+**The rule.** Once a position entered by `extreme_reject_close` stops out (`stop_out`, an
+attempt spent; not `stop_out_initial`, not a follow-up position), §7 enters nothing more
+for the rest of the plan. The machine keeps tracking its extreme; each fire it would have
+taken is recorded as a `veto`, reason `sec7_quiet_after_stop`, with its price and stop, and
+spends no attempt. Every other mechanism is unchanged. Switch `ACT_SEC7_QUIET_AFTER_STOP`
+(`0`/`false`/`no`/`off`, `1`/`true`/`yes`/`on`; unset = `executor.SEC7_QUIET_DEFAULT`,
+ON by operator decision 2026-10-09), read once per Executor.
+
+**Motivating day, 2026-10-08 (DOWN).** After the FVG fix, §7 shorted 10:22:00 @ 31290.5
+and 10:24:00 @ 31313.5 into the climb to TDO, both stopped within 40 s, and the plan's
+attempts were gone by 10:24:40, so the 10:30 short off TDO was never taken. Quiet after
+the 10:22 stop-out, the 10:24 short does not happen and `fvg_1m_post_extreme` shorts at
+10:30:14 @ 31352.75 (MFE 110 vs a 6-pt stop): -28.00 -> +62.50 pts (marked at 10:56).
+
+**Evidence.**
+- Corpus study (113 days, the real `ExtremeReject` machine 09:30-11:00, unscoped, MFE vs
+  own stop to a flat 40-pt retrace): 127 fires on 59 days. The day's FIRST §7 fire is a
+  winner (MFE >= 2x stop) 47% of the time; later fires 28% (19 of 68), below the 36% base
+  rate of an arbitrary with-thesis entry with a 15-pt stop. Bar-size, swept-extreme age,
+  named-liquidity sweep, distance-back and favourable-1m-FVG filters were all tested and
+  rejected (none separates; the two-bar confirmation removes or spoils 23 of 47 winners).
+- Replay A/B, rule off vs on, the 30 corpus days with two or more §7 fires (code with the
+  shared 11:00 cutoff, before §7's own 10:30 cutoff): §7 entries 44 -> 25; the 19 removed
+  are 16 losers and 3 winners; all entries 83 -> 81, winners 18 -> 20; session P&L
+  (secondary) -1048.50 -> -892.25. 15 days differ. Harmed days (a removed §7 entry was a
+  winner): 07-08 (09:48, MFE 77/15, replaced by a §6 loser), 06-30 (10:25, 27/10),
+  05-01 (10:05, 30/12, offset by a §6 winner). Helped: 10-08, 07-30 (+68.75 vs -45.00),
+  06-02, 06-26.
+- Replay A/B on the final code (§7 and `tmso_reject` at 10:30, the rest at 11:00), rule
+  off vs on, the 15 days that differed above: entries 43 -> 37, winners 10 -> 12, §7
+  entries 32 -> 14 (18 removed: 15 losers, 3 winners); session P&L (secondary) -576.25 ->
+  -298.00. Harmed: 07-08 and 06-30 as above (-15.00, -19.50); 05-01 neutral. Clean gains
+  with nothing replacing the removed loser: 06-05, 06-26, 07-06, 08-20 (+14 to +15 each).
+  Mixed (the freed attempt goes to another loser): 05-26, 06-15, 08-04, 08-05 (-5 to -6.25
+  each). 10-08: -28.00 -> +131.00 (the §6 10:30 short reaches its target on the longer
+  tape now in `general/main`).
+- Disabling §7 outright was rejected: on 09-15 (MFE 214) and 09-18 (115) no other
+  mechanism replaces its winner.
+
+**Open.** The freed attempt often goes to another mechanism that also loses (a §6 entry
+with a 30-pt stop, a late `tmso_reject`); that is those mechanisms' question. The slow
+suite was not run; no named-case date has a second §7 fire after a §7 stop-out in its
+documented sequence that was checked.

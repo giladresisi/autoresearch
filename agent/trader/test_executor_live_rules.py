@@ -4,7 +4,8 @@ Everything here runs the REAL `Executor.on_bar` over synthetic 1s-cadence frames
 the market mechanisms are stubbed, so a fire can be ordered up at an exact second. The
 rules under test live in the Executor, in BAR time:
 
-  * no NEW entry at or after 10:30:00; an open position is still managed after it;
+  * no NEW entry at or after 11:00:00 (10:30:00 until 2026-10-08); an open position is
+    still managed after it;
   * no NEW entry after a profitable close;
   * at the first bar >= 13:00:00 any open position is MARKED and the plan dies;
   * a port that reports an external change kills the plan.
@@ -127,7 +128,7 @@ def _step(ex, hms, px, *, fire=False, hi=None, lo=None, **fire_kw):
 # --------------------------------------------------------------------------- #
 
 def test_the_rules_sit_behind_named_constants():
-    assert ENTRY_CUTOFF_ET == (10, 30)
+    assert ENTRY_CUTOFF_ET == (11, 0)
     assert NO_ENTRY_AFTER_POSITIVE is True
     assert WINDOW_END_ET == (13, 0)
 
@@ -175,39 +176,46 @@ def test_an_injected_port_with_a_recording_sink_decides_identically(tmp_path,
 
 
 # --------------------------------------------------------------------------- #
-# cases 10, 11: the 10:30 cutoff                                                #
+# cases 10, 11: the 11:00 cutoff                                                #
 # --------------------------------------------------------------------------- #
 
-def test_no_entry_at_or_after_1030_but_an_open_position_is_still_managed(tmp_path,
+def test_no_entry_at_or_after_1100_but_an_open_position_is_still_managed(tmp_path,
                                                                           monkeypatch):
     """Case 10."""
     ex = make_executor(tmp_path, monkeypatch)
-    _step(ex, "10:20:00", 29250.0, fire=True)
+    _step(ex, "10:50:00", 29250.0, fire=True)
     assert ex.position() is not None
-    _step(ex, "10:30:00", 29255.0)
+    _step(ex, "11:00:00", 29255.0)
     assert ex.bind_state()["entry_block"] == "entry_cutoff"
-    _step(ex, "10:45:00", 29240.0, lo=29230.0)                 # the stop is still live
+    _step(ex, "11:15:00", 29240.0, lo=29230.0)                 # the stop is still live
     assert ex.position() is None
     assert _kinds(tmp_path) == ["fill", "target_selected", "initial_target_selected",
                                 "stop_out"]
 
-    asked = ex._market.asked
-    _step(ex, "10:46:00", 29250.0, fire=True)
-    assert ex.position() is None and ex._market.asked == asked
+    # Past O3's window too, so the executor may still reach `pick` with an EMPTY fire
+    # list (the real arbiter returns None); what the cutoff guarantees is that no
+    # ordinary mechanism is driven, so nothing can fire.
+    driven = []
+    for name in ("sec6_on_bar_close", "sec7_on_bar_close", "tmso_on_bar_close",
+                 "fvg1h_on_bar_close", "nym_on_bar_close"):
+        setattr(ex._market, name, lambda *a, _n=name, **k: driven.append(_n))
+    ex._market.pick = lambda fires: next((f for _, f in fires if f is not None), None)
+    _step(ex, "11:16:00", 29250.0, fire=True)
+    assert ex.position() is None and driven == []
     assert _kinds(tmp_path).count("fill") == 1
     assert ex.bind_state()["plan_alive"] is True, "the cutoff blocks entries, not the plan"
 
 
-def test_exactly_1030_00_is_blocked(tmp_path, monkeypatch):
+def test_exactly_1100_00_is_blocked(tmp_path, monkeypatch):
     ex = make_executor(tmp_path, monkeypatch)
-    _step(ex, "10:30:00", 29250.0, fire=True)
+    _step(ex, "11:00:00", 29250.0, fire=True)
     assert ex.position() is None and "fill" not in _kinds(tmp_path)
 
 
-def test_a_1029_59_entry_is_allowed(tmp_path, monkeypatch):
+def test_a_1059_59_entry_is_allowed(tmp_path, monkeypatch):
     """Case 11 — the boundary."""
     ex = make_executor(tmp_path, monkeypatch)
-    _step(ex, "10:29:59", 29250.0, fire=True)
+    _step(ex, "10:59:59", 29250.0, fire=True)
     assert ex.position() is not None
     assert _kinds(tmp_path)[:1] == ["fill"]
 
@@ -216,19 +224,40 @@ def test_a_resting_order_still_unfilled_at_the_cutoff_is_withdrawn(tmp_path,
                                                                     monkeypatch):
     from agent.trader.order_sim import RestingOrder
     ex = make_executor(tmp_path, monkeypatch)
-    _step(ex, "10:29:00", 29250.0)
-    ex._sim.place(RestingOrder("UP", 29260.0, 29240.0, "gapA", _ts("10:29:00")))
-    _step(ex, "10:30:00", 29262.0, hi=29265.0)                 # would have filled it
+    _step(ex, "10:59:00", 29250.0)
+    ex._sim.place(RestingOrder("UP", 29260.0, 29240.0, "gapA", _ts("10:59:00")))
+    _step(ex, "11:00:00", 29262.0, hi=29265.0)                 # would have filled it
     assert ex._sim.resting is None and ex.position() is None
     assert "fill" not in _kinds(tmp_path)
 
 
+
+def test_tmso_and_sec7_are_not_driven_from_1030_while_the_others_run_to_1100(tmp_path,
+                                                                            monkeypatch):
+    """Operator 2026-10-09: `tmso_reject` and `extreme_reject_close` keep the 10:30 cutoff
+    (`MECHANISM_CUTOFF_ET`); §6 and `fvg_1h_reject` run to the shared 11:00."""
+    from agent.trader.executor import MECHANISM_CUTOFF_ET
+    assert MECHANISM_CUTOFF_ET == {"tmso_reject": (10, 30), "extreme_reject_close": (10, 30)}
+    ex = make_executor(tmp_path, monkeypatch)
+    driven = []
+    for name in ("sec6_on_bar_close", "sec7_on_bar_close", "tmso_on_bar_close",
+                 "fvg1h_on_bar_close"):
+        setattr(ex._market, name, lambda *a, _n=name, **k: driven.append(_n))
+    _step(ex, "10:28:00", 29250.0)
+    _step(ex, "10:29:00", 29250.0)
+    assert set(driven) == {"sec6_on_bar_close", "sec7_on_bar_close", "tmso_on_bar_close",
+                           "fvg1h_on_bar_close"}
+    driven.clear()
+    _step(ex, "10:30:00", 29250.0)
+    _step(ex, "10:45:00", 29250.0)
+    assert driven and set(driven) == {"sec6_on_bar_close", "fvg1h_on_bar_close"}
+
 def test_the_cutoff_is_measured_on_the_arm_date_not_the_bar_date(tmp_path, monkeypatch):
     """The live bar loop runs the whole CME session. 09:40 the morning AFTER a 20:00
-    arm is not 'after 10:30' merely because 20:00 was."""
+    arm is not 'after 11:00' merely because 20:00 was."""
     ex = make_executor(tmp_path, monkeypatch)
     assert ex._entry_block(_ts("09:40:00")) is None
-    assert ex._entry_block(_ts("10:30:00")) == "entry_cutoff"
+    assert ex._entry_block(_ts("11:00:00")) == "entry_cutoff"
     assert ex._at_window_end(_ts("12:59:59")) is False
     assert ex._at_window_end(_ts("13:00:00")) is True
 

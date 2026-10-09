@@ -167,6 +167,13 @@ baselines below are historical.
   10:30; every market-mechanism gate and veto applies. Same bar as `tmso_reject` = one entry,
   `nym_mid_reject`'s, with the bigger stop (`also_fired` on the fill). A plain replay does
   not load `.env`: set it in the shell for a replay.
+- `ACT_SEC7_QUIET_AFTER_STOP` (`l2-mechanisms.md` §11.11 CANDIDATE, 2026-10-09) is **ON by
+  default** (operator decision 2026-10-09): unset or empty = on; `0` (or `false`/`no`/`off`)
+  is the rollback, read once per Executor. Once an `extreme_reject_close` position stops out,
+  §7 enters nothing more for the rest of the plan (its fires become `veto` records, reason
+  `sec7_quiet_after_stop`; no attempt spent). Separately, `tmso_reject` and
+  `extreme_reject_close` stop at 10:30 (`executor.MECHANISM_CUTOFF_ET`) while the shared
+  entry cutoff is 11:00. A plain replay does not load `.env`: set the rollback in the shell.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.

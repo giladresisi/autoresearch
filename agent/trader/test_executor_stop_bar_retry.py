@@ -221,7 +221,8 @@ def test_tmso_retry_with_the_veto_off_is_taken(tmp_path, monkeypatch):
 
 def test_tmso_no_retry_at_or_after_the_1030_cutoff(tmp_path, monkeypatch):
     """The sweep at 10:28 fires 10:29:00; the 10:29 bar takes the stop at 10:29:40 and
-    closes red at 10:30:00 -- the shared cutoff. No retry, and the reason says so."""
+    closes red at 10:30:00 -- tmso_reject's own cutoff
+    (`executor.MECHANISM_CUTOFF_ET`; the shared one is 11:00 since 2026-10-08). No retry, and the reason says so."""
     ex = make_executor(tmp_path, monkeypatch)
     tape = Tape(ex, {"10:28": (PX + 2, PX + 5, PX - 10, PX - 5)},
                 {"10:28": (MES_PX + 2, MES_PX + 5, MES_PX - 10, MES_PX - 5)})

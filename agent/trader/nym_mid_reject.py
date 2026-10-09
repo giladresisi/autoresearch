@@ -24,9 +24,9 @@ blocked or loses arbitration leaves it free to fire on a later sweep. The Execut
 **Window.** Bars labelled 09:31 or later, fires strictly before 10:30:00 ET. The 09:30
 opening bar is EXCLUDED (operator, 2026-10-07): it can neither sweep nor confirm, because on
 it every print is a fresh post-open extreme (09-18: its self-confirming opening-bar sweep
-was stopped on the next bar with 0 MFE). The first sweep is the 09:31 bar (the
-Executor's `ENTRY_CUTOFF_ET` refuses a fire at 10:30:00 anyway; the machine says it too so
-it is testable alone). Every other block and veto the market mechanisms get is the
+was stopped on the next bar with 0 MFE). The first sweep is the 09:31 bar. The window end
+was the Executor's `ENTRY_CUTOFF_ET` until 2026-10-08, when the shared cutoff moved to 11:00;
+this window was left at 10:30. Every other block and veto the market mechanisms get is the
 Executor's, not this module's.
 
 **Deliberately NOT a fact and NOT a DOL candidate** (same reasoning as `tmso_reject`): the
@@ -58,7 +58,7 @@ MID_START_ET = (6, 0)
 OPEN_ET = (9, 30)
 #: The first bar that may sweep (the 09:30 opening bar is excluded, operator 2026-10-07).
 FIRST_SWEEP_ET = (9, 31)
-#: No fire at or after this ET time (= `executor.ENTRY_CUTOFF_ET`).
+#: No fire at or after this ET time (the shared `executor.ENTRY_CUTOFF_ET` until 2026-10-08).
 WINDOW_END_ET = (10, 30)
 
 _SHORT = ("DOWN", "SHORT")
