@@ -2561,3 +2561,49 @@ the 09:36 close of 31236.25 was 2.25 pts on the wrong side, not 0.75. Reading TM
 **Not done.** No named-case date is touched, so no figure moved. The slow suite was not
 run. The underlying 1s-vs-IB 1m open skew is untraced at the source (live tick-to-1s
 builder, `data/ib_realtime.py`).
+
+### 11.11 CANDIDATE — `extreme_reject_close` quiet after its own stop-out (session 2026-10-08 O6, operator, 2026-10-09)
+
+**The rule.** Once a position entered by `extreme_reject_close` stops out (`stop_out`, an
+attempt spent; not `stop_out_initial`, not a follow-up position), §7 enters nothing more
+for the rest of the plan. The machine keeps tracking its extreme; each fire it would have
+taken is recorded as a `veto`, reason `sec7_quiet_after_stop`, with its price and stop, and
+spends no attempt. Every other mechanism is unchanged. Switch `ACT_SEC7_QUIET_AFTER_STOP`
+(`0`/`false`/`no`/`off`, `1`/`true`/`yes`/`on`; unset = `executor.SEC7_QUIET_DEFAULT`,
+ON by operator decision 2026-10-09), read once per Executor.
+
+**Motivating day, 2026-10-08 (DOWN).** After the FVG fix, §7 shorted 10:22:00 @ 31290.5
+and 10:24:00 @ 31313.5 into the climb to TDO, both stopped within 40 s, and the plan's
+attempts were gone by 10:24:40, so the 10:30 short off TDO was never taken. Quiet after
+the 10:22 stop-out, the 10:24 short does not happen and `fvg_1m_post_extreme` shorts at
+10:30:14 @ 31352.75 (MFE 110 vs a 6-pt stop): -28.00 -> +62.50 pts (marked at 10:56).
+
+**Evidence.**
+- Corpus study (113 days, the real `ExtremeReject` machine 09:30-11:00, unscoped, MFE vs
+  own stop to a flat 40-pt retrace): 127 fires on 59 days. The day's FIRST §7 fire is a
+  winner (MFE >= 2x stop) 47% of the time; later fires 28% (19 of 68), below the 36% base
+  rate of an arbitrary with-thesis entry with a 15-pt stop. Bar-size, swept-extreme age,
+  named-liquidity sweep, distance-back and favourable-1m-FVG filters were all tested and
+  rejected (none separates; the two-bar confirmation removes or spoils 23 of 47 winners).
+- Replay A/B, rule off vs on, the 30 corpus days with two or more §7 fires (code with the
+  shared 11:00 cutoff, before §7's own 10:30 cutoff): §7 entries 44 -> 25; the 19 removed
+  are 16 losers and 3 winners; all entries 83 -> 81, winners 18 -> 20; session P&L
+  (secondary) -1048.50 -> -892.25. 15 days differ. Harmed days (a removed §7 entry was a
+  winner): 07-08 (09:48, MFE 77/15, replaced by a §6 loser), 06-30 (10:25, 27/10),
+  05-01 (10:05, 30/12, offset by a §6 winner). Helped: 10-08, 07-30 (+68.75 vs -45.00),
+  06-02, 06-26.
+- Replay A/B on the final code (§7 and `tmso_reject` at 10:30, the rest at 11:00), rule
+  off vs on, the 15 days that differed above: entries 43 -> 37, winners 10 -> 12, §7
+  entries 32 -> 14 (18 removed: 15 losers, 3 winners); session P&L (secondary) -576.25 ->
+  -298.00. Harmed: 07-08 and 06-30 as above (-15.00, -19.50); 05-01 neutral. Clean gains
+  with nothing replacing the removed loser: 06-05, 06-26, 07-06, 08-20 (+14 to +15 each).
+  Mixed (the freed attempt goes to another loser): 05-26, 06-15, 08-04, 08-05 (-5 to -6.25
+  each). 10-08: -28.00 -> +131.00 (the §6 10:30 short reaches its target on the longer
+  tape now in `general/main`).
+- Disabling §7 outright was rejected: on 09-15 (MFE 214) and 09-18 (115) no other
+  mechanism replaces its winner.
+
+**Open.** The freed attempt often goes to another mechanism that also loses (a §6 entry
+with a 30-pt stop, a late `tmso_reject`); that is those mechanisms' question. The slow
+suite was not run; no named-case date has a second §7 fire after a §7 stop-out in its
+documented sequence that was checked.

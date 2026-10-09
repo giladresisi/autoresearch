@@ -147,6 +147,24 @@ def smt_wait_block_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+SEC7_QUIET_ENV_FLAG = "ACT_SEC7_QUIET_AFTER_STOP"
+#: What an unset / empty `ACT_SEC7_QUIET_AFTER_STOP` means (§11.11 CANDIDATE): ON
+#: (operator decision 2026-10-09).
+SEC7_QUIET_DEFAULT = True
+
+
+def sec7_quiet_enabled() -> bool:
+    """§11.11 CANDIDATE: `extreme_reject_close` goes quiet for the rest of the plan once
+    one of its own positions has stopped out. `0`/`false`/`no`/`off` off, `1`/`true`/
+    `yes`/`on` on, unset or empty = `SEC7_QUIET_DEFAULT`."""
+    raw = str(os.environ.get(SEC7_QUIET_ENV_FLAG, "")).strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return bool(SEC7_QUIET_DEFAULT)
+
+
 class Executor:
     def __init__(self, state_dir, plan: dict, arm_ts: pd.Timestamp, *, recorder=None,
                  store=None, maintainer=None, requirement=EXECUTOR_REQUIREMENT,
@@ -274,6 +292,10 @@ class Executor:
         # `_smt_wait` is built on the first fire it judges: it needs the session date.
         self._smt_wait_block = smt_wait_block_enabled()
         self._smt_wait = None
+        # §11.11 CANDIDATE: the switch, read once; `_sec7_quiet` is set by the plan's
+        # first `extreme_reject_close` stop-out and never cleared (one plan per Executor).
+        self._sec7_quiet_rule = sec7_quiet_enabled()
+        self._sec7_quiet = False
         # `nym_mid_reject` (§11.9 CANDIDATE): its switch, read ONCE for the same reason.
         self._nym_mid = nym_mid_reject.enabled()
         # MES day-extreme sweep stop (`agent/trader/mes_sweep.py`, §11.7 CANDIDATE, ON by
@@ -1382,6 +1404,8 @@ class Executor:
         # starts, the takeover scan — behaves as for any stop-out.
         if not self._pos_is_followup:
             self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
+            if self._sec7_quiet_rule and self._state.get("mechanism") == "extreme_reject_close":
+                self._sec7_quiet = True
         self._plan.setdefault("max_attempts", MAX_ATTEMPTS)
         # The SHARED per-plan budget, tallied per mechanism for the artifact only
         # (`Arbiter.spent_by` is "RECORDED, never scored"). Spent at the same instant as
@@ -1943,8 +1967,17 @@ class Executor:
             # was no block at all).
             if block is None:
                 if not self._past_mechanism_cutoff(now, "extreme_reject_close"):
-                    fires.append(("extreme_reject_close",
-                                  self._market.sec7_on_bar_close(now, bar)))
+                    # The machine keeps tracking while quiet (§11.11); only its fire is
+                    # dropped, and recorded.
+                    fire7 = self._market.sec7_on_bar_close(now, bar)
+                    if fire7 is not None and self._sec7_quiet:
+                        self._rec.veto(now=now, plan_id=self._plan.get("plan_id"),
+                                       mechanism="extreme_reject_close",
+                                       reason="sec7_quiet_after_stop",
+                                       detail={"price": fire7.get("price"),
+                                               "stop": fire7.get("stop")})
+                        fire7 = None
+                    fires.append(("extreme_reject_close", fire7))
                 fires.append(("fvg_1m_post_extreme",
                               self._market.sec6_on_bar_close(now, bar,
                                                              mid=self._market_price())))
