@@ -80,3 +80,29 @@ def test_rollover_due_is_surfaced(monkeypatch):
     out = []
     assert session_end.run([], out=out.append, sleep=lambda s: None) == 4
     assert any("ROLLOVER DUE" in l for l in out)
+
+
+def test_report_parses_past_progress_lines_on_stdout():
+    # 2026-10-13: `[merge_session_1s]` prints from data/parquet_maintenance.py reach the
+    # engine's stdout ahead of its JSON report; the whole-stdout parse failed and the
+    # summary said "promotion: not run" after a successful promote.
+    import json
+    stdout = ("[merge_session_1s] MNQ: +12 gap bars\n"
+              "[merge_session_1s] MNQ: merged 1 session file(s)\n"
+              + json.dumps(_report(), indent=2) + "\n")
+    report = session_end.parse_report(stdout)
+    assert report["promotion"]["promote_success"] is True
+    assert any("promotion: success=True" in l for l in session_end.summarize(report))
+
+
+def test_report_with_progress_lines_keeps_the_merge_retry(monkeypatch):
+    import json
+    assert session_end.merge_failed(session_end.parse_report(
+        "[merge_session_1s] IB unavailable — merging without gap fill\n"
+        + json.dumps(_report(merge=False, promote=False), indent=2)))
+
+
+def test_report_unparseable_and_empty_stdout():
+    assert session_end.parse_report("") == {}
+    bad = session_end.parse_report("[check] no json here\n{ broken")
+    assert bad["error"] == "unparseable engine output"
