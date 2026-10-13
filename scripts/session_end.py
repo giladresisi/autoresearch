@@ -48,11 +48,23 @@ def run_engine(extra_args: list[str]) -> tuple[int, dict]:
     proc = subprocess.run(
         [sys.executable, str(ENGINE), "--mode", "session-end", *extra_args],
         cwd=str(REPO_ROOT), stdout=subprocess.PIPE, text=True)
-    try:
-        report = json.loads(proc.stdout) if proc.stdout.strip() else {}
-    except json.JSONDecodeError:
-        report = {"error": "unparseable engine output", "raw": proc.stdout[-2000:]}
-    return proc.returncode, report
+    return proc.returncode, parse_report(proc.stdout)
+
+
+def parse_report(stdout: str) -> dict:
+    """The engine's JSON report: the LAST top-level object on stdout. Progress lines from
+    code the engine calls (`[merge_session_1s] ...` in data/parquet_maintenance.py) also
+    reach stdout ahead of it, so the whole stream is not JSON."""
+    if not stdout.strip():
+        return {}
+    starts = [0] + [i + 1 for i, ch in enumerate(stdout) if ch == "\n"]
+    for i in reversed(starts):
+        if stdout.startswith("{", i):
+            try:
+                return json.loads(stdout[i:])
+            except json.JSONDecodeError:
+                continue
+    return {"error": "unparseable engine output", "raw": stdout[-2000:]}
 
 
 def merge_failed(report: dict) -> bool:
