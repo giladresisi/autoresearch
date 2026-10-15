@@ -891,7 +891,7 @@ def main() -> None:
         _popen_env = {**os.environ, "FORCE_RESET": "true"} if force else None
         with open(stdout_log, "a", encoding="utf-8") as out_f, \
              open(stderr_log, "a", encoding="utf-8") as err_f:
-            subprocess.Popen(
+            orch_proc = subprocess.Popen(
                 orch_cmd,
                 stdout=out_f,
                 stderr=err_f,
@@ -899,9 +899,16 @@ def main() -> None:
                 **detached_popen_kwargs(),
             )
 
-        time.sleep(3)
+        # A slow start writes the pid file after a few seconds; poll instead of a single
+        # fixed-delay check, and stop early if the process already exited.
+        new_pid = None
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            new_pid = _orchestrator_pid()
+            if new_pid or orch_proc.poll() is not None:
+                break
+            time.sleep(0.5)
 
-        new_pid = _orchestrator_pid()
         if new_pid:
             print(f"Orchestrator started pid={new_pid}")
             if summary:
