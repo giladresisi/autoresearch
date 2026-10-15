@@ -716,12 +716,13 @@ chase entries the §2 DOL-floor veto now suppresses).
     harmless, the count just keeps restarting and the earliest possible fire remains ≥4 bars
     after the open — but the §10.2 lesson applies: extreme tracking must be tick-level on
     the fallback track too.
-- **Stop-loss:** the entry bar's opposite-wick edge, CAPPED at 15 pts from the entry price
-  (wick edge if nearer). The cap places the stop inside the swept zone — a plain retest of
-  the sweep kills the trade (08-10's stop survived by 9.75 pts at 1s); a §6-style
-  wick+3-capped-30 alternative was identical on the studied dates but WON the §10.3
-  unseen sweep by ~+91 (it kept a deep-wick +316.5 winner the 15-cap stopped at −15) —
-  the highest-priority §9 A/B, single-flip sensitive.
+- **Stop-loss:** a flat **22 pts** from the entry price (2026-10-14, O1; was the entry bar's
+  opposite-wick edge capped at 15). Evidence: 40 §7 fills on 114 corpus dates, scored as MFE
+  against the stop to a flat 40-pt retrace — 18 were stopped at 15; a flat 22 rescues three
+  that each ran >= 50 pts (05-06 09:46 +70.75, 05-25 09:52 +70.5, 10-14 09:39 long 30574.25
+  +50.25: 20.25 against, then +50.25 before a 40-pt retrace) and costs 7 pts more on each of
+  the 15 fills stopped either way (105 pts). 25 adds 08-20 (+58.25) but two rescues below 2R;
+  30 is mostly weak rescues. The flat stop also widens fills whose wick sat nearer than 15.
 - **Scope:** lives and dies with the plan — **the DOL touch and the attempt budget**, which is
   what this document's own backchecks enforce ("plan scope enforced — a fire cannot occur
   after the plan's DOL is touched"). Falsification is deliberately NOT part of scope here:
@@ -1184,7 +1185,7 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
 | Stop-out cooldown | until the stop-out 1m bar closes | §2; acts on current state at the close (crossed trigger ⇒ market) |
 | DOL-floor veto | 60 pts remaining, entry → DOL | §2; ABSOLUTE floor, not an RR ratio; winners ≥65.75 / losing chases ≤45.5 on studied dates — thin band, tune early |
 | `extreme_reject_close` quiet count | 3 consecutive 1m closes | §7; tick-based restarts |
-| `extreme_reject_close` SL | opposite-wick edge, capped 15 pts from entry | §7; A/B alternative wick+3 capped 30 — identical on studied dates but +91 better on the §10.3 sweep (deep-wick winners); top-priority A/B (note: cap15 keeps the far-extreme-fallback backcheck's adverse band at 0..−70; w3c30 carries 07-31 −83.75) |
+| `extreme_reject_close` SL | flat 22 pts from entry | §7 (2026-10-14 O1; was opposite-wick edge capped 15) — sweep 15/18/20/22/25/30 over 40 fills: 22 = 3 rescues all >= 50 pts MFE, -7 pts per fill stopped either way |
 | `extreme_reject_close` stale-extreme fallback threshold | **2h, AGE of the counter-thesis 24h day extreme at the plan arm** (was: 150 pts of arm-time DISTANCE, until 2026-08-26) | §7; switches the machine to the post-09:30 extreme. NOT a fitted knob — totals identical for any T in 1.0h–3.0h (measured ages gap from 0.60h to 1.90h with nothing between). Re-keyed off 08-25, which no distance threshold can separate from 08-07 (123.50 vs 152.50 pts, opposite correct answers; ages 3.55h vs 0.60h). Backcheck 07-15..08-25: age +655.37 vs distance>150 +466.00 vs strict +50.75 vs 6h-block +35.75. Pin the measurement instant to the plan arm — the old distance key straddled 150 between a 09:20 and a 09:30 reading of 08-07 |
 | Takeover defer-entry gate | skip if excursion-SL distance > the 30-pt cap | §8; parameter-free (reuses the `fvg_1m_post_extreme` SL cap) |
 | Leg reversal threshold | max(30 pts, 25% of leg range) | §3 |

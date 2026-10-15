@@ -32,7 +32,7 @@ from __future__ import annotations
 import pandas as pd
 
 QUIET_CLOSES_TO_ARM = 3           # §9
-SL_CAP_PTS = 15.0                 # §9; the cap15-vs-w3c30 A/B is a DEFERRED knob
+SL_PTS = 22.0                     # flat stop distance from the entry (2026-10-14 O1)
 STALE_EXTREME_AGE_HOURS = 2.0     # §9; NOT fitted — identical totals for any T in 1.0-3.0
 
 _SHORT = ("DOWN", "SHORT")
@@ -128,16 +128,14 @@ class ExtremeReject:
         return c < o if self._short else c > o
 
     def _fire(self, now, bar) -> dict:
-        """Market entry at the bar's CLOSE; stop at the opposite wick, capped at 15 pts.
+        """Market entry at the bar's CLOSE; stop a flat 22 pts from the entry.
 
-        The cap places the stop inside the swept zone — a plain retest of the sweep kills
-        the trade — which is the accepted cost of the tighter loss. The wick+3-capped-30
-        alternative is a §9 knob A/B and is DEFERRED; cap15 stays the default.
+        Was the opposite wick capped at 15 until 2026-10-14 (O1): over 40 §7 fills on
+        114 corpus dates, 22 rescues three 15-stopped entries that each ran >= 50 pts
+        (05-06, 05-25, 10-14) for 7 pts more risk on the fills stopped either way.
         """
         entry = float(bar["Close"])
-        wick = float(bar["High"]) if self._short else float(bar["Low"])
-        capped = entry + SL_CAP_PTS if self._short else entry - SL_CAP_PTS
-        stop = min(wick, capped) if self._short else max(wick, capped)
+        stop = entry + SL_PTS if self._short else entry - SL_PTS
         return {"time": now, "price": entry, "stop": stop,
                 "direction": "DOWN" if self._short else "UP",
                 "mechanism": "extreme_reject_close"}
