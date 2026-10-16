@@ -70,6 +70,7 @@ import agent.trader.followup as followup
 import agent.trader.nym_mid_reject as nym_mid_reject
 from agent.trader import premove_context
 from agent.trader.smt_wait import SmtWait
+from agent.trader.tape import session_open
 
 # l2-mechanisms.md §9 starting values.
 SETTLE_UNTIL_SECONDS = 30            # settle window ends at 09:30:30
@@ -92,6 +93,9 @@ MAX_ATTEMPTS = 3                     # §8; per plan_id, shared across mechanism
 HTF_VIEW_TAIL = pd.Timedelta(hours=24)
 PRIMARY_TF = "5min"
 FALLBACK_TF = "1min"                 # §4's widened fallback, §6, §8
+# §6: only 1m gaps existing after the 24h counter-thesis extreme. A harness knob for
+# before/after replays, not a runtime flag: the rule is §6's own (2026-10-16).
+SEC6_SINCE_EXTREME = True
 RTH_OPEN_HOUR = 9                    # §4: creating bar at or after 09:30
 RTH_OPEN_MINUTE = 30
 
@@ -1237,6 +1241,28 @@ class Executor:
         return [g for g in self._gaps_on(PRIMARY_TF, now, direction=direction)
                 if self._within_max_distance(g, price)]
 
+    def _sec6_gaps(self, now: pd.Timestamp, mnq) -> list:
+        """§6's candidates: thesis-direction 1m gaps CREATED SINCE the counter-thesis day
+        extreme, read off EXISTENCE (§2). The day is the 24h CME session from the prior
+        evening's 18:00 ET (pinned 2026-10-16); the extreme is recomputed every call, so
+        a new adverse extreme retires every gap that existed before it.
+
+        2026-10-16 09:58:14: without this a 10-15 10:38 gap (existing from 10-15 10:40)
+        was still a §6 candidate after the 09:56 day low, and its long stopped out.
+        """
+        anchor = self._arm_ts if self._arm_ts is not None else now
+        _, ext_ts = post_open_counter_extreme(
+            mnq, self._plan.get("direction"), session_open(str(anchor.date())))
+        gaps = self._gaps_on(FALLBACK_TF, now)
+        if ext_ts is None or not SEC6_SINCE_EXTREME:
+            return gaps
+        out = []
+        for g in gaps:
+            at = g.extra.get("exists_from") or g.reference_ts
+            if at is not None and pd.Timestamp(at) > ext_ts:
+                out.append(g)
+        return out
+
     def _created_at_or_after_rth(self, gap, now: pd.Timestamp) -> bool:
         """§4's 1m-fallback filter: the gap's CREATING (third) bar at or after 09:30 ET.
 
@@ -1946,7 +1972,7 @@ class Executor:
         usable = self.usable_5m_gaps(now, price)
         armed6 = Arbiter.sec6_armed(usable_5m_gaps=len(usable or ()))
         self._market.sync_episodes(
-            self._gaps_on(FALLBACK_TF, now) if armed6 else (), armed=armed6)
+            self._sec6_gaps(now, mnq) if armed6 else (), armed=armed6)
 
         fires = []
         if bar is None:

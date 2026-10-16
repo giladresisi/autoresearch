@@ -460,6 +460,18 @@ resting order beyond them.
     displacement evidence that the market is already moving the thesis's way; counter-thesis
     1m gaps do not qualify. An SMT in the thesis direction is corroborating context, never a
     requirement.
+    - **Implemented 2026-10-16 (`Executor._sec6_gaps`).** Until then the code handed §6
+      every LIVE 1m gap, whatever its age: 2026-10-16 09:58:14 went long off a 10-15 10:38
+      gap after the 09:56 day low 29802.75 and stopped out (−29.5). Pinned readings:
+      "that extreme" = the counter-thesis extreme of the **24h CME session** (from the
+      prior evening's 18:00 ET), recomputed every bar; "created since" = the gap's
+      EXISTENCE strictly after the label of the bar holding that extreme. The post-09:30
+      window was rejected: over the corpus it would remove 76 of 233 §6 fills, and those
+      scored better than the rest (mean 2.42R vs 1.67R). The 24h reading removes 7 of 233
+      (05-27 ×3, 06-10 ×2, 07-01, 08-28): two winners (05-27 10:35 2.57R, 06-10 09:49
+      4.47R), five losers. The precondition above it (a new extreme after the last 5m
+      gap's creation) is still NOT enforced: under the 24h reading it would disarm §6 on
+      every day whose adverse extreme printed overnight.
 - **Episode model:** an *episode* begins when price enters a candidate gap — strictly inside,
   at least one tick beyond the near edge (edge touches don't count; no traversal requirement)
   — and it tracks the excursion extreme until a trade starts. Adverse 1m closes beyond the
