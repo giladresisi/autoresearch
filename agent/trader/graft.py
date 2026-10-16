@@ -391,7 +391,13 @@ class TraderGraft:
         if self._executor is not None:
             self._executor.kill_plan(now, "operator_direction_change",
                                      {"to": want, "seq": rec.get("seq")})
-        plan = self._derive({**dict(thesis), "bias": want}, bars, now)
+        # Against the thesis, its DOL and falsifiers describe the other side: a DOWN DOL
+        # below price and "closes above" as the UP plan's falsifier. Both are record-only
+        # (`Executor._death`, the dol-floor), so they are dropped rather than mirrored.
+        flipped = {**dict(thesis), "bias": want}
+        if str(thesis.get("bias") or "").upper() != want:
+            flipped.update({"dol": None, "falsified_if": []})
+        plan = self._derive(flipped, bars, now)
         if plan is None:
             return {"accepted": False, "reason": "derive_failed"}
         plan["attempts_used"] = int(used)
