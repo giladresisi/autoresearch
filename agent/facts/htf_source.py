@@ -131,6 +131,25 @@ def load_session_extremes(trade_date, *, source: str, tolerance=STALE_TOLERANCE)
     return out
 
 
+#: O5 (2026-10-16): how far back the HTF liquidity context reads (the weekly FVG tier needs
+#: 52 weeks plus its own formation bars).
+HTF_HISTORY_DAYS = 380
+
+
+def load_htf_history(trade_date, *, source: str, days: float = HTF_HISTORY_DAYS) -> dict:
+    """{"MNQ": 1m OHLC frame, "MES": ...}: the last `days` of the 1m file before the
+    session open, for `htf_liquidity.compute` (the trader's own frames hold ~17 days).
+    Raises whatever `read_parquet` raises; the caller decides (never fatal)."""
+    trade_date = str(trade_date)[:10]
+    as_of = session_as_of(trade_date)
+    lo = as_of - pd.Timedelta(days=days)
+    out = {}
+    for tk in TICKERS:
+        df, _, _ = _read(source_path(trade_date, tk, source), as_of, lo)
+        out[tk] = df[["Open", "High", "Low", "Close"]]
+    return out
+
+
 def _content(ext: dict) -> dict:
     return {tk: {"extremes": [e.to_json() for e in ext.get(tk) or ()],
                  "seed": seed_to_json((ext.get("seed") or {}).get(tk))}

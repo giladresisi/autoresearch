@@ -41,7 +41,7 @@ import pandas as pd
 from agent.facts.assemble import assemble_facts
 from agent.facts.requirements import ANALYZER_REQUIREMENT
 from agent.stretch_override import stretch_override
-from agent.trader import premove_context
+from agent.trader import htf_liquidity, premove_context
 
 ARM_HOUR = 9
 ARM_MINUTE = 20
@@ -73,6 +73,9 @@ THESIS_FILE = "thesis_state.json"
 #: Plan 46: what the pre-move classifier saw and what the Analyzer did with it. Written in
 #: `shadow` and `on` modes only; never in `off`.
 PREMOVE_FILE = "premove_context.json"
+#: O5 (2026-10-16): the 09:20 HTF liquidity context (`htf_liquidity.compute`). SHADOW ONLY:
+#: written once per arm, after the thesis call, and read by nothing in the trader.
+HTF_FILE = "htf_context.json"
 
 # thesis.md §3a — near-maturity WAIT.
 #
@@ -206,10 +209,27 @@ def stands(thesis) -> bool:
     return thesis.get("dol") is not None
 
 
+def _splice_history(disk, frame):
+    """O5: the disk 1m history up to the first bar of the trader's own frame, then that
+    frame. Returns (frame, provenance). Either side may be missing."""
+    disk = premove_context._normalise(disk)
+    live = premove_context._normalise(frame)
+    if disk is None:
+        return live, {"disk_from": None, "frame_from": str(live.index[0]) if live is not None else None}
+    if live is None:
+        return disk, {"disk_from": str(disk.index[0]), "frame_from": None}
+    disk = disk[disk.index < live.index[0]]
+    return (pd.concat([disk, live]) if len(disk) else live,
+            {"disk_from": str(disk.index[0]) if len(disk) else None,
+             "frame_from": str(live.index[0])})
+
+
 class Analyzer:
     def __init__(self, state_dir, backend, *, requirement=ANALYZER_REQUIREMENT,
-                 threaded: bool = False, arrival_latency_sec: float = 0.0) -> None:
+                 threaded: bool = False, arrival_latency_sec: float = 0.0,
+                 htf_history: "dict | None" = None) -> None:
         self.state_dir = str(state_dir)
+        self._htf_history = htf_history or {}   # O5: disk 1m bars before the session open
         self._backend = backend
         self._requirement = requirement
         self._threaded = bool(threaded)
@@ -401,7 +421,14 @@ class Analyzer:
 
     def _call(self, now: pd.Timestamp, bars: dict):
         """`_attempt`, retried as a whole when it raises (CALL_ATTEMPTS, then a recorded
-        failure). Returns the thesis, or None when every attempt failed."""
+        failure). Returns the thesis, or None when every attempt failed. The O5 HTF context
+        is recorded AFTER the thesis is in, so it never adds to the thesis latency."""
+        try:
+            return self._call_attempts(now, bars)
+        finally:
+            self._save_htf_context(now, bars)
+
+    def _call_attempts(self, now: pd.Timestamp, bars: dict):
         for attempt in range(1, CALL_ATTEMPTS + 1):
             try:
                 return self._attempt(now, bars)
@@ -683,6 +710,27 @@ class Analyzer:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(record, fh, default=str)
             os.replace(tmp, os.path.join(self.state_dir, PREMOVE_FILE))
+        except Exception:
+            pass
+
+    # -- O5: the 09:20 HTF liquidity context (shadow only) ---------------------------- #
+
+    def _save_htf_context(self, now, bars) -> None:
+        """Record `htf_liquidity.compute` to `htf_context.json`. Never raises; nothing reads
+        it back, so a failure here can neither darken the day nor change a decision."""
+        try:
+            bars = bars or {}
+            frames, sources = {}, {}
+            for tk in ("MNQ", "MES"):
+                frames[tk], sources[tk] = _splice_history(self._htf_history.get(tk),
+                                                          bars.get(tk))
+            ctx = htf_liquidity.compute(frames["MNQ"], frames["MES"], now)
+            record = {"armed_at": str(now), "history": sources, **ctx.to_dict()}
+            os.makedirs(self.state_dir, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=self.state_dir, prefix=".htf_", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(record, fh, default=str, indent=1)
+            os.replace(tmp, os.path.join(self.state_dir, HTF_FILE))
         except Exception:
             pass
 

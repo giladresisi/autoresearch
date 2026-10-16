@@ -90,7 +90,7 @@ def trader_enabled() -> bool:
 class TraderGraft:
     def __init__(self, state_dir, backend, *, requirement=EXECUTOR_REQUIREMENT,
                  threaded: bool = True, arrival_latency_sec: float = 0.0,
-                 order_sink=None, htf_extremes=None) -> None:
+                 order_sink=None, htf_extremes=None, htf_history=None) -> None:
         """`arrival_latency_sec` withholds the thesis until `armed_at + latency` in BAR
         time. 0.0 (the default, and what live constructs) is cycle-1 behaviour exactly;
         cycle-2 replay sets it to reproduce, deterministically, the wall-clock delay live
@@ -104,7 +104,10 @@ class TraderGraft:
 
         `htf_extremes` (plan 40) is `htf_source.load_session_extremes`'s result, computed
         by the caller from the 1m parquet at the session open. It is written to the run
-        folder once, here, and the plan ticker's part is handed to every Executor."""
+        folder once, here, and the plan ticker's part is handed to every Executor.
+
+        `htf_history` (O5) is `htf_source.load_htf_history`'s result; the Analyzer only
+        records it in `htf_context.json` (shadow)."""
         self.state_dir = str(state_dir)
         self._htf_ctx = None
         if htf_extremes is not None:
@@ -123,7 +126,8 @@ class TraderGraft:
         self._req = requirement
         self._journal = Journal(state_dir)
         self._analyzer = (Analyzer(state_dir, backend, threaded=threaded,
-                                   arrival_latency_sec=arrival_latency_sec)
+                                   arrival_latency_sec=arrival_latency_sec,
+                                   htf_history=htf_history)
                           if backend is not None else None)
         self._snapshot_date = None
         self._plans = PlanStore(state_dir)

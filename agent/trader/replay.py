@@ -45,7 +45,7 @@ from agent.trader.fixed_backend import (                       # noqa: E402
     FixedThesisBackend, OracleThesisError, validate_oracle_thesis)
 from agent.trader.thesis_cache import ThesisCache              # noqa: E402
 from agent.facts.htf_source import (                           # noqa: E402
-    ARTIFACT as HTF_ARTIFACT, load_session_extremes, write_error_artifact)
+    ARTIFACT as HTF_ARTIFACT, load_htf_history, load_session_extremes, write_error_artifact)
 # The window end has ONE source, and it is the Executor's: live has no replay window, so
 # the Executor enforces the same 13:00 in bar time (plan 38 F11). Re-exported here under
 # its old name because every caller reads `replay.WINDOW_END_ET`.
@@ -134,11 +134,18 @@ def build_replay_trader(date, run_dir, *, allow_calls, arrival_latency_sec,
         except Exception:
             pass
 
+    # O5 (shadow): the 1m history behind `htf_context.json`; without it the record covers
+    # only the trader's own ~17 days.
+    try:
+        htf_hist = load_htf_history(date, source="replay")
+    except Exception:
+        htf_hist = None
+
     # `arrival_latency_sec` goes through the constructor rather than by overwriting
     # `graft._analyzer` afterwards (the plan's shape), which built and threw away a whole
     # Analyzer -- including its state-file load -- on every replayed date.
     return TraderGraft(run_dir, backend, threaded=False, arrival_latency_sec=latency,
-                       htf_extremes=htf)
+                       htf_extremes=htf, htf_history=htf_hist)
 
 
 class _arm_env:
