@@ -130,6 +130,12 @@ REUSE_FIRST_T2 = True
 
 _SHORT = ("DOWN", "SHORT")
 
+# The operator's manual market entry routed THROUGH the agent (`trade.py up|down` with the
+# agent owning the dispatcher, operator decision 2026-10-16): its default protective stop,
+# this far from the fill when the command carries no explicit `--sl`.
+OPERATOR_ENTRY_STOP_PTS = 20.0
+OPERATOR_ENTRY_MECHANISM = "operator_entry"
+
 EXTENSION_VETO_ENV_FLAG = "ACT_EXTENSION_VETO"
 
 
@@ -316,6 +322,9 @@ class Executor:
         self._followup = None
         self._followup_close_recorded = False
         self._pos_is_followup = False
+        # The binding's mechanism the operator entry displaced in `_state`, restored at
+        # its exit (`_restore_after_operator`) so a standing binding keeps its own label.
+        self._op_saved_mechanism = None
         self._last_minute = None
         # The last bar instant this Executor was handed. BAR time, never a wall clock
         # (the gate in `test_executor.py` forbids one here). Only `mark_open_position`
@@ -2519,6 +2528,110 @@ class Executor:
         return {"accepted": True,
                 "detail": {"stop": price, "prev_stop": ev.get("prev_stop")}}
 
+    def plan_direction(self) -> str:
+        return "DOWN" if self._is_short() else "UP"
+
+    def operator_entry_refusal(self, now, bars, direction, stop=None,
+                               check_direction=True):
+        """(want, refusal) for an operator entry at `now`: `want` the normalized direction,
+        `refusal` the graft's verdict dict when it must be refused, else None. Changes
+        nothing, so the graft can run it BEFORE it flips the plan to the command's
+        direction (`check_direction=False`): a refused entry then leaves the plan as it
+        was."""
+        want = str(direction or "").upper()
+        want = {"LONG": "UP", "SHORT": "DOWN"}.get(want, want)
+        if want not in ("UP", "DOWN"):
+            return want, {"accepted": False, "reason": "bad_direction"}
+        if self._window_ended or self._at_window_end(now):
+            return want, {"accepted": False, "reason": "window_end"}
+        if not self._state.get("plan_alive"):
+            return want, {"accepted": False, "reason": "no_plan",
+                          "detail": {"dead_reason": self._state.get("dead_reason")}}
+        if self._sim.position is not None:
+            return want, {"accepted": False, "reason": "open_position"}
+        if check_direction and want != self.plan_direction():
+            return want, {"accepted": False, "reason": "direction_mismatch",
+                          "detail": {"plan_direction": self.plan_direction()}}
+        if self._followup_open():
+            return want, {"accepted": False, "reason": "followup_open"}
+        mnq = truncate(normalize((bars or {}).get(self._ticker)), now)
+        if not len(mnq):
+            return want, {"accepted": False, "reason": "no_bars"}
+        if stop is not None:
+            last = mnq.iloc[-1]
+            hi, lo = float(last["High"]), float(last["Low"])
+            try:
+                stop_px = float(stop)
+            except (TypeError, ValueError):
+                return want, {"accepted": False, "reason": "bad_stop", "detail": {"stop": stop}}
+            if not (stop_px > hi if want == "DOWN" else 0 < stop_px < lo):
+                return want, {"accepted": False, "reason": "bad_stop",
+                              "detail": {"stop": stop_px, "bar_high": hi, "bar_low": lo}}
+        return want, None
+
+    def operator_entry(self, now, bars, direction, stop=None) -> dict:
+        """Enter BY MARKET on the operator's command (`trade.py up|down` under the agent,
+        operator decision 2026-10-16). Returns the graft's verdict dict.
+
+        Routed through the agent so the manual position is the model's own: it goes out
+        through the normal order port (live: one `market-entry`, stop embedded, `source:
+        agent`), the watchdog never sees an external change, and no mechanism can stack a
+        second entry on it. Refused (`operator_entry_refusal`) without a live plan, with a
+        position or a follow-up window open, against the plan's direction (the graft flips
+        the plan first, so this only guards a direct call), with no bars, with a stop on
+        the wrong side, or at/after the 13:00 window end. It BYPASSES the mechanism gates
+        (settle, entry cutoffs, extension veto, SMT-wait block, attempt budget, cooldowns)
+        — the operator chose to enter — but not one-position-at-a-time.
+
+        Fill = the current 1s bar's mid, snapped adversely, like every market mechanism.
+        Stop = `stop` if given (strictly beyond this bar's extreme on the losing side, so
+        the fill bar cannot stop it out), else `OPERATOR_ENTRY_STOP_PTS` from the fill.
+        T2, break-even, the MES sweep stop, the micro-SMT exit and the window end then
+        manage it like any fill. BAR time only.
+        """
+        want, refusal = self.operator_entry_refusal(now, bars, direction, stop)
+        if refusal is not None:
+            return refusal
+        mnq = truncate(normalize((bars or {}).get(self._ticker)), now)
+        last = mnq.iloc[-1]
+        hi, lo = float(last["High"]), float(last["Low"])
+        self._bars = bars
+        self._state["now_price"] = float(last["Close"])
+        self._state["now_mid"] = (hi + lo) / 2.0
+        self._state["now_high"], self._state["now_low"] = hi, lo
+        price = self._market_price()
+        short = want == "DOWN"
+        if stop is None:
+            stop_px = price + OPERATOR_ENTRY_STOP_PTS if short else price - OPERATOR_ENTRY_STOP_PTS
+            stop_px = round(round(stop_px / TICK_PTS) * TICK_PTS, 4)
+            stop_src = "default"
+        else:
+            stop_px, stop_src = float(stop), "explicit"
+        self._op_saved_mechanism = (self._state.get("mechanism"),)
+        self._state["mechanism"] = OPERATOR_ENTRY_MECHANISM
+        ev = self._sim.fill_market(now, direction=self._plan.get("direction"),
+                                   price=price, stop=stop_px,
+                                   artifact_id=OPERATOR_ENTRY_MECHANISM)
+        self._rec.order_event(now=now, plan_id=self._plan.get("plan_id"),
+                              mechanism=OPERATOR_ENTRY_MECHANISM, artifact_label=None,
+                              stop_source=stop_src, **{k: v for k, v in ev.items()
+                                                       if k != "stop_source"})
+        if ev.get("kind") != "fill":
+            self._restore_after_operator()
+            return {"accepted": False, "reason": f"voided:{ev.get('reason')}",
+                    "detail": {"fill_price": price, "fill_stop": stop_px}}
+        self._set_target_on_fill(now)
+        return {"accepted": True,
+                "detail": {"fill_price": price, "fill_stop": stop_px, "stop_source": stop_src,
+                           "target": self._sim.target}}
+
+    def _restore_after_operator(self) -> None:
+        """Give `_state["mechanism"]` back to the binding the operator entry displaced.
+        Called once its position has exited (and its exit records carry its own name)."""
+        saved, self._op_saved_mechanism = self._op_saved_mechanism, None
+        if saved is not None and self._sim.position is None:
+            self._state["mechanism"] = saved[0]
+
     def has_position(self) -> bool:
         return self._sim.position is not None
 
@@ -2747,6 +2860,7 @@ class Executor:
             artifact_label=self._label_for(ev.get("artifact_id")), **ev)
         self._note_exit(ev)
         self._note_close(ev)
+        self._restore_after_operator()
 
     def _drive_trail(self, now, mnq, bar_complete) -> None:
         """§8 break-even at 50% (`agent/trader/trail.py`, ON; `ACT_STOP_BE=0` is the
@@ -2918,6 +3032,7 @@ class Executor:
         """A position just exited. One of the follow-up's own: it spends the follow-up's
         budget (or, in profit, closes it). The first position's sweep stop touched in
         profit: the follow-up opens. Anything else: nothing, as today."""
+        self._restore_after_operator()
         if self._pos_is_followup:
             self._pos_is_followup = False
             if self._followup is not None:

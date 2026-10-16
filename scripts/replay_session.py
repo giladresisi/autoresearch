@@ -44,7 +44,7 @@ def main() -> int:
                     help="oracle runs only: make the thesis visible at the arm instant")
     ap.add_argument("--operator-control", default=None, metavar="FILE",
                     help="a recorded operator_control.jsonl to replay (plan 41): the "
-                         "session's direction/target overrides are applied at the same "
+                         "session's direction/target/stop overrides and operator entries are applied at the same "
                          "bars they were applied live")
     ap.add_argument("--window-end", default=None, metavar="HH:MM",
                     help="override the window end (default 13:00; the fidelity "
