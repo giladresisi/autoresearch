@@ -5,7 +5,8 @@ Usage:
   python trade.py up                     # Market LONG. AGENT brain: queued to the agent, which enters by market
                                          #   as `operator_entry` (stop = fill - 20 pts) and manages it (B/E, MES sweep, T2);
                                          #   against the plan direction it flips the plan first (as agent-direction);
-                                         #   refused without a live plan / with a position open.
+                                         #   refused without a live plan (out of attempts is fine) / with a position open;
+                                         #   its stop-out spends no attempt.
                                          #   LEGACY brain (ACT_TRADER=0): S/L from bar_state.json
   python trade.py up --sl 30035          # ... with an explicit stop (both brains)
   python trade.py up 27000               # Stop entry LONG at 27000 (legacy order path, both brains)
@@ -578,7 +579,8 @@ def _queue_agent_entry(direction: str, stop, *, force: bool) -> None:
     default (`executor.OPERATOR_ENTRY_STOP_PTS` from the fill), and manages the position
     with its normal exits. Against the plan's direction it flips the plan first, as
     `agent-direction` does (attempts carry over). It refuses (`operator_override`
-    accepted=false) without a live plan, with a position open or at/after 13:00 ET.
+    accepted=false) without a live plan, with a position open or at/after 13:00 ET; a
+    plan out of attempts still takes it, and its stop-out spends no attempt.
     """
     from agent.trader.operator_control import KIND_OPERATOR_ENTRY, OperatorControl
     state_dir = _agent_session_dir()

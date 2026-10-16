@@ -322,6 +322,10 @@ class Executor:
         self._followup = None
         self._followup_close_recorded = False
         self._pos_is_followup = False
+        # The OPEN position (or the one that just closed) is an operator entry
+        # (`operator_entry`): its stop-out or losing close spends no plan attempt. Reset at
+        # every fill.
+        self._pos_is_operator = False
         # The binding's mechanism the operator entry displaced in `_state`, restored at
         # its exit (`_restore_after_operator`) so a standing binding keeps its own label.
         self._op_saved_mechanism = None
@@ -679,7 +683,10 @@ class Executor:
         self._state["dead_reason"] = reason
         self._state["bound_id"] = None
         self._state["bound_label"] = None
-        self._state["mechanism"] = None
+        if not (self._pos_is_operator and self._sim.position is not None):
+            # An open operator entry keeps its label: a plan out of attempts dies on the
+            # bar it is entered, and its exit records must still name it.
+            self._state["mechanism"] = None
         self._state["trigger"] = None
         self._state["stop"] = None
         self._rec.plan_dead(now=now, plan_id=self._plan.get("plan_id"),
@@ -1437,7 +1444,8 @@ class Executor:
         # A follow-up position spends the FOLLOW-UP's own budget (`_after_exit`), never the
         # plan's; everything else below — the shared tally, the cooldown the order book
         # starts, the takeover scan — behaves as for any stop-out.
-        if not self._pos_is_followup:
+        # An operator entry is the operator's own risk, not the plan's: no attempt spent.
+        if not self._pos_is_followup and not self._pos_is_operator:
             self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
             if self._sec7_quiet_rule and self._state.get("mechanism") == "extreme_reject_close":
                 self._sec7_quiet = True
@@ -1446,7 +1454,8 @@ class Executor:
         # (`Arbiter.spent_by` is "RECORDED, never scored"). Spent at the same instant as
         # the plan's own counter so the two can never disagree.
         try:
-            self._market.arbiter.spend(self._state.get("mechanism"))
+            if not self._pos_is_operator:
+                self._market.arbiter.spend(self._state.get("mechanism"))
         except Exception:
             pass
         # O1 (§7c): AFTER the attempt is spent, so the budget it checks is the one the
@@ -2257,6 +2266,7 @@ class Executor:
         self._micro_smt_exit_unwired_recorded = False
         self._open_retry = None
         self._pos_is_followup = False
+        self._pos_is_operator = False
         self._sweep_stop = None
         pick, reuse = self._reused_first_pick(now)
         if pick is None:
@@ -2544,7 +2554,8 @@ class Executor:
             return want, {"accepted": False, "reason": "bad_direction"}
         if self._window_ended or self._at_window_end(now):
             return want, {"accepted": False, "reason": "window_end"}
-        if not self._state.get("plan_alive"):
+        if (not self._state.get("plan_alive")
+                and self._state.get("dead_reason") != "attempts_exhausted"):
             return want, {"accepted": False, "reason": "no_plan",
                           "detail": {"dead_reason": self._state.get("dead_reason")}}
         if self._sim.position is not None:
@@ -2576,7 +2587,9 @@ class Executor:
         Routed through the agent so the manual position is the model's own: it goes out
         through the normal order port (live: one `market-entry`, stop embedded, `source:
         agent`), the watchdog never sees an external change, and no mechanism can stack a
-        second entry on it. Refused (`operator_entry_refusal`) without a live plan, with a
+        second entry on it. Refused (`operator_entry_refusal`) without a live plan (a plan
+        dead of `attempts_exhausted` still takes it: the budget is the plan's, not the
+        operator's; the plan stays dead, the position is managed as any open one), with a
         position or a follow-up window open, against the plan's direction (the graft flips
         the plan first, so this only guards a direct call), with no bars, with a stop on
         the wrong side, or at/after the 13:00 window end. It BYPASSES the mechanism gates
@@ -2587,7 +2600,8 @@ class Executor:
         Stop = `stop` if given (strictly beyond this bar's extreme on the losing side, so
         the fill bar cannot stop it out), else `OPERATOR_ENTRY_STOP_PTS` from the fill.
         T2, break-even, the MES sweep stop, the micro-SMT exit and the window end then
-        manage it like any fill. BAR time only.
+        manage it like any fill; its stop-out or losing close spends no plan attempt
+        (`_on_stop_out`). BAR time only.
         """
         want, refusal = self.operator_entry_refusal(now, bars, direction, stop)
         if refusal is not None:
@@ -2621,6 +2635,7 @@ class Executor:
             return {"accepted": False, "reason": f"voided:{ev.get('reason')}",
                     "detail": {"fill_price": price, "fill_stop": stop_px}}
         self._set_target_on_fill(now)
+        self._pos_is_operator = True          # after the per-fill reset above
         return {"accepted": True,
                 "detail": {"fill_price": price, "fill_stop": stop_px, "stop_source": stop_src,
                            "target": self._sim.target}}
@@ -3194,10 +3209,11 @@ class Executor:
             mechanism=self._state.get("mechanism"),
             artifact_label=self._label_for(ev.get("artifact_id")), **ev)
         was_followup = self._pos_is_followup
+        was_operator = self._pos_is_operator
         self._note_exit(ev)
         self._note_close(ev)
         self._after_exit(now, ev)
-        if not self._is_profitable(ev) and not was_followup:
+        if not self._is_profitable(ev) and not was_followup and not was_operator:
             self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
             self._plan.setdefault("max_attempts", MAX_ATTEMPTS)
             try:

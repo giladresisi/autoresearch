@@ -1176,7 +1176,9 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
   `operator_control.jsonl`, beside `set_direction` (`agent-direction`), `set_target` /
   `reset_target` (`agent-target`) and `set_stop` (the operator stop adoption of
   `update-sl`). The graft applies it on its next bar close, BEFORE the Executor's own pass
-  (`Executor.operator_entry`). Accepted only with the plan alive, no position open and
+  (`Executor.operator_entry`). Accepted only with the plan alive (or dead only of
+  `attempts_exhausted`: the budget is the plan's, not the operator's, so the entry is taken
+  and the plan stays dead; the position is managed as any open one), no position open and
   before 13:00 ET; otherwise an `operator_override` with accepted=false and reason
   `no_plan` / `open_position` / `window_end` (also `bad_stop`, `followup_open` while a
   §11.8 follow-up window is open, `no_bars` when there is no MNQ bar to price the fill
@@ -1194,7 +1196,8 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
   extension veto, the SMT-wait block, the attempt budget, cooldowns) but not one position
   at a time. T2 is selected at the fill as for any fill (first-pick reuse included) and the
   position is managed by the normal exits (break-even, MES sweep stop, T2, micro-SMT exit,
-  window end). A profitable close or a target touch ends the plan as usual. The watchdog never sees an external change, and no mechanism can
+  window end). Its stop-out (or losing close) spends NO plan attempt; a profitable close
+  or a target touch ends the plan as usual. The watchdog never sees an external change, and no mechanism can
   stack a second entry on it. A replay handed the session's control file
   (`--operator-control`) applies it at the same bar. Under `ACT_TRADER=0` the legacy path
   is unchanged except that `--sl` is accepted as the stop and `hypothesis.json` is written
@@ -1202,7 +1205,10 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
   `tmso_reject` stop-outs by 09:33): `up` at 09:34 flipped the plan to UP (attempts 2 carried
   over) and filled 30640.5, stop 30620.5, T2 30774.25; break-even 09:37:58, take-profit
   09:41:34 (+133.75). An `up` with a stop above the bar was refused `bad_stop` with the DOWN
-  plan left in place; the next `up` flipped and filled.
+  plan left in place; the next `up` flipped and filled. Attempts (same date, DOWN plan): a
+  09:35 operator stop-out left attempts at 2, so the plan died `attempts_exhausted` only at
+  the 09:41:26 `extreme_reject_close` stop-out; a `down` at 09:45 was still entered on the
+  dead plan, and an `up` at 10:00 flipped it (attempts 3 carried over) and was entered.
 - **Audit:** every bind / re-bind / disarm decision is logged (JSONL, extends the existing
   audit conventions) for post-session analysis.
 
