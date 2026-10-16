@@ -1102,7 +1102,21 @@ class SmtV2Dispatcher:
         backend = cached_thesis_backend(date, inner=real_thesis_backend(),
                                         allow_calls=True)
         return TraderGraft(out_dir, backend, order_sink=sink,
-                           htf_extremes=SmtV2Dispatcher._load_htf_extremes(date, out_dir))
+                           htf_extremes=SmtV2Dispatcher._load_htf_extremes(date, out_dir),
+                           htf_history=SmtV2Dispatcher._load_htf_history(date))
+
+    @staticmethod
+    def _load_htf_history(date):
+        """O5 (shadow): ~380 days of the LIVE 1m parquet before the session open, for
+        `htf_context.json` only. NON-FATAL: any failure prints one line and returns None
+        (the record then covers the trader's own ~17 days)."""
+        try:
+            from agent.facts.htf_source import load_htf_history
+            return load_htf_history(date, source="live")
+        except Exception as exc:
+            print("[AGENT-LIVE] htf-history: unavailable (%s: %s)"
+                  % (type(exc).__name__, exc), flush=True)
+            return None
 
     @staticmethod
     def _load_htf_extremes(date, out_dir=None):
