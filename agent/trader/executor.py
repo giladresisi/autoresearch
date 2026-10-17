@@ -70,6 +70,7 @@ import agent.trader.followup as followup
 import agent.trader.nym_mid_reject as nym_mid_reject
 from agent.trader import premove_context
 from agent.trader.smt_wait import SmtWait
+from agent.trader.tape import session_open
 
 # l2-mechanisms.md §9 starting values.
 SETTLE_UNTIL_SECONDS = 30            # settle window ends at 09:30:30
@@ -92,6 +93,9 @@ MAX_ATTEMPTS = 3                     # §8; per plan_id, shared across mechanism
 HTF_VIEW_TAIL = pd.Timedelta(hours=24)
 PRIMARY_TF = "5min"
 FALLBACK_TF = "1min"                 # §4's widened fallback, §6, §8
+# §6: only 1m gaps existing after the 24h counter-thesis extreme. A harness knob for
+# before/after replays, not a runtime flag: the rule is §6's own (2026-10-16).
+SEC6_SINCE_EXTREME = True
 RTH_OPEN_HOUR = 9                    # §4: creating bar at or after 09:30
 RTH_OPEN_MINUTE = 30
 
@@ -125,6 +129,12 @@ if INITIAL_TARGET_ACTION not in INITIAL_TARGET_ACTIONS:      # a typo must not r
 REUSE_FIRST_T2 = True
 
 _SHORT = ("DOWN", "SHORT")
+
+# The operator's manual market entry routed THROUGH the agent (`trade.py up|down` with the
+# agent owning the dispatcher, operator decision 2026-10-16): its default protective stop,
+# this far from the fill when the command carries no explicit `--sl`.
+OPERATOR_ENTRY_STOP_PTS = 20.0
+OPERATOR_ENTRY_MECHANISM = "operator_entry"
 
 EXTENSION_VETO_ENV_FLAG = "ACT_EXTENSION_VETO"
 
@@ -312,6 +322,13 @@ class Executor:
         self._followup = None
         self._followup_close_recorded = False
         self._pos_is_followup = False
+        # The OPEN position (or the one that just closed) is an operator entry
+        # (`operator_entry`): its stop-out or losing close spends no plan attempt. Reset at
+        # every fill.
+        self._pos_is_operator = False
+        # The binding's mechanism the operator entry displaced in `_state`, restored at
+        # its exit (`_restore_after_operator`) so a standing binding keeps its own label.
+        self._op_saved_mechanism = None
         self._last_minute = None
         # The last bar instant this Executor was handed. BAR time, never a wall clock
         # (the gate in `test_executor.py` forbids one here). Only `mark_open_position`
@@ -666,7 +683,10 @@ class Executor:
         self._state["dead_reason"] = reason
         self._state["bound_id"] = None
         self._state["bound_label"] = None
-        self._state["mechanism"] = None
+        if not (self._pos_is_operator and self._sim.position is not None):
+            # An open operator entry keeps its label: a plan out of attempts dies on the
+            # bar it is entered, and its exit records must still name it.
+            self._state["mechanism"] = None
         self._state["trigger"] = None
         self._state["stop"] = None
         self._rec.plan_dead(now=now, plan_id=self._plan.get("plan_id"),
@@ -1237,6 +1257,28 @@ class Executor:
         return [g for g in self._gaps_on(PRIMARY_TF, now, direction=direction)
                 if self._within_max_distance(g, price)]
 
+    def _sec6_gaps(self, now: pd.Timestamp, mnq) -> list:
+        """§6's candidates: thesis-direction 1m gaps CREATED SINCE the counter-thesis day
+        extreme, read off EXISTENCE (§2). The day is the 24h CME session from the prior
+        evening's 18:00 ET (pinned 2026-10-16); the extreme is recomputed every call, so
+        a new adverse extreme retires every gap that existed before it.
+
+        2026-10-16 09:58:14: without this a 10-15 10:38 gap (existing from 10-15 10:40)
+        was still a §6 candidate after the 09:56 day low, and its long stopped out.
+        """
+        anchor = self._arm_ts if self._arm_ts is not None else now
+        _, ext_ts = post_open_counter_extreme(
+            mnq, self._plan.get("direction"), session_open(str(anchor.date())))
+        gaps = self._gaps_on(FALLBACK_TF, now)
+        if ext_ts is None or not SEC6_SINCE_EXTREME:
+            return gaps
+        out = []
+        for g in gaps:
+            at = g.extra.get("exists_from") or g.reference_ts
+            if at is not None and pd.Timestamp(at) > ext_ts:
+                out.append(g)
+        return out
+
     def _created_at_or_after_rth(self, gap, now: pd.Timestamp) -> bool:
         """§4's 1m-fallback filter: the gap's CREATING (third) bar at or after 09:30 ET.
 
@@ -1402,7 +1444,8 @@ class Executor:
         # A follow-up position spends the FOLLOW-UP's own budget (`_after_exit`), never the
         # plan's; everything else below — the shared tally, the cooldown the order book
         # starts, the takeover scan — behaves as for any stop-out.
-        if not self._pos_is_followup:
+        # An operator entry is the operator's own risk, not the plan's: no attempt spent.
+        if not self._pos_is_followup and not self._pos_is_operator:
             self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
             if self._sec7_quiet_rule and self._state.get("mechanism") == "extreme_reject_close":
                 self._sec7_quiet = True
@@ -1411,7 +1454,8 @@ class Executor:
         # (`Arbiter.spent_by` is "RECORDED, never scored"). Spent at the same instant as
         # the plan's own counter so the two can never disagree.
         try:
-            self._market.arbiter.spend(self._state.get("mechanism"))
+            if not self._pos_is_operator:
+                self._market.arbiter.spend(self._state.get("mechanism"))
         except Exception:
             pass
         # O1 (§7c): AFTER the attempt is spent, so the budget it checks is the one the
@@ -1946,7 +1990,7 @@ class Executor:
         usable = self.usable_5m_gaps(now, price)
         armed6 = Arbiter.sec6_armed(usable_5m_gaps=len(usable or ()))
         self._market.sync_episodes(
-            self._gaps_on(FALLBACK_TF, now) if armed6 else (), armed=armed6)
+            self._sec6_gaps(now, mnq) if armed6 else (), armed=armed6)
 
         fires = []
         if bar is None:
@@ -2222,6 +2266,7 @@ class Executor:
         self._micro_smt_exit_unwired_recorded = False
         self._open_retry = None
         self._pos_is_followup = False
+        self._pos_is_operator = False
         self._sweep_stop = None
         pick, reuse = self._reused_first_pick(now)
         if pick is None:
@@ -2493,6 +2538,115 @@ class Executor:
         return {"accepted": True,
                 "detail": {"stop": price, "prev_stop": ev.get("prev_stop")}}
 
+    def plan_direction(self) -> str:
+        return "DOWN" if self._is_short() else "UP"
+
+    def operator_entry_refusal(self, now, bars, direction, stop=None,
+                               check_direction=True):
+        """(want, refusal) for an operator entry at `now`: `want` the normalized direction,
+        `refusal` the graft's verdict dict when it must be refused, else None. Changes
+        nothing, so the graft can run it BEFORE it flips the plan to the command's
+        direction (`check_direction=False`): a refused entry then leaves the plan as it
+        was."""
+        want = str(direction or "").upper()
+        want = {"LONG": "UP", "SHORT": "DOWN"}.get(want, want)
+        if want not in ("UP", "DOWN"):
+            return want, {"accepted": False, "reason": "bad_direction"}
+        if self._window_ended or self._at_window_end(now):
+            return want, {"accepted": False, "reason": "window_end"}
+        if (not self._state.get("plan_alive")
+                and self._state.get("dead_reason") != "attempts_exhausted"):
+            return want, {"accepted": False, "reason": "no_plan",
+                          "detail": {"dead_reason": self._state.get("dead_reason")}}
+        if self._sim.position is not None:
+            return want, {"accepted": False, "reason": "open_position"}
+        if check_direction and want != self.plan_direction():
+            return want, {"accepted": False, "reason": "direction_mismatch",
+                          "detail": {"plan_direction": self.plan_direction()}}
+        if self._followup_open():
+            return want, {"accepted": False, "reason": "followup_open"}
+        mnq = truncate(normalize((bars or {}).get(self._ticker)), now)
+        if not len(mnq):
+            return want, {"accepted": False, "reason": "no_bars"}
+        if stop is not None:
+            last = mnq.iloc[-1]
+            hi, lo = float(last["High"]), float(last["Low"])
+            try:
+                stop_px = float(stop)
+            except (TypeError, ValueError):
+                return want, {"accepted": False, "reason": "bad_stop", "detail": {"stop": stop}}
+            if not (stop_px > hi if want == "DOWN" else 0 < stop_px < lo):
+                return want, {"accepted": False, "reason": "bad_stop",
+                              "detail": {"stop": stop_px, "bar_high": hi, "bar_low": lo}}
+        return want, None
+
+    def operator_entry(self, now, bars, direction, stop=None) -> dict:
+        """Enter BY MARKET on the operator's command (`trade.py up|down` under the agent,
+        operator decision 2026-10-16). Returns the graft's verdict dict.
+
+        Routed through the agent so the manual position is the model's own: it goes out
+        through the normal order port (live: one `market-entry`, stop embedded, `source:
+        agent`), the watchdog never sees an external change, and no mechanism can stack a
+        second entry on it. Refused (`operator_entry_refusal`) without a live plan (a plan
+        dead of `attempts_exhausted` still takes it: the budget is the plan's, not the
+        operator's; the plan stays dead, the position is managed as any open one), with a
+        position or a follow-up window open, against the plan's direction (the graft flips
+        the plan first, so this only guards a direct call), with no bars, with a stop on
+        the wrong side, or at/after the 13:00 window end. It BYPASSES the mechanism gates
+        (settle, entry cutoffs, extension veto, SMT-wait block, attempt budget, cooldowns)
+        — the operator chose to enter — but not one-position-at-a-time.
+
+        Fill = the current 1s bar's mid, snapped adversely, like every market mechanism.
+        Stop = `stop` if given (strictly beyond this bar's extreme on the losing side, so
+        the fill bar cannot stop it out), else `OPERATOR_ENTRY_STOP_PTS` from the fill.
+        T2, break-even, the MES sweep stop, the micro-SMT exit and the window end then
+        manage it like any fill; its stop-out or losing close spends no plan attempt
+        (`_on_stop_out`). BAR time only.
+        """
+        want, refusal = self.operator_entry_refusal(now, bars, direction, stop)
+        if refusal is not None:
+            return refusal
+        mnq = truncate(normalize((bars or {}).get(self._ticker)), now)
+        last = mnq.iloc[-1]
+        hi, lo = float(last["High"]), float(last["Low"])
+        self._bars = bars
+        self._state["now_price"] = float(last["Close"])
+        self._state["now_mid"] = (hi + lo) / 2.0
+        self._state["now_high"], self._state["now_low"] = hi, lo
+        price = self._market_price()
+        short = want == "DOWN"
+        if stop is None:
+            stop_px = price + OPERATOR_ENTRY_STOP_PTS if short else price - OPERATOR_ENTRY_STOP_PTS
+            stop_px = round(round(stop_px / TICK_PTS) * TICK_PTS, 4)
+            stop_src = "default"
+        else:
+            stop_px, stop_src = float(stop), "explicit"
+        self._op_saved_mechanism = (self._state.get("mechanism"),)
+        self._state["mechanism"] = OPERATOR_ENTRY_MECHANISM
+        ev = self._sim.fill_market(now, direction=self._plan.get("direction"),
+                                   price=price, stop=stop_px,
+                                   artifact_id=OPERATOR_ENTRY_MECHANISM)
+        self._rec.order_event(now=now, plan_id=self._plan.get("plan_id"),
+                              mechanism=OPERATOR_ENTRY_MECHANISM, artifact_label=None,
+                              stop_source=stop_src, **{k: v for k, v in ev.items()
+                                                       if k != "stop_source"})
+        if ev.get("kind") != "fill":
+            self._restore_after_operator()
+            return {"accepted": False, "reason": f"voided:{ev.get('reason')}",
+                    "detail": {"fill_price": price, "fill_stop": stop_px}}
+        self._set_target_on_fill(now)
+        self._pos_is_operator = True          # after the per-fill reset above
+        return {"accepted": True,
+                "detail": {"fill_price": price, "fill_stop": stop_px, "stop_source": stop_src,
+                           "target": self._sim.target}}
+
+    def _restore_after_operator(self) -> None:
+        """Give `_state["mechanism"]` back to the binding the operator entry displaced.
+        Called once its position has exited (and its exit records carry its own name)."""
+        saved, self._op_saved_mechanism = self._op_saved_mechanism, None
+        if saved is not None and self._sim.position is None:
+            self._state["mechanism"] = saved[0]
+
     def has_position(self) -> bool:
         return self._sim.position is not None
 
@@ -2721,6 +2875,7 @@ class Executor:
             artifact_label=self._label_for(ev.get("artifact_id")), **ev)
         self._note_exit(ev)
         self._note_close(ev)
+        self._restore_after_operator()
 
     def _drive_trail(self, now, mnq, bar_complete) -> None:
         """§8 break-even at 50% (`agent/trader/trail.py`, ON; `ACT_STOP_BE=0` is the
@@ -2892,6 +3047,7 @@ class Executor:
         """A position just exited. One of the follow-up's own: it spends the follow-up's
         budget (or, in profit, closes it). The first position's sweep stop touched in
         profit: the follow-up opens. Anything else: nothing, as today."""
+        self._restore_after_operator()
         if self._pos_is_followup:
             self._pos_is_followup = False
             if self._followup is not None:
@@ -3053,10 +3209,11 @@ class Executor:
             mechanism=self._state.get("mechanism"),
             artifact_label=self._label_for(ev.get("artifact_id")), **ev)
         was_followup = self._pos_is_followup
+        was_operator = self._pos_is_operator
         self._note_exit(ev)
         self._note_close(ev)
         self._after_exit(now, ev)
-        if not self._is_profitable(ev) and not was_followup:
+        if not self._is_profitable(ev) and not was_followup and not was_operator:
             self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
             self._plan.setdefault("max_attempts", MAX_ATTEMPTS)
             try:

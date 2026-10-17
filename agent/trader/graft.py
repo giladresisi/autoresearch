@@ -46,9 +46,9 @@ from agent.facts.requirements import EXECUTOR_REQUIREMENT
 from agent.facts.store import ensure_coverage
 from agent.trader.analyzer import Analyzer
 from agent.trader.executor import Executor
-from agent.trader.operator_control import (KIND_RESET_TARGET, KIND_SET_DIRECTION,
-                                           KIND_SET_STOP, KIND_SET_TARGET,
-                                           OperatorControl)
+from agent.trader.operator_control import (KIND_OPERATOR_ENTRY, KIND_RESET_TARGET,
+                                           KIND_SET_DIRECTION, KIND_SET_STOP,
+                                           KIND_SET_TARGET, OperatorControl)
 from agent.trader.order_port import MirroringOrderPort
 from agent.trader.order_sim import OrderSim
 from agent.trader.plan_store import PlanStore
@@ -348,6 +348,8 @@ class TraderGraft:
                     res = self._apply_target(now, rec)
                 elif kind == KIND_SET_STOP:
                     res = self._apply_stop(now, rec)
+                elif kind == KIND_OPERATOR_ENTRY:
+                    res = self._apply_entry(now, bars, thesis, rec)
                 elif kind == KIND_RESET_TARGET:
                     res = (self._executor.reset_target(now)
                            if self._executor is not None
@@ -442,6 +444,35 @@ class TraderGraft:
         if price is None:
             return {"accepted": False, "reason": "no_price"}
         return self._executor.set_stop_override(now, price)
+
+    def _apply_entry(self, now, bars, thesis, rec) -> dict:
+        """The operator's manual market entry, routed through the agent (2026-10-16).
+        On a bar close, BEFORE the Executor's own pass, so no mechanism can fire on this
+        bar beside it; the Executor judges and enters (`Executor.operator_entry`).
+
+        Against the plan's direction it FLIPS the plan first, exactly as `agent-direction`
+        would (`_apply_direction`: the plan is killed and re-derived, attempts carry over),
+        then enters on the new plan. Every other refusal is checked before the flip, so a
+        refused entry leaves the plan as it was."""
+        if self._executor is None:
+            return {"accepted": False, "reason": "no_plan"}
+        stop = rec.get("stop")
+        want, refusal = self._executor.operator_entry_refusal(
+            now, bars, rec.get("direction"), stop, check_direction=False)
+        if refusal is not None:
+            return refusal
+        flipped = None
+        if want != self._executor.plan_direction():
+            res = self._apply_direction(now, bars, thesis,
+                                        {"direction": want, "seq": rec.get("seq")})
+            if not res.get("accepted"):
+                return {"accepted": False, "reason": f"flip_failed:{res.get('reason')}",
+                        "detail": res.get("detail")}
+            flipped = res.get("detail")
+        res = self._executor.operator_entry(now, bars, want, stop=stop)
+        if flipped is not None:
+            res = {**res, "detail": {**(res.get("detail") or {}), "flipped": flipped}}
+        return res
 
     def _maybe_snapshot(self, now, closed) -> None:
         """One store snapshot per session date, on a bar close.

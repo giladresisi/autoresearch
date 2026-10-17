@@ -2,9 +2,16 @@
 """trade.py — Manual order CLI for the live session.
 
 Usage:
-  python trade.py up                     # Market LONG  (S/L from bar_state.json)
-  python trade.py up 27000               # Stop entry LONG at 27000
-  python trade.py down                   # Market SHORT (S/L from bar_state.json)
+  python trade.py up                     # Market LONG. AGENT brain: queued to the agent, which enters by market
+                                         #   as `operator_entry` (stop = fill - 20 pts) and manages it (B/E, MES sweep, T2);
+                                         #   against the plan direction it flips the plan first (as agent-direction);
+                                         #   refused without a live plan (out of attempts is fine) / with a position open;
+                                         #   its stop-out spends no attempt.
+                                         #   LEGACY brain (ACT_TRADER=0): S/L from bar_state.json
+  python trade.py up --sl 30035          # ... with an explicit stop (both brains)
+  python trade.py up 27000               # Stop entry LONG at 27000 (legacy order path, both brains)
+  python trade.py down                   # Market SHORT (agent: stop = fill + 20 pts; same rules as `up`)
+  python trade.py down --sl 30120        # ... with an explicit stop
   python trade.py down 27000             # Stop entry SHORT at 27000
   python trade.py cancel                 # Cancel unfilled stop entry
   python trade.py move 28000             # Move unfilled stop entry to 28000
@@ -562,6 +569,42 @@ def _agent_override(cmd: str, rest: list, *, force: bool) -> None:
           + (f" ({known[0].get('price')})" if known else ""))
 
 
+def _queue_agent_entry(direction: str, stop, *, force: bool) -> None:
+    """`trade.py up|down` (no price) with the AGENT owning the dispatcher: queue an
+    `operator_entry` for the running agent (2026-10-16).
+
+    Nothing is sent to the broker from here and nothing legacy is written (no
+    bar_state.json read, no hypothesis.json): the agent enters by market through its own
+    order port on its next bar close, `mechanism: operator_entry`, with `stop` or its
+    default (`executor.OPERATOR_ENTRY_STOP_PTS` from the fill), and manages the position
+    with its normal exits. Against the plan's direction it flips the plan first, as
+    `agent-direction` does (attempts carry over). It refuses (`operator_override`
+    accepted=false) without a live plan, with a position open or at/after 13:00 ET; a
+    plan out of attempts still takes it, and its stop-out spends no attempt.
+    """
+    from agent.trader.operator_control import KIND_OPERATOR_ENTRY, OperatorControl
+    state_dir = _agent_session_dir()
+    if not state_dir.is_dir():
+        print(f"ERROR: no session folder {state_dir}; the agent is not running this session.")
+        sys.exit(1)
+    no_plan = _agent_no_plan_reason(state_dir)
+    if no_plan and not force:
+        print(f"ERROR: {no_plan}; the entry would be refused with no_plan. "
+              "--force queues it anyway.")
+        sys.exit(1)
+    want = "UP" if direction == "long" else "DOWN"
+    ctl = OperatorControl(state_dir)
+    rec = ctl.append({"kind": KIND_OPERATOR_ENTRY, "direction": want,
+                      "stop": (float(stop) if stop is not None else None),
+                      "created_at": _now_iso()})
+    stop_txt = (str(rec["stop"]) if rec.get("stop") is not None
+                else "fill -/+ 20 pts (default)")
+    print(f"Queued for the agent: market {want} entry, stop {stop_txt} -> {ctl.path}")
+    print("The agent enters on its next bar close (against the plan's direction it flips "
+          "the plan first). Watch trader_decisions.jsonl for the `operator_override` "
+          "record and the `fill` with mechanism operator_entry.")
+
+
 def _queue_agent_stop(stop_price: float) -> None:
     """Tell the RUNNING agent about the stop the broker was just given (`update-sl`).
 
@@ -663,17 +706,31 @@ def main() -> None:
 
     if cmd in ("up", "down"):
         direction = "long" if cmd == "up" else "short"
+        sl_opt = None
+        if "--sl" in args:
+            i = args.index("--sl")
+            try:
+                sl_opt = float(args[i + 1])
+            except (IndexError, ValueError):
+                print("ERROR: --sl needs a price (e.g. trade.py up --sl 30035)")
+                sys.exit(1)
+            args = args[:i] + args[i + 2:]
         pos = live_orders.get_position()
         if not force and (pos.get("active") or pos.get("stop_entry")):
             what = "active position" if pos.get("active") else "pending stop entry"
             print(f"ERROR: position.json already has a {what} — use --force to override")
             sys.exit(1)
+        if len(args) < 2 and not _agent_switched_off():
+            # The agent owns the dispatcher: route the market entry THROUGH it.
+            _queue_agent_entry(direction, sl_opt, force=force)
+            return
         forced_v2 = "up" if direction == "long" else "down"
-        live_orders._force_hypothesis_for_direction(forced_v2)
         if len(args) >= 2:
             entry_price = float(args[1])
             if len(args) >= 3:
                 sl_price = float(args[2])
+            elif sl_opt is not None:
+                sl_price = sl_opt
             else:
                 bar_state = smt_state.load_bar_state()
                 if bar_state is None:
@@ -685,19 +742,27 @@ def main() -> None:
                     print(f"ERROR: {stop_key} is null in bar_state.json — provide sl_price explicitly")
                     sys.exit(1)
                 sl_price = float(_sl)
+            # Only once the stop is known: a refused command must write no legacy state.
+            live_orders._force_hypothesis_for_direction(forced_v2)
             label = "LONG" if direction == "long" else "SHORT"
             print(f"Stop entry {label} at {entry_price} | S/L: {sl_price}")
             live_orders.place_stop_entry(direction, entry_price, sl_price, source="manual")
         else:
-            bar_state = smt_state.load_bar_state()
-            if bar_state is None:
-                print("ERROR: bar_state.json not found — cannot determine stop price")
-                sys.exit(1)
-            stop_key = "potential_stop_long" if direction == "long" else "potential_stop_short"
-            stop = bar_state.get(stop_key)
-            if stop is None:
-                print(f"ERROR: {stop_key} is null in bar_state.json — cannot place market entry")
-                sys.exit(1)
+            if sl_opt is not None:
+                stop = sl_opt
+            else:
+                bar_state = smt_state.load_bar_state()
+                if bar_state is None:
+                    print("ERROR: bar_state.json not found — cannot determine stop price "
+                          "(give one with --sl <price>)")
+                    sys.exit(1)
+                stop_key = "potential_stop_long" if direction == "long" else "potential_stop_short"
+                stop = bar_state.get(stop_key)
+                if stop is None:
+                    print(f"ERROR: {stop_key} is null in bar_state.json — cannot place "
+                          "market entry (give a stop with --sl <price>)")
+                    sys.exit(1)
+            live_orders._force_hypothesis_for_direction(forced_v2)
             label = "LONG" if direction == "long" else "SHORT"
             print(f"Market {label} | S/L: {stop}")
             live_orders.place_market_entry(direction, 0.0, float(stop), source="manual")
