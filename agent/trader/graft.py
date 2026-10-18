@@ -39,6 +39,7 @@ import os
 import pandas as pd
 
 from agent.facts.bars import resample
+from agent.facts.detectors._common import normalize, truncate
 from agent.facts.detectors.legs import segment_legs
 from agent.facts.journal import Journal
 from agent.facts.maintainer import FactsMaintainer
@@ -46,6 +47,7 @@ from agent.facts.requirements import EXECUTOR_REQUIREMENT
 from agent.facts.store import ensure_coverage
 from agent.trader.analyzer import Analyzer
 from agent.trader.executor import Executor
+import agent.trader.liq_exhaust as liq_exhaust
 from agent.trader.operator_control import (KIND_RESET_TARGET, KIND_SET_DIRECTION,
                                            KIND_SET_STOP, KIND_SET_TARGET,
                                            OperatorControl)
@@ -161,6 +163,11 @@ class TraderGraft:
         # loop was busy is picked up on the next bar close rather than lost.
         self._control = OperatorControl(state_dir)
         self._control_seq = 0
+        # §11.13 CANDIDATE (`liq_exhaust.py`, ON by default): read ONCE here. `_liq` is
+        # None until the 09:20 HTF context arrives, then a `LiqWatch`, or False when the
+        # day's gate failed.
+        self._liq_enabled = liq_exhaust.enabled()
+        self._liq = None
         if order_sink is not None and self._plans.all():
             self._disarmed = "restart"
 
@@ -301,6 +308,13 @@ class TraderGraft:
                 self._plan["attempts_used"] = used
                 self._plans.put(self._plan)
 
+        # §11.13: after the Executor, so its position state is this bar's.
+        if self._liq_enabled and closed and self._executor is not None:
+            try:
+                self._drive_liq(now, bars, thesis)
+            except Exception as exc:
+                self._health["liq_error"] = f"{type(exc).__name__}: {exc}"
+
         # Last, so the arming bar is covered too: under the default switch the
         # maintenance block above runs BEFORE the Executor exists, so a snapshot taken
         # there would skip the very bar the plan armed on.
@@ -384,18 +398,32 @@ class TraderGraft:
         if str(self._plan.get("direction") or "").upper() == want:
             return {"accepted": False, "reason": "already_that_direction"}
 
-        used = 0 if rec.get("reset_attempts") else (
+        res = self._replace_plan(
+            now, bars, thesis, want, "operator_direction_change",
+            {"to": want, "seq": rec.get("seq")},
+            reset_attempts=bool(rec.get("reset_attempts")),
+            extra={"operator_direction": want})
+        if res is None:
+            return {"accepted": False, "reason": "derive_failed"}
+        return {"accepted": True, "detail": res}
+
+    def _replace_plan(self, now, bars, thesis, want, reason, kill_detail, *,
+                      reset_attempts=False, extra=None, max_attempts=None) -> "dict | None":
+        """Kill the standing plan and arm a new one biased `want`; None if the derive
+        failed. Shared by the operator's direction command and the §11.13 flip."""
+        used = 0 if reset_attempts else (
             self._executor.attempts_used() if self._executor is not None
             else int(self._plan.get("attempts_used") or 0))
         old_id = self._plan.get("plan_id")
         if self._executor is not None:
-            self._executor.kill_plan(now, "operator_direction_change",
-                                     {"to": want, "seq": rec.get("seq")})
+            self._executor.kill_plan(now, reason, kill_detail)
         plan = self._derive({**dict(thesis), "bias": want}, bars, now)
         if plan is None:
-            return {"accepted": False, "reason": "derive_failed"}
+            return None
         plan["attempts_used"] = int(used)
-        plan["operator_direction"] = want
+        plan.update(extra or {})
+        if max_attempts is not None:
+            plan["max_attempts"] = int(max_attempts)
         plan["replaces_plan_id"] = old_id
         self._plan = plan
         self._plans.put(plan)
@@ -403,9 +431,55 @@ class TraderGraft:
                                   maintainer=self._maint, requirement=self._req,
                                   order_port=self._order_port(),
                                   htf_extremes=self._htf_ctx)
-        return {"accepted": True,
-                "detail": {"direction": want, "plan_id": plan.get("plan_id"),
-                           "replaces_plan_id": old_id, "attempts_used": int(used)}}
+        return {"direction": want, "plan_id": plan.get("plan_id"),
+                "replaces_plan_id": old_id, "attempts_used": int(used)}
+
+    # -- §11.13 CANDIDATE: the liquidity-exhaustion flip ------------------------ #
+
+    def _drive_liq(self, now, bars, thesis) -> None:
+        """Build the day's watch once the 09:20 HTF context exists, judge every completed
+        bar, and flip the plan at a stall (`liq_exhaust.py`). Once a day."""
+        if self._liq is False:
+            return
+        plan_id = (self._plan or {}).get("plan_id")
+        if self._liq is None:
+            ctx = self._analyzer.htf_context() if self._analyzer is not None else None
+            if ctx is None:
+                return
+            direction = (self._plan or {}).get("direction")
+            levels, gate = liq_exhaust.watch_levels(ctx, direction)
+            self._rec.liq_exhaust(now=now, plan_id=plan_id, kind="liq_watch",
+                                  detail={"gate": gate, "levels": levels})
+            if not levels:
+                self._liq = False
+                return
+            self._liq = liq_exhaust.LiqWatch(direction, levels, gate)
+        watch = self._liq
+        if watch.done is not None:
+            return
+        if str((self._plan or {}).get("direction") or "").upper() != watch.direction:
+            watch.finish("plan_direction_changed")
+            self._rec.liq_exhaust(now=now, plan_id=plan_id, kind="liq_watch_end",
+                                  detail={"reason": watch.done})
+            return
+        frames = {tk: truncate(normalize((bars or {}).get(tk)), now) for tk in ("MNQ", "MES")}
+        ev = watch.on_bar_close(now, frames)
+        if ev is None:
+            if watch.done is not None:
+                self._rec.liq_exhaust(now=now, plan_id=plan_id, kind="liq_watch_end",
+                                      detail={"reason": watch.done, **watch.state()})
+            return
+        if self._executor.has_position():
+            watch.finish("skipped_open_position")
+            self._rec.liq_exhaust(now=now, plan_id=plan_id, kind="liq_flip_skipped",
+                                  detail={"reason": watch.done, **ev})
+            return
+        res = self._replace_plan(now, bars, thesis, ev["to"], "liquidity_exhausted", ev,
+                                 reset_attempts=True, max_attempts=1,
+                                 extra={"liq_flip": {**ev, "at": str(now)},
+                                        "armed_classes": [liq_exhaust.MECHANISM]})
+        self._rec.liq_exhaust(now=now, plan_id=(res or {}).get("plan_id", plan_id),
+                              kind="liq_flip", detail={**ev, "replaced": res})
 
     def _apply_target(self, now, rec) -> dict:
         """Set the bound target. `level` names a row of the CURRENT menu (re-priced at

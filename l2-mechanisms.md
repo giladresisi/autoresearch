@@ -2607,3 +2607,54 @@ the 10:22 stop-out, the 10:24 short does not happen and `fvg_1m_post_extreme` sh
 with a 30-pt stop, a late `tmso_reject`); that is those mechanisms' question. The slow
 suite was not run; no named-case date has a second §7 fire after a §7 stop-out in its
 documented sequence that was checked.
+
+### 11.13 CANDIDATE — liquidity-exhaustion flip + `fvg_1m_both` (session 2026-10-15 O2, operator, 2026-10-18/19)
+
+**The rule** (`agent/trader/liq_exhaust.py`; switch `ACT_LIQ_EXHAUST_FLIP`, ON by default by
+operator decision 2026-10-19, `0`/`false`/`no`/`off` the rollback, read once per graft). The
+operator called it "the ONLY reversal re-entry".
+- **Gate (09:20).** The O5 HTF context (`htf_liquidity`, `htf_context.json`): MNQ's move in
+  the PLAN's direction is >= 3 x ADR and `ongoing` (no 25% retrace).
+- **Levels.** The context's levels AHEAD of price in the plan direction, on either asset,
+  `untouched` at 09:19, within its 0.5-ADR band, tiers 4h / daily / weekly FVG and prior-day /
+  prior-week extremes. 6h-session extremes are excluded (the worst group, 21% at 2x stop, in
+  the 2026-10-16 research). A level entered between 09:20 and 09:35 is dropped.
+- **Touch.** A completed 1m bar of the level's asset trades strictly beyond the near edge,
+  labelled 09:35-10:30. An FVG whose far edge is then traded through is void.
+- **Stall.** At or after the touch, before 10:30: the last two completed 1m bars closed
+  against the plan in BOTH assets, or the level's asset closed back out of the level.
+- **Flip.** At the stall, when flat, the standing plan (alive or already dead) is killed
+  (`liquidity_exhausted`) and replaced through the operator direction path by an opposite
+  plan with `liq_flip`, `armed_classes: ["fvg_1m_both"]` and a one-attempt budget. Once a day,
+  never back. A position open at the stall skips it and ends the watch.
+- **Entry `fvg_1m_both`.** The first 1m FVG in the new direction in BOTH assets whose third
+  bar completes after the flip: market at that bar's close, stop the MNQ gap's far edge one
+  tick out. One fill, none at/after 10:30 (`executor.MECHANISM_CUTOFF_ET`). The extension
+  veto and the SMT-wait block apply. No other mechanism fires on the flipped plan.
+
+**Motivating day, 2026-10-15 (DOWN, 4.0 ADR move).** The plan died `positive_close` at 09:36.
+MNQ wicked one tick into the Sep 17 06:00 4h bull FVG (just under the Sep 17 daily FVG) at
+09:54 and closed back out: flip 09:55:00. The 10:00 bar left a gap in both assets (MNQ
+[29674.0, 29684.0], MES [7725.0, 7726.25]): long 10:01:00 @ 29708.25, stop 29673.75, MFE
+120.75 (3.5x), take-profit at TDO 29855.0. Replay: entry MFE sum +37.25 -> +158.00, session
+P&L (secondary) +19.00 -> +165.75.
+
+**Evidence** (MFE vs the entry's own stop to a flat 40-pt retrace).
+- 2026-10-16 research (690 days of 1m bars): at 3-4 ADR moves a stall at a real MNQ level
+  reversed 80% (holdout) / 90% (primary) vs 55% / 68% at pseudo-levels at the same distance;
+  at >= 4 ADR the sign flips (ahead levels break more than they hold). The both-asset FVG
+  entry after a real-level stall alone was no better than random (31% at 2x vs 29%); HTF
+  tiers did better on small n (prior-day/week extremes 50%, 4h FVG 35%, daily FVG 33%).
+- Screen of 113 corpus days plus 7 recent ones: the gate passes on 19, the watch arms on 13,
+  the flip comes on 7.
+- Replay A/B on those 7: 10-15 +120.75 MFE. 05-28: the plan was already dead (target), flip
+  10:15, short 10:22 @ 30119 MFE 53.25 vs a 13.5-pt stop (3.9x), stopped -13.5 (far target).
+  07-28, 09-22, 10-02: skipped, a position was open. 07-29, 08-13: flip after a winning
+  trade, no both-asset FVG before 10:30. No entry of the original plan removed anywhere.
+- Replay A/B on the last 20 trading days (09-21..10-16): only 10-15 differs. 10-16 armed and
+  voided (its 4h FVG was traded through), 10-06 (an operator direction change, same code
+  path) identical.
+
+**Open.** Two entries in ~120 days: no harm found, no edge proven. The flipped plan's target
+is the ordinary T2 pick (05-28 lost on a far one). The slow suite was not run (operator,
+2026-10-19). The 3-4 ADR effect is non-monotonic and 10-15 sits at 3.99.

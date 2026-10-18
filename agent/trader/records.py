@@ -245,6 +245,13 @@ class DecisionRecorder:
                     "reason": reason, "detail": detail or {}, "seq": seq})
         self._write(rec)
 
+    def liq_exhaust(self, *, now, plan_id, kind, detail=None) -> None:
+        """§11.13 CANDIDATE (`liq_exhaust.py`): `kind` is one of `liq_watch` (the gate and
+        the levels), `liq_watch_end`, `liq_flip_skipped`, `liq_flip`."""
+        rec = self._base(kind, now, plan_id, "liq_exhaust")
+        rec.update({"detail": detail or {}})
+        self._write(rec)
+
     def session_disarmed(self, *, now, reason, plan_id=None, detail=None) -> None:
         """The chain will do nothing more this session. Live only: a restart that found
         a plan already on disk, or a disarm ordered from outside after a trader error."""
