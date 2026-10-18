@@ -75,6 +75,27 @@ def _close_session_position(log_ch: OutputChannel) -> None:
         log_ch.writeln(f"[ORCH] WARNING: session-end close failed: {_exc}")
 
 
+def _write_session_trades(relay: SessionRelay, session_dir: Path, today, log_ch: OutputChannel) -> None:
+    """Write the session's trades.tsv from its events.jsonl (2026-10-16 D4).
+
+    The relay only sees automation.main's stdout and pairs entries with exits in order, so an
+    exit from another process (`trade.py close`) or a restart shifts every later pairing and
+    drops trades. events.jsonl gets every fill and exit, from every process and run segment,
+    so the ledger is rebuilt from it (`scripts.rebuild_trades_from_events`, the same pairing
+    session-analysis uses for trades_full.tsv). The relay's own pairing is only the fallback
+    when events.jsonl is missing or cannot be read."""
+    events_path = session_dir / "events.jsonl"
+    try:
+        if events_path.exists():
+            from scripts.rebuild_trades_from_events import rebuild_trades_from_events, write_trades_tsv
+            write_trades_tsv(rebuild_trades_from_events(events_path), session_dir / "trades.tsv")
+            return
+    except Exception as _exc:
+        log_ch.writeln(f"[ORCH] WARNING: trades.tsv from events.jsonl failed ({_exc}); "
+                       "falling back to the relay's pairing")
+    relay.write_trades_tsv(session_dir / "trades.tsv", today)
+
+
 from gap_fill import check_ib_reachable as _check_ib_reachable
 from data.ib_realtime import GapFillFailedError
 
@@ -569,13 +590,13 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
                 _extra["FORCE_RESET"] = "true"
             result = ProcessManager(signal_cmd, relay, orch_ch, extra_env=_extra).run_session(today, grace_end_dt=grace_end_dt)
             if result == "stop_requested":
-                # Operator stop mid-session (trade.py terminate). Only the in-memory
-                # trades.tsv is written. NOT the 1s merge: it opens an IB connection and
+                # Operator stop mid-session (trade.py terminate). Only trades.tsv is
+                # written (from events.jsonl). NOT the 1s merge: it opens an IB connection and
                 # rewrites the main parquets, which must not race trade.py's kill timeout —
                 # _pre_session_init runs the same merge at the next start. NOT the
                 # session-end close: terminate refuses with a position open, and its
                 # override deliberately leaves the position at the broker.
-                relay.write_trades_tsv(_SESSIONS_DIR / session_label.isoformat() / "trades.tsv", today)
+                _write_session_trades(relay, _SESSIONS_DIR / session_label.isoformat(), today, orch_ch)
                 orch_ch.writeln("[ORCH] Stop requested mid-session — subprocess stopped")
                 raise _GracefulStop()
             # Post-session: fill the ~2-min gap (gap-fill end → first session tick) and merge
@@ -588,7 +609,7 @@ def run(summarizer: Summarizer | None = None, skip_summary: bool = False, force_
             except Exception as _exc:
                 orch_ch.writeln(f"[ORCH] WARNING: 1s session merge failed: {_exc}")
             _close_session_position(orch_ch)
-            relay.write_trades_tsv(_SESSIONS_DIR / session_label.isoformat() / "trades.tsv", today)
+            _write_session_trades(relay, _SESSIONS_DIR / session_label.isoformat(), today, orch_ch)
             # if summarizer is not None:
             #     summarizer.run(today, _SESSIONS_DIR / today.isoformat() / "signals.log", _SESSIONS_DIR, signal_ch)
             if result == "ib_disconnected":

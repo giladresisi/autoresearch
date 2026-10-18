@@ -69,6 +69,8 @@ broker reports keep their legacy shapes. The deterministic counterpart is theref
   the trader graft (`thesis_state.json`, `plans.json`, `trader_decisions.jsonl`,
   `facts_journal.jsonl`, `facts_snapshot.json`, `snapshots/`), the `live-comment` skill
   (`comments.md`), the `run-orchestrator` skill (the running-commit line in `comments.md`),
+  `trade.py` (`operator_actions.jsonl`: one record per command, refused or not, since
+  2026-10-18; `operator_control.jsonl`: the commands queued for the agent),
   and the `get-reports` extractors (`tradovate_orders.csv`, `tradovate_position_history.csv`,
   `pickmytrade_alerts.csv`). Never look anywhere else for session inputs.
 - **Replay** outputs are local to the analysis worktree (`<WT>`, Step 1.5), per-run, under
@@ -221,10 +223,12 @@ fetched and **do not exist** for this session. When this happens:
 
 ## Step 2.1 — Rebuild a complete trade ledger from events.jsonl
 
-The live `trades.tsv` is written from the orchestrator relay's **in-memory, per-run** events
-and overwritten at each session-end, so it loses round-trips across restarts/terminations
-(GIL-13). Rebuild a complete ledger from the persistent, append-only `events.jsonl` before
-analysis:
+Up to 2026-10-17 the live `trades.tsv` was written from the orchestrator relay's
+**in-memory, per-run** events, so it lost round-trips across restarts/terminations (GIL-13)
+and mispaired exits sent by another process (`trade.py close`, 2026-10-16 D4). Since then the
+orchestrator writes it from `events.jsonl` at session end and at `trade.py terminate`, with
+the same pairing as below. Rebuild the ledger anyway: it does not depend on how the
+orchestrator exited (a hard kill writes no `trades.tsv`) and works for older sessions:
 
 ```bash
 uv run python -m scripts.rebuild_trades_from_events --date <date>
@@ -387,7 +391,13 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
    A SECOND exit after a "user-requested" close (see Step 2.1, phantom second exit) is
    mirror noise, not a fill — exclude it and record it as a discrepancy of the
    manual-close/simulator interaction. The original <SESSION>\trades.tsv is the live relay's
-   restart-lossy record; a gap between trades_full.tsv and trades.tsv is D-class material.
+   restart-lossy record for sessions up to 2026-10-17 (since then it is built from
+   events.jsonl too); a gap between trades_full.tsv and trades.tsv is D-class material.
+   <SESSION>\operator_actions.jsonl (since 2026-10-18; absent before): one JSON record per
+   `trade.py` command at the moment it ran, refused or not: {time_et, command, args,
+   brain, exit_code, output (tail)}. It is the list of every manual action, and it survives
+   a manual terminate. Join it to events.jsonl (the orders) and trader_decisions.jsonl
+   (`operator_override` = what the agent did with a queued command).
 
 3. <SESSION>\signals.log
    Raw stdout from automation.main. Contains [PMT] lines showing every order sent
