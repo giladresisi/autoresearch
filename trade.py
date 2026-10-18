@@ -681,6 +681,49 @@ def _mirror_broker_lines(cmd: str) -> None:
         pass
 
 
+#: Lines of a command's output kept in its operator_actions.jsonl record (the tail).
+_ACTION_OUTPUT_LINES = 20
+
+
+class _OutputCapture:
+    """stdout pass-through that keeps everything printed, for the action record."""
+
+    def __init__(self, stream) -> None:
+        self._stream, self.text = stream, []
+
+    def write(self, text):
+        self.text.append(text)
+        return self._stream.write(text)
+
+    def flush(self):
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _record_action(argv: list, started_et: str, exit_code: int, output: str) -> None:
+    """Append ONE record of this command to `<session>/operator_actions.jsonl` (2026-10-16
+    D4): every `trade.py` command, refused or not, at the moment it ran, so a session that
+    is terminated by hand still leaves the full list of operator actions for the analysis.
+    {time_et, command, args, brain, exit_code, output (tail)}. Only when today's session
+    folder exists (never created here). Best-effort: a failed append never fails the
+    command."""
+    try:
+        session_dir = _agent_session_dir()
+        if not session_dir.is_dir():
+            return
+        import json
+        lines = [ln for ln in output.splitlines() if ln.strip()]
+        rec = {"time_et": started_et, "command": (argv[0].lower() if argv else ""),
+               "args": argv[1:], "brain": "legacy" if _agent_switched_off() else "agent",
+               "exit_code": exit_code, "output": lines[-_ACTION_OUTPUT_LINES:]}
+        with open(session_dir / "operator_actions.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
+
 def _now_iso() -> str:
     """Wall clock, legitimately: this is the CLI, outside the bar loop. The graft stamps
     the BAR instant it applied the record at."""
@@ -1080,8 +1123,21 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _started_et = _dt.datetime.now(tz=_ZoneInfo("America/New_York")).isoformat()
+    _capture = _OutputCapture(sys.stdout)
+    sys.stdout = _capture
+    _exit_code = 0
     try:
         main()
+    except SystemExit as exc:
+        _exit_code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        raise
     except Exception as exc:
         print(f"ERROR: {exc}")
+        _exit_code = 1
         sys.exit(1)
+    finally:
+        if sys.argv[1:]:
+            _record_action(sys.argv[1:], _started_et, _exit_code, "".join(_capture.text))
