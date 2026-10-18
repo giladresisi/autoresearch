@@ -460,6 +460,18 @@ resting order beyond them.
     displacement evidence that the market is already moving the thesis's way; counter-thesis
     1m gaps do not qualify. An SMT in the thesis direction is corroborating context, never a
     requirement.
+    - **Implemented 2026-10-16 (`Executor._sec6_gaps`).** Until then the code handed §6
+      every LIVE 1m gap, whatever its age: 2026-10-16 09:58:14 went long off a 10-15 10:38
+      gap after the 09:56 day low 29802.75 and stopped out (−29.5). Pinned readings:
+      "that extreme" = the counter-thesis extreme of the **24h CME session** (from the
+      prior evening's 18:00 ET), recomputed every bar; "created since" = the gap's
+      EXISTENCE strictly after the label of the bar holding that extreme. The post-09:30
+      window was rejected: over the corpus it would remove 76 of 233 §6 fills, and those
+      scored better than the rest (mean 2.42R vs 1.67R). The 24h reading removes 7 of 233
+      (05-27 ×3, 06-10 ×2, 07-01, 08-28): two winners (05-27 10:35 2.57R, 06-10 09:49
+      4.47R), five losers. The precondition above it (a new extreme after the last 5m
+      gap's creation) is still NOT enforced: under the 24h reading it would disarm §6 on
+      every day whose adverse extreme printed overnight.
 - **Episode model:** an *episode* begins when price enters a candidate gap — strictly inside,
   at least one tick beyond the near edge (edge touches don't count; no traversal requirement)
   — and it tracks the excursion extreme until a trade starts. Adverse 1m closes beyond the
@@ -1157,6 +1169,46 @@ nothing else: §6, §7 and `fvg_1h_reject` are unchanged.
   position at that bar's close (a MARK, recorded as such — the live side mirrors it as the
   window-end market close) and the plan dies with reason `window_end`. Unreachable in
   replay by construction, so every replayed stream is unchanged.
+- **Operator market entry through the agent (`operator_entry`, operator decision 2026-10-16).**
+  With the agent owning the dispatcher, `trade.py up|down` with no price no longer goes to
+  the legacy order path (which needed the legacy-only `bar_state.json` and wrote
+  `hypothesis.json`); it queues one `operator_entry` {direction, stop or null} on
+  `operator_control.jsonl`, beside `set_direction` (`agent-direction`), `set_target` /
+  `reset_target` (`agent-target`) and `set_stop` (the operator stop adoption of
+  `update-sl`). The graft applies it on its next bar close, BEFORE the Executor's own pass
+  (`Executor.operator_entry`). Accepted only with the plan alive (or dead only of
+  `attempts_exhausted`: the budget is the plan's, not the operator's, so the entry is taken
+  and the plan stays dead; the position is managed as any open one), no position open and
+  before 13:00 ET; otherwise an `operator_override` with accepted=false and reason
+  `no_plan` / `open_position` / `window_end` (also `bad_stop`, `followup_open` while a
+  §11.8 follow-up window is open, `no_bars` when there is no MNQ bar to price the fill
+  from, and `voided:<reason>` when the dispatcher declines the entry, e.g. paused).
+  AGAINST the plan's direction it first flips the plan exactly as `agent-direction` does
+  (the plan is killed with `operator_direction_change` and re-derived, attempts carry
+  over; the override's detail carries `flipped`), then enters on the new plan; every
+  other refusal is checked before the flip, so a refused entry leaves the plan as it was
+  (a flip the Planner cannot derive is `flip_failed:<reason>`). Accepted = a
+  market fill at the current 1s bar's mid (snapped adversely), `mechanism: operator_entry`,
+  through the normal order port (live: one `market-entry` with the stop embedded, `source:
+  agent`). Stop = `--sl <price>` if given (refused `bad_stop` unless strictly beyond the
+  bar's extreme on the losing side), else `executor.OPERATOR_ENTRY_STOP_PTS` = 20 pts from
+  the fill. It BYPASSES every mechanism gate (settle, the 10:30 / 11:00 cutoffs, the
+  extension veto, the SMT-wait block, the attempt budget, cooldowns) but not one position
+  at a time. T2 is selected at the fill as for any fill (first-pick reuse included) and the
+  position is managed by the normal exits (break-even, MES sweep stop, T2, micro-SMT exit,
+  window end). Its stop-out (or losing close) spends NO plan attempt; a profitable close
+  or a target touch ends the plan as usual. The watchdog never sees an external change, and no mechanism can
+  stack a second entry on it. A replay handed the session's control file
+  (`--operator-control`) applies it at the same bar. Under `ACT_TRADER=0` the legacy path
+  is unchanged except that `--sl` is accepted as the stop and `hypothesis.json` is written
+  only after the stop is known. Synthetic check, 2026-10-13 (corpus thesis, DOWN plan, two
+  `tmso_reject` stop-outs by 09:33): `up` at 09:34 flipped the plan to UP (attempts 2 carried
+  over) and filled 30640.5, stop 30620.5, T2 30774.25; break-even 09:37:58, take-profit
+  09:41:34 (+133.75). An `up` with a stop above the bar was refused `bad_stop` with the DOWN
+  plan left in place; the next `up` flipped and filled. Attempts (same date, DOWN plan): a
+  09:35 operator stop-out left attempts at 2, so the plan died `attempts_exhausted` only at
+  the 09:41:26 `extreme_reject_close` stop-out; a `down` at 09:45 was still entered on the
+  dead plan, and an `up` at 10:00 flipped it (attempts 3 carried over) and was entered.
 - **Audit:** every bind / re-bind / disarm decision is logged (JSONL, extends the existing
   audit conventions) for post-session analysis.
 

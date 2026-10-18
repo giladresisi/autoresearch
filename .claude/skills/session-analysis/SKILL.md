@@ -69,6 +69,8 @@ broker reports keep their legacy shapes. The deterministic counterpart is theref
   the trader graft (`thesis_state.json`, `plans.json`, `trader_decisions.jsonl`,
   `facts_journal.jsonl`, `facts_snapshot.json`, `snapshots/`), the `live-comment` skill
   (`comments.md`), the `run-orchestrator` skill (the running-commit line in `comments.md`),
+  `trade.py` (`operator_actions.jsonl`: one record per command, refused or not, since
+  2026-10-18; `operator_control.jsonl`: the commands queued for the agent),
   and the `get-reports` extractors (`tradovate_orders.csv`, `tradovate_position_history.csv`,
   `pickmytrade_alerts.csv`). Never look anywhere else for session inputs.
 - **Replay** outputs are local to the analysis worktree (`<WT>`, Step 1.5), per-run, under
@@ -221,10 +223,12 @@ fetched and **do not exist** for this session. When this happens:
 
 ## Step 2.1 — Rebuild a complete trade ledger from events.jsonl
 
-The live `trades.tsv` is written from the orchestrator relay's **in-memory, per-run** events
-and overwritten at each session-end, so it loses round-trips across restarts/terminations
-(GIL-13). Rebuild a complete ledger from the persistent, append-only `events.jsonl` before
-analysis:
+Up to 2026-10-17 the live `trades.tsv` was written from the orchestrator relay's
+**in-memory, per-run** events, so it lost round-trips across restarts/terminations (GIL-13)
+and mispaired exits sent by another process (`trade.py close`, 2026-10-16 D4). Since then the
+orchestrator writes it from `events.jsonl` at session end and at `trade.py terminate`, with
+the same pairing as below. Rebuild the ledger anyway: it does not depend on how the
+orchestrator exited (a hard kill writes no `trades.tsv`) and works for older sessions:
 
 ```bash
 uv run python -m scripts.rebuild_trades_from_events --date <date>
@@ -275,16 +279,24 @@ would diverge on the thesis rather than on execution.
    uv run python scripts/replay_session.py --dates <date> --thesis-file "<global>/sessions/<date>/replay_thesis.json"
    ```
 
-   **Operator commands.** If `<global>/sessions/<date>/operator_control.jsonl` exists, the
-   operator steered the agent during the session (`agent-direction`, `agent-target`, or
-   since 2026-09-30 a `set_stop` written by `trade.py update-sl`). Add
-   `--operator-control "<global>/sessions/<date>/operator_control.jsonl"` so the replay
-   applies the same commands at the same bar instants; that run is the one to diff
-   against live. For the strategy-alone measure, run a second replay WITHOUT the flag and
-   report both P&L figures, labelled.
+   **This strategy-only run is THE replay** (operator decision 2026-10-18): it shows what
+   the strategy would have done had the operator run NO manual command, and it is the
+   `<REPLAY>` every later step diffs against live. Never add `--operator-control` to it.
 
-   The CLI prints `[replay] <date> done -> <run_dir>` and a P&L block. Note `<run_dir>`
-   (`regression/sessions/<date>/<HH-MM-SS>/`) — it is the `<REPLAY>` folder Step 3 reads.
+   **Optional second run with the operator's commands.** If
+   `<global>/sessions/<date>/operator_control.jsonl` exists (`agent-direction`,
+   `agent-target`, `update-sl`'s `set_stop`, `trade.py up|down`'s `operator_entry`), a second
+   replay with `--operator-control "<global>/sessions/<date>/operator_control.jsonl"` applies
+   those commands at the same bar instants. It is context only, labelled as such, never the
+   strategy measure. It CANNOT replay `trade.py close` or any other order sent straight to the
+   broker, so from the first such command on it reproduces neither live nor the strategy (on
+   2026-10-16 the flip after a manual close was refused `open_position`): say so wherever it
+   is quoted, or skip it.
+
+   The CLI prints `[replay] <date> done -> <run_dir>` and a P&L block. Note the
+   strategy-only run's `<run_dir>` (`regression/sessions/<date>/<HH-MM-SS>/`): it is the
+   `<REPLAY>` folder Step 3 reads (the optional operator-command run, if made, is
+   `<REPLAY_OP>`).
 
 3. Replay P&L, machine-readable (points; dollars at `TRADING_CONTRACTS`, MNQ $2/pt):
 
@@ -341,7 +353,7 @@ BASE = <WT>                                                  # the analysis work
 GLOBAL = <GLOBAL>                                            # ACT_GLOBAL_DIR; default ~/projects/auto-co-trader/global
 DATE = <DATE>
 SESSION = <GLOBAL>\sessions\<DATE>
-REPLAY = <RUN>                                               # <BASE>\regression\sessions\<DATE>\<HH-MM-SS> (the replay from Step 2.5)
+REPLAY = <RUN>                                               # <BASE>\regression\sessions\<DATE>\<HH-MM-SS> (the STRATEGY-ONLY replay from Step 2.5: what the strategy would have done with no manual command)
 
 WHICH ENGINE WAS LIVE: since 2026-09-18 (commit 99bb32b) the legacy engine is blocked
 (trader_only) and every entry comes from the trader graft (agent/trader): L1 Analyzer arms on
@@ -387,7 +399,13 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
    A SECOND exit after a "user-requested" close (see Step 2.1, phantom second exit) is
    mirror noise, not a fill — exclude it and record it as a discrepancy of the
    manual-close/simulator interaction. The original <SESSION>\trades.tsv is the live relay's
-   restart-lossy record; a gap between trades_full.tsv and trades.tsv is D-class material.
+   restart-lossy record for sessions up to 2026-10-17 (since then it is built from
+   events.jsonl too); a gap between trades_full.tsv and trades.tsv is D-class material.
+   <SESSION>\operator_actions.jsonl (since 2026-10-18; absent before): one JSON record per
+   `trade.py` command at the moment it ran, refused or not: {time_et, command, args,
+   brain, exit_code, output (tail)}. It is the list of every manual action, and it survives
+   a manual terminate. Join it to events.jsonl (the orders) and trader_decisions.jsonl
+   (`operator_override` = what the agent did with a queued command).
 
 3. <SESSION>\signals.log
    Raw stdout from automation.main. Contains [PMT] lines showing every order sent
@@ -570,9 +588,12 @@ sent while a position was actually open at the broker but not in position.json.
 ### B. Live vs Replay (logic fidelity)
 
 If replay files exist, compare the two decision logs (live #11 vs replay #12) event by
-event. The goal is convergence: any divergence is a real-time execution artifact
-(bar-delivery timing, the Analyzer's arrival time, a manual intervention, or a code
-change deployed after the live run).
+event. The replay is STRATEGY-ONLY: it ran no operator command, so every manual action
+(operator_actions.jsonl, operator_control.jsonl, `user-requested` closes) is a divergence
+by construction — attribute it to bucket 1 below and carry on from there; do not flag what
+follows from it as a strategy fault. Outside those, any divergence is a real-time execution
+artifact (bar-delivery timing, the Analyzer's arrival time, a code change deployed after the
+live run).
 
 **B0. Whole-session P&L delta — MANDATORY, do this FIRST (before per-event matching).**
 Compute the live clean-ledger P&L (sum of `trades_full.tsv` clean rows, phantom second
@@ -886,7 +907,7 @@ to; do not go looking elsewhere for context. Working state: never commit this fi
 | Live session folder (every live input + the three analysis files) | `<SESSION>` |
 | Operator notes for the session | `<SESSION>\comments.md` |
 | Live session chart | `<chart path>` |
-| Replay run the analysis compared live against | `<RUN>` |
+| Replay run the analysis compared live against (strategy only, no manual commands) | `<RUN>` |
 | Thesis injected into that replay | `<SESSION>\replay_thesis.json` |
 | Commit the live session ran on | `<running commit>` |
 | This worktree (the analysis and that replay ran here) | `<WT>` — branch `<WORKTREE_BRANCH>`, from `origin/master`; the replay ran @ `<short-hash>` |

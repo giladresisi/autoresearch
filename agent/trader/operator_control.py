@@ -33,7 +33,13 @@ KIND_RESET_TARGET = "reset_target"
 #: the position model, which otherwise keeps the original stop and never sees the fill
 #: (2026-09-30: a phantom long for eleven minutes after the raised stop was hit).
 KIND_SET_STOP = "set_stop"
-KINDS = (KIND_SET_DIRECTION, KIND_SET_TARGET, KIND_RESET_TARGET, KIND_SET_STOP)
+#: The operator's manual market entry (`trade.py up|down` with no price, agent owning the
+#: dispatcher; 2026-10-16): {direction: UP|DOWN, stop: price or null}. The Executor enters
+#: by market through its own order port (`mechanism: operator_entry`) and manages it like
+#: any fill, so the watchdog never sees an external position and nothing stacks on it.
+KIND_OPERATOR_ENTRY = "operator_entry"
+KINDS = (KIND_SET_DIRECTION, KIND_SET_TARGET, KIND_RESET_TARGET, KIND_SET_STOP,
+         KIND_OPERATOR_ENTRY)
 
 
 class OperatorControl:
