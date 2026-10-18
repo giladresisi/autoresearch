@@ -230,6 +230,7 @@ class Analyzer:
                  htf_history: "dict | None" = None) -> None:
         self.state_dir = str(state_dir)
         self._htf_history = htf_history or {}   # O5: disk 1m bars before the session open
+        self._htf_ctx = None                    # O5: the recorded context, for §11.13
         self._backend = backend
         self._requirement = requirement
         self._threaded = bool(threaded)
@@ -716,8 +717,9 @@ class Analyzer:
     # -- O5: the 09:20 HTF liquidity context (shadow only) ---------------------------- #
 
     def _save_htf_context(self, now, bars) -> None:
-        """Record `htf_liquidity.compute` to `htf_context.json`. Never raises; nothing reads
-        it back, so a failure here can neither darken the day nor change a decision."""
+        """Record `htf_liquidity.compute` to `htf_context.json`. Never raises. Only the
+        §11.13 CANDIDATE (`liq_exhaust.py`, ON by default) reads it back, through
+        `htf_context()`; a failure here leaves that watch unarmed and darkens nothing."""
         try:
             bars = bars or {}
             frames, sources = {}, {}
@@ -726,6 +728,7 @@ class Analyzer:
                                                           bars.get(tk))
             ctx = htf_liquidity.compute(frames["MNQ"], frames["MES"], now)
             record = {"armed_at": str(now), "history": sources, **ctx.to_dict()}
+            self._htf_ctx = record
             os.makedirs(self.state_dir, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=self.state_dir, prefix=".htf_", suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -733,6 +736,11 @@ class Analyzer:
             os.replace(tmp, os.path.join(self.state_dir, HTF_FILE))
         except Exception:
             pass
+
+    def htf_context(self) -> "dict | None":
+        """The 09:20 HTF context as recorded to `htf_context.json`, or None before it is.
+        Read by the §11.13 liquidity-exhaustion watch (`liq_exhaust.py`) only."""
+        return self._htf_ctx
 
     def pending(self) -> bool:
         """True while a threaded call is still in flight."""

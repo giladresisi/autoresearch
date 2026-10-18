@@ -174,6 +174,17 @@ baselines below are historical.
   `sec7_quiet_after_stop`; no attempt spent). Separately, `tmso_reject` and
   `extreme_reject_close` stop at 10:30 (`executor.MECHANISM_CUTOFF_ET`) while the shared
   entry cutoff is 11:00. A plain replay does not load `.env`: set the rollback in the shell.
+- `ACT_LIQ_EXHAUST_FLIP` (`l2-mechanisms.md` §11.13 CANDIDATE, 2026-10-19) is **ON by default**
+  (operator decision 2026-10-19): unset or empty = on; `0` (or `false`/`no`/`off`) is the
+  rollback, read once per graft (`liq_exhaust.ENABLED` overrides it for a harness). When the
+  09:20 HTF context (`htf_context.json`) shows MNQ's move in the plan direction >= 3 ADR and
+  still running, MNQ entering an untouched 4h/daily/weekly FVG or prior-day/week extreme ahead
+  (either asset) in 09:35-10:30 and stalling there (two closes against the plan in both
+  assets, or a close back out of the level) replaces the plan, when flat, with an opposite one
+  that enters by `fvg_1m_both` only (a 1m FVG in both assets, stop at the MNQ gap's far edge,
+  one fill, none at/after 10:30). Once a day; a position open at the stall skips it. Records
+  `liq_watch` / `liq_flip` / `liq_flip_skipped` / `liq_watch_end`. A plain replay does not
+  load `.env`: set the rollback in the shell.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.

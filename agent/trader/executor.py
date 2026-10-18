@@ -70,6 +70,7 @@ import agent.trader.followup as followup
 import agent.trader.nym_mid_reject as nym_mid_reject
 from agent.trader import premove_context
 from agent.trader.smt_wait import SmtWait
+import agent.trader.liq_exhaust as liq_exhaust
 from agent.trader.tape import session_open
 
 # l2-mechanisms.md §9 starting values.
@@ -107,7 +108,8 @@ ENTRY_CUTOFF_ET = (11, 0)            # no NEW entry at or after this; positions 
 # Mechanisms that keep the old 10:30 cutoff (operator 2026-10-09): from this instant they
 # are not driven at all, exactly as under the shared 10:30 cutoff (10:30-11:00 replays of
 # the 49 corpus days: tmso_reject 1 winner in 7, extreme_reject_close 0 in 4).
-MECHANISM_CUTOFF_ET = {"tmso_reject": (10, 30), "extreme_reject_close": (10, 30)}
+MECHANISM_CUTOFF_ET = {"tmso_reject": (10, 30), "extreme_reject_close": (10, 30),
+                       liq_exhaust.MECHANISM: (10, 30)}
 NO_ENTRY_AFTER_POSITIVE = True       # a plan that closed a winner is done: it dies (`positive_close`)
 # §8's window end, and the ONE source of it: `replay.py` imports this constant. Replay's
 # last bar is 12:59:59, so the rule below is unreachable there; live runs the whole CME
@@ -1980,6 +1982,9 @@ class Executor:
             return
 
         price = self._state.get("now_price")
+        if self._plan.get("liq_flip"):
+            self._drive_liq_flip_entry(now, mnq, bar, block)
+            return
         # The WHOLE frame, not `_since_arm`: §7's anchor is the counter-thesis extreme of
         # the 24h BEFORE the arm, and a frame cut at the arm leaves that window holding
         # the arm bar alone — age 0, so always the "24h" track off the arm bar's own
@@ -2078,6 +2083,26 @@ class Executor:
         if retry is not None and fire is not retry:
             self._stop_bar_retry_skip(now, "lost_arbitration", pending=retry_pending)
         self._enter_by_market(now, fire)
+
+    def _drive_liq_flip_entry(self, now, mnq, bar, block) -> None:
+        """§11.13 CANDIDATE (`liq_exhaust.py`): a plan the liquidity-exhaustion flip armed
+        enters by `fvg_1m_both` ONLY, on a bar close, one FILL, before 10:30, through the
+        extension veto and the SMT-wait block like every market mechanism."""
+        if (bar is None or block is not None or self._state.get("liq_filled")
+                or self._past_mechanism_cutoff(now, liq_exhaust.MECHANISM)):
+            return
+        mes = truncate(normalize((self._bars or {}).get("MES")), now)
+        fire = liq_exhaust.both_fvg_fire(now, mnq, mes, self._plan.get("direction"),
+                                         self._arm_ts)
+        if fire is None:
+            return
+        if self._extension_veto and not self._extension_allows(now, mnq, fire):
+            return
+        if self._smt_wait_block and not self._smt_wait_allows(now, mnq, fire):
+            return
+        self._enter_by_market(now, fire)
+        if self._sim.position is not None:
+            self._state["liq_filled"] = True
 
     def _extension_allows(self, now, mnq, fire: dict) -> bool:
         """§2's extension veto: False when the fire's price is MORE than
