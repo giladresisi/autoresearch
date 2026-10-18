@@ -279,16 +279,24 @@ would diverge on the thesis rather than on execution.
    uv run python scripts/replay_session.py --dates <date> --thesis-file "<global>/sessions/<date>/replay_thesis.json"
    ```
 
-   **Operator commands.** If `<global>/sessions/<date>/operator_control.jsonl` exists, the
-   operator steered the agent during the session (`agent-direction`, `agent-target`, or
-   since 2026-09-30 a `set_stop` written by `trade.py update-sl`). Add
-   `--operator-control "<global>/sessions/<date>/operator_control.jsonl"` so the replay
-   applies the same commands at the same bar instants; that run is the one to diff
-   against live. For the strategy-alone measure, run a second replay WITHOUT the flag and
-   report both P&L figures, labelled.
+   **This strategy-only run is THE replay** (operator decision 2026-10-18): it shows what
+   the strategy would have done had the operator run NO manual command, and it is the
+   `<REPLAY>` every later step diffs against live. Never add `--operator-control` to it.
 
-   The CLI prints `[replay] <date> done -> <run_dir>` and a P&L block. Note `<run_dir>`
-   (`regression/sessions/<date>/<HH-MM-SS>/`) — it is the `<REPLAY>` folder Step 3 reads.
+   **Optional second run with the operator's commands.** If
+   `<global>/sessions/<date>/operator_control.jsonl` exists (`agent-direction`,
+   `agent-target`, `update-sl`'s `set_stop`, `trade.py up|down`'s `operator_entry`), a second
+   replay with `--operator-control "<global>/sessions/<date>/operator_control.jsonl"` applies
+   those commands at the same bar instants. It is context only, labelled as such, never the
+   strategy measure. It CANNOT replay `trade.py close` or any other order sent straight to the
+   broker, so from the first such command on it reproduces neither live nor the strategy (on
+   2026-10-16 the flip after a manual close was refused `open_position`): say so wherever it
+   is quoted, or skip it.
+
+   The CLI prints `[replay] <date> done -> <run_dir>` and a P&L block. Note the
+   strategy-only run's `<run_dir>` (`regression/sessions/<date>/<HH-MM-SS>/`): it is the
+   `<REPLAY>` folder Step 3 reads (the optional operator-command run, if made, is
+   `<REPLAY_OP>`).
 
 3. Replay P&L, machine-readable (points; dollars at `TRADING_CONTRACTS`, MNQ $2/pt):
 
@@ -345,7 +353,7 @@ BASE = <WT>                                                  # the analysis work
 GLOBAL = <GLOBAL>                                            # ACT_GLOBAL_DIR; default ~/projects/auto-co-trader/global
 DATE = <DATE>
 SESSION = <GLOBAL>\sessions\<DATE>
-REPLAY = <RUN>                                               # <BASE>\regression\sessions\<DATE>\<HH-MM-SS> (the replay from Step 2.5)
+REPLAY = <RUN>                                               # <BASE>\regression\sessions\<DATE>\<HH-MM-SS> (the STRATEGY-ONLY replay from Step 2.5: what the strategy would have done with no manual command)
 
 WHICH ENGINE WAS LIVE: since 2026-09-18 (commit 99bb32b) the legacy engine is blocked
 (trader_only) and every entry comes from the trader graft (agent/trader): L1 Analyzer arms on
@@ -580,9 +588,12 @@ sent while a position was actually open at the broker but not in position.json.
 ### B. Live vs Replay (logic fidelity)
 
 If replay files exist, compare the two decision logs (live #11 vs replay #12) event by
-event. The goal is convergence: any divergence is a real-time execution artifact
-(bar-delivery timing, the Analyzer's arrival time, a manual intervention, or a code
-change deployed after the live run).
+event. The replay is STRATEGY-ONLY: it ran no operator command, so every manual action
+(operator_actions.jsonl, operator_control.jsonl, `user-requested` closes) is a divergence
+by construction — attribute it to bucket 1 below and carry on from there; do not flag what
+follows from it as a strategy fault. Outside those, any divergence is a real-time execution
+artifact (bar-delivery timing, the Analyzer's arrival time, a code change deployed after the
+live run).
 
 **B0. Whole-session P&L delta — MANDATORY, do this FIRST (before per-event matching).**
 Compute the live clean-ledger P&L (sum of `trades_full.tsv` clean rows, phantom second
@@ -896,7 +907,7 @@ to; do not go looking elsewhere for context. Working state: never commit this fi
 | Live session folder (every live input + the three analysis files) | `<SESSION>` |
 | Operator notes for the session | `<SESSION>\comments.md` |
 | Live session chart | `<chart path>` |
-| Replay run the analysis compared live against | `<RUN>` |
+| Replay run the analysis compared live against (strategy only, no manual commands) | `<RUN>` |
 | Thesis injected into that replay | `<SESSION>\replay_thesis.json` |
 | Commit the live session ran on | `<running commit>` |
 | This worktree (the analysis and that replay ran here) | `<WT>` — branch `<WORKTREE_BRANCH>`, from `origin/master`; the replay ran @ `<short-hash>` |
