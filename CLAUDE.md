@@ -14,16 +14,6 @@ detects artifacts; `agent/trader/` plans and executes against them; the legacy e
 executable truth.** `agent/trader/named_cases.py` is the single source for every
 documented figure, and `agent/trader/test_named_cases.py` fails when the two disagree.
 
-## Before changing any entry mechanism
-
-**Read `docs/entry-mechanism-change-protocol.md`.** A step 0 and then eight steps; it
-exists because the expensive failures of this project were all process failures, not
-coding ones. Step 0 is the one most often skipped: decide whether the change is a RULE
-yet. A proposal with an unresolved rule-level ambiguity belongs in `l2-mechanisms.md`
-§11 as a CANDIDATE with its evidence, NOT in §§2-8.
-Read `l2-mechanisms.md` §11.0 first as well: it is the authoritative scope split and it
-lists what must NOT be built.
-
 ## Hard constraints an agent cannot infer
 
 - **Never import `live_orders`** from anywhere under `agent/`. The AST gate
@@ -64,8 +54,7 @@ baselines below are historical.
   prerequisite for an A/B verdict, a commit, a PR or a merge on its own. When a change
   touches an entry mechanism, the replay, thesis-cache or facts path, say in the report
   that the slow suite was not run, so the operator can ask for it. A behaviour change
-  moves named-case figures: re-measure them per
-  `docs/entry-mechanism-change-protocol.md` (precedent: `l2-mechanisms.md` §11.3).
+  moves named-case figures: re-measure them (precedent: `l2-mechanisms.md` §11.3).
   Thesis recordings are keyed per date x code version; when a gate skips or raises
   `NetworkCallRefused`, re-seed that date with `--seed` (one model call; 08-13 and 09-04
   were re-seeded 2026-09-27, 09-04 with `ACT_TRADER_BACKEND=anthropic`).
