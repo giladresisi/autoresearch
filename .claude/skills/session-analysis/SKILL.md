@@ -47,7 +47,8 @@ invoked from only runs the Step-1 gate; nothing is edited, replayed or committed
 entry comes from the trader graft (`agent/trader`: L1 Analyzer at 09:20 ET, Planner,
 Executor; market-only mechanisms `fvg_1m_post_extreme`, `extreme_reject_close`,
 `tmso_reject`, `fvg_1h_reject`, `micro_smt_reject`, `nym_mid_reject` (§11.9 CANDIDATE,
-`ACT_NYM_MID_REJECT`); no entries at/after 10:30 ET; open
+`ACT_NYM_MID_REJECT`), `hidden_smt_5m` (§11.14 CANDIDATE, `ACT_HIDDEN_SMT_ENTRY`; its own
+reserved attempt, so it may fill after `plan_dead attempts_exhausted`); no entries at/after 10:30 ET; open
 position flattened at 13:00 ET). Position management changes often — `l2-mechanisms.md`
 §8 in the analysis worktree is the authority, not any summary in this file. The
 graft's simulated orders are mirrored into the legacy signal vocabulary
@@ -359,11 +360,14 @@ WHICH ENGINE WAS LIVE: since 2026-09-18 (commit 99bb32b) the legacy engine is bl
 (trader_only) and every entry comes from the trader graft (agent/trader): L1 Analyzer arms on
 the 09:20 ET bar (one OpenRouter call), a plan derives on the next bar close, the Executor
 enters by MARKET only via fvg_1m_post_extreme (§6), extreme_reject_close (§7), tmso_reject,
-fvg_1h_reject, micro_smt_reject (§7a) or nym_mid_reject (§11.9 CANDIDATE, ACT_NYM_MID_REJECT),
+fvg_1h_reject, micro_smt_reject (§7a), nym_mid_reject (§11.9 CANDIDATE, ACT_NYM_MID_REJECT) or
+hidden_smt_5m (§11.14 CANDIDATE, ACT_HIDDEN_SMT_ENTRY),
 with a stop embedded at the broker and ONE T2 target
 picked at the fill (exit = market close on a tick touch). No new entries at/after 10:30 ET; an
 open position is flattened at 13:00 ET. Reaching the target kills the plan (no re-entry that
-day); a stop-out spends one of 3 attempts.
+day); a stop-out spends one of 3 attempts. Exception: `hidden_smt_5m` (§11.14) has its own
+RESERVED attempt — its fill is outside the 3, may come after the plan died of
+`attempts_exhausted` (never after any other death), and its stop-out spends nothing.
 The 16:55 ET session-end close and pause/resume still apply through live_orders.
 
 POSITION MANAGEMENT is not summarised here because it changes between sessions. Before judging
@@ -456,8 +460,11 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
     {plan_id: {direction, dol, valid_while (falsifiers), armed_classes, attempts_used,
     cooldown_until, created_at, last_trend}}. armed_classes MUST be exactly the market set
     [fvg_1m_post_extreme, extreme_reject_close, tmso_reject, fvg_1h_reject, micro_smt_reject,
-    nym_mid_reject] (`nym_mid_reject`, §11.9 CANDIDATE, joined 2026-10-06 and is present only
-    while `ACT_NYM_MID_REJECT` is on — ON by default; absent with the flag off is correct)
+    nym_mid_reject, hidden_smt_5m] (`nym_mid_reject`, §11.9 CANDIDATE, joined 2026-10-06 and is
+    present only while `ACT_NYM_MID_REJECT` is on — ON by default; absent with the flag off is
+    correct; `hidden_smt_5m`, §11.14 CANDIDATE, joined 2026-10-20, likewise present only while
+    `ACT_HIDDEN_SMT_ENTRY` is on — ON by default; a §11.13 `liq_flip` plan carries
+    [fvg_1m_both] alone)
     (updated 2026-09-26: `fvg_1h_reject` was already unconditionally armed and this line had
     fallen behind; `micro_smt_reject` (O3) joined it at adoption, both flag-gated ON by
     default — see `l2-mechanisms.md` §7a); anything else is [CRITICAL].
@@ -474,7 +481,9 @@ DATA SOURCES TO READ (read ALL of them before writing anything):
     `stop_moved` here means the agent never adopted that stop — a D-class finding, see also
     `stop_diverged` in agent_dispatch.jsonl),
     cancel_entry_cutoff, plan_dead {reason: target_reached | hard_close | falsified |
-    attempts_exhausted | ..., detail}, would_have_falsified (falsifier met, NOT acted on —
+    attempts_exhausted | ..., detail} (a `hidden_smt_5m` fill AFTER `plan_dead
+    attempts_exhausted`, carrying `reserved_attempt: true, plan_alive: false`, is §11.14's
+    reserved attempt and correct — not an entry by a dead plan), would_have_falsified (falsifier met, NOT acted on —
     plans no longer die on falsification), would_have_killed (dol_reached, recorded only),
     veto / no-move-zone notes — including `reason: micro_smt_exit_unwired` (O4 would have
     market-closed the position but the live order port in use does not implement `flatten`;

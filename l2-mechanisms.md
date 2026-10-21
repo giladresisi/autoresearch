@@ -2710,3 +2710,138 @@ P&L (secondary) +19.00 -> +165.75.
 **Open.** Two entries in ~120 days: no harm found, no edge proven. The flipped plan's target
 is the ordinary T2 pick (05-28 lost on a far one). The slow suite was not run (operator,
 2026-10-19). The 3-4 ADR effect is non-monotonic and 10-15 sits at 3.99.
+
+### 11.14 CANDIDATE — `hidden_smt_5m`: a hidden 5m SMT at the NY-morning extreme, on its own reserved attempt (session 2026-10-19 O1, operator, 2026-10-20)
+
+**Not a rule.** A market entry mechanism beside §§2-8, leaving their text and their
+mechanisms untouched. Code `agent/trader/hidden_smt.py` (a state machine that re-derives
+everything from the frames it is handed), driven from `Executor._drive_market_mechanisms`
+beside `nym_mid_reject` and, once the plan is dead of `attempts_exhausted`, from
+`Executor._drive_reserved_attempt`. Env var `ACT_HIDDEN_SMT_ENTRY`, **ON by default**
+(operator decision 2026-10-20; `hidden_smt.DEFAULT_ENABLED`, one constant): unset or empty =
+the default, `0` / `false` / `no` / `off` = off, `1` / `true` / `yes` / `on` = on, read once
+per Executor and by the Planner, which arms `hidden_smt_5m` in `armed_classes` only while it
+is on; `hidden_smt.HIDDEN_SMT_ENTRY_ENABLED` overrides it for a harness. The Executor drives it
+only for a plan that armed it (a §11.13 flipped plan arms `fvg_1m_both` alone). Off = the bar
+loop and the plan exactly as before (10-19 replays byte-identical to the pre-change run).
+
+**The rule (operator, 2026-10-20; 5m only).**
+- *Levels*, per asset (MNQ and MES separately), fixed at 09:30 ET: the NY-morning low and high
+  = min Low / max High of the rows 06:00:00-09:29:59 ET. A frame without the 06:00 minute
+  gives no levels: the mechanism is off for the day.
+- *Hidden SMT, thesis direction only.* On each completed 5m bar (left-labelled, aligned 09:30,
+  09:35, ...; close instants 09:35 through 10:55), an UP thesis compares each asset's 5m CLOSE
+  with its own NY-morning LOW (DOWN: CLOSE vs HIGH). The SMT is the FIRST 5m bar on which
+  exactly one asset closes beyond its level and the other does not (the other may wick
+  through), provided neither has closed beyond on an earlier 5m bar since 09:30. Once either
+  asset has closed beyond (alone or both together) the side is spent for the day.
+- *Confirmation and entry.* The first completed 1m bar whose close instant lies in [the 5m
+  close, the 5m close + 14 min] — the 1m bar closing at the same instant as the 5m bar counts
+  — on which BOTH MNQ and MES close with the thesis (UP: Close > Open on both). Enter MNQ by
+  market at that 1m close, at the instant the bar completes.
+- *Stop.* A fixed 20 pts from the entry (operator 2026-10-20), not beyond MNQ's swept
+  extreme or the confirming bar's wick (the fire records the extreme as `swept_extreme`). It
+  replaced "MNQ's extreme since the SMT bar -/+ 2, vetoed beyond 40" on the stop study below.
+- *One FILL a day*, latched on the fill.
+- *Its own RESERVED attempt.* The fill neither consumes nor is blocked by the plan's 3-attempt
+  budget: it may fire after the plan died of `attempts_exhausted` (10-19: dead 09:40:04, fire
+  10:05:00). It does not fire after any other death (target reached, positive close, window
+  end, an operator or external kill) or while a position is open. Its stop-out, and a losing
+  `micro_smt_exit` of its position, spend no attempt and no arbiter tally. The fill records
+  `reserved_attempt: true`, `plan_alive` (false = taken on a dead plan) and `hidden_smt {smt
+  {bar, closed_beyond, closes, levels, side}, bar, risk}`.
+- *Gates.* Every gate of the other market mechanisms applies, on a live plan and on the
+  reserved path alike: nothing while a position is open, the settle window, §8's spine gates
+  (`_entry_block`: the shared 11:00 cutoff, after a positive trade, a follow-up window, an
+  external change), §2's stop-out cooldown, §2's extension veto, §11.6's SMT-wait block. The
+  only gate it does NOT get is the attempt budget, which is the point of the reserved
+  attempt. `executor.MECHANISM_CUTOFF_ET` does not list it (its window is the 5m closes
+  09:35-10:55 plus 14 min of confirmation, cut by the 11:00 entry cutoff).
+- T2 (the pick at the fill, with §7c's first-T2 reuse) and position management (break-even,
+  MES sweep stop, `micro_smt_exit`, window end) are the ordinary ones. Live, it reaches the
+  broker through the existing market-entry path (no new order kind), as the operator entry
+  already does on a plan dead of `attempts_exhausted`.
+
+**Implementer-pinned readings (confirmed by the operator 2026-10-20).**
+1. "Beyond" is strict: a 5m close exactly AT the level is not beyond; the confirmation needs
+   Close strictly > Open (UP) / < Open (DOWN) on both assets.
+2. Only the FIRST confirming 1m bar in the window counts. If the Executor cannot take it (a
+   position open, a cooldown, a spine gate, an extension / SMT-wait veto, a lost arbitration, or a plan dead for another reason at that bar), the day's setup is
+   gone: no later bar in the window is taken. Bars the Executor was not driven on still count
+   (the machine re-reads them from the frames).
+3. The window end: SMT 5m closes at or before 10:55; the confirmation can run to 11:09, but
+   the shared 11:00 entry cutoff blocks any fill at/after 11:00 (and, by 2, ends the setup).
+4. `swept_extreme` (record only) is MNQ's extreme over [the 5m SMT bar's start, the entry
+   1m bar's end).
+5. Ties with another mechanism's fire on the same bar (live plan only) break by the
+   arbiter's existing rule (fire time, then mechanism name: `extreme_reject_close`,
+   `fvg_1h_reject` and `fvg_1m_post_extreme` win, `micro_smt_reject`, `nym_mid_reject` and
+   `tmso_reject` lose). No merge rule like §11.9's.
+6. A plan replaced by the operator's direction command or by §11.13 starts a fresh machine
+   (and a fresh one-fill latch) with its new Executor; the flipped §11.13 plan never arms it.
+7. On a live plan a reserved fill that reaches its target or closes in profit ends the plan
+   as any fill does (`target_reached` / `positive_close`).
+
+**The motivating date (2026-10-19, UP).** 06:00-09:29 lows: MNQ 29665.50, MES 7733.00. The
+three ordinary attempts were all stopped by 09:40:04 (`attempts_exhausted`). The 10:00 5m bar:
+MNQ L 29653.75 C 29681.25 (wick through, close above), MES C 7731.75 (close below) -> hidden
+bullish SMT at 10:05:00; the 10:04 1m bar closed up on both -> long 10:05:00 @ 29681.25, stop
+29651.75 (29.50 pts). As an ENTRY: MFE 187.00 (10:18:49) before the first flat 40-pt retrace
+(10:21:26), 6.34R, stop survived. Replay (recorded thesis, `--thesis-file`): flag off
+byte-identical to the analysis replay (-50.00, 3 stop-outs); flag on adds the 10:05:00 fill on
+the reserved attempt (`plan_alive: false`), break-even armed 10:14:44, closed by
+`micro_smt_exit` 11:08:00 @ 29878.50, +197.25; session (secondary) -50.00 -> +147.25.
+
+**Evidence** (the operator's research, `optimizations.md` 2026-10-19 O1; MFE vs the entry's
+own stop).
+- Full-history 1m scan 2024-01..2026-10-19 (722 days), direction fixed to the day's actual
+  move (lookahead: the biggest 09:30-11:00-origin leg, 40-pt zigzag, >= 80 pts): 5m fires
+  223, >= 2R 39%, MFE/risk 1.89, against a no-SMT control (the same both-assets 1m close and
+  stop rule at every 5m boundary 09:35-11:00) of 5,491 entries, >= 2R 29%, MFE/risk 1.31.
+- Beats the control every year (>= 2R: 2024 47% vs 35%, 2025 32% vs 28%, 2026 27% vs 24% —
+  a shrinking edge) and in every stop band; stops > 40 break even (MFE/risk 0.97). Fires on
+  about 1 day in 3.
+- Stop study (2026-10-20, the 223 first-per-day 5m fires in the oracle direction, MNQ 1m, stop
+  first inside a bar, which penalises tight stops): swept extreme -/+ 2 vetoed > 40 = 179
+  fires, stopped 49%, MFE/risk 2.41, 37.7 ideal pts/fire (MFE if the stop held, else minus the
+  stop); fixed 20 = 223 fires, stopped 53%, MFE/risk 2.56, 34.8 pts/fire, 7,771 vs 6,746 in
+  all (2026: 2.36 on 62 fires vs 2.19 on 39); fixed 15 = 3.14 / 31.8; fixed 25 = 2.27 / 41.6;
+  fixed 10 = 3.30 / 19.9 and loses 10-19; swept extreme vetoed > 20 vetoes 10-19. 10-19 with
+  20 pts (stop 29661.25) survives, MFE 187.00. Study `o1_stop_variants.py` (session
+  scratchpad).
+- Counter-thesis fires lose (25 fires 2026-09-08..10-19, 13 stopped). Thesis-aligned with the
+  RECORDED theses (2026-05..10): 75 fires, >= 2R 29% vs 23% for the aligned control. The live
+  value is this timing edge times how often L1's direction is right.
+
+**Replay corpus, INCOMPLETE, superseded by the fixed 20-pt stop (2026-10-20, swept-extreme
+stop with the 40 veto, corpus theses, flag ON only).** The
+run was stopped by the host for low memory after 48 of 121 dates (05-01..07-07); the OFF arm
+was not run, so no other-entry diff exists yet. On those 48 dates: 13 fills, 4
+`hidden_smt_stop_too_wide` vetoes (05-07, 06-09, 06-11, 07-02). As ENTRIES (MFE vs own stop,
+flat 40-pt retrace): >= 2R on 3 (05-12 82.00/32.75, 05-25 81.75/6.00, 07-06 114.75/38.50);
+stop hit first on 7 (05-06, 05-08, 05-19, 05-26, 05-27, 06-02, 06-19); MFE sum 396.75. Four
+fills came only through the reserved attempt, after `attempts_exhausted` (05-04, 05-06, 05-12,
+05-25: 2 of them >= 2R). Re-run both arms before reading this as a verdict.
+
+**Loser filter search (2026-10-21, operator: find a structural criterion that removes the
+stop-hit fills without the good ones).** Corpus partial with the fixed 20-pt stop (31 dates,
+05-01..06-12): 11 added fills, 6 stop hit (05-06, 05-07, 05-08, 05-19, 05-27, 06-02), 5 held,
+3 >= 2R; none removed. Tested on the 625 history 5m fires (first per day and direction, fixed
+20, MNQ 1m): closer asset, direction, non-closer wick beyond its level, 09:30 open vs NY-morning
+mid, entry distance from the level (signed and absolute, 25/50), non-closer's gap to its level,
+closer's depth beyond, entry vs the 09:30 open, open vs the level, SMT close by 10:00, entry
+distance from the post-09:30 counter-extreme, confirming-bar body (5/10), a confirming close
+beyond the SMT bar's extreme, the SMT bar's own direction, same-instant confirmation, and the
+closer back inside its level on the confirming bar. Over ALL fires every split keeps the stop
+rate at 57-68% on both sides; the only lift is the closer back inside its level (stop 57% vs
+65%, MFE/risk 1.96 vs 1.72, 124 of 625), and as a requirement it blocks 10-19 and 4 of the 5
+corpus winners. What separates losers is the direction: 53% stopped in the day's actual
+direction vs about 70% against it (corpus: 4 of 6 losers against it, but 3 of 5 winners too). No filter
+adopted. Scripts `o1_bad_features.py` / `o1_bad_features2.py` (session scratchpad).
+
+**Open.** The slow suite was not run and no named case was re-measured (a module-only bar scan finds
+thesis-direction fires on the named-case dates of `sec7-0807-strict`, `sec6-0721-current` and
+`sec8-0721-takeover`, and, with the old 40-pt veto, fires vetoed on `sec6-0806-current`,
+`sec6-0810-no-fire` and `sec8-0731-deepest` that the fixed stop now enters; those figures may
+move and were not re-measured). 15m is not built (it added nothing on the
+one recent day it fired). The 14-min window is untuned.

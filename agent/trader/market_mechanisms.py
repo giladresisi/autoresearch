@@ -40,6 +40,8 @@ from agent.trader.extreme_reject import ExtremeReject, choose_track
 from agent.trader.tmso_reject import TmsoReject, prior_adverse_excursion, tmso_for
 from agent.trader.nym_mid_reject import NymMidReject
 import agent.trader.nym_mid_reject as nym_mid_mod
+from agent.trader.hidden_smt import HiddenSmt
+import agent.trader.hidden_smt as hidden_smt_mod
 from agent.trader.fvg_reject import FvgReject, zone_at_0700
 from agent.trader.micro_smt import (MicroSmt, entry_latch_from,
                                     entry_previous_micro_extremes, micro_smt_entry_armed,
@@ -109,6 +111,9 @@ class MarketMechanisms:
         # §11.9 CANDIDATE — see `nym_mid_reject.py`. Built eagerly; the Executor drives it
         # only when `ACT_NYM_MID_REJECT` is on, and it latches only on a FILL (`latch_nym`).
         self._nym = NymMidReject(direction)
+        # §11.14 CANDIDATE — see `hidden_smt.py`. Built eagerly; the Executor drives it
+        # only when `ACT_HIDDEN_SMT_ENTRY` is on, and it latches only on a FILL.
+        self._hidden = HiddenSmt(direction)
         # O3/O4, ADOPTED 2026-09-26 (`l2-mechanisms.md` §7a/§7b) — see `micro_smt.py`.
         # Both flag-gated, both default ON, and built eagerly regardless: cheap, and
         # self-gating until a previous micro-session exists (for the entry, from 09:00
@@ -132,6 +137,7 @@ class MarketMechanisms:
                 "episodes": {k: e.state() for k, e in self._episodes.items()},
                 "tmso": self._tmso.state(), "fvg_1h": self._fvg1h.state(),
                 "nym_mid": self._nym.state(),
+                "hidden_smt": self._hidden.state(),
                 "micro_smt_entry": self._micro_smt_entry.state(),
                 "micro_smt_exit": self._micro_smt_exit.state(),
                 "seeded": self._seeded}
@@ -184,6 +190,15 @@ class MarketMechanisms:
     def latch_nym(self) -> None:
         """A `nym_mid_reject` fire FILLED: the day's one fire is spent."""
         self._nym.latch()
+
+    # -- hidden_smt_5m (§11.14 CANDIDATE) ---------------------------------------- #
+
+    def hidden_smt_on_bar_close(self, now, mnq, mes) -> "dict | None":
+        return self._hidden.on_bar_close(now, mnq, mes)
+
+    def latch_hidden_smt(self) -> None:
+        """A `hidden_smt_5m` fire FILLED: the day's one fill is spent."""
+        self._hidden.latch()
 
     def fvg1h_on_bar_close(self, now, bar, mnq) -> "dict | None":
         return self._fvg1h.on_bar_close(now, bar, zone_at_0700(mnq, now))
@@ -323,6 +338,8 @@ class MarketMechanisms:
         out.append(Candidate("fvg_1h_reject", "market"))
         if nym_mid_mod.enabled():
             out.append(Candidate("nym_mid_reject", "market"))
+        if hidden_smt_mod.enabled():
+            out.append(Candidate(hidden_smt_mod.MECHANISM, "market"))
         if micro_smt_entry_armed():
             out.append(Candidate("micro_smt_reject", "market"))
         return out

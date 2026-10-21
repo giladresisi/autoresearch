@@ -174,6 +174,20 @@ baselines below are historical.
   one fill, none at/after 10:30). Once a day; a position open at the stall skips it. Records
   `liq_watch` / `liq_flip` / `liq_flip_skipped` / `liq_watch_end`. A plain replay does not
   load `.env`: set the rollback in the shell.
+- `ACT_HIDDEN_SMT_ENTRY` (`l2-mechanisms.md` §11.14 CANDIDATE, 2026-10-20) is **ON by
+  default** (`hidden_smt.DEFAULT_ENABLED`, one constant; operator decision 2026-10-20): unset
+  or empty = the default; `0`/`false`/`no`/`off` = off (the bar loop and the plan's
+  `armed_classes` exactly as before); `1`/`true`/`yes`/`on` = on; read once per Executor (and
+  by the Planner at the arm); `hidden_smt.HIDDEN_SMT_ENTRY_ENABLED` overrides it for a
+  harness. A market mechanism, `hidden_smt_5m`, 5m only: per asset the 06:00-09:29 NY-morning
+  low/high; the first 5m close (09:35-10:55) on which exactly one of MNQ/MES closes beyond its
+  level against the thesis (neither did earlier; then the side is spent), then the first 1m
+  bar closing within 14 min with the thesis on BOTH assets -> enter MNQ at that close, stop
+  a fixed 20 pts from the entry; one FILL a day. Its OWN RESERVED attempt: outside the 3-attempt
+  budget, still allowed after the plan died of `attempts_exhausted` (never after any other
+  death), its stop-out spends no attempt; the fill carries `reserved_attempt: true`. Every
+  other market-mechanism gate and veto applies. A plain replay does not load `.env`: set it
+  in the shell for a replay.
 - `TRADING_CONTRACTS` is also what `position.json["active"]["contracts"]` records.
 - `ACT_TRADER_ARM_HHMM` overrides the 09:20 arm — fidelity fixtures only. `run_replay`
   restores it after a run; leaving it set re-arms every later run in the same process.
