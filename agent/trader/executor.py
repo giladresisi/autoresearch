@@ -68,6 +68,7 @@ import agent.trader.trail as trail
 import agent.trader.mes_sweep as mes_sweep
 import agent.trader.followup as followup
 import agent.trader.nym_mid_reject as nym_mid_reject
+import agent.trader.hidden_smt as hidden_smt
 from agent.trader import premove_context
 from agent.trader.smt_wait import SmtWait
 import agent.trader.liq_exhaust as liq_exhaust
@@ -310,6 +311,15 @@ class Executor:
         self._sec7_quiet = False
         # `nym_mid_reject` (§11.9 CANDIDATE): its switch, read ONCE for the same reason.
         self._nym_mid = nym_mid_reject.enabled()
+        # `hidden_smt_5m` (§11.14 CANDIDATE): its switch, read ONCE, and only for a plan
+        # that armed it (a §11.13 flipped plan arms `fvg_1m_both` alone). Its fill is the
+        # plan's RESERVED attempt: outside the shared budget, still open after the plan
+        # died of `attempts_exhausted` (`_drive_reserved_attempt`). `_pos_is_reserved`:
+        # the OPEN position (or the one that just closed) was taken on it, so its
+        # stop-out or losing close spends no plan attempt. Reset at every fill.
+        self._hidden_smt = (hidden_smt.enabled() and hidden_smt.MECHANISM
+                            in (self._plan.get("armed_classes") or ()))
+        self._pos_is_reserved = False
         # MES day-extreme sweep stop (`agent/trader/mes_sweep.py`, §11.7 CANDIDATE, ON by
         # default): the switch, read once, and the stage of the CURRENT position.
         self._mes_sweep_enabled = mes_sweep.enabled()
@@ -532,6 +542,12 @@ class Executor:
             if reason is not None:
                 self._kill_plan(now, reason, detail)
         if not self._state["plan_alive"]:
+            # §11.14: the one entry a plan dead of `attempts_exhausted` may still take.
+            if bar_complete and self._hidden_smt:
+                try:
+                    self._drive_reserved_attempt(now, mnq)
+                except Exception as exc:
+                    self._state["market_mech_error"] = f"{type(exc).__name__}: {exc}"
             return                    # no more BINDING; facts above keep accumulating
 
         # 3b. §5 phase one, PER SECOND. The fresh-retrace precondition is a TICK
@@ -1447,7 +1463,8 @@ class Executor:
         # plan's; everything else below — the shared tally, the cooldown the order book
         # starts, the takeover scan — behaves as for any stop-out.
         # An operator entry is the operator's own risk, not the plan's: no attempt spent.
-        if not self._pos_is_followup and not self._pos_is_operator:
+        # A reserved-attempt position (§11.14) is outside the shared budget too.
+        if not (self._pos_is_followup or self._pos_is_operator or self._pos_is_reserved):
             self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
             if self._sec7_quiet_rule and self._state.get("mechanism") == "extreme_reject_close":
                 self._sec7_quiet = True
@@ -1456,7 +1473,7 @@ class Executor:
         # (`Arbiter.spent_by` is "RECORDED, never scored"). Spent at the same instant as
         # the plan's own counter so the two can never disagree.
         try:
-            if not self._pos_is_operator:
+            if not self._pos_is_operator and not self._pos_is_reserved:
                 self._market.arbiter.spend(self._state.get("mechanism"))
         except Exception:
             pass
@@ -2043,6 +2060,10 @@ class Executor:
                     # thesis. Same gates as `tmso_reject` (driven only with no block).
                     fires.append(("nym_mid_reject",
                                   self._market.nym_on_bar_close(now, bar, mnq)))
+                if self._hidden_smt:
+                    # §11.14 CANDIDATE: a hidden 5m SMT confirmed on both assets' 1m
+                    # close. Its fill takes the plan's reserved attempt.
+                    fires.append((hidden_smt.MECHANISM, self._hidden_smt_fire(now, mnq)))
             if micro_smt.MICRO_SMT_ENTRY_ENABLED and self._micro_smt_entry_block(now) is None:
                 mes = truncate(normalize((self._bars or {}).get("MES")), now)
                 mes_bar = self._completed_1m(mes, now) if len(mes) else None
@@ -2082,6 +2103,34 @@ class Executor:
             return
         if retry is not None and fire is not retry:
             self._stop_bar_retry_skip(now, "lost_arbitration", pending=retry_pending)
+        self._enter_by_market(now, fire)
+
+    def _hidden_smt_fire(self, now, mnq) -> "dict | None":
+        """§11.14's fire on this bar close, or None."""
+        mes = truncate(normalize((self._bars or {}).get("MES")), now)
+        return self._market.hidden_smt_on_bar_close(now, mnq, mes)
+
+    def _drive_reserved_attempt(self, now, mnq) -> None:
+        """§11.14's RESERVED attempt on a plan that died of `attempts_exhausted`, bar
+        close only. The plan's budget is spent, but this mechanism never drew on it: the
+        same gates as on a live plan except the budget -- nothing while a position is
+        open, the spine gates (`_entry_block`: the 11:00 cutoff, after a positive trade,
+        ...), §2's cooldown, the extension veto and the SMT-wait block. Any other death
+        (target reached, positive close, window end, an operator or external kill) ends
+        it with the plan."""
+        if self._state.get("dead_reason") != "attempts_exhausted":
+            return
+        if self._sim.position is not None or self._state["in_settle"] or not len(mnq):
+            return
+        if self._entry_block(now) is not None or self._in_cooldown(now):
+            return
+        fire = self._hidden_smt_fire(now, mnq)
+        if fire is None:
+            return
+        if self._extension_veto and not self._extension_allows(now, mnq, fire):
+            return
+        if self._smt_wait_block and not self._smt_wait_allows(now, mnq, fire):
+            return
         self._enter_by_market(now, fire)
 
     def _drive_liq_flip_entry(self, now, mnq, bar, block) -> None:
@@ -2230,6 +2279,11 @@ class Executor:
                                 "bar": fire.get("bar")}
             if fire.get("also_fired"):
                 extra["also_fired"] = fire["also_fired"]
+        if mechanism == hidden_smt.MECHANISM:
+            extra["hidden_smt"] = {"smt": fire.get("smt"), "bar": fire.get("bar"),
+                                   "risk": fire.get("risk")}
+            extra["reserved_attempt"] = True
+            extra["plan_alive"] = bool(self._state.get("plan_alive"))
         self._rec.order_event(now=now, plan_id=self._plan.get("plan_id"),
                               mechanism=mechanism,
                               artifact_label=self._label_for(ev.get("artifact_id")),
@@ -2240,6 +2294,9 @@ class Executor:
             self._pos_is_followup = bool(fire.get("followup"))
             if mechanism == "nym_mid_reject":
                 self._market.latch_nym()          # one FILL a day (§11.9)
+            if mechanism == hidden_smt.MECHANISM:
+                self._market.latch_hidden_smt()   # one FILL a day (§11.14)
+                self._pos_is_reserved = True      # after the per-fill reset
         # NO attempt is spent HERE. The budget counts STOP-OUTS, not entries
         # (`_on_stop_out`, and `order_sim`'s own "the attempt counter counts stop-outs"),
         # so incrementing on the fill double-counted every §6/§7 trade that then stopped
@@ -2292,6 +2349,7 @@ class Executor:
         self._open_retry = None
         self._pos_is_followup = False
         self._pos_is_operator = False
+        self._pos_is_reserved = False
         self._sweep_stop = None
         pick, reuse = self._reused_first_pick(now)
         if pick is None:
@@ -3235,10 +3293,12 @@ class Executor:
             artifact_label=self._label_for(ev.get("artifact_id")), **ev)
         was_followup = self._pos_is_followup
         was_operator = self._pos_is_operator
+        was_reserved = self._pos_is_reserved
         self._note_exit(ev)
         self._note_close(ev)
         self._after_exit(now, ev)
-        if not self._is_profitable(ev) and not was_followup and not was_operator:
+        if (not self._is_profitable(ev) and not was_followup and not was_operator
+                and not was_reserved):
             self._plan["attempts_used"] = int(self._plan.get("attempts_used") or 0) + 1
             self._plan.setdefault("max_attempts", MAX_ATTEMPTS)
             try:

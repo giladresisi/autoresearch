@@ -36,6 +36,7 @@ import pandas as pd
 from agent.facts.detectors.legs import last_trend
 from agent.trader.micro_smt import micro_smt_entry_armed
 from agent.trader.nym_mid_reject import enabled as nym_mid_reject_armed
+from agent.trader.hidden_smt import enabled as hidden_smt_armed
 
 MECHANISM_CLASSES = (
     "fvg_negation_reversal",
@@ -46,6 +47,7 @@ MECHANISM_CLASSES = (
     "fvg_1h_reject",
     "micro_smt_reject",
     "nym_mid_reject",
+    "hidden_smt_5m",
 )
 
 # §6/§7 verify their own preconditions on every bar, so there is nothing for the
@@ -134,6 +136,10 @@ def derive_plan(thesis: dict, legs, now: pd.Timestamp,
         # §11.9 CANDIDATE (`nym_mid_reject.py`), flag-gated like O3: not armed at all when
         # `ACT_NYM_MID_REJECT` is off, so a rollback byte-matches earlier plans.
         armed.append("nym_mid_reject")
+    if hidden_smt_armed():
+        # §11.14 CANDIDATE (`hidden_smt.py`), flag-gated the same way: not armed at all
+        # when `ACT_HIDDEN_SMT_ENTRY` is off, so a rollback byte-matches earlier plans.
+        armed.append("hidden_smt_5m")
     trend = last_trend(list(legs or ()), now)
     trend_dir = (trend.extra.get("direction") if trend is not None else None)
     # `last_trend` is still computed and still reported in the plan when the 5m classes are
